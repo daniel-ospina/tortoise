@@ -988,8 +988,8 @@ def core_test_files(manifest: dict, unresolved: list[str] | None = None) -> list
     or deleted member and used to say nothing, which contradicts this module's
     stated contract ("anything the analysis CANNOT resolve is reported … and
     never dropped") and silently shrinks the denominator every published
-    percentage is a ratio over — `745`, `186/258`, `84.6 %`, the 630-file split
-    ceiling — with no red anywhere. Pass `unresolved` to collect them; the
+    percentage is a ratio over (`docs/ci/core-import-closure.md` §1 carries the
+    current set) — with no red anywhere. Pass `unresolved` to collect them; the
     caller surfaces them.
     """
     ci = _selection_module()
@@ -1712,7 +1712,7 @@ def derived_core_selection(
       (c) `keep_empty_closures` and its closure is EMPTY.
 
     (c) is not a fudge, it is the one class the closure provably cannot answer:
-    115 of the 745 core files import nothing from the package — they assert
+    118 of the 752 core files import nothing from the package — they assert
     invariants of a CONFIG, WORKFLOW or DOC file, which is exactly why they were
     hand-registered in `SOURCE_PATTERNS`/`CORE_ALSO` in the first place. An
     import closure has no edge to carry that dependency, so a mapping that drops

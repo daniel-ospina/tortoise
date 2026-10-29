@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (77 test functions / 79 collected, incl. the harness
+- Pins: `tests/test_ci_import_closure.py` (81 test functions / 83 collected, incl. the harness
   mutation check — re-derive with `grep -c '^def test_' tests/test_ci_import_closure.py` and
   `pytest --collect-only -q`; a count written here without that command is a snapshot, not a fact)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
@@ -35,7 +35,8 @@ closed to `_full_selection()`. Selection is deliberate; this is measurement.
   `config/ci-surfaces.yml`'s own comment states the same boundary.
 - Reproduce: `uv run python tools/ci_import_closure.py` · `… validate --window 40`
 - **Measurement basis:** the head of PR #10143 — the commit that adds this line. Two things make a
-  re-run differ from these tables: `main` keeps adding `core` registrations (**745** here), and the
+  re-run differ from these tables: `main` keeps adding `core` registrations (**752** here, 751 on
+  `main` alone, and 745 at `3934648ae` — the gap is `main`, not this lane), and the
   file enumeration has two paths — `git ls-files` (used whenever git is available) and a
   pruning directory walk of the WHOLE repo (the fallback). They enumerate the same package set; a
   fallback that walked a fixed root list (`tortoise`, `tests`, `battery`, `tools`) used to differ
@@ -45,21 +46,21 @@ closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 ## 1. What was derived
 
-Static `ast` analysis of every tracked `*.py`: for each of the **745** `core` test files, the
+Static `ast` analysis of every tracked `*.py`: for each of the **752** `core` test files, the
 transitive set of `tortoise/**` modules it imports. Modules under analysis are never imported
 (that has side effects and measures the wrong thing); every edge comes from the source text, and
 `tests/`-side helpers are traversed but not reported.
 
 | Measure | Value |
 |---|---|
-| core test files | **745** (744 before this lane registered its own test) |
+| core test files | **752** (751 before this lane registered its own test) |
 | `tortoise/**` modules in the tree | 258 |
 | **distinct closure sets** (a split's real granularity) | **59** |
-| closure size — median / mean / min / max | **186** / 158.7 / 0 / 207 |
-| files sharing the single **most common** closure (186 modules; the largest is 207) | **427** |
-| files with an EMPTY closure (no `tortoise/**` import at all) | **115** |
-| files reaching `tortoise/__init__.py` | **630 (84.6 %)** |
-| files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 141 (18.9 %) |
+| closure size — median / mean / min / max | **186** / 158.2 / 0 / 207 |
+| files sharing the single **most common** closure (186 modules; the largest is 207) | **431** |
+| files with an EMPTY closure (no `tortoise/**` import at all) | **118** |
+| files reaching `tortoise/__init__.py` | **634 (84.3 %)** |
+| files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 143 (19.0 %) |
 
 ### 1.1 Function-local imports are the whole ballgame (and the trap)
 
@@ -67,37 +68,40 @@ The same derivation restricted to **module-level** imports only — the naive re
 median core closure of **21 modules** and a `tortoise/__init__.py` closure of **6**. That looks like
 a triumphant 88 % reduction and it is exactly the false green: `tortoise/sdk.py` has **89** in-repo
 import targets, of which **28 carry a module-level edge** and **61 arrive only from a function
-body**, and `tortoise/config.py`'s cycle-breaking `from tortoise.sdk import _derive_graph_name` is
-itself deferred. Measured both ways on the same tree:
+body** — and **13 of those 28 also arrive from a function body** (`tests/test_ci_import_closure.py`,
+`test_function_local_imports_are_walked_and_tagged`), which is a refinement of the 28, not a third
+bucket: 28 + 61 = 89 either way, so the two statements are two views of one measurement. And
+`tortoise/config.py`'s cycle-breaking `from tortoise.sdk import _derive_graph_name` is itself
+deferred. Measured both ways on the same tree:
 
 | | module-level only | all nesting (this tool) |
 |---|---|---|
 | `closure(tortoise/__init__.py)` | **6** | **186** |
 | core closure median / max | **21** / 86 | **186** / 207 |
 
-A closure that reads only top-level imports would have selected **299** of 745 files for a change to
-`tortoise/sdk.py`, against **630** with every nesting walked — and its median closure is 21 modules
+A closure that reads only top-level imports would have selected **302** of 752 files for a change to
+`tortoise/sdk.py`, against **634** with every nesting walked — and its median closure is 21 modules
 where this tool's is 186. Three different populations are in play here, and the closure gap and the
-direct-importer set are close in size (331 and 329) without being the same set — their overlap is 77
+direct-importer set are close in size (332 and 332) without being the same set — their overlap is 77
 files:
 
 | quantity | value | definition |
 |---|---|---|
-| closure gap | **331** | files whose closure CONTAINS `tortoise.sdk` with every nesting walked and does not under the module-level reader (`630 − 299`) |
-| direct importers | **329** | of 745 core files, those with any `tortoise.sdk` edge of their own |
-| direct, module-level | **233** | of those 329, the ones with a module-level `tortoise.sdk` edge — so **96** import it only inside a function body |
+| closure gap | **332** | files whose closure CONTAINS `tortoise.sdk` with every nesting walked and does not under the module-level reader (`634 − 302`) |
+| direct importers | **332** | of 752 core files, those with any `tortoise.sdk` edge of their own |
+| direct, module-level | **236** | of those 332, the ones with a module-level `tortoise.sdk` edge — so **96** import it only inside a function body |
 
 This is the reason the tool walks the whole tree and tags every edge `in_function`: a reader that
-kept only module-level edges would lose `tortoise.sdk` from 331 closures, and only **77** of those
-files import `sdk` inside a function themselves — the other **254** reach it transitively, through
+kept only module-level edges would lose `tortoise.sdk` from 332 closures, and only **77** of those
+files import `sdk` inside a function themselves — the other **255** reach it transitively, through
 another module's deferred edge. (A file with a module-level `sdk` edge cannot be in the gap at all:
 its module-level closure would already contain `tortoise.sdk`. So the only direct importers inside
 the gap are the function-only ones — bounded by the 96 in the table above and measured as 77.)
 
-**59 distinct sets sounds like granularity. It is not.** 427 + 115 = **542 of 745 (72.8 %)** core
+**59 distinct sets sounds like granularity. It is not.** 431 + 118 = **549 of 752 (73.0 %)** core
 files sit in one of two degenerate buckets — "the entire 186-module block" or "nothing at all" —
-and a change to any module in that block still selects 630 files, i.e. **84.6 % of the surface**.
-The best reduction a closure-based split could deliver for those changes is 745 → 630 (15.4 %).
+and a change to any module in that block still selects 634 files, i.e. **84.3 % of the surface**.
+The best reduction a closure-based split could deliver for those changes is 752 → 634 (15.7 %).
 
 ## 2. Why the block exists: ONE deferred import
 
@@ -106,11 +110,12 @@ The best reduction a closure-based split could deliver for those changes is 745 
 ```text
 tortoise/__init__.py        line 39   from tortoise.config import RELATIVE_PATH_ERROR   (module level)
 tortoise/config.py          line 135  from tortoise.sdk import _derive_graph_name       (function-local)
-tortoise/sdk.py             42 230 lines, 89 in-repo modules (28 module-level, 61 function-local only)
+tortoise/sdk.py             42 535 lines, 89 in-repo modules (28 module-level, 61 function-local only,
+                            13 of the 28 reached BOTH ways)
                             → 186-module closure for every test that imports ANY tortoise.* submodule
 ```
 
-Because importing a submodule imports its package first, that chain lands in 84.6 % of the core
+Because importing a submodule imports its package first, that chain lands in 84.3 % of the core
 surface. So the answer to the issue's own question is yes — **most core tests transitively depend
 on `tortoise/__init__.py`** — but the mechanism is not "the shim re-exports everything". The shim
 imports four modules (`config`, `embedded_lifecycle`, `fork_safety`, and one function-local), and
@@ -132,40 +137,59 @@ test that ACTUALLY failed on it?* Ground truth is each run's `junit.xml` artifac
 a failing test — see §3.3). Two derived mappings are scored:
 
 - **naive** — a core file stays selected only if a changed `tortoise/**` module is in its closure.
-- **keep-non-python** — the same, plus core files whose closure is **empty**: 115 files import
+- **keep-non-python** — the same, plus core files whose closure is **empty**: 118 files import
   nothing from the package because they assert an invariant of a CONFIG/WORKFLOW/DOC file (or
   drive a script as a subprocess). No import edge can ever exist for them, so only a hand-written
   registration carries that dependency.
 
-**Window: the 40 newest merged PRs** (`/pulls?state=closed&merged_at≠null`; `gh pr list --state
-merged` was measured to under-report — it returned 24 PRs while #10102/#10103/#10104/#10106 were
-absent). The window is a MOVING set, so the exact one these numbers come from is listed here:
+**Window: the 40 newest merged PRs, ranked by MERGE time** (`/pulls?state=closed`, `merged_at≠null`,
+re-ranked by `merged_at`; `gh pr list --state merged` was measured to under-report — it returned 24
+PRs while #10102/#10103/#10104/#10106 were absent — and `/pulls` has **no** merge-time sort: the
+documented values are `created` (the default), `updated`, `popularity` and `long-running`, and
+`sort=merged` is silently ignored (measured 2026-10-29: it returns the `created` order verbatim), so
+the walk asks by `updated` and ranks client-side — ranking by *creation* omitted 11 PRs that merged
+AFTER entries the window contained, e.g. #10108). The window is a MOVING set, so the exact one these
+numbers come from is listed here:
 10167, 10162, 10153, 10151, 10144, 10140, 10135, 10134, 10129, 10128, 10120, 10118, 10111, 10110,
 10106, 10104, 10103, 10102, 10101, 10100, 10098, 10097, 10096, 10094, 10092, 10091, 10089, 10087,
 10086, 10081, 10079, 10078, 10075, 10071, 10070, 10069, 10068, 10066, 10055, 10053 (`--prs` that list
 reproduces the tables below exactly; a re-run `--window 40` after further merges reports different
-totals — that is the window moving, not a contradiction). Coverage: **11 PRs carried ≥ 1 test-level
-failure**, **22 failing test files (17 distinct)**; **16 artifact problems, across 9 PRs, made ground
-truth partial** — **11 legs whose OWN `pytest-log-*` artifact was absent while a sibling leg's was
-present** (7 PRs: #10144, #10140, #10120, #10111, #10104, #10103, #10096), and **5 artifacts that
-carried no `junit.xml`** (4 PRs: #10144, #10134, #10103, #10098). So this window is **PARTIAL** and
-`validate` exits **2** to say so rather than reporting a clean window it could not read. A partial
-artifact set can only UNDER-count misses, so the two miss counts below are lower bounds (the 40-PR
-count includes the `init`-level checks only; a green PR contributes nothing here).
+totals — that is the window moving, not a contradiction). Coverage: **9 PRs carried ≥ 1 test-level
+failure**, **25 failing test files (18 distinct)**; **8 artifact problems, across 5 PRs, made ground
+truth partial** — **5 legs whose OWN `pytest-log-*` artifact was absent while a sibling leg's was
+present** (2 PRs: #10111 with 1, #10096 with 4), and **3 artifacts that carried no `junit.xml`**
+(3 PRs: #10144, #10134, #10098). So this window is **PARTIAL** and `validate` exits **2** to say so
+rather than reporting a clean window it could not read. A partial artifact set can only UNDER-count
+misses, so the two miss counts below are lower bounds (the 40-PR count includes the `init`-level
+checks only; a green PR contributes nothing here). 7 further PRs went red with **no test-level
+failure at all** — a post-test hygiene step, a run whose junit described zero testcases, a run with
+no readable artifact — and every one of those is recorded rather than scored as clean (§3.4).
 
-| mapping | misses | PRs | median selected tests (today: 966) |
+| mapping | misses | PRs | median selected tests (today: 973) |
 |---|---|---|---|
-| naive | **10** | 4 (#10151, #10144, #10134, #10070) | 482 |
-| keep-non-python | **9** | 3 (#10151, #10144, #10134) | 597 |
+| naive | **13** | 4 (#10151, #10144, #10134, #10104) | 488 |
+| keep-non-python | **13** | 4 (#10151, #10144, #10134, #10104) | 606 |
 
-**A single miss means the derivation is not safe. There are 9** (10 for the naive reader). They fall
-in three classes, and only one of them is an analysis limitation that better parsing would fix:
+**A single miss means the derivation is not safe. There are 13**, under BOTH mappings — the empty
+-closure refinement changes no file in this window (see the class table: the class it repairs has no
+scored instance here, because #10070's failing run was unreadable — §3.4 — so its one historical win
+cannot be re-scored). They fall in two classes, and only one of them is an analysis limitation that
+better parsing would fix:
 
 | class | count | what it is |
 |---|---|---|
-| `non-python-dependency` (naive only) | 1 | the test imports nothing from `tortoise/**`; its subject is a manifest, workflow, doc or a script it runs (#10070 `test_ci_check_repair.py`). **Fixed by the keep-non-python refinement** — this is the one refinement the data *proves* is required. |
+| `non-python-dependency` (naive only) | **0 here** | the test imports nothing from `tortoise/**`; its subject is a manifest, workflow, doc or a script it runs. **Fixed by the keep-non-python refinement** — measured 1 (`#10070 test_ci_check_repair.py`) on the window as it stood at `3934648ae`, and unscorable now because that PR's red run uploaded no readable junit (§3.4). The refinement stays: it is the direction that cannot over-select, and the class is real whenever the truth is readable. |
 | `tainted-closure` | 3 | the file's own imports are `UNKNOWN` (`importlib` with a computed name / `setattr`-style access), so the derivation could not see the edge (#10151 `test_dry_run_preview.py`; #10134 `test_9350_capture_provenance_journalled.py` and `test_reaper.py`). |
-| `no-closure-intersection` | 6 | the closure is complete and nothing in it intersects the diff. Two sub-causes, both outside any import graph: a diff that changes **workflows/docs/config only** (#10151 `test_derived_names.py`, #10144 `test_derived_names.py`/`test_embedded_concurrency.py`), where the failing test guards that non-Python subject, and a diff that changes **only test files** — today's surface rule is what keeps the rest of the surface running, and no import edge couples one test to another (most of #10134's five). |
+| `no-closure-intersection` | 10 | the closure is complete and nothing in it intersects the diff. Two sub-causes, both outside any import graph: a diff that changes **workflows/docs/config only** (#10151 `test_derived_names.py`, #10144 `test_derived_names.py`/`test_embedded_concurrency.py`/`test_9209_handle_non_cypher_wipe.py`, #10104's three), where the failing test guards that non-Python subject, and a diff that changes **only test files** — today's surface rule is what keeps the rest of the surface running, and no import edge couples one test to another (most of #10134's five). |
+
+⚠️ **One of the 14 misses the pre-`a746139ba` reader scored is not a miss at all.** #10120's
+`test_9078_record_written_by_production_path.py` is one of `ALWAYS_ON_LEG_FILES` (run on EVERY PR by
+`test-record-postgres`), and it was counted as `tainted-closure` because `derived` subtracted every
+`core` member — including the unconditional legs — before adding back only the closure-derived ones.
+On a workflow-only diff no import edge can exist, so an unconditional leg could never be derived, and
+its failure was scored against the derivation. The union into `derived` is now real (F2, `a746139ba`),
+which is why the totals read **13** here and **14** at that head: same window, same ground truth, one
+unmappable row removed.
 
 ### 3.1 What the harness would need to be safe
 
@@ -174,7 +198,7 @@ The three classes are additive requirements, not bugs to patch:
 1. keep the hand-written registrations for non-Python subjects (`SOURCE_PATTERNS` / `CORE_ALSO` —
    which already exist and are the reason `core` is blunt);
 2. keep a surface-wide minimum when a **test file** changes (today's rule);
-3. resolve the 141 tainted files, or exclude them from any narrowing.
+3. resolve the 143 tainted files, or exclude them from any narrowing.
 
 Requirement (1) alone means the closure can never *replace* the hand-written map — only narrow the
 part of `core` that is genuinely import-driven. That is a smaller change than the issue anticipated,
@@ -189,7 +213,7 @@ and its ceiling is the 15 % in §1.
 | `if not TYPE_CHECKING:` | **runtime** dependency (`type_checking: false`) | the NEGATED guard is the standard idiom for a runtime import a type checker cannot see. `ast.walk` found the `TYPE_CHECKING` name anywhere in the test, so the negated body was tagged type-only and `--exclude-type-checking` DELETED a real runtime edge — the same axis inversion the `_dedupe_deps` key removes, one level up. |
 | decorators, default values, annotations, return annotation | **import-time** (`in_function: false`) | they are evaluated where the `def` EXECUTES, not when the body is called. Tagging them function-local made `--import-time-only` drop real import-time edges — an under-selection inside the reader that exists to *demonstrate* under-selection, which skews the 21-module figure it publishes. |
 | `from __future__` | **not a dependency**, counted and named | no `tortoise/**` target can match it; excluding it silently would make the exclusion invisible. |
-| re-export shims | `tortoise/__init__.py` modelled via an explicit **`package-init` edge** on every `import tortoise.x`; `tortoise/__all__.py` reported when imported (1 test) | the package-init edge is what answers "do most tests depend on the shim" — and it is where 84.6 % of the surface comes from. `__all__.py` is a *data* module of approved names, not a re-export surface. |
+| re-export shims | `tortoise/__init__.py` modelled via an explicit **`package-init` edge** on every `import tortoise.x`; `tortoise/__all__.py` reported when imported (1 test) | the package-init edge is what answers "do most tests depend on the shim" — and it is where 84.3 % of the surface comes from. `__all__.py` is a *data* module of approved names, not a re-export surface. |
 | dynamic imports | constant argument **resolved**; computed argument → `UNKNOWN` with reason | `importlib.import_module("tortoise.x")` is still static information; only a computed name is a blind spot. |
 | `getattr(module, ...)` | in-repo module + literal attr → resolve (or no edge); computed attr → `UNKNOWN`; third-party module → **no taint** | the candidate is built from the binding's **dotted target**, never its local name: `from tortoise import projection` + `getattr(projection, "in_memory")` resolves `tortoise.projection.in_memory`, where a local-name candidate (`projection.in_memory`) is not a module at all and would drop a real submodule with neither an edge nor an `UNKNOWN`. Taint must mean "may be MISSING a `tortoise` module" or it says nothing: over-tainting marks the whole connected component and the signal collapses (measured: 89 % tainted before this rule, 19 % after). |
 | package/module name collision | **package wins** (CPython's `FileFinder` order) | `tortoise/projection/__init__.py` and `tortoise/projection.py` share a name; resolving to the module **used to** under-select by 7 modules. On this tree it changes no closure's module count (measured: 634 core closures swap `tortoise/projection/__init__.py` for `tortoise/projection.py` and back, 0 net), so the pin for the precedence rule is the SYNTHETIC case in the test file, and the pair is still reported in `shadowed_modules` rather than discarded. |
@@ -232,14 +256,14 @@ closed the same way: the state is recorded, the truth is **not cached**, and the
 | `junit.xml` unparseable | corrupt/truncated zip payload | `parse_junit_failures`' `error` is now read, not ignored |
 | failing test whose FILE neither key can attribute | `xunit2` legs drop `file`/`line` | `unresolved` → `artifact_errors` |
 | red run whose artifact listing is **empty** | artifacts expire in 90 days; deleting a run deletes them | `artifact_errors` entry per run |
-| **the red leg's own artifact is absent but a SIBLING leg's is present** | `rid` is the workflow **run**, and `test`/`test-slow`/`test-carve-out`/the always-on legs are matrix jobs inside one run; a leg that early-exits uploads nothing | **measured 11 times across 7 PRs in the §3 window** — the wide `pytest-log-*` fallback (a rename mitigation, kept) now also records the substitution, so a sibling's clean junit can no longer stand in for the leg that failed |
+| **the red leg's own artifact is absent but a SIBLING leg's is present** | `rid` is the workflow **run**, and `test`/`test-slow`/`test-carve-out`/the always-on legs are matrix jobs inside one run; a leg that early-exits uploads nothing | **measured 5 times across 2 PRs in the §3 window** — the wide `pytest-log-*` fallback (a rename mitigation, kept) now also records the substitution, so a sibling's clean junit can no longer stand in for the leg that failed |
 | **the head sha yielded no check run at all** | completed runs are deletable; a `GITHUB_TOKEN`-created run can complete with zero check runs | `runs_seen` / `test_legs_seen` are recorded, a zero is never cached, and the window is PARTIAL |
 | **runs exist but NONE of them is a `test*` leg** (`test_legs_seen == 0`) | the leg names change in `python-ci.yml`, or a PR's only check runs are lint/typecheck | counted and never cached; `validate` treats a zero as UNASSESSED and exits **2**. This state was recorded for exactly this reason and gated nowhere, so `jobs: []` / `artifacts: 0` / `artifact_errors: []` read as a clean PR |
 | **a red `test*` leg whose `details_url` carries no run id** | a check run not created by a workflow run, or a url shape change | recorded in `artifact_errors` per leg. The leg never reached the artifact loop, and beside a readable red sibling `artifacts > 0` also disabled the unread-PR guard |
 | **a junit that parses but contains ZERO `<testcase>` elements** | the suite did not run (collection aborted, a marker selected nothing, exit 5) | `parse_junit_failures` reports `executed` and the caller now reads it: a red run that described 0 tests is an unread run, not "no test-level failure" |
 | **a red `test*` leg whose run uploads no `pytest-log-*` at all** (e.g. `ci.yml`'s `test-isolation`) | that leg is outside the junit-carrying set, so its failures cannot be attributed to files | recorded in `artifact_errors` and the window is PARTIAL. This is deliberate and it is the honest state: the harness cannot read that leg, and an unread leg can only UNDER-count misses. Each red leg is checked against **its own run's** listing, so a leg in one workflow is never re-checked against another's artifacts |
 | **the manifest's `core` surface resolves to ZERO test files** | a renamed/removed `core` key, or a failed `_surface_members` fallback | `core_empty` is flagged and every verb that publishes a number REFUSES (exit **2**). An empty surface makes `derived = current`, so nothing can ever miss and the window reports "TOTAL MISSES 0" from an analysis that examined nothing |
-| **a failure lands outside the modelled selection** | `select()` models the surface legs only, while ground truth covers every leg — so `test-record-postgres`'s four files (run on EVERY PR, `python-ci.yml:3640`) and `test-track-b`'s one (`:2527`) were outside `current_rel` | those legs are unioned into today's selection (`ALWAYS_ON_LEG_FILES`), and any residual entry is reported as a HOLE IN THE MODEL and makes the window PARTIAL — never as an absolution |
+| **a failure lands outside the modelled selection** | `select()` models the surface legs only, while ground truth covers every leg — so `test-record-postgres`'s four files (run on EVERY PR, `python-ci.yml:3733`, literals `:3819-3822`) and `test-track-b`'s one (`:2568`, `FILES=` `:2627`) were outside `current_rel` | those legs are unioned into today's selection AND into the derived one (`ALWAYS_ON_LEG_FILES` — a `core` member is otherwise subtracted out of `derived`), and any residual entry is reported as a HOLE IN THE MODEL and makes the window PARTIAL — never as an absolution |
 
 `test-d14-hosted-api` (`pytest tests/ -m embedded_only`) is deliberately **not** modelled: its set is
 a marker over the whole tree, and a wider guess is the DANGEROUS direction, because everything in
@@ -301,21 +325,21 @@ here is a ratio over that count.
 
 **Is a file-level split of `surfaces.core` justified by the data? No.**
 
-1. **The granularity is not there.** 59 distinct closure sets, but 72.8 % of core files are in the
+1. **The granularity is not there.** 59 distinct closure sets, but 73.0 % of core files are in the
    two degenerate buckets (one 186-module set, or empty), and the median core closure is **186 of
-   258 modules (72 %)**. A change to any module in that block still selects 630 files — 84.6 % of
-   the surface — so the ceiling of a split is a 15.4 % reduction, for a change that would narrow a
+   258 modules (72 %)**. A change to any module in that block still selects 634 files — 84.3 % of
+   the surface — so the ceiling of a split is a 15.7 % reduction, for a change that would narrow a
    guard.
-2. **The derivation is not safe.** 9 historical misses (10 naive) over 40 merged PRs — a lower
-   bound, since 16 artifact problems in that window left its ground truth partial — in three
-   classes, and only one class is an analysis limitation. A mapping that would not have run 9 tests
-   that actually failed is not a mapping to build selection on.
+2. **The derivation is not safe.** 13 historical misses (13 under BOTH mappings) over 40 merged PRs
+   — a lower bound, since 8 artifact problems in that window left its ground truth partial — in two
+   scored classes, and only one class is an analysis limitation. A mapping that would not have run
+   13 tests that actually failed is not a mapping to build selection on.
 3. **The lever is import hygiene, not surface bookkeeping.** In order of measured leverage:
    - the **one deferred `config → sdk` import** (§2): worth 179 of the 186 modules in the shim's
-     closure, i.e. it is the entire 84.6 % block;
-   - **`tortoise/sdk.py`** (42 230 lines, 89 in-repo import targets) and **`tortoise/hosted_api.py`**
+     closure, i.e. it is the entire 84.3 % block;
+   - **`tortoise/sdk.py`** (42 535 lines, 89 in-repo import targets) and **`tortoise/hosted_api.py`**
      (88, of which 51 only in function bodies): splitting *these* is what gives a closure something
-     to differentiate on — 329 of 745 core files import `tortoise.sdk` directly;
+     to differentiate on — 332 of 752 core files import `tortoise.sdk` directly;
    - **test-side hygiene** where a test imports the whole package for one constant.
 
    Doing (a) or (b) makes this measurement worth re-running; nothing in `ci-surfaces.yml` needs to
@@ -324,4 +348,5 @@ here is a ratio over that count.
 
 **What would flip this verdict** (stated so it can be falsified rather than believed): median
 closure ≤ ~20 % of `tortoise/**`, no single module in more than half the closures, **and** zero
-misses from `validate` with the keep-non-python refinement over the same window.
+misses from `validate` over the same window — under BOTH mappings, since on this window the
+keep-non-python refinement moves no file and therefore proves nothing on its own.

@@ -396,7 +396,7 @@ def test_harness_does_not_blame_the_derivation_for_a_test_the_selector_never_run
 
 
 def test_empty_closure_files_survive_only_when_asked_to():
-    """115 of 745 core files import nothing from the package: they guard a
+    """118 of 752 core files import nothing from the package: they guard a
     CONFIG/WORKFLOW/DOC file, which no import edge can carry (#10070, #10120)."""
     core = ["tests/test_config_guard.py", "tests/test_imports_pkg.py"]
     closures = {
