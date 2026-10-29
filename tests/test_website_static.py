@@ -2457,6 +2457,21 @@ class TestARenderedCodeElementGetsAMonoFace:
     indirection resolves, a `font:` shorthand naming a mono face is accepted, and the
     last compound may carry a class/id/attribute/pseudo.
 
+    One residual does fail GREEN, and it is named here rather than implied: a custom
+    property is collected from **every** rule that declares it, regardless of the
+    selector, and resolved for every element — but custom properties inherit
+    (css-variables-1, the `--*` property table: `Inherited: yes`), so a token declared
+    on a scoped rule does not reach a `<code>` outside that scope.
+    `.art-body{--mono:Menlo} code{font-family:var(--mono)}` is therefore credited here,
+    while a browser computes the guaranteed-invalid value for a `code` outside
+    `.art-body`, invalidates the whole declaration, and renders the inherited family.
+    Latent, not live — all nine subjects define `--mono` in `:root` (`404.html:17`,
+    `faq.html:24`, … `_lib.ts:1098`) — and keying `defined` by declaring selector would
+    mean modelling which ancestors an element has, i.e. the CSS parse this guard
+    deliberately does not do. Pinned by
+    `test_a_scoped_token_is_credited_and_that_is_a_documented_limit`, so closing it is a
+    deliberate edit and never a silent change (#10254 review, round 9).
+
     Known residual, deliberately not modelled: a page rendering `<code>` **only**
     inside `<pre>` is refused, because the `pre code` pairing is skipped
     unconditionally. It fails RED, never green, and no page in this tree is shaped
@@ -2907,6 +2922,39 @@ class TestARenderedCodeElementGetsAMonoFace:
             assert got == expect, (
                 f"{'false green' if got else 'false red'}: {why}\n  css: {css}\n"
                 f"  guard says mono={got}, CSS computes mono={expect}")
+
+    def test_a_scoped_token_is_credited_and_that_is_a_documented_limit(self):
+        """The one fail-GREEN shape this guard documents instead of fixing (#10254 r9).
+
+        `VAR_DEF` collects `--x: …` from every rule whatever selector declares it, and
+        `_elements_styled_mono` resolves any `var(--x)` against that flat map. A custom
+        property INHERITS (css-variables-1, the `--*` property table: `Inherited: yes`),
+        so a token declared on `.art-body` does not reach a `<code>` outside it: the
+        reference there is the guaranteed-invalid value, the declaration is invalid at
+        computed-value time, and the element renders its PARENT's family — not the mono
+        face this guard credits.
+
+        This is the opposite direction from the two residuals the class docstring
+        states, which both fail RED. It stays a documented LIMIT because keying
+        `defined` by declaring selector means modelling which ancestors an element has;
+        and it is latent today — all nine subjects define `--mono` in `:root`. The
+        assertion is written to RED the moment the limit is closed, so closing it is a
+        deliberate edit and this probe is deleted with the docstring bullet, rather than
+        the shape being re-derived as a finding for the fourth time.
+        """
+        probes = [
+            # (why, css) — each is GREEN here; the CSS computes no mono face for `code`
+            ("token declared on a scoped ancestor rule",
+             ".art-body{--mono:Menlo} code{font-family:var(--mono)}"),
+            ("token declared inside a conditional group",
+             "@media print{:root{--mono:Menlo}} code{font-family:var(--mono)}"),
+        ]
+        for why, css in probes:
+            assert "code" in self._elements_styled_mono(css), (
+                f"the documented declaring-scope limit CHANGED ({why}): the guard now "
+                f"REFUSES a token whose declaring selector it cannot prove reaches the "
+                f"element. That is the fail-safe direction, so update the "
+                f"`WHAT IT DOES NOT PIN` bullet and delete this probe.\n  css: {css}")
 
     def test_a_nested_var_is_resolved_the_way_the_browser_resolves_it(self):
         """A `var()` inside a fallback, and an unresolvable reference in a list (#10254 r6).
