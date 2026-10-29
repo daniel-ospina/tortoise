@@ -1396,6 +1396,36 @@ def identifier_alias_append_clauses(aliases: list[str]) -> tuple[list[str], dict
     return clauses, params
 
 
+def _flat_search_keys_value(value) -> str:
+    """#10203 — ANY ``search_keys`` value a NODE can hand back, as one string.
+
+    A node's value crosses the driver boundary as a ``list`` whenever the array
+    shape is present, and that state is reachable at any time —
+    :data:`_NODE_SEARCH_KEYS_VIEW` and ``_array_valued_search_keys_exist`` exist
+    for exactly that reason (a later ``update_entity``'s ``SET n += $props`` has
+    no flatten, #5482; a RESTORE/DR graph carries them). ``str(value)`` on a list
+    is NOT the value — it is ``"['alpha', 'beta']"`` — so joining it directly
+    silently REPLACED the whole stored vocabulary with the new alias, which is
+    the loss ``revise_identifier_aliases``'s own docstring forbids (#10203
+    review round 9, F1).
+
+    ``None``/absent flattens to ``""``; a string is returned as-is; a sequence
+    is space-joined token-wise (the same rule
+    :func:`_derive_point_identifier_aliases` applies to the node value for the
+    ``stale`` half), and any other scalar contributes its own text rather than
+    disappearing.
+
+    This is the read-side counterpart of :func:`flatten_search_keys_prop`, which
+    applies the same rule to a PAYLOAD: an array is never a legal stored form,
+    so flattening it on the way in loses nothing.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
+
+
 def revise_identifier_aliases(*, new_content, old_content, old_search_keys,
                               caller_search_keys=None) -> str | None:
     """#10203 — the ``search_keys`` value a CONTENT EDIT must store.
@@ -1423,17 +1453,27 @@ def revise_identifier_aliases(*, new_content, old_content, old_search_keys,
     says which tokens are stale, and it is not in the event. The caller passes
     it in, so this stays a pure function (the ``_revise_point``/``update_point``
     doors read it in the SAME round trip as the write).
+
+    ⛔ ``old_search_keys`` is a NODE VALUE, so it can be a LIST (see
+    :func:`_flat_search_keys_value`). Both callers pass the raw column —
+    ``MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys`` — and FalkorDB
+    hands an array property back as a Python ``list``. Treating a non-``str`` as
+    empty discarded every stored token and returned the new content's alias
+    alone (or ``None``, which both doors write as ``SET n.search_keys = null``),
+    destroying the retrieval vocabulary the A4/#2070 expansion leg reads — the
+    same loss the ADD door's append-vs-assign fix prevents, through the door it
+    did not cover (#10203 review round 9, F1).
     """
     if caller_search_keys is not None:
         # The caller OWNS the list in this call: replace rather than merge, so a
         # removed key really goes away. The old aliases cannot leak into it.
-        base = caller_search_keys
+        base = _flat_search_keys_value(caller_search_keys)
     else:
         stale = set(point_identifier_aliases(
             {"content": old_content, "search_keys": old_search_keys}))
-        current = old_search_keys if isinstance(old_search_keys, str) else ""
+        current = _flat_search_keys_value(old_search_keys)
         base = " ".join(t for t in current.split() if t not in stale)
-    base = " ".join(str(base).split())
+    base = " ".join(base.split())
     tokens = base.split()
     for alias in identifier_aliases(
             index_text(new_content, base), space_separated=False):

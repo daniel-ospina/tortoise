@@ -822,6 +822,47 @@ class TestWritePathLive:
         for token in ("alpha", "beta", "err4032"):
             assert token in stored.split(), (token, stored)
 
+    def test_a_content_edit_on_an_ARRAY_valued_node_keeps_its_vocabulary(self, proj):
+        """#10203 review round 9 (F1/P1): the REVISE door honours the array state.
+
+        Round 8 type-guarded the ADD door so an array-valued node is not
+        aborted and its vocabulary is KEPT. The REVISE door normalised the SAME
+        value two ways three lines apart: ``stale`` went through
+        ``point_identifier_aliases`` (list-aware, ``:1227-1228``) while ``base``
+        took ``old_search_keys if isinstance(old_search_keys, str) else ""`` —
+        so every stored token was dropped and the node ended up holding the new
+        content's alias ALONE (or lost the property entirely), a silent loss of
+        the retrieval vocabulary on a state this repo maintains (#5482's
+        ``update_entity`` ``SET n += $props``; a RESTORE/DR graph).
+
+        (1) Fails on the pre-fix code: case A stores ``'err4032'`` instead of
+            ``'alpha beta err4032'``, case B removes the property (``None``)
+            instead of keeping ``'alpha beta'``.
+        (2) Reachable: a raw-Cypher point holding an array, then the ordinary
+            revise the SDK / replay door issues for a content edit.
+        """
+        for pid in ("p-arrev-1", "p-arrev-2"):
+            proj.g.query(
+                f"CREATE (n:Point {{id:'{pid}', content:'plain', "
+                "search_keys:['alpha','beta']})")
+        # A — the edit INTRODUCES an identifier: the array's tokens survive and
+        #     the alias joins them.
+        proj.apply({"type": "PointRevised", "id": "p-arrev-1",
+                    "new_content": "error ERR-4032 on deploy"})
+        stored = self._keys(proj, "p-arrev-1")
+        assert isinstance(stored, str), (
+            f"the revise door left the node ARRAY-valued: {stored!r}")
+        assert sorted(stored.split()) == ["alpha", "beta", "err4032"], stored
+        # B — the edit REMOVES the identifier: the array's tokens survive, the
+        #     alias goes, and the property is NOT dropped.
+        proj.apply({"type": "PointRevised", "id": "p-arrev-2",
+                    "new_content": "deploy is clean again"})
+        stored = self._keys(proj, "p-arrev-2")
+        assert stored is not None, (
+            "a content edit DESTROYED an array-valued search_keys instead of "
+            "keeping the tokens it held")
+        assert sorted(stored.split()) == ["alpha", "beta"], stored
+
     def test_a_content_edit_rederives_the_alias_and_retracts_stale_ones(self, proj):
         """#10203 review round 6 (measured P0/P1): a revision is not a capture.
 
