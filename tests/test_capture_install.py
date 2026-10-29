@@ -3431,7 +3431,12 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # only) must read as stale to receive the injection half.  The drift detector
 # also flags the missing script/entry on its own, so the bump is what carries
 # the change to an install whose bytes are frozen at generation 3.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
+# #4848 and main's #6388/#10216 bumps are INDEPENDENT and both apply: `pi`
+# moved 14→15 on main (the capture spool's rank-by-class cap) while claude,
+# codex and cursor moved here (the `tortoise-interp-guard` block).  Taking
+# either side alone would pin `pi` to a generation main has already passed and
+# leave the shell seams accepting an interpreter they cannot run.
+_EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
                              "pi": 15}
 
 
@@ -3471,7 +3476,14 @@ def test_shipped_install_contract_generations(harness):
     The codex seam took the same slot split and its marker was already at 3 on
     main (#5919), so NO number moved for it: a stale codex install is caught by
     the installed-copy byte comparison (`modified-script`), not by a generation
-    bump.  Cursor also started at 3, then moved 3→4 under #2122 (the
+    bump.  #4848 changed the BEHAVIOUR of every shell seam that resolves an
+    interpreter (the byte-identical `tortoise-interp-guard` block: a candidate
+    that holds `tortoise/` but cannot be RUN is now refused instead of run under
+    an unversioned `python3`, which on a stock macOS host is 3.9 and cannot
+    import the package), so claude 11→12, codex 3→4 and cursor 4→5.  The bump is
+    again what carries the guard to an already-installed host, whose hook bytes
+    are frozen at install time — without it that host keeps accepting an
+    unusable checkout and keeps reporting the capture as merely quiet.  Cursor also started at 3, then moved 3→4 under #2122 (the
     sessionStart injection half — see the table comment above).  `pi` moved 1→2 on
     main under #4897, which this branch predates, so 2 is main's number and not
     a #5838 bump; #5109 then moved `pi` 2→3 (the read-side store-mode warning

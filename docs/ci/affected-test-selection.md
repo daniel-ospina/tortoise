@@ -128,18 +128,18 @@ uv run pytest tests/test_onboarding_state.py -q
 ```
 
 A **fourth** set is subtracted, and it is the one that surprises people: the **non-gating lane**
-(`config/ci-surfaces.yml: on_demand` — **43 files** at this head). These are tests that exist and run
+(`config/ci-surfaces.yml: on_demand` — **44 files** at this head). These are tests that exist and run
 but are deliberately not a merge gate:
 
 | lane entry | files | its runner |
 |---|---|---|
-| `eval/**` + `longmem_eval/**` (the subtree form, expanded against disk) | 42 | `.github/workflows/eval-suite-manual.yml` — `workflow_dispatch` only (#10194) |
-| `eval/retrieval/test_integration.py` (already inside `eval/**`, so it runs in BOTH shapes — and it is the most expensive of the 42: 1 523.4 s of their 2 604.3 s) | 0 extra | `.github/workflows/evals-on-demand.yml` — its own literal lane entry, embedded shape (#4711) · and `.github/workflows/eval-suite-manual.yml`, docker shape, as one of the 42 |
+| `eval/**` + `longmem_eval/**` (the subtree form, expanded against disk — the count GROWS with the subtree and is never a literal) | 43 | `.github/workflows/eval-suite-manual.yml` — `workflow_dispatch` only (#10194) |
+| `eval/retrieval/test_integration.py` (already inside `eval/**`, so it runs in BOTH shapes — and it is the most expensive of the subtree's files: 1 523.4 s of their 2 604.3 s, measured over the 42 they numbered at #10194) | 0 extra | `.github/workflows/evals-on-demand.yml` — its own literal lane entry, embedded shape (#4711) · and `.github/workflows/eval-suite-manual.yml`, docker shape, as one of the subtree's files |
 | `test_perf_lane_volunteer_context.py` | 1 | `.github/workflows/perf-lane.yml` (#3992) |
 
 So a diff under `tests/eval/` or `tests/longmem_eval/`, or one that selects the `eval` surface (an
 `eval`-registered test file, `tools/longmem_eval/…`, `tortoise/embeddings.py`), will select **none of
-those 42** — a green PR there says nothing about them. That is the owner's decision (#10194, evals
+those files** — a green PR there says nothing about them. That is the owner's decision (#10194, evals
 paused), not a tool defect: run the manual workflow, or `--run` with the paths yourself.
 
 `--run` otherwise runs the fast set only — the same files the PR's shard legs run. Without that
