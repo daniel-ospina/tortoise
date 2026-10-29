@@ -302,8 +302,14 @@ def test_each_declared_type_materializes_or_declares_a_no_effect(record_type):
                 "the raw-turn carrier produced no statement — the capture's "
                 "turns would reach no store at all")
             assert any("INSERT INTO public.point" in s.sql for s in statements)
-            assert not any(s.sql.startswith("INSERT INTO public.node ")
-                           for s in statements)
+            # ⛔ There is no `assert not any("INSERT INTO public.node" ...)`
+            # here: no migration creates a `public.node` table
+            # (`rp.NODE_TABLES` is source/event/session/object/subject/point),
+            # so that string cannot appear in any plan — the assertion could not
+            # fail, and it would have passed identically on the pre-fix code. A
+            # guard that cannot fire is worse than none: it reads as coverage.
+            # Its twin was removed from `tests/test_10017_record_carrier.py`
+            # for exactly this reason.
         else:
             assert statements == []
         # A declared no-op must say WHY. "No reason" is the silent skip.

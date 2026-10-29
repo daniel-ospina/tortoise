@@ -2427,11 +2427,11 @@ _TURN_WRITE_CYPHER = (
 
 
 # #10000: §9.1/D1 places the raw transcript in Postgres — "not in the graph, not
-# a `Document`, not a `Point`". The per-turn `PointAdded` records this writer
-# emits ARE that Postgres write (the projection folds them into `public.point`
-# with `is_episodic = true`), so when the record can hold the turns the graph
-# keeps only the Session's redaction count: one node write, no rows, no
-# `CONTAINS` edges.
+# a `Document`, not a `Point`". The turn RECORDS this writer emits ARE that
+# Postgres write — one `PointAdded` per turn while the GRAPH holds them, ONE
+# `TurnsRecorded` carrier when the RECORD does (#10017; same `public.point` row,
+# no node), so that capture leaves the graph only the Session's redaction count:
+# one node write, no rows, no `CONTAINS` edges.
 _SESSION_REDACTIONS_CYPHER = (
     "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"
 )
