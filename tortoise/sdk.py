@@ -2688,8 +2688,8 @@ def _write_capture_turns(
     from tortoise.record_writer import (
         record_tenant_effective as _record_tenant_effective,
     )
-    # The journal conjunct is DURABILITY, not presence (#10067 review, the
-    # DURABILITY note on the conjunct list).
+    # The journal conjunct reads the log's durable FLAG, not mere presence
+    # (#10067 review; `docs/durability-posture.md` is the authority).
     # `write_live_record` reads `durable` off the log and DECLINES a scratch
     # buffer (`no_durable_journal`) before it looks at the DSN or the tenant —
     # its rows could never be reproduced or healed by a replay, so nothing is
