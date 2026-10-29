@@ -32,7 +32,7 @@ already existed and had no production caller.
 | part | what it is |
 |---|---|
 | **adapter** | `vet_verdicts` / `classify_tail` turn a candidate batch into **one round trip**: `state` (the narrative, plus one element per candidate) and a **map** of typed `questions`, answered in one response. The shape is copied from a working caller where one existed — see §2 for the three parts that are not. |
-| **prompt** | two versioned question sets, `vet-v2` (a `noul` *validity* question + a `score` *atomicity* question per candidate) and `classify-v2` (a `choice` per candidate over the kinds the kNN just offered), **every question carrying the untrusted-data framing** (§4). The version rides in every result — `stats["seam"]["prompt"]`, on both the VET gate's stats and the classifier's — and `vet-v1` is stamped into every **degraded** record's line in `stats["seam"]["degraded"]`, so an artifact names the exact question wording behind a step that produced no verdict. It is deliberately not in a verdict's `reason`: that is band arithmetic over an already-validated answer pair, and a rejected answer produces no verdict for a version to ride on. On the classify side the rejected answer is recorded as the failing question name in `stats["seam"]["rejected"]`, with the version beside it under `stats["seam"]["prompt"]`. |
+| **prompt** | two versioned question sets, `vet-v2` (a `noul` *validity* question + a `score` *atomicity* question per candidate) and `classify-v2` (a `choice` per candidate over the kinds the kNN just offered), **every question carrying the untrusted-data framing** (§4). The version rides in every result — `stats["seam"]["prompt"]`, on both the VET gate's stats and the classifier's — and `vet-v2` is stamped into every **degraded** record's line in `stats["seam"]["degraded"]`, so an artifact names the exact question wording behind a step that produced no verdict. It is deliberately not in a verdict's `reason`: that is band arithmetic over an already-validated answer pair, and a rejected answer produces no verdict for a version to ride on. On the classify side the rejected answer is recorded as the failing question name in `stats["seam"]["rejected"]`, with the version beside it under `stats["seam"]["prompt"]`. |
 | **parser** | `_noul` / `_score` / `_choice` validate the answer *against the question that was asked*: the echoed `type`, a finite probability in `[0, 1]`, a score on the declared scale, a choice inside the offered set. A violation raises `SchemaViolation` **carrying the question name**; nothing downstream coerces a bad answer into a label. |
 
 ## 2. The request shape is copied from a caller, not only from the documentation
@@ -47,7 +47,7 @@ the forms below, so it is not the page that misleads):
   use a map in every example, 0 array examples, `llms-full.txt`);
 - every question needs **`instructions`** (``400 'Question "t" needs instructions.'``);
 - a **`score`** question must carry `criteria`: an **ordered array of 2–10 level
-  descriptions, low → high**. `vet-v1` sends four levels
+  descriptions, low → high**. `vet-v2` sends four levels
   (`ATOMICITY_LEVELS`), so a score is on `0..3` — and it is **fractional in
   practice**: the vendor's own worked example reports `1.43` on a three-level
   scale (`primitives/score.md`: "a score of 1.43 means the model is split between
@@ -113,7 +113,7 @@ this record states it per primitive rather than for "the caller": `choice`
 endpoint on the alias `jev-latest`) each have a live caller of ours, while
 `score` is **documented only** — the vendor publishes it
 (`docs.typesafe.ai/primitives/score`) and **no caller of ours has ever sent one**,
-so its 2–10 level `criteria` array, the dominant term in `vet-v1`'s request, is
+so its 2–10 level `criteria` array, the dominant term in `vet-v2`'s request, is
 unmeasured here rather than corroborated. A wrong shape returns 400 →
 `Unavailable` → the declared fallback (nothing is dropped, nothing is minted), and
 the counters name it. Never
@@ -165,7 +165,7 @@ Each is a **recorded decision**, not an omission:
   version. A caller that needs backoff owns it.
 - **No per-mention links, no span, no `sourceKind`.** It never re-derives a source
   type (S0 knows it mechanically and for free) and never collapses the
-  `sourceKind`/`documentKind` axes: `classify-v1` offers **genres and pack kinds**,
+  `sourceKind`/`documentKind` axes: `classify-v2` offers **genres and pack kinds**,
   which is what S2.3 assigns (Q2).
 - **It does not touch the deployed pipeline** until armed (§6).
 - **It DOES tell the model that `state` is data, not instructions — and the position is
@@ -418,7 +418,7 @@ owed (`agent-infra#2918`).
 
   ⚠️ **This paragraph previously claimed the opposite** — that two questions per
   item is *"why this row costs more per item than"* the `$0.000144` figure. It is
-  refuted by this section's own table (`$0.0000097/item`, ~15× below `$0.000144`)
+  refuted by this section's own table (`\$0.0000118/item`, ~12× below `$0.000144`)
   and by the sentence four lines down that calls the comparator lookalike-priced at
   ≈10× the vendor's rate. Read the correction as a **token-basis** comparison and
   not as a saving: the two figures are different prompts (a `score` over 4 levels
