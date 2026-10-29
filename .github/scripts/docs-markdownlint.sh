@@ -136,9 +136,12 @@ install_tail() {
 # this step fails and a consumer is (ever) allowed to run anyway, it must see NO
 # report rather than the previous one. Cleared BEFORE any early-exit path.
 TMP_REPORT="${OUTPUT}.tmp"
-rm -f "${OUTPUT}.stderr" "$TMP_REPORT" "$OUTPUT"
+rm -f "$TMP_REPORT" "$OUTPUT"
 
-# Never from a shared cache, and never from PATH alone: absolute first.
+# Never from a shared cache, and never from an AMBIENT PATH: the private prefix
+# or nothing. A `markdownlint-cli2` that happens to be on PATH is a version this
+# check never asked for — resolving it would let another job's toolchain decide
+# what the required check measures (the #9708 lesson, one step over).
 if [ -n "${DOCS_MARKDOWNLINT_BIN:-}" ]; then
   # An explicit override is a contract, not a hint: it must be executable, or we
   # fail rather than silently measuring with something else.
@@ -147,10 +150,8 @@ if [ -n "${DOCS_MARKDOWNLINT_BIN:-}" ]; then
   BIN="$DOCS_MARKDOWNLINT_BIN"
 elif [ -x "$BIN" ]; then
   :
-elif command -v markdownlint-cli2 >/dev/null 2>&1; then
-  BIN="$(command -v markdownlint-cli2)"
 elif [ "${DOCS_MARKDOWNLINT_ALLOW_INSTALL:-1}" = "0" ]; then
-  fail "${CLI2_SPEC} is not available on this runner (not at ${BIN}, not on PATH) and installing is disabled — the lint did not run"
+  fail "${CLI2_SPEC} is not available on this runner (nothing at ${BIN}) and installing is disabled — the lint did not run"
 else
   install_pinned_cli2
   [ -x "$BIN" ] || fail \

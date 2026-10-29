@@ -140,12 +140,15 @@ def _run(
     output: str = "report.txt",
     binary: Path | None = None,
     allow_install: str | None = "0",
+    extra_path: str | None = None,
 ) -> subprocess.CompletedProcess:
     out = tmp_path / output
     env = {
         **os.environ,
         "RUNNER_TEMP": str(tmp_path / "runner"),
-        "PATH": os.environ.get("PATH", ""),
+        "PATH": os.pathsep.join(
+            p for p in (extra_path, os.environ.get("PATH", "")) if p
+        ),
     }
     if allow_install is not None:
         env["DOCS_MARKDOWNLINT_ALLOW_INSTALL"] = allow_install
@@ -321,6 +324,34 @@ def test_an_absent_linter_with_installing_disabled_fails_loudly(tmp_path: Path):
     )
     assert PIN in proc.stderr, proc.stderr
     assert "did not run" in proc.stderr, proc.stderr
+
+
+def test_a_linter_on_the_ambient_path_is_not_used(tmp_path: Path):
+    """#9708, one step over: an ambient PATH must not decide a required check.
+
+    A `markdownlint-cli2` that happens to be on PATH is a version this check
+    never asked for — another job's toolchain would be deciding what the required
+    check measures. The producer resolves the private prefix or an explicit
+    override, and otherwise installs; with installing disabled it must fail
+    EVEN THOUGH a perfectly good linter is on PATH.
+    """
+    poison = tmp_path / "poison-bin"
+    poison.mkdir()
+    marker = tmp_path / "path-linter-ran"
+    for name in ("markdownlint-cli2",):
+        exe = poison / name
+        exe.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
+        exe.chmod(0o755)
+    proc = _run(tmp_path, allow_install="0", extra_path=str(poison))
+    assert proc.returncode != 0, (
+        "the producer resolved a linter from the ambient PATH: "
+        f"{proc.stdout}{proc.stderr}"
+    )
+    assert not marker.exists(), (
+        "a linter found only on the ambient PATH was executed — that is the "
+        "#9708 defect (a measurement decided by the runner's environment "
+        "rather than by the pin)"
+    )
 
 
 def test_a_non_executable_override_is_refused_not_silently_replaced(tmp_path: Path):
