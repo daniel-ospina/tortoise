@@ -1034,6 +1034,29 @@ SOURCE_PATTERNS = {
             # core-registered guard. Pinned by tests/test_ci_selection.py::
             # test_a_consent_token_only_diff_runs_the_bridge_guard.
             "tortoise/consent_token.py",
+            # #3524 review (P2 at `f1d420615`, never closed until now): the
+            # MIGRATION that creates the control-plane jti RPC the store calls.
+            # `_consume_blocking` reaches `consume_oauth_consent_ticket` through
+            # PostgREST BY PARAMETER NAME (`{"p_jti": …, "p_expires_at": …}`),
+            # and the only guard that encodes those names is
+            # `tests/test_oauth_consent_jti_store.py` — registered on `api`.
+            # `supabase/` is a flat NON_PYTHON_PREFIXES entry, so before this
+            # entry a MIGRATION-ONLY diff was filtered out entirely and selected
+            # NO surface. MEASURED: `select(['supabase/migrations/
+            # 20261030000001_oauth_consent_tickets.sql'], 'pull_request')` ->
+            # `surfaces: []`, `full: False`, `test_oauth_consent_jti_store.py`
+            # ABSENT. So renaming a parameter — which turns every consent-token
+            # redemption into a `503 temporarily_unavailable` with no other
+            # symptom — could ship green, because the Python store reaches the
+            # RPC by name while the harness that pins it never ran. Naming the
+            # path here makes the migration select `api`, where that guard lives
+            # (the SQL's own half is the pglite suite
+            # `supabase/tests/20261030000001_oauth_consent_tickets.sql`, which
+            # now pins the argument names AND order). Same silent-drop class as
+            # the `tortoise/consent_token.py` entry directly above. Pinned by
+            # tests/test_ci_selection.py::
+            # test_the_consent_jti_migration_selects_the_store_guard.
+            "supabase/migrations/20261030000001_oauth_consent_tickets.sql",
             # #3496: the consent page pins its browser auth client to a CDN
             # specifier whose version must equal the VENDORED bundle the
             # behavioural harness executes (test_oauth_consent_pkce.py, api).

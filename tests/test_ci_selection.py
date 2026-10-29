@@ -2022,6 +2022,47 @@ def test_a_consent_token_only_diff_runs_the_bridge_guard():
     )
 
 
+def test_the_consent_jti_migration_selects_the_store_guard():
+    """#3524 review (P2 at `f1d420615`): the MIGRATION's own diff must select the
+    guard that pins the contract the migration defines.
+
+    `tortoise/consent_token.py::ControlPlaneJtiStore.consume` reaches
+    `consume_oauth_consent_ticket` through PostgREST with NAMED arguments
+    (`{"p_jti": …, "p_expires_at": …}`), and the only Python guard that encodes
+    those names is `tests/test_oauth_consent_jti_store.py` — registered on
+    `api`. `supabase/` is a flat NON_PYTHON_PREFIXES entry, so before this entry
+    a migration-only diff was filtered out and selected NO surface: a renamed or
+    reordered parameter would turn every consent-token redemption into a
+    `503 temporarily_unavailable` with all CI green.
+
+    Asserts the SELECTION (not the registration), so it reds on the pre-fix
+    patterns. Mutation check: dropping the
+    `supabase/migrations/20261030000001_oauth_consent_tickets.sql` entry from
+    `SOURCE_PATTERNS["api"]` fails every assertion below (measured pre-fix:
+    `surfaces: []`, `test_oauth_consent_jti_store.py` absent).
+    """
+    migration = "supabase/migrations/20261030000001_oauth_consent_tickets.sql"
+    assert (Path(__file__).resolve().parents[1] / migration).exists(), (
+        f"the guarded migration is gone: {migration}")
+    r = _sel([migration])
+    assert r["full"] is False, r
+    assert "api" in r["surfaces"], (
+        f"a migration-only diff selects {r['surfaces']} — the store guard is "
+        "registered on `api`, so it cannot fire on the migration that defines "
+        "the RPC it pins (#3524 review P2)"
+    )
+    for guard in (
+        "test_oauth_consent_jti_store.py",
+        "test_oauth_consent_bridge.py",
+    ):
+        assert guard in r["test_files"], (
+            f"a {migration} diff does not run tests/{guard} — the migration's "
+            "parameter NAMES are the caller's contract "
+            "(consent_token.py::_consume_blocking passes them by name), and a "
+            "rename 503s every redemption with no other symptom"
+        )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 
