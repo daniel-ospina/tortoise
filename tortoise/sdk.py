@@ -6610,8 +6610,14 @@ def _index_no_network_enabled() -> bool:
 def _holds_role_available(graph) -> bool:
     """True when this graph can carry ``holdsRole`` edges at all (#4889).
 
-    ``get_org_structure`` returns ``roles`` from a ``holdsRole`` traversal
-    whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``. That predicate has
+    ``get_org_structure`` returned ``roles`` from a ``holdsRole`` traversal
+    whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``. ⚠️ #4282 deleted that
+    SDK method, and **nothing in the tree consumes this helper any more** — there
+    is no hosted response key, REST route or MCP tool that surfaces `roles` or
+    `HOLDS_ROLE_UNAVAILABLE`. It is kept (not deleted) only because a private
+    helper may go in a rule-bound pass; it is recorded in the PR's orphan
+    inventory, so a reader must not infer a live consumer from this docstring.
+    That predicate has
     **no producer anywhere in the tree** — every reference is an edge
     allow-list, the read query itself, or an explicit
     ``create_edge``/``create_entity`` caller. On a graph where it is absent the
@@ -6651,7 +6657,8 @@ def _holds_role_available(graph) -> bool:
         return True
 
 
-#: The exact ``holdsRole`` shape ``get_org_structure`` traverses. Scoping the
+#: The exact ``holdsRole`` shape the (now deleted, #4282) ``get_org_structure``
+#: traversed. Scoping the
 #: probe to it is what keeps a non-Subject ``holdsRole`` edge from suppressing
 #: the marker on a graph where ``roles`` can never be populated.
 _HOLDS_ROLE_SCOPED_PROBE = (
@@ -6663,8 +6670,9 @@ _HOLDS_ROLE_SCOPED_PROBE = (
 _HOLDS_ROLE_PROBE_TIMEOUT_MS = 200
 
 
-#: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returns
-#: when the ``holdsRole`` leg has no producer on this graph.
+#: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returned
+#: when the ``holdsRole`` leg had no producer on this graph. ⚠️ #4282 deleted
+#: that door and **this constant now has no reader**; see the orphan inventory.
 HOLDS_ROLE_UNAVAILABLE = (
     "holdsRole has no producer anywhere in the tree — only an explicit "
     "create_edge/create_entity caller — so 'roles' is structurally empty "
@@ -7410,7 +7418,7 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     written-but-never-read nodes as read and bias `f` HIGH (#8877). The FTS
     funnel records its rows through the same module INLINE (it resolves the
     label per `entity_type`), so it is covered without calling this helper. ⛔ It is NOT every row-returning path:
-    `traverse` and `get_historical_knowledge` read by
+    `traverse` (deleted by #4282) and `get_historical_knowledge` read by
     direct Cypher and call nothing here (`recall_state`'s RELATED readers are
     likewise unhooked — the method itself does record the rows it serves), and
     the FTS funnel records only its
@@ -9825,8 +9833,8 @@ class TortoiseSDK:
                 # update_point prop path on a dedup hit. update_point writes the
                 # node property but never calls _link_source, so the Point would
                 # end up carrying `extractedFrom` with NO `:Source` edge — still
-                # an orphan — and `list_drafts` reads that prop, so it would
-                # report provenance that does not exist as an edge. It is not
+                # an orphan — and `list_drafts` (deleted by #4282) read that prop,
+                # so it could report provenance that does not exist as an edge. It is not
                 # replayed either (_revise_point restores content/embedding
                 # only), so the rebuilt graph drops the prop entirely and
                 # live != rebuild for the very property this path introduced.
@@ -10593,10 +10601,12 @@ class TortoiseSDK:
         if not session_date:
             session_date = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # #4911: the SAME scrubber on the public `commit_session` sibling — it
-        # drives the same extractor over the raw conversation and POSTs the
+        # drove the same extractor over the raw conversation and POSTed the
         # derived payload to /v1/sessions/commit, whose writes have no scrubber
         # of their own, so a conditional echo of a pasted credential is the same
-        # leak class one public API over (named by review).
+        # leak class one public API over (named by review). That sibling was
+        # deleted by #4282; `commit_session` above is the surviving internal
+        # entry, and it keeps the scrubber because the same echo path remains.
         #
         # ⛔ NO ``cap`` HERE, deliberately. The extractor does NOT window (it
         # renders each turn verbatim into the prompt), so capping would both
@@ -17051,8 +17061,10 @@ class TortoiseSDK:
         return result
 
     # ── Operator action consolidation (epic #888 W2) ──────────────────
-    # operator_action() is the unified operator write entry; the legacy
-    # mitigate_operator/annotate_operator remain the implementations.
+    # `operator_action()` was the unified operator write ENTRY on the SDK; #4282
+    # deleted it. The MCP tool `tortoise_operator_action` still is the unified
+    # entry, and mitigate_operator/annotate_operator below remain the
+    # implementations it calls.
 
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
@@ -31540,7 +31552,8 @@ class TortoiseSDK:
             rather than assume one entry per leg. #2952: combine with
             :func:`tortoise.search_engine.declared_degraded_read` (declare the
             single-leg read) or :func:`tortoise.search_engine.require_hybrid_read`
-            (fail loud) — see also :meth:`retrieval_legs`.
+            (fail loud) — see also `retrieval_legs` (that SDK method was deleted
+            by #4282; the two functions above are the surviving surface).
         read_status_out (B6 #3892): the read-path status contract — when
             provided, the dict receives ``{"status": <term>}`` with ONE of the
             four recorded terms (``tortoise.status_vocabulary``, consumed by
@@ -36303,7 +36316,13 @@ class TortoiseSDK:
 
     def _index_resolve_corpus_root(self, file_path: str, corpus_root: str | None,
                                    corpus_name: str | None) -> tuple:
-        """§6.1 I6 pin: index_file's corpus_root default resolution.
+        """§6.1 I6 pin: the corpus_root default resolution `index_file` used.
+
+        ⚠️ #4282 deleted `index_file`, so **this helper has no caller today** —
+        it is recorded in the PR's orphan inventory rather than deleted (a
+        private helper may only go in a rule-bound pass, like the privatised
+        methods). The semantics below are kept because a replacement indexer
+        must derive the same corpus:// url.
 
         Explicit param → realpath-resolved. Else the nearest ancestor of the
         file that equals TORTOISE_INGEST_BASE_DIR; else ValueError demanding
@@ -36331,13 +36350,14 @@ class TortoiseSDK:
                     break
                 p = parent
             raise ValueError(
-                f"index_file: file {file_path!r} is not under "
+                f"index (deleted entry `index_file`): file {file_path!r} is not under "
                 f"TORTOISE_INGEST_BASE_DIR ({base_real}) and no corpus_root "
                 f"was given — pass corpus_root explicitly (§6.1 I6)."
             )
         raise ValueError(
-            f"index_file: corpus_root required — TORTOISE_INGEST_BASE_DIR is "  # noqa: F541
-            f"unset and no corpus_root was given (§6.1 I6)."  # noqa: F541
+            f"index (deleted entry `index_file`): corpus_root required — "  # noqa: F541
+            f"TORTOISE_INGEST_BASE_DIR is unset and no corpus_root was given "  # noqa: F541
+            f"(§6.1 I6)."  # noqa: F541
         )
 
     def _index_max_bytes(self) -> int:

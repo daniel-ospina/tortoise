@@ -53,9 +53,11 @@ Rationale and decisions:
 
   Until #310 lands the Stripe integration, there is no user-facing tier-change
   REST endpoint — the decision is a documented policy, not a live code path.
-  The ``org_update`` SDK method (registry-level, no REST surface) allows
-  tier/limit writes for operational relief; it does NOT check downgrade
-  preconditions (operator intent overrides).
+  The ``org_update`` SDK method (registry-level, no REST surface) used to allow
+  tier/limit writes for operational relief, without checking downgrade
+  preconditions (operator intent overrides). #4282 **deleted that method**, so
+  there is now no SDK affordance for the relief this paragraph describes — a
+  reader must not treat this policy as an available lever.
 """
 from __future__ import annotations
 

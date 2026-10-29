@@ -15036,9 +15036,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # `sourceVersionTransit` snapshot, so a post-pass re-stamp would be an
     # unjournalled second write that a rebuild drops (#9206/#9079).
     #
-    # ⚠️ The SDK lane (`capture_session`) and this one are documented
-    # byte-parity (#4014/#1727); the anchor is part of that parity, so fixing
-    # one without the other would DIVERGE them.
+    # ⚠️ The SDK lane (`capture_session`, deleted by #4282) and this one were
+    # documented byte-parity (#4014/#1727); the anchor was part of that parity,
+    # and that lane no longer exists — this host path is now the only producer,
+    # so there is no second copy left to diverge from.
     #
     # Only the MINT + MATERIALIZE half moves — the provenance STAMPS need
     # `extracted`, so they stay below and read the `event_id` bound here.
@@ -15986,9 +15987,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         #      or two HOSTED captures) could otherwise read and clear the SAME
         #      `ep_dirty` roots and interleave `warm_start` writes — the exact
         #      exclusion #3718's review made explicit for the pooled sites.
-        #      (The SDK lane's own inline `capture_session` call is unchanged
-        #      and takes no lock — it is synchronous on its caller's thread and
-        #      cannot import this module; that is pre-existing, not widened.)
+        #      (The SDK lane's own inline `capture_session` call — deleted by
+        #      #4282 — was unchanged and took no lock: it was synchronous on its
+        #      caller's thread and could not import this module. That is now
+        #      moot; the note is kept so the lock's asymmetry is not
+        #      re-litigated.)
         #      The lock is a `threading.Lock` taken INSIDE the worker, never on
         #      the loop (an `asyncio.Lock` binds to the first loop, which breaks
         #      across the per-test loops — the `_CAPTURE_IN_FLIGHT` rationale).
