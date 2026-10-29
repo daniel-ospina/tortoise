@@ -513,9 +513,16 @@ NARRATIVE_RECORD_TYPE = "SessionNarrated"
 #: them.** The reason is the one that decides it: on this lane the writer
 #: deliberately stores no turn NODE, so a `:GraphEvent` about a turn would
 #: advertise an entity the graph does not hold — a subscriber would be told about
-#: a Point no graph read can return. The capture itself is still announced
-#: (`SessionRecorded`), and the whole transcript is served by `get_session_detail`
-#: from the record, which is where §9.1/D1 puts it. `TurnsRecorded` must NOT be
+#: a Point no graph read can return. ⛔ AND NOTHING COMPENSATES FOR IT ON THE
+#: FEED: `SessionRecorded` is NOT in `_GRAPH_EVENT_TYPES` either, so it writes no
+#: `:GraphEvent` row and `poll_events` (which serves `event_store.read_after`)
+#: never sees it — on the armed lane the change feed's visibility therefore ends
+#: with the EXTRACTION lane's claim Points, which are unaffected and stay
+#: `PointAdded`. The capture's own session-level record is JSONL only (durable
+#: in `public.journal_event` / the journal file), and the whole transcript is
+#: served by `get_session_detail` from the record, which is where §9.1/D1 puts
+#: it — a READ, not an announcement. Do not write a comment here claiming the
+#: feed still announces the capture; it does not. `TurnsRecorded` must NOT be
 #: added to `_GRAPH_EVENT_TYPES` to "restore" the rows — that set's shape is a
 #: recorded decision, and adding a JSONL-only carrier to it would make an event
 #: with no entity. Pinned by `tests/test_10017_turn_carrier_replay.py`

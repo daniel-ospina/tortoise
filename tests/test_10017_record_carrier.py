@@ -225,8 +225,9 @@ def test_the_carrier_declares_no_NODE_but_does_write_the_ROWS():
     §9.1's record home for the turns is `public.point`, and the per-turn
     `PointAdded` records the carrier replaces were the write that put them
     there. So the node half stays empty and the HOME half is the carrier-keyed
-    `_turn_row_statements` — one row per turn, `cache_tier = 'record_only'`, and
-    still no `node_identity` for any of them.
+    `_turn_row_statements` — one row per turn, `cache_tier = 'record_only'`, plus
+    the `node_identity` row that row's `relation` FK needs (which is identity
+    bookkeeping, not a graph node — see the `⚠️` below).
     """
     snap = {"id": f"{SESSION}_t0", "content": "c",
             "pointKind": "event", "speaker": "user",
@@ -241,8 +242,16 @@ def test_the_carrier_declares_no_NODE_but_does_write_the_ROWS():
     # record's node list comes from the node TABLES (`read_record_view`), and
     # the identity row is the FK anchor the turn's `relation` row needs — the
     # same rows the per-turn `PointAdded` lane wrote. What §4 pins is that the
-    # READER plans no node for the row, which is the property that matters.
-    assert not any("INSERT INTO public.node " in st.sql for st in plan)
+    # READER plans no node for the row, which is the property that matters (and
+    # which `tests/test_10017_cache_tier.py`'s reader leg measures).
+    #
+    # ⛔ There is no `assert not any("INSERT INTO public.node" ...)` here: no
+    # migration creates a `public.node` table, so that string cannot appear in
+    # any plan — the assertion could not fail, and it would have passed
+    # identically on the pre-fix code. A guard that cannot fire is worse than
+    # none: it reads as coverage.
+    assert sum("INSERT INTO public.point" in st.sql for st in plan) == 1, (
+        "the carrier wrote something other than one turn row per turn")
     # …and the DECLARED effect stays `NoRecordEffect`: a `NodeSnapshot` here
     # would be a second node-creating path the graph fold does not have.
     assert isinstance(rp.RECORD_MUTATIONS[rp.TURNS_RECORD_TYPE].effect,

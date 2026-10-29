@@ -350,6 +350,20 @@ def test_an_armed_capture_writes_NO_graph_event_for_its_turns(
     assert not [e for e in served["events"]
                 if any(tid in str(e) for tid in EXPECTED_TURN_IDS)], (
         "poll_events still serves a turn event on the record-held lane")
+    # ⛔ AND NOTHING ELSE ANNOUNCES THE CAPTURE ON THE FEED EITHER. The rationale
+    # this leg makes falsifiable is `record_projection.TURNS_RECORD_TYPE`'s
+    # docstring: `SessionRecorded` is NOT a `:GraphEvent` type, so it writes no
+    # feed row — the armed lane's change-feed visibility ends with the extraction
+    # lane's claim Points. A comment claiming otherwise (as an earlier head did)
+    # is the contract lying about the code, and this is what reds it.
+    assert "SessionRecorded" not in sdk_mod._GRAPH_EVENT_TYPES, (
+        "SessionRecorded became a `:GraphEvent` type — the carrier's docstring "
+        "now understates what the feed serves; re-derive it, do not delete this pin")
+    assert not [row for row in rows if row[0] == "SessionRecorded"], (
+        f"the capture IS announced on the change feed: {rows}")
+    assert "SessionRecorded" not in str(served["events"]), (
+        "poll_events announced the capture on the record-held lane — the "
+        "rationale in record_projection.TURNS_RECORD_TYPE says it does not")
 
 
 def test_the_GRAPH_held_lane_still_announces_its_turns(tmp_path, monkeypatch):

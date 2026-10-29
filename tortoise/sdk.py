@@ -2696,8 +2696,11 @@ def _write_capture_turns(
                      for _i in range(_first_live, prior_turn_max_index + 1)]
         # Which store the removal targets is the same capability question as the
         # write above: with the record holding the turns there is no node to
-        # delete, and the record delete is the `PointRetracted` +
-        # `EntityMutated` pair emitted below (folded as a hard delete).
+        # delete, and the removal is the `EntityMutated` op=delete emitted below
+        # (the record half is a TIER DEMOTE, not a row delete — see
+        # `record_projection._delete_statements`). `PointRetracted` is emitted
+        # ONLY on the graph-held lane: it is in `_GRAPH_EVENT_TYPES`, and on the
+        # record-held lane the turn was never announced there either.
         if stale and not _record_holds_turns:
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(
@@ -2831,10 +2834,24 @@ def _write_capture_turns(
         # `creating=True` is accurate (this capture computed these vectors); the
         # `embedding_preserved` branch still withholds the identity, because
         # THAT vector may predate a model change.
-        from .embeddings import stamp_journal_embedding
+        #
+        # #5148: the import is GUARDED, for the reason `_emit_event` states at
+        # the identical seam — a write must not depend on an import. By the time
+        # we get here the record rows are planned and the stale-turn removals
+        # are already journaled, so raising would hand the caller an
+        # ImportError for a capture that otherwise SUCCEEDED, and would then
+        # reach neither the carrier nor the trailing `SessionRecorded` below.
+        # Skipping the stamp is the fail-SOFT shape `_capture_turn_embeddings`
+        # uses on the same call path: the vectors ride verbatim, only the
+        # identity that makes a model change audible is lost.
+        try:
+            from .embeddings import stamp_journal_embedding
+        except Exception:  # noqa: BLE001, RUF100
+            stamp_journal_embedding = None
 
-        for _record in _turn_records:
-            stamp_journal_embedding(_record["point"], creating=True)
+        if stamp_journal_embedding is not None:
+            for _record in _turn_records:
+                stamp_journal_embedding(_record["point"], creating=True)
         # `contains_session` rides the ENVELOPE (a capture-write structural fact,
         # ONTOLOGY §4.5 — never a node property). The graph fold reads it for
         # `PointAdded` only; the record applies it once per turn
