@@ -1160,7 +1160,7 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log`-named tails in python-ci.yml (2 of them the per-runner
+    #9300): 5 `pytest.log`-named tails in python-ci.yml (3 of them the per-runner
     `"$PYTEST_LOG"`, not a `/tmp` literal), 1 `trackb.log` (the must-pass
     Track B member, whose log name does not contain "pytest" — it was the coverage
     gap a first cut missed), 1 `pmv-pytest.log` in post-merge-validation.yml, and 1
@@ -1199,6 +1199,31 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     # A drop here means a leg was lost, not that it got safer; an ADDITION is fine,
     # which is why this is a floor.
     assert tails >= 8, f"only {tails} pytest-log sites found (expected >= 8) — a leg was renamed or dropped"
+
+
+def test_the_docstrings_inventory_split_is_derived_not_restated() -> None:
+    """PR #10264 review P3 (F1): the split said "2 of them the per-runner" — one leg stale.
+
+    The relocation that made `test-slow` write through `"$PYTEST_LOG"` is the SAME
+    commit that made this paragraph wrong, and nothing noticed: the sentence and the
+    closing floor comment in one docstring then stated two different inventories of
+    one file. Deriving the split from `capture_site` (the counter the floor uses)
+    means the prose cannot be true of an older head — an edit that changes either
+    shape reds HERE, with the number to write.
+    """
+    sites = [s for s in (capture_site(ln) for ln in WORKFLOW.read_text().splitlines())
+             if s is not None]
+    per_runner = [s for s in sites if s == _RUNNER_TEMP_LOG]
+    literal = [s for s in sites if s == "/tmp/pytest.log"]
+    # the total this sentence states, and the split it got wrong
+    assert len(per_runner) + len(literal) == 5, sites
+    flat = " ".join(
+        (test_every_pytest_log_tail_is_followed_by_the_reporter.__doc__ or "").split()
+    )
+    assert f"{len(per_runner)} of them the per-runner" in flat, (
+        f"{WORKFLOW.name} has {len(per_runner)} per-runner and {len(literal)} literal "
+        f"`/tmp/pytest.log` sites; the docstring's parenthetical must say so"
+    )
 
 
 def test_a_comment_mentioning_the_tee_shape_is_not_a_capture_site() -> None:
