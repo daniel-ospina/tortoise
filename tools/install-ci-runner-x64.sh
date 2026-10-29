@@ -587,19 +587,43 @@ if [ "$MODE" = status ]; then
     # the one block that must not produce one, and the mirror of the boundary
     # `tools/runner_autoscale.py:284-287` states ("a custom label that merely starts
     # `ubuntu-<digits>` … is NOT in the class"). One predicate, two readers.
+    # ⛔ THE NUMERATOR IS COUNTED IN THE SAME POPULATION AS THE DENOMINATOR, OR THE RATIO CAN
+    # EXCEED 1 AND THE EROSION ARM SWITCHES ITSELF OFF. The denominator was fixed to the sub-pool
+    # above; the numerator was not, so it counted EVERY carrier in the pool — including the ARM64
+    # runners whose answer that denominator explicitly does not count. Measured on a 12-runner
+    # pool shaped like the drift this PR records (3 of 7 x64 carriers + 5 arm64 runners wrongly
+    # carrying the bare pin) the pre-fix program printed `8 of 7 runner(s)` with NO `⚠️ PARTIAL`,
+    # because `n < denom` is false as soon as `denom - n_actual` foreign carriers are present —
+    # `8 > 7`, so the one read that sees erosion before the last carrier goes was unreachable, and
+    # the autoscaler could walk the x64 sub-pool to zero with this instrument green at every step.
+    # It is not hypothetical and it is not "still coverage": per the published label→arch mapping a
+    # bare `ubuntu-<version>` IS the x64 image, so an arm64 runner claiming it is a false
+    # architecture claim — the exact state `_preserve_labels` now drops on re-registration, and
+    # never evidence that the label is served. So `hit` is carried together with the class
+    # membership the loop already computes (`nx` = bare-class carriers, `na` = arm-class carriers)
+    # and the END block selects the numerator by the SAME class it selected the denominator by, so
+    # `num <= denom` holds by construction. Mutation: use `n` as the numerator again -> `8 of 7`,
+    # no PARTIAL -> tests/test_ci_runner_x64_install.py
+    # ::test_label_coverage_reports_partial_coverage_rather_than_green RED.
     counts="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" -v x64label="$ARCH_LABEL" -v armlabel="$ARM_POOL_LABEL" \
       -v fallbacklabel="$FALLBACK_LABEL" -v pool_total="$pool_total" '
       {k=split($2,a,","); hit=0; x64=0; arm=0
        for(i=1;i<=k;i++){ if(a[i]==want) hit=1; if(a[i]==x64label) x64=1; if(a[i]==armlabel) arm=1 }
-       if (hit) n++; if (x64) nx64++; if (arm) narm++}
+       if (hit) n++; if (x64) nx64++; if (arm) narm++
+       if (hit && x64) nx++; if (hit && arm) na++}
       END { total = pool_total + 0   # the MEASURED runner count, never the record count above
             denom = total
             cls = "other"
-            if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) { denom = narm; cls = "arm" }
+            num = n                 # whole-pool classes count the whole pool, numerator included
+            if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) { denom = narm; cls = "arm"; num = na }
             else if (want == fallbacklabel) cls = "fallback"
-            else if (want ~ /^ubuntu-[0-9][0-9.]*$/) { denom = nx64; cls = "bare" }
-            if (denom == 0) denom = total
-            printf "%d %d %s", n+0, denom+0, cls }')"
+            else if (want ~ /^ubuntu-[0-9][0-9.]*$/) { denom = nx64; cls = "bare"; num = nx }
+            # ⛔ THE FALLBACK PAIRS THE DENOMINATOR WITH ITS OWN NUMERATOR. When the sub-pool is
+            # empty the denominator becomes the whole pool — so the numerator must widen with it,
+            # or a label carried by a runner OUTSIDE the (measured-empty) sub-pool would read as
+            # `0 of N` and exit 5 on a carrier it had just counted.
+            if (denom == 0) { denom = total; num = n }
+            printf "%d %d %s", num+0, denom+0, cls }')"
     n="${counts%% *}"
     rest="${counts#* }"
     denom="${rest%% *}"

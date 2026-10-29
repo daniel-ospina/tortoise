@@ -637,6 +637,52 @@ def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Pat
         f"the destructive instruction must be refused out loud, not printed as the fix: {r.stderr}"
     )
 
+    # ⛔ AND THE NUMERATOR IS COUNTED IN THE SAME POPULATION AS THE DENOMINATOR — the arm that
+    # reads EROSION was defeated by its own arithmetic. The denominator was fixed to the sub-pool
+    # (the ARM64 runners must never claim the bare `ubuntu-<version>`), but the numerator still
+    # counted EVERY carrier in the pool — including the arm64 runners whose answer the denominator
+    # deliberately does not count. Measured pre-fix on this exact fixture: `ubuntu-24.04 = 8 of 7
+    # runner(s)` with NO `⚠️ PARTIAL` and exit 0, because `n < denom` is false once `denom - n_real`
+    # foreign carriers exist. So the one read that sees the x64 sub-pool eroding before its last
+    # carrier goes printed a clean row — a ratio that cannot be true, reported as coverage — and the
+    # scheduled autoscaler could walk that sub-pool to zero with this instrument green at every
+    # step. The arm64 carrier is not "coverage" on the instrument's own terms either: per the
+    # published label→arch mapping a bare `ubuntu-<version>` IS the x64 image, so an arm64 runner
+    # answering it is the false architecture claim `_preserve_labels` now drops on re-registration.
+    # Mutation: count `hit` for the whole pool (use `n` as the numerator) -> `8 of 7`, no PARTIAL,
+    # and the two assertions below are RED.
+    foreign = _stub_gh(
+        tmp_path / "gh-foreign",
+        "b1\tself-hosted-x64,ubuntu-24.04\n"
+        "b2\tself-hosted-x64,ubuntu-24.04\n"
+        "b3\tself-hosted-x64,ubuntu-24.04\n"
+        "b4\tself-hosted-x64\n"
+        "b5\tself-hosted-x64\n"
+        "b6\tself-hosted-x64\n"
+        "b7\tself-hosted-x64\n"
+        "a1\tself-hosted-arm64,ubuntu-24.04\n"
+        "a2\tself-hosted-arm64,ubuntu-24.04\n"
+        "a3\tself-hosted-arm64,ubuntu-24.04\n"
+        "a4\tself-hosted-arm64,ubuntu-24.04\n"
+        "a5\tself-hosted-arm64,ubuntu-24.04",
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{foreign}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=pin,
+    )
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-24.04 = 3 of 7 runner(s)" in r.stderr, (
+        "a foreign-arch carrier must not be counted as an answer for the x64 sub-pool "
+        f"(pre-fix this printed `8 of 7`): {r.stderr}"
+    )
+    assert "PARTIAL" in r.stderr, (
+        f"4 of the 7 runners that must answer the bare pin cannot, so a clean row is a fail-open: {r.stderr}"
+    )
+    assert "8 of 7" not in r.stderr, (
+        f"a ratio above 1 means the numerator and denominator came from different populations: {r.stderr}"
+    )
+
     # ⛔ AND THE MIRROR: `ubuntu-latest` with NO carrier is the HEALTHY state, not a block. The gate
     # detaches that label from the pool whenever GitHub-hosted is healthy, so a zero-answer
     # `ubuntu-latest` verdict would make `--status` — and any `--status && …` guard — permanently red
