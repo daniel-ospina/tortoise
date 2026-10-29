@@ -332,8 +332,15 @@ def test_the_gating_workflow_still_logs_what_it_does_not_run():
     report = cs.non_gating_report(_manifest())
     assert "eval/**" in report and "longmem_eval/**" in report
     assert "test (i)" in report, "the report must list every gating fast shard"
-    assert "non-gating total: 43 file(s)" in report, (
-        f"the report's counts are the observability: got\n{report}")
+    # The COUNT is not pinned as a literal: the lane's whole point is that the
+    # subtree is the unit (``on_demand_subtree_files`` walks disk), so a new
+    # ``tests/longmem_eval/test_*.py`` grows the lane without a config edit and
+    # must not red an unrelated PR. What IS pinned is that the printed total is
+    # the selector's own count and reconciles with the itemization below.
+    expected = len(cs.on_demand_files(_manifest()))
+    assert f"non-gating total: {expected} file(s)" in report, (
+        f"the report must state the selector's lane size ({expected}): "
+        f"got\n{report}")
     # #10206 review: the itemization must RECONCILE with that total. A literal
     # that also sits inside a subtree (`eval/retrieval/test_integration.py`
     # inside `eval/**`) used to be counted twice, and the per-entry lines summed
@@ -348,9 +355,9 @@ def test_the_gating_workflow_still_logs_what_it_does_not_run():
     per_entry = sum(int(chunk.split(" file")[0])
                     for chunk in report.split("-> ")[1:] if " file(s)" in chunk)
     literal_only = report.count("-> 1 file")
-    assert per_entry + literal_only == 43, (
+    assert per_entry + literal_only == expected, (
         f"entries attribute {per_entry + literal_only} file(s) against a "
-        f"43-file lane: got\n{report}")
+        f"{expected}-file lane: got\n{report}")
 
 
 def _mutation_dropping_the_subtree_lane() -> dict:
