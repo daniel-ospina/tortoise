@@ -1203,16 +1203,28 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # extractor's shared design doc `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
 # architecture doc carries ~15 cites belonging to other epics, so another epic's
-# `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
-# continuation (the docs write `` `extractor_v2.py:8504` and `:8524` ``) is NOT a
-# cite this leg can resolve, because the file is named only once for several
-# numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
-# `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
-# 15 cites (`8288-8292`, `8278-8284`, `7928-7932`, `7912`, `7881`, `7781-7801`,
-# `7804`) matched no pattern at all, so they were neither resolved nor reported
-# `unmatched` — the leg stayed green over numbers it never read. The index row
-# was the second: nothing but a hand re-derivation stood between it and the same
-# silent staleness.
+# `sdk.py` cite must not be told to add a phrase for a line it is not about).
+#
+# ⛔ A bare `:NNNN` continuation (the docs write `` `extractor_v2.py:8504` and
+# `:8524` ``) IS a cite this leg resolves — for the documents that opt in via
+# `_BUNDLE_CONTINUATION_DOCS`. It used to be excluded on the reasoning that "the
+# file is named only once for several numbers"; that exclusion was a FALSE PASS
+# and it is the exact shape that rotted: `docs/00_index.md`'s `#7949` row writes
+# `extractor_v2.py:8592` once and then **fourteen** bare numbers, all of which
+# drifted while the sweep stayed green (PR #10010 review, P2 — every one of them
+# pointed at a comment, a blank line, a docstring, or unrelated code, and the row
+# even ordered a block "before" the line it followed). Attribution is mechanical
+# and needs no inference: a bare number belongs to the last file NAMED before it
+# on the same table row, which is how a reader parses it too.
+#
+# `extractor_v2.py` was the first gap: its 15 cites (`8288-8292`, `8278-8284`,
+# `7928-7932`, `7912`, `7881`, `7781-7801`, `7804`) matched no pattern at all, so
+# they were neither resolved nor reported `unmatched` — the leg stayed green over
+# numbers it never read. The index row was the second: nothing but a hand
+# re-derivation stood between it and the same silent staleness — and then it
+# happened a fourth time. The remaining unread continuations are now COUNTED and
+# pinned (`_BUNDLE_UNREAD_CONTINUATIONS`), so the gap cannot grow silently: a new
+# bare continuation in a non-opted-in document reds and names the repair.
 
 _BUNDLE_DOCS = (
     ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
@@ -1273,6 +1285,45 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
+
+# Documents whose BARE `:NNNN` continuations this leg resolves. The index row is
+# the document that rotted four times, and it is the one whose numbers are NOT
+# paired with a symbol the way the README's `symbol` + `:NNN` step table is — so
+# nothing but this sweep stands between it and silent staleness.
+#
+# ⛔ Opting a document IN is strictly stronger, never a way to stay green: every
+# continuation it carries then has to bind to a `_BUNDLE_RULES` phrase, so a new
+# bare number with no verifiable claim reds as `unmatched` instead of passing.
+_BUNDLE_CONTINUATION_DOCS = ("docs/00_index.md",)
+
+#: a bare continuation: the colon is not preceded by a word char, a dot or a
+#: slash, so `extractor_v2.py:8592` and `https://…` are never re-read as one.
+_BUNDLE_CONTINUATION = re.compile(r"(?<![\w./:]):(\d+)(?:-(\d+))?")
+
+#: ANY `file.py:NNN` on a row, used only to attribute a bare continuation to the
+#: file named before it. Deliberately wider than `_BUNDLE_CITE`: a continuation of
+#: `tools/capstone_verdict_check.py` is not a cite this leg reads (that file is in
+#: no `_BUNDLE_SOURCES`), and it must be attributed — and then dropped — rather
+#: than silently bound to whichever of the three sources appeared last.
+_BUNDLE_ANY_FILE_CITE = re.compile(r"([A-Za-z0-9_./-]+\.py):(\d+)(?:-(\d+))?")
+
+#: Bare continuations of a `_BUNDLE_SOURCES` file that this leg still does NOT
+#: read, by document. These are the documents that have not opted in to
+#: `_BUNDLE_CONTINUATION_DOCS`: the README and both probes, whose numbers are
+#: written beside the symbol they name (the bundle's own documented cite
+#: convention — "the symbol is authoritative and the line is a convenience"), plus
+#: the one E-row cite that wraps. The number is MEASURED, not estimated, and it is
+#: pinned so it cannot GROW unnoticed — a new bare number in one of these documents
+#: reds and says which document to opt in. Closing the remainder (giving each of
+#: these a `_BUNDLE_RULES` phrase) is a follow-up, not a silent exclusion: the
+#: fourteen index-row numbers that used to sit in this pool are exactly what the
+#: exclusion cost, so the pool is now visible and counted.
+_BUNDLE_UNREAD_CONTINUATIONS = {
+    "README.md": 33,
+    "E1-E5-PROOFS.md": 1,
+    "probes/capstone_measure.py": 25,
+    "probes/capstone_run.py": 10,
+}
 
 # A paragraph that is ABOUT numbers which no longer resolve is not a live cite:
 # the README discloses the frozen log's stale set on purpose, and the supersession
@@ -1344,6 +1395,32 @@ _BUNDLE_RULES = (
      ("early-return path",),
      ('"classify_later": {"enabled"', '"vet": {"enabled"'), "span",
      ("contains", '"vet": {"enabled"')),
+    # ── the `docs/00_index.md` row's BARE continuations. Each phrase is the row's
+    # own words, sitting immediately before the number it names; each anchor is
+    # the code that number must point at. These are the claims that went unread
+    # for six review cycles (#10010 review, P2), so they are pinned, not prose.
+    ("the OFF block the `if not edus:` return emits", "extractor_v2",
+     ("`if not edus:` return",), ('"vet": {"enabled"',), "line", None),
+    ("the OFF block the classify pass's early return emits", "extractor_v2",
+     ("the early-return block at",), ('"classify_later": {"enabled"',),
+     "span", ("exact", '"slot_rekeys": 0},')),
+    ("the VET pass's embed-list gate", "extractor_v2",
+     ("gated on the LIST",), ("if vet_enabled and embed_list:",), "line", None),
+    ("the VET pass the list gate calls", "extractor_v2",
+     ("the `_run_vet_pass` call itself is",), ("_run_vet_pass(",), "line", None),
+    ("the VET pass's complete-list gate", "extractor_v2",
+     ("the complete-list gate is",),
+     ("if vet_enabled and complete_list:",), "line", None),
+    ("the classify pass's embed-list gate", "extractor_v2",
+     ("`if classify_later and embed_list:`",),
+     ("if classify_later and embed_list:",), "line", None),
+    ("the classify pass's complete-list gate", "extractor_v2",
+     ("`if classify_later and complete_list:`",),
+     ("if classify_later and complete_list:",), "line", None),
+    ("the classify pass's items gate", "extractor_v2",
+     ("`if items:`",), ("if items:",), "line", None),
+    ("the classify pass's fail-open exception paths", "extractor_v2",
+     ("fail-open `except` at",), ("except Exception as e:",), "line", None),
     ("the extractor entry point", "extractor_v2",
      ("extract_session_v2",), ("def extract_session_v2(",), "def", None),
     # The S2.1 FINDING in `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
@@ -1446,6 +1523,84 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
     return []
 
 
+def _bundle_continuation_records(doc_name: str, text: str, doc_lines,
+                                 paragraphs) -> list:
+    """Every bare `:NNNN` continuation of a swept source, with what it belongs to.
+
+    Attribution is mechanical and needs no inference: a bare number belongs to the
+    last file NAMED before it **within the unit the document is read in** — the
+    table ROW for a row-filtered document (`docs/00_index.md`), the paragraph
+    otherwise. Using the paragraph everywhere would be wrong for the index: its
+    whole §5 table is ONE paragraph, so a bare number on another epic's row would
+    inherit the file named on the `#7949` row. Using the line everywhere is wrong
+    for prose, where the filename and its numbers wrap.
+
+    Only a `_BUNDLE_SOURCES` file is attributable; a continuation of any other
+    file (`tools/capstone_verdict_check.py:110` … `:498`) is attributed and then
+    dropped, so it can never be rebound to whichever source happened to appear
+    last. Yields `(pos, source, start, end, display)`.
+    """
+    row_scoped = doc_name in _BUNDLE_ROW_FILTER
+    line_starts = [0]
+    for ln in doc_lines:
+        line_starts.append(line_starts[-1] + len(ln) + 1)
+    out = []
+    for match in _BUNDLE_CONTINUATION.finditer(text):
+        pos = match.start()
+        line_no = text.count("\n", 0, pos)
+        if row_scoped:
+            unit_start = line_starts[line_no]
+        else:
+            unit_start = next(s for s, _e in paragraphs if s <= pos)
+        named = [n for n in _BUNDLE_ANY_FILE_CITE.finditer(text[unit_start:pos])]
+        if not named:
+            continue
+        path = Path(named[-1].group(1)).name
+        source = next((k for k, v in _BUNDLE_SOURCES.items()
+                       if Path(v).name == path), None)
+        if source is None:
+            continue
+        out.append((pos, source, int(match.group(1)), match.group(2),
+                    match.group(0)))
+    return out
+
+
+def _bundle_continuation_cites(doc_name: str, text: str, doc_lines,
+                               paragraphs) -> list:
+    """The subset of `_bundle_continuation_records` this leg RESOLVES.
+
+    Only for a document that opted in via `_BUNDLE_CONTINUATION_DOCS`.
+    """
+    if doc_name not in _BUNDLE_CONTINUATION_DOCS:
+        return []
+    return _bundle_continuation_records(doc_name, text, doc_lines, paragraphs)
+
+
+def _bundle_unread_continuations(docs) -> dict:
+    """Bare continuations of a swept source that no document opted in to read.
+
+    The MEASURED size of what this leg still cannot verify — reported so the
+    remainder is visible instead of being confused with "nothing there". The
+    count is pinned by `test_the_unread_bare_continuations_are_counted_not_hidden`,
+    so a NEW one reds instead of joining a silent pool: the gap may be closed or
+    acknowledged, never quietly grown.
+    """
+    counts: dict[str, int] = {}
+    for doc_name, doc_path in docs:
+        if doc_name in _BUNDLE_CONTINUATION_DOCS:
+            continue
+        text = doc_path.read_text(encoding="utf-8")
+        doc_lines = text.splitlines()
+        scope = _BUNDLE_ROW_FILTER.get(doc_name)
+        kept = [r for r in _bundle_continuation_records(
+                    doc_name, text, doc_lines, _paragraph_spans(text))
+                if scope is None
+                or scope.search(doc_lines[text.count("\n", 0, r[0])])]
+        if kept:
+            counts[doc_name] = len(kept)
+    return counts
+
+
 def _bundle_sweep(docs, sources) -> dict:
     """Read every LIVE cite out of `docs` and resolve it against `sources`.
 
@@ -1463,22 +1618,25 @@ def _bundle_sweep(docs, sources) -> dict:
         text = doc_path.read_text(encoding="utf-8")
         doc_lines = text.splitlines()
         paragraphs = _paragraph_spans(text)
-        for match in _BUNDLE_CITE.finditer(text):
+        records = [(m.start(), m.group(1), int(m.group(2)), m.group(3),
+                    m.group(0)) for m in _BUNDLE_CITE.finditer(text)]
+        records += _bundle_continuation_cites(doc_name, text, doc_lines,
+                                               paragraphs)
+        for pos, source, start, end, shown_cite in sorted(records):
             paragraph = next((s, e) for s, e in paragraphs
-                             if s <= match.start() < e)
-            line_no = text.count("\n", 0, match.start()) + 1
+                             if s <= pos < e)
+            line_no = text.count("\n", 0, pos) + 1
             # a scoped document is swept ROW by row: only the row (line) that
             # names this bundle is ours, not the whole markdown-table paragraph.
             if not _bundle_in_scope(doc_name, doc_lines[line_no - 1]):
                 continue
             marker = _bundle_historical(text[paragraph[0]:paragraph[1]])
             if marker:
-                skipped.setdefault(marker, []).append(match.group(0))
+                skipped.setdefault(marker, []).append(shown_cite)
                 continue
-            source, start, end = match.group(1), int(match.group(2)), match.group(3)
             rule = _bundle_rule(source, text[paragraph[0]:paragraph[1]],
-                                paragraph[0], match.start())
-            cite = f"{doc_name}:{line_no} `{match.group(0)}`"
+                                paragraph[0], pos)
+            cite = f"{doc_name}:{line_no} `{shown_cite}`"
             if rule is None:
                 unmatched.append(cite)
                 continue
@@ -1563,6 +1721,67 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         " — the bundle's cites for those symbols moved or were dropped; re-derive them")
     assert checked >= 20, (
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
+
+
+def test_the_unread_bare_continuations_are_counted_not_hidden():
+    """The bare continuations this leg does NOT resolve are a MEASURED remainder.
+
+    ⛔ This test exists because the last time a whole class of cite was excluded
+    from the sweep, it went stale FOUR times with the leg green (`docs/00_index.md`'s
+    `#7949` row — fourteen bare numbers pointing at comments, blank lines, a
+    docstring and unrelated code; PR #10010 review, P2). An excluded cite is fine
+    only while it is COUNTED. A new bare continuation in a document that has not
+    opted in reds here and names the two honest repairs: pair the number with the
+    symbol it names (the bundle's own cite convention, which is what makes the
+    README's step table self-detecting), or add the document to
+    `_BUNDLE_CONTINUATION_DOCS` and give each of its numbers a `_BUNDLE_RULES`
+    phrase — at which point the sweep verifies them instead of tolerating them.
+    """
+    measured = _bundle_unread_continuations(_BUNDLE_DOCS)
+    assert measured == _BUNDLE_UNREAD_CONTINUATIONS, (
+        "the set of bare `:NNNN` continuations this leg cannot resolve has moved — "
+        "a cite nothing re-checks WILL rot silently, so either opt the document in "
+        f"(`_BUNDLE_CONTINUATION_DOCS`) or pair the number with its symbol: "
+        f"measured={measured} pinned={_BUNDLE_UNREAD_CONTINUATIONS}")
+    # and the documents that DO opt in are genuinely read: every continuation in
+    # them is a resolved cite, so opting in cannot be used to stay green.
+    for doc_name, doc_path in _BUNDLE_DOCS:
+        if doc_name not in _BUNDLE_CONTINUATION_DOCS:
+            continue
+        text = doc_path.read_text(encoding="utf-8")
+        doc_lines = text.splitlines()
+        resolved = _bundle_continuation_cites(
+            doc_name, text, doc_lines, _paragraph_spans(text))
+        swept = _bundle_sweep((((doc_name), doc_path),), _BUNDLE_SOURCES)
+        assert swept["checked"] >= len(resolved), (
+            f"{doc_name} opted in to continuation resolution but only "
+            f"{swept['checked']} of its {len(resolved)} continuations were "
+            "checked — the resolver is not reaching them")
+
+
+def test_a_restaled_bare_continuation_reds_the_sweep():
+    """Non-vacuity: the fourteen now-resolved index-row cites really are checked.
+
+    Before this leg could resolve bare continuations, every one of them was
+    invisible to it: this test re-stales one number in a COPY of the shipped row
+    and drives the shipped `_bundle_sweep` over it, so reverting the resolver (or
+    dropping a rule) reds here rather than passing over an unread number.
+    """
+    shipped = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+    # a bare continuation the resolver must attribute to `extractor_v2.py`
+    stale = shipped.replace(
+        "the early-return block at `:8608-8611`",
+        "the early-return block at `:8520-8523`")
+    assert stale != shipped, "the index row moved — update this non-vacuity pin"
+    with tempfile.TemporaryDirectory() as tmp:
+        doc = Path(tmp) / "00_index.md"
+        doc.write_text(stale, encoding="utf-8")
+        swept = _bundle_sweep((("docs/00_index.md", doc),), _BUNDLE_SOURCES)
+    assert swept["failures"], (
+        "re-staling a bare continuation to the pre-fix `:8520-8523` left the sweep "
+        "green — the index row's continuations are not actually verified")
+    assert any(":8520-8523" in f for f in swept["failures"]), (
+        f"the re-staled cite was not the one that redded: {swept['failures']}")
 
 
 def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
