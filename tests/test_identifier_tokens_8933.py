@@ -613,6 +613,118 @@ class TestWritePath:
         finally:
             sdk.close()
 
+    def test_the_sdk_update_door_does_not_JOURNAL_the_derived_alias(
+            self, tmp_path):
+        """#10203 review round 8 (F1/P2): the derived alias must not reach the
+        record from the REVISE door either.
+
+        ``update_point`` recomputes ``search_keys`` on a content edit and put the
+        result into ``emit_props``, which strips only ``content_hash`` (#1904)
+        and the derived vector (#4208). So the ``PointRevised`` record carried a
+        producer claim the replay does not honour: ``_revise_point`` re-derives
+        from ``new_content`` and the node's own previous keys and never reads
+        ``ev["search_keys"]``. That made "derived, never recorded" — the PR
+        body, ``.env.example``, ``point_identifier_aliases`` and the create
+        door's own snapshot — false from this door onward, and ``search_keys``
+        is a COLUMN in ``public.point``, so the derived value became
+        authoritative in the record lane (``record_projection`` patches columns
+        from the flat ``NodePatch``), which that module's doctrine forbids.
+
+        The create door already had this pin
+        (``test_the_sdk_create_door_derives_and_stays_equal_to_the_replay``);
+        the revise door had none, because its test only read the NODE.
+
+        (1) Fails on the pre-fix door: the ``PointRevised`` row carries
+            ``search_keys='err4032'``. Fails too if the fix over-reaches and
+            stops the live NODE from holding the alias (the parity half).
+        (2) Reachable: the ordinary SDK create + content edit, with a real
+            JSONL journal, replayed through the projection's own revise fold.
+        """
+        import uuid
+
+        from tortoise.log import EventLog
+        from tortoise.projection import FalkorProjection
+        from tortoise.sdk import TortoiseSDK
+
+        log_path = str(tmp_path / "revise.jsonl")
+        sdk = TortoiseSDK(
+            os.path.join(str(tmp_path), "revise.db"),
+            namespace=f"test_ident_revise_{uuid.uuid4().hex[:8]}",
+            event_log_path=log_path,
+        )
+        try:
+            pid = sdk.create_point(
+                content="release notes", kind="statement")["id"]
+            sdk.update_point(pid, content="error ERR-4032 on deploy")
+
+            def keys_of(graph):
+                rows = graph.query(
+                    f"MATCH (n:Point {{id:'{pid}'}}) RETURN n.search_keys"
+                ).result_set
+                return rows[0][0] if rows else None
+
+            live = keys_of(sdk._proj.g)
+            assert live is not None and "err4032" in str(live).split(), live
+
+            events = EventLog(log_path).read_all()
+            revised = [e for e in events if e.get("type") == "PointRevised"]
+            assert revised, events
+            for event in revised:
+                assert "err4032" not in str(event.get("search_keys") or ""), (
+                    "the DERIVED alias reached the journal from the revise "
+                    f"door: {event.get('search_keys')!r}")
+
+            replayed = FalkorProjection(
+                os.path.join(str(tmp_path), "revise_replay.db"),
+                graph_name=f"test_ident_revise_rp_{uuid.uuid4().hex[:8]}")
+            try:
+                for event in events:
+                    if event.get("type") in ("PointAdded", "PointRevised"):
+                        replayed.apply(event)
+                assert keys_of(replayed.g) == live, (
+                    "derived != replay(journal) on `search_keys` for the "
+                    "revise door: the live edit and the rebuild disagree")
+            finally:
+                replayed.close()
+        finally:
+            sdk.close()
+
+    def test_a_CALLER_supplied_search_keys_still_rides_the_record(
+            self, tmp_path):
+        """The strip is scoped to the DERIVED value only.
+
+        A caller-supplied ``search_keys`` on a revision is not recomputable by a
+        replay (the value exists only in the call), it rode ``PointRevised``
+        before #8933 too, and the #5046 caller-owned parity gap is a separate
+        recorded decision — so this fix must not silence it.
+
+        (1) Fails if the strip is written as an unconditional
+            ``k != "search_keys"``.
+        (2) Reachable: a revision that supplies its own key.
+        """
+        from tortoise.log import EventLog
+        from tortoise.sdk import TortoiseSDK
+
+        log_path = str(tmp_path / "caller.jsonl")
+        sdk = TortoiseSDK(
+            os.path.join(str(tmp_path), "caller.db"),
+            namespace="test_ident_caller_keys",
+            event_log_path=log_path,
+        )
+        try:
+            pid = sdk.create_point(
+                content="release notes", kind="statement")["id"]
+            sdk.update_point(pid, content="tick second",
+                             search_keys=["customkey"])
+            revised = [e for e in EventLog(log_path).read_all()
+                       if e.get("type") == "PointRevised"]
+            assert revised, "the revision appended no record at all"
+            assert "customkey" in str(revised[-1].get("search_keys") or ""), (
+                "a CALLER-supplied search_keys was stripped from the record: "
+                f"{revised[-1].get('search_keys')!r}")
+        finally:
+            sdk.close()
+
 
 @requires_live
 class TestWritePathLive:
@@ -677,6 +789,39 @@ class TestWritePathLive:
         for token in ("release", "deploy", "rollout", "err4032"):
             assert token in stored.split(), (token, stored)
 
+    def test_an_ARRAY_valued_node_does_not_abort_the_alias_write(self, proj):
+        """#10203 review round 8 (F3/P2): the append is TYPE-GUARDED on the node.
+
+        Array-valued ``search_keys`` is a state this repo MAINTAINS, not a
+        hypothetical legacy shape: ``flatten_search_keys_prop`` flattens the
+        PAYLOAD, a later ``update_entity`` (``SET n += $props``, no flatten,
+        #5482) can put an array back, and ``_array_valued_search_keys_exist`` /
+        ``_array_search_keys_rows`` exist precisely because such rows can be
+        present at any time. ``' ' + <list>`` is not a string expression, so the
+        pre-fix clause made the whole ``_persist_extra_props`` statement raise
+        ``Type mismatch: expected String or Null but was List`` — a write whose
+        only job was to add one alias ABORTED (measured on the embedded lane at
+        the previous head, then on both lanes here).
+
+        (1) Fails on the pre-fix clause: the apply raises, so the assertions
+            never run. Fails if the guard only survives the raise by DISCARDING
+            the array (the vocabulary assertions).
+        (2) Reachable: one raw-Cypher point holding an array, then the ordinary
+            ``PointAdded`` re-emit whose payload carries no ``search_keys`` —
+            the same door the round-6 P1 fix opened.
+        """
+        proj.g.query(
+            "CREATE (n:Point {id:'p-arr-1', content:'plain', "
+            "search_keys:['alpha','beta']})")
+        proj.apply({"type": "PointAdded", "point": {
+            "id": "p-arr-1", "content": "error ERR-4032 on deploy"}})
+        stored = self._keys(proj, "p-arr-1") or ""
+        assert isinstance(stored, str), (
+            "the guard left the node ARRAY-valued (invisible to the fulltext "
+            f"index) instead of flattening it: {stored!r}")
+        for token in ("alpha", "beta", "err4032"):
+            assert token in stored.split(), (token, stored)
+
     def test_a_content_edit_rederives_the_alias_and_retracts_stale_ones(self, proj):
         """#10203 review round 6 (measured P0/P1): a revision is not a capture.
 
@@ -702,7 +847,7 @@ class TestWritePathLive:
                     "new_content": "deploy is clean again"})
         assert self._keys(proj, "p-rev-1") == "release deploy"
 
-    def test_the_sdk_update_door_rederives_too(self):
+    def test_the_sdk_update_door_rederives_too(self, tmp_path):
         """The SECOND content-edit door. `check_consistency` compares the graph
         against `replay(journal)`, so both doors must produce the SAME value —
         `update_point` writes live (`SET n += $props`) and journals a
@@ -713,11 +858,9 @@ class TestWritePathLive:
         (2) Reachable: create with keys, edit in an identifier, edit it out,
             edit in a DIFFERENT identifier.
         """
-        import tempfile
-
         from tortoise.sdk import TortoiseSDK
 
-        sdk = TortoiseSDK(db_path=os.path.join(tempfile.mkdtemp(), "t.db"))
+        sdk = TortoiseSDK(db_path=os.path.join(str(tmp_path), "t.db"))
         pid = sdk.create_point(content="release notes", kind="statement",
                                search_keys=["release", "deploy"])["id"]
 
@@ -775,22 +918,71 @@ class TestDiscrimination:
             reset_circuit_breakers()
         return ids.index(target) + 1 if target in ids else None
 
+    def _scores(self, proj, query) -> dict[str, float]:
+        from tortoise.search_engine import reset_circuit_breakers, run_fts_query
+        reset_circuit_breakers()
+        try:
+            return {row[0]: round(float(row[1]), 6)
+                    for row in run_fts_query(proj.g, query, limit=25)}
+        finally:
+            reset_circuit_breakers()
+
     def test_the_just_written_exact_match_ranks_first(self, corpus):
         """Measured on this corpus: the fresh exact match is rank 1 of 16 at
-        score 3.0, against 2.0 for every look-alike."""
+        score 3.0, against 2.0 for every look-alike.
+
+        ⚠️ Rank alone is not the proof the sibling test used to claim: the
+        product's own ``recency_tie_clause`` breaks a SCORE tie newest-first
+        (#10121), so the freshly written point leads a tied group with or
+        without this mechanism. The mechanism's contribution is the SCORE, and
+        that is what the sibling measures."""
         assert self._rank_of(corpus, "capstone 9664 write probe",
                              "p-99") == 1
 
-    def test_mutation_without_the_mechanism_the_match_is_not_first(
+    def test_mutation_without_the_mechanism_the_match_has_no_advantage(
             self, corpus, monkeypatch):
-        """The same corpus and query with the mechanism switched OFF reproduces
-        the SHIPPED behaviour the ruling measured: the fresh exact match scores
-        2.0 like every look-alike, and the id tie-break puts it in the tail
-        (measured here: rank 15 of 16). That is what makes the test above a
-        real pin rather than a coincidence."""
+        """The mutation proof, restated at #10203 review round 7: with the
+        mechanism switched OFF the fresh exact match has NO score advantage
+        over the look-alikes.
+
+        This test previously asserted ``rank > 1`` when OFF ("measured here:
+        rank 15 of 16"), and that claim is FALSE on the docker lane at this
+        head — with the mechanism off, ``run_fts_query`` returns the target
+        FIRST. The cause is upstream of #8933 and deliberate:
+        ``search_engine.recency_tie_clause`` breaks a score tie newest-first
+        (#10121's recorded defect, the reason it is not the id direction), and
+        a 3-term OR ties every document in this corpus at 2.0 — so the
+        rank-order assertion was measuring the TIE RULE, not the mechanism, and
+        reported a mutation that does not exist. It was red at the previous
+        head too (``982619da8``), so the PR's recorded "rank 15 of 16" was not
+        reproduced by this lane at the head it claimed.
+
+        The honest instrument is the score, which is exactly what the ruling's
+        mechanism adds: ON → the target scores 3.0 (alias + adjacency phrase)
+        against 2.0 for every look-alike; OFF → every document, the target
+        included, scores 2.0 — no advantage, i.e. the shipped pre-#8933
+        scoring. Both halves are asserted on the SAME corpus, so the only thing
+        differing between them is the env switch.
+
+        (1) Fails if the mechanism stops contributing (the ON gap closes), and
+            fails if it stops being switchable (the OFF advantage reappears).
+        (2) Reachable: the ON half yields 3.0 vs 2.0 and the OFF half 2.0 vs
+            2.0 on this fixture, measured above.
+        """
+        query = "capstone 9664 write probe"
+        monkeypatch.setenv(IDENTIFIER_ENV, "1")
+        on = self._scores(corpus, query)
         monkeypatch.setenv(IDENTIFIER_ENV, "0")
-        rank = self._rank_of(corpus, "capstone 9664 write probe", "p-99")
-        assert rank is not None and rank > 1, rank
+        off = self._scores(corpus, query)
+
+        look_alikes = [pid for pid in on if pid != "p-99"]
+        assert len(look_alikes) == 15, on
+        assert on["p-99"] > max(on[pid] for pid in look_alikes), (
+            "the mechanism contributes nothing on this fixture, so the rank pin "
+            f"above proves nothing: {on}")
+        assert off["p-99"] == max(off[pid] for pid in look_alikes), (
+            "with the mechanism OFF the fresh exact match still scores above "
+            f"the look-alikes — the mutation is not a mutation: {off}")
 
 
 # ── the operator contract: the bisect switch must be DISCOVERABLE ──────────
@@ -826,3 +1018,46 @@ def test_env_example_declares_the_identifier_bisect_switch():
     assert declared, (
         f"{IDENTIFIER_ENV} must be shown as a commented assignment (the "
         "example form an operator copies), not just named in prose")
+
+
+def test_env_example_states_the_TRUE_limit_of_byte_identity():
+    """#10203 review round 8 (F1/P2): the operator-facing contract must not
+    understate the read side's one behaviour change.
+
+    ``.env.example`` said "A plain non-identifier query is byte-identical to
+    before" — and this file's own
+    ``TestRawRetrieval::test_the_space_typed_pair_is_a_MEASURED_cost_not_a_silent_one``
+    pins the opposite for the space form: ``build_or_query("top 10")`` is
+    ``top|top10|"top 10"`` (on ``origin/main``: the raw ``top 10``),
+    ``step 10 failed`` -> ``failed|step|step10|"step 10"``, ``invoice 2024`` ->
+    ``invoice|invoice2024|"invoice 2024"``. The plan doc §2 already states the
+    truth ("Byte-identity holds only for queries with no identifier SHAPE");
+    only the operator-facing text understated it.
+
+    Why it matters: the env block is the ONE place an operator decides whether
+    to bisect, and the reason the switch exists is "flip it to measure a batch
+    whose aggregate retrieval disappoints". Told that the shape is unaffected,
+    they attribute such a regression to something else — or flip the switch
+    expecting those bytes to move back and cannot explain why they already were.
+
+    (1) Fails on the pre-fix block: the false sentence is present and the
+        ``top 10`` example is absent.
+    (2) Reachable: both assertions read the shipped ``.env.example``.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    env = (root / ".env.example").read_text()
+    start = env.index("── #8933 identifier preservation")
+    end = env.index(f"# {IDENTIFIER_ENV}=", start)
+    block = env[start:end]
+
+    assert 'A plain non-identifier query is byte-identical to before' not in block, (
+        "the env contract claims a plain non-identifier query is byte-identical, "
+        "which TestRawRetrieval contradicts for the `<word> <2+ digits>` form")
+    assert "identifier SHAPE" in block or "identifier shape" in block, (
+        "the byte-identity guarantee must be scoped to queries with no "
+        f"identifier shape:\n{block}")
+    assert "top 10" in block, (
+        "the carve-out must name a concrete example (`top 10`), not only the "
+        f"abstract rule:\n{block}")

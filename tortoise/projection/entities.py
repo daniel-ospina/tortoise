@@ -1313,6 +1313,40 @@ def strip_identifier_aliases(view: dict) -> bool:
     return True
 
 
+#: The node's ``search_keys`` seen as the FLAT STRING the fulltext index needs,
+#: without ever handing a LIST to a string operator.
+#:
+#: ``NULL`` views as the empty string (the ordinary "no vocabulary yet"
+#: case). ``String`` passes through untouched, so the emitted clause is
+#: byte-identical to the pre-guard one for every node this repo writes today.
+#: ``List`` is flattened with the rule :func:`flatten_search_keys_prop` applies
+#: to a payload, so the vocabulary it holds survives instead of being dropped:
+#: ``['a','b']`` views as ``' a b'``, which ``trim(...)`` normalises in the ELSE
+#: arm. Any OTHER scalar views as its own text (``7`` -> ``' 7'``), so a shape
+#: no writer produces is still not silently discarded.
+#:
+#: ⛔ The inner ``CASE`` around the ``reduce`` source is NOT decoration. Both
+#: engines evaluate/type-check a ``CASE`` arm for EVERY row, so the moment the
+#: reduce's ``IN`` source is the raw property, a STRING row raises
+#: ``Type mismatch: expected List or Null but was String`` even though its
+#: ``WHEN`` is false (measured on the embedded lane — the naive
+#: ``THEN reduce(_sk = '', _v IN n.search_keys | …)`` reds every string node).
+#: Feeding ``IN`` a list-typed expression in every branch is what makes the
+#: guard safe. ``typeof``/``reduce``/``toString`` and ``IS NULL`` in a searched
+#: ``CASE`` were verified on the embedded lane (FalkorDBLite 4.18.3) against
+#: array-, empty-array-, string-, absent- and integer-valued nodes, and
+#: ``typeof(n.search_keys) = 'List'`` is already load-bearing here on BOTH
+#: engines (``_array_valued_search_keys_exist``). Idempotence re-checked by
+#: applying each clause twice (#10203 review round 8, F3).
+_NODE_SEARCH_KEYS_VIEW = (
+    "CASE WHEN n.search_keys IS NULL THEN '' "
+    "WHEN typeof(n.search_keys) = 'String' THEN n.search_keys "
+    "ELSE reduce(_sk = '', _v IN (CASE WHEN typeof(n.search_keys) = 'List' "
+    "THEN n.search_keys ELSE [n.search_keys] END) "
+    "| _sk + ' ' + toString(_v)) END"
+)
+
+
 def identifier_alias_append_clauses(aliases: list[str]) -> tuple[list[str], dict]:
     """#10203 — Cypher `SET` clauses that APPEND ``search_keys``, never replace it.
 
@@ -1332,6 +1366,17 @@ def identifier_alias_append_clauses(aliases: list[str]) -> tuple[list[str], dict
     containment test pads with spaces: a bare ``CONTAINS`` would treat
     ``err4032`` as present inside ``xerr40321``.
 
+    ⛔ The NODE side is TYPE-GUARDED (:data:`_NODE_SEARCH_KEYS_VIEW`), because
+    ``search_keys`` can be an ARRAY in a graph this repo maintains and
+    ``' ' + <list>`` is not a string expression (#10203 review round 8, F3).
+    Measured on the embedded lane at the previous head: the whole
+    ``_persist_extra_props`` statement raised ``Type mismatch: expected String
+    or Null but was List``, so a write whose only job was to add one alias
+    ABORTED. :func:`flatten_search_keys_prop` flattens the PAYLOAD, never a node
+    value that predates the flatten rule, and
+    ``_array_valued_search_keys_exist``/``_array_search_keys_rows`` exist
+    precisely because such rows can be present at any time.
+
     Returns ``(clauses, params)`` for ``_persist_extra_props``.
     """
     clauses: list[str] = []
@@ -1343,10 +1388,10 @@ def identifier_alias_append_clauses(aliases: list[str]) -> tuple[list[str], dict
         params[name] = token
         clauses.append(
             "SET n.search_keys = CASE "
-            "WHEN (' ' + coalesce(n.search_keys, '') + ' ') "
+            f"WHEN (' ' + {_NODE_SEARCH_KEYS_VIEW} + ' ') "
             f"CONTAINS (' ' + ${name} + ' ') "
             "THEN n.search_keys "
-            f"ELSE trim(coalesce(n.search_keys, '') + ' ' + ${name}) "
+            f"ELSE trim({_NODE_SEARCH_KEYS_VIEW} + ' ' + ${name}) "
             "END")
     return clauses, params
 

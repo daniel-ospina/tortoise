@@ -288,14 +288,36 @@ def _derive_search_keys(text: str, *,
     STRING the product stores after ``sdk._flatten_search_keys_prop``
     (#1541 D3: FalkorDB's fulltext index does not index array-valued
     properties). Empty when the turn yields no storable token.
+
+    ⛔ This is a WRITE path, so it asks for the WRITE-side identifier form:
+    ``space_separated=False`` (:func:`tortoise.sparse.identifier_aliases`),
+    the same one ``point_identifier_aliases`` uses for a real capture
+    (#10203 review round 8, F3). The shared tokenizer's default is the READ
+    side, whose ``space_separated=True`` accepts prose pairs — a seeded turn
+    reading "sprint 2024 planning" would then store ``sprint2024``, a graph
+    shape the product's own capture path REFUSES to produce, in a seeder whose
+    own rule two functions down is "can teach a graph shape the real capture
+    path cannot produce". The diagnostic must measure the store the product
+    writes, not one it cannot.
     """
     if not text:
         return ""
-    from tortoise.sparse import tokenize_sparse_query
+    from tortoise.sparse import (
+        identifier_aliases,
+        identifier_tokens_enabled,
+        tokenize_sparse_query,
+    )
+
+    pool = tokenize_sparse_query(
+        str(text), keep_numeric=True, keep_identifiers=False)
+    if identifier_tokens_enabled():
+        # WRITE-side precision, and gated on the same bisect lever the real
+        # write path honours (``point_identifier_aliases``).
+        pool += identifier_aliases(str(text), space_separated=False)
 
     seen: set[str] = set()
     uniq: list[str] = []
-    for tok in tokenize_sparse_query(str(text), keep_numeric=True):
+    for tok in pool:
         if tok in seen or len(tok) > _MAX_SEARCH_KEY_LEN:
             continue
         seen.add(tok)

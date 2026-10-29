@@ -157,6 +157,38 @@ def test_derive_search_keys_matches_the_e3_shape():
     assert _derive_search_keys("a i of") == ""      # nothing storable
 
 
+def test_derive_search_keys_uses_the_WRITE_side_identifier_form(monkeypatch):
+    """#10203 review round 8 (F3/P3): this seeder must mint the shape the CAPTURE
+    path mints, not the shape the READ path accepts.
+
+    ``tokenize_sparse_query`` defaults to ``space_separated=True`` (the read
+    side, which accepts the space-typed ``ERR 4032`` a person types into a
+    search box). This is a WRITE path — its output goes into the Point's
+    ``search_keys`` — so a seeded turn reading "sprint 2024 planning" was
+    storing ``sprint2024``, exactly the token ``point_identifier_aliases``
+    (``space_separated=False``) exists to refuse. The file states that rule
+    about itself two functions down: "can teach a graph shape the real capture
+    path cannot produce".
+
+    (1) Fails on the pre-fix derivation: the prose alias is present.
+    (2) Reachable: an ORDINARY turn, and the explicit-separator positive case
+        on the same call, so the fix cannot be "drop identifiers entirely".
+    """
+    prose = _derive_search_keys("sprint 2024 planning").split()
+    assert "planning" in prose and "sprint" in prose, prose
+    assert "sprint2024" not in prose, (
+        "the A4 seeder minted a PROSE alias the capture path refuses: "
+        f"{prose}")
+
+    # Env-invariant on purpose: the shipped default is ON, and a bisect run of
+    # the suite (`TORTOISE_IDENTIFIER_TOKENS=0`) must not turn this red.
+    monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
+    explicit = _derive_search_keys("error ERR-4032 on deploy").split()
+    assert "err4032" in explicit, (
+        "the write side does store an explicitly separated identifier, so a "
+        f"seeded store must too: {explicit}")
+
+
 def test_harvested_aliases_drive_a_non_empty_expansion(sdk):
     """The UNIT leg: aliases harvested off the seeded first-pass hits yield a
     non-empty ``expansion_tokens`` — the call A4 makes. Before #5534 this was

@@ -14580,6 +14580,13 @@ class TortoiseSDK:
         # so a stale hash after update_point(content=...) silently breaks
         # dedup and diverges the live graph from JSONL replay (which derives
         # the hash from PointRevised.new_content).
+        #
+        # #8933 Stage 2 (review round 8, F1): tracks whether the ``search_keys``
+        # this door writes was DERIVED, so it can be kept out of the record the
+        # way ``content_hash`` and the derived vector already are. Declared here
+        # (not inside the ``if`` below) because the emit is far below and reads
+        # it unconditionally.
+        _derived_search_keys = False
         if "content" in props:
             props["content_hash"] = _content_hash(props["content"])
             # #8933 Stage 2 / #10203 (measured P0): a content edit is the THIRD
@@ -14598,18 +14605,36 @@ class TortoiseSDK:
             # the event, so it is read here; `revise_identifier_aliases` then
             # keeps every non-alias key and swaps the derived half. A
             # caller-supplied `search_keys` owns the list and wins as the base.
+            #
+            # ⛔ DERIVED, so NOT RECORDED (the #1904/#4208 rule, applied to the
+            # third derived field on this door). `_revise_point` re-derives the
+            # value from `new_content` and the node's own previous keys, so a
+            # journalled copy is dead weight at best and a producer claim the
+            # replay does not honour at worst (#5004/#5046). Left in the record,
+            # `search_keys` is a COLUMN (`public.point`, record_projection
+            # patches columns from the flat `NodePatch`), so a DERIVED value
+            # would become authoritative in the record lane — which that
+            # module's own doctrine forbids, and `chk_*_props_no_derived`
+            # cannot catch it for a name that has a column.
+            #
+            # A CALLER-supplied key is different: it is owned by the call, the
+            # replay cannot recompute it, and it rode `emit_props` before
+            # #8933 too — so that case keeps its record, with the #5046
+            # caller-owned parity gap unchanged (not widened here).
             if _identifier_tokens_enabled():
                 _prev = proj.g.query(
                     "MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys",
                     params={"id": id},
                 ).result_set
                 _old_content, _old_keys = _prev[0] if _prev else (None, None)
+                _caller_keys = props.get("search_keys")
                 props["search_keys"] = _revise_identifier_aliases(
                     new_content=props["content"],
                     old_content=_old_content,
                     old_search_keys=_old_keys,
-                    caller_search_keys=props.get("search_keys"),
+                    caller_search_keys=_caller_keys,
                 )
+                _derived_search_keys = _caller_keys is None
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         # #5004 round-4: a caller-supplied vector is stored VERBATIM here
@@ -14928,10 +14953,18 @@ class TortoiseSDK:
         # would be dead weight, and #5004's presence-is-ownership rule would
         # read the key as a producer claim the replay does not honour (the
         # #5046 shape). A CALLER-supplied vector stays in the record, as before.
+        # #8933 (review round 8, F1): `search_keys` is the THIRD of these — the
+        # alias `_revise_point` re-derives on a content edit — and it was riding
+        # this record, making "derived, never recorded" (the PR body,
+        # `.env.example`, `point_identifier_aliases`, and the create door's own
+        # snapshot) false from this door onward. Stripped only when DERIVED: a
+        # caller-supplied `search_keys` is caller-owned and stays, exactly like
+        # the vector above.
         emit_props = {
             k: v for k, v in props.items()
             if k != "content_hash"
             and not (_derived_embedding and k == "embedding")
+            and not (_derived_search_keys and k == "search_keys")
         }
         _promote_arm = 'status' in props
 
