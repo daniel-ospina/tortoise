@@ -438,18 +438,28 @@ def resolve_fold_name(g, label: str, name: str, *,
     ``create_entity`` alone; a caller that wants the attribution edge registers
     the target explicitly, and every unregistered mention is dropped here.
 
-    ⚠️ **TWO live in-repo producers do NOT register, and they are named here so
-    the cost is recorded rather than silent:** ``tortoise.ingest
-    --capture-metadata`` writes ``sessionCaptured`` through
+    ⚠️ **These live in-repo producers do NOT register every name they mention,
+    and they are named here so the cost is recorded rather than silent:**
+    ``tortoise.ingest --capture-metadata`` writes ``sessionCaptured`` through
     ``EventAPI.add_event`` with ``subject="pi-agent"`` and
     ``uses=[{"name": "tortoise-capture", "kind": "skill"}]``
-    (``tortoise/ingest.py``), and the SDK's own ``create_event`` door leaves the
-    same fields unregistered (D1). Both attribution edges are therefore dropped,
-    on the live pass and on replay alike, and recorded as exempt
-    :data:`SHAPE_UNFOLDED_MENTION` (bounded and reconstructible: the journal
-    still replays, which is the whole point of the exemption).
+    (``tortoise/ingest.py``), and the SDK's own ``create_event`` door leaves its
+    ``subject``/``object``/``uses`` names unregistered (D1). Those attribution
+    edges are dropped, on the live pass and on replay alike, and recorded as
+    exempt :data:`SHAPE_UNFOLDED_MENTION` (bounded and reconstructible: the
+    journal still replays, which is the whole point of the exemption).
+    ⛔ **The ``uses`` half of the ``--capture-metadata`` record is NOT one of
+    them**: that producer WANTS the ``uses→skill`` attribution edge (#125 pins
+    it), so it takes D1's own remedy for a wanted edge and registers the target
+    explicitly — ``api.add_object("tortoise-capture", "skill")`` before the
+    event — and the fold then resolves it. Measured on CI run 40917794096: while
+    it did not, the #125 assertion ``uses >= 1`` was red, because nothing in the
+    journal ever grew the entity the mention named. What this door keeps losing
+    for that producer is its ``subject="pi-agent"`` mention alone.
     ``tests/test_3590_minted_identity_acceptance.py::
-    test_a_bare_mention_mints_nothing_and_drops_its_link`` is the pin.
+    test_a_bare_mention_mints_nothing_and_drops_its_link`` is the pin;
+    ``test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions``
+    pins the door-level loss.
     """
     holders = live_name_holder_ids(g, label, name)
     ids = [str(h) for h in holders if h]
