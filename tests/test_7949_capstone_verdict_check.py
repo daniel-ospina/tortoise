@@ -2559,6 +2559,20 @@ def test_the_probes_line_citations_resolve_too():
     sites, and `test_the_readmes_line_citations_resolve_to_the_symbols_they_name` reads only
     `README.md` — so a merge-up that moves `sdk.py` re-stales the probe silently, which is exactly
     how the earlier rounds went stale. Same check, other file.
+
+    #10214 review P2 (round 8): that same failure had ALREADY recurred one layer down. The eight
+    BARE step cites (`` ``run_s1`` (S1, ``:8540``) ``) were never read by anything — the README's
+    twin check pins only the README's copy — so a merge of `main` that added 88 lines to
+    `extractor_v2.py` re-staled all eight by exactly +88 and every gate stayed green. The paragraph
+    below the list even claimed they were "pinned only where the README's step table repeats the same
+    numbers", which nothing compared. The README's own step-table check is the right shape, so this
+    test now applies it here too: each `` ``symbol`` (LABEL, ``:NNNN``) `` in the header must name a
+    line that CARRIES that symbol. The claim of coverage is now true rather than asserted.
+
+    Non-vacuity: at the pre-fix head every one of the eight cited +88 lines is unrelated code
+    (`:8507` is `extract_session_v2`'s docstring prose, `:8646` is a blank line, `:8845` a comment
+    about `aboutObject`), so all eight assertions red; `sdk.py:11611` is a comment inside an
+    unrelated M2 paragraph, so the call-site assertion reds as well.
     """
     probe = PROBE.read_text()
     sdk = (_REPO / "tortoise/sdk.py").read_text().splitlines()
@@ -2578,6 +2592,25 @@ def test_the_probes_line_citations_resolve_too():
     assert extractor[module_line - 1].lstrip().startswith("def extract_session_v2("), (
         f"probe cites the entry point at extractor_v2.py:{module_line}, which is "
         f"{extractor[module_line - 1].strip()!r}")
+
+    # (b) The eight step call sites: `` ``symbol`` (LABEL, ``:NNNN``) `` into the same file. The
+    # line WRAPS (`run_s4` and `_apply_classify_kinds` split their paren group), so the text is
+    # whitespace-normalised before matching — the unit is the cite, not the physical line.
+    flat = re.sub(r"\s+", " ", probe)
+    # The entry-point cite is FILE-NAMED and asserted above; a bare step cite has no file name inside
+    # the parenthesis, which is how the two shapes are told apart here.
+    steps = [
+        (symbol, int(lineno))
+        for symbol, inner, lineno in re.findall(
+            r"``([A-Za-z_][\w.]*)``\s*\(([^()]*?)``:(\d+)``\)", flat)
+        if ".py:" not in inner
+    ]
+    assert len(steps) == 8, f"the probe's eight step cites are gone: {steps}"
+    for symbol, lineno in steps:
+        text = extractor[lineno - 1]
+        assert symbol.split(".")[-1] in text, (
+            f"probe cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
+            f"{text.strip()!r} — the line moved and the cite did not")
 
 
 # ── V7 across a multi-artifact table (the capstone's own rows) ────────────
