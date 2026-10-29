@@ -1592,21 +1592,30 @@ jobs:
         # not always ~0 by construction — the embedded-file-contract atexit race
         # leaves strays on the full matrix
         # too (trunk run 34928488659 measured 7), and that residue is what the
-        # sweep's own `left` now accounts for. What this gate reds: a leak
-        # that appears AFTER the sweep (COUNT > left), an accounting-identity
-        # violation (reaped + exited + left < before), a probe_failed report above a
-        # measured COUNT of zero (no `left` to bind to), an error or skipped
-        # report, a no_embedded_servers report above a measured COUNT of zero,
-        # and an unaccounted/unreadable report. A `cleared: false` report does
+        # sweep's own `left` now accounts for. #1005: every count-based red is
+        # applied to servers ATTRIBUTED to this run — those whose argv carries a
+        # socket path under one of the run's own session temp roots — because
+        # `COUNT` is a host-wide pgrep and `left` a snapshot from one pytest
+        # process. What this gate reds: this run's OWN servers growing after the
+        # sweep measured them (own_now > own_left), an accounting-identity
+        # violation (reaped + exited + left < before), a probe_failed report
+        # with an attributed residue above zero (no `left` to bind to), an error
+        # or skipped report, a no_embedded_servers report with an attributed
+        # own_now above zero, and a report that is unaccounted, unreadable or
+        # UNATTRIBUTABLE (no usable `own_roots`). The HOST-WIDE count above
+        # `left` is NOT a verdict: it is a `::warning::` that names the
+        # attribution, because on the self-hosted pool it includes every other
+        # job's servers. A `cleared: false` report does
         # NOT red at any measured COUNT: `cleared` reports whether the sweep's
         # TIME BUDGET sufficed — a function of runner load — not its residue
-        # (#4989). A `probe_failed` report at a measured COUNT of zero is a
+        # (#4989). A `probe_failed` report with no attributed server is a
         # warning, not a red: there is no live residue to bound, and the
-        # measured COUNT — not `cleared` — decides the verdict. It does NOT
+        # measured attribution — not `cleared` — decides the verdict. It does NOT
         # independently red a residue the sweep itself
         # measures and declines to act on (a server with a live client, an
-        # unconfirmed path-based server): that lands in `left` and passes at
-        # COUNT == left, bounded by the sweep's own measurement (#4884).
+        # unconfirmed path-based server): that lands in `left`/`own_left` and
+        # passes at own_now == own_left, bounded by the sweep's own measurement
+        # (#4884).
         # #1371 kill-aware: after a WATCHDOG kill (rc 124/137/2) the
         # orphan count is a GUARANTEED kill-path artifact — SIGKILL skips atexit
         # and the conftest end-sweep — not a leak signal, so the gate downgrades
@@ -1629,10 +1638,54 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              # #10255 review 1 (P1): `ps -p <list>` exits 1 when NO listed pid
+              # matched — measured on procps-ng 4.0.4 (`ps -p 1` → 0,
+              # `ps -p 999999` → 1, `ps -p 1,999999` → 0), and the procps man
+              # page publishes no exit-status contract at all, so `-eq 0` was
+              # an assumption the tool never made. That rc is a COMPLETED
+              # measurement of an empty population, not a failed probe: this
+              # read sits inside the residue's shutdown window, which the
+              # gate's own header documents as normal (a server the sweep
+              # still saw exits in the ~0.05s before this later probe), and
+              # every counted server exiting in between is most likely exactly
+              # at COUNT 1-2. Failing the job there reds a passing run that
+              # leaked nothing, with a message that blames attribution and
+              # sends the reader after a residue that does not exist. Only a
+              # real probe failure (rc>1, a missing `ps`, a timeout) reds. On
+              # the benign path the (truncated) file stays empty, so the gate
+              # reads own_now=0 — below every `own_left`, i.e. never a red.
+              [ "$arc" -le 1 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
 
       - name: Stop FalkorDB services (#6673)
         # Last step + always(): a failed or cancelled job must not leave a
@@ -2169,7 +2222,10 @@ jobs:
         # (.github/scripts/orphan-bound.sh), never a hand-picked constant. On a
         # docker leg the sweep reports no embedded server was ever running, so
         # the bound is structurally 0; on a tier-2 embedded leg it is the
-        # sweep's own `left`. A `cleared: false` report does not red at any
+        # sweep's own post-sweep count of THIS RUN's servers (`own_left`), and
+        # every count-based red is applied to the servers attributed to this run
+        # (#1005) — a host-wide `COUNT` above `left` is a `::warning::`, never a
+        # verdict. A `cleared: false` report does not red at any
         # measured COUNT: `cleared` reports whether the sweep's TIME BUDGET
         # sufficed — a function of runner load — not its residue (#4989).
         if: always()
@@ -2186,10 +2242,54 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              # #10255 review 1 (P1): `ps -p <list>` exits 1 when NO listed pid
+              # matched — measured on procps-ng 4.0.4 (`ps -p 1` → 0,
+              # `ps -p 999999` → 1, `ps -p 1,999999` → 0), and the procps man
+              # page publishes no exit-status contract at all, so `-eq 0` was
+              # an assumption the tool never made. That rc is a COMPLETED
+              # measurement of an empty population, not a failed probe: this
+              # read sits inside the residue's shutdown window, which the
+              # gate's own header documents as normal (a server the sweep
+              # still saw exits in the ~0.05s before this later probe), and
+              # every counted server exiting in between is most likely exactly
+              # at COUNT 1-2. Failing the job there reds a passing run that
+              # leaked nothing, with a message that blames attribution and
+              # sends the reader after a residue that does not exist. Only a
+              # real probe failure (rc>1, a missing `ps`, a timeout) reds. On
+              # the benign path the (truncated) file stays empty, so the gate
+              # reads own_now=0 — below every `own_left`, i.e. never a red.
+              [ "$arc" -le 1 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
 
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload — same contract as the fast job's upload.
@@ -2971,12 +3071,17 @@ jobs:
         # Same gate contract as the fast/slow asserts (#4740): the bound is read
         # from the conftest session-end sweep's own report
         # (.github/scripts/orphan-bound.sh), never a hand-picked constant. The
-        # carve-out runs embedded, so the sweep reports its own `left`. The
-        # gate reds a leak that appears AFTER the sweep (COUNT > left), an
-        # accounting-identity violation, a probe_failed report above a measured
-        # COUNT of zero, an error or skipped report, a no_embedded_servers
-        # report above a measured COUNT of zero, and an unaccounted/unreadable
-        # report; a residue the sweep itself measures and declines to act on is
+        # carve-out runs embedded, so the sweep reports its own `left` — and
+        # #1005 applies every count-based red to the servers ATTRIBUTED to this
+        # run (own_now vs own_left), never to the host-wide `COUNT`. The
+        # gate reds this run's own servers growing after the sweep
+        # (own_now > own_left), an accounting-identity violation, a probe_failed
+        # report with an attributed residue above zero, an error or skipped
+        # report, a no_embedded_servers report with an attributed own_now above
+        # zero, and a report that is unaccounted, unreadable or unattributable
+        # (no usable `own_roots`); a host-wide `COUNT` above `left` is a
+        # `::warning::` diagnostic; a residue the sweep itself measures and
+        # declines to act on is
         # bounded by that measurement, not independently red (#4884). A
         # `cleared: false` report does not red at any measured COUNT: `cleared`
         # reports whether the sweep's TIME BUDGET sufficed — a function of
@@ -2995,10 +3100,54 @@ jobs:
           prc=$?
           [ "$prc" -le 1 ] || { echo "::error::pgrep failed rc=$prc — the orphan count is unmeasured (issue #1005)"; exit 1; }
           COUNT=$(printf '%s' "$PIDS" | wc -w | tr -d ' ')
+          # #1005 (epic #1647 E2E-7): hand the gate the counted servers' argv,
+          # so it can say WHICH of them live under this run's own session temp
+          # root. `COUNT` alone is host-wide — on the self-hosted pool every
+          # concurrent job's servers appear in it — and comparing that to the
+          # sweep's snapshot redded PASSING runs (9 counted vs left=8; 22 vs
+          # 14). A `ps` failure here is a FAILED probe, never an empty
+          # measurement: the attribution would silently degrade to "someone
+          # else's servers" and hide a real residue.
+          ARGV="${RUNNER_TEMP:-/tmp}/redislite-orphan-argv.txt"
+          : > "$ARGV"
+          if [ -n "$PIDS" ]; then
+            # `pgrep` prints one pid per line; GNU `ps` refuses a `-p` list with
+            # newlines in it ("process ID list syntax error") while BSD `ps`
+            # tolerates them — measured, so the separator is normalised to a
+            # comma list both accept. Without this the Linux legs write an EMPTY
+            # argv file and every counted server would read as unattributable.
+            PIDLIST=$(printf '%s' "$PIDS" | tr -s '[:space:]' ',' |
+              sed 's/^,*//; s/,$//')
+            # A whitespace-only probe normalises to an EMPTY list, which GNU ps
+            # rejects ("list of process IDs must follow -p") — there is nothing
+            # to attribute, so do not call it.
+            if [ -n "$PIDLIST" ]; then
+              ps -ww -o pid=,args= -p "$PIDLIST" > "$ARGV" 2>/dev/null
+              arc=$?
+              # #10255 review 1 (P1): `ps -p <list>` exits 1 when NO listed pid
+              # matched — measured on procps-ng 4.0.4 (`ps -p 1` → 0,
+              # `ps -p 999999` → 1, `ps -p 1,999999` → 0), and the procps man
+              # page publishes no exit-status contract at all, so `-eq 0` was
+              # an assumption the tool never made. That rc is a COMPLETED
+              # measurement of an empty population, not a failed probe: this
+              # read sits inside the residue's shutdown window, which the
+              # gate's own header documents as normal (a server the sweep
+              # still saw exits in the ~0.05s before this later probe), and
+              # every counted server exiting in between is most likely exactly
+              # at COUNT 1-2. Failing the job there reds a passing run that
+              # leaked nothing, with a message that blames attribution and
+              # sends the reader after a residue that does not exist. Only a
+              # real probe failure (rc>1, a missing `ps`, a timeout) reds. On
+              # the benign path the (truncated) file stays empty, so the gate
+              # reads own_now=0 — below every `own_left`, i.e. never a red.
+              [ "$arc" -le 1 ] || { echo "::error::ps failed rc=$arc — the orphan count cannot be attributed to this run (issue #1005)"; exit 1; }
+            fi
+          fi
           bash .github/scripts/orphan-bound.sh \
             --count "$COUNT" \
             --rc "$RC" \
-            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json"
+            --hygiene "${RUNNER_TEMP:-/tmp}/redislite-hygiene-end.json" \
+            --argv "$ARGV"
       - name: Upload carve-out log (measurement artifact, #1477)
         if: always()
         continue-on-error: true
