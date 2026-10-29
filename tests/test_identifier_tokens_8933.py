@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from tests import _live_utils
+from tortoise.bm25 import bm25_rank, bm25_scores, bm25_tokens
 from tortoise.projection.entities import (
     append_identifier_aliases,
     flatten_search_keys_prop,
@@ -462,6 +463,84 @@ class TestRawRetrieval:
         original tokens are still emitted."""
         tokens = tokenize_sparse_query("customer cus_9fA2bL failed")
         assert tokens[:3] == ["customer", "cus", "9fa2bl"], tokens
+
+
+# ── the DOCUMENT half of the asymmetry (#10203 round 10, F1) ──────────────
+
+class TestDocumentSideLexicalLeg:
+    """The in-process BM25 leg tokensises the CORPUS, and documents are INDEXED
+    TEXT — so they take the WRITE half of the asymmetry, not the read half.
+
+    The defect these pin (`tortoise/bm25.py:218` pre-fix): `bm25_scores`
+    tokenised every document through `bm25_tokens`' read-side default, so the
+    prose "sprint 2024 planning" minted `sprint2024` into the corpus token bag —
+    the exact token `point_identifier_aliases` (`space_separated=False`)
+    deliberately refuses to store. A prose document then became
+    indistinguishable from an `sprint-2024` one, the BM25 leg returned a hit the
+    graph lane's own fulltext index cannot return for the same document, and the
+    bogus token entered `df`/`idf` and `avgdl` (shifting the length
+    normalisation of EVERY score in the corpus).
+
+    Non-vacuity is proven in the tests themselves, not by the pre-fix run alone:
+    each one also asserts the read-side list DOES carry the token, i.e. that the
+    failing condition is reachable and the equality below is not passable by an
+    all-empty result.
+    """
+
+    PROSE = "sprint 2024 planning"
+    CODE = "sprint-2024 planning"
+
+    def test_a_prose_pair_never_mints_a_document_token(self):
+        """Mutation: tokenise docs with the read-side default → RED.
+
+        The read side is asserted PRESENT on the same input, so a blanket
+        "stop emitting aliases" regression cannot pass this test either.
+        """
+        read_side = bm25_tokens(self.PROSE)
+        assert "sprint2024" in read_side, read_side
+        doc_side = bm25_tokens(self.PROSE, space_separated_identifiers=False)
+        assert "sprint2024" not in doc_side, doc_side
+        assert doc_side == ["sprint", "planning"], doc_side
+
+    def test_the_document_side_matches_the_write_path_exactly(self):
+        """One rule, two consumers: the alias set the lexical leg derives from a
+        document must equal the set the Point writer stored for it."""
+        for text in (self.PROSE, self.CODE, "failure ERR-4032",
+                     "INV-2024-0091 broke", "spent 27.5 hours",
+                     "meeting 27:12 covers rollout"):
+            write_path = point_identifier_aliases({"content": text})
+            read_side = identifier_aliases(text)
+            doc_side = identifier_aliases(text, space_separated=False)
+            assert doc_side == write_path, (text, doc_side, write_path)
+            # ... and the leg's own doc tokens carry exactly those aliases.
+            toks = bm25_tokens(text, space_separated_identifiers=False)
+            assert [t for t in toks if t in set(read_side)] == doc_side, text
+
+    def test_the_alias_query_no_longer_hits_the_prose_document(self):
+        """Mutation: pass the read-side default at ``bm25_scores``' document
+        call → the prose document scores and this assertion flips to RED."""
+        prose = [("prose", self.PROSE)]
+        assert bm25_scores("sprint2024", prose) == {}, (
+            "a document that merely SAYS the words must not answer the alias "
+            "query — the graph lane's index holds no such token for it"
+        )
+        # Non-vacuity: the same scorer DOES hit once the token is really there.
+        assert bm25_scores("sprint2024", [("prose", self.PROSE + " sprint2024")])
+
+    def test_the_identifier_document_still_answers_the_alias_query(self):
+        """The fix must keep the discrimination #8933 exists for: an
+        `sprint-2024` document (whose writer stored `sprint2024`) still hits,
+        and ranks above the prose one when both share the plain terms."""
+        ranked = dict(bm25_rank("sprint2024", [
+            ("prose", self.PROSE), ("code", self.CODE)]))
+        assert set(ranked) == {"code"}, ranked
+        # A query that ALSO carries the plain words ranks the code document
+        # above the prose one — the alias term is the only difference.
+        order = [pid for pid, _ in bm25_rank(
+            "sprint2024 planning", [("prose", self.PROSE),
+                                    ("code", self.CODE)])]
+        assert order[:1] == ["code"], order
+        assert "prose" in order, order
 
 
 # ── criterion 2 (write side): the shared writer door ───────────────────────

@@ -1919,8 +1919,13 @@ def run_bm25_query(
     search_keys)`` — the SAME fields each served label's own FTS index is
     declared on (``tortoise.sparse``; see ``BM25_ENTITY_TYPES`` for the
     per-family mapping), so the lexical stacks cannot disagree about what a
-    document says. A family outside ``BM25_ENTITY_TYPES`` is REFUSED at entry
-    rather than scanned for nothing — see that constant.
+    document says. That claim is only true because the CORPUS is tokenised with
+    the WRITE side of the #8933 identifier asymmetry (``bm25_scores`` /
+    ``bm25_tokens(..., space_separated_identifiers=False)``): the write path
+    stores ``err4032`` for ``ERR-4032`` and NOTHING for the prose "sprint
+    2024", so a read-side corpus would put a token in this leg's bag that the
+    graph lane's index does not hold. A family outside ``BM25_ENTITY_TYPES`` is
+    REFUSED at entry rather than scanned for nothing — see that constant.
 
     Returns ``[(id, score)]`` ranked descending, ties broken by id (#3019: RRF
     is rank-based, so an unstable tie would make the fused order a function of
@@ -1958,10 +1963,14 @@ def run_bm25_query(
     AND the read is impaired by it (a failed read, an open breaker), never on
     a clean empty result and never on a decline.
 
-    ``keep_numeric`` is threaded, never decided: the search lane's
-    byte-identical control is a RECORDED decision and its reopen belongs to the
-    owner (#8933). With the default, ``ERR-4032`` contributes ``err`` only —
-    the leg is honest about the policy it was given.
+    ``keep_numeric`` is threaded, never decided: it governs BARE NUMERIC tokens
+    (with the default, a bare ``4032`` contributes nothing) and this leg does
+    not decide it. The #8933 identifier control is a SEPARATE, LANDED decision
+    — the owner reopened the byte-identity control for identifier-shaped input,
+    so under the shipped defaults ``ERR-4032`` contributes ``err`` AND the
+    composite ``err4032``, on the identifier switch in ``tortoise/sparse.py``
+    rather than on this flag. A caller may still ask for the numeric half;
+    nothing here changes either default.
 
     ``meter=False`` suppresses the retrieval-tally note while keeping the trace
     entry. The read path uses it when it runs this leg ALONGSIDE the shipped

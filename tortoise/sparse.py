@@ -358,6 +358,7 @@ def escape_redisearch_literal(term: str) -> str:
 
 def tokenize_sparse_query(
     query: str, *, keep_numeric: bool = False, keep_identifiers: bool = True,
+    space_separated_identifiers: bool = True,
 ) -> list[str]:
     """Lowercase; split on non-alphanumeric; drop tokens <2 chars, all-digits,
     and stopwords. Deterministic order (source order).
@@ -385,6 +386,19 @@ def tokenize_sparse_query(
     COMPOSITE (letters + digits), which is the whole point — it is the term the
     write path also stores, so query and index agree. Off via
     ``TORTOISE_IDENTIFIER_TOKENS=0`` (:func:`identifier_tokens_enabled`).
+
+    ``space_separated_identifiers=False`` asks for the **WRITE side** of that
+    asymmetry (:func:`identifier_aliases`' ``space_separated=False``) while
+    still emitting the plain tokens: pass it when the text being tokenised is
+    INDEXED TEXT, not a query (#10203 review round 10, F1). The default is the
+    read side because most callers tokenise a query, and the read side is the
+    superset — so this parameter only ever TIGHTENS. Why it has to exist at
+    all: ``tortoise.bm25`` tokensises the CORPUS with this function, and a
+    read-side default there would mint ``sprint2024`` from the prose
+    "sprint 2024 planning" — the exact token the write side deliberately
+    refuses (``projection/entities.py``, ``point_identifier_aliases``) — making
+    a prose document indistinguishable from an ``sprint-2024`` one and shifting
+    every score in the corpus through an inflated ``avgdl``/``df``.
     """
     if not query:
         return []
@@ -404,7 +418,8 @@ def tokenize_sparse_query(
     # shorter original token out of the OR cap (the A4 regression guard).
     if keep_identifiers and identifier_tokens_enabled():
         seen = set(out)
-        for alias in identifier_aliases(query):
+        for alias in identifier_aliases(
+                query, space_separated=space_separated_identifiers):
             if alias not in seen:
                 seen.add(alias)
                 out.append(alias)

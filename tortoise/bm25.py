@@ -49,16 +49,35 @@ What this module DELIBERATELY does not decide
   about what a token IS. Every entry point takes the tokens from
   :func:`tortoise.sparse.tokenize_sparse_query`.
 * **The numeric-token policy.** That policy (``keep_numeric``, default False)
-  is a RECORDED control — the search lane stays byte-identical — and its
-  reopen is the owner's call (#8933). This module only THREADS the caller's
-  choice: ``keep_numeric=True`` makes ``ERR-4032`` contribute its ``4032``
-  segment, ``False`` (the shipped default) keeps today's behaviour. Nothing
-  here changes the default.
+  was the search lane's byte-identity control, and the owner REOPENED it
+  (#8933 ruling, 2026-10-26) — for IDENTIFIER-shaped input only. So the
+  identifier half is no longer pending, and it is not this module's: the
+  shared tokenizer preserves an identifier by default (``ERR-4032`` ->
+  ``err4032`` plus the adjacency phrase ``"err 4032"``), switched by
+  ``TORTOISE_IDENTIFIER_TOKENS`` in ``tortoise/sparse.py`` — **not** here, and
+  not by ``keep_numeric``. ``keep_numeric`` still governs ONLY bare all-digit
+  tokens: ``keep_numeric=True`` makes a bare ``4032`` participate, ``False``
+  (the shipped default) drops it. This module only THREADS the caller's
+  choice; nothing here changes either default. The identifier control's own
+  coverage is ``tests/test_identifier_tokens_8933.py``.
+* **Which half of the identifier asymmetry a TEXT is.** ``tortoise/sparse.py``
+  ships one deliberate asymmetry — the write side is the PRECISE half
+  (``ERR-4032`` mints ``err4032``; the prose "sprint 2024" mints nothing) and
+  the read side also accepts the space-typed shape a person types. This module
+  tokenises BOTH a query and a CORPUS, so it must ask for the right half:
+  :func:`bm25_scores` tokenises the query on the read side and each DOCUMENT
+  on the WRITE side (:func:`bm25_tokens`' ``space_separated_identifiers``).
+  Getting that wrong is not cosmetic — a read-side corpus mints
+  ``sprint2024`` from the prose "sprint 2024 planning", which is exactly the
+  token the write path refuses to store, so a prose document would score as
+  if it held the code and the two lexical stacks would disagree about what a
+  document says (#10203 review round 10, F1).
 * **Whether the arm is on.** :func:`bm25_enabled` reads
-  ``TORTOISE_BM25_LEXICAL`` and the read path only swaps the lexical scorer
-  when it is explicitly enabled (fail-safe OFF, the same posture as
-  ``TORTOISE_ASK_RERANK``). The swap is a retrieval-behaviour change and #8486
-  has not yet produced a baseline to measure it against.
+  ``TORTOISE_BM25_LEXICAL``, which since #8488's owner ruling is an OPT-OUT
+  (``BM25_DEFAULT_ENABLED = True``) rather than a fail-safe-OFF switch — the
+  fail-safe-OFF posture belongs to while the arm was UNMEASURED, and the
+  reasoning for moving it, plus the #10121 tie fix it depends on, is recorded
+  on that constant.
 
 The fusion BOUND (why :func:`resolve_lexical_weight` exists)
 ------------------------------------------------------------
@@ -158,17 +177,34 @@ def bm25_enabled() -> bool:
     return env_flag(BM25_ENV, BM25_DEFAULT_ENABLED)
 
 
-def bm25_tokens(text: str, *, keep_numeric: bool = False) -> list[str]:
+def bm25_tokens(
+    text: str, *, keep_numeric: bool = False,
+    space_separated_identifiers: bool = True,
+) -> list[str]:
     """Tokenise through the ONE shared tokenizer (``tortoise.sparse``).
 
     Imported lazily: ``sparse`` is dependency-free, but importing it at module
     scope would put this module in the import graph of anything that only wants
     :func:`resolve_lexical_weight`, and the fusion helper is deliberately
     usable without the scorer.
+
+    ``space_separated_identifiers`` selects WHICH HALF of the #8933 identifier
+    asymmetry applies, and it is about the KIND of text, not a tuning knob:
+
+    * ``True`` (default) — a QUERY. The read side also accepts the space-typed
+      shape a person types (``ERR 4032`` -> ``err4032``), and a spurious alias
+      costs one extra OR term in one query.
+    * ``False`` — INDEXED TEXT (a document). Only an explicit ``-``/``_``
+      separator mints an alias, matching the write side exactly, because a
+      document saying "sprint 2024" must never behave as though it stored
+      ``sprint2024``. :func:`bm25_scores` passes this for every document.
     """
     from .sparse import tokenize_sparse_query
 
-    return tokenize_sparse_query(text, keep_numeric=keep_numeric)
+    return tokenize_sparse_query(
+        text, keep_numeric=keep_numeric,
+        space_separated_identifiers=space_separated_identifiers,
+    )
 
 
 def bm25_scores(
@@ -189,7 +225,19 @@ def bm25_scores(
         k1, b: the estimator's parameters (see the module docstring).
         keep_numeric: the caller's numeric-token policy, threaded verbatim to
             the shared tokenizer. Default False = the shipped search-lane
-            policy; this function never decides it (#8933).
+            policy; this function never decides it (#8933). It governs BARE
+            NUMERIC tokens only — the identifier control is the tokenizer's
+            (``TORTOISE_IDENTIFIER_TOKENS``) and rides both policies.
+
+    The two halves are tokenised with the ASYMMETRY the write path defines: the
+    QUERY takes the read side (a person's ``ERR 4032`` counts) and each
+    DOCUMENT takes the WRITE side (only ``ERR-4032`` does). That is not a
+    refinement — the document side is INDEXED TEXT, and a read-side corpus
+    would mint ``sprint2024`` from the prose "sprint 2024 planning", which the
+    write path deliberately does not store: a prose document would then score
+    as if it held the code, the two lexical stacks would disagree about what a
+    document says, and the bogus token would shift ``avgdl``/``df`` for every
+    score in the corpus (#10203 review round 10, F1).
 
     Returns:
         ``{doc_id: score}`` for every document that shares at least one token
@@ -203,6 +251,8 @@ def bm25_scores(
     """
     if not query or not docs:
         return {}
+    # The QUERY takes the read side of the identifier asymmetry (:func:`bm25_tokens`'
+    # default): the space-typed ``ERR 4032`` a person actually types counts.
     q_tokens = bm25_tokens(query, keep_numeric=keep_numeric)
     if not q_tokens:
         return {}
@@ -215,7 +265,10 @@ def bm25_scores(
     tokenised: list[tuple[str, list[str]]] = []
     doc_len_sum = 0
     for doc_id, text in docs:
-        toks = bm25_tokens(text or "", keep_numeric=keep_numeric)
+        toks = bm25_tokens(
+            text or "", keep_numeric=keep_numeric,
+            space_separated_identifiers=False,
+        )
         tokenised.append((doc_id, toks))
         doc_len_sum += len(toks)
     n_docs = len(tokenised)
