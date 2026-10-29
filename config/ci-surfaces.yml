@@ -3663,6 +3663,13 @@ surfaces:
   # the producer↔baseline-generator invocation contract. Same `core` home as its
   # two docs-lint siblings above.
   - test_docs_link_check.py
+  # #10265: the `docs` job's MARKDOWNLINT PRODUCER
+  # (`.github/scripts/docs-markdownlint.sh`) — the pinned linter is installed into a
+  # private prefix and invoked by ABSOLUTE path (never `npx`'s shared cache), and a
+  # report the pinned banner did not produce is refused, so an absent linter names
+  # itself instead of surfacing as a finding about the diff. Same `core` home as
+  # its three docs-lint siblings above.
+  - test_docs_markdownlint_producer.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
