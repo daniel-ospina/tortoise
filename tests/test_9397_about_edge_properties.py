@@ -2446,7 +2446,25 @@ def test_the_document_population_counts_match_the_census():
         f"the document no longer states 'written by {words[named]} in the named form', which is "
         f"what `RECORDED_WRITERS` holds ({named})"
     )
-    ordinals = {2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth"}
+    # ⛔ ONE table per spelling family — the rule the `NUMBER_WORDS`/`ORDINAL_WORDS`
+    # comment above states, and the one this literal broke (`#10200` review,
+    # cycle 11). It carried a THIRD ordinal copy reaching only `{2..6}` while
+    # `ORDINAL_WORDS` reaches twelve, and `ordinals[named]` below is INDEXED from
+    # it: the day `RECORDED_WRITERS` grows to seven this leg raises `KeyError: 7`
+    # instead of reding with the actionable message the sibling leg gives
+    # (`test_the_population_numerals_are_derived_from_the_census_tables` —
+    # "extend `NUMBER_WORDS`/`ORDINAL_WORDS` rather than dropping the
+    # derivation"). The span assertion below is what keeps a re-narrowed copy
+    # from coming back: nothing else pinned `ORDINAL_WORDS` to the cardinal
+    # family it mirrors, so a table that stopped short was drift nobody saw.
+    ordinals = ORDINAL_WORDS
+    assert (min(ordinals), max(ordinals)) == (min(words) + 1, max(words)), (
+        "the ordinal family must span the same population as the cardinal "
+        f"family (`NUMBER_WORDS` {min(words)}..{max(words)} vs `ORDINAL_WORDS` "
+        f"{min(ordinals)}..{max(ordinals)}): a table that stops short raises "
+        "`KeyError` on a grown population instead of reding with the message "
+        "that says what to extend"
+    )
     assert f"sees {words[named]} of the {words[total]}" in storage, (
         f"§13's census sentence no longer matches the tables: it must say "
         f"'sees {words[named]} of the {words[total]}' (RECORDED_WRITERS={named}, total={total})"
@@ -2481,10 +2499,10 @@ def test_the_document_population_counts_match_the_census():
         f"CORRECT ordinal ({ordinals[named]!r}), so the loop below would red on "
         "the corrected document"
     )
-    # `ordinals` maps NUMBER -> word, so the wrong ordinals are its VALUES whose
-    # number is not the table's; reading the keys instead is how a loop over
-    # `ordinals.items()` can silently search for "2 NAMED form writer" and match
-    # nothing — the same dead-pin shape this block exists to close.
+    # `ORDINAL_WORDS` maps NUMBER -> word, so the wrong ordinals are its VALUES
+    # whose number is not the table's; reading the keys instead is how a loop
+    # over `ordinals.items()` can silently search for "2 NAMED form writer" and
+    # match nothing — the same dead-pin shape this block exists to close.
     wrong_ordinals = [word for number, word in ordinals.items() if number != named]
     assert len(wrong_ordinals) >= 3, (
         "the wrong-ordinal set collapsed — it exists to catch a renumbered "
