@@ -342,6 +342,11 @@ if [ "$MODE" = status ]; then
   # paginated for the same reason. The runner COUNT comes out of the same read, which is what lets
   # the partial-coverage arm below exist at all: a label tally cannot tell 12 runners from 1.
   pool_tsv="$(gh api --paginate "repos/$REPO/actions/runners" --jq '.runners[] | [.name, ([.labels[].name]|join(","))] | @tsv' 2>/dev/null)" || exit 3
+  # ⛔ THE RUNNER COUNT IS A MEASUREMENT, AND IT IS THE DENOMINATOR — so it is PASSED to the awk
+  # below, not re-inferred there. `awk` counts RECORDS, and an empty pool still feeds it ONE empty
+  # record (`printf '%s\n' ""`), so `total` came out as 1 and an empty pool printed
+  # `0 of 1 self-hosted runner(s)` — a fabricated runner, in the one block whose doctrine is "an
+  # empty read is not a coverage verdict". The correct 0 was computed here and then never read.
   pool_total="$(printf '%s\n' "$pool_tsv" | grep -c . || true)"
   case "$pool_total" in ''|*[!0-9]*) pool_total=0 ;; esac
   uncovered=0
@@ -366,11 +371,13 @@ if [ "$MODE" = status ]; then
     # `7 of 12` on the live pool would read as erosion when it is exactly correct. A bare version
     # label is measured against the x64 pool, an `-arm` spelling against the arm64 pool, and
     # anything else against the whole pool.
-    counts="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" -v x64label="$ARCH_LABEL" -v armlabel="$ARM_POOL_LABEL" '
+    counts="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" -v x64label="$ARCH_LABEL" -v armlabel="$ARM_POOL_LABEL" \
+      -v pool_total="$pool_total" '
       {k=split($2,a,","); hit=0; x64=0; arm=0
        for(i=1;i<=k;i++){ if(a[i]==want) hit=1; if(a[i]==x64label) x64=1; if(a[i]==armlabel) arm=1 }
-       total++; if (hit) n++; if (x64) nx64++; if (arm) narm++}
-      END { denom = total
+       if (hit) n++; if (x64) nx64++; if (arm) narm++}
+      END { total = pool_total + 0   # the MEASURED runner count, never the record count above
+            denom = total
             if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) denom = narm
             else if (want ~ /^ubuntu-[0-9][0-9.]*$/) denom = nx64
             if (denom == 0) denom = total

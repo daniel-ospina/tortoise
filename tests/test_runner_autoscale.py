@@ -30,6 +30,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -40,6 +41,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "tools" / "runner_autoscale.py"
+INSTALLER = REPO_ROOT / "tools" / "install-ci-runner-x64.sh"
+BASH = shutil.which("bash") or "/bin/bash"
 REPO = "daniel-ospina/tortoise"
 
 #: A pool label set carrying BOTH hosted version spellings — the bare shape the pool is opted
@@ -237,7 +240,9 @@ class Env:
         provisioner_absent: bool = False,
         sudo_fails: bool = False,
         sudo_scoped: bool = False,
+        os_label: str | None = None,
     ) -> None:
+        self.os_label = os_label
         self.tmp = tmp
         self.root = tmp / "opt"
         self.root.mkdir(parents=True)
@@ -380,6 +385,15 @@ class Env:
         else:
             env.pop("RUNNER_AUTOSCALE_ALIVE_DIRS", None)
         env.pop("RUNNER_AUTOSCALE_REPO", None)
+        # ⛔ `resolve_labels` reads the operator's OS-label opt-in out of the environment — the same
+        # channel `install-runner-autoscale-schedule.sh` renders into the timer — so a box (or CI
+        # job) that exports it would red these tests for a reason unrelated to the code. The default
+        # arm belongs to the fixture; each test that means an arm sets it, via `monkeypatch.setenv`
+        # (read at call time, so it reaches the child).
+        for leak in ("CI_RUNNER_OS_LABEL", "CI_RUNNER_OS_NAME", "CI_RUNNER_OS_RELEASE"):
+            env.pop(leak, None)
+        if self.os_label is not None:
+            env["CI_RUNNER_OS_LABEL"] = self.os_label
         return env
 
     def run(self, *args: str, module: Path | None = None) -> subprocess.CompletedProcess:
@@ -1249,6 +1263,125 @@ def test_labels_follow_the_gate_and_never_claim_the_other_arch():
     }
     assert RA.resolve_labels(engaged, "x86_64") == "self-hosted-x64,ubuntu-latest"
     assert RA.resolve_labels({}, "aarch64") == "self-hosted-arm64"
+
+
+@pytest.mark.parametrize("mode", ["off", "on", "auto"])
+@pytest.mark.parametrize(
+    "host,release_marker",
+    [("Linux", "24.04"), ("Linux", "22.04"), ("Darwin", None)],
+)
+def test_resolve_labels_matches_the_installer_on_every_os_label_arm(
+    tmp_path, monkeypatch, mode, host, release_marker
+):
+    """The OS fact this file derives IS the installer's rule — proven by running both.
+
+    The docstring of `resolve_labels` claimed to mirror `install-ci-runner-x64.sh::resolve_labels`
+    while emitting no OS label at all, so an ORPHANED re-registration silently dropped the
+    `ubuntu-24.04` mitigation on the one path with no labels to preserve. A comment cannot hold
+    that mirror together — the installer grew the OS arm and nothing here failed — so the claim is
+    pinned by EXECUTION: the real installer's `--print-labels` beside `resolve_labels`, over every
+    mode × host-release combination, on both the bare and the engaged arm.
+
+    Mutation: drop `_os_labels` from `resolve_labels`' return -> every claiming arm reds -> RED.
+    Mutation: ignore `CI_RUNNER_OS_LABEL` and always emit the label -> the `off` arm reds -> RED.
+    """
+    os_release = tmp_path / "os-release"
+    os_release.write_text(
+        f'NAME="{host}"\n' + (f'VERSION_ID="{release_marker}"\n' if release_marker else "")
+    )
+    installer_env = {
+        **os.environ,
+        "CI_RUNNER_OS_LABEL": mode,
+        "CI_RUNNER_OS_NAME": host,
+        "CI_RUNNER_OS_RELEASE": str(os_release),
+    }
+    monkeypatch.setenv("CI_RUNNER_OS_LABEL", mode)
+    monkeypatch.setenv("CI_RUNNER_OS_NAME", host)
+    monkeypatch.setenv("CI_RUNNER_OS_RELEASE", str(os_release))
+
+    # `on` is the operator saying "this box is that release"; `auto` has to READ it; `off` never
+    # claims it. `on` does not consult the host (the installer returns before the read).
+    claims = mode == "on" or (mode == "auto" and host == "Linux" and release_marker == "24.04")
+    suffix = ",ubuntu-24.04" if claims else ""
+
+    def printed(*args: str) -> str:
+        r = subprocess.run(
+            [BASH, str(INSTALLER), "--print-labels", *args],
+            capture_output=True,
+            text=True,
+            env=installer_env,
+        )
+        assert r.returncode == 0, (args, r.returncode, r.stderr)
+        return r.stdout.strip()
+
+    # the bare arm (no fallback) and the engaged arm — the whole set, in the installer's order
+    assert printed("--fallback", "off") == f"self-hosted-x64{suffix}"
+    assert RA.resolve_labels({}, "x86_64") == printed("--fallback", "off")
+
+    engaged = {
+        "vm-2": RA.PoolEntry("vm-2", "online", False, ["self-hosted-arm64", "ubuntu-latest"])
+    }
+    assert printed("--fallback", "on") == f"self-hosted-x64,ubuntu-latest{suffix}"
+    assert RA.resolve_labels(engaged, "x86_64") == printed("--fallback", "on")
+
+    # ⛔ AND ONLY THE ARCH THAT HOSTS THAT IMAGE MAY CLAIM IT: `ubuntu-24.04` names the x64 hosted
+    # image, so an arm64 box deriving it would be the false architecture claim `_preserve_labels`
+    # drops. The installer never meets this case (it refuses a non-x86_64 INSTALL); this path can.
+    assert RA.resolve_labels({}, "aarch64") == "self-hosted-arm64", (
+        f"mode={mode}: an arm64 box claimed a version-pinned x64 label"
+    )
+
+
+def test_an_unknown_os_label_value_refuses_rather_than_defaulting_to_off(monkeypatch):
+    """A typo is not `off`: refuse, the way the installer does.
+
+    Defaulting the unreadable value to `off` would drop the label while LOOKING like restraint —
+    and this is the path an unattended autoscale pass runs, so nothing else would say so.
+    """
+    monkeypatch.setenv("CI_RUNNER_OS_LABEL", "true")
+    with pytest.raises(RA.Unmeasurable) as exc:
+        RA.resolve_labels({}, "x86_64")
+    assert "CI_RUNNER_OS_LABEL must be off|on|auto" in str(exc.value)
+
+
+def test_an_orphaned_re_registration_keeps_the_os_label(env, monkeypatch):
+    """ORPHANED is the ONE repair with no labels to preserve — and it used to drop the mitigation.
+
+    `resolve_labels` emitted `arch[,ubuntu-latest]` and never the OS fact, so a runner absent from
+    the pool was re-registered WITHOUT `ubuntu-24.04`: the same erasure as the repair pass this PR
+    already fixed, one door over, and equally silent (no error, no log line). The opt-in is driven
+    through the environment the schedule's timer renders, because that is the sanctioned channel.
+
+    Mutation: return `resolve_labels` without `_os_labels` -> the `on` case loses the label -> RED.
+    """
+    monkeypatch.setenv("CI_RUNNER_OS_LABEL", "on")
+    e = env(pool=[], installs=[("gh-runner-x64-1", "pi-runner-ghost")], os_label="on")
+    rec = e.record()
+    assert rec["_rc"] == 0, rec
+    assert rec["runners"][0]["state"] == "ORPHANED", rec
+    assert "--labels self-hosted-x64,ubuntu-24.04 " in e.config(), (
+        f"an ORPHANED re-registration dropped the mitigation: {e.config()}"
+    )
+
+    # ⛔ NOT ON AN ARM64 BOX: the bare label names the x64 hosted image, so deriving it here is the
+    # false architecture claim `_preserve_labels` exists to drop.
+    arm = env(pool=[], installs=[("gh-runner-x64-1", "pi-runner-ghost")], machine="aarch64", os_label="on")
+    arm.record()
+    assert "ubuntu-24.04" not in arm.config(), (
+        f"an arm64 box claimed the x64 version-pinned label: {arm.config()}"
+    )
+
+    # The control: unset (the default) claims nothing — the #6897 pin is not reversed by a repair.
+    monkeypatch.delenv("CI_RUNNER_OS_LABEL")
+    default = env(pool=[], installs=[("gh-runner-x64-1", "pi-runner-ghost")])
+    default.record()
+    assert "ubuntu-24.04" not in default.config(), default.config()
+
+    # And a typo REFUSES the repair instead of guessing which set to register.
+    typo = env(pool=[], installs=[("gh-runner-x64-1", "pi-runner-ghost")], os_label="true")
+    rec = typo.record()
+    assert "CI_RUNNER_OS_LABEL must be off|on|auto" in " ".join(rec["problems"]), rec
+    assert typo.config() == "", "a refused derivation must not register anything"
 
 
 def test_unknown_architecture_refuses_rather_than_guessing(env):

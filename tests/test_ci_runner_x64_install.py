@@ -483,6 +483,21 @@ def test_label_coverage_distinguishes_did_not_look_from_looked_and_found(tmp_pat
     # ⛔ THE REMEDY MUST NAME ITS PRECONDITION: `--repair-labels` PUTs a WHOLE set, so the bare
     # command (variable unset ⇒ `off`) removes the mitigation while the operator means to fix it.
     assert "CI_RUNNER_OS_LABEL=on" in r.stderr and "REMOVES the mitigation" in r.stderr, r.stderr
+    # ⛔ AN EMPTY POOL IS NOT ONE RUNNER. `awk` counts RECORDS, and an empty pool feeds it exactly
+    # one empty record, so the denominator was `total=1` and an empty pool reported
+    # `0 of 1 self-hosted runner(s)` — a fabricated runner, in the block whose doctrine is "an empty
+    # read is not a coverage verdict". The count the script already had (`grep -c .` → 0) is now the
+    # denominator it prints. Mutation: stop passing `pool_total` to the awk -> `0 of 1` -> RED.
+    empty_pool = _stub_gh(tmp_path / "empty", "")
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{empty_pool}:{os.environ['PATH']}"),
+        cwd=_repo_with_workflows(tmp_path / "e", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"),
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "0 of 0 self-hosted runner(s)" in r.stderr, (
+        f"an empty pool must report 0 runners, not a fabricated one: {r.stderr}"
+    )
 
 
 def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Path):

@@ -245,6 +245,7 @@ import argparse
 import datetime
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -642,9 +643,68 @@ def fallback_engaged(pool: dict[str, PoolEntry]) -> bool:
     return any(ARM_POOL_LABEL in e.labels and FALLBACK_LABEL in e.labels for e in pool.values())
 
 
+OS_LABEL = "ubuntu-24.04"
+"""`ubuntu-24.04` — the version-pinned HOSTED label the installer attaches under
+`CI_RUNNER_OS_LABEL=on|auto` (see `_os_labels`)."""
+
+
+def _host_is_the_os_release() -> bool:
+    """Is this host the release `OS_LABEL` names? The installer's `auto` read, same seams.
+
+    `CI_RUNNER_OS_NAME` / `CI_RUNNER_OS_RELEASE` are the INSTALLER's own seams, honoured here for
+    the same reason it honours them: the box reading this code is not always the box being labelled,
+    and a test that cannot drive the read cannot pin it.
+    """
+    if (os.environ.get("CI_RUNNER_OS_NAME") or platform.system()) != "Linux":
+        return False
+    try:
+        release = os.environ.get("CI_RUNNER_OS_RELEASE", "/etc/os-release")
+        with open(release, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("VERSION_ID="):
+                    found = line.split("=", 1)[1].strip().strip('"')
+                    return found == OS_LABEL.removeprefix("ubuntu-")
+    except OSError:
+        return False
+    return False
+
+
+def _os_labels(machine: str) -> str:
+    """`""` or `,ubuntu-24.04` — the rule of `install-ci-runner-x64.sh::resolve_os_label`.
+
+    ⛔ IT IS A MIRROR, SO IT IS PINNED TO THE THING IT MIRRORS: `tests/test_runner_autoscale.py::
+    test_resolve_labels_matches_the_installer_on_every_os_label_arm` runs the real installer's
+    `--print-labels` beside this function across on|off|auto × host-release × arch. Without that the
+    claim in `resolve_labels`' docstring was false the moment the installer grew an OS arm, and
+    nothing failed — which is the review finding this closes.
+
+    The environment IS the sanctioned channel: `install-runner-autoscale-schedule.sh` renders
+    `CI_RUNNER_OS_LABEL` into the timer's own env, so a scheduled pass reads the operator's opt-in
+    without a second config surface. An unknown value REFUSES instead of defaulting to `off` — the
+    installer refuses it too, and a silent `off` would drop the label while looking like restraint.
+    """
+    mode = os.environ.get("CI_RUNNER_OS_LABEL", "off")
+    if mode == "off":
+        return ""
+    if mode not in ("on", "auto"):
+        raise Unmeasurable(
+            f"CI_RUNNER_OS_LABEL must be off|on|auto (got {mode!r}): refusing to guess whether this "
+            f"runner claims {OS_LABEL}"
+        )
+    # ⛔ ONLY THE ARCH THAT HOSTS THAT IMAGE MAY CLAIM IT. `ubuntu-24.04` names the x64 hosted
+    # image, so an arm64 box claiming it is exactly the false architecture claim
+    # `_foreign_arch_version_pin` DROPS on re-registration. The installer never meets this case (it
+    # refuses a non-x86_64 install); this derivation runs on a box of either arch.
+    if ARCH_LABEL.get(machine.lower()) != ARCH_LABEL["x86_64"]:
+        return ""
+    if mode == "on":
+        return f",{OS_LABEL}"
+    return f",{OS_LABEL}" if _host_is_the_os_release() else ""
+
+
 def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
-    """The label set a re-registered runner gets — arch marker, plus the fallback label only if
-    the fallback is engaged right now.
+    """The label set a re-registered runner gets — arch marker, the fallback label only if the
+    fallback is engaged right now, and the OS fact whenever the operator opted into it.
 
     This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels`
     (the `resolve_labels` function of `tools/install-ci-runner-x64.sh`, in this tree since #9639)
@@ -656,6 +716,15 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
     `fallback_engaged`). An unknown architecture RAISES —
     `self-hosted`/`Linux`/`<ARCH>` are host-derived and may not be set, so there is no safe
     default to fall back to.
+
+    ⛔ THE MIRROR IS TESTED AS ONE, because it had already drifted: this function returned
+    `f"{arch},{FALLBACK_LABEL}"` or `arch` and never the OS label, so re-registering a runner that
+    was ABSENT from the pool (ORPHANED — the one case with no labels to preserve) silently dropped
+    the `ubuntu-24.04` mitigation the repair exists to keep, with no error and no log line. That is
+    the same erasure this file's own header describes, one door over. `_os_labels` now applies the
+    installer's rule, and `tests/test_runner_autoscale.py::
+    test_resolve_labels_matches_the_installer_on_every_os_label_arm` runs the REAL installer beside
+    it over the whole matrix so the two cannot drift again in silence.
     """
     arch = ARCH_LABEL.get(machine.lower())
     if not arch:
@@ -663,7 +732,10 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
             f"unknown architecture {machine!r}: cannot derive a label set "
             "(self-hosted/Linux/<ARCH> are host-derived and may not be set)"
         )
-    return f"{arch},{FALLBACK_LABEL}" if fallback_engaged(pool) else arch
+    os_labels = _os_labels(machine)
+    if fallback_engaged(pool):
+        return f"{arch},{FALLBACK_LABEL}{os_labels}"
+    return f"{arch}{os_labels}"
 
 
 # ── actions ───────────────────────────────────────────────────────────────────────────────────
@@ -1184,7 +1256,10 @@ def converge(
             # failure this preserves against: it drops any custom/tier label (and the fallback
             # label, when it is engaged), so the workflows that target it queue forever — a
             # "repair" that removes capacity. Only a runner absent from the pool (ORPHANED) has no
-            # labels to keep, and only that case derives them.
+            # labels to keep, and only that case derives them — and that derivation now carries the
+            # OS fact too (`resolve_labels` → `_os_labels`), because it is the SAME erasure one door
+            # over: an ORPHANED runner re-registered without `ubuntu-24.04` drops the mitigation
+            # silently, with no error and no log line (PR #10275 review, finding 2).
             # ⛔ PER RUNNER, never a value cached from the previous iteration: that
             # leaked one runner's set (including an other-arch marker) onto every later repair in
             # the same pass (round 2, finding 3). Host-derived labels (self-hosted/Linux/X64/ARM64)

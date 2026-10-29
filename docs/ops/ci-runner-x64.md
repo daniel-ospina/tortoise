@@ -26,11 +26,12 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 | `ubuntu-24.04` | 9 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
 Counts are JOBS (not files), re-measured 2026-10-29 on this branch (`yaml.safe_load` each workflow,
-count each job's `runs-on`): **77 / 9**, which is exactly what `--status`'s `label-coverage` block
-now prints — it used to read 85 / 12 because its extractor counted `runs-on:` mentions in YAML
-**comments** (it strips whole-line comments first now). Only `runs-on:` lines that name a single
-`ubuntu-*` label are counted; the `ubuntu-latest` row was previously written as 83 against a measured
-79, so treat both rows as a dated measurement and re-derive them rather than trusting the numbers.
+count each job's `runs-on`): **77 / 9** — the same label set `--status`'s `label-coverage` block
+reads (it counted 85 / 12 before it stripped whole-line comments), though that block reports RUNNER
+counts per label (`ubuntu-latest = 7 of 12 runner(s)`), not job counts. Only `runs-on:` lines that
+name a single `ubuntu-*` label are counted; the `ubuntu-latest` row was previously written as 83
+against a measured 79, so treat both rows as a dated measurement and re-derive them rather than
+trusting the numbers.
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
@@ -91,7 +92,7 @@ a re-registration only protects a runner that already has it. The autoscaler's F
 `env=`), and the installer's default is `off` — so on a box whose timer carries no
 `CI_RUNNER_OS_LABEL`, every runner the schedule **adds** joins without `ubuntu-24.04`. The pool then
 drifts back to zero answers one fill at a time, and `--status` used to print "covered" at every step
-until the last carrier was replaced. Two pins close it: `tools/install-runner-autoscale-schedule.sh`
+until the last carrier was replaced. **Three pins** close it: `tools/install-runner-autoscale-schedule.sh`
 renders `CI_RUNNER_OS_LABEL` into the timer (systemd unit, launchd plist, cron entry) **and** its
 probe, captured from the operator's environment at install time and defaulting to `off`, so the
 install command is the opt-in:
@@ -101,7 +102,13 @@ CI_RUNNER_OS_LABEL=on tools/install-runner-autoscale-schedule.sh   # the FILL le
 ```
 
 and `--status` now reports `⚠️ PARTIAL` for any label only part of the pool answers, which is the
-read that sees the drift before it reaches zero. **Restore after a drift**, on each affected box:
+read that sees the drift before it reaches zero. The **third** pin is the ORPHANED re-registration
+path, which used to be open: `runner_autoscale.py::resolve_labels` derived `arch[,ubuntu-latest]`
+and never the OS fact, so a runner ABSENT from the pool — the one case with no labels to preserve —
+was re-registered without `ubuntu-24.04`, silently, with no error and no log line. It now applies
+the installer's own rule from the same `CI_RUNNER_OS_LABEL` (`_os_labels`), and a test runs the real
+installer's `--print-labels` beside it across every arm so the mirror cannot drift again.
+**Restore after a drift**, on each affected box:
 
 ```bash
 CI_RUNNER_OS_LABEL=on tools/install-ci-runner-x64.sh --repair-labels --count <N>
@@ -191,21 +198,32 @@ time with nothing red in between. One read is one `--paginate`d pool listing, so
 `per_page` cannot read as uncovered.
 
 **Adding capacity (the second half).** One runner instance = one concurrent job, so extra instances
-are the only lever on throughput besides trimming the matrix:
+are the only lever on throughput besides trimming the matrix. ⛔ **There is ONE registration path and
+it is the installer** — `runner_autoscale.py` calls it "the one registration path" and refuses to
+improvise a second, divergent one; this section now obeys the same rule it does:
 
 ```bash
-# on the box, reusing an existing install; registration token from the repo API
-sudo cp -a /opt/gh-runner-x64-4 /opt/gh-runner-x64-5
-sudo rm -rf /opt/gh-runner-x64-5/{.runner,.runner_migrated,.credentials,.credentials_rsaparams,.service,.env,.path,_work,_diag}
-sudo chown -R "$(id -un):$(id -gn)" /opt/gh-runner-x64-5
-cd /opt/gh-runner-x64-5 && ./config.sh --unattended --replace --url https://github.com/<owner>/<repo> \
-  --token "$TOK" --name <new-name> --labels self-hosted-x64,ubuntu-latest,ubuntu-24.04 --work "$PWD/_work"
-sudo ./svc.sh install "$(id -un)" && sudo ./svc.sh start     # NOT nohup: a reboot must not lose it
+# on the box: ensure slots 1..N exist, carrying the label set the contract requires
+CI_RUNNER_OS_LABEL=on tools/install-ci-runner-x64.sh --count <N>
 ```
 
-⛔ **`.runner_migrated` counts as "already configured"** — a copied directory that keeps it (or
-`.runner`) makes `config.sh` refuse with *"Cannot configure the runner because it is already
-configured"*. Remove every one of the files listed above, not just `.runner`.
+⛔ **NEVER hand-write a `config.sh --labels …` registration.** The 2026-10-28 mitigation was applied
+that way, and this section used to print it as a procedure; it breaks three of the statements this
+document makes. It bypasses `--print-labels`' resolution and the `CI_RUNNER_OS_LABEL` validation, so
+a typo or an extra label is accepted there and refused everywhere else; it claims `ubuntu-24.04` with
+the flag **unset**, so no `--status` read can tell that runner apart from one an operator opted in;
+and it writes `ubuntu-latest` in **permanently**, when the fallback label is the gate's to attach and
+detach. That day is reproducible from this paragraph and is not a recipe for the next one. It is
+stickier than it looks, too: `_preserve_labels` now PRESERVES the bare `ubuntu-24.04`, so anything
+written by hand survives every subsequent repair and autoscale pass — a mistake made there is
+permanent as well.
+
+⛔ **If a runner directory is ever copied by hand** (the shape the dismissed recipe used),
+`.runner_migrated` counts as "already configured": a copied directory that keeps it (or `.runner`)
+makes `config.sh` refuse with *"Cannot configure the runner because it is already configured"*.
+Remove `.runner`, `.runner_migrated`, `.credentials`, `.credentials_rsaparams`, `.service`, `.env`,
+`.path`, `_work` and `_diag` — not just `.runner`.
+
 ⛔ **Never start the same registration twice.** A `nohup`'d `run.sh` plus the systemd unit means two
 listeners polling under one name: they steal each other's jobs and one exits mid-job. After
 installing the unit, confirm **one** `Runner.Listener` per directory and kill the other.
@@ -282,15 +300,15 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:705` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:527` (arch refusal dies at `:532`) and `uninstall` `:580` ·
-  guards at `:527-577` (forks `:535`, disk `:555`, cpu/memory `:562` — `:575`, the memory guard,
-  is the last one) · sha256 pin + registration at `:716-726` (verify `:716`, token `:719`, one
-  argv `:724-725`, `config.sh` `:726`; the run at `:708` is the dry-run echo) · systemd
-  install/start at `:736-738` · label resolution at `:216-313` (`fallback_engaged` `:216`,
+- `--count N` → `tools/install-ci-runner-x64.sh:712` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:534` (arch refusal dies at `:539`) and `uninstall` `:587` ·
+  guards at `:534-584` (forks `:542`, disk `:562`, cpu/memory `:569` — `:582`, the memory guard,
+  is the last one) · sha256 pin + registration at `:723-733` (verify `:723`, token `:726`, one
+  argv `:731-732`, `config.sh` `:733`; the run at `:715` is the dry-run echo) · systemd
+  install/start at `:743-745` · label resolution at `:216-313` (`fallback_engaged` `:216`,
   `resolve_os_label` `:244`, `resolve_labels` `:276`, whose body ends at its `}` on `:313`) ·
-  `repair` `:467` · `--print-labels` `:500` · label-coverage at `:338-460` (the two "read
-  nothing" arms at `:443` and `:452`, the uncovered verdict at `:460`).
+  `repair` `:474` · `--print-labels` `:507` · label-coverage at `:345-467` (the two "read
+  nothing" arms at `:450` and `:459`, the uncovered verdict at `:467`).
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:180-184`, the `case`
   through its `esac`): a `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op
   that reports success having deregistered nothing. `CI_RUNNER_OS_LABEL` is validated the same
