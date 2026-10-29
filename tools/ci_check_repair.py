@@ -77,8 +77,8 @@ instrument in the fleet: on 2026-10-19 twelve PR heads carried ZERO check-runs
 while 44-49 runs sat queued behind one reporting workflow, and "pending" read as
 "CI is slow". So the queue is measured ONCE per pass
 (`tools/ci_queue_health.py`, the repo-level `CI: FLOOD(<workflow>, queued=N,
-pr_running=0)` state, or `CI: PR-STARVED(...)` when PR CI is not running but no
-trim-safe offender can be blamed) and a context whose producing run is QUEUED
+pr_running=0)` state, or `CI: PR-STARVED(...)` when PR CI is not running and the
+dominance clause declined) and a context whose producing run is QUEUED
 while the repo is starved — `QueueHealth.starves_pr`, i.e. either verdict — is
 reported as STARVED — a named state, distinct from PENDING and from UNTRIGGERED
 — instead of as pending. A starved context is NOT repaired here:
