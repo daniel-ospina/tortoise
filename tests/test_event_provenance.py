@@ -33,11 +33,26 @@ def sdk():
 # ── Part 1: uses/produces edges ──────────────────────────────────────────
 
 class TestUsesProducesEdges:
-    """Events should auto-create Subject-performs->Event, Event-produces->Object,
-    and Event-uses->Object edges via _upsert_event."""
+    """An event wires Subject-performs->Event, Event-produces->Object and
+    Event-uses->Object edges via _upsert_event — to entities the producer
+    REGISTERED.
+
+    ⛔ #3590 D1 (owner-RULED 2026-10-26): "an unresolvable mention drops its
+    link, records the miss, and mints nothing." The fold used to MERGE a
+    name-keyed Object/Subject stub for every name a record mentioned; it now
+    RESOLVES the name to its single live holder and otherwise leaves the edge
+    unwired. So every positive row below registers the entity FIRST, and
+    `test_an_unregistered_mention_mints_nothing` is the pin on the retirement
+    itself (the pre-#3590 tree mints three stubs for that record).
+    """
 
     def test_performs_edge_created(self, sdk):
-        """_upsert_event with subject creates performs edge."""
+        """_upsert_event with subject creates performs edge.
+
+        The subject is REGISTERED first: since #3590 D1 the fold resolves a
+        mention instead of minting it, so an unregistered name would wire
+        nothing (see the retirement pin at the end of this class)."""
+        sdk.create_subject("alice", "engineer")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -60,7 +75,11 @@ class TestUsesProducesEdges:
         assert r[0][0] is True
 
     def test_produces_edge_created(self, sdk):
-        """_upsert_event with object creates produces edge."""
+        """_upsert_event with object creates produces edge.
+
+        The object is REGISTERED first (#3590 D1: the fold resolves a mention,
+        it does not mint it)."""
+        sdk.create_object("release-v1.0", "release")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -84,7 +103,11 @@ class TestUsesProducesEdges:
         assert r[0][0] is True
 
     def test_uses_edge_created(self, sdk):
-        """_upsert_event with uses list creates uses edges."""
+        """_upsert_event with uses list creates uses edges.
+
+        Both `uses[]` targets are REGISTERED first (#3590 D1)."""
+        sdk.create_object("dataset-a", "dataset")
+        sdk.create_object("dataset-b", "dataset")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -106,6 +129,7 @@ class TestUsesProducesEdges:
 
     def test_uses_single_string(self, sdk):
         """_upsert_event with uses as a single string works."""
+        sdk.create_object("paper-xyz", "paper")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -124,7 +148,13 @@ class TestUsesProducesEdges:
 
     def test_uses_deduplicates_duplicate_entries(self, sdk):
         """_upsert_event with uses containing duplicates must not create
-        duplicate edges — MERGE is idempotent on the pattern level (#146)."""
+        duplicate edges — MERGE is idempotent on the pattern level (#146).
+
+        Both targets are REGISTERED first (#3590 D1), so the count this pins
+        is really about the edge MERGE rather than about how many stubs the
+        fold could have minted."""
+        sdk.create_object("a", "dataset")
+        sdk.create_object("b", "dataset")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -153,6 +183,43 @@ class TestUsesProducesEdges:
         assert r_total[0][0] == 2, (
             f"Expected 2 total uses edges, got {r_total[0][0]}"
         )
+
+    def test_an_unregistered_mention_mints_nothing(self, sdk):
+        """#3590 D1 — a bare mention is NOT an entity.
+
+        FAILS IF: a `subject` / `object` / `uses[]` mention mints an Object or
+        a Subject again (the pre-#3590 name-keyed stub MERGE), or wires an edge
+        to it. It DOES require the event itself to be recorded: the record is
+        the evidence the link was dropped, not lost.
+        REACHABLE: every fold arm with no registered holder — the shape the
+        retired stub path existed for."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-mention",
+            "eventId": "ev-mention",
+            "eventKind": "analysis",
+            "subject": "nobody-registered",
+            "object": "no-such-object",
+            "uses": ["no-such-input"],
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        ev = proj.g.query(
+            "MATCH (e:Event {eventId:'ev-mention'}) RETURN count(e)"
+        ).result_set
+        assert ev[0][0] == 1, "the event record must still be folded"
+        for label in ("Object", "Subject"):
+            n = proj.g.query(
+                f"MATCH (n:{label}) RETURN count(n)"  # noqa: S608 - fixed literal
+            ).result_set
+            assert n[0][0] == 0, (
+                f"a bare mention minted a :{label} (D1 forbids it)")
+        edges = proj.g.query(
+            "MATCH (:Event {eventId:'ev-mention'}) "
+            "-[r:performs|produces|uses]->() RETURN count(r)"
+        ).result_set
+        assert edges[0][0] == 0, (
+            "a mention wired an edge to an entity nothing registered")
 
     def test_create_event_wires_about_subject(self, sdk):
         """create_event with aboutSubject creates aboutSubject edge."""
@@ -1014,7 +1081,12 @@ class TestNegativePaths:
     # ── create_event with uses containing empty strings ───────────────
 
     def test_create_event_uses_with_empty_strings(self, sdk):
-        """create_event with uses containing empty strings skips them gracefully."""
+        """create_event with uses containing empty strings skips them gracefully.
+
+        `valid-input` is REGISTERED first (#3590 D1 — a mention is resolved,
+        never minted), so the surviving edge is the one the fold can actually
+        wire; an empty string is not a writable MERGE key at all."""
+        sdk.create_object("valid-input", "dataset")
         ev = sdk.create_event("ev-empty-uses", "analysis",
                               uses=["", "valid-input", ""],
                               subject="test-agent")
