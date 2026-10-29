@@ -137,6 +137,7 @@ from tests._tmpdir_hygiene import (  # noqa: E402
     install_scan_guard,
     install_session_tmpdir,
     install_tolerant_tempdir_cleanup,
+    run_roots,
     sweep_stale_session_roots,
     write_tolerated_cleanup_report,
 )
@@ -1082,6 +1083,11 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # marks a failed probe. The module-attribute call and
                     # probe (see the import block above) are pinned by
                     # `test_conftest_sweep_returns_build_end_sweep_report`.
+                    # `own_probe` (#1005) is the SAME-instant read restricted to
+                    # this RUN's session roots, so the CI orphan gate can bind
+                    # to a population this run owns instead of the host-wide
+                    # count that also contains other jobs' and other workers'
+                    # servers (the 9-vs-8 and 22-vs-14 false reds).
                     return embedded_reaper.build_end_sweep_report(
                         lambda: _run_sweep(
                             dry_run=False, batch_size=SWEEP_BATCH_SIZE,
@@ -1102,6 +1108,9 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                             deadline=deadline),
                         deadline,
                         embedded_reaper.live_embedded_server_count,
+                        own_probe=lambda: (
+                            embedded_reaper.own_live_server_count(
+                                run_roots())),
                     )
                 finally:
                     if prev is None:
@@ -1224,6 +1233,12 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                 "other_suites": others,
                 "foreign_pytest": foreign,
                 "foreign_pids": foreign_matches,
+                # #1005: the run's own session temp roots — the attribution key
+                # the CI orphan gate uses to separate this run's servers from
+                # every other process sharing the host's process table. Written
+                # even when empty: a report that OMITS it is `unattributable`,
+                # never silently 0.
+                "own_roots": run_roots(),
                 "sweep": end_result,
             }, fh, indent=2)
     except Exception:
