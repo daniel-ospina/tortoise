@@ -86,6 +86,9 @@ LINK_NAME = "scripts"
 #: It names the commit the box's controller RUNS, which is not necessarily the commit
 #: ``$AGENT_INFRA_PATH`` happens to be at (#10114 measured 23 commits of daylight between them).
 PIN_ENV = "HARNESS_PIN"
+#: LINE 1 of this record is the full sha and line 2 is an ISO timestamp — that is the shape the
+#: fleet's own writer produces (agent-infra ``scripts/cloud-cell-bringup.sh``), so a reader that
+#: needs the COMMIT must take line 1, exactly as every fleet reader does (``head -1``).
 PIN_RELATIVE = Path(".pi") / "agent" / "state" / "HARNESS-PIN"
 #: A ``git`` that hangs must not hang a setup step. Every call here is local and offline.
 GIT_TIMEOUT = 20
@@ -189,7 +192,50 @@ def resolve_pin(explicit: str | None) -> Path | None:
     if env:
         return Path(env).expanduser()
     default = default_pin_path()
-    return default if default.exists() else None
+    # ⛔ NOT ``default.exists()`` (PR #10250 review ROUND 6 ISSUE 2, P2 — both directions
+    # MEASURED). ``Path.exists()`` re-raises every ``OSError`` except ``ENOENT``/``ENOTDIR``/
+    # ``ELOOP``, so a ``chmod 000`` parent escaped as a ``PermissionError`` TRACEBACK and the
+    # interpreter exited **1** — the DRIFT class, whose remedy sends an operator to
+    # ``git fetch && git checkout`` for a filesystem permission problem. And because it returned
+    # ``False`` for ELOOP, a record that IS there as a self-referential or dangling link was
+    # reported as ``no-pin`` → exit **0**, a false PASS claiming the box "records no pin" over a
+    # record it merely could not examine.
+    #
+    # ``lstat`` asks about the ENTRY, not what it resolves to, and this is the same predicate
+    # ``link_state`` already uses (``os.path.lexists``). Only a provably ABSENT entry — same
+    # absence ``Path.exists()`` itself defines, ``ENOENT``/``ENOTDIR`` — is ``None``. Everything
+    # else is returned, because readability is ``pin_state``'s job and it already answers
+    # ``PIN_UNREADABLE`` → 2: an unexaminable record is never an absent one (the rule
+    # ``harness-up`` states as its own verdict: "cannot-verify is never an absent pin").
+    try:
+        os.lstat(default)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return default
+    return default
+
+
+def _pin_sha_line(pin: Path) -> str:
+    """The commit id a pin record NAMES — line 1 of it, never the whole file.
+
+    ⛔ The whole-file read is what PR #10250 review ROUND 6 ISSUE 1 (P2, measured) found: the
+    fleet's own writer emits TWO lines —
+    ``printf '%s\\n%s\\n' "$got" "$(date -u +%FT%TZ)"`` (agent-infra
+    ``scripts/cloud-cell-bringup.sh:815``) — and its own suite pins that as the format CONTRACT
+    (``cloud-cell-bringup.test.sh:1160-1167``: *"HARNESS-PIN line 1 is the FULL sha, so 'status'
+    can read it with head -1"* / *"line 2 is the timestamp"*). ``str.strip()`` removes only
+    LEADING/TRAILING whitespace, so the INTERIOR newline survived and the anchored
+    ``PIN_SHA_RE`` could never match: a perfectly valid record was named as corrupt, ``--pin-check``
+    could never return ok/behind/diverged on any box that script provisioned, and the ``--check``
+    drift note degraded to ``pin: UNKNOWN`` on exactly the boxes #10114 is about.
+
+    Every fleet reader takes line 1 the same way (``harness-up``, ``harness-apply-pass.sh``,
+    ``cloud-cell-supervisor.sh``), so this is ONE reader shared by ``pin_state`` and
+    ``pin_remedy`` — the remedy read the whole file too, and would have printed
+    ``git checkout <sha>\\n<timestamp>`` once the verdict was fixed alone.
+    """
+    return pin.read_text(encoding="utf-8").split("\n", 1)[0].strip()
 
 
 def _git(infra: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
@@ -225,7 +271,7 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
             "cannot say whether this checkout is the tree this box runs"
         )
     try:
-        sha = pin.read_text(encoding="utf-8").strip()
+        sha = _pin_sha_line(pin)
     except (OSError, UnicodeDecodeError) as exc:
         # ``UnicodeDecodeError`` is a ``ValueError``, NOT an ``OSError`` (Python's exception
         # hierarchy; verified, not assumed). A pin holding raw bytes therefore escaped a bare
@@ -248,6 +294,28 @@ def pin_state(infra: Path, pin: Path | None) -> tuple[str, str]:
         return PIN_UNREADABLE, (
             f"the pin record {pin} holds {sha[:40]!r}, which is not a commit id — a corrupted "
             "pin cannot say which tree this box runs; refusing to call this verified"
+        )
+
+    # ⛔ ``git -C <dir>`` ANSWERS ABOUT AN ENCLOSING REPOSITORY (PR #10250 review ROUND 6
+    # ISSUE 3, P3 — measured, both directions). git's own manual: *"most of the options and
+    # operation modes require you to run this command inside a git repository **or a working
+    # tree that is under the control of a git repository**"* — so a plain directory with no
+    # ``.git`` of its own, nested anywhere inside a checkout (a vendored copy, exactly the shape
+    # this docstring warns about), answered ``rev-parse --verify HEAD`` with the ENCLOSING
+    # repo's HEAD. The verdict was then a false ``ok`` when that HEAD happened to carry the pin,
+    # or a drift verdict whose printed remedy (``cd <dir> && git fetch``) cannot run at all.
+    # ``--show-toplevel`` is the question that was actually being asked: is THIS directory the
+    # root of the repository git is answering about?
+    toplevel = _git(infra, "rev-parse", "--show-toplevel")
+    root = toplevel.stdout.strip() if toplevel is not None and toplevel.returncode == 0 else ""
+    if not root or os.path.realpath(root) != os.path.realpath(infra):
+        # ``realpath`` on both sides: ``infra`` was already ``resolve()``d, and a pinned tree is
+        # materialised as a LINKED WORKTREE (``~/harness/<sha12>``), where ``--show-toplevel``
+        # legitimately names the worktree root — the same directory, not the main checkout.
+        enclosing = f" (git answers for {root}, the ENCLOSING repository)" if root else ""
+        return PIN_NOT_A_REPO, (
+            f"{infra} is not a git checkout{enclosing}, so it cannot be compared with the pin "
+            f"{sha[:12]} — cannot verify"
         )
 
     head = _git(infra, "rev-parse", "--verify", "HEAD")
@@ -293,7 +361,7 @@ def pin_remedy(infra: Path, pin: Path | None) -> str:
         # Same widened tuple as ``pin_state``: an undecodable pin must degrade to the ``<pin>``
         # placeholder, never raise out of a function whose only job is to print a remedy hint.
         with contextlib.suppress(OSError, UnicodeDecodeError):
-            sha = pin.read_text(encoding="utf-8").strip() or "<pin>"
+            sha = _pin_sha_line(pin) or "<pin>"
     return f"cd {infra} && git fetch origin && git checkout {sha}"
 
 

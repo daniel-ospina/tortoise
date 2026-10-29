@@ -685,7 +685,7 @@ def git_commit(infra: Path, message: str) -> str:
     subprocess.run(["git", "-C", str(infra), "add", "."], check=True, capture_output=True)
     subprocess.run(
         ["git", "-C", str(infra), "-c", "user.email=test@example.com",
-         "-c", "user.name=test", "commit", "-q", "-m", message],
+         "-c", "user.name=test", "-c", "commit.gpgsign=false", "commit", "-q", "-m", message],
         check=True, capture_output=True,
     )
     return subprocess.run(
@@ -1007,6 +1007,16 @@ class TestPinAgreement:
             "the refusal does not name both flags, so the caller cannot tell what to split: "
             f"{result.stderr!r}"
         )
+        # ⛔ PR #10250 review ROUND 6 ISSUE 4 (P3): every assertion ABOVE holds on ``origin/main``'s
+        # tool, where ``--pin-check`` does not exist at all — argparse exits 2, its usage line
+        # contains ``--check``, and ``unrecognized arguments: --pin-check`` contains the other.
+        # Measured on the pre-fix tool: rc=2, stdout 0 bytes, both substrings present, no pointer.
+        # This phrase is the only one that separates "the guard REFUSED the combination" from "one
+        # of the flags does not exist", so without it the test pins nothing it claims to.
+        assert "not allowed with" in result.stderr, (
+            "the refusal is not argparse's mutually-exclusive one, so this test cannot tell a "
+            "REFUSED combination from a flag that does not exist: " f"{result.stderr!r}"
+        )
         assert "pin:" not in result.stdout, (
             "one question was answered anyway — that is the silent half-answer, and it is what "
             f"turns a broken pointer into a green exit: {result.stdout!r}"
@@ -1075,4 +1085,170 @@ class TestPinAgreement:
         assert result.stdout == "", f"--quiet printed the action line: {result.stdout!r}"
         assert result.stderr == "", (
             f"--quiet printed the drift note through the CI wrapper's path: {result.stderr!r}"
+        )
+
+    def test_a_two_line_pin_record_is_read_from_LINE_ONE(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ROUND 6 ISSUE 1 (P2) — the record shape the FLEET actually writes.
+
+        ``~/.pi/agent/state/HARNESS-PIN`` is not a sha file, it is a sha PLUS an ISO timestamp:
+        agent-infra's ``scripts/cloud-cell-bringup.sh`` writes it with
+        ``printf '%s\\n%s\\n' "$got" "$(date -u +%FT%TZ)"``, and its own suite pins that shape as a
+        contract (``cloud-cell-bringup.test.sh``: "HARNESS-PIN line 1 is the FULL sha … line 2 is
+        the timestamp"). Reading the whole file and ``strip()``-ing it leaves the INTERIOR newline
+        in place, so ``PIN_SHA_RE`` could never match: every cloud-cell box got
+        ``pin: unreadable`` → exit 2 over a perfectly VALID record, ``--pin-check`` could never
+        answer ok/behind/diverged there, and the ``--check`` drift note degraded to
+        ``pin: UNKNOWN`` on exactly the boxes #10114 is about. Measured RED at the pre-fix head.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        home = self._home(tmp_path)
+        (home / ".pi" / "agent" / "state" / "HARNESS-PIN").write_text(
+            f"{pin}\n2026-10-28T00:00:00Z\n"
+        )
+        env = self._env(home)
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 0, (
+            "a pin record carrying the fleet's own timestamp line must read as 'ok', not as a "
+            f"corrupt one — rc={result.returncode}, stdout={result.stdout!r}"
+        )
+        assert "pin: ok" in result.stdout, result.stdout
+        assert pin[:12] in result.stdout, "the verdict does not name the pin it compared against"
+
+        # The other half of the same defect: `--check` said "pin: UNKNOWN" here, so the #10114
+        # symptom this PR exists to close survived on every box the bring-up script provisioned.
+        check = run_tool("--check", "--repo", str(repo), "--infra", str(git_infra), env=env)
+        assert "pin: UNKNOWN" not in check.stderr, (
+            f"the drift note cannot read a valid two-line pin and reports it as unknown: "
+            f"{check.stderr!r}"
+        )
+
+    def test_the_REMEDY_never_embeds_the_records_timestamp(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """``pin_remedy`` reads the same record, so fixing only ``pin_state`` prints a broken command.
+
+        The whole-file read meant a two-line record would be pasted into the printed fix as
+        ``git checkout <sha>\\n2026-10-28T00:00:00Z`` — a command that cannot run. Both readers now
+        share ``_pin_sha_line``, and this pins the second one.
+        """
+        behind = subprocess.run(
+            ["git", "-C", str(git_infra), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        pin = git_commit(git_infra, "the commit the box runs")
+        subprocess.run(
+            ["git", "-C", str(git_infra), "checkout", "-q", behind], check=True, capture_output=True
+        )
+        home = self._home(tmp_path)
+        (home / ".pi" / "agent" / "state" / "HARNESS-PIN").write_text(
+            f"{pin}\n2026-10-28T00:00:00Z\n"
+        )
+        env = self._env(home)
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "BEHIND" in result.stdout, result.stdout
+        assert f"git checkout {pin}" in result.stderr, result.stderr
+        assert "2026-10-28" not in result.stderr, (
+            f"the printed remedy embeds the record's timestamp and cannot run: {result.stderr!r}"
+        )
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root ignores directory permissions, so the unexaminable-parent case cannot be staged",
+    )
+    def test_an_UNEXAMINABLE_pin_record_is_cannot_verify_never_DRIFT(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ROUND 6 ISSUE 2 (P2), direction A — the traceback that exits 1.
+
+        ``Path.exists()`` re-raises every ``OSError`` except ``ENOENT``/``ENOTDIR``/``ELOOP``, so
+        an unsearchable parent escaped ``resolve_pin`` as a ``PermissionError`` TRACEBACK and the
+        interpreter exited **1** — this tool's DRIFT class, whose remedy sends an operator to
+        ``git fetch && git checkout`` over a filesystem permission problem. ``resolve_pin`` runs on
+        EVERY mode, so it also took down the previously-working materialise path, including the
+        in-process call in ``tools/agent_infra_drift_check.py`` (which wraps only
+        ``ConfigError``). Exit 2 is the honest answer: this record exists, it just cannot be read.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        home = self._home(tmp_path, pin)
+        state = home / ".pi" / "agent" / "state"
+        state.chmod(0o000)
+        try:
+            result = self._pin_check(repo, git_infra, self._env(home))
+        finally:
+            state.chmod(0o755)  # so pytest can clean tmp_path up
+
+        assert result.returncode == 2, (
+            f"an unexaminable record is 'cannot verify' (2), never drift (1) — "
+            f"rc={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "Traceback" not in result.stderr, (
+            f"the pin probe crashed instead of returning a verdict: {result.stderr}"
+        )
+
+    def test_a_pin_entry_that_cannot_be_EXAMINED_is_never_no_pin(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ROUND 6 ISSUE 2 (P2), direction B — the false PASS.
+
+        ``Path.exists()`` answers ``False`` for ``ELOOP``, so a record that IS there as a
+        self-referential or dangling link was reported as ``no-pin`` → exit **0**: a pass
+        claiming the box "records no pin" over a record the tool merely could not examine. The
+        module already refuses this two branches later ("an EMPTY pin is not 'no pin'"), and the
+        fleet reader it mirrors has a dedicated state for it (``harness-up``: "pin: UNEXAMINABLE
+        … cannot-verify is never an absent pin", exit 2).
+        """
+        home = self._home(tmp_path)
+        record = home / ".pi" / "agent" / "state" / "HARNESS-PIN"
+        record.symlink_to(record.name)  # self-referential: the entry exists, resolution loops
+        result = self._pin_check(repo, git_infra, self._env(home))
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "pin: no-pin" not in result.stdout, (
+            f"a record that cannot be examined was reported as 'no pin recorded': {result.stdout!r}"
+        )
+        assert "cannot verify" in result.stdout, result.stdout
+
+        record.unlink()
+        record.symlink_to(tmp_path / "no-such-target")  # dangling: same class
+        result = self._pin_check(repo, git_infra, self._env(home))
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "pin: no-pin" not in result.stdout, result.stdout
+
+    def test_a_directory_nested_inside_a_repo_is_not_treated_as_a_checkout(
+        self, repo: Path, fake_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ROUND 6 ISSUE 3 (P3) — ``git -C`` answers about the ENCLOSING repo.
+
+        git's own manual: ``rev-parse`` "require[s] you to run this command inside a git
+        repository **or a working tree that is under the control of a git repository**". So a
+        plain directory with no ``.git`` of its own — a vendored copy is exactly that shape — was
+        compared using the PARENT repo's HEAD, and here the pin IS that HEAD, which is the false
+        ``ok`` (measured: ``pin: ok … carries the pin``, rc=0, on a directory that is not a
+        checkout at all). The other direction gave a drift verdict whose printed remedy
+        (``cd <vendored dir> && git fetch``) cannot run. The sibling test above passes only
+        because its fixture sits OUTSIDE any repo.
+        """
+        enclosing = fake_infra.parent
+        subprocess.run(
+            ["git", "-C", str(enclosing), "init", "-q", "-b", "main"],
+            check=True, capture_output=True,
+        )
+        # A commit in the enclosing repo, so `rev-parse --verify HEAD` SUCCEEDS there — that is
+        # what made the wrong answer a false pass rather than an error.
+        pin = git_commit(enclosing, "the enclosing repo's commit")
+        env = self._env(self._home(tmp_path, pin))
+
+        result = self._pin_check(repo, fake_infra, env)
+        assert result.returncode == 2, (
+            "a directory with no .git of its own is 'cannot verify' (2) even when it is nested "
+            f"inside a repo — rc={result.returncode}, stdout={result.stdout!r}"
+        )
+        assert "not a git checkout" in result.stdout, result.stdout
+        assert "pin: ok" not in result.stdout, (
+            f"the enclosing repository's HEAD was used as this directory's HEAD: {result.stdout!r}"
         )
