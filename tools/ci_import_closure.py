@@ -1249,7 +1249,7 @@ ARTIFACT_NAME_OVERRIDES: dict[str, list[str]] = {
     # Same shape: job `:3167` (no `name:`) uploads the literal at `:3327`.
     "test-d14-hosted-api": ["pytest-log-d14-hosted-api"],
     # The BARE matrix name is shard 0, whose `name:` suffix is `''` while its
-    # ARTIFACT label is `a` (`tools/ci_selection.py:3643-3652`; the upload at
+    # ARTIFACT label is `a` (`tools/ci_selection.py:3687-3689`; the upload at
     # `python-ci.yml:3160` uses `matrix.label`). The check run therefore reads
     # `test-carve-out` while the artifact is `pytest-log-test-carve-out-a` — the
     # `-a` is not a guess, it is pinned against the selector itself by
@@ -1423,7 +1423,7 @@ def _is_junit_member(name: str) -> bool:
 
     ⛔ `--junitxml` TAKES A CALLER-CHOSEN PATH (#10143 review P2). Matching only
     a member that `endswith("junit.xml")` made the d14 leg unreadable BY
-    CONSTRUCTION: `python-ci.yml:3088` runs it with `--junitxml=/tmp/junit-d14.xml`
+    CONSTRUCTION: `python-ci.yml:3266` runs it with `--junitxml=/tmp/junit-d14.xml`
     and uploads that file, so that leg's ground truth was never parsed — it read
     as "no junit in the artifact" (a permanent false PARTIAL) and its failures
     reached neither the residual arm nor the miss count, which is the opposite of
@@ -1639,7 +1639,24 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
                     f"{art.get('name')}: {len(parsed['unresolved'])} failing "
                     f"test(s) with no resolvable file "
                     f"({parsed['unresolved'][0]})"[:200])
-            executed_total += int(parsed.get("executed") or 0)
+            # ⛔ RECORDED PER ARTIFACT, NOT PER RUN (#10143 review P3). `rid`
+            # is the workflow RUN and `selected` is one artifact per RED LEG in
+            # it (see the sibling-masking block above: `test`/`test-slow`/
+            # `test-carve-out` and the always-on legs are matrix jobs inside ONE
+            # run). Counting `executed` only as a run-wide total meant a leg
+            # whose junit described ZERO testcases was masked by a sibling leg
+            # in the same run that described 500 — `executed_total` was non-zero,
+            # so no error was written, the truncated truth was CACHED and
+            # `cmd_validate` could return 0 or 1 on a window whose first leg's
+            # ground truth was never read. That is the sibling-masking defect one
+            # granularity down, in its COUNTING form.
+            executed = int(parsed.get("executed") or 0)
+            if not executed:
+                artifact_errors.append(
+                    f"{art.get('name')}: junit described 0 testcases — the suite "
+                    "did not run, so 'no test-level failure' is not a "
+                    "reading"[:200])
+            executed_total += executed
             if parsed["files"]:
                 pr_found = True
                 failed_files.update(parsed["files"])
@@ -1651,10 +1668,15 @@ def pr_ground_truth(repo: str, sha: str, cache: Path) -> dict:
         # parsed as CLEAN, `artifact_errors` stayed empty, the row read "job red,
         # no test-level failure" (the genuine #10070 zero-failure shape) and the
         # truncated truth was CACHED.
+        # The RUN-level summary of the per-artifact entries above: every red leg
+        # in this run was unreadable in the same way (a collection abort that
+        # stopped the whole matrix), which is a stronger statement than any one
+        # leg's entry and must not be silently deduped into it.
         if selected and not executed_total:
             artifact_errors.append(
-                f"run {rid}: junit present but described 0 testcases — the suite "
-                "did not run, so 'no test-level failure' is not a reading"[:200])
+                f"run {rid}: every selected junit described 0 testcases — the "
+                "suite did not run, so 'no test-level failure' is not a "
+                "reading"[:200])
         if not pr_found:
             no_test_failure.append(f"run {rid}")
 
@@ -2074,7 +2096,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         # ⛔ TODAY'S SELECTION IS EVERY LEG THE WORKFLOW RUNS — and `select()`
         # models three of them, not one. The carve-out leg is SUBTRACTED from
         # `test_files` (a carve-out file cannot run in a URI-set docker leg,
-        # ci_selection.py:2992) and reported separately as `carve_out_run`,
+        # ci_selection.py:3055) and reported separately as `carve_out_run`,
         # which the tier-2 PR path runs whenever a matched surface owns a
         # carve-out file. Reading only `test_files`/`slow_selected` therefore
         # scored a carve-out failure as `not_in_current` — i.e. it blamed the

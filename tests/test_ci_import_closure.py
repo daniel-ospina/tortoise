@@ -871,6 +871,136 @@ def test_summarise_reports_the_shim_closure_for_the_reader_that_was_used():
     assert naive["package_init_closure"] == 2     # the deferred sdk edge is gone
 
 
+# ---------------------------------------------------------------------------
+# The verdict — the ONE answer this lane exists to produce
+# ---------------------------------------------------------------------------
+def _verdict_summary(*, hub_tests: int, core_files: int,
+                     median_closure_size: int, tortoise_modules: int,
+                     hub_module: str = "tortoise/config.py") -> dict:
+    """A `summarise`-shaped payload carrying only what the verdict reads."""
+    return {
+        "core_files": core_files,
+        "top_hubs": [{"module": hub_module, "tests": hub_tests}],
+        "median_closure_size": median_closure_size,
+        "tortoise_modules": tortoise_modules,
+        "distinct_closure_sets": 3,
+    }
+
+
+def test_the_split_verdict_can_say_YES():
+    """#10143 review P3: `split_justified` is the lane's whole product and NO
+    test asserted it — `verdict_from_summary` merely executed inside a test that
+    read `summary["core_files"]`.
+
+    The rule must be able to answer YES, or "No" is not a measurement. Inverting
+    either comparison (`<` → `>`) turns this into False and reds here.
+    """
+    from tools import ci_import_closure as module
+    summary = _verdict_summary(hub_tests=100, core_files=752,
+                               median_closure_size=90, tortoise_modules=258)
+    verdict = module.verdict_from_summary(summary, {}, module.ModuleIndex([]))
+    assert verdict["hub_share"] == round(100 / 752, 4), verdict
+    assert verdict["median_closure_share_of_package"] == round(90 / 258, 4), verdict
+    assert verdict["hub_module"] == "tortoise/config.py"
+    assert verdict["split_justified"] is True, verdict
+
+
+def test_the_split_verdict_says_NO_when_one_module_dominates():
+    """The published answer — `docs/ci/core-import-closure.md` §6 *"Is a
+    file-level split … justified by the data? No."* — is this comparison.
+
+    `hub_share` 0.60 sits ABOVE the 0.5 rule and BELOW 0.95, which is what makes
+    the pin discriminating: the surviving mutation at the review head
+    (`POSITION_HUB_SHARE = 0.95`) flips this to True and reds here, while a
+    case at 0.9 could not tell the constant from the rule.
+    """
+    from tools import ci_import_closure as module
+    summary = _verdict_summary(hub_tests=451, core_files=752,
+                               median_closure_size=90, tortoise_modules=258)
+    verdict = module.verdict_from_summary(summary, {}, module.ModuleIndex([]))
+    assert verdict["hub_share"] == round(451 / 752, 4), verdict
+    assert verdict["split_justified"] is False, verdict
+
+
+def test_the_split_verdict_says_NO_when_the_TYPICAL_change_still_hits_half():
+    """The MEDIAN conjunct, isolated: a tiny hub beside a median change that
+    still selects over half the package.
+
+    Without this, deleting `median_share < POSITION_HUB_SHARE` from the rule is
+    invisible — the hub term alone answers False on the dominating-hub case.
+    """
+    from tools import ci_import_closure as module
+    summary = _verdict_summary(hub_tests=10, core_files=752,
+                               median_closure_size=200, tortoise_modules=258)
+    verdict = module.verdict_from_summary(summary, {}, module.ModuleIndex([]))
+    assert verdict["hub_share"] == round(10 / 752, 4), verdict
+    assert verdict["median_closure_share_of_package"] == round(200 / 258, 4), verdict
+    assert verdict["split_justified"] is False, (
+        "hub_share is ~0, so only the median term can answer No: "
+        f"{verdict}")
+
+
+def test_the_published_rule_states_the_share_it_was_measured_at():
+    """`cmd_closure` prints `verdict["rule"]` beside the verdict, and the doc
+    restates it. Pin the share INTO the sentence so the printed verdict cannot
+    disagree with the document (#10143 review P3)."""
+    from tools import ci_import_closure as module
+    summary = _verdict_summary(hub_tests=451, core_files=752,
+                               median_closure_size=90, tortoise_modules=258)
+    verdict = module.verdict_from_summary(summary, {}, module.ModuleIndex([]))
+    assert "60%" in verdict["rule"], verdict["rule"]
+    assert "752 core files" in verdict["rule"], verdict["rule"]
+    assert "more than half" in verdict["rule"], verdict["rule"]
+
+
+def test_the_verdict_and_summarise_publish_the_SAME_hub_share():
+    """`hub_share` is computed in TWO places — `summarise` publishes it and
+    `verdict_from_summary` recomputes it from `top_hubs[0]` — so the number the
+    report shows and the number the verdict used can drift apart silently
+    (#10143 review P3).
+
+    Restricted to the shape where the shim IS the busiest hub (the real tree's
+    shape, 634 of 752), because `summarise` measures `tortoise/__init__.py`
+    specifically while the verdict takes the top hub: this pin must not assert an
+    equality the two are not supposed to have.
+    """
+    from tools import ci_import_closure as module
+    mods = ("tortoise/__init__.py",)
+    closures = {
+        f"tests/test_{i}.py": module.Closure(f"tests/test_{i}.py", mods, False, ())
+        for i in range(4)
+    }
+    idx = _index("tortoise/__init__.py")
+    summary = summarise(closures, idx, None)
+    assert summary["top_hubs"][0]["module"] == "tortoise/__init__.py", summary
+    verdict = module.verdict_from_summary(summary, closures, idx)
+    assert verdict["hub_share"] == summary["hub_share"], (
+        f"the published share {summary['hub_share']} and the one the verdict "
+        f"used {verdict['hub_share']} disagree")
+
+
+def test_summarise_ranks_top_hubs_by_dependant_count():
+    """The verdict reads `top_hubs[0]`, so `summarise`'s ORDERING decides the
+    answer. Ranked ascending (or unsorted) it would report the LEAST busy module
+    as the hub and flip a split-justified verdict to YES (#10143 review P3)."""
+    from tools import ci_import_closure as module
+    closures = {
+        # `tortoise/quiet.py` has 1 dependant, `tortoise/busy.py` has 3.
+        "tests/test_1.py": module.Closure("tests/test_1.py",
+                                          ("tortoise/busy.py",), False, ()),
+        "tests/test_2.py": module.Closure("tests/test_2.py",
+                                          ("tortoise/busy.py",), False, ()),
+        "tests/test_3.py": module.Closure("tests/test_3.py",
+                                          ("tortoise/busy.py",
+                                           "tortoise/quiet.py"), False, ()),
+    }
+    idx = _index("tortoise/busy.py", "tortoise/quiet.py")
+    summary = summarise(closures, idx, None)
+    assert summary["top_hubs"][0] == {"module": "tortoise/busy.py", "tests": 3}, (
+        summary["top_hubs"])
+
+
+
 def _truth_cache(cache: Path, sha: str, repo: str = "o/r") -> Path:
     """The truth cache path — keyed by REPO **and** sha (#10143 review P2).
 
@@ -932,6 +1062,22 @@ def _write_tmp(cache: Path, aid: int, blob: bytes) -> Path:
     p = cache / f"artifact-{aid}.zip"
     p.write_bytes(blob)
     return p
+
+
+def _zip_of(junit: bytes, member: str = "junit.xml") -> bytes:
+    """An artifact zip carrying one junit payload under `member`.
+
+    `_download_artifact` returns a ZIP path and `_junit_from_zip` reads a MEMBER
+    out of it, so a test that hands back raw XML exercises the "no junit.xml in
+    artifact" arm instead of the one it means to.
+    """
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(member, junit)
+    return buf.getvalue()
 
 
 def test_ground_truth_records_an_artifact_that_carries_no_junit(monkeypatch, tmp_path):
@@ -1785,6 +1931,86 @@ def test_ground_truth_records_a_junit_with_zero_testcases(monkeypatch, tmp_path)
                        listing_names=["pytest-log-test-a"])
     truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
     assert any("0 testcases" in e for e in truth["artifact_errors"]), truth
+    assert not _truth_cache(tmp_path, "deadbeef").exists()
+
+
+def test_a_zero_testcase_junit_is_recorded_per_LEG_not_masked_by_its_SIBLING(
+    monkeypatch, tmp_path,
+):
+    """#10143 review P3: the zero-testcase check was a PER-RUN aggregate.
+
+    `rid` is the workflow RUN and `selected` is one artifact per RED LEG in it
+    (`test`, `test-slow`, `test-carve-out` and the always-on legs are matrix jobs
+    inside ONE run). Summing `executed` across the run meant a leg whose junit
+    described ZERO `<testcase>` elements — a collection abort, `exit 5` — was
+    masked by a sibling leg in the same run that described 500: `executed_total`
+    was non-zero, no `artifact_errors` entry was written, the truncated truth was
+    CACHED, and `cmd_validate` could return 0 or 1 over a window whose first
+    leg's ground truth was never read.
+
+    That is the sibling-artifact masking this PR already fixed one granularity
+    up, left in its COUNTING form. On the pre-fix code this test fails on both
+    counts: no error entry AND the truncated truth is written to the cache.
+    """
+    from tools import ci_import_closure as module
+
+    # TWO red legs, ONE run (99) — the ordinary matrix shape.
+    legs = [
+        {"name": "test (a)", "conclusion": "failure", "id": 1,
+         "details_url": "https://github.com/o/r/actions/runs/99/job/1"},
+        {"name": "test (b)", "conclusion": "failure", "id": 2,
+         "details_url": "https://github.com/o/r/actions/runs/99/job/2"},
+    ]
+    monkeypatch.setattr(module, "_check_runs", lambda repo, sha: legs)
+    monkeypatch.setattr(module, "_artifacts", lambda repo, rid: [
+        {"id": 7, "name": "pytest-log-test-a"},
+        {"id": 8, "name": "pytest-log-test-b"},
+    ])
+
+    good = _junit(
+        '<testcase classname="tests.test_b" name="t1" file="tests/test_b.py"/>',
+        '<testcase classname="tests.test_b" name="t2" file="tests/test_b.py"/>',
+        '<testcase classname="tests.test_b" name="t3" file="tests/test_b.py"/>',
+    )
+    # `_download_artifact` hands back a ZIP; leg (a) described ZERO testcases.
+    blobs = {7: _zip_of(b"<testsuite/>"), 8: _zip_of(good)}
+    monkeypatch.setattr(module, "_download_artifact",
+                        lambda repo, aid, cache: _write_tmp(cache, aid, blobs[aid]))
+
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert any("0 testcases" in e and "pytest-log-test-a" in e
+               for e in truth["artifact_errors"]), (
+        "leg (a)'s empty junit must be recorded against ITS OWN artifact, not "
+        f"masked by leg (b)'s 3 testcases: {truth['artifact_errors']}")
+    assert truth["artifacts"] == 2, truth
+    assert not _truth_cache(tmp_path, "deadbeef").exists(), (
+        "a window whose first leg was never read must never be cached")
+
+
+def test_a_zero_testcase_junit_records_the_LEG_and_the_RUN_when_both_are_empty(
+    monkeypatch, tmp_path,
+):
+    """The control for the pin above: when EVERY selected leg is empty this is a
+    stronger, run-level statement and it must still be made — the per-leg fix
+    narrows the check, it does not replace it."""
+    from tools import ci_import_closure as module
+    monkeypatch.setattr(module, "_check_runs", lambda repo, sha: [
+        {"name": "test (a)", "conclusion": "failure", "id": 1,
+         "details_url": "https://github.com/o/r/actions/runs/99/job/1"},
+        {"name": "test (b)", "conclusion": "failure", "id": 2,
+         "details_url": "https://github.com/o/r/actions/runs/99/job/2"},
+    ])
+    monkeypatch.setattr(module, "_artifacts", lambda repo, rid: [
+        {"id": 7, "name": "pytest-log-test-a"},
+        {"id": 8, "name": "pytest-log-test-b"},
+    ])
+    monkeypatch.setattr(module, "_download_artifact",
+                        lambda repo, aid, cache: _write_tmp(
+                            cache, aid, _zip_of(b"<testsuite/>")))
+
+    truth = module.pr_ground_truth("o/r", "deadbeef", tmp_path)
+    assert any("run 99" in e for e in truth["artifact_errors"]), (
+        f"every leg's junit was empty — record the run: {truth['artifact_errors']}")
     assert not _truth_cache(tmp_path, "deadbeef").exists()
 
 
