@@ -76,10 +76,14 @@
 #        tool missing from PATH, or a failed remote read (`--status`).
 #     4  label-coverage could not read the workflows, so it has NO verdict — run `--status` from
 #        the repo root. An empty read is not a clean bill of health, and neither is a PARTIAL one:
-#        a `runs-on:` whose labels are not a static label set (a `${{ matrix.os }}` expression, or
-#        a spelling this parser does not understand) is refused rather than cleared.
-#     5  label-coverage WAS read and found a required label with NO self-hosted answer — the
-#        incident state (every PR blocked). 0 does not mean "covered": read the report.
+#        a `runs-on:` whose labels are not a static label set (a `${{ matrix.os }}` expression in
+#        the value OR in any single member of a list, or a spelling this parser does not
+#        understand) is refused rather than cleared.
+#     5  label-coverage WAS read and found a required label this pool is ASKED to serve with NO
+#        self-hosted answer — the erosion state: the operator opted in, and the label is not there.
+#        A zero-answer label this pool is NOT asked to serve (`CI_RUNNER_OS_LABEL=off`, the shipped
+#        default, or `auto` declining) is a REPORT, not a verdict — that is #6897's pin applied
+#        correctly. 0 does not mean "covered": read the report.
 set -uo pipefail
 
 # The help text is the file's OWN header, cut at the closing `set` line rather than a frozen line
@@ -351,6 +355,24 @@ if [ "$MODE" = status ]; then
   # empty read is not a coverage verdict". The correct 0 was computed here and then never read.
   pool_total="$(printf '%s\n' "$pool_tsv" | grep -c . || true)"
   case "$pool_total" in ''|*[!0-9]*) pool_total=0 ;; esac
+  # ⛔ THE BARE-PIN VERDICT READS THE OPERATOR'S INTENT, NOT ONLY THE COUNT — the same predicate
+  # this block already applies to `ubuntu-latest` ("a pool carrying no `ubuntu-latest` IS the healthy
+  # state, because the gate is not routing it here"). Without it the block verdicts the CONFIGURATION
+  # #6897 REQUIRES as the incident state: the shipped default is `off`, so a pool that correctly
+  # answers no `ubuntu-24.04` — the pin, and the exact state this file's own revert recipe
+  # (`CI_RUNNER_OS_LABEL=off` plus `--repair-labels`) produces — exited 5, and the remedy it printed
+  # (`CI_RUNNER_OS_LABEL=on …`) re-applied a departure the owner has not settled. `--status` is the
+  # mode the runbook tells an operator to VERIFY with, so a permanently-red instrument there is the
+  # false red this block's neighbouring comment refuses to create for `ubuntu-latest`.
+  # The intent is READ FROM THE SAME FUNCTION THE INSTALL PATH USES (`resolve_os_label`, whose
+  # validation arm is 300 lines above), so the verdict and the label set a re-registration would
+  # actually get cannot disagree: `on` claims it, `auto` claims it only on a matching host, `off`
+  # (and `auto` declining) does not.
+  resolve_os_label
+  case "$OS_LABELS" in
+    *",$OS_LABEL") os_label_asked=1 ;;
+    *)              os_label_asked=0 ;;
+  esac
   uncovered=0
   labels_seen=0
   # ⛔ A WHOLE-LINE YAML COMMENT IS NOT A `runs-on:` LINE. Unanchored, `# legacy: runs-on: windows-2022`
@@ -375,7 +397,18 @@ if [ "$MODE" = status ]; then
   # The arms: a same-line scalar or flow sequence; a block sequence; a mapping whose `labels:` key
   # is a flow list, a scalar or a nested block list (`group:` names a runner GROUP, not a label, so
   # it is consumed and never counted); and single quotes unquoted alongside double quotes.
-  # A `runs-on:` that yields no label and names no group prints `!` — see the fail-closed arm below.
+  # ⛔ ONE UNREADABLE MEMBER MAKES THE WHOLE BLOCK UNREADABLE — a `!` line, never a silent drop.
+  # The extractor used to print `!` only when the block yielded NOTHING (`got == 0 && !pgroup`), so
+  # any parseable sibling ABSORBED an unparsed one and the block cleared: `labels: ${{ … }}` beside
+  # `group: pool` emitted no label and no marker (the `group:` suppressed it), and
+  # `runs-on: [self-hosted, "${{ matrix.arch }}"]` emitted `self-hosted` and dropped the expression
+  # member. GitHub documents BOTH shapes — the combined `group:`/`labels:` form is its own example
+  # (`docs.github.com/…/self-hosted-runners/use-in-a-workflow`), and a matrix-ified workflow's first
+  # move is to put the OS into the label list — so a REQUIRED leg can be routed that way, and the
+  # instrument would have reported it `covered` and exited 0. That is the incident state this block
+  # exists to surface, cleared by the one arm that was meant to fail closed.
+  # So: an expression member (or a `labels:` key that yields no static label at all, even with a
+  # `group:` named beside it) prints `!`, exactly like a block with no readable label and no group.
   coverage="$(grep -rhvE '^[[:space:]]*#' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
       | awk '
       function trim(s) { gsub(/^[ \t]+/, "", s); gsub(/[ \t]+$/, "", s); return s }
@@ -388,7 +421,10 @@ if [ "$MODE" = status ]; then
       function emit(t,   v) {
         v = unq(t)
         if (v == "") return
-        if (v ~ /^\$/) return          # an expression is not a label this pass can read
+        # ⛔ `bad++`, NOT a silent `return`: an expression is not a label this pass can read, so the
+        # BLOCK has no static label set and must reach the exit-4 arm. Dropping it let a parseable
+        # sibling (`self-hosted`) answer for the whole block.
+        if (v ~ /^\$/) { bad++; return }
         print v; got++
       }
       function flowlist(s,   n, i, a) {
@@ -410,7 +446,7 @@ if [ "$MODE" = status ]; then
         for (i = 1; i <= n; i++) {
           k = trim(parts[i])
           if (k ~ /^group[ \t]*:/) pgroup = 1
-          else if (k ~ /^labels[ \t]*:/) value(substr(k, index(k, ":") + 1))
+          else if (k ~ /^labels[ \t]*:/) { plabels = 1; value(substr(k, index(k, ":") + 1)) }
         }
       }
       function value(s) {
@@ -421,7 +457,12 @@ if [ "$MODE" = status ]; then
       }
       function finish() {
         if (!pend) return
-        if (got == 0 && !pgroup) print "!"
+        # ⛔ `bad > 0` FIRST: an unreadable MEMBER refuses the block even when a sibling parsed, and
+        # a `labels:` key that produced no static label refuses it even when a `group:` was named
+        # (`!pgroup` alone let that shape through — the group suppressed the marker entirely).
+        # A `group:` with genuinely NO `labels:` key stays a report: there is no label there to
+        # check, which is a real read, not a failed one.
+        if (bad > 0 || (got == 0 && (!pgroup || plabels))) print "!"
         pend = 0
       }
       {
@@ -437,7 +478,7 @@ if [ "$MODE" = status ]; then
         if (line ~ /^runs-on[ \t]*:/) {
           finish()
           rest = trim(substr(line, index(line, ":") + 1))
-          pend = 1; pind = ind; got = 0; pgroup = 0
+          pend = 1; pind = ind; got = 0; pgroup = 0; bad = 0; plabels = 0
           if (rest != "") { value(rest); finish() }
           next
         }
@@ -445,11 +486,12 @@ if [ "$MODE" = status ]; then
           if (line ~ /^-[ \t]/) {
             item = trim(substr(line, 2))
             if (item ~ /^group[ \t]*:/) pgroup = 1
-            else if (item ~ /^labels[ \t]*:/) value(substr(item, index(item, ":") + 1))
+            else if (item ~ /^labels[ \t]*:/) { plabels = 1; value(substr(item, index(item, ":") + 1)) }
             else value(item)
           }
           else if (line ~ /^group[ \t]*:/) pgroup = 1
           else if (line ~ /^labels[ \t]*:/) {
+            plabels = 1
             v = substr(line, index(line, ":") + 1)
             if (trim(v) != "") value(v)
           }
@@ -527,8 +569,20 @@ if [ "$MODE" = status ]; then
           say "     GitHub-hosted serves $FALLBACK_LABEL while the gate is not routing it here — a report, not a block."
           ;;
         bare)
-          say "     A required leg naming it can then only be served by GitHub-hosted: python-ci-gate is never dispatched and every PR stays BLOCKED."
-          uncovered=1
+          # ⛔ WHAT WAS MEASURED, AND WHAT FOLLOWS ONLY CONDITIONALLY. The measurement is "no
+          # self-hosted runner answers this label"; "every PR stays BLOCKED" is a consequence that
+          # holds only WHILE hosted is also unavailable (the 2026-10-28 outage). On a healthy day the
+          # pinned legs dispatch on hosted by design — that is what the pin is for — so the verdict
+          # states the measurement and makes the consequence conditional instead of asserting it.
+          # And the verdict itself exists only when the pool IS asked to serve the label: with the
+          # flag `off` a zero answer is #6897's pin applied correctly, which is a REPORT.
+          if [ "$os_label_asked" = 1 ]; then
+            say "     Only GitHub-hosted can answer it, and this pool IS asked to serve it (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}) — so a required leg naming it has NO self-hosted answer: the mitigation is not applied. On a hosted outage that is every PR BLOCKED; on a healthy day it is the #6897 pin in effect."
+            uncovered=1
+          else
+            say "     Only GitHub-hosted is asked to answer it: this pool is NOT asked to serve it (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}) — that is the #6897 pin applied correctly, NOT the incident state. A report, not a block."
+            say "     To have this instrument check the mitigation instead, run it with CI_RUNNER_OS_LABEL=on — \`--status\` is read-only, so that changes nothing on the pool."
+          fi
           ;;
         *)
           say "     Not a label this pool serves (hosted-only or custom), so its zero answer blocks nothing here — a report, not a block."
@@ -549,7 +603,15 @@ if [ "$MODE" = status ]; then
       # computed (same awk as the denominator), so use it.
       case "$label_class" in
         bare)
-          say "     A re-registration or fill that omits it erodes coverage silently; re-apply with CI_RUNNER_OS_LABEL=on --repair-labels."
+          # ⛔ THE REMEDY CARRIES THE PRECONDITION IT NEEDS, and never prescribes a side of the open
+          # decision: when the pool is not asked to serve this label, a partial carrier set is
+          # LEFTOVER from a previous state and the revert removes it — telling that operator to
+          # "re-apply with CI_RUNNER_OS_LABEL=on" would reverse #6897 in passing.
+          if [ "$os_label_asked" = 1 ]; then
+            say "     A re-registration or fill that omits it erodes coverage silently; re-apply with CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} --repair-labels."
+          else
+            say "     This pool is not asked to serve it (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}), so a partial carrier set is a leftover from a previous state: $0 --repair-labels with the variable UNSET removes it. A report, not a block."
+          fi
           ;;
         arm)
           say "     An ARM64 hosted spelling: only the arm64 pool may claim it, and nothing on this x64 box re-applies it — a report."
@@ -573,8 +635,11 @@ if [ "$MODE" = status ]; then
     # `CI_RUNNER_OS_LABEL` is unset and therefore `off` — REMOVES $OS_LABEL from every runner and
     # re-creates the deadlock, while the operator's intent was to fix coverage. The one instruction
     # this instrument emits in its failure case must not be the one that undoes the mitigation.
-    say "⛔ UNCOVERED label(s) above. To (re-)apply this script's label set INCLUDING $OS_LABEL, run:"
-    say "     CI_RUNNER_OS_LABEL=on $0 --repair-labels --count <N>"
+    # ⛔ AND IT REPEATS THE OPERATOR'S OWN SPELLING, never a hardcoded `on`: reaching this arm means
+    # the pool IS asked to serve the label, and `auto` (which may have resolved to claimed on THIS
+    # host) has to survive the re-run. Prescribing `on` would silently un-narrow an `auto` install.
+    say "⛔ UNCOVERED label(s) above. This pool IS asked to serve them and does not. To (re-)apply this script's label set INCLUDING $OS_LABEL, run:"
+    say "     CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} $0 --repair-labels --count <N>"
     say "   Run it with the variable UNSET and the PUT body has no $OS_LABEL in it — that REMOVES the mitigation from every runner it touches."
   fi
   # ⛔ "NOTHING TO CHECK" IS NOT "ALL COVERED". Run from a directory with no .github/workflows (or on

@@ -475,14 +475,42 @@ def test_label_coverage_distinguishes_did_not_look_from_looked_and_found(tmp_pat
         f"comment prose was counted as a required label: {r.stderr}"
     )
 
-    # The incident state: a REQUIRED label nobody answers. A verdict, and it is bad -> 5.
+    # The incident state: a REQUIRED label the pool IS ASKED to serve and nobody answers. A verdict,
+    # and it is bad -> 5. ⛔ `CI_RUNNER_OS_LABEL=on` IS PART OF THE FIXTURE: `--status` reads the
+    # operator's intent (the same `resolve_os_label` the install path uses) before it verdicts a bare
+    # pin, because with the flag at its shipped default `off` a zero-answer `ubuntu-24.04` is #6897's
+    # pin applied correctly — see the flag-off control below.
     uncovered = _repo_with_workflows(tmp_path / "u", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n")
-    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=uncovered)
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=uncovered,
+    )
     assert r.returncode == 5, (r.returncode, r.stderr)
     assert "0 of 1 self-hosted runner(s)" in r.stderr, r.stderr
     # ⛔ THE REMEDY MUST NAME ITS PRECONDITION: `--repair-labels` PUTs a WHOLE set, so the bare
     # command (variable unset ⇒ `off`) removes the mitigation while the operator means to fix it.
     assert "CI_RUNNER_OS_LABEL=on" in r.stderr and "REMOVES the mitigation" in r.stderr, r.stderr
+    # ⛔ AND THE REMEDY MUST NOT PRESCRIBE A SIDE OF AN OPEN DECISION. Reaching exit 5 means the pool
+    # is ALREADY asked to serve the label, so the command repeats the operator's own spelling and
+    # never re-derives `on` (which would silently widen an `auto` install).
+    assert "This pool IS asked to serve them" in r.stderr, r.stderr
+
+    # ⛔ THE MIRROR — AND THE FALSE RED THIS FIX REMOVES. With `CI_RUNNER_OS_LABEL` at its shipped
+    # default (`off`, and `_env` pins that), a pool that correctly answers NO `ubuntu-24.04` is the
+    # #6897 pin — the exact state the runbook's own revert recipe (`off` plus `--repair-labels`)
+    # produces. Verdicting it made `--status` — the mode the runbook tells an operator to VERIFY
+    # with — permanently red in the one configuration the doc calls the recorded recommendation, and
+    # the remedy it printed re-applied a departure the owner has not settled. Report: exit 0.
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=uncovered)
+    assert r.returncode == 0, (
+        f"the pinned configuration (#6897, flag off) is not the incident state: {r.stderr}"
+    )
+    assert "#6897 pin applied correctly" in r.stderr, r.stderr
+    assert "⛔ UNCOVERED" not in r.stderr, r.stderr
+    # The verdict is still ONE read away, and the report says so without claiming it applied anything.
+    assert "CI_RUNNER_OS_LABEL=on" in r.stderr and "read-only" in r.stderr, r.stderr
+
     # ⛔ AN EMPTY POOL IS NOT ONE RUNNER. `awk` counts RECORDS, and an empty pool feeds it exactly
     # one empty record, so the denominator was `total=1` and an empty pool reported
     # `0 of 1 self-hosted runner(s)` — a fabricated runner, in the block whose doctrine is "an empty
@@ -491,13 +519,22 @@ def test_label_coverage_distinguishes_did_not_look_from_looked_and_found(tmp_pat
     empty_pool = _stub_gh(tmp_path / "empty", "")
     r = _run(
         "--status",
-        env=_env(tmp_path, PATH=f"{empty_pool}:{os.environ['PATH']}"),
+        env=_env(tmp_path, PATH=f"{empty_pool}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
         cwd=_repo_with_workflows(tmp_path / "e", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"),
     )
     assert r.returncode == 5, (r.returncode, r.stderr)
     assert "0 of 0 self-hosted runner(s)" in r.stderr, (
         f"an empty pool must report 0 runners, not a fabricated one: {r.stderr}"
     )
+    # CONTROL — the same empty pool with the flag OFF is a report, so the 5 above is caused by the
+    # intent read and not by the empty pool (the two arms are independent predicates).
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{empty_pool}:{os.environ['PATH']}"),
+        cwd=_repo_with_workflows(tmp_path / "e2", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"),
+    )
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "0 of 0 self-hosted runner(s)" in r.stderr, r.stderr
 
 
 def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Path):
@@ -538,12 +575,26 @@ def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Pat
     pin = _repo_with_workflows(
         tmp_path / "pin", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
     )
-    r = _run("--status", env=_env(tmp_path, PATH=f"{half}:{os.environ['PATH']}"), cwd=pin)
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{half}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=pin,
+    )
     assert r.returncode == 0, (r.returncode, r.stderr)
     assert "ubuntu-24.04 = 1 of 2 runner(s)" in r.stderr, r.stderr
     assert "CI_RUNNER_OS_LABEL=on --repair-labels" in r.stderr, (
         f"a half-covered bare pin IS this script's to re-apply: {r.stderr}"
     )
+
+    # ⛔ AND THE SAME ARM WITH THE FLAG OFF IS THE MIRROR DEFECT: a partial carrier set is then a
+    # LEFTOVER from a previous state, and "re-apply with CI_RUNNER_OS_LABEL=on" would reverse #6897
+    # in passing. The remedy must be the revert, and the verdict must stay a report.
+    r = _run("--status", env=_env(tmp_path, PATH=f"{half}:{os.environ['PATH']}"), cwd=pin)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "CI_RUNNER_OS_LABEL=on --repair-labels" not in r.stderr, (
+        f"the remedy must not re-apply a departure the operator has switched off: {r.stderr}"
+    )
+    assert "leftover from a previous state" in r.stderr, r.stderr
 
     # ⛔ AND THE MIRROR: `ubuntu-latest` with NO carrier is the HEALTHY state, not a block. The gate
     # detaches that label from the pool whenever GitHub-hosted is healthy, so a zero-answer
@@ -592,13 +643,19 @@ def test_label_coverage_does_not_verdict_a_custom_label_that_starts_ubuntu_digit
     )
     assert "⛔ UNCOVERED" not in r.stderr, r.stderr
 
-    # CONTROL — the class the verdict exists for. Same pool, same shape, bare pin at zero.
+    # CONTROL — the class the verdict exists for. Same pool, same shape, bare pin at zero — with the
+    # pool ASKED to serve it (`CI_RUNNER_OS_LABEL=on`); with the flag off the same fixture is a
+    # report, because a zero answer there is #6897's pin applied correctly.
     bare = _repo_with_workflows(
         tmp_path / "bare", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
     )
-    r = _run("--status", env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}"), cwd=bare)
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=bare,
+    )
     assert r.returncode == 5, (r.returncode, r.stderr)
-    assert "every PR stays BLOCKED" in r.stderr, r.stderr
+    assert "every PR BLOCKED" in r.stderr, r.stderr
 
 
 # ── 3b. every DOCUMENTED `runs-on` form must be read, or refused ────────────────────────────
@@ -643,13 +700,17 @@ def test_label_coverage_reads_every_documented_runs_on_form(tmp_path: Path):
     }
     for i, (name, body) in enumerate(forms.items()):
         repo = _repo_with_workflows(tmp_path / f"form{i}", body)
-        r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=repo)
+        r = _run(
+            "--status",
+            env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+            cwd=repo,
+        )
         assert r.returncode == 5, (
             f"{name}: a required label written this way has NO self-hosted answer, so this is the "
             f"incident state and must exit 5, not {r.returncode}: {r.stderr}"
         )
         assert "ubuntu-24.04 = 0 of 1 self-hosted runner(s)" in r.stderr, f"{name}: {r.stderr}"
-        assert "every PR stays BLOCKED" in r.stderr, f"{name}: {r.stderr}"
+        assert "every PR BLOCKED" in r.stderr, f"{name}: {r.stderr}"
 
     # ⛔ AND A SPELLING NOBODY PARSED IS `exit 4`, NOT `0`. A matrix expression has no static label
     # set to verdict, so the honest answer is "no verdict" — the fail-closed direction every other
@@ -676,6 +737,61 @@ def test_label_coverage_reads_every_documented_runs_on_form(tmp_path: Path):
     r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=grp)
     assert r.returncode == 0, (r.returncode, r.stderr)
     assert "pool" not in r.stderr, f"a runner GROUP was counted as a label: {r.stderr}"
+
+
+# ── 3b-ii. ONE UNREADABLE MEMBER REFUSES THE BLOCK ────────────────────────────────────────
+def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Path):
+    r"""A parseable sibling must NOT absorb an unparsed member — the block has no static label set.
+
+    The extractor dropped an unreadable member silently (`if (v ~ /^\$/) return`, no marker) and the
+    only marker that reached the `exit 4` arm was printed when the block yielded NOTHING. So a
+    `runs-on:` cleared as long as ANY part of it parsed:
+
+    * `group: pool` + `labels: ${{ … }}` — no label emitted, and the `group:` suppressed the marker
+      (`got == 0 && !pgroup`), so the block vanished entirely;
+    * `runs-on: [self-hosted, "${{ matrix.arch }}"]` — `self-hosted` emitted, the expression member
+      dropped, so the block read as covered.
+
+    Both are DOCUMENTED shapes (GitHub's own example of the combined form is `group: ubuntu-runners`
+    / `labels: ubuntu-24.04-16core`, and a matrix-ified workflow's first move is to put the OS into
+    the label list), so this is not an exotic spelling: it is the ordinary way a required leg gets
+    routed, and the instrument meant to prove coverage reported `covered` and exited 0 — clearing
+    the incident state this whole block exists to surface.
+
+    Mutation: `if (v ~ /^\$/) return` -> no `bad++` -> every fixture below exits 0/5, never 4 -> RED.
+    Mutation: `finish()` back to `got == 0 && !pgroup` -> the `group:`/`labels:` fixture clears -> RED.
+    Control: a `group:` with genuinely NO `labels:` key stays a report — there is no label to check,
+    which is a real read (pinned by the case above).
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    unreadable = {
+        "group + expression labels": (
+            "jobs:\n  a:\n    runs-on:\n      group: pool\n"
+            "      labels: ${{ fromJSON(vars.labels) }}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "expression member in a list": (
+            "jobs:\n  a:\n    runs-on: [self-hosted, \"${{ matrix.arch }}\"]\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "group + block-list of expressions": (
+            "jobs:\n  a:\n    runs-on:\n      group: pool\n      labels:\n"
+            "        - ${{ matrix.os }}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "inline mapping with an expression": (
+            "jobs:\n  a:\n    runs-on: {group: pool, labels: \"${{ matrix.os }}\"}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+    }
+    for i, (name, body) in enumerate(unreadable.items()):
+        repo = _repo_with_workflows(tmp_path / f"bad{i}", body)
+        r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=repo)
+        assert r.returncode == 4, (
+            f"{name}: a block with an unreadable member has NO static label set, so it must refuse "
+            f"with 4 — not clear it at {r.returncode}: {r.stderr}"
+        )
+        assert "STATIC label set" in r.stderr, f"{name}: {r.stderr}"
 
 
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
