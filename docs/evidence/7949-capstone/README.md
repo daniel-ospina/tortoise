@@ -130,8 +130,8 @@ itself.
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
 a log. The frozen `capstone-measured-e0fc940b.log` therefore still carries the cites **as-of its own
 stamp**, and **every rendered cite this bundle re-derives is listed here** — including the ones the E3
-rule and the S2.2/S2.3 cause strings render: `sdk.py:12402` (the meta fold), `sdk.py:12683` (the
-references-edge writer), `sdk.py:2368` (`_TURN_WRITE_CYPHER`), `edges.py:467`
+rule and the S2.2/S2.3 cause strings render: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
+references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
 (`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
 re-derived by this bundle to `502`/`510`), `edges.py:2168-2192` (`link_source_to_event`),
 `tortoise/extractor_v2.py:8278-8285` (the **classify-later** surface, as the S2.3 cause string cites
