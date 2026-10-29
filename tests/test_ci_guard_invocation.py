@@ -152,7 +152,14 @@ ENV_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
 #: the fixtures the harness fabricates in each sandbox, by basename: an
 #: enforcing step may only read runner-temp paths from this set, so that what the
 #: harness prepares and what the workflow produces are known to be the same file.
-FIXTURES = ("pytest-rc", "pytest-files")
+#: The runner-temp artifacts the frozen-set steps BRANCH ON or reconcile against,
+#: which the harness therefore has to know by name. `junit.xml` and
+#: `expected-nodeids.txt` joined them when the carve-out/slow/track-b legs stopped
+#: reconciling against the host-global `/tmp` literals (#7815): three jobs on one
+#: self-hosted host share ONE `/tmp`, so the guard read a PEER's manifest and
+#: junit and redded on a mismatch belonging to no test it ran (measured on run
+#: 40798901821 — 1428 "expected nodeids absent" against a 4-nodeid run).
+FIXTURES = ("pytest-rc", "pytest-files", "junit.xml", "expected-nodeids.txt")
 #: a literal runner-temp path, the only form this harness can fabricate
 RUNNER_TEMP_LITERAL_RE = re.compile(r"\$\{RUNNER_TEMP:-/tmp\}/[A-Za-z0-9._-]+")
 RUNNER_TEMP_REF_RE = re.compile(r"\$\{RUNNER_TEMP[^}]*\}|\$RUNNER_TEMP\b")

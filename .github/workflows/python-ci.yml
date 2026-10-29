@@ -2009,7 +2009,11 @@ jobs:
         # pytest step (off the 40m watchdog), using each leg's DERIVED
         # `matrix.files` expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
-        # construction the run step builds) -> /tmp/expected-nodeids.txt.
+        # construction the run step builds) -> ${RUNNER_TEMP}/expected-nodeids.txt.
+        # ⛔ `${RUNNER_TEMP}` and not the host-global `/tmp` literal: this job
+        # shares its `/tmp` with `test-carve-out` and `test-track-b` on the
+        # self-hosted runner, and a peer's manifest clobbers this one (#7815 —
+        # measured on run 40798901821).
         run: |
           FILES=""
           # #2148 tier-2 (slow_run == true, full == false): run only the
@@ -2031,7 +2035,7 @@ jobs:
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"
         env:
           # Same defect class as the fast matrix's manifest step (see above): the
           # collect must see what the run sees, or the expected set silently omits
@@ -2124,7 +2128,7 @@ jobs:
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
-          timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -2186,7 +2190,7 @@ jobs:
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+              python3 tools/skip-guard.py /tmp/pytest.log --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" --manifest "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"
             else
               python3 tools/skip-guard.py /tmp/pytest.log
             fi
@@ -2310,8 +2314,8 @@ jobs:
           name: pytest-log-${{ github.job }}-${{ matrix.half }}
           path: |
             /tmp/pytest.log
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
           if-no-files-found: ignore
 
       - name: Stop FalkorDB services (#6673)
@@ -2623,10 +2627,19 @@ jobs:
         # The track-b run uses `-m track_b` — the manifest's collect-only
         # MUST use the same marker (never the default 'not track_b'), or the
         # expected set would not match the observed set.
+        # ⛔ BOTH RECONCILED ARTIFACTS ARE PER-RUNNER (#7815/#10028), never the
+        # host-global `/tmp` names. `test-slow`, `test-carve-out` and this job run
+        # CONCURRENTLY on one self-hosted host and share ONE `/tmp`: measured on
+        # run 40798901821 three of them wrote `/tmp/expected-nodeids.txt` inside
+        # the same 10 minutes, and this 4-nodeid run reconciled against a PEER's
+        # manifest + `junit.xml` and redded with "1428 expected nodeids absent"
+        # belonging to no test it ran. `${RUNNER_TEMP}` is
+        # `<runner_install>/_work/_temp`, and a self-hosted runner executes ONE
+        # job at a time, so it is per-JOB unique on a shared host.
         run: |
           FILES="tests/test_ingest_safety.py"
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "track_b" --output "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"
       - name: Run Track B tests (explicit marker)
         # §7: non-blocking UNTIL the sentinels flip, then MUST-PASS — both
         # Track B sentinels (_TRACK_B_FULL, SENTINEL_A9) have shipped, so
@@ -2638,7 +2651,7 @@ jobs:
           # in-step kill must stay BELOW the job's 10m outer cap (#798).
           timeout -s INT -k 10 5m stdbuf -oL python -m pytest \
             tests/test_ingest_safety.py -m track_b -v --timeout=300 \
-            -p no:cacheprovider --maxfail=20 -r fEs --junitxml=/tmp/junit.xml \
+            -p no:cacheprovider --maxfail=20 -r fEs --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" \
             -o junit_family=xunit1 > /tmp/trackb.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
@@ -2663,7 +2676,7 @@ jobs:
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
-            python3 tools/skip-guard.py /tmp/trackb.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+            python3 tools/skip-guard.py /tmp/trackb.log --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" --manifest "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
@@ -2698,8 +2711,8 @@ jobs:
           name: pytest-log-${{ github.job }}
           path: |
             /tmp/trackb.log
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
           if-no-files-found: ignore
 
       - name: Stop FalkorDB services (#6673)
@@ -2853,7 +2866,7 @@ jobs:
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"
       - name: Run carve-out suite (embedded, URI unset — E2E-4)
         # The embedded carve-out. Deliberately NO TORTOISE_DB_URI:
         # the carve-out's embedded-specific assertions (recovery, busy-error,
@@ -2910,7 +2923,7 @@ jobs:
           # to remove. The outer `timeout-minutes` stays a literal and must
           # clear this value — `test_every_bounded_pytest_job_caps_above_its_
           # watchdog` re-derives that from the emitted matrix.
-          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -2985,7 +2998,7 @@ jobs:
             # passed). Accumulate the codes and exit non-zero if EITHER failed.
             guard_rc=0
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt || guard_rc=1
+              python3 tools/skip-guard.py /tmp/pytest.log --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" --manifest "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt" || guard_rc=1
             else
               python3 tools/skip-guard.py /tmp/pytest.log || guard_rc=1
             fi
@@ -3038,7 +3051,7 @@ jobs:
             SCOPE=""
             for f in ${{ matrix.files }}; do SCOPE="$SCOPE tests/$f.py"; done
             python3 tools/skip-guard.py /tmp/pytest.log \
-              --junitxml=/tmp/junit.xml \
+              --junitxml="${RUNNER_TEMP:-/tmp}/junit.xml" \
               --manifest config/ci-expected-nodeids/platform-gated.txt \
               --scope "$SCOPE" --manifest-only || guard_rc=1
             exit $guard_rc
@@ -3160,8 +3173,8 @@ jobs:
           name: pytest-log-${{ github.job }}-${{ matrix.label }}
           path: |
             /tmp/pytest.log
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
           if-no-files-found: ignore
 
   test-d14-hosted-api:
