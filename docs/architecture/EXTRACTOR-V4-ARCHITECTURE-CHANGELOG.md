@@ -994,9 +994,9 @@ split, S2.3's vocabulary (`documentKind` genres and pack kinds, never `sourceKin
 fail-open direction are all served by the seam as recorded.
 
 **What was built.** `tortoise/s2_decision_seam.py` — the adapter (one round trip: `state` + a
-**map** of typed questions, shape copied from a working caller per `#7866`; the `choice`-criteria map
-and the `model`-echo check come from the vendor's reference page and are **not** yet exercised by a
-live call), the two versioned
+**map** of typed questions, shape copied from a working caller per `#7866`; §2 of the record owns the
+per-primitive evidence ledger, and this entry states it the same way rather than for "the caller", so
+that no artifact in this PR can understate or overstate what has been sent), the two versioned
 prompts (`vet-v1`: `noul` + `score` per candidate; `classify-v1`: a `choice` over the kinds the kNN
 offered), and the validating parser (`type` echo, `[0,1]`, the declared 0–3 scale, membership of
 the offered set — a violation names its question and yields **no verdict**). Consumers are the
@@ -1004,6 +1004,19 @@ seams that already existed and had no production caller: `vet_gate.vet_candidate
 `KindClassifier(tail_decider=…)`. Armed only by `TORTOISE_S2_DECISION_SEAM`; **OFF by default**, so
 no rate effect is measurable until an operator arms it. Design record and measured cost:
 `docs/architecture/S2-DECISION-SEAM.md`.
+
+**Which of those shapes is corroborated live, per primitive** (the ledger §2 owns; the split is
+stated rather than lumped, because a lumped claim is how review round 18's `noul`/`score` finding
+arose). `noul` and `choice` each have a live caller of ours: `agent-infra/scripts/ask-owner.py`
+posts five `noul` questions to the vendor endpoint on the alias, and
+`agent-infra/scripts/turn-classify.py` sends one `choice` carrying a `criteria` **map** and reads the
+envelope's `model` on every call — so both the `choice` criteria map and the `model` field are
+**corroborated**, not taken from a reference page. `score` is **documented only**: the vendor
+publishes it (`docs.typesafe.ai/primitives/score`) and no caller of ours has ever sent one, so its
+2–10 level `criteria` array — the dominant term in `vet-v1`'s request — is unmeasured here rather
+than corroborated. The `model` echo is a **receipt, never an assertion**: it records which version
+answered and is never compared to `MODEL`, because asserting it would make an armed seam inert on
+the vendor's next release.
 
 **What it does NOT do (each a recorded decision, not an omission).** No `SPLIT` (absent from O4),
 no `RENARRATE`/coverage verdict (batch-level, and §S2.2 bounds that loop), no `MERGE` (`#5006`'s

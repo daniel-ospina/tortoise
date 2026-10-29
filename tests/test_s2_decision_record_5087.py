@@ -97,6 +97,66 @@ _LUMPED_LIVE_CLAIM = re.compile(
 #: The module whose docstring makes the same claim — the two artifacts must not disagree.
 SEAM_MODULE = ROOT / "tortoise" / "s2_decision_seam.py"
 
+#: The THIRD artifact carrying the same ledger (its #10072 entry). Round 18 found it stating the
+#: OPPOSITE of §2 for `choice` + `model` while the guard above watched only `SEAM_MODULE` and the
+#: record — two of the artifacts that make the claim. It is corpus here, not a comment, because a
+#: claim that moves between four artifacts with only two of them guarded is exactly how round 16's
+#: `noul`/`score` finding recurred.
+CHANGELOG = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md"
+
+#: The `choice` `criteria` MAP and the envelope's `model` echo — the two shapes a caller of OURS
+#: exercises live: `agent-infra/scripts/turn-classify.py:207-239` sends one `choice` carrying a
+#: `criteria` map, and `:381` reads `model` off the response into its meta. A sentence pairing
+#: either with "not exercised by a live call" states the OPPOSITE of §2 and of the code, and it
+#: understates the evidence in the one entry that records why this seam exists.
+_CHOICE_OR_ECHO = re.compile(r"choice[`\s-]{0,3}criteria|model[`\s-]{0,3}echo", re.IGNORECASE)
+
+#: A "nothing of ours has ever sent this" claim. The bold/code markers between the words are
+#: tolerated: the artifacts say "are **not** yet exercised", not "are not yet exercised".
+_NO_LIVE_CLAIM = re.compile(
+    r"not[\s*_`]{0,4}(?:yet[\s*_`]{0,4})?exercised"
+    r"|no live (?:call|caller)"
+    r"|reference page only"
+    r"|documented only",
+    re.IGNORECASE,
+)
+
+#: The wording that makes such a sentence TRUE — the shape IS corroborated. A sentence carrying
+#: both is the honest per-primitive form ("`choice` … has a live caller, while `score` is
+#: documented only") and must pass.
+_CORROBORATED = re.compile(r"corroborat|live caller|has a live", re.IGNORECASE)
+
+#: The unit the reader reads. A claim may not be attributed across `.`, `!`, `?` or `;` — otherwise
+#: a nearby "corroborated" would be read as covering a sentence that says the opposite.
+_SENTENCE = re.compile(r"[^.!?;]+")
+
+#: The `model` echo NAMED as a check/gate/assertion. The code RECORDS the echo and never compares
+#: it to `MODEL` (deliberately: asserting it would make an armed seam inert on the vendor's next
+#: release), so an artifact naming a check the code refuses to perform is the same defect class as
+#: a false live-evidence claim.
+_ECHO_NAMED_AS_CHECK = re.compile(
+    r"model[`\s-]{0,3}echo[\s`_*-]{0,6}(?:check|assert|gate|validat)", re.IGNORECASE
+)
+
+
+def _per_primitive_claims(text: str) -> list[str]:
+    """Sentences pairing `choice`/`model` with a "nothing live has sent this" claim.
+
+    Whitespace is collapsed FIRST: the claim wraps across lines in every artifact, and a checker
+    that only saw single lines would pass on a re-wrapped re-introduction.
+    """
+    collapsed = " ".join(text.split())
+    hits: list[str] = []
+    for sentence in _SENTENCE.finditer(collapsed):
+        span = sentence.group(0)
+        if (
+            _CHOICE_OR_ECHO.search(span)
+            and _NO_LIVE_CLAIM.search(span)
+            and not _CORROBORATED.search(span)
+        ):
+            hits.append(span.strip())
+    return hits
+
 
 def _lines() -> list[str]:
     return DOC.read_text(encoding="utf-8").splitlines()
@@ -293,11 +353,13 @@ def test_neither_artifact_claims_the_score_primitive_was_exercised_live():
     docstring = ast.get_docstring(
         ast.parse(SEAM_MODULE.read_text(encoding="utf-8"))
     ) or ""
+    changelog = CHANGELOG.read_text(encoding="utf-8")
     assert docstring, f"{SEAM_MODULE.name} no longer carries a module docstring"
 
     for name, text in (
         (f"§2 of {DOC.relative_to(ROOT)}", record),
         (f"{SEAM_MODULE.relative_to(ROOT)}'s module docstring", docstring),
+        (f"{CHANGELOG.relative_to(ROOT)}'s #10072 entry", changelog),
     ):
         # Collapse whitespace first: the claim wraps across lines in both artifacts, and a
         # checker that only saw single lines would pass on a re-wrapped re-introduction.
@@ -337,4 +399,91 @@ def test_neither_artifact_claims_the_score_primitive_was_exercised_live():
     ):
         assert _LUMPED_LIVE_CLAIM.search(legitimate) is None, (
             f"this is a TRUE statement and must pass: {legitimate!r}"
+        )
+
+
+def test_no_artifact_understates_a_live_corroborated_shape():
+    """`choice`+`criteria` and `model` ARE live-corroborated; no artifact may say otherwise.
+
+    THE DEFECT THIS PINS (review round 18 of PR #10072, found at head `d511204d4`):
+    `EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md`'s #10072 entry said *"the `choice`-criteria map and
+    the `model`-echo check come from the vendor's reference page and are **not** yet exercised by a
+    live call"* — while §2 of this record and `s2_decision_seam.py`'s docstring both said a live
+    caller corroborates exactly those two. The CHANGELOG was the outlier and it was FALSE:
+    `agent-infra/scripts/turn-classify.py` sends one `choice` carrying a `criteria` **map**
+    (`scripts/turn-classify.py:207-239`) to the vendor endpoint on the alias, and reads `model` off
+    the response on every call (`:381`). Two artifacts overstated nothing; the third understated.
+
+    Two claims, because the same sentence carried both:
+    1. **No artifact may pair `choice`+`criteria` or the `model` echo with a "nothing live has sent
+       this" claim** (words: not-yet-exercised / reference-page-only / documented-only / no live
+       caller) unless the same sentence also says it IS corroborated. Round 16's finding was a
+       lumped `noul`/`score` claim in two artifacts; round 18's was the mirror image in a third —
+       the reason this file's corpus is now all three artifacts and not two.
+    2. **No artifact may call the `model` echo a CHECK.** The code deliberately never compares the
+       echo to `MODEL` (asserting it would make an armed seam inert on the vendor's next release),
+       so naming one is claiming a guard the code refuses to perform — the class this PR has been
+       correcting every round.
+
+    Why it is not cosmetic: the CHANGELOG entry is the artifact that records WHY the seam exists and
+    what the first scored run must re-measure, and its Tests section already re-verifies the
+    `noul`/`score` split — so the reader is told the ledger is per-primitive one paragraph after
+    being told the two corroborated shapes are unexercised.
+
+    Non-vacuity: the pre-fix sentence is re-checked below. Static: three file reads, no network.
+    """
+    record = DOC.read_text(encoding="utf-8")
+    changelog = CHANGELOG.read_text(encoding="utf-8")
+    docstring = ast.get_docstring(
+        ast.parse(SEAM_MODULE.read_text(encoding="utf-8"))
+    ) or ""
+    assert docstring, f"{SEAM_MODULE.name} no longer carries a module docstring"
+
+    for name, text in (
+        (f"§2 of {DOC.relative_to(ROOT)}", record),
+        (f"{SEAM_MODULE.relative_to(ROOT)}'s module docstring", docstring),
+        (f"{CHANGELOG.relative_to(ROOT)}'s #10072 entry", changelog),
+    ):
+        offenders = _per_primitive_claims(text)
+        assert not offenders, (
+            f"{name} says the `choice` `criteria` map or the `model` echo has no live caller. "
+            "That is false — `agent-infra/scripts/turn-classify.py` sends one `choice` with a "
+            "`criteria` map and reads `model` on every call — and it understates the evidence in "
+            f"the artifact a reader uses to decide what to re-measure. Offending span(s): "
+            f"{offenders}"
+        )
+        named_as_check = _ECHO_NAMED_AS_CHECK.search(text)
+        assert named_as_check is None, (
+            f"{name} calls the `model` echo a check/gate. The seam RECORDS the echo and never "
+            "compares it to `MODEL` (asserting it would make an armed seam inert on the vendor's "
+            "next release), so this names a guard the code refuses to perform. Offending span: "
+            f"{named_as_check.group(0)!r}"
+        )
+
+    # ── non-vacuity: the pre-fix CHANGELOG sentence, re-measured ─────────────
+    pre_fix = (
+        "The `choice`-criteria map and the `model`-echo check come from the vendor's reference "
+        "page and are **not** yet exercised by a live call."
+    )
+    assert _per_primitive_claims(pre_fix), (
+        "the pre-fix CHANGELOG sentence must red on this checker — otherwise the guard is inert "
+        "and the false claim can be restored green"
+    )
+    assert _ECHO_NAMED_AS_CHECK.search(pre_fix) is not None, (
+        "the pre-fix wording `model`-echo check must red on the echo-as-check checker"
+    )
+
+    # The legitimate, factual shapes must NOT be flagged.
+    for legitimate in (
+        # §2's own per-primitive form: both subjects present, the claim is TRUE per primitive.
+        "the `choice` `criteria` map and the `model` field are both corroborated by a live "
+        "caller, while `score` is documented only",
+        "the `model` echo is a receipt, never an assertion",
+        "`agent-infra/scripts/turn-classify.py` sends one `choice` carrying a `criteria` map",
+    ):
+        assert _per_primitive_claims(legitimate) == [], (
+            f"this is a TRUE statement and must pass: {legitimate!r}"
+        )
+        assert _ECHO_NAMED_AS_CHECK.search(legitimate) is None, (
+            f"this is a TRUE statement and must pass the echo check too: {legitimate!r}"
         )
