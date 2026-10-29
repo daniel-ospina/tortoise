@@ -227,12 +227,22 @@ function post(path, body, headers) {
   });
 }
 
+// The RAW body TEXT, for the shapes `JSON.stringify` cannot express faithfully: a body is a byte
+// string, and `null` must reach the route as the four characters `null`, not as an omitted body.
+function postRaw(path, text, headers) {
+  return new Request("https://app.premiselabs.co" + path, {
+    method: "POST",
+    headers: Object.assign({ "Content-Type": "application/json", Origin: "https://api.premiselabs.co" }, headers || {}),
+    body: text,
+  });
+}
+
 const out = { scenario };
 
 if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario === "mint_ok"
     || scenario === "mint_cross_origin" || scenario === "mint_no_secret"
     || scenario === "mint_foreign_attempt" || scenario === "mint_null_owner"
-    || scenario === "mint_twice") {
+    || scenario === "mint_twice" || scenario === "mint_non_object_body") {
   const seeded = ["mint_ok", "mint_cross_origin", "mint_no_secret", "mint_foreign_attempt",
                   "mint_null_owner", "mint_twice"];
   // #10208: the mint now requires the ELECTRONIC key the creating browser holds. Every mint
@@ -272,7 +282,29 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   const headers = scenario === "mint_no_session" ? {} : { Cookie: "__Host-session=handle-1" };
   if (scenario === "mint_cross_origin") headers.Origin = "https://evil.example";
   const mintBody = opts.omitKey ? { state: "state-xyz" } : { state: "state-xyz", attempt_key: MINT_KEY };
-  if (scenario === "mint_twice") {
+  if (scenario === "mint_non_object_body") {
+    // `request.json()` RESOLVES with any JSON value (`null`, an array, a number…), so "the parse
+    // succeeded" is not "there is an object to read". Each arm posts the raw TEXT, because
+    // `JSON.stringify` would turn a request for the text `null` into a present-or-absent body.
+    // A throw is RECORDED rather than allowed to escape: on the pre-fix route the `null` arm threw
+    // a TypeError out of `onRequestPost`, and an escaping throw would kill the harness process (an
+    // exit-code failure) instead of asserting the status and body a caller actually receives.
+    out.cases = [];
+    for (const [label, text] of Object.entries(opts.bodies || {})) {
+      const one = { label, text };
+      try {
+        const res = await tokenRoute.onRequestPost(
+          { request: postRaw("/api/consent/token", text, headers), env: e });
+        one.status = res.status;
+        one.body = await res.json();
+      } catch (err) {
+        one.threw = String((err && err.name) || err) + ": " + String((err && err.message) || "");
+      }
+      out.cases.push(one);
+    }
+    out.status = out.cases.length ? (out.cases[0].status ?? null) : null;
+    out.body = out.cases.length ? (out.cases[0].body ?? null) : null;
+  } else if (scenario === "mint_twice") {
     // TWO mints of ONE attempt in ONE process: separate `_run`s would each build a fresh in-memory
     // database, so asserting on them proves nothing about re-minting the SAME row.
     const first = await tokenRoute.onRequestPost(
@@ -1083,6 +1115,48 @@ def test_the_attempt_can_be_MINTED_AGAIN_for_step_4s_recovery() -> None:
     # requests inside one driver run, so this now pins the real behaviour: the attempt is not
     # consumed, and making it single-use (the deferred contract change named in §2.2 and
     # `consent_token.py`) would red this instead of shipping silently into step 4.
+
+
+def test_a_json_body_that_is_not_an_object_is_a_typed_400_not_an_untyped_500() -> None:
+    """`request.json()` resolves with ANY JSON value — `null` included — so "the parse succeeded"
+    is not "there is an object to read".
+
+    The route's own contract is typed refusals (`401 no_session` / `503 unavailable` + named 4xx),
+    and the sibling route names an untyped 500 as the state a page cannot tell apart from a bug in
+    itself. The body is read BEFORE the session cookie, so this arm is reachable with no credential
+    at all: `Origin` (an ordinary request header) plus `Content-Type: application/json` and the
+    four bytes `null`. Pre-fix that last shape threw `TypeError: Cannot read properties of null`
+    out of `onRequestPost`, which Pages answers as an untyped 500.
+
+    The message is pinned, not just the status: the simpler-looking fix
+    `((await request.json()) ?? {}) as Record<string, unknown>` also stops the throw, but it reports
+    a *missing `state`* for a body that was the wrong SHAPE — so a revert to it reds here even
+    though it would pass a status-only assertion.
+
+    Nothing in the suite sent such a body before (every mint scenario supplies a well-formed
+    object), so this arm was unpinned in both directions.
+    """
+    bodies = {
+        "null": "null",
+        "array": "[]",
+        "number": "5",
+        "string": '"state-xyz"',
+        "boolean": "true",
+    }
+    out = _run("mint_non_object_body", bodies=bodies)
+    assert len(out["cases"]) == len(bodies), out
+    for case in out["cases"]:
+        assert "threw" not in case, (
+            f"the mint THREW on the JSON body {case['text']!r} instead of refusing it "
+            f"({case.get('threw')}) — an uncaught throw out of the handler is an UNTYPED 500, and "
+            "this route answers a caller who holds no credential")
+        assert case["status"] == 400, (
+            f"JSON body {case['text']!r} answered {case['status']}, not a typed 400: {case}")
+        assert case["body"] == {
+            "error": "invalid_request", "message": "Body must be a JSON object."}, (
+            f"JSON body {case['text']!r} was refused for the wrong reason: {case['body']}")
+    # …and the guard is not a blanket refusal of the route: the object form still mints.
+    assert _run("mint_ok")["status"] == 200
 
 
 def test_the_four_refusals_are_byte_identical() -> None:

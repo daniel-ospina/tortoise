@@ -138,12 +138,21 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return corsJson(env, origin, { error: "unsupported_media_type" }, 415);
   }
 
-  let body: Record<string, unknown>;
-  try {
-    body = (await request.json()) as Record<string, unknown>;
-  } catch {
-    return corsJson(env, origin, { error: "invalid_request", message: "Body must be JSON." }, 400);
+  // ⛔ PARSE to a VALUE, then REQUIRE AN OBJECT — a try/catch around `request.json()` is not that
+  // check. `json()` rejects only for an unparseable or disturbed body; it RESOLVES with whatever
+  // JSON value the text holds (MDN: "an object, an array, a string, a number…"), so the body text
+  // `null` yields JS `null`, the cast below succeeds, and the next property read throws a TypeError
+  // that the old `catch` could never see. That escaped `onRequestPost` as an UNTYPED 500 — on a
+  // route reachable with no credential at all (the session is read further down), which is the same
+  // class `start.ts` names as the thing a page cannot tell apart from a bug in itself.
+  // A non-object body is therefore a 400 with a typed body, exactly like unparseable JSON.
+  const parsed: unknown = await request.json().catch(() => undefined);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return corsJson(
+      env, origin, { error: "invalid_request", message: "Body must be a JSON object." }, 400,
+    );
   }
+  const body = parsed as Record<string, unknown>;
   const state = typeof body.state === "string" ? body.state : "";
   if (!state) {
     // `state` is the attempt's identity (§2.2 binds it), so a mint without one names no flow.
