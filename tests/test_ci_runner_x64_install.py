@@ -72,6 +72,18 @@ WHAT IS BEING PINNED
      them and nothing else; `ubuntu-latest` and a genuine custom label always survive.
      `--status` answers "who answers this `runs-on:` label" for the same reason: the failure it
      reports produces no check to look at.
+  10b. **The version-pin carve-out is the `off` state of `CI_RUNNER_OS_LABEL`, not an unconditional
+     drop** — #6897's `OVERRIDES:` marker records the revert as `CI_RUNNER_OS_LABEL=off` PLUS
+     `--repair-labels`, so a repair that dropped the pin whatever the flag said performed that revert
+     with no switch involved. `on|auto` KEEPS the pin (and prints `version-pinned, kept=[…]`),
+     `off`/unset drops it, an unrecognised value is read as `off`. The keep-half is also ARCH-AWARE:
+     a runner whose read-only host label says `ARM64`/`ARM` is refused, because keeping
+     `ubuntu-latest` there is the measured #6897 false red rather than a queue delay.
+  10c. **A label set is PARSED literally, and `relabelled` is a claim about the server.** An unquoted
+     split expanded a glob-carrying label against the operator's cwd and PUT the filenames as runner
+     labels (the illegal-label guard now refuses that runner); and the Set verb's 200 is read back,
+     so every requested label must be in the returned set before `relabelled` is printed — a pool has
+     already reported `ok=16 fail=0` for a label that was never attached (#6897).
   11. ⛔ **AN UNREAD WORKFLOW MUST NOT READ AS COVERED.** GitHub accepts `.yml` and `.yaml`, and the
      coverage reader globbed only `*.yml` — so a `.yaml` workflow was dropped silently while the
      block printed "every one has an online self-hosted answer". There are 0 `.yaml` workflows
@@ -115,17 +127,34 @@ _NEUTRAL_HEADROOM = {
 
 
 def _env(base: Path, **extra: str) -> dict[str, str]:
-    """A hermetic installer environment: local base dir, neutral headroom, no host state."""
+    """A hermetic installer environment: local base dir, neutral headroom, no host state.
+
+    `CI_RUNNER_OS_LABEL` is pinned EMPTY here, not inherited: it is the box's recorded choice about
+    claiming a version-pinned hosted label, so a machine that happens to export `on` would flip the
+    version-pin carve-out under every arm in this file and make the drop arm pass on the real host
+    for the wrong reason. An empty value reads as `off`, which is the installer's default.
+    """
     env = dict(os.environ)
     env.update(_NEUTRAL_HEADROOM)
-    env.update({"CI_RUNNER_REPO": "daniel-ospina/tortoise", "CI_RUNNER_BASE": str(base)})
+    env.update(
+        {"CI_RUNNER_REPO": "daniel-ospina/tortoise", "CI_RUNNER_BASE": str(base), "CI_RUNNER_OS_LABEL": ""}
+    )
     env.update(extra)
     return env
 
 
-def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def _run(
+    *args: str, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess:
+    """Run the installer. `cwd` matters for exactly one arm: an unquoted label split would expand a
+    `*` against the shell's working directory, so that test runs the installer FROM the directory
+    holding the decoy files it would otherwise swallow."""
     return subprocess.run(
-        [BASH, str(INSTALLER), *args], capture_output=True, text=True, env=env or _env(Path("/nonexistent-base"))
+        [BASH, str(INSTALLER), *args],
+        capture_output=True,
+        text=True,
+        env=env or _env(Path("/nonexistent-base")),
+        cwd=None if cwd is None else str(cwd),
     )
 
 
@@ -205,6 +234,7 @@ def _stub_gh(
     labels: str = "self-hosted,Linux,X64",
     rows: str = "",
     detail_by_name: dict[str, str] | None = None,
+    put_response: str | None = None,
 ) -> Path:
     """A `gh` that answers all three reads the installer makes, and logs every call.
 
@@ -215,9 +245,12 @@ def _stub_gh(
         from another's);
       * anything else → the ARM64 pool's fallback count (`stdout`, the existing argument).
     A `-X PUT` also records the request BODY it was fed on stdin, so a test can assert the exact
-    label set a repair would write — not a message about it. `labels` defaults to the read-only trio
-    GitHub itself returns for any runner, which is also what makes the union's host-label filter
-    observable rather than exercised on an impossible empty list.
+    label set a repair would write — not a message about it — and answers it the way the REAL Set
+    verb does: with the runner's resulting label set, which is what the repair reads back before it
+    calls a write `relabelled`. `put_response` overrides that answer, which is how the arm for #6897's
+    `ok=16 fail=0` false PASS is exercised (an accepted PUT whose returned set is missing a label).
+    `labels` defaults to the read-only trio GitHub itself returns for any runner, which is also what
+    makes the union's host-label filter observable rather than exercised on an impossible empty list.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -239,11 +272,25 @@ def _stub_gh(
         )
     else:
         detail_arm = f"  *'select(.name=='*) printf '%s\\n' {shlex.quote(detail)} ;;\n"
+    # ⛔ THE SET VERB'S REAL 200 IS A LABEL SET, AND THE REPAIR READS IT BACK. Echoing the body it was
+    # fed is the SUCCESS case (the write took effect); `put_response` replaces that answer with the
+    # false PASS #6897 measured — an accepted PUT whose returned set is missing a requested label.
+    if put_response is not None:
+        put_arm = f"    printf '%s\\n' {shlex.quote(put_response)}\n"
+    else:
+        put_arm = (
+            "    printf '%s\\n' \"$(printf '%s' \"$body\" | sed -n 's/^{\"labels\":\\[\"\\(.*\\)\"\\]}$/\\1/p'"
+            " | sed 's/\",\"/,/g')\"\n"
+        )
     gh.write_text(
         "#!/usr/bin/env bash\n"
         f'printf "%s\\n" "$*" >> {log}\n'
         "case \"$*\" in\n"
-        f"  *'-X PUT'*) printf 'PUT %s\\n' \"$(cat)\" >> {log} ;;\n"
+        "  *'-X PUT'*)\n"
+        "    body=\"$(cat)\"\n"
+        f'    printf \'PUT %s\\n\' "$body" >> {log}\n'
+        f"{put_arm}"
+        f"    exit {rc} ;;\n"
         "esac\n"
         "case \"$*\" in\n"
         f"  *'busy='*) printf '%s\\n' {shlex.quote(rows)} ;;\n"
@@ -264,9 +311,15 @@ def _put_body(stub_dir: Path) -> list[str]:
     return json.loads(puts[-1])["labels"]
 
 
-def _repair_runner(tmp_path: Path, *, pool: str, labels: str) -> tuple[Path, dict[str, str]]:
-    """An already-configured runner 1 whose CURRENT labels are `labels`, plus the stub env."""
-    stub = _stub_gh(tmp_path / "gh", pool, labels=labels)
+def _repair_runner(
+    tmp_path: Path, *, pool: str, labels: str, put_response: str | None = None
+) -> tuple[Path, dict[str, str]]:
+    """An already-configured runner 1 whose CURRENT labels are `labels`, plus the stub env.
+
+    `put_response` is the label set the Set verb's 200 will be read back as; the default (None) is
+    the honest one — the labels the request asked for.
+    """
+    stub = _stub_gh(tmp_path / "gh", pool, labels=labels, put_response=put_response)
     (tmp_path / ".runner").write_text('{"agentName": "pi-runner-x64-1"}\n')
     env = _env(tmp_path, PATH=f"{stub}:{os.environ['PATH']}", CI_RUNNER_ARCH="x86_64")
     return tmp_path / "gh", env
@@ -387,7 +440,7 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
     decision (not just a style choice): `docs/ops/ci-runner-x64.md:61` — "these runners
-    deliberately **do not** claim any `ubuntu-<version>` label" — and `:65-66`, an out-of-band
+    deliberately **do not** claim any `ubuntu-<version>` label" — and `:70-71`, an out-of-band
     attachment "cannot survive a re-registration or `tools/install-ci-runner-x64.sh
     --repair-labels`". `tools/runner_autoscale.py::_preserve_labels` already drops the family
     (`VERSION_PINNED_HOSTED_LABEL`), so a union that kept it would leave the two writers with
@@ -428,7 +481,7 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:199-201`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:220-222`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker" (`:313-314`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
@@ -454,6 +507,188 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
     assert "alien-arch, not kept=[self-hosted-arm64]" in r.stderr, r.stderr
     assert "removed=[self-hosted-arm64]" in r.stderr, r.stderr
     assert "version-pinned, not kept=[]" in r.stderr, r.stderr
+
+
+def test_the_version_pin_carve_out_obeys_the_boxes_own_choice(tmp_path: Path):
+    """⛔ THE VERSION-PIN CARVE-OUT IS A FLAG'S `off` STATE, NOT AN UNCONDITIONAL DROP.
+
+    #6897's `OVERRIDES:` marker suspends the version-pin invariant and measures the departure as
+    APPLIED (2026-10-29: 7 of 7 x64 runners carry `ubuntu-24.04`), and it records the REVERT as
+    `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. A repair that dropped the pin whatever the
+    flag said therefore reached that revert with NO SWITCH INVOLVED: the next manual heal would undo
+    an owner departure the operator had opted this box into, printing a warning about a label the
+    box was asked to claim. So the flag is read, under the same name and values the install-side
+    contract uses (#10275), and the four arms below are the whole truth table:
+
+      * `on`     → the pin is KEPT and printed as `version-pinned, kept=[…]`, `removed=[]`;
+      * `auto`   → same (the box may claim one);
+      * unset    → dropped (the pre-departure invariant `_preserve_labels` also enforces);
+      * `yes`    → read as `off` — the invariant-consistent side, never a silent keep — and says so.
+
+    Non-vacuity: with the flag ignored (an unconditional drop, the shape review rejected) the `on`
+    arm reds on the PUT set and on the `kept=` line; with the flag inverted (an unconditional keep)
+    the unset arm reds on `ubuntu-24.04` appearing in the PUT.
+    """
+    # `on` / `auto`: the box has opted in, so the pin it was asked to claim survives
+    for value in ("on", "auto"):
+        stub, env = _repair_runner(tmp_path / f"opt-{value}", pool="1", labels=POOL_LABELS)
+        env["CI_RUNNER_OS_LABEL"] = value
+        r = _run("--repair-labels", "--count", "1", env=env)
+        assert r.returncode == 0, r.stderr
+        put = _put_body(stub)
+        assert {"ubuntu-24.04", "ubuntu-24.04-arm"} <= set(put), (
+            f"CI_RUNNER_OS_LABEL={value} is the box's recorded state — a repair must not strip the "
+            f"pin it opted into: {put}"
+        )
+        assert "version-pinned, kept=[ubuntu-24.04,ubuntu-24.04-arm]" in r.stderr, r.stderr
+        assert "removed=[]" in r.stderr, f"nothing is removed when the box opted in: {r.stderr}"
+
+    # unset (and an explicit `off`): the pre-departure invariant — the pin is dropped and printed
+    for value in ("", "off"):
+        stub, env = _repair_runner(tmp_path / f"off-{value or 'unset'}", pool="1", labels=POOL_LABELS)
+        env["CI_RUNNER_OS_LABEL"] = value
+        r = _run("--repair-labels", "--count", "1", env=env)
+        assert r.returncode == 0, r.stderr
+        put = _put_body(stub)
+        assert not {"ubuntu-24.04", "ubuntu-24.04-arm"} & set(put), put
+        assert "version-pinned, kept=[]" in r.stderr, r.stderr
+
+    # an unrecognised value is READ AS off, and says so — never a silent keep
+    stub, env = _repair_runner(tmp_path / "bogus", pool="1", labels=POOL_LABELS)
+    env["CI_RUNNER_OS_LABEL"] = "yes"
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    assert "is not on|auto|off — read as off" in r.stderr, r.stderr
+    assert not {"ubuntu-24.04", "ubuntu-24.04-arm"} & set(_put_body(stub))
+
+
+def test_the_repair_refuses_an_arm64_runner_instead_of_keeping_ubuntu_latest_on_it(tmp_path: Path):
+    """⛔ THE KEEP-HALF IS ARCH-BLIND, WHICH RE-CREATES #6897's OWN DEFECT ON ARM64.
+
+    A repair can be run from any host and against any install, so a runner registered on an arm64
+    box reaches this loop too. The union keeps `ubuntu-latest` ON PRINCIPLE — and on an arm64 runner
+    that keep is the exact measured false red (an arm64 box wins an `ubuntu-latest` job and dies in
+    "Set up job" on a codeload timeout, one shard per run), the reason the ARM pool was stripped in
+    the first place. The read-only host label GitHub derives from the HOST (`ARM64`/`ARM`) is the one
+    witness a caller cannot spoof, so such a runner is REFUSED (exit 3, nothing written) and the
+    batch contract still holds: no PUT, no `relabelled`, and the message names the label.
+
+    Non-vacuity: without the guard the arm PUTs `{ubuntu-latest,self-hosted-x64}` onto the arm64
+    registration and exits 0 — measured on the pre-fix loop, `before=[…,self-hosted-arm64,
+    ubuntu-latest]` → `after=[ubuntu-latest,self-hosted-x64]`, `removed=[self-hosted-arm64]`.
+    """
+    stub, env = _repair_runner(
+        tmp_path, pool="1", labels="self-hosted,Linux,ARM64,self-hosted-arm64,ubuntu-latest"
+    )
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 3, (
+        "an arm64 registration must be refused (exit 3 = operation failed), never relabelled as an "
+        f"x86 runner: {r.returncode}\n{r.stderr}"
+    )
+    assert "host label 'ARM64'" in r.stderr, r.stderr
+    log = (stub / "gh-calls.log").read_text()
+    assert "PUT " not in log, f"nothing may be written to an arm64 runner: {log}"
+
+
+def test_a_label_with_a_glob_character_is_refused_never_expanded_into_cwd_filenames(tmp_path: Path):
+    """⛔ AN UNQUOTED LABEL SPLIT IS A PATHNAME EXPANSION, AND IT WROTE THE CWD INTO A RUNNER'S LABELS.
+
+    Every loop that walks a label set expands `$(… | tr ',' ' ')` UNQUOTED, so a label carrying `*`
+    is expanded against the operator's working directory before the loop sees it. The vendor's PUT
+    schema declares no pattern — the `[A-Za-z0-9._-]` charset is server-side only — so nothing stops
+    one arriving. Measured on the pre-fix loop, run from a directory holding two files:
+    `current=…,DECOY-*` → `after=[self-hosted-x64,DECOY-1.txt,DECOY-2.log]`, `removed=[]`, PUT
+    accepted: the operator's filenames became the runner's labels, and the block's own "a removal
+    must be visible" guarantee could not show it.
+
+    With the split literal the label reaches the illegal-label guard and REFUSES that runner (exit 3,
+    no PUT). `DECOY-1.txt` is a legal label, which is what makes the injected form invisible to every
+    other guard in the block.
+    """
+    (tmp_path / "DECOY-1.txt").write_text("decoy\n")
+    (tmp_path / "DECOY-2.log").write_text("decoy\n")
+    stub, env = _repair_runner(
+        tmp_path, pool="1", labels="self-hosted,Linux,X64,self-hosted-x64,DECOY-*"
+    )
+    r = _run("--repair-labels", "--count", "1", env=env, cwd=tmp_path)
+    assert r.returncode == 3, f"a glob-carrying label must refuse the runner: {r.returncode}\n{r.stderr}"
+    assert "is not a legal runner label" in r.stderr, r.stderr
+    log = (stub / "gh-calls.log").read_text()
+    assert "PUT " not in log, f"no body may be built from an expanded label set: {log}"
+    assert "DECOY-1.txt" not in log, f"the cwd leaked into the request: {log}"
+
+
+def test_a_custom_label_that_only_looks_host_owned_survives_the_filter(tmp_path: Path):
+    """⛔ `is_host_label` IS CASE-SENSITIVE ON PURPOSE, AND NOTHING TESTED IT.
+
+    Filtering a label out of the PUT body IS a removal — the one thing this block must never do — so
+    the host-owned filter matches GitHub's EXACT spellings only. A case-insensitive matcher (the
+    obvious "cleanup", e.g. `tr '[:upper:]' '[:lower:]'` comparisons) would also swallow an
+    operator's own `linux` or `x64` label and delete it from the runner on the next repair, silently:
+    both are ordinary custom labels, and the filtered list is only PRINTED, never a refusal.
+
+    Non-vacuity: with a case-insensitive `is_host_label` the PUT drops `linux` and the set assertion
+    reds (measured line-neutral mutant: `case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')"`).
+    """
+    stub, env = _repair_runner(
+        tmp_path, pool="1", labels="self-hosted,Linux,X64,self-hosted-x64,linux,gpu"
+    )
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    put = _put_body(stub)
+    assert "linux" in put, f"a CUSTOM label spelled like a host label must survive: {put}"
+    assert set(put) == {"self-hosted-x64", "ubuntu-latest", "linux", "gpu"}, put
+    # only GitHub's own spellings are filtered, and they are printed rather than silently dropped
+    assert "host-owned, not sent=[self-hosted,Linux,X64]" in r.stderr, r.stderr
+
+
+def test_a_put_that_is_accepted_but_not_reflected_is_never_called_relabelled(tmp_path: Path):
+    """⛔ `relabelled` MUST BE A CLAIM ABOUT THE SERVER, NOT ABOUT THE PUT'S EXIT STATUS.
+
+    This pool has already reported `set_labels ok=16 fail=0` while the label it said it had attached
+    was still absent (#6897) — the false PASS this whole block exists to prevent is precisely a write
+    that is ACCEPTED and not applied. The Set verb's own 200 carries the runner's resulting label set,
+    so the repair reads it back and requires every label it asked for to be in it; a mismatch is exit
+    3 with the returned set in the warning, and NO `relabelled` line.
+
+    Non-vacuity: with the read-back removed (the pre-fix `>/dev/null 2>&1` + exit status) this arm
+    exits 0 and prints `relabelled …` over a label set the server did not reflect.
+    """
+    stub, env = _repair_runner(
+        tmp_path,
+        pool="1",
+        labels="self-hosted,Linux,X64,self-hosted-x64,gpu",
+        put_response="self-hosted,Linux,X64,self-hosted-x64",
+    )
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 3, (
+        "an accepted PUT whose returned set is missing the labels must not read as success: "
+        f"{r.returncode}\n{r.stderr}"
+    )
+    assert "relabelled" not in r.stderr, f"nothing was relabelled, so nothing may say so: {r.stderr}"
+    assert "did NOT take effect" in r.stderr, r.stderr
+    assert "gpu" in r.stderr and "ubuntu-latest" in r.stderr, r.stderr
+    _put_body(stub)  # the PUT was attempted; only the CLAIM is withheld
+
+
+def test_the_computed_set_is_never_empty_which_is_what_makes_the_empty_union_guard_dead():
+    """⛔ THE EMPTY-UNION GUARD IS KEPT AND UNREACHABLE, AND THIS PINS THE PROPERTY THAT MAKES IT SO.
+
+    The guard refuses to PUT `{"labels":[]}` — which the vendor documents as "remove all custom
+    labels", i.e. the full strip this block exists to stop. Its condition is `after` empty, and
+    `after ⊇ LABELS`, so it can only fire if the COMPUTED set is empty. `resolve_labels` always emits
+    at least `$ARCH_LABEL` in every mode, so the guard is dead code at this head: a witness for it
+    would have to fake a state the resolver cannot produce, which is why the honest test is this one.
+    It is the check that makes the guard's presence (rather than its deletion) defensible, and it
+    reds the moment a future edit lets `resolve_labels` emit nothing — which is the day the guard
+    starts earning its line.
+    """
+    for mode in ("on", "off", "auto"):
+        r = _run("--print-labels", "--fallback", mode)
+        assert r.returncode == 0, f"--fallback {mode} must resolve: {r.stderr}"
+        labels = [label for label in r.stdout.strip().split(",") if label]
+        assert labels, f"--fallback {mode} computed an EMPTY label set: {r.stdout!r}"
+        assert "self-hosted-x64" in labels, (mode, labels)
 
 
 def test_a_computed_set_that_omits_the_label_cannot_remove_it(tmp_path: Path):
@@ -703,7 +938,7 @@ def test_label_coverage_reads_yaml_workflows_too(tmp_path: Path):
     GitHub accepts both `.yml` and `.yaml`, and the reader globbed only `*.yml` — so a `.yaml`
     workflow's `runs-on:` was dropped while the block still printed "every one has an online
     self-hosted answer". The repo has 0 `.yaml` workflows today, which is exactly why nothing caught
-    it: the block's own contract (`docs/ops/ci-runner-x64.md:205-207`) is that an unread label must
+    it: the block's own contract (`docs/ops/ci-runner-x64.md:229-231`) is that an unread label must
     never read as healthy.
 
     Non-vacuity: with the glob reverted to `*.yml` the `macos-14` row never appears and the summary
@@ -1300,33 +1535,34 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
 
     # cited number -> a regex the line at that number must match, i.e. what the sentence names
     anchors: dict[int, str] = {
-        84: r"^# EXIT — the one distinction",  # "Exit codes (`:84-100`)"
-        180: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # "--count is validated ONCE"
-        213: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        217: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        221: r"^fallback_engaged\(\) \{",
-        232: r"^resolve_labels\(\) \{",
-        261: r"label algebra: the UNION",  # "the union's label algebra at"
-        285: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        303: r"label coverage: which",  # "the label-coverage block"
-        323: r"^workflow_files\(\) \{",  # "read from BOTH `.yml` and `*.yaml`"
-        360: r"^label_coverage\(\) \{",
-        405: r"── status ──",  # "the `--status` block that calls it"
-        440: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        465: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        535: r'MODE" = labels',  # "`--print-labels`"
-        562: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        567: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        570: r"FORK HEADROOM FIRST",  # "forks"
-        590: r"DISK NEXT",  # "disk"
-        597: r"CPU LAST",  # "cpu/memory"
-        615: r'MODE" = uninstall',  # "`uninstall`" / "`--uninstall` deletes only what it can PROVE"
-        740: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        751: r"SHA256_LINUX_X64",  # "sha256 pin" / "verify"
-        754: r"registration-token",  # "token"
-        759: r"set -- --unattended",  # "one argv"
-        761: r'\./config\.sh "\$@"',  # "`config.sh`"
-        771: r"svc\.sh install",  # "systemd install/start"
+        89: r"^# EXIT — the one distinction",  # "Exit codes (`:84-100`)"
+        185: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # "--count is validated ONCE"
+        218: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        222: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        226: r"^fallback_engaged\(\) \{",
+        237: r"^resolve_labels\(\) \{",
+        266: r"label algebra: the UNION",  # "the union's label algebra at"
+        290: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        308: r"label coverage: which",  # "the label-coverage block"
+        328: r"^workflow_files\(\) \{",  # "read from BOTH `.yml` and `*.yaml`"
+        365: r"^label_coverage\(\) \{",
+        410: r"── status ──",  # "the `--status` block that calls it"
+        445: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        470: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        574: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        606: r'MODE" = labels',  # "`--print-labels`"
+        633: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        638: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        641: r"FORK HEADROOM FIRST",  # "forks"
+        661: r"DISK NEXT",  # "disk"
+        668: r"CPU LAST",  # "cpu/memory"
+        686: r'MODE" = uninstall',  # "`uninstall`" / "`--uninstall` deletes only what it can PROVE"
+        811: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        822: r"SHA256_LINUX_X64",  # "sha256 pin" / "verify"
+        825: r"registration-token",  # "token"
+        830: r"set -- --unattended",  # "one argv"
+        832: r'\./config\.sh "\$@"',  # "`config.sh`"
+        842: r"svc\.sh install",  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())

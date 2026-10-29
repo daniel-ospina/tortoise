@@ -58,6 +58,11 @@
 #   repair and PRINTED, never silently skipped, and the drop mirrors
 #   `tools/runner_autoscale.py::_preserve_labels`, which drops exactly those two classes too.
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
+#   ⚠️ AND THE VERSION-PIN CARVE-OUT OBEYS THE BOX'S OWN CHOICE, so it cannot revert an APPLIED owner
+#   departure with no switch involved: the pin is dropped under `CI_RUNNER_OS_LABEL=off`/unset (the
+#   default, and the pre-departure invariant) and KEPT under `on|auto` — the same flag #6897's
+#   `OVERRIDES:` marker names as the suspension's revert path (`CI_RUNNER_OS_LABEL=off` **plus**
+#   `--repair-labels`). Same name and same values as the install-side contract (#10275).
 #
 # ⛔ ARCH LABELS ARE NOT INTERCHANGEABLE. A runner is registered with `self-hosted-x64`
 #   (its own distinct pool marker, mirroring `self-hosted-arm64`) — NEVER with
@@ -280,7 +285,7 @@ list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
 # It must be dropped by a repair: `self-hosted-arm64` is a CUSTOM label (GitHub returns only
 # `self-hosted`, `Linux`/`macOS`/`Windows` and `X64`/`ARM64`/`ARM` as read-only), so a union that
 # keeps it leaves an x86 box advertising an arm64 pool — the false PASS this file forbids at
-# `:62-69`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
+# `:67-74`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
 # puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too.
 is_foreign_arch_label() {
   case "$1" in
@@ -316,7 +321,7 @@ is_version_pinned_hosted_label() {
 # GitHub accepts BOTH `.yml` and `.yaml`. Globbing only `*.yml` silently dropped a `.yaml`
 # workflow, so the coverage block below printed "every one has an online self-hosted answer" over a
 # file it never read — the same false-clean one level down that this whole block exists to expose.
-# ⛔ EXISTING FILES ONLY, and that is not cosmetic: `set -o pipefail` is on (`:101`) and a glob that
+# ⛔ EXISTING FILES ONLY, and that is not cosmetic: `set -o pipefail` is on (`:106`) and a glob that
 # matches nothing is passed through LITERALLY, so handing `…/*.yaml` to grep makes grep exit 2 on a
 # missing path and the whole read report "cannot read" on a tree that HAS workflows (measured while
 # fixing this: every label-coverage arm went SKIPPED). One path per line; empty when there are none.
@@ -473,16 +478,61 @@ if [ "$MODE" = repair ]; then
     if [ -z "$current" ]; then
       say "WARNING: cannot read the current labels of $agent (id $id) — refusing to PUT a set that may REPLACE the labels this runner already carries (a replace is how $FALLBACK_LABEL was lost). Nothing was changed for this runner; re-run once the read succeeds."; rc=3; continue
     fi
-    after=""; host_skipped=""; arch_dropped=""; pinned_dropped=""
+    # ⛔ GLOBBING OFF WHILE A LABEL SET IS SPLIT. Every loop below walks a comma-separated list with
+    # an UNQUOTED expansion, so a label carrying `*`, `?` or `[` is expanded against the operator's
+    # cwd before the loop ever sees it — and the vendor's PUT schema declares no pattern, so the
+    # charset that stops one arriving is server-side only. Measured: `current=…,*` became
+    # `after=[self-hosted-x64,DECOY-1.txt,DECOY-2.log]` with `removed=[]`, and the PUT then attached
+    # the operator's own filenames to the runner as labels — a write the `removed=` line cannot show.
+    # `set -f` makes the split literal, so such a label reaches the illegal-label guard below and
+    # REFUSES the runner. It is restored after the last split (before the `relabelled` line); a
+    # `continue` on a refusal path leaves it set, and every such path either re-sets it at the top of
+    # the next iteration or leaves it to `exit` at the end of this block — nothing past the loop runs.
+    set -f
+    after=""; host_skipped=""; arch_dropped=""; pinned_dropped=""; pinned_kept=""; host_arch=""
     for l in $(printf '%s' "$current" | tr ',' ' '); do
-      if is_host_label "$l"; then host_skipped="${host_skipped:+$host_skipped,}$l"; continue; fi
+      if is_host_label "$l"; then
+        # the ONE honest witness of the box's architecture: GitHub derives these from the HOST.
+        case "$l" in ARM|ARM64) host_arch="$l" ;; X64) host_arch="X64" ;; esac
+        host_skipped="${host_skipped:+$host_skipped,}$l"; continue
+      fi
       # ⛔ THE TWO NAMED CARVE-OUTS (see the header). Dropping them is a REMOVAL, so each is
       # PRINTED — a union that silently kept a false arch claim or a version pin is the defect this
       # loop's own `removed=` line exists to expose.
       if is_foreign_arch_label "$l"; then arch_dropped="${arch_dropped:+$arch_dropped,}$l"; continue; fi
-      if is_version_pinned_hosted_label "$l"; then pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"; continue; fi
+      # ⛔ THE VERSION-PIN CARVE-OUT IS THE FLAG'S `off` STATE, NOT AN UNCONDITIONAL DROP. #6897's
+      # `OVERRIDES:` marker suspends the version-pin invariant for as long as hosted deadlocks, it
+      # measures the departure as APPLIED (2026-10-29: 7 of 7 x64 runners carry `ubuntu-24.04`), and
+      # it records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. A repair that
+      # dropped the pin whatever the flag said reached that revert with NO SWITCH INVOLVED: the next
+      # manual heal would have reverted an applied owner departure while the operator read a warning
+      # about a label their own box had been asked to claim. So the box's choice is READ here, under
+      # the same name and values the install-side contract uses (#10275): `on|auto` keeps the pin
+      # (the mitigation IS this box's state), `off`/unset drops it (the pre-departure invariant, and
+      # what `_preserve_labels` drops on re-registration). An unrecognised value is read as `off` —
+      # the invariant-consistent side, never a silent keep — and says so, once per such label.
+      if is_version_pinned_hosted_label "$l"; then
+        case "${CI_RUNNER_OS_LABEL:-off}" in
+          on|auto) pinned_kept="${pinned_kept:+$pinned_kept,}$l" ;;
+          off) pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"; continue ;;
+          *) pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
+             say "WARNING: CI_RUNNER_OS_LABEL='$CI_RUNNER_OS_LABEL' is not on|auto|off — read as off, so the version pin '$l' is not kept"; continue ;;
+        esac
+      fi
       list_has "$after" "$l" || after="${after:+$after,}$l"
     done
+    # ⛔ THE KEEP-HALF IS ARCH-BLIND WITHOUT THIS GUARD, which re-creates #6897's own defect on the
+    # labels it was measured on. The union keeps `ubuntu-latest` ON PRINCIPLE, but on a runner whose
+    # read-only host label says ARM64 that keep hands an `ubuntu-latest` job to an arm64 box — the
+    # measured failure (job won by the ARM pool, died in "Set up job" on a codeload timeout, one
+    # shard per run turned into a FALSE RED per shard) that got the ARM pool stripped in the first
+    # place. The repair may be run from any host and against any install, so the runner's own
+    # `ARM64`/`ARM` label is the one witness a caller cannot talk it out of: this runner is refused
+    # (rc 3, nothing written) rather than PUT `self-hosted-x64` and `ubuntu-latest` onto an arm64
+    # registration. An absent arch label keeps the pre-existing path — the API always returns one.
+    case "$host_arch" in
+      ARM|ARM64) say "WARNING: $agent reports the read-only host label '$host_arch', so it is not an x86_64 runner: this repair would add $ARCH_LABEL to it and KEEP $FALLBACK_LABEL there, which is the #6897 false red (an arm64 box wins a $FALLBACK_LABEL job and dies in Set up job). Nothing was changed for this runner — relabel it from the x86_64 host that owns it, or deregister it."; rc=3; continue ;;
+    esac
     for l in $(printf '%s' "$LABELS" | tr ',' ' '); do
       list_has "$after" "$l" || after="${after:+$after,}$l"
     done
@@ -504,21 +554,42 @@ if [ "$MODE" = repair ]; then
     if [ -n "$illegal" ]; then
       say "WARNING: label '$illegal' on $agent is not a legal runner label (alphanumeric, '.', '_', '-') — refusing to build a request body from it. Nothing was changed for this runner."; rc=3; continue
     fi
+    # ⚠️ KEPT DELIBERATELY, AND UNREACHABLE BY CONSTRUCTION at this head: the union can only be empty
+    # if the COMPUTED set is, and `resolve_labels` always emits at least `$ARCH_LABEL` — the modes are
+    # pinned by `test_the_computed_set_is_never_empty_which_is_what_makes_the_empty_union_guard_dead`.
+    # It stays because the array it refuses to send is not harmless: the vendor's own Set-custom-labels
+    # parameter note reads "you can pass an empty array to remove all custom labels", i.e. exactly the
+    # strip this block exists to stop, and the guard costs one line against a future edit to
+    # `resolve_labels`.
     if [ -z "$after" ]; then
       say "WARNING: the union of $agent's current labels and the computed set ($LABELS) is EMPTY — refusing to PUT an empty label set, which would strip the runner. Nothing was changed for this runner."; rc=3; continue
     fi
     say "labels for $agent (id $id):"
     say "  before=[$current]"
     say "  after =[$after]"
-    say "  host-owned, not sent=[$host_skipped] alien-arch, not kept=[$arch_dropped] version-pinned, not kept=[$pinned_dropped]"
-    say "  removed=[$removed]"
+    say "  host-owned, not sent=[$host_skipped] alien-arch, not kept=[$arch_dropped] version-pinned, not kept=[$pinned_dropped] version-pinned, kept=[$pinned_kept]"
+    say "  removed=[$removed]  (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} decides the version-pin carve-out)"
     body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$after" | sed 's/,/","/g')")"
-    if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; continue; fi
-    if printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - >/dev/null 2>&1; then
-      say "relabelled $agent → $after"
-    else
-      say "WARNING: relabel FAILED for $agent (id $id)"; rc=3
+    if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; set +f; continue; fi
+    # ⛔ `relabelled` IS A CLAIM ABOUT THE SERVER'S STATE, NOT ABOUT THE PUT'S EXIT STATUS. A whole-set
+    # relabel on this pool has already printed `set_labels ok=16 fail=0` while the label it reported
+    # attaching was still absent (#6897) — an exit status says a request was accepted, never that it
+    # took effect, and the two differ exactly when the repair matters. The Set verb's own 200 carries
+    # the runner's RESULTING label set, so it is read back through `--jq` and every label this repair
+    # asked for must be in it; anything else is exit 3 with the returned set in the message, never a
+    # `relabelled` line over a state nobody looked at.
+    if ! relabelled_now="$(printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - --jq '[.labels[].name]|join(",")' 2>/dev/null)"; then
+      say "WARNING: relabel FAILED for $agent (id $id)"; rc=3; continue
     fi
+    missing=""
+    for l in $(printf '%s' "$after" | tr ',' ' '); do
+      list_has "$relabelled_now" "$l" || missing="${missing:+$missing,}$l"
+    done
+    set +f
+    if [ -n "$missing" ]; then
+      say "WARNING: the PUT for $agent (id $id) was ACCEPTED but the label set GitHub returned does not carry $missing (returned=[$relabelled_now]) — the write did NOT take effect (#6897 measured ok=16 fail=0 for a label that was never attached). Nothing is claimed about this runner; re-read it with --status before trusting the queue."; rc=3; continue
+    fi
+    say "relabelled $agent → $after (read back from the PUT's own response)"
   done
   exit "$rc"
 fi
