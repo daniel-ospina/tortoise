@@ -266,6 +266,42 @@ def test_a_partial_token_overlap_does_not_warn(sdk, caplog):
         f"{[r.message for r in caplog.records]}")
 
 
+def test_a_prose_pair_does_not_silence_an_identifier_name(sdk, caplog):
+    """#10203 round 12 (P2): the INDEXED half must be tokenised WRITE-side.
+
+    ``content`` "sprint 2024 planning" is indexed as ``sprint`` / ``2024`` /
+    ``planning`` — the write half of the #8933 identifier asymmetry
+    (``point_identifier_aliases`` -> ``identifier_aliases(space_separated=
+    False)``) deliberately refuses to mint a composite from a prose pair, so
+    the index NEVER holds ``sprint2024``. The shared tokenizer's DEFAULT is the
+    READ half, which mints exactly that, so the coverage test intersected a
+    token no search can produce and this advisory fell SILENT about a name the
+    point cannot be found by — the stored-but-unfindable case it exists for.
+
+    FAIL VALUE: drop ``space_separated_identifiers=False`` from the
+    ``indexed_tokens`` loop and this reds with ZERO advisories (the read-side
+    ``sprint2024`` looks like coverage). The FTS probe below is a POSITIVE
+    CONTROL, not decoration: it proves the composite really is absent from the
+    index, so the advisory is OWED rather than assumed — and if the write path
+    ever starts minting it, this test says so instead of pinning a stale
+    premise.
+    """
+    with caplog.at_level(logging.WARNING):
+        created = sdk.create_point("statement", "sprint 2024 planning",
+                                   name="sprint2024")
+    assert created.get("id"), "FIXTURE NOT REACHED: the point was not created"
+    hits = [pid for pid, _score in run_fts_query(
+        sdk._get_proj().g, "sprint2024", entity_type="point", limit=20)]
+    assert created["id"] not in hits, (
+        "a query for the composite FOUND the point — the write path now mints "
+        "`sprint2024` from a prose pair, so silence would be CORRECT and this "
+        "pin's premise (stored but un-findable) no longer holds")
+    assert len(_advisories(caplog)) == 1, (
+        "the name `sprint2024` is stored and genuinely un-findable — 'sprint "
+        "2024' is two separate index terms, never the composite — so the "
+        f"advisory is owed: {[r.message for r in caplog.records]}")
+
+
 def test_update_point_miss_does_not_warn(sdk, caplog):
     """An update that matches nothing writes nothing, so it must not advise.
 

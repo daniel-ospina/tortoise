@@ -848,6 +848,66 @@ class TestWritePath:
         finally:
             sdk.close()
 
+    def test_an_explicit_search_keys_clear_is_not_overwritten_by_the_derivation(
+            self, tmp_path):
+        """#10203 round 12 (P3): an explicit ``search_keys=None`` IS a clear.
+
+        ``props.get("search_keys")`` cannot tell an explicit ``None`` from an
+        ABSENT key, so a content edit combined with the documented
+        ``None``-clears-a-property shape (the same one ``tags`` and
+        ``embedding`` already use in this door) was REPLACED by the recomputed
+        derived value — which keeps the node's previous non-alias keys. The
+        caller was told the write landed while the vocabulary it asked to drop
+        survived on the node and in the FTS index: the stale-index-value class,
+        reached through argument-default ambiguity rather than a bad clause.
+
+        (1) Fails on the pre-fix gate with ``'release deploy'`` (the derivation
+            rebuilt the vocabulary the caller cleared) and with a record that
+            carries NO ``search_keys`` at all (`_derived_search_keys` came out
+            ``True``, so the clear was stripped from both halves).
+        (2) Reachable: the ordinary combined call ``update_point(id,
+            content=…, search_keys=None)`` — a clear with no content edit never
+            enters the derivation at all, which is why only this shape bit.
+        """
+        from tortoise.log import EventLog
+        from tortoise.sdk import TortoiseSDK
+
+        log_path = str(tmp_path / "clear.jsonl")
+        sdk = TortoiseSDK(
+            os.path.join(str(tmp_path), "clear.db"),
+            namespace="test_ident_explicit_clear",
+            event_log_path=log_path,
+        )
+        try:
+            pid = sdk.create_point(content="error ERR-4032 on deploy",
+                                   kind="statement",
+                                   search_keys=["release", "deploy"])["id"]
+
+            def keys():
+                rows = sdk._proj.g.query(
+                    f"MATCH (n:Point {{id:'{pid}'}}) RETURN n.search_keys"
+                ).result_set
+                return rows[0][0] if rows else None
+
+            assert keys() == "release deploy err4032", keys()  # PRECONDITION
+            sdk.update_point(pid, content="deploy is clean again",
+                             search_keys=None)
+            assert keys() is None, (
+                "the caller's explicit clear was overwritten by the derived "
+                f"value — the vocabulary it asked to drop is still indexed: {keys()!r}")
+            # The RECORD half: a clear is CALLER intent, not a derived value, so
+            # it rides `PointRevised` the way a caller-supplied list does (the
+            # sibling above) instead of being stripped with the derived alias.
+            revised = [e for e in EventLog(log_path).read_all()
+                       if e.get("type") == "PointRevised"]
+            assert revised, "the revision appended no record at all"
+            assert "search_keys" in revised[-1], (
+                "the caller's explicit clear was stripped from the record too: "
+                f"{revised[-1]!r}")
+            assert revised[-1]["search_keys"] is None, revised[-1]["search_keys"]
+        finally:
+            sdk.close()
+
 
 @requires_live
 class TestWritePathLive:

@@ -4985,9 +4985,27 @@ def _warn_point_name_not_lexically_indexed(
             effective[field] = stored.get(field)
         else:
             effective[field] = None
+    # ⛔ WRITE SIDE for the INDEXED half (#10203 review round 12, P2).
+    # ``indexed_tokens`` must be the terms the INDEX will hold, and the index
+    # is written by the WRITE half of the #8933 identifier asymmetry —
+    # ``point_identifier_aliases`` -> ``identifier_aliases(space_separated=
+    # False)`` — which deliberately does NOT mint a composite from prose
+    # (``_IDENTIFIER_SPAN_RE`` admits no whitespace, so "sprint 2024 planning"
+    # indexes ``sprint``/``2024``/``planning`` and never ``sprint2024``).
+    # The tokenizer's DEFAULT is the READ side (it mints ``sprint2024`` from
+    # that prose), so tokenising the indexed text with the default made a
+    # name of ``sprint2024`` intersect ``indexed_tokens`` and this advisory
+    # fall SILENT about a name the engine cannot find — the exact
+    # stored-but-unfindable case it exists to report, silenced by a token no
+    # search can produce. Same fix, same reasoning, as ``tortoise/bm25``
+    # applies to its corpus.
+    # ``name_tokens`` above stays on the READ side on purpose: the name is
+    # caller-typed and reaches the engine as a QUERY (``build_or_query``), so
+    # the read side is the correct half for it.
     for field in fields:
         indexed_tokens.update(tokenize_sparse_query(
-            _lexical_text(effective[field]), keep_numeric=True))
+            _lexical_text(effective[field]), keep_numeric=True,
+            space_separated_identifiers=False))
     if not any(ch.isalnum() for ch in str(name)):
         # Silent only when the name carries NO alphanumeric character at all
         # (pure punctuation/whitespace): then there is nothing to index and the
@@ -14635,20 +14653,43 @@ class TortoiseSDK:
             # replay cannot recompute it, and it rode `emit_props` before
             # #8933 too — so that case keeps its record, with the #5046
             # caller-owned parity gap unchanged (not widened here).
+            # ⛔ AN EXPLICIT `search_keys=None` IS A CLEAR, NOT AN ABSENT KEY
+            # (#10203 review round 12, P3). ``props.get(...)`` cannot tell the
+            # two apart, so a call that edits content AND clears the vocabulary
+            # — ``update_point(id, content=…, search_keys=None)``, the same
+            # documented ``None``-clears shape ``tags``/``embedding`` use in
+            # this very function — used to be REPLACED by the recomputed
+            # derived value, which keeps the node's previous non-alias keys:
+            # the caller was told the write succeeded while the vocabulary it
+            # asked to drop survived on the node and in the FTS index (the
+            # stale-index-value class, reached through argument-default
+            # ambiguity rather than a bad clause).
+            #
+            # So the gate is on the KEY, not the value. The ``None`` then rides
+            # ``SET n += $props`` exactly as it did before #8933 (a null REMOVES
+            # the property) and rides the record too: a clear is CALLER intent,
+            # not a derived value, so it keeps the same caller-owned record
+            # parity a caller-supplied list has (and the same #5046 gap — the
+            # replay fold has no clear clause — neither widened nor narrowed
+            # here). When no content is edited the block below is never even
+            # reached, which is why the defect only ever bit the combined call.
             if _identifier_tokens_enabled():
-                _prev = proj.g.query(
-                    "MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys",
-                    params={"id": id},
-                ).result_set
-                _old_content, _old_keys = _prev[0] if _prev else (None, None)
-                _caller_keys = props.get("search_keys")
-                props["search_keys"] = _revise_identifier_aliases(
-                    new_content=props["content"],
-                    old_content=_old_content,
-                    old_search_keys=_old_keys,
-                    caller_search_keys=_caller_keys,
-                )
-                _derived_search_keys = _caller_keys is None
+                if "search_keys" in props and props["search_keys"] is None:
+                    _derived_search_keys = False  # caller-owned CLEAR
+                else:
+                    _prev = proj.g.query(
+                        "MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys",
+                        params={"id": id},
+                    ).result_set
+                    _old_content, _old_keys = _prev[0] if _prev else (None, None)
+                    _caller_keys = props.get("search_keys")
+                    props["search_keys"] = _revise_identifier_aliases(
+                        new_content=props["content"],
+                        old_content=_old_content,
+                        old_search_keys=_old_keys,
+                        caller_search_keys=_caller_keys,
+                    )
+                    _derived_search_keys = _caller_keys is None
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         # #5004 round-4: a caller-supplied vector is stored VERBATIM here
