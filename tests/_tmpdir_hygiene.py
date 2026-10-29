@@ -53,6 +53,7 @@ import os
 import shutil
 import stat
 import tempfile
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -307,6 +308,26 @@ _ROOT_PREFIX = "tt_"
 # reclaimable by ``sweep_stale_session_roots``. A contract with the operator
 # surface, pinned by tests/test_tmpdir_hygiene.py.
 _PID_MARKER = ".session-pid"
+
+# ── the run-scoped root registry (#1005 / epic #1647 E2E-7) ───────────────
+# A redislite server's argv carries the socket path inside the session root it
+# was started from, so the root set of a RUN is the attribution key that
+# distinguishes "a server some other process on this shared host started" from
+# "a server this run started" — the distinction the CI orphan gate needs before
+# it may call a residue a leak (see .github/scripts/orphan-bound.sh).
+#
+# One pytest PROCESS creates one root, so under `pytest -n N` a run owns N of
+# them and the last writer of the hygiene report would otherwise see only its
+# own. Each process therefore appends its root here at install time — before it
+# can spawn a server, so the set is complete by the time ANY process sweeps.
+# Keyed by the xdist run uid, which every worker of one run shares, and by a
+# pid+start pair when the run is not under xdist (then there is exactly one
+# process, so one entry). A file from a DIFFERENT run is never read: the key is
+# unique per run, so the registry needs no cleanup to stay correct; the age
+# prune below is housekeeping for a long-lived dev box, nothing more.
+_RUN_REGISTRY_DIR = os.path.join(HOST_TMPDIR, ".tortoise", "hygiene-runs")
+_RUN_REGISTRY_MAX_AGE_S = 24 * 3600
+
 # (pid, start-time) identity tolerance, mirroring embedded_reaper: a recycled
 # pid has a different start time, so a bare pid is not a liveness proof.
 _START_TOLERANCE_S = 2.0
@@ -380,6 +401,135 @@ def session_tmpdir() -> str | None:
     return _SESSION_TMPDIR
 
 
+# ── the run-scoped root registry (#1005) ────────────────────────────────
+
+def run_uid() -> str:
+    """Identity shared by every process of ONE pytest run (never empty).
+
+    Under ``pytest -n`` every worker inherits ``PYTEST_XDIST_TESTRUNUID`` (xdist
+    sets it in the worker process only), so the workers of one run agree and two
+    concurrent runs never do. A non-xdist process has no run id and IS the whole
+    run, so a pid+start pair names it uniquely — a recycled pid has a different
+    start time.
+    """
+    shared = os.environ.get("PYTEST_XDIST_TESTRUNUID") or ""
+    if shared:
+        # Filename-safe: the value comes from the environment, so never trust
+        # its shape. A collision after sanitising is harmless (roots are
+        # additive), a path separator is not.
+        cleaned = "".join(
+            ch if (ch.isalnum() or ch in "-_") else "-" for ch in shared)[:64]
+        if cleaned:
+            return cleaned
+    start = _process_start_time(os.getpid())
+    return f"pid{os.getpid()}-{int(start) if start else 0}"
+
+
+def run_registry_path() -> str:
+    """The file listing every session root of the CURRENT run."""
+    return os.path.join(_RUN_REGISTRY_DIR, run_uid())
+
+
+def record_run_root(root: str) -> None:
+    """Append ``root`` to this run's registry (best-effort, never raises).
+
+    Called at install time, before the process can spawn an embedded server, so
+    the registry is complete by the time ANY process of the run sweeps.
+
+    ⚠️ A failed append happens SILENTLY, and it does NOT reach the gate's
+    ``unattributable`` path (#10255 review B — an earlier comment here claimed
+    it did, and that claim was false). Two facts make the real failure mode
+    narrow and quiet rather than loud:
+
+      - ``run_roots()`` re-appends this process's in-memory ``_SESSION_TMPDIR``
+        unconditionally, so ``own_roots`` in the report is never empty from this
+        cause. The gate therefore takes the ATTRIBUTED path — with a **partial**
+        root set, which it treats as authoritative.
+      - the report is written by whichever ``pytest -n`` worker exits LAST, and
+        it sees a sibling's root only through this file. So if a sibling's
+        append failed, that sibling's leaked server is counted in neither
+        ``own_left`` nor ``own_now`` and passes silently, where origin/main's
+        host-wide ``COUNT > left`` would have red on it.
+
+    That residue is deliberately NOT papered over with an ``own_roots_incomplete``
+    flag: the fact would have to TRAVEL to the process that writes the report —
+    over the very medium that just failed — and the process that hit the error
+    re-adds its own root in memory anyway, so such a flag could only ever
+    describe a root set that is already complete. It would be inert exactly
+    where it claims to protect (AGENTS.md, "an inert enforcer"). What IS
+    possible is a record in the process that hit it, which is what the warning
+    below is: this runs at install time, OUTSIDE test capture, so it is not
+    discarded the way a passing test's teardown warning is (#7735).
+    """
+    if not root:
+        return
+    path = run_registry_path()
+    try:
+        os.makedirs(_RUN_REGISTRY_DIR, exist_ok=True)
+        line = os.path.realpath(root) + "\n"
+        # O_APPEND: concurrent workers of one run each add their own root, and
+        # a short line under PIPE_BUF appends atomically.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line.encode())
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        # Swallowed on purpose (this must never fail the suite or a collect),
+        # but never silent: see the docstring for what is lost and why a flag
+        # would not have helped.
+        logger.warning(
+            "#1005: could not record %s in the run registry %s (%s) — a "
+            "sibling worker of this run will not see this root, and the orphan "
+            "gate cannot report `unattributable` for it (it reads a PARTIAL "
+            "root set as authoritative)",
+            root, path, exc)
+
+
+def run_roots() -> list[str]:
+    """Every session root recorded for this run (may be empty).
+
+    Read by the end-of-session sweep to decide which live servers belong to
+    THIS run; see the constant block above for why the key is run-scoped.
+    """
+    roots: list[str] = []
+    try:
+        with open(run_registry_path(), encoding="utf-8") as fh:
+            for line in fh:
+                root = line.strip()
+                if root and root not in roots:
+                    roots.append(root)
+    except OSError:
+        pass
+    current = _SESSION_TMPDIR
+    if current and current not in roots:
+        roots.append(current)
+    return roots
+
+
+def _prune_run_registry() -> None:
+    """Delete registry entries older than a day (housekeeping only).
+
+    Correctness never depends on this: the registry is keyed by a per-run id, so
+    a stale entry is never read. Without it a dev box would accumulate one tiny
+    file per pytest run under the host temp dir forever.
+    """
+    try:
+        entries = list(_ORIGINAL_SCANDIR(_RUN_REGISTRY_DIR))
+    except OSError:
+        return
+    cutoff = time.time() - _RUN_REGISTRY_MAX_AGE_S
+    for entry in entries:
+        try:
+            if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                continue
+            if entry.stat(follow_symlinks=False).st_uid != os.geteuid():
+                continue
+            os.unlink(entry.path)
+        except OSError:
+            continue
+
+
 def scan_root() -> str:
     """The root test discovery must scan: the private session temp dir.
 
@@ -434,6 +584,13 @@ def install_session_tmpdir() -> str:
     suite-wide end-sweep writes that file on any run where a live embedded
     server is discovered, and without the pin it landed in the developer's real
     ``$HOME/.tortoise``. Contained per session, it is thrown away with the root.
+
+    #1005 (epic #1647 E2E-7): the new root is also appended to the RUN-scoped
+    registry (``record_run_root``), so the end-sweep can tell this run's own
+    embedded servers apart from the servers of every other pytest run sharing
+    the host's process table — the distinction the CI orphan gate needs.
+    Recorded BEFORE this process can spawn anything, so the run's root set is
+    complete by the time any process sweeps.
     """
     global _SESSION_TMPDIR, _PREV_HOST_TMPDIR_ENV, _PREV_TMPDIR_ENV
     global _PREV_ZERO_CLIENT_STATE_PATH_ENV
@@ -461,6 +618,10 @@ def install_session_tmpdir() -> str:
         root, ".tortoise", "reaper-zero-client.json")
     tempfile.tempdir = root
     atexit.register(teardown_session_tmpdir)
+    # Housekeeping for a long-lived dev box: the registry is keyed per run, so a
+    # stale entry is never READ — it is only deleted so the dir stays bounded.
+    _prune_run_registry()
+    record_run_root(root)
 
     try:
         _write_marker(root)
@@ -606,7 +767,9 @@ def _prune_host_coordination_dir() -> None:
     permanent empty host entry on every run.
     """
     coordination = os.path.join(HOST_TMPDIR, ".tortoise")
-    for path in (os.path.join(coordination, "active_suites"), coordination):
+    for path in (os.path.join(coordination, "active_suites"),
+                 os.path.join(coordination, "hygiene-runs"),
+                 coordination):
         try:  # noqa: SIM105
             os.rmdir(path)
         except OSError:
