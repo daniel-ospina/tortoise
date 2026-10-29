@@ -1425,13 +1425,21 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     ⛔ The arch marker is RE-DERIVED from this box, never preserved: a mis-registered runner can
     carry the OTHER arch's marker, and passing it straight back lets an x86 box register with
     `self-hosted-arm64` — a false PASS (an arm64 job built on x86), not a queue delay.
+
+    ⛔ THE HOST-DERIVED MATCH IS EXACT-CASE, like the repair's `is_host_label`
+    (`tools/install-ci-runner-x64.sh`) — `ONE invariant, two writers` is only true if both compare
+    the same way. GitHub returns `Linux`/`X64`/`macOS`/`Windows`/`self-hosted`, so a LOWER-CASED
+    compare adds nothing to the class and silently drops an operator's own `linux` or `x64` label on
+    re-registration — while `--repair-labels` keeps it. Filtering a label out of this argv IS a
+    removal: a label one writer keeps and the other deletes is the divergence this function's
+    shared-constant comment forbids.
     """
-    host_derived = {"self-hosted", "linux", "macos", "windows", "x64", "arm64", "arm"}
+    host_derived = {"self-hosted", "Linux", "macOS", "Windows", "X64", "ARM64", "ARM"}
     arch = ARCH_LABEL.get(machine.lower())
     keep = [
         x
         for x in current
-        if x and x.lower() not in host_derived and not x.lower().startswith("self-hosted-")
+        if x and x not in host_derived and not x.startswith("self-hosted-")
         and not VERSION_PINNED_HOSTED_LABEL.fullmatch(x)
     ]
     if not arch:

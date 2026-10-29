@@ -58,11 +58,11 @@
 #   only under `CI_RUNNER_OS_LABEL=off`/unset (KEPT under `on|auto`). Both are PRINTED, never
 #   silently skipped. `_preserve_labels` drops both but reads NO flag: ONE writer here (#10275).
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
-#   ⚠️ AND THE VERSION-PIN CARVE-OUT OBEYS THE BOX'S OWN CHOICE, so it cannot revert an APPLIED owner
-#   departure with no switch involved: the pin is dropped under `CI_RUNNER_OS_LABEL=off`/unset (the
-#   default, and the pre-departure invariant) and KEPT under `on|auto` — the same flag #6897's
-#   `OVERRIDES:` marker names as the suspension's revert path (`CI_RUNNER_OS_LABEL=off` **plus**
-#   `--repair-labels`). Same name and same values as the install-side contract (#10275).
+#   ⚠️ THAT FLAG IS READ HERE AND NOWHERE ELSE IN THIS TREE, and nothing WRITES it: the install-side
+#   reader/emitter ships with #10275, still open. So `CI_RUNNER_OS_LABEL` unset — what this fleet's
+#   unit has today — takes the `off` arm and DROPS the pin. A repair with no exported flag therefore
+#   IS #6897's recorded revert (`CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`), not a no-op: it
+#   prints `version-pinned, not kept=[…]` BEFORE the PUT. Export `CI_RUNNER_OS_LABEL=on` to KEEP one.
 #
 # ⛔ ARCH LABELS ARE NOT INTERCHANGEABLE. A runner is registered with `self-hosted-x64`
 #   (its own distinct pool marker, mirroring `self-hosted-arm64`) — NEVER with
@@ -77,7 +77,7 @@
 #   tools/install-ci-runner-x64.sh --count 2                  # install/repair runners 1..2
 #   tools/install-ci-runner-x64.sh --count 2 --dry-run        # plan + headroom arithmetic only
 #   tools/install-ci-runner-x64.sh --status                   # remote view + label coverage + units
-#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin + a foreign arch marker; refuses --fallback off — it cannot DETACH)
+#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin unless CI_RUNNER_OS_LABEL=on + a foreign arch marker; refuses --fallback off — it cannot DETACH)
 #   tools/install-ci-runner-x64.sh --uninstall --count 2      # deregister + remove
 #   tools/install-ci-runner-x64.sh --print-labels             # the label set config.sh would get
 #   tools/install-ci-runner-x64.sh --help
