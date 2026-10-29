@@ -299,10 +299,14 @@ def _inject_session_state(session_id: str, *, value_nodes_created: int = 0,
 def _seed_objects(client, session_id: str, names: list[str]) -> None:
     """Prior-commit seeding of LIVE Objects by name — the superseded side
     must pre-exist the supersession commit (the commit under test only
-    carries the supersession records). The names ride payload.entities
-    (create_entity mints the canonical obj-<sha26(name)> ids); one net-new
-    point keeps the payload non-empty. Must 200 — a failed seed would
-    invalidate the guard under test."""
+    carries the supersession records). The names ride payload.entities and
+    `create_entity` mints an OPAQUE id for each — since #3590 it is NOT
+    derived from the name: `ids.entity_name_id` is gone, `ids.ulid()` is the
+    mint, and the `obj-<sha26(name)>` spelling survives only in
+    `legacy_ids._derived_legacy_handle` (an offline legacy-key normaliser,
+    never an entity create path) — so nothing here may assert on the id's
+    spelling. One net-new point keeps the payload non-empty. Must 200 — a
+    failed seed would invalidate the guard under test."""
     raw = _raw_payload(1, session_id=session_id, points=[
         {"id": f"pt_{content_hash('seed:' + session_id)}",
          "content": f"seed point {session_id}",
