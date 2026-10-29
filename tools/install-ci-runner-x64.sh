@@ -292,8 +292,14 @@ if [ "$MODE" = status ]; then
   pool="$(gh api "repos/$REPO/actions/runners?per_page=100" --jq '.runners[].labels[].name' 2>/dev/null | sort | uniq -c)" || exit 3
   uncovered=0
   labels_seen=0
-  for label in $(grep -rhoE 'runs-on:[[:space:]]*(\[[^]]*\]|[A-Za-z0-9._/-]+)' .github/workflows/*.yml 2>/dev/null \
-      | sed -E 's/^runs-on:[[:space:]]*//; s/^\[//; s/\]$//' | tr ',' '\n' \
+  # ⛔ A WHOLE-LINE YAML COMMENT IS NOT A `runs-on:` LINE. Unanchored, `# legacy: runs-on: windows-2022`
+  # was counted as a required label and printed a false ⛔ UNCOVERED, and this tree's own comments
+  # name both real labels — the block printed 85/12 where the real lines are 77/9 (2026-10-29).
+  # Both arms are needed: strip whole-line comments, AND anchor to the line's first token — anchoring
+  # is what stops a TRAILING comment (`runs-on: x  # note: runs-on: y`) contributing `y`.
+  for label in $(grep -rhvE '^[[:space:]]*#' .github/workflows/*.yml 2>/dev/null \
+      | grep -oE '^[[:space:]]*runs-on:[[:space:]]*(\[[^]]*\]|[A-Za-z0-9._/-]+)' \
+      | sed -E 's/^[[:space:]]*runs-on:[[:space:]]*//; s/^\[//; s/\]$//' | tr ',' '\n' \
       | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^"//; s/"$//' \
       | grep -vE '^(\$|[[:space:]]*$)' | sort -u); do
     labels_seen=$((labels_seen + 1))

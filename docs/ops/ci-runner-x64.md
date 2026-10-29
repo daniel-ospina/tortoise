@@ -22,13 +22,15 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 75 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
+| `ubuntu-latest` | 77 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
 | `ubuntu-24.04` | 9 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
-Counts are JOBS (not files), measured 2026-10-27 at `a97a6b1` + the four-observer pin. Only `runs-on:`
-lines that name a single `ubuntu-*` label are counted; the `ubuntu-latest` row was previously
-written as 83 against a measured 79, so treat both rows as a dated measurement and re-derive them
-(`yaml.safe_load` each workflow, count each job's `runs-on`) rather than trusting the numbers.
+Counts are JOBS (not files), re-measured 2026-10-29 on this branch (`yaml.safe_load` each workflow,
+count each job's `runs-on`): **77 / 9**, which is exactly what `--status`'s `label-coverage` block
+now prints — it used to read 85 / 12 because its extractor counted `runs-on:` mentions in YAML
+**comments** (it strips whole-line comments first now). Only `runs-on:` lines that name a single
+`ubuntu-*` label are counted; the `ubuntu-latest` row was previously written as 83 against a measured
+79, so treat both rows as a dated measurement and re-derive them rather than trusting the numbers.
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
@@ -65,14 +67,23 @@ temporary mitigation described in the label contract above. Arm64 spellings GitH
 (`ubuntu-24.04-arm`, `ubuntu-22.04-arm`,
 `ubuntu-26.04-arm`), which `_preserve_labels` drops too — the installer refuses to emit them, and
 `tools/runner_autoscale.py::_preserve_labels` DROPS rather than preserves one on re-registration,
-so an out-of-band attachment cannot survive a re-registration or
+so an `-arm` attachment cannot survive a re-registration or
 `tools/install-ci-runner-x64.sh --repair-labels`. That is NOT the same as "cannot become
 permanent": `scripts/ci_runner_gate.sh` treats any non-auto label as `extra` (`:222`) and re-emits
 it in its whole-set `PUT` body on every fallback transition (`:232`), and a runner nobody
 re-registers keeps whatever label it was given — so re-measure.
-Nothing ASSERTS the LIVE label set: `read_pool()` reads it on every autoscale pass and
-`_preserve_labels` drops a pin from it, but no test and no gate compares it to the invariant above.
-Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a runner's labels are re-cut.
+
+⚠️ **The BARE `ubuntu-24.04` is a different case, and it is preserved — that is a correction.**
+`_preserve_labels` used to drop it too ("the pool claims `ubuntu-latest` and never an
+`ubuntu-<version>`"), which meant the scheduled autoscaler pass —
+`tools/install-runner-autoscale-schedule.sh`, running with no operator watching — silently deleted
+the mitigation from every re-registered runner, putting the `ubuntu-24.04` legs back to zero answers
+and every PR back to BLOCKED, with no error and no log line. A fix that vanishes without a trace is
+the failure this whole document exists to make visible, so the label is now **operator state**: the
+installer attaches it under `CI_RUNNER_OS_LABEL=on|auto`, `--repair-labels` re-applies it, and
+`CI_RUNNER_OS_LABEL=off --repair-labels` removes it on purpose. Nothing ASSERTS the LIVE label set —
+`read_pool()` reads it on every autoscale pass, but no test and no gate compares it to the invariant
+above — so re-measure `gh api repos/<owner>/<repo>/actions/runners` if a runner's labels are re-cut.
 
 ## The label contract — a label no runner answers silently blocks EVERY PR
 
@@ -205,18 +216,19 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:571` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:393` (arch refusal dies at `:398`) and `uninstall` `:446` ·
-  guards at `:393-438` (forks `:401`, disk `:421`, cpu/memory `:428`) · sha256 pin + registration
-  at `:582-592` (verify `:582`, token `:585`, one argv `:590-591`, `config.sh` `:592`; the run at
-  `:574` is the dry-run echo) · systemd install/start at `:602-604` · label resolution at
-  `:205-252` (`fallback_engaged` `:207`, `resolve_os_label` `:218`, `resolve_labels` `:237`) ·
-  `repair` `:333` · `--print-labels` `:366`.
-- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:166-171`): a
-  `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
-  having deregistered nothing.
+- `--count N` → `tools/install-ci-runner-x64.sh:577` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:399` (arch refusal dies at `:404`) and `uninstall` `:452` ·
+  guards at `:399-447` (forks `:407`, disk `:427`, cpu/memory `:434` — `:447`, the memory guard,
+  is the last one) · sha256 pin + registration at `:588-598` (verify `:588`, token `:591`, one
+  argv `:596-597`, `config.sh` `:598`; the run at `:580` is the dry-run echo) · systemd
+  install/start at `:608-610` · label resolution at `:205-268` (`fallback_engaged` `:207`,
+  `resolve_os_label` `:218`, `resolve_labels` `:237`, whose body ends at its `}` on `:268`) ·
+  `repair` `:339` · `--print-labels` `:372`.
+- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:166-175`, the `case`
+  through its `esac`): a `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op
+  that reports success having deregistered nothing.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:446-554`; the proof is `is_runner_install` at `:199`, which accepts `.runner` or
+  gone** (`:452-560`; the proof is `is_runner_install` at `:199`, which accepts `.runner` or
   `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -240,8 +252,8 @@ falls back.
   a coverage verdict (a `0`-runner label inside a real read is `0` with its own ⛔ line, not `4`).
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:393`, the `MODE = install`
-  block; the refusal itself dies at `:398`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:399`, the `MODE = install`
+  block; the refusal itself dies at `:404`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 
@@ -262,7 +274,12 @@ falls back.
   pool). `--print-labels` answers "which labels would a runner get" without touching a guard,
   token or the network — that is the seam the label invariant is tested through. `--repair-labels`
   re-applies the label set to already-registered runners: the repair for residual 1, needing no
-  re-download and no re-registration.
+  re-download and no re-registration. It is also **the restore verb for the OS label** — if
+  `ubuntu-24.04` is missing from an already-registered runner (turned off, dropped by a fresh
+  install, or removed by hand), `CI_RUNNER_OS_LABEL=on tools/install-ci-runner-x64.sh
+  --repair-labels` puts it back on every runner in `CI_RUNNER_BASE`, and
+  `CI_RUNNER_OS_LABEL=off … --repair-labels` takes it away again — both without re-downloading or
+  re-registering anything.
 - Requires: `gh` authenticated with admin on the repo (mints the registration and removal tokens),
   `curl`/`tar`/`sha256sum` for the pinned tarball, `sudo` for the system units — and `gh`, `unzip`
   and `docker` **on the runner's own PATH**, because the lane jobs need them (#9018: a pool runner

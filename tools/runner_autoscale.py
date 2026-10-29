@@ -23,12 +23,22 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   capacity is now a goal in its own right. So this file adds capacity openly instead of dressing
   it up as a fallback. It does NOT reverse the parts the owner did not reopen: the fallback
   LABEL stays gate-following (see `resolve_labels`), and nothing here relabels, removes, or
-  re-ranks an existing runner -- with ONE exception, a version-pinned hosted label
-  (`VERSION_PINNED_HOSTED_LABEL`), which re-registration DROPS, so a pin attached out of band cannot
-  survive the next RE-REGISTRATION (a repair that only restarts a healthy runner never re-registers
-  it). The invariant stays OBSERVED, not ASSERTED: `read_pool()` reads the live label set on every
-  pass and `_preserve_labels` drops a pin from it, but no test and no gate compares the live set to
-  the invariant (`docs/ops/ci-runner-x64.md:67`), so re-measure it after any runner is registered.
+  re-ranks an existing runner -- with ONE exception, the ARM64 SPELLINGS of a version-pinned hosted
+  label (`ARM64_VERSION_PINNED_LABEL`, e.g. `ubuntu-24.04-arm`), which re-registration DROPS, so an
+  `-arm` pin attached out of band cannot survive the next RE-REGISTRATION (a repair that only
+  restarts a healthy runner never re-registers it).
+
+  ⛔ THE BARE `ubuntu-<version>` IS PRESERVED, NOT DROPPED (corrected 2026-10-29, PR #10275
+  review). Since the #6897 version-pin decision is SUSPENDED while hosted deadlocks,
+  `tools/install-ci-runner-x64.sh` emits `ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto` and the
+  pool legitimately carries it — so dropping it here made a routine repair pass DELETE the
+  mitigation, silently, which is the exact vanishing-fix class the label contract exists to make
+  visible: the `ubuntu-24.04` legs go back to zero answers and every PR back to BLOCKED. The label
+  is operator state now: the installer attaches it (`--repair-labels` re-applies it) and
+  `CI_RUNNER_OS_LABEL=off --repair-labels` removes it. It stays OBSERVED, not ASSERTED —
+  `read_pool()` reads the live label set on every pass, but no test and no gate compares it to the
+  invariant recorded in `docs/ops/ci-runner-x64.md` (the label contract), so re-measure after any
+  runner is registered.
 
 THE CEILING IS A PREDICATE, NOT A NUMBER
     ceiling = min(core_ceiling, runners_live + headroom_by_memory)
@@ -256,21 +266,19 @@ ARCH_LABEL = {
     "arm64": "self-hosted-arm64",
 }
 
-#: `ubuntu-24.04`-shaped labels — a VERSION-pinned GitHub-hosted label. The pool deliberately
-#: claims only `ubuntu-latest` and never one of these (`docs/ops/ci-runner-x64.md:25-26`), because
-#: a job that pins a version asks for the GitHub-hosted image specifically.
+#: The ARM64 spellings of GitHub's version-pinned hosted class — `ubuntu-24.04-arm`,
+#: `ubuntu-22.04-arm`, `ubuntu-26.04-arm` (`github/docs`
+#: `data/reusables/actions/supported-github-runners.md`, checked 2026-10-27).
 #:
-#: The class is bounded by what GitHub's hosted images ANSWER TO, not by a spelling: the same label
-#: table publishes the arm64 variants `ubuntu-24.04-arm` / `ubuntu-22.04-arm` / `ubuntu-26.04-arm`
-#: (`github/docs` `data/reusables/actions/supported-github-runners.md`, checked 2026-10-27), and a
-#: job pinned to one of those is escaping this pool exactly as a bare version pin does. The suffixed
-#: shape is in the class as defence in depth over the WHOLE hosted version family, NOT because it is
-#: the likeliest one to be attached here: this runbook is the x64 pool
-#: (`docs/ops/ci-runner-x64.md:13`), and the ARM64 VMs register their own markers (`:33-34`), so an
-#: `-arm` pin on this box is the LEAST likely — and it is dropped anyway. A custom label that merely
-#: starts `ubuntu-<digits>` (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be
-#: preserved.
-VERSION_PINNED_HOSTED_LABEL = re.compile(r"ubuntu-\d+(?:\.\d+)*(?:-arm)?", re.IGNORECASE)
+#: ⛔ THIS IS WHAT RE-REGISTRATION DROPS, AND IT IS NOW THE ONLY THING IT DROPS. The BARE
+#: `ubuntu-24.04`-shaped label is PRESERVED (`_preserve_labels`): the pool carries it as the
+#: temporary mitigation for the suspended #6897 pin, so dropping it on a repair pass deleted the
+#: mitigation silently — the class of failure this whole contract exists to make visible. An `-arm`
+#: label is a different matter: it names an ARM64 hosted image, and on this x64 pool it is a false
+#: architecture claim (an arm64 job served by x86 hardware is a false PASS, not a queue delay), so
+#: it is dropped rather than carried forward. A custom label that merely starts `ubuntu-<digits>`
+#: (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be preserved.
+ARM64_VERSION_PINNED_LABEL = re.compile(r"ubuntu-\d+(?:\.\d+)*-arm", re.IGNORECASE)
 
 DEFAULT_REPO = "daniel-ospina/tortoise"
 
@@ -1151,11 +1159,13 @@ def converge(
                 f"{c['name']} still offline after restart — re-registering with --replace"
             )
         try:
-            # ⛔ Re-registering KEEPS the labels the runner already carries — EXCEPT a
-            # version-pinned hosted label (`VERSION_PINNED_HOSTED_LABEL`; the carve-out is spelled
-            # out in `_preserve_labels`). That one is DROPPED, because a job naming `ubuntu-24.04`
-            # wants the GitHub-hosted image and not this pool, so keeping the pin is how a label
-            # attached once out of band becomes permanent. Deriving a whole fresh set is still the
+            # ⛔ Re-registering KEEPS the labels the runner already carries — EXCEPT the arm64
+            # SPELLING of a version-pinned hosted label (`ARM64_VERSION_PINNED_LABEL`; the carve-out
+            # is spelled out in `_preserve_labels`). That one is DROPPED: it names an ARM64 image,
+            # so on this x64 pool it is a false architecture claim. The BARE `ubuntu-24.04` is KEPT
+            # — it is the mitigation the installer attaches under `CI_RUNNER_OS_LABEL=on|auto`, and
+            # dropping it here removed it silently on every repair pass (PR #10275 review).
+            # Deriving a whole fresh set is still the
             # failure this preserves against: it drops any custom/tier label (and the fallback
             # label, when it is engaged), so the workflows that target it queue forever — a
             # "repair" that removes capacity. Only a runner absent from the pool (ORPHANED) has no
@@ -1411,16 +1421,26 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     other label (a custom tier, a pool tag, `ubuntu-latest` while the fallback is engaged) is
     PRESERVED, because a workflow targeting it would otherwise queue forever.
 
-    ⛔ A VERSION-PINNED HOSTED LABEL (`ubuntu-24.04`-shaped, INCLUDING GitHub's arm64 spelling
-    `ubuntu-24.04-arm` — see `VERSION_PINNED_HOSTED_LABEL`) is the ONE exception, and it is
-    dropped rather than preserved. The recorded invariant is that the pool claims `ubuntu-latest`
-    and never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:25-26`), and that label is
-    precisely what a lane pins to ESCAPE this pool. Preserving it on re-registration is how a label
-    attached once out of band — the 2026-10-24 drift that put `finding-provenance` on
-    `pi-runner-vm-*` with `ubuntu-24.04` (`tests/test_runner_tool_contract.py:5-12`) — becomes
-    permanent, and it would silently un-pin every observer job pinned to it. Dropping it restores
-    the invariant; no workflow is starved by that, because a job naming the label wants the
-    GitHub-hosted image. `ubuntu-latest` itself is NOT dropped: that one is the fallback label.
+    ⛔ THE ARM64 SPELLING OF A VERSION-PINNED HOSTED LABEL (`ubuntu-24.04-arm`-shaped — see
+    `ARM64_VERSION_PINNED_LABEL`) is the ONE class dropped rather than preserved. It names an
+    ARM64 hosted image, so on this x64 pool it is a false architecture claim: a job pinned to it
+    would be served by hardware it did not ask for — a false PASS, not a queue delay. Dropping it
+    restores the arch invariant; no workflow is starved by that, because a job naming the label
+    wants the GitHub-hosted image of that architecture.
+
+    ⛔ THE BARE `ubuntu-<version>` IS PRESERVED, and that is a DELIBERATE reversal of what this
+    function used to do (PR #10275 review, 2026-10-29). The pool carries `ubuntu-24.04` as the
+    temporary mitigation for the suspended #6897 pin (`tools/install-ci-runner-x64.sh`,
+    `CI_RUNNER_OS_LABEL=on|auto`; `docs/ops/ci-runner-x64.md`, the label contract), so DROPPING it
+    here meant a routine repair pass deleted the mitigation — with no error, no line, and every
+    `ubuntu-24.04` leg back to zero answers. A fix that vanishes without a trace is the failure
+    class this contract exists to make visible, so the label is now operator state: the installer
+    attaches it, `--repair-labels` re-applies it, and `CI_RUNNER_OS_LABEL=off --repair-labels`
+    removes it on purpose. The 2026-10-24 out-of-band drift this used to defend against
+    (`finding-provenance` on `pi-runner-vm-*` with `ubuntu-24.04`,
+    `tests/test_runner_tool_contract.py:5-12`) is now an ACCEPTED cost of the mitigation, and it is
+    bounded: the label stops being served the moment an operator turns the flag off and repairs.
+    `ubuntu-latest` itself is untouched: that one is the fallback label.
 
     ⛔ The arch marker is RE-DERIVED from this box, never preserved: a mis-registered runner can
     carry the OTHER arch's marker, and passing it straight back lets an x86 box register with
@@ -1432,7 +1452,7 @@ def _preserve_labels(current: list[str], machine: str) -> str:
         x
         for x in current
         if x and x.lower() not in host_derived and not x.lower().startswith("self-hosted-")
-        and not VERSION_PINNED_HOSTED_LABEL.fullmatch(x)
+        and not ARM64_VERSION_PINNED_LABEL.fullmatch(x)
     ]
     if not arch:
         return ""  # unknown arch: the caller falls back to resolve_labels, which REFUSES
