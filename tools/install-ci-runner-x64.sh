@@ -742,8 +742,8 @@ if [ "$MODE" = status ]; then
   # ⛔ THE INCIDENT STATE IS NOT SUCCESS. Exit 0 used to cover BOTH "every label covered" and "a
   # required label has no runner at all" — so `--status && …` could not tell the state that blocks
   # every PR from the one that does not. 4 already means "no verdict"; 5 is "a verdict, and it is
-  # bad". Nothing in the tree keys on `--status`'s status today (`grep -rn -- '--status'` finds only
-  # this script's own help rows), so no caller changes meaning.
+  # bad". No caller in the tree invokes this script's `--status`: the repo-wide `--status` hits
+  # are other tools' own flags plus its tests and the runbook's examples, so none changes meaning.
   if [ "$uncovered" = 1 ]; then exit 5; fi
   exit 0
 fi
