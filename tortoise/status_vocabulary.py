@@ -102,7 +102,7 @@ was told a set one value too small. A reader that needs the set MUST read
 ``record_writer`` — and if the two ever disagree again, the code is the answer.
 
 So the write path carries all six as ``degraded`` — the NEAREST recorded term
-for "not available", and not a measured outage for four of them — and keeps the
+for "not available", and not a measured outage for five of them — and keeps the
 reason in ``RecordWrite.refusal``, which is authoritative: a consumer must read
 ``refusal`` before calling a refusal an outage, a set-up gap, or an error.
 Recorded here for the same reason as the read-path dimension above — this

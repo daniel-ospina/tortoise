@@ -1980,6 +1980,14 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
     set's real size, wherever the doc spells it. The same rule is applied to
     ``RecordWrite.status``'s own enumeration, which the map names as
     authoritative — it was one token short when this round started.
+
+    ⛔ #10021 review, THIRD round: round 2's claim of universality was still
+    wider than its needle, which recognised only `one of` / `all` / `NONE of the`
+    — so `not a measured outage for four of them` (a size spelled with none of
+    those prefixes) survived the reword and shipped `four` against six. The
+    needle below now also matches `for <word> of them`, and derives THAT count
+    too: the sentence counts the members that are not a measured outage, and
+    `circuit_open` is the only literal outage, so it is `size − 1`.
     """
     import inspect
     import re
@@ -2023,6 +2031,20 @@ def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
                 f"`status_vocabulary` says the refusal set is '{spelled}' and "
                 f"also '{word}' — one closed set, two sizes, in the module that "
                 f"declares itself the vocabulary's ONE home")
+    # ⛔ ROUND 3 (#10021 review): round 2 widened this to "every spelled size",
+    # but its needle only recognised three prefixes — so the surviving sentence
+    # `not a measured outage for four of them` slipped through and shipped
+    # `four` against a set of six. It is the SAME closed set one member down:
+    # `circuit_open` is the only literal outage in the list above, so the count
+    # in that sentence is DERIVED here too (size − 1) rather than typed.
+    non_outage = _WORD[size - 1]
+    for word in re.findall(r"for ([a-z]+) of them", doc):
+        assert word == non_outage, (
+            f"`status_vocabulary` says {size} refusals are carried as "
+            f"`degraded` but that it is 'not a measured outage for {word} of "
+            f"them' — only `circuit_open` is an outage, so that sentence must "
+            f"read '{non_outage}'; a derived count spelled a size staler than "
+            f"the set it describes is the defect this pin exists to catch")
     # The pointer is not decoration: the module that declares the set is alive
     # and still carries the token the map was missing.
     assert "no_tenant_carried" in LIVE_WRITE_REFUSALS
