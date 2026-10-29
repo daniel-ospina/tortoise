@@ -953,6 +953,70 @@ class TestPinAgreement:
             f"a cannot-verify verdict printed a `git checkout` remedy: {result.stderr!r}"
         )
 
+    def test_git_output_this_process_cannot_DECODE_is_cannot_verify_not_drift(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """ROUND 11/12 note, FIXED: an UNDECODABLE git answer is not a stale checkout.
+
+        ``_git`` ran ``subprocess.run(..., text=True)`` with no ``errors=``, so stdout **and** stderr
+        were decoded ``strict`` (the ``io.TextIOWrapper`` default per the ``subprocess`` docs).
+        ``UnicodeDecodeError`` is a ``ValueError``, so it was caught by neither
+        ``except (OSError, subprocess.SubprocessError)`` inside ``_git`` nor
+        ``except (OSError, RuntimeError)`` in ``main``: it escaped as a TRACEBACK and the
+        interpreter exited **1** — this tool's DRIFT class, whose printed meaning is "your checkout
+        is stale, ``git fetch && git checkout <pin>``". Measured on the pre-fix tool: ``rc=1`` with
+        ``UnicodeDecodeError`` in the traceback; at this head, ``pin: git-error`` and ``rc=2``.
+
+        A shim is the only way to reach it (a monkeystamped ``_git`` would prove the mapping, not the
+        decode): the byte has to come out of GIT, and git's other answers here are ASCII by
+        construction (hex shas, counts), so no real checkout can carry one on a test host. The shim
+        answers ``--is-ancestor`` with a ``fatal:`` message carrying a raw ``\377`` (0xff — not
+        valid UTF-8, and a ``fatal:`` line embedding a non-UTF-8 path is the natural carrier) and
+        git's error status; every other question is REAL git, so the checkout genuinely carries the
+        pin and there is no drift to report.
+        """
+        real = shutil.which("git")
+        assert real, "no git on PATH — this module cannot be tested without one"
+        shim_dir = tmp_path / "git-undecodable"
+        shim_dir.mkdir()
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            'for arg in "$@"; do\n'
+            '  if [ "$arg" = "--is-ancestor" ]; then\n'
+            # `printf` expands \377 to the single byte 0xff on both dash and bash.
+            "    printf 'fatal: bad object \\377\\n' >&2\n"
+            "    exit 128\n"
+            "  fi\n"
+            "done\n"
+            f'exec "{real}" "$@"\n'
+        )
+        shim.chmod(0o755)
+        pin = git_commit(git_infra, "the pinned commit")
+        git_commit(git_infra, "work after the pin")
+        env = self._env(
+            self._home(tmp_path, pin),
+            PATH=f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+        )
+
+        result = self._pin_check(repo, git_infra, env)
+        assert result.returncode == 2, (
+            "an UNDECODABLE git answer is 'cannot verify' (2), never drift (1) — rc="
+            f"{result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "pin: git-error" in result.stdout, result.stdout
+        assert "cannot verify" in result.stdout, result.stdout
+        assert "Traceback" not in result.stderr, (
+            f"a decode failure escaped as a traceback instead of a verdict: {result.stderr!r}"
+        )
+        assert "DIVERGED" not in result.stdout, (
+            f"a git whose answer could not be DECODED was reported as a diverged checkout: "
+            f"{result.stdout!r}"
+        )
+        assert "remedy" not in result.stderr, (
+            f"a cannot-verify verdict printed a `git checkout` remedy: {result.stderr!r}"
+        )
+
     def test_a_checkout_that_predates_the_pin_entirely_is_drift_not_unknown(
         self, repo: Path, git_infra: Path, tmp_path: Path
     ) -> None:

@@ -340,7 +340,30 @@ def _pin_sha_line(pin: Path) -> str:
 
 
 def _git(infra: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
-    """Run ``git -C <infra> …``; ``None`` when git itself could not be run."""
+    """Run ``git -C <infra> …``; ``None`` when git itself could not ANSWER.
+
+    Three ways git fails to answer, and all three are ``None`` (the callers map ``None`` to
+    cannot-verify, never to drift): it cannot be RUN (``OSError``), it does not answer inside
+    ``GIT_TIMEOUT`` (``TimeoutExpired``, a ``SubprocessError``), and it answers in bytes this
+    process cannot DECODE (``UnicodeDecodeError`` — PR #10250 review ROUND 11/12, recorded there as
+    a bounded note; fixed here because it broke this module's own invariant).
+
+    ⛔ ``UnicodeDecodeError`` is a ``ValueError``, NOT an ``OSError``/``SubprocessError``. With
+    ``text=True`` and no ``errors=``, stdout **and** stderr are decoded ``strict`` (the
+    ``io.TextIOWrapper`` default, per the ``subprocess`` docs), so a single non-UTF-8 byte in a path
+    git echoes — ``rev-parse --show-toplevel`` prints the checkout's path — raised straight out of
+    ``subprocess.run``, out of ``pin_state``, and past ``main``'s ``except (OSError, RuntimeError)``.
+    The interpreter then exited **1**, this module's DRIFT class, whose printed meaning is "your
+    checkout is stale — ``git fetch && git checkout <pin>``": an undecodable answer reported as a
+    stale checkout, which is exactly the failure the module is built against ("cannot-verify is
+    never drift"). Measured through a ``git`` shim that emits ``\xff`` from the ancestry step: a
+    traceback and ``rc=1`` before this line, ``pin: git-error`` + ``rc=2`` after it.
+
+    ``errors="replace"`` was the alternative and is worse: it manufactures a decodable string that
+    is not the path git printed, so the verdict would be a FINDING about a directory (``not-a-repo``,
+    naming a mangled path) instead of "git could not answer". An answer this tool cannot read is not
+    an answer.
+    """
     try:
         return subprocess.run(
             ["git", "-C", str(infra), *args],
@@ -348,7 +371,7 @@ def _git(infra: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
             text=True,
             timeout=GIT_TIMEOUT,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return None
 
 
