@@ -317,7 +317,8 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    remover above: the gate's `fallback_off` still strips `ubuntu-latest` from this pool on its next
    tick, from `scripts/ci_runner_gate.sh` in **agent-infra**, which is not in this checkout. So the
    label can still disappear within one tick after a hand repair — the gate-side removal is its own
-   follow-up, and re-measuring (`--status`, then `gh api …/runners`) is still the way to know.
+   follow-up, tracked by open **#10237** — and re-measuring (`--status`, then `gh api …/runners`) is
+   still the way to know.
 2. **The pool is still the slower class for long legs.** These runners are not pinned off the
    fast matrix (`test (a)…(i)`), so a 20m watchdog leg can still be killed here if this box
    turns out slower than hosted under load. That is the #6897 measurement, unchanged; the
