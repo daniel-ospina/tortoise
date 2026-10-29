@@ -6323,15 +6323,23 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                if s.get("name", "").startswith("Run slow test suite"))
     invocation = run["run"]
     # ⛔ THE GUARD'S TWO RECONCILED ARTIFACTS ARE PER-RUNNER, not host-global
-    # `/tmp` literals (#7815/#10028). `test-slow`, `test-carve-out` and
-    # `test-track-b` run CONCURRENTLY on one self-hosted host and share ONE
-    # `/tmp`: measured on run 40798901821, three of them wrote
+    # `/tmp` literals (#7815/#10028). The legs that really do share ONE host
+    # `/tmp` are the ones on the `ubuntu-latest` SELF-HOSTED pool (`test`,
+    # `test-concurrency-falkor`, `test-track-b`, `test-carve-out`):
+    # `scripts/ci_runner_gate.sh` re-attaches that label and several runner
+    # installs on one host share `/tmp`, so those jobs run CONCURRENTLY over one
+    # namespace. Measured on run 40798901821, three of them wrote
     # `/tmp/expected-nodeids.txt` within the same 10 minutes, and `test-track-b`
     # then reconciled its own 4-nodeid run against a PEER's manifest and
     # `junit.xml` and redded with 1428 "expected nodeids absent" belonging to no
     # test it ran. `${RUNNER_TEMP}` is `<runner_install>/_work/_temp`, and a
     # self-hosted runner executes ONE job at a time — per-JOB unique on a shared
     # host. Asserting the pinned literal instead would re-open the clobber.
+    # ⛔ `test-slow` is NOT one of those legs — it is pinned to the HOSTED
+    # `ubuntu-24.04` label, so its `/tmp` is its own VM. It spells the path this
+    # way so ONE construction serves every leg; naming it as a co-tenant (as this
+    # comment did) is a FALSE reason for a right answer, and it is exactly what
+    # the next lane copies.
     assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in invocation
     assert "-o junit_family=xunit1" in invocation
     # the pytest command line itself (the comment block may mention the
@@ -6564,10 +6572,102 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
             == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
         "the carve-out matrix must come from the selector's carve_matrix output"
     assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in run["run"], \
-        ("#7815: the carve-out legs share a host with `test-slow`/`test-track-b`, "
-         "so the junitxml they reconcile against must be per-runner, never the "
-         "host-global /tmp literal")
+        ("#7815: the carve-out legs share a host `/tmp` with the `test` matrix, "
+         "`test-concurrency-falkor` and `test-track-b` (all on the `ubuntu-latest` "
+         "self-hosted pool) — NOT with `test-slow`, which is pinned to the hosted "
+         "`ubuntu-24.04` label — so the junitxml they reconcile against must be "
+         "per-runner, never the host-global /tmp literal")
 
+
+
+def test_the_guard_decided_log_is_per_runner_on_every_pool_leg():
+    """#7815: the pytest LOG is a guard-decided artifact and moves with the rest.
+
+    `expected-nodeids.txt` and `junit.xml` moved to `${RUNNER_TEMP}` because
+    three jobs on one self-hosted host share ONE `/tmp` (#10028). The log was
+    left behind by that change in the two legs that WRITE it on the pool, and in
+    `test-carve-out` it is not cosmetic: when `pytest-files` is empty the
+    skip-guard is invoked with the log ALONE, so the log IS its observed set —
+    a peer's clean log hides this leg's availability skip (fail-open) and a
+    peer's violations red a green leg. This pins writer AND readers on the
+    per-runner path, in every leg that shares the host `/tmp`.
+
+    It also pins the REASON, because a right answer stated with the wrong reason
+    is what the next lane copies: `test-slow` does NOT share that `/tmp` (it is
+    pinned to the hosted `ubuntu-24.04` label, whose `/tmp` is the job's own
+    VM), so claiming it as a co-tenant — as the workflow, `test_ci_selection.py`
+    and `test_ci_guard_invocation.py` all did — teaches a false fact about the
+    runner topology.
+    """
+    wf = _load_python_ci()
+    jobs = wf["jobs"]
+    #: the legs that WRITE the log this pin is about, and whether the leg also
+    #: runs a skip-guard over it. (`test-slow` writes `pytest.log` too, on the
+    #: hosted pin, so it is not listed — and its own log is correctly VM-private.
+    #: `test-concurrency-falkor` carries no guard of its own; it is the CLOBBERER,
+    #: so it is pinned as a writer only.)
+    legs = {
+        "test-concurrency-falkor": ("pytest.log", False),
+        "test-carve-out": ("pytest.log", True),
+        "test-track-b": ("trackb.log", True),
+    }
+    offenders: list[str] = []
+    for job_name, (log, has_guard) in legs.items():
+        want = "${RUNNER_TEMP:-/tmp}/" + log
+        bodies = [(s.get("name") or "?", s.get("run") or "")
+                  for s in jobs[job_name]["steps"]]
+        if not any(want in body for _name, body in bodies):
+            offenders.append(f"{job_name}: no step writes `{want}`")
+        for name, body in bodies:
+            for line in body.splitlines():
+                # the host-global form, in any spelling: bare, quoted or as an
+                # upload `path:` (the `${RUNNER_TEMP:-/tmp}` form is the pin).
+                # COMMENT lines are skipped — naming the old path in prose is how
+                # the reason travels with the fix; what must not survive is an
+                # EXECUTABLE host-global path.
+                if line.lstrip().startswith("#"):
+                    continue
+                if f"/tmp/{log}" in line and want not in line:
+                    offenders.append(
+                        f"{job_name}/{name}: host-global `/tmp/{log}` here: {line.strip()!r}")
+        if not has_guard:
+            continue
+        # the guard step is the one that reads the LOG (the manifest-emitting
+        # step names the tool too, and comes first)
+        guards = [s for s in jobs[job_name]["steps"]
+                  if "skip-guard.py" in (s.get("run") or "")
+                  and log in (s.get("run") or "")]
+        if not guards:
+            offenders.append(f"{job_name}: no skip-guard step over the log found to pin")
+        elif not any(want in s["run"] for s in guards):
+            offenders.append(
+                f"{job_name}: the skip-guard step reads a different log than the run step "
+                f"writes (`{want}` absent) — a writer-only change leaves the guard on the "
+                "host-global path, which is the artifact it DECIDES on")
+    assert not offenders, (
+        "#7815: these pool legs still share a host-global pytest log with their concurrent "
+        f"peers: {offenders}. Use `${{RUNNER_TEMP:-/tmp}}/<name>` in the writer, in every "
+        "reader (tail, pytest-attribution.sh, the grep counters, the skip-guard argument) and "
+        "`${{ runner.temp }}/<name>` in the upload `path:`")
+
+    # ⛔ THE REASON. `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the
+    # self-hosted pool, and that is what makes the pool legs share `/tmp`. A leg
+    # pinned to a VERSIONED hosted label is not in that set.
+    runs_on = str(jobs["test-slow"]["runs-on"])
+    assert "ubuntu-latest" not in runs_on, (
+        "`test-slow` is now on `ubuntu-latest`, which `scripts/ci_runner_gate.sh` re-attaches "
+        "to the self-hosted pool — it DOES share a host `/tmp` after all, and every comment "
+        "that excludes it (and its VM-private `/tmp/pytest.log`) must be revised with it")
+    wf_text = (Path(__file__).resolve().parents[1]
+               / ".github" / "workflows" / "python-ci.yml").read_text()
+    misattributed = [
+        line.strip() for line in wf_text.splitlines()
+        if "test-slow" in line and "/tmp" in line
+        and ("share" in line.lower() or "concurrently" in line.lower())
+    ]
+    assert not misattributed, (
+        "these workflow comments name `test-slow` as a co-tenant of a shared host `/tmp`, "
+        f"which it is not (hosted `{runs_on}` pin): {misattributed}")
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
 # The `concurrency:` group is per-PR with `cancel-in-progress: true`, so a

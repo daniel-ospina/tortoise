@@ -159,7 +159,13 @@ ENV_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
 #: self-hosted host share ONE `/tmp`, so the guard read a PEER's manifest and
 #: junit and redded on a mismatch belonging to no test it ran (measured on run
 #: 40798901821 — 1428 "expected nodeids absent" against a 4-nodeid run).
-FIXTURES = ("pytest-rc", "pytest-files", "junit.xml", "expected-nodeids.txt")
+#: `pytest.log` joined them in the same change, for the same reason and one step
+#: further: the carve-out guard's NO-MANIFEST arm (`skip-guard.py <log>`, taken
+#: when `pytest-files` is empty) does not reconcile — it reads the log as its
+#: OBSERVED set, so a peer's clean log hides this leg's availability skip
+#: (fail-open) and a peer's violations red a green leg.
+FIXTURES = ("pytest-rc", "pytest-files", "junit.xml", "expected-nodeids.txt",
+            "pytest.log")
 #: a literal runner-temp path, the only form this harness can fabricate
 RUNNER_TEMP_LITERAL_RE = re.compile(r"\$\{RUNNER_TEMP:-/tmp\}/[A-Za-z0-9._-]+")
 RUNNER_TEMP_REF_RE = re.compile(r"\$\{RUNNER_TEMP[^}]*\}|\$RUNNER_TEMP\b")
