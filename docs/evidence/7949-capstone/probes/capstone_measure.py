@@ -57,8 +57,9 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8961-8967`` and
 ``result["vet"]`` at ``:8883-8887``); they are dropped at the meta fold,
-``tortoise/sdk.py:13651`` (``"stats": out.get("stats") or {}`` inside
-``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
+``"stats": out.get("stats") or {}`` inside ``_extract_session_v2`` — the sibling
+key is never copied — whose LINE this probe reads out of the tree rather than
+typing it (``META_FOLD_CITE``, see ``_sdk_line``). That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
 forbids.
@@ -73,6 +74,16 @@ and the composition line carry, so one cannot be dropped or silently re-worded;
 the number's RESOLUTION is checked against the tree at the moment it is
 re-derived (``grep -n`` at the stamped head), which is the only check that can be
 made without pinning a line that ``main`` is free to move.
+
+📌 THE ``sdk.py`` NUMBERS THE CAUSES PRINT ARE DERIVED, NOT TYPED. A number in a
+markdown row is re-derived by a lane (and the sweep reds until it is), but a
+number inside an f-string that the pin CHECKS AGAINST ITS OWN DERIVED EXPECTATION
+is a second source of truth: the pin moves with the tree and the cause does not,
+so the next insertion above the symbol reds a test whose order of events says
+the pass was fine (that is exactly what #10199's head did — ``+20`` lines above
+the fold). ``META_FOLD_CITE`` / ``REFERENCES_EDGE_CITE`` / ``TURN_WRITE_CITE``
+are therefore READ from ``tortoise/sdk.py`` at import (``_sdk_line``), the way
+the pin derives its own expected value.
 
 ⛔ WHERE THE LOG GOES. NOT over ``capstone.log``. That file is the shipped REFUSAL
 record, its add-commit predates the pre-registration, and
@@ -121,6 +132,44 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+def _sdk_line(code: str) -> int:
+    """The ONE line of ``tortoise/sdk.py`` that carries ``code`` — READ from the tree.
+
+    See the CITE CONVENTION above: the SYMBOL is authoritative and the number is
+    a convenience, so a number this probe PRINTS is read at the moment it is
+    printed instead of being typed into the source. Sphinx reaches the same
+    conclusion from the other side — ``sphinx.ext.linkcode`` resolves a
+    source link from the object's ``module``/``fullname`` (``_DOMAIN_KEYS =
+    {'py': ['module', 'fullname']}``) at build time, and its Python domain has no
+    "line N of file X" role at all, because a stored line number cannot survive
+    an edit above it.
+
+    A code string that is not on exactly ONE line is refused rather than guessed:
+    the callers below name a single known line, and a second hit means the anchor
+    moved, not that either line will do.
+    """
+    hits = [n for n, line in enumerate(
+        (ROOT / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines(), 1)
+        if code in line]
+    if len(hits) != 1:
+        raise SystemExit(
+            f"`{code}` is on {len(hits)} line(s) of tortoise/sdk.py {hits} — this "
+            f"probe names ONE line; re-anchor the constant, do not pick one")
+    return hits[0]
+
+
+#: The meta fold ``_extract_session_v2`` drops S2.2/S2.3 at, in the exact shape
+#: the causes below print it.
+META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line('\"stats\": out.get(\"stats\")')}"
+
+#: The capture path's call that writes the references edge.
+REFERENCES_EDGE_CITE = (
+    f"tortoise/sdk.py:{_sdk_line('proj.link_source_to_event(source_key, event_id)')}")
+
+#: The turn-row writer the E3 denominator excludes by construction.
+TURN_WRITE_CITE = f"tortoise/sdk.py:{_sdk_line('_TURN_WRITE_CYPHER = (')}"
+
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
@@ -148,9 +197,10 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13932`` (``proj.link_source_to_event(source_key,
-#: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
-#: is on the same link, but the DERIVED node is its TARGET.
+#: path at ``proj.link_source_to_event(source_key, event_id)`` in
+#: ``_extract_session_v2`` — ``(Source)-[:references]->(sessionCaptured Event)``,
+#: cited as ``REFERENCES_EDGE_CITE`` (derived from the tree, never typed). The
+#: anchor is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
 ANCHOR_IN = ("references",)
 
@@ -163,7 +213,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13932 "
+    f"the capture path at {REFERENCES_EDGE_CITE} "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
@@ -1081,7 +1131,7 @@ def point_composition_line(composition: dict | None) -> str:
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2377, t.is_episodic=true, wired only by CONTAINS), and "
+        f"{TURN_WRITE_CITE}, t.is_episodic=true, wired only by CONTAINS), and "
         f"operator Points are written by create_operator (tortoise/sdk.py — the "
         f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
         f"(measured: {operators_anchored} of {operators} anchored). Whether an "
@@ -1159,7 +1209,7 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"classes cannot carry a derivation link AT ALL and are named "
         f"rather than folded into the figure: the turn rows carry none BY "
         f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2377, t.is_episodic=true, wired only by "
+        f"{TURN_WRITE_CITE}, t.is_episodic=true, wired only by "
         f"CONTAINS), and the operator Points are written by "
         f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
         f"operator writer), which never writes extractedFrom. So "
@@ -1290,14 +1340,14 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8971-8975. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:13651 (\"stats\": out.get(\"stats\") "
+            f"the meta fold {META_FOLD_CITE} (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:13651 is the line its fix "
+            f"#9116 is the seam, and {META_FOLD_CITE} is the line its fix "
             f"must target; reading a wrapper instead is the instrumentation "
             f"E4's row forbids")
 
@@ -1325,12 +1375,12 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8961-8967. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:13651 "
+            f"is DROPPED at the same meta fold, {META_FOLD_CITE} "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:13651 is the line its fix must target")
+            f"{META_FOLD_CITE} is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "

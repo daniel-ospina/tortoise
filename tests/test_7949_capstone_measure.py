@@ -856,8 +856,10 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8971-8975) and `result["classify_later"]` (:8961-8967). The
-    drop is the meta fold at `tortoise/sdk.py:13651` — **re-derived from the tree at
-    this head, never from the other side of a merge.** Both this branch and `main`
+    drop is the meta fold at `"stats": out.get("stats")` inside
+    `_extract_session_v2` — **re-derived from the tree at this head, never from the
+    other side of a merge, so this docstring does not print the number either.**
+    Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4), so any typed number is
     stale on the next merge and a merge that "takes the newer side" silently
@@ -886,6 +888,39 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
+
+
+def test_the_probes_printed_sdk_cites_are_derived_from_the_tree_not_typed():
+    """The numbers the CAUSES print are the tree's, so an insert above cannot red them.
+
+    `#10199`'s head added 20 lines to `sdk.py` **above** the meta fold. This file's
+    expectation (`_META_FOLD_CITE`) is DERIVED, so it moved with the tree; the
+    probe's cause strings were TYPED, so they did not — and the pin above went red
+    over a change that broke no behaviour, pointing a lane at a cite repair while
+    the real subject was a capture. The probe now derives what it prints
+    (`_sdk_line`), and this leg holds the two derivations to each other AND to the
+    tree: a constant re-anchored on a different code string, a hand-typed number
+    put back, or a number that simply does not resolve reds HERE, at the moment it
+    is written, instead of at the next insertion above the symbol.
+
+    Non-vacuity (measured on the pre-fix probe): `sdk.py:13651` is
+    `"provider": getattr(model, "provider", "mock"),` at this head, so the
+    resolution leg below reddens on every typed-number version of these constants.
+    """
+    sdk_lines = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    anchors = (
+        (measure.META_FOLD_CITE, '"stats": out.get("stats")'),
+        (measure.REFERENCES_EDGE_CITE, "proj.link_source_to_event(source_key, event_id)"),
+        (measure.TURN_WRITE_CITE, "_TURN_WRITE_CYPHER = ("),
+    )
+    for cite, anchor in anchors:
+        assert re.fullmatch(r"tortoise/sdk\.py:\d+", cite), cite
+        line_no = int(cite.rsplit(":", 1)[1])
+        assert anchor in sdk_lines[line_no - 1], (
+            f"{cite} does not carry {anchor!r} — it reads {sdk_lines[line_no - 1]!r}")
+    assert measure.META_FOLD_CITE == _META_FOLD_CITE, (
+        "the probe and this pin derive the meta fold from different code strings: "
+        f"{measure.META_FOLD_CITE} vs {_META_FOLD_CITE}")
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -1219,8 +1254,8 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13651`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
-# ``tortoise/extractor_v2.py:8971-8975``
+# e.g. `tortoise/sdk.py`…`"stats": out.get("stats")`, ``tortoise/projection/edges.py:2432-2457``,
+# `edges.py:475`, ``tortoise/extractor_v2.py:8971-8975``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
