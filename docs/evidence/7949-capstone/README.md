@@ -219,7 +219,7 @@ touching the probe or these tests**.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:8608-8612`, `:8961-8975`). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:8597-8612`, `:8961-8975`). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -481,8 +481,8 @@ made V5 pass on a step nobody observed; its derivation figure was also circular 
 defined by the link it measures). `6020cbd5f` (the stamped run THIS one replaces) fixed that rule but
 left two prose defects this round repairs: its flag-on/no-activity cause was templated for the surface
 NAME while every citation in it was the VET pass's, so the S2.3 line sent a reader to code the
-classify pass never runs (`classify_later` at `:8473`, its `if classify_later and …` / `if items:`
-gates at `:8604`/`:8607`/`:8729`/`:8739`), and its absent-surface cause asserted "so the pass RAN"
+classify pass never runs (`classify_later` at `:8561`, its `if classify_later and …` / `if items:`
+gates at `:8692`/`:8695`/`:8817`/`:8827`), and its absent-surface cause asserted "so the pass RAN"
 from the forced-and-read-back flag alone — the very equation `_pass_ran` rejects — so an unobserved
 step read as a pass that ran and was merely hidden. Keeping any of them alongside the corrected run
 would leave two artifacts claiming to be THE measurement. **Superseding is how a row moves: re-run the probe, DELETE
