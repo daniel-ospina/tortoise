@@ -3380,8 +3380,13 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # That shape is what distinguishes a member from the identifiers sharing this
     # paragraph (`None`, `grep -E`, `no_journal`, `tortoise.hosted_api`), and it is
     # read off `flat`, so a word-preserving refill cannot move it.
+    # ⛔ CASE is not the claim (#10083 review P2, measured): `MESSAGES` → `messages`
+    # is a pure typographic edit that keeps the count, and it red this label pin
+    # with a message accusing the section of not counting its messages. The
+    # NUMERAL is what is read (and `.upper()`ed below), so the WORD's casing must
+    # not be able to red it.
     _c_label = re.search(
-        r"\(c\) The tenant-RESOLUTION faults — ([A-Za-z]+) MESSAGES", flat
+        r"\(c\) The tenant-RESOLUTION faults — ([A-Za-z]+) MESSAGES", flat, re.I
     )
     assert _c_label and _c_label.group(1).upper() in _NUMERALS, (
         "the exclusion (c) label no longer counts its emitted messages, so a "
@@ -3473,12 +3478,13 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         r"|of which\s+this grep\s+matches none"
         r"|none of which\s+are matched by this grep)",
         _excl_c,
+        re.I,
     ), (
         "exclusion (c) no longer says these faults are OUTSIDE recipe 1's "
         "grep — inverted, it tells the reader an empty recipe-1 read clears them"
     )
     assert not re.search(
-        _c_count_word + r" MESSAGES, (?:all|each) of which this grep", _excl_c
+        _c_count_word + r" MESSAGES, (?:all|each) of which this grep", _excl_c, re.I
     ), (
         "exclusion (c) claims the three resolution faults ARE in recipe 1's grep, "
         "which is false — recipe 1 greps `the record write did not happen`"
@@ -3671,9 +3677,11 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     )
     # Member presence only — the label's NUMERAL is derived at the (c) paragraph
     # above, so a literal `four` here would red an honest `five` relabel for no
-    # claim change (#10083 review cycle 18, P3).
+    # claim change (#10083 review cycle 18, P3). CASE is not the claim either:
+    # `MESSAGES` → `messages` keeps the member and the count, so this presence pin
+    # must be `re.I` (#10083 review P2, measured).
     assert re.search(
-        r"\(c\) The tenant-RESOLUTION faults — [A-Za-z]+ MESSAGES", flat
+        r"\(c\) The tenant-RESOLUTION faults — [A-Za-z]+ MESSAGES", flat, re.I
     ), (
         "the exclusion list does not name the resolution-fault member, so the "
         "count and the members disagree"
