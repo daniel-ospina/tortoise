@@ -6337,6 +6337,59 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     invocation = run["run"]
     assert '--junitxml="$PYTEST_JUNIT"' in invocation
     assert "-o junit_family=xunit1" in invocation
+    # (d) the resolve step comes FIRST (it publishes $GITHUB_ENV, which only
+    # reaches SUBSEQUENT steps) and fails CLOSED on a missing RUNNER_TEMP — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
+    resolve = steps[0]
+    assert resolve.get("name", "").startswith("Resolve per-job pytest artifact paths")
+    assert "${RUNNER_TEMP:?" in resolve["run"], \
+        "the resolve step must REFUSE to fall back to the host-global /tmp"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"), ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'echo "{var}=$base/{leaf}"' in resolve["run"]
+    # ... and no part of THIS job may name the host-global artifact again. The
+    # literals are what the collision needs, so their absence is the property —
+    # ACROSS EVERY KEY OF EVERY STEP, not just `run:`. All three literals lived in
+    # the `upload-artifact` step's `with: path:` block before #10028, so a
+    # `run`-only scan is green on exactly the key the collision rides: reverting
+    # that block re-points the upload at the host-global files while the step's
+    # own `if-no-files-found: ignore` + `continue-on-error: true` keep the leg
+    # green on ANOTHER job's `pytest.log`. `json.dumps` carries every YAML value
+    # verbatim (parsed data holds no comments), so the `"# "`-strip still forgives
+    # a shell comment that names a RETIRED path.
+    def host_global_hits(step_list):
+        blob = json.dumps(step_list)
+        return [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                                "/tmp/expected-nodeids.txt")
+                if lit in blob.replace("# " + lit, "")]
+
+    assert host_global_hits(steps) == [], (
+        f"{host_global_hits(steps)} is host-global: two concurrent jobs on a "
+        f"shared runner clobber it and red this leg on the clash (#10028, #7815)")
+    # ⛔ NON-VACUITY, asked of a COPY: reverting ONLY the upload's `path:` block to
+    # the pre-#10028 literals — the one shape a `run`-only scan cannot see — must
+    # red. The real file cannot be both correct and reverted, so the mutation is
+    # the only way to show the guard actually discriminates.
+    upload = next(s for s in steps
+                  if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+    reverted = [
+        {**s, "with": {**s["with"],
+                        "path": "/tmp/pytest.log\n/tmp/junit.xml\n"
+                                "/tmp/expected-nodeids.txt"}}
+        if s is upload else s
+        for s in steps
+    ]
+    assert host_global_hits(reverted) == ["/tmp/pytest.log", "/tmp/junit.xml",
+                                          "/tmp/expected-nodeids.txt"], (
+        "the guard must red on a reverted upload `path:` — that block is where "
+        "all three host-global literals live, and it is not a `run:` key")
+    # ...and this is the fail-open that mutation closes: the retired `run`-only
+    # scan sees NOTHING in those same steps, so it certified a reverting leg green.
+    assert [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                            "/tmp/expected-nodeids.txt")
+            if lit in "\n".join(s.get("run", "") for s in reverted)] == [], (
+        "a `run`-only scan is blind to the upload's `path:` — the blank result is "
+        "the defect this scan's broader key set fixes, not a passing check")
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
     cmdline = next(line for line in invocation.splitlines()
