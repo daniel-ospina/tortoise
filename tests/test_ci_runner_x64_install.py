@@ -888,6 +888,50 @@ def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Pat
         )
         assert "STATIC label set" in r.stderr, f"{name}: {r.stderr}"
 
+    # ⛔ AND A PARTIAL READ REFUSES **BEFORE** IT VERDICTS ANYTHING. The three exit-4 arms used to
+    # sit AFTER the per-label loop and after the block-level `⛔ UNCOVERED` message, so a repo with
+    # ONE unreadable `runs-on:` block AND a zero-answer `ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on`
+    # printed the full UNCOVERED verdict plus its `--repair-labels` remedy and THEN exited 4: the
+    # exit code disowning the verdict it had just printed (the EXIT header and the runbook define `4`
+    # as "NO verdict" — `docs/ops/ci-runner-x64.md`, Exit codes), and the printed remedy unable to
+    # fix the actual cause, since relabelling runners cannot parse an unreadable block. That is the
+    # "a red whose printed remedy cannot work is a false red" rule this block applies to
+    # `ubuntu-22.04` and to the gate-owned `ubuntu-latest`. The `b:` job below is a COVERED sibling
+    # that gives the loop a verdict to print; `c:` is the zero-answer bare pin (stub pool carries
+    # `self-hosted-x64,ubuntu-latest`, never `ubuntu-24.04`) that made the verdict fire.
+    #
+    # Mutation: move the three exit-4 arms back below the loop -> `UNCOVERED` reappears in stderr at
+    # rc 4 -> RED.
+    partial = (
+        "jobs:\n  a:\n    runs-on: ${{ matrix.os }}\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        "  c:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+    repo = _repo_with_workflows(tmp_path / "partial-and-unreadable", partial)
+    r = _run(
+        "--status",
+        env=_env(
+            tmp_path,
+            PATH=f"{bindir}:{os.environ['PATH']}",
+            CI_RUNNER_OS_LABEL="on",
+        ),
+        cwd=repo,
+    )
+    assert r.returncode == 4, (
+        "an unreadable block means NO verdict — the pool's coverage of the readable labels is not "
+        f"a verdict either, so this must be 4, not {r.returncode}: {r.stderr}"
+    )
+    assert "STATIC label set" in r.stderr, r.stderr
+    assert "UNCOVERED" not in r.stderr, (
+        "the block printed the ⛔ UNCOVERED verdict and its `--repair-labels` remedy and THEN "
+        "refused with 4 — the exit code disowns the verdict just printed, and the printed remedy "
+        "cannot fix an unreadable block. The no-verdict arms must run BEFORE the per-label loop: "
+        f"{r.stderr}"
+    )
+    assert "ubuntu-24.04 = 0 of" not in r.stderr, (
+        f"a partial read must not verdict any label, but a per-label verdict line was printed: {r.stderr}"
+    )
+
 
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
 def test_dry_run_decides_nothing_and_calls_nothing(tmp_path: Path):
@@ -1452,6 +1496,27 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
     n = int(m.group(1))
     assert "would register a DIFFERENT arch label" in installer[n - 1], (
         f"the runbook says the arch refusal dies at :{n}, but that line is {installer[n - 1]!r}"
+    )
+
+    # ⛔ THE FIFTH SIBLING SENTENCE, AND THE ONE THAT HAD DRIFTED RED-FREE AT THIS HEAD. The map
+    # above re-derivation moved the runbook's `--uninstall` proof ref off `is_runner_install` and
+    # onto `:268` — a `# shellcheck disable=SC1091` pragma inside `resolve_os_label()` — while the
+    # function itself was 54 lines earlier (on `main` the sentence cited `:173`, and `:173` WAS the
+    # function, so the re-derivation is what moved it). An operator sent to `:268` to check the "is
+    # this provably a runner install?" proof lands in the OS-label resolver instead, which is
+    # precisely the class the doc itself calls worse than no ref at all. Pinned by SENTENCE, not by
+    # the `anchors` dict, because that dict's regex requires the ref to follow the label
+    # immediately and this sentence spells it `` `is_runner_install` at `:NNN` ``.
+    m = re.search(r"`is_runner_install` at `:(\d+)`", whole)
+    assert m is not None, (
+        "the runbook no longer cites `is_runner_install` by line — re-anchor this pin rather than "
+        "deleting it (an unpinned ref is how it drifted into the OS-label resolver)"
+    )
+    n = int(m.group(1))
+    assert re.search(r"^is_runner_install\(\)", installer[n - 1]), (
+        f"the runbook cites :{n} as the `is_runner_install` proof, but that line is "
+        f"{installer[n - 1]!r} (the definition is at "
+        f"{[i + 1 for i, line in enumerate(installer) if re.search(r'^is_runner_install\\(\\)', line)]})"
     )
 
 

@@ -170,9 +170,9 @@ dispatched**: no red, no green, and **no merges at all**. On 2026-10-28 the seco
 being paid, so the live pool carries `ubuntu-24.04` as a temporary, explicitly-flagged mitigation —
 and the installer's default stays `off`, so a fresh box does not silently reverse #6897.
 
-⛔ **The measurement the departure is built on is FAVOURABLE, and the freshest owner record on
-#6897 is not.** "The pool is ~2x slower" above is the 2026-10-28 reading. Re-measured like for like
-on the same 365 nodeids (#6897, `daniel-ospina`, `2026-10-29T04:49:36Z`):
+⛔ **The measurement the departure is built on is FAVOURABLE, and the freshest owner record is
+not.** On **#6897**, "The pool is ~2x slower" above is the 2026-10-28 reading. Re-measured like for
+like on the same 365 nodeids (#6897, `daniel-ospina`, `2026-10-29T04:49:36Z`):
 
 | leg | nodeids | class | pytest wall | job wall | conclusion |
 | --- | --- | --- | --- | --- | --- |
@@ -264,13 +264,13 @@ The EXIT is decided per CLASS, not "any zero-answer label":
   (⇒ `off`), and a shell variable cannot say what the last installer pass, the autoscaler timer, or
   a peer lane asked for. Two consequences, both of which this block now states instead of papering
   over:
-  * **`n == 0` with the flag off cannot be NAMED.** It is consistent with BOTH "the #6897 pin
+  - **`n == 0` with the flag off cannot be NAMED.** It is consistent with BOTH "the #6897 pin
     applied correctly" (nothing to do) and "asked and gone" — the pool eroded to zero one fill at a
     time, which is the incident state. The block reports the measurement plus both readings, exit
     `0`. It used to assert the harmless one (`NOT the incident state`), which cleared exactly the
     erosion this block exists to surface — a fail-open in the blocking direction, in the default
     invocation. To get the verdict anyway, run `CI_RUNNER_OS_LABEL=on --status` (read-only).
-  * **`n > 0` OUTVOTES THE FLAG.** A self-hosted runner's labels are explicitly assigned — GitHub's
+  - **`n > 0` OUTVOTES THE FLAG.** A self-hosted runner's labels are explicitly assigned — GitHub's
     REST surface is *Add custom labels* / *Set custom labels* / *Remove all custom labels*, and
     registration labels come from `config.sh --labels`, so a runner never acquires one on its own.
     A measured carrier is therefore proof that SOME actor asked the pool to serve the label, and a
@@ -358,7 +358,7 @@ installing the unit, confirm **one** `Runner.Listener` per directory and kill th
 | | |
 | --- | --- |
 | Runner names | `pi-runner-x64-1`, `pi-runner-x64-2` |
-| Labels | `self-hosted`, `Linux`, `X64` (host-derived) + `self-hosted-x64` (custom, this arch's own) + `ubuntu-latest` while the fallback is engaged + `ubuntu-24.04` **only** when an operator opts in with `CI_RUNNER_OS_LABEL=on|auto` (default `off`; the live pool is opted in as the temporary mitigation described in the label contract above) |
+| Labels | `self-hosted`, `Linux`, `X64` (host-derived) + `self-hosted-x64` (custom, this arch's own) + `ubuntu-latest` while the fallback is engaged + `ubuntu-24.04` **only** when an operator opts in with `CI_RUNNER_OS_LABEL=on\|auto` (default `off`; the live pool is opted in as the temporary mitigation described in the label contract above) |
 | Directories | `/opt/gh-runner-x64` (instance 1), `/opt/gh-runner-x64-2` (instance 2) |
 | Service units | `actions.runner.daniel-ospina-tortoise.pi-runner-x64-<N>.service` (system mode, **enabled**) |
 | Version | pinned to the pool's `2.337.0`, tarball sha256 pinned in the installer |
@@ -425,23 +425,23 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:977` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:799` (arch refusal dies at `:804`) and `uninstall` `:852` ·
-  guards at `:799-849` (forks `:807`, disk `:827`, cpu/memory `:834` — `:847`, the memory guard,
-  is the last one) · sha256 pin + registration at `:988-998` (verify `:988`, token `:991`, one
-  argv `:996-997`, `config.sh` `:998`; the run at `:980` is the dry-run echo) · systemd
-  install/start at `:1008-1010` · label resolution at `:222-319` (`fallback_engaged` `:222`,
+- `--count N` → `tools/install-ci-runner-x64.sh:992` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:814` (arch refusal dies at `:819`) and `uninstall` `:867` ·
+  guards at `:814-864` (forks `:822`, disk `:842`, cpu/memory `:849` — `:862`, the memory guard,
+  is the last one) · sha256 pin + registration at `:1003-1013` (verify `:1003`, token `:1006`, one
+  argv `:1011-1012`, `config.sh` `:1013`; the run at `:995` is the dry-run echo) · systemd
+  install/start at `:1023-1025` · label resolution at `:222-319` (`fallback_engaged` `:222`,
   `resolve_os_label` `:250`, `resolve_labels` `:282`, whose body ends at its `}` on `:319`) ·
-  `repair` `:739` · `--print-labels` `:772` · label-coverage at `:337-734` (section separator at
-  `:337`, its `say` header at `:344`, the three "read nothing" arms at `:707`, `:715` and `:724`,
-  the uncovered verdict at `:732`).
+  `repair` `:754` · `--print-labels` `:787` · label-coverage at `:337-749` (section separator at
+  `:337`, its `say` header at `:344`, the three "read nothing" arms at `:552`, `:561` and `:570`,
+  the uncovered verdict at `:747`).
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:186-190`, the `case`
   through its `esac`): a `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op
   that reports success having deregistered nothing. `CI_RUNNER_OS_LABEL` is validated the same
   way and in the same place (`:245-247`), so a typo is refused in `--status` and `--uninstall`
   too — not only in the three modes that resolve labels.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:851-960`; the proof is `is_runner_install` at `:268`, which accepts `.runner` or
+  gone** (`:866-975`; the proof is `is_runner_install` at `:214`, which accepts `.runner` or
   `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -463,7 +463,10 @@ falls back.
   `.github/workflows/*.yml|*.yaml` where `--status` was run, workflows that name no
   single-label `runs-on:` at all, or a `runs-on:` with a member that is not a static label (a
   `${{ … }}` expression in the value OR in any single member of a list, or a spelling this parser
-  does not understand). Nothing was read, so nothing was cleared: re-run `--status`
+  does not understand). Nothing was read, so nothing was cleared — and on a partial read the block
+  prints NO per-label verdict and NO remedy, because a `4` that follows a `⛔ UNCOVERED` line
+  contradicts itself (and the only remedy it could print, `--repair-labels`, relabels runners and
+  cannot parse the unreadable block): re-run `--status`
   from the repo root, because an empty read is not a coverage verdict — and neither is a PARTIAL
   one · `5` label-coverage WAS read and found a required label that **this pool is asked to serve**
   with no self-hosted answer — the erosion state: the operator opted in (`CI_RUNNER_OS_LABEL=on`,
@@ -476,8 +479,8 @@ falls back.
   operator or a future `--status && …` guard, not a change any caller currently reads.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:799`, the `MODE = install`
-  block; the refusal itself dies at `:804`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:814`, the `MODE = install`
+  block; the refusal itself dies at `:819`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 

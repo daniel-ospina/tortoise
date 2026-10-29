@@ -393,7 +393,6 @@ if [ "$MODE" = status ]; then
     *)              shell_asks_os_label=0 ;;
   esac
   uncovered=0
-  labels_seen=0
   # ⛔ A WHOLE-LINE YAML COMMENT IS NOT A `runs-on:` LINE. Unanchored, `# legacy: runs-on: windows-2022`
   # was counted as a required label and printed a false ⛔ UNCOVERED, and this tree's own comments
   # name both real labels — the block printed 85/12 where the real lines are 77/9 (2026-10-29).
@@ -527,8 +526,52 @@ if [ "$MODE" = status ]; then
   # from a false green into an honest no-verdict — the choice every other arm here already made.
   runs_on_unreadable="$(printf '%s\n' "$coverage" | grep -c '^!' || true)"
   case "$runs_on_unreadable" in ''|*[!0-9]*) runs_on_unreadable=0 ;; esac
-  for label in $(printf '%s\n' "$coverage" | grep -v '^!' | sort -u); do
-    labels_seen=$((labels_seen + 1))
+  # ⛔ THE LABEL SET IS COLLECTED ONCE, BEFORE THE LOOP, BECAUSE THE REFUSALS BELOW MUST RUN BEFORE
+  # ANY VERDICT. Both the `labels_seen == 0` read and the loop iterate the same set, so they share
+  # this one pipeline — two readers, one read.
+  coverage_labels="$(printf '%s\n' "$coverage" | grep -v '^!' | sort -u)"
+  labels_seen=0
+  if [ -n "$coverage_labels" ]; then
+    labels_seen="$(printf '%s\n' "$coverage_labels" | grep -c . || true)"
+  fi
+  case "$labels_seen" in ''|*[!0-9]*) labels_seen=0 ;; esac
+  # ⛔ ALL THREE "NO VERDICT" ARMS RUN **BEFORE** THE LOOP THAT PRINTS VERDICTS. They used to sit
+  # after it, so a repo with ONE unreadable `runs-on:` block AND a zero-answer `ubuntu-24.04` under
+  # `CI_RUNNER_OS_LABEL=on` printed the full ⛔ UNCOVERED verdict and its `--repair-labels` remedy
+  # and THEN exited `4` — the exit code disowning the verdict it had just printed (the EXIT header
+  # and the runbook define `4` as "NO verdict"), and the printed remedy fixing nothing, since the
+  # cause is an unparsed block and relabelling runners cannot parse it. That is the same "a red
+  # whose printed remedy cannot work is a false red" rule this block applies to `ubuntu-22.04` and
+  # to the gate-owned `ubuntu-latest`. A partial read refuses before it verdicts anything.
+  # ⛔ "NOTHING TO CHECK" IS NOT "ALL COVERED". Run from a directory with no .github/workflows (or on
+  # a repo whose workflows name no single-label runs-on) the loop below prints its header, zero rows,
+  # and exits 0 — a clean bill of health from the one instrument meant to prove coverage. Refuse
+  # instead, with its own exit code so a caller can tell it apart from a real zero-answer label.
+  # ⛔ EACH GLOB IS TESTED SEPARATELY: `ls *.yml *.yaml` exits 2 when only ONE of them matches, so a
+  # repo with valid `.yaml` workflows and no `.yml` reads as "nothing there" and exits 4.
+  if [ ! -d .github/workflows ] \
+      || { ! ls .github/workflows/*.yml >/dev/null 2>&1 && ! ls .github/workflows/*.yaml >/dev/null 2>&1; }; then
+    say "⛔ label-coverage read NOTHING: no .github/workflows/*.yml|*.yaml in $(pwd) — run --status from the repo root. An empty read is not a coverage verdict."
+    exit 4
+  fi
+  # ⛔ AND A PARTIAL READ IS NOT A VERDICT EITHER. This arm is what makes the extractor's blind
+  # spots fail CLOSED: a `runs-on:` it produced no label for (an expression, or a spelling it does
+  # not parse) is no-verdict, not covered. It sits before the covered/uncovered verdict so an
+  # unreadable construct can never be outvoted by the labels that did parse.
+  if [ "$runs_on_unreadable" -gt 0 ]; then
+    say "⛔ label-coverage could not read $runs_on_unreadable runs-on: block(s) as a STATIC label set (a matrix/expression value, or a YAML spelling this parser does not understand) — a partial read is not a coverage verdict."
+    exit 4
+  fi
+  # ⛔ AND THE DIRECTORY EXISTING IS NOT THE SAME PREDICATE: a repo whose workflows are all `uses:`
+  # re-usable-workflow callers (or any shape with no single-label `runs-on:`) satisfies the arm above
+  # and still yields ZERO rows. Counting the labels the loop actually FOUND is the only read that
+  # distinguishes "covered" from "did not look" — measured: a dir with one `uses:`-only workflow
+  # printed the header, no rows, and exited 0.
+  if [ "$labels_seen" -eq 0 ]; then
+    say "⛔ label-coverage parsed .github/workflows/*.yml|*.yaml in $(pwd) and found NO runs-on label to check — an empty read is not a coverage verdict."
+    exit 4
+  fi
+  for label in $coverage_labels; do
     # ⛔ n OF WHO? The denominator has to be the runners that COULD answer this label, or the
     # reading is a false red on a two-arch pool: the ARM64 runners must never claim the bare
     # `ubuntu-<version>` (that is the arch invariant `_preserve_labels` now enforces), so
@@ -695,34 +738,6 @@ if [ "$MODE" = status ]; then
     say "⛔ UNCOVERED label(s) above. This pool IS asked to serve them and does not. To (re-)apply this script's label set INCLUDING $OS_LABEL, run:"
     say "     CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} $0 --repair-labels --count <N>"
     say "   Run it with the variable UNSET and the PUT body has no $OS_LABEL in it — that REMOVES the mitigation from every runner it touches."
-  fi
-  # ⛔ "NOTHING TO CHECK" IS NOT "ALL COVERED". Run from a directory with no .github/workflows (or on
-  # a repo whose workflows name no single-label runs-on) the loop above prints its header, zero rows,
-  # and exits 0 — a clean bill of health from the one instrument meant to prove coverage. Refuse
-  # instead, with its own exit code so a caller can tell it apart from a real zero-answer label.
-  # ⛔ EACH GLOB IS TESTED SEPARATELY: `ls *.yml *.yaml` exits 2 when only ONE of them matches, so a
-  # repo with valid `.yaml` workflows and no `.yml` reads as "nothing there" and exits 4.
-  if [ ! -d .github/workflows ] \
-      || { ! ls .github/workflows/*.yml >/dev/null 2>&1 && ! ls .github/workflows/*.yaml >/dev/null 2>&1; }; then
-    say "⛔ label-coverage read NOTHING: no .github/workflows/*.yml|*.yaml in $(pwd) — run --status from the repo root. An empty read is not a coverage verdict."
-    exit 4
-  fi
-  # ⛔ AND A PARTIAL READ IS NOT A VERDICT EITHER. This arm is what makes the extractor's blind
-  # spots fail CLOSED: a `runs-on:` it produced no label for (an expression, or a spelling it does
-  # not parse) is no-verdict, not covered. It sits before the covered/uncovered verdict so an
-  # unreadable construct can never be outvoted by the labels that did parse.
-  if [ "$runs_on_unreadable" -gt 0 ]; then
-    say "⛔ label-coverage could not read $runs_on_unreadable runs-on: block(s) as a STATIC label set (a matrix/expression value, or a YAML spelling this parser does not understand) — a partial read is not a coverage verdict."
-    exit 4
-  fi
-  # ⛔ AND THE DIRECTORY EXISTING IS NOT THE SAME PREDICATE: a repo whose workflows are all `uses:`
-  # re-usable-workflow callers (or any shape with no single-label `runs-on:`) satisfies the arm above
-  # and still yields ZERO rows. Counting the labels the loop actually FOUND is the only read that
-  # distinguishes "covered" from "did not look" — measured: a dir with one `uses:`-only workflow
-  # printed the header, no rows, and exited 0.
-  if [ "$labels_seen" -eq 0 ]; then
-    say "⛔ label-coverage parsed .github/workflows/*.yml|*.yaml in $(pwd) and found NO runs-on label to check — an empty read is not a coverage verdict."
-    exit 4
   fi
   # ⛔ THE INCIDENT STATE IS NOT SUCCESS. Exit 0 used to cover BOTH "every label covered" and "a
   # required label has no runner at all" — so `--status && …` could not tell the state that blocks
