@@ -245,9 +245,14 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
       node) and is what ``#8398``'s replay contract and the shipped pins are
       written against. ⚠️ #3590 briefly made this arm resolve-only; that was
       withdrawn — see ``_mint_subject_stub``'s docstring, which records why the
-      D9 rule against fold-time mints does not apply to a name-keyed stub, and
-      what the LIVE half of D9 actually requires (the SDK door registers the
-      Subject it references, so a NEW journal carries a ``SubjectAdded``).
+      D9 rule against fold-time mints does not apply to a name-keyed stub.
+      ⛔ It is NOT discharged upstream: since #3590 D1 (RULED 2026-10-26) the
+      SDK's Event door registers NOTHING for a mention, so a NEW journal carries
+      no ``SubjectAdded`` for this name and this replay-time mint is the LIVE
+      mint too — a node whose `id` IS its `name`, the R1 shape, open as #8914.
+      (An earlier revision of this sentence claimed the door registered the
+      Subject; D1 deleted that door behaviour and the claim was not deleted
+      with it — #9876 review P2.)
     * **``aboutDocument`` (Source) is RESOLVE-ONLY**, and for a sharper reason: a
       miss is logged and skipped, never minted, because a phantom Source would
       silently mis-point the resurrected edge (adversarial class B1). D10 §4.4
@@ -1583,10 +1588,13 @@ class _EdgeHandlers:
         # resolve-only for a while and that is WITHDRAWN: the stub is
         # name-KEYED, so its id is a pure function of the MERGE key and replay
         # reproduces it exactly — the mint D9 forbids is the OPAQUE one, not
-        # this one (see the helper's docstring). The live half of D9 is kept
-        # upstream, on the producer: the SDK's Event door registers the Subject
-        # it references, so a NEW journal carries a ``SubjectAdded`` for it and
-        # does not depend on a replay-time stub.
+        # this one (see the helper's docstring). ⛔ It is NOT covered upstream:
+        # since #3590 D1 (RULED 2026-10-26) the SDK's Event door registers
+        # NOTHING for a mention — "an unresolvable mention drops its link,
+        # records the miss, and mints nothing" — so a NEW journal carries no
+        # ``SubjectAdded`` for this name and DOES depend on this replay-time
+        # mint. That mint writes `id` = `name` (the R1 shape): the residual is
+        # #8914, not a producer duty the door discharges (#9876 review P2).
         #
         # `mint_if_absent` is True on purpose: it is the record's claim about
         # the construction this fallback names, and BOTH arms now honour it

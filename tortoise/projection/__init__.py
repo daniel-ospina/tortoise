@@ -8822,10 +8822,17 @@ def journal_object_surviving_keys(
             id_to_name[oid] = name
         elif t == "EventRecorded":
             # #3590: `_event_plain_merge` no longer MINTS Object/Subject name
-            # stubs for a mention — the projection never mints (a fold-time mint
-            # is not replay-deterministic), and the SDK door registers every
-            # `about*`/`subject`/`object` name before the event is journaled. So
-            # this record contributes NO Object carrier of its own.
+            # stubs for a mention — the fold RESOLVES the name and, when it
+            # resolves to no live holder, drops the link and records the exempt
+            # `unfolded-mention`. ⛔ NOT because the door registers the names:
+            # since D1 (RULED 2026-10-26) the door mints nothing for a mention
+            # either ("an unresolvable mention drops its link, records the
+            # miss, and mints nothing"), so a claim that it does is a reason
+            # that stopped being true (#9876 review P2). The conclusion stands
+            # on the fold's resolve-only arm: this record contributes NO Object
+            # carrier of its own. (The one surviving name-keyed mint is
+            # `aboutSubject`'s `_mint_subject_stub`, #8914 — the `about` leg,
+            # not this one.)
             pass
         elif t == "EntityMutated":
             rid, label = ev.get("id"), ev.get("label")
