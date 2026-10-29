@@ -519,6 +519,31 @@ def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Pat
     assert "PARTIAL" in r.stderr, (
         f"a label only half the pool answers must not read as plain coverage: {r.stderr}"
     )
+    # ⛔ AND THE REMEDY IS CLASS-CORRECT, because one message for all classes prescribed a fix that
+    # cannot apply. `ubuntu-latest` is the GATE's label: `scripts/ci_runner_gate.sh` attaches and
+    # detaches it, and this installer never registers it — so telling an operator to "re-apply with
+    # CI_RUNNER_OS_LABEL=on --repair-labels" during a fallback transition sends them to a command
+    # that does not change this label at all. Only the bare `ubuntu-<version>` pin is re-applied by
+    # this script, so only that class may carry the instruction.
+    assert "nothing to re-apply here" in r.stderr, (
+        f"a gate-owned label must not be given this script's re-apply instruction: {r.stderr}"
+    )
+    assert "CI_RUNNER_OS_LABEL=on --repair-labels" not in r.stderr, (
+        f"the repair instruction cannot apply to a label the gate owns: {r.stderr}"
+    )
+
+    # CONTROL — the bare pin, half-covered, is the class where the instruction IS correct (a fill or
+    # re-registration that omitted it is exactly what erodes coverage).
+    half = _stub_gh(tmp_path / "gh-half", "x1\tself-hosted-x64,ubuntu-24.04\nx2\tself-hosted-x64")
+    pin = _repo_with_workflows(
+        tmp_path / "pin", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{half}:{os.environ['PATH']}"), cwd=pin)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-24.04 = 1 of 2 runner(s)" in r.stderr, r.stderr
+    assert "CI_RUNNER_OS_LABEL=on --repair-labels" in r.stderr, (
+        f"a half-covered bare pin IS this script's to re-apply: {r.stderr}"
+    )
 
     # ⛔ AND THE MIRROR: `ubuntu-latest` with NO carrier is the HEALTHY state, not a block. The gate
     # detaches that label from the pool whenever GitHub-hosted is healthy, so a zero-answer
@@ -574,6 +599,83 @@ def test_label_coverage_does_not_verdict_a_custom_label_that_starts_ubuntu_digit
     r = _run("--status", env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}"), cwd=bare)
     assert r.returncode == 5, (r.returncode, r.stderr)
     assert "every PR stays BLOCKED" in r.stderr, r.stderr
+
+
+# ── 3b. every DOCUMENTED `runs-on` form must be read, or refused ────────────────────────────
+def test_label_coverage_reads_every_documented_runs_on_form(tmp_path: Path):
+    """A required label in ANY documented `runs-on` spelling must be counted — or refused, never cleared.
+
+    GitHub documents `runs-on` as a single string, an **array of strings**, a variable, and a
+    `key: value` pair using the `group` or `labels` keys. The extractor this replaces required the
+    value on the SAME line and unquoted DOUBLE quotes only, so three of those four forms were
+    cleared to `exit 0` on the incident state itself:
+
+    * `runs-on: ['ubuntu-24.04']` kept its single quotes, matched no class arm, fell to the `*)`
+      report arm ("not a label this pool serves") and left `uncovered=0`;
+    * a BLOCK sequence and a `group:`/`labels:` mapping yielded NOTHING at all, so the label was
+      never counted and the read looked covered.
+
+    Each fixture carries a second, COVERED label on purpose: that makes the read PARTIAL, which is
+    the shape neither exit-4 arm could see (the read was not empty, so `labels_seen` never hit 0).
+
+    Mutation (measured against the pre-fix script): restore the three-grep pipeline -> the four
+    spellings below exit 0 instead of 5 -> RED.
+    """
+    # The pool answers `ubuntu-latest` and nothing else: the required pin has NO self-hosted answer.
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    forms = {
+        "block sequence": (
+            "jobs:\n  a:\n    runs-on:\n      - self-hosted-x64\n      - ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "single-quoted flow sequence": (
+            "jobs:\n  a:\n    runs-on: ['ubuntu-24.04']\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "labels: mapping, block list": (
+            "jobs:\n  a:\n    runs-on:\n      group: pool\n      labels:\n        - ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "labels: mapping, inline flow": (
+            "jobs:\n  a:\n    runs-on: {group: pool, labels: [ubuntu-24.04]}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+    }
+    for i, (name, body) in enumerate(forms.items()):
+        repo = _repo_with_workflows(tmp_path / f"form{i}", body)
+        r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=repo)
+        assert r.returncode == 5, (
+            f"{name}: a required label written this way has NO self-hosted answer, so this is the "
+            f"incident state and must exit 5, not {r.returncode}: {r.stderr}"
+        )
+        assert "ubuntu-24.04 = 0 of 1 self-hosted runner(s)" in r.stderr, f"{name}: {r.stderr}"
+        assert "every PR stays BLOCKED" in r.stderr, f"{name}: {r.stderr}"
+
+    # ⛔ AND A SPELLING NOBODY PARSED IS `exit 4`, NOT `0`. A matrix expression has no static label
+    # set to verdict, so the honest answer is "no verdict" — the fail-closed direction every other
+    # arm of this block already chose. The covered `ubuntu-latest` here is what makes this a PARTIAL
+    # read: without the backstop it would sail through as coverage.
+    expr = _repo_with_workflows(
+        tmp_path / "expr",
+        "jobs:\n  a:\n    runs-on: ${{ matrix.os }}\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=expr)
+    assert r.returncode == 4, (
+        f"a `runs-on` whose labels are not a static label set must refuse, not clear: {r.stderr}"
+    )
+    assert "STATIC label set" in r.stderr, r.stderr
+
+    # CONTROL — `group:` alone names a runner GROUP, not a label: it must be consumed, never counted
+    # (counting `pool` would print a false UNCOVERED for a "label" no runner is supposed to carry).
+    grp = _repo_with_workflows(
+        tmp_path / "grp",
+        "jobs:\n  a:\n    runs-on:\n      group: pool\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=grp)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "pool" not in r.stderr, f"a runner GROUP was counted as a label: {r.stderr}"
 
 
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
@@ -1095,6 +1197,50 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
         "the runbook's installer line map no longer lands on what it names "
         "(re-derive the numbers from the installer): "
         + "; ".join(f"{k}: doc says :{n}, the anchor is at {actual}" for k, (n, actual) in wrong.items())
+    )
+
+    # ⛔ AND THE **SIBLING** BULLETS, WHICH THE MAP PIN ABOVE CANNOT SEE. Three refs sat OUTSIDE the
+    # map bullet, so they were only range-checked (`1 <= n <= EOF`) — and an offset-shifted number
+    # always passes a range check. All three had been shifted by a constant that matched main's
+    # numbers plus a line delta, and one of them landed on the INSTALL disk guard
+    # (`die "disk headroom: …"`) while its sentence named the uninstall block: a fixer sent there
+    # edits the capacity guard on the destructive path, which is worse than no ref at all. They are
+    # pinned by SENTENCE here so that class reds instead of sailing through.
+    whole = "\n".join(lines)
+
+    m = re.search(r"`--uninstall` deletes only what it can PROVE[^(]*\(`:(\d+)-(\d+)`", whole)
+    assert m is not None, (
+        "the runbook no longer cites the `--uninstall` span — re-anchor this pin rather than "
+        "deleting it (an unpinned span is how it drifted onto the install disk guard)"
+    )
+    lo, hi = int(m.group(1)), int(m.group(2))
+    span = "\n".join(installer[lo - 1 : hi])
+    assert "# ── uninstall ──" in span, (
+        f"the runbook's --uninstall span :{lo}-{hi} does not begin inside the uninstall section "
+        f"(it starts at {installer[lo - 1]!r})"
+    )
+    assert 'if [ "$MODE" = uninstall ]' in span, (
+        f"the runbook's --uninstall span :{lo}-{hi} does not contain the uninstall mode block"
+    )
+    assert installer[hi - 1].strip() == "fi", (
+        f"the runbook's --uninstall span ends at :{hi} = {installer[hi - 1]!r}, not at the block's fi"
+    )
+
+    # The arch refusal, cited twice by NUMBER outside the map: `(:NNN, the MODE = install block)` and
+    # `the refusal itself dies at :NNN`. Both were off by the same constant, one of them landing on a
+    # comment line. One is a block start, the other is a `die` — checking them by shape, not range.
+    m = re.search(r"`:(\d+)`, the `MODE = install`", whole)
+    assert m is not None, "the runbook no longer cites the `MODE = install` block — re-anchor this pin"
+    n = int(m.group(1))
+    assert re.search(r'^if \[ "\$MODE" = install \]', installer[n - 1]), (
+        f"the runbook cites :{n} as the `MODE = install` block, but that line is {installer[n - 1]!r}"
+    )
+
+    m = re.search(r"the refusal itself dies at `:(\d+)`", whole)
+    assert m is not None, "the runbook no longer cites where the arch refusal dies — re-anchor this pin"
+    n = int(m.group(1))
+    assert "would register a DIFFERENT arch label" in installer[n - 1], (
+        f"the runbook says the arch refusal dies at :{n}, but that line is {installer[n - 1]!r}"
     )
 
 

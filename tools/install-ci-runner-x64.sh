@@ -75,7 +75,9 @@
 #        LEFT intact rather than deleted out from under an enabled unit or a live registration), a
 #        tool missing from PATH, or a failed remote read (`--status`).
 #     4  label-coverage could not read the workflows, so it has NO verdict — run `--status` from
-#        the repo root. An empty read is not a clean bill of health.
+#        the repo root. An empty read is not a clean bill of health, and neither is a PARTIAL one:
+#        a `runs-on:` whose labels are not a static label set (a `${{ matrix.os }}` expression, or
+#        a spelling this parser does not understand) is refused rather than cleared.
 #     5  label-coverage WAS read and found a required label with NO self-hosted answer — the
 #        incident state (every PR blocked). 0 does not mean "covered": read the report.
 set -uo pipefail
@@ -359,11 +361,112 @@ if [ "$MODE" = status ]; then
   # ⛔ AND `*.yaml` IS AS REAL AS `*.yml` — GitHub accepts both. Globbing only `*.yml` read NOTHING
   # on a repo whose workflows are `.yaml`, which the empty-read arm below then reports as exit 4 (a
   # false failure, not a false pass) while `--status` never sees the labels it exists to check.
-  for label in $(grep -rhvE '^[[:space:]]*#' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
-      | grep -oE '^[[:space:]]*runs-on:[[:space:]]*(\[[^]]*\]|[A-Za-z0-9._/-]+)' \
-      | sed -E 's/^[[:space:]]*runs-on:[[:space:]]*//; s/^\[//; s/\]$//' | tr ',' '\n' \
-      | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^"//; s/"$//' \
-      | grep -vE '^(\$|[[:space:]]*$)' | sort -u); do
+  # ⛔ EXTRACTION IS A STATE MACHINE, NOT THREE GREPS. The pipeline this replaces required the
+  # value on the SAME line and unquoted DOUBLE quotes only, so three of the four DOCUMENTED
+  # `runs-on` forms were cleared to exit 0 — measured against the pre-fix script:
+  # `runs-on: ['ubuntu-24.04']` kept its single quotes, matched no class arm, fell to the `*)`
+  # report arm and left `uncovered=0`; a BLOCK sequence (`runs-on:` then `- ubuntu-24.04`) and a
+  # `group:`/`labels:` mapping yielded NOTHING AT ALL, so the label was never counted and the read
+  # looked covered. GitHub documents all four forms (a single string, an ARRAY of strings, a
+  # variable, and a `key: value` pair using `group`/`labels`), so those are not exotic spellings —
+  # they are most of the documented surface, and the incident state this block exists to surface is
+  # exactly what they express. Every one of them reported success, in the one direction the header
+  # above forbids.
+  # The arms: a same-line scalar or flow sequence; a block sequence; a mapping whose `labels:` key
+  # is a flow list, a scalar or a nested block list (`group:` names a runner GROUP, not a label, so
+  # it is consumed and never counted); and single quotes unquoted alongside double quotes.
+  # A `runs-on:` that yields no label and names no group prints `!` — see the fail-closed arm below.
+  coverage="$(grep -rhvE '^[[:space:]]*#' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
+      | awk '
+      function trim(s) { gsub(/^[ \t]+/, "", s); gsub(/[ \t]+$/, "", s); return s }
+      function unq(s) {
+        s = trim(s)
+        while (s ~ /^["\047]/) s = substr(s, 2)
+        while (s ~ /["\047]$/) s = substr(s, 1, length(s) - 1)
+        return trim(s)
+      }
+      function emit(t,   v) {
+        v = unq(t)
+        if (v == "") return
+        if (v ~ /^\$/) return          # an expression is not a label this pass can read
+        print v; got++
+      }
+      function flowlist(s,   n, i, a) {
+        s = trim(s); sub(/^\[/, "", s); sub(/\]$/, "", s)
+        n = split(s, a, ",")
+        for (i = 1; i <= n; i++) emit(a[i])
+      }
+      function mapping(s,   m, i, c, depth, cur, parts, n, k) {
+        m = s; sub(/^\{/, "", m); sub(/\}[ \t]*$/, "", m)
+        n = 0; cur = ""; depth = 0
+        for (i = 1; i <= length(m); i++) {
+          c = substr(m, i, 1)
+          if (c == "[" || c == "{") depth++
+          else if (c == "]" || c == "}") depth--
+          if (c == "," && depth == 0) { parts[++n] = cur; cur = ""; continue }
+          cur = cur c
+        }
+        if (trim(cur) != "") parts[++n] = cur
+        for (i = 1; i <= n; i++) {
+          k = trim(parts[i])
+          if (k ~ /^group[ \t]*:/) pgroup = 1
+          else if (k ~ /^labels[ \t]*:/) value(substr(k, index(k, ":") + 1))
+        }
+      }
+      function value(s) {
+        s = trim(s)
+        if (s ~ /^\[/) { flowlist(s); return }
+        if (s ~ /^\{/) { mapping(s); return }
+        emit(s)
+      }
+      function finish() {
+        if (!pend) return
+        if (got == 0 && !pgroup) print "!"
+        pend = 0
+      }
+      {
+        raw = $0
+        line = raw
+        sub(/^[ \t]+/, "", line)
+        if (line == "") next
+        ind = index(raw, line) - 1
+        sub(/[ \t]+#.*$/, "", line)   # a TRAILING comment must not contribute a second label
+        line = trim(line)
+        if (line == "") next
+        if (pend && ind <= pind) finish()
+        if (line ~ /^runs-on[ \t]*:/) {
+          finish()
+          rest = trim(substr(line, index(line, ":") + 1))
+          pend = 1; pind = ind; got = 0; pgroup = 0
+          if (rest != "") { value(rest); finish() }
+          next
+        }
+        if (pend && ind > pind) {
+          if (line ~ /^-[ \t]/) {
+            item = trim(substr(line, 2))
+            if (item ~ /^group[ \t]*:/) pgroup = 1
+            else if (item ~ /^labels[ \t]*:/) value(substr(item, index(item, ":") + 1))
+            else value(item)
+          }
+          else if (line ~ /^group[ \t]*:/) pgroup = 1
+          else if (line ~ /^labels[ \t]*:/) {
+            v = substr(line, index(line, ":") + 1)
+            if (trim(v) != "") value(v)
+          }
+          else finish()
+          next
+        }
+      }
+      END { finish() }')"
+  # ⛔ A `runs-on:` THE EXTRACTION COULD NOT READ IS `exit 4`, NEVER A SILENT 0. The two exit-4 arms
+  # below catch a read that produced NOTHING; they cannot catch one that is PARTIAL, which is what
+  # an unrecognised spelling produces whenever any other workflow names a label. A matrix expression
+  # (`runs-on: ${{ matrix.os }}`) is the same case for a different reason: its label set is not
+  # static, so there is nothing to verdict. Refusing converts the next spelling nobody thought of
+  # from a false green into an honest no-verdict — the choice every other arm here already made.
+  runs_on_unreadable="$(printf '%s\n' "$coverage" | grep -c '^!' || true)"
+  case "$runs_on_unreadable" in ''|*[!0-9]*) runs_on_unreadable=0 ;; esac
+  for label in $(printf '%s\n' "$coverage" | grep -v '^!' | sort -u); do
     labels_seen=$((labels_seen + 1))
     # ⛔ n OF WHO? The denominator has to be the runners that COULD answer this label, or the
     # reading is a false red on a two-arch pool: the ARM64 runners must never claim the bare
@@ -436,7 +539,28 @@ if [ "$MODE" = status ]; then
       # the scheduled autoscaler ADDS runners, and a fill/repair pass that omits the label leaves
       # the pool drifting back to zero answers one runner at a time with this instrument green at
       # every step. `0 < n < denom` is the only read that sees it before the last one goes.
-      say "  $label = $n of $denom runner(s) — ⚠️ PARTIAL: the other $((denom - n)) cannot answer it. A re-registration or fill that omits it erodes coverage silently; re-apply with CI_RUNNER_OS_LABEL=on --repair-labels."
+      say "  $label = $n of $denom runner(s) — ⚠️ PARTIAL: the other $((denom - n)) cannot answer it."
+      # ⛔ THE REMEDY IS CLASS-BLIND HERE TOO, AND THIS IS WHERE IT BITES. The zero-answer arm above
+      # decides per class; this one printed the bare-pin instruction for EVERY class. So a pool
+      # mid-fallback-transition printed `ubuntu-latest = 5 of 12 … re-apply with
+      # CI_RUNNER_OS_LABEL=on --repair-labels` for a label the GATE owns and toggles, and a
+      # deliberately partial custom label got the same instruction. Following it cannot work: only
+      # the bare `ubuntu-<version>` pin is re-applied by this script at all. The class is already
+      # computed (same awk as the denominator), so use it.
+      case "$label_class" in
+        bare)
+          say "     A re-registration or fill that omits it erodes coverage silently; re-apply with CI_RUNNER_OS_LABEL=on --repair-labels."
+          ;;
+        arm)
+          say "     An ARM64 hosted spelling: only the arm64 pool may claim it, and nothing on this x64 box re-applies it — a report."
+          ;;
+        fallback)
+          say "     The gate attaches and detaches $FALLBACK_LABEL itself, so a partial count is the gate mid-transition — nothing to re-apply here."
+          ;;
+        *)
+          say "     A custom label this pool does not fully carry. This script does not register it; nothing to re-apply here."
+          ;;
+      esac
     else
       say "  $label = $n of $denom runner(s)"
     fi
@@ -462,6 +586,14 @@ if [ "$MODE" = status ]; then
   if [ ! -d .github/workflows ] \
       || { ! ls .github/workflows/*.yml >/dev/null 2>&1 && ! ls .github/workflows/*.yaml >/dev/null 2>&1; }; then
     say "⛔ label-coverage read NOTHING: no .github/workflows/*.yml|*.yaml in $(pwd) — run --status from the repo root. An empty read is not a coverage verdict."
+    exit 4
+  fi
+  # ⛔ AND A PARTIAL READ IS NOT A VERDICT EITHER. This arm is what makes the extractor's blind
+  # spots fail CLOSED: a `runs-on:` it produced no label for (an expression, or a spelling it does
+  # not parse) is no-verdict, not covered. It sits before the covered/uncovered verdict so an
+  # unreadable construct can never be outvoted by the labels that did parse.
+  if [ "$runs_on_unreadable" -gt 0 ]; then
+    say "⛔ label-coverage could not read $runs_on_unreadable runs-on: block(s) as a STATIC label set (a matrix/expression value, or a YAML spelling this parser does not understand) — a partial read is not a coverage verdict."
     exit 4
   fi
   # ⛔ AND THE DIRECTORY EXISTING IS NOT THE SAME PREDICATE: a repo whose workflows are all `uses:`
