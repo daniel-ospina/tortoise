@@ -36608,6 +36608,18 @@ class TortoiseSDK:
             preserve. It is NOT put in ``state``: ``state`` is re-applied as
             node properties by the fold's ``SET n += $state``, and a tier is
             never graph state.
+
+            REFUSED on any op other than ``delete``, and RESERVED on the
+            envelope (``projection._ENTITY_MUTATION_RESERVED_KEYS``). Both are
+            fail-closed against a record that would LIE: the only arms that read
+            a tier are the delete fold's demote
+            (``record_projection._delete_statements``) and the carrier's own row
+            insert, so a tier on a state op would be accepted and then silently
+            ignored by every fold — a record that looks like it moved placement
+            and moves nothing. And a ``provenance`` bag merged over the record
+            must not be able to rewrite the tier, for the same reason the rest of
+            that set exists (#1423): the caller's explicit argument wins, the
+            stray key is dropped loudly.
         """
         from tortoise.projection import _ENTITY_MUTATION_IMPLEMENTED_OPS
         if op not in _ENTITY_MUTATION_IMPLEMENTED_OPS:
@@ -36617,6 +36629,13 @@ class TortoiseSDK:
             raise ValueError(
                 f"{op!r} is not an implemented EntityMutated op "
                 f"(declared: {sorted(_ENTITY_MUTATION_IMPLEMENTED_OPS)})")
+        if cache_tier is not None and op != "delete":
+            # Codomain error, same class as the op check above: the fold has no
+            # arm that reads a tier outside a delete, so accepting one here
+            # would emit a record whose declared placement nothing applies.
+            raise ValueError(
+                f"cache_tier={cache_tier!r} is meaningless on op {op!r}: only a "
+                "delete records a tier (#10017 R1)")
         record: dict = {"id": id_val, "op": op, "label": label}
         if state is not None:
             record["state"] = state

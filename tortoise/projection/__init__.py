@@ -7795,6 +7795,11 @@ _ENTITY_MUTATION_PENDING_OPS: frozenset[str] = frozenset(
 #: place, which an unguarded provenance merge would re-open.
 _ENTITY_MUTATION_RESERVED_KEYS: frozenset[str] = frozenset({
     "type", "id", "op", "label", "state", "name",
+    # #10017 R1: the removal's TIER declaration. Reserved for the same reason
+    # `state` is — a `provenance` bag is merged BESIDE the record and must not
+    # be able to rewrite a field the caller passed explicitly, and a rewritten
+    # tier changes the fold's meaning (demote vs hard delete).
+    "cache_tier",
     "point", "payload", "event_id", "ts", "initiated_by",
     "projection_version", "recorded_ts",
 })

@@ -226,6 +226,45 @@ def test_an_entity_mutation_cannot_carry_the_tier() -> None:
                 label, st.sql, st.params)
 
 
+def test_the_builder_REFUSES_a_tier_on_any_op_but_delete() -> None:
+    """#10017 review P3 — a tier on a state op is a record that lies.
+
+    `_journal_entity_mutation` accepted `cache_tier` for ANY op although only
+    the delete arm has a fold that reads it (`_delete_statements`' demote).
+    Pre-fix the call below is accepted and the assembled record carries a tier
+    no fold applies — placed-by-nothing, while reading as an applied placement.
+    """
+    sdk = TortoiseSDK()
+    try:
+        with pytest.raises(ValueError, match="cache_tier"):
+            sdk._journal_entity_mutation(
+                "Point", "p-1", "restatus", state={"status": "retracted"},
+                cache_tier=RECORD_ONLY_TIER)
+    finally:
+        sdk.close()
+
+
+def test_provenance_cannot_rewrite_the_tier(monkeypatch) -> None:
+    """#10017 review P3 — the EXPLICIT argument wins over a provenance bag.
+
+    `provenance` is merged AFTER `cache_tier`, so without the reserve entry a
+    caller passing both could have the tier silently replaced — and the tier
+    decides hard-delete vs demote in the delete fold (`graph` is refused loudly
+    by `_delete_statements`; a VALID value would not be)."""
+    sdk = TortoiseSDK()
+    seen: dict = {}
+    monkeypatch.setattr(sdk, "_emit_event",
+                        lambda _type, **record: seen.update(record))
+    try:
+        sdk._journal_entity_mutation(
+            "Point", "s1_t0", "delete", cache_tier=RECORD_ONLY_TIER,
+            provenance={"cache_tier": "graph", "session_id": "s1"})
+    finally:
+        sdk.close()
+    assert seen.get("cache_tier") == RECORD_ONLY_TIER, seen
+    assert seen.get("session_id") == "s1", "non-reserved provenance was dropped"
+
+
 # ── the read half
 # `read_record_view` reads NODE tables and (now) the relation table. The fake
 # keys on the MAIN table so the relation query's `public.point` SUBQUERY — the
