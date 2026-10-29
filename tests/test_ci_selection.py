@@ -6308,20 +6308,32 @@ def test_live_required_job_runs_only_declared_live_tests():
 def test_test_slow_job_carries_junitxml_manifest_guard():
     """cycle-7 P2-1 (int-1) + Task 9 Step 5: the test-slow legs flip to
     docker with the fast job's exact wiring — (a) the pytest invocation
-    carries --junitxml=/tmp/junit.xml -o junit_family=xunit1 AND -r fEs
+    carries `--junitxml="$PYTEST_JUNIT"` -o junit_family=xunit1 AND -r fEs
     (never the historical -rfE — pytest 9.1.1 replaces the report set on
     repeated -r flags, so a trailing -rfE would suppress the skip summary
     the guard depends on), (b) a manifest-generation step exists BEFORE the
     pytest step (echoing each leg's ${{ matrix.files }} to
     ${RUNNER_TEMP}/pytest-files + --collect-only -m 'not track_b' ->
-    /tmp/expected-nodeids.txt), and (c) a skip-guard step gated on rc==0 AND
-    non-empty $FILES runs tools/skip-guard.py with --manifest."""
+    `$PYTEST_MANIFEST`), and (c) a skip-guard step gated on rc==0 AND
+    non-empty $FILES runs tools/skip-guard.py with `--manifest
+    "$PYTEST_MANIFEST"`.
+
+    ⛔ THE ARTIFACTS ARE NAMED BY THEIR PER-JOB VARIABLES, NOT BY THE OLD
+    HOST-GLOBAL `/tmp/...` LITERALS (#10280). This pin used to assert the
+    literal `--junitxml=/tmp/junit.xml` and `--manifest
+    /tmp/expected-nodeids.txt`, which RE-PINNED the defect: those three paths
+    are shared by every co-tenant job on one host, which is how run
+    40921262252 read a co-tenant's manifest and redded `test-slow (a)` for
+    `850 expected nodeid(s) absent` while its own pytest exited 0. The
+    no-literal half is pinned once, for every migrated leg, by
+    `tests/test_tmpdir_hygiene.py::test_migrated_legs_read_their_OWN_pytest_log`.
+    """
     wf = _load_python_ci()
     steps = wf["jobs"]["test-slow"]["steps"]
     run = next(s for s in steps
                if s.get("name", "").startswith("Run slow test suite"))
     invocation = run["run"]
-    assert "--junitxml=/tmp/junit.xml" in invocation
+    assert '--junitxml="$PYTEST_JUNIT"' in invocation
     assert "-o junit_family=xunit1" in invocation
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
@@ -6339,6 +6351,7 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     mrun = manifest["run"]
     assert "pytest-files" in mrun
     assert "--collect-only" in mrun or "--emit-manifest" in mrun
+    assert '--output "$PYTEST_MANIFEST"' in mrun
     # the slow legs' URI gate matches the fast job (full==true only)
     uri = next(s for s in steps
                if s.get("name", "").startswith("Compute docker URI"))
@@ -6348,7 +6361,7 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                  if s.get("name", "").startswith("Skip-fail guard"))
     grun = guard["run"]
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in grun
-    assert "--manifest /tmp/expected-nodeids.txt" in grun
+    assert '--manifest "$PYTEST_MANIFEST"' in grun
     # the slow legs no longer carry carve-out files (E2E-4 owns them)
     # #9539: read the DERIVED legs — the workflow holds no literal rows.
     leg_files = slow_leg_files(load_manifest())
