@@ -242,7 +242,8 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
   `gh: command not found` / 127 — a red that reads as a product failure and is not. Measured
   2026-10-24: 38 of the 39 `classify` failures were on `pi-runner-vm-*` holding this same label
   (run 40141219586). Both jobs now carry `runner-tools.sh ensure gh`, which provides the tool or
-  fails NAMING it — so the pin is a belt, not the brace. Its in-file comment also stated the
+  fails NAMING it — so the tool gap is closed by that step, and the pin is defence in depth, not the
+  mitigation of it. Its in-file comment also stated the
   invariant as current ("a version-pinned label no self-hosted runner claims") and was corrected in
   the same change.
 
