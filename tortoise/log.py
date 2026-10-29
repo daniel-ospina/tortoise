@@ -256,9 +256,9 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                  record home is one row of SUMMARY text, so a torn line costs
 #                  a summary. The turn carrier IS the transcript: a torn
 #                  `TurnsRecorded` line drops an entire capture's turn set, and
-#                  once step 7 turns the producer over, that line is the only
-#                  journal carrier of those turns — the per-turn `PointAdded`
-#                  records this type replaces would not be there to lose.
+#                  since step 7 turned the producer over (#10067) that line IS the
+#                  only journal carrier of those turns — the per-turn `PointAdded`
+#                  records this type replaces are no longer there to lose.
 #                  So the set's default polarity (a NEW type is REFUSED) stands,
 #                  and this is the one §9.1 carrier that is NOT harmless: the
 #                  two are classified separately, never by family.
@@ -268,13 +268,22 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                  `recover_from_log` returns `recovered=False, nodes=0`, against
 #                  `recovered=True, nodes=3` for the same tear on `SessionNarrated`
 #                  and on `PointAdded`. That is the SIGKILL-mid-append shape
-#                  #9555 added the narrative carrier to stop. So this is a
-#                  PLACEHOLDER decision, not a settled one: step 7 of #10017 owns
-#                  it, and it must be settled against the WRITE ORDER (record
-#                  write vs journal append) and against whether the turns survive
-#                  in the record when the append tears. Refusing is right only if
-#                  losing the journal tail is cheaper than replaying a transcript
-#                  the record already holds.
+#                  #9555 added the narrative carrier to stop. ✅ Step 7 — the
+#                  producer turn-over this note used to defer to — HAS LANDED
+#                  (#10067), so the polarity above is now load-bearing on live
+#                  traffic and the set still REFUSES the type: that was the state
+#                  it LANDED in, not an oversight, and #10067 raised the write
+#                  ORDER question without re-deciding it. ⛔ Do not read this as
+#                  "step 7 settled it" — it did not, and a later reader must not
+#                  silently flip it either. The re-decision is owned by #10017
+#                  (OPEN) and turns on the WRITE ORDER: `_write_capture_turns`
+#                  journals the carrier BEFORE `_write_record_projection` runs, so
+#                  on a torn carrier line BOTH stores lack the capture's turns —
+#                  which is the argument that would move the type into the set,
+#                  and it has not been made yet. Refusing is right only if losing
+#                  the journal TAIL is cheaper than replaying a transcript the
+#                  record already holds; until that is measured, the default
+#                  polarity (a new type is REFUSED) stands.
 #
 # ⛔ ``EventRecorded`` IS NOT IN THE SET, although its loss is the data-LOSS
 # direction for most records. ``_upsert_event`` →
