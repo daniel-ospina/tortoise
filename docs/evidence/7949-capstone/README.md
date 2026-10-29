@@ -470,7 +470,7 @@ anchor in one direction (so its `:Event 0/41` contradicted its own `references=7
 fixed both, but its envelope was stale: every `tortoise/sdk.py` line it cited (`:12196` for the meta
 fold, `:12477` for `link_source_to_event`, `:2306-2331` for `_TURN_WRITE_CYPHER`) had moved under
 it when `main` advanced, so the one instruction it carried for #9116 — "the fix targets
-`sdk.py:12197`" — pointed into unrelated code. `8a8bbcba2` fixed
+`sdk.py:12196`" — pointed into unrelated code. `8a8bbcba2` fixed
 the OFF-block witness hazard, but its rule accepted `enabled: true` on its own — and `enabled` is the
 FLAG, not activity (see "The eight steps" above), so a single flag-on/empty-list session could have
 made V5 pass on a step nobody observed; its derivation figure was also circular (`132/132`, a class
