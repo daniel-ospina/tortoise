@@ -20215,15 +20215,18 @@ class TortoiseSDK:
         (cycle-7); §8 field validity (direction/confidence/weight/mitigation)
         + route-scoped attribute rejection (cycle-13: relation carries
         direction/confidence/weight — plus ``mitigation`` since #5244, because
-        a structural edge has no operator bridge to damp; operator route
-        carries confidence/weight).
+        a structural edge has no operator bridge to damp; the operator route
+        REFUSES confidence/weight, because ``create_operator`` has no edge
+        attribute to carry them).
 
         ``effective_route`` (#9173) is the route the write loop will ACTUALLY
         take — the request PROMOTED by the endpoint-kind gate
         (:meth:`_effective_route` / :meth:`_effective_connection_routes`,
         owner ruling 2026-10-13, #8499). It scopes the multi-item-``to`` arm,
         which is a DIRECT-edge rule (``create_direct_edge`` takes ONE target;
-        the operator route fans out). It is passed in rather than probed here
+        the operator route fans out), and — since #9749 — BOTH attribute arms,
+        because a route that cannot store an attribute must not be told the
+        attribute is clean (see the arm below). It is passed in rather than probed here
         so the caller keeps its one graph read per bundle/connection — and
         because Phase 2 has the resolved ids and no bundle to read refs from.
         The parameter is REQUIRED (no default) on purpose: a default of
@@ -20344,30 +20347,27 @@ class TortoiseSDK:
                                f"be one of {', '.join(sorted(self._INGEST_DIRECTION_VALUES))}, "
                                f"got {direction!r}",
                 })
-            if route == "operator":
+            if write_route == "operator":
                 # cycle-13 route scoping: create_operator accepts no
                 # confidence/weight (they are plain direct-edge attributes).
-                # ⛔ #9173 review — DELIBERATELY left on the REQUEST route, not
-                # `write_route`: a promoted Point-bearing plain IMPL already
-                # passes these attributes through and `create_operator` DROPS
-                # them (measured at this head: a SINGULAR plain IMPL between
-                # Points with `confidence: 0.5` validates clean and writes an
-                # edge without it). Scoping this arm by the effective route
-                # would turn that silently-accepted bundle into a refusal — a
-                # new refusal for every existing caller, outside #9173's scope.
-                # The silent drop is a PRE-EXISTING defect on both route
-                # spellings, tracked as its own issue; when it is fixed this arm
-                # must move WITH the multi-item arm above, or the two rules stay
-                # inconsistent inside one function.
-                for key in ("confidence", "weight"):
-                    if key in conn:
-                        violations.append({
-                            "section": "connections", "index": index,
-                            "message": f"ingest: connections[{index}] {key} is "
-                                       f"not allowed on the operator route "
-                                       f"(reify:true/mitigation) — it belongs "
-                                       f"on plain IMPL/NAND direct edges",
-                        })
+                #
+                # #9749 — judged by the EFFECTIVE route, not the REQUEST.
+                # The #9173 review left it on the request route ON PURPOSE and
+                # said why: a promoted Point-bearing plain IMPL was validated
+                # as a direct edge and then written by `create_operator`, which
+                # has no such edge attribute, so the value was DROPPED while the
+                # caller was told "clean" (measured there: a singular plain IMPL
+                # between Points with `confidence: 0.5` validated clean and
+                # wrote an edge without it). That review's own instruction was
+                # that THIS arm must move WITH the multi-item arm above once the
+                # drop was decided. #9749 is that decision, and it goes the way
+                # `docs/INGEST_CONTRACT.md` §13 row 4 already states: an
+                # attribute the route cannot store is a Phase-1 violation, not a
+                # silent discard. The direct route — where §13 row 4 says these
+                # attributes belong — now actually carries them (the write loop
+                # forwards both into `create_direct_edge`).
+                self._reject_operator_route_attributes(index, conn, route,
+                                                       violations)
             else:
                 for key in ("confidence", "weight"):
                     val = conn.get(key)
@@ -20445,6 +20445,64 @@ class TortoiseSDK:
                                f"id=<operator id>, reason=..., "
                                f"strength=0.10..0.50)",
                 })
+
+    def _reject_operator_route_attributes(self, index: int, conn: dict,
+                                          request_route: str,
+                                          violations: list[dict]) -> None:
+        """#9749 — refuse ``confidence``/``weight`` on the OPERATOR route.
+
+        `create_operator` writes ``(op)-[:IMPL|NAND {idx}]->(endpoint)`` edges
+        and takes neither attribute, so a connection that reaches the operator
+        route has nowhere to PUT them. §8 assigns them to the operator-less
+        direct edge (``docs/INGEST_CONTRACT.md`` §13 row 4), and §11 is explicit
+        that an author-stated confidence is RECORDED for audit while EP computes
+        belief from factor structure — so dropping the value is not a harmless
+        no-op, it is the caller's declared value going missing behind a "clean"
+        verdict.
+
+        Two spellings reach this refusal, and they need different sentences
+        because the caller's remedy differs:
+
+        - ``request_route == "operator"`` — the caller ASKED for the operator
+          route (``reify: true`` / ``mitigation``). The remedy is to drop the
+          attribute, or to use the direct route (a non-Point pair).
+        - ``request_route == "direct"`` — the plain spelling, PROMOTED by the
+          endpoint-kind gate (#8499, owner ruling 2026-10-13) because the pair
+          is Point-bearing. The caller never chose the operator route, and
+          ``create_direct_edge`` is deliberately not gated, so the message names
+          that escape hatch rather than telling them to do something the
+          promotion overrode: measured on this tree, the promoted write created
+          the operator and wrote edges with ``confidence`` ABSENT.
+
+        Splitting the sentence must not split the ARM: both live in one helper,
+        called from the one place the write route is known, so they cannot drift
+        the way the pre-#9749 request-route/effective-route pair did.
+        """
+        _direct_escape = (
+            "write the operator-less edge explicitly with "
+            "sdk.create_direct_edge(...) if you need an edge-carried value")
+        for key in ("confidence", "weight"):
+            if key not in conn:
+                continue
+            if request_route == "operator":
+                message = (
+                    f"ingest: connections[{index}] {key} is not allowed on the "
+                    f"operator route (reify:true/mitigation) — it belongs on "
+                    f"plain IMPL/NAND direct edges (a pair with no plain :Point "
+                    f"endpoint); {_direct_escape}"
+                )
+            else:
+                message = (
+                    f"ingest: connections[{index}] {key} cannot be stored on "
+                    f"this connection: a Point-bearing pair is operator-mediated "
+                    f"(endpoint-kind gate, #8499), an operator has no edge "
+                    f"attribute to carry it, and its weighting is EP-computed "
+                    f"(INGEST_CONTRACT §11) — drop the key, or {_direct_escape}"
+                )
+            violations.append({
+                "section": "connections", "index": index,
+                "message": message,
+            })
 
     def _fetch_endpoint_info(self, values: set[str]) -> dict[str, dict]:
         """ONE batched query resolving external endpoint existence, label
@@ -22750,6 +22808,16 @@ class TortoiseSDK:
                         op_type, src, dsts[0],
                         label=label,
                         direction=direction,
+                        # #9749: the §8 attributes this route is the ONLY home
+                        # for (INGEST_CONTRACT §13 row 4) were validated here
+                        # and then dropped — `create_direct_edge` has always
+                        # accepted both and wrote them on the edge (and the
+                        # `DirectEdgeCreated` journal descriptor replays them),
+                        # so the omission in THIS call was the whole defect. A
+                        # connection reaching this branch is non-Point-bearing,
+                        # so nothing upstream refuses them.
+                        confidence=conn.get("confidence"),
+                        weight=conn.get("weight"),
                         batch_id=batch_id,
                         promote_source=(promotion_policy == "auto"),
                     )
