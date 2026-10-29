@@ -207,8 +207,9 @@ def main() -> int:
         os.environ.pop("TORTOISE_RECORD_DSN", None)
 
     # The journal is one half of the capability gate this measurement is ABOUT
-    # (`_record_holds_turns` needs a configured journal AND a record DSN), so it
-    # is provisioned in every arm — the arms differ only in the DSN.
+    # (`record_writer.record_holds_turns(journal_configured=…)` needs a configured
+    # journal AND a record DSN), so it is provisioned in every arm — the arms
+    # differ only in the DSN.
     import tempfile
 
     journal_dir = tempfile.mkdtemp(prefix="r10000-bytes-")

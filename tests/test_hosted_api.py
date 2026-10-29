@@ -4399,14 +4399,28 @@ class TestSessionDetail:
 
         The sibling tests cover the two obvious states — the graph copy is
         EMPTY (refuse) and the graph copy is COMPLETE (serve). This one is the
-        third, and it is the state an ordinary arming day leaves behind:
-        `sdk._write_capture_turns`' stale-turn sweep is gated on the write
-        predicate (`sdk.py:2696`, `if stale and not _record_holds_turns`), so a
-        session captured BEFORE arming and re-captured after it keeps its old,
-        SHORTER turn nodes and NOTHING removes them. With the record then
-        unreachable, the fallback yields 2 turn_points while the response's own
-        `turns` (the Session's `turn_count`) says 4 — the caller cannot tell the
-        transcript is short, and the body even contradicts itself.
+        third, and it is the state a PARTIAL graph copy leaves behind. ⛔ The
+        pre-#10021 prose here named a gate that no longer exists: the stale-turn
+        sweep used to be gated on the write predicate (`_record_holds_turns`),
+        so a session captured before arming and re-captured after it kept its
+        old, SHORTER turn nodes and nothing removed them. `_write_capture_turns`
+        now takes the sweep's bound as the MAX of both stores
+        (`_record_turn_high_water` beside the graph's `turn_max_index`) and
+        issues the graph `DETACH DELETE` unconditionally, so the writer no
+        longer leaves that surplus.
+
+        The READ door's refusal is still the last line of defence and must not
+        depend on the writer having succeeded, because a partial graph copy is
+        reachable through the sweep itself: when `_record_turn_high_water`
+        cannot be read (a connect failure, a tenant this capture may not read)
+        it returns `None` and the bound falls back to the graph's mark alone —
+        and that mark is absent whenever the `:Session` node was gone before the
+        MERGE, which §2.0 makes an ordinary state (the graph is the cache).
+
+        So: with the record then unreachable, the fallback yields 2 turn_points
+        while the response's own `turns` (the Session's `turn_count`) says 4 —
+        the caller cannot tell the transcript is short, and the body even
+        contradicts itself.
 
         The fixture patches the SDK init so captured turns land in the GRAPH, so
         the armed re-capture cannot be replayed end to end here. The state it
