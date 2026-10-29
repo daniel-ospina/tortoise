@@ -85,7 +85,7 @@ _BARE_LINE_CITATION = re.compile(r"(?<![A-Za-z0-9_.]):\d{2,4}\b")
 #: has none — no caller anywhere in the fleet builds a `score` question. So a sentence
 #: pairing them under "exercised"/"corroborated"/"verified live" is false about `score`,
 #: and false in the UNSAFE direction: it licenses the `score` shape (its 2–10 level
-#: `criteria` array is the dominant term in `vet-v1`'s request and the input to the
+#: `criteria` array is the dominant term in `vet-v2`'s request and the input to the
 #: `atomic_min` veto that stops a FUSED candidate being dropped) as if it had ever been
 #: sent to the vendor. The sentence is the unit, so the match may not cross `.`, `!`, `?`
 #: or `;` — otherwise a nearby mention of "verified live" would be attributed to the pair.
@@ -337,7 +337,7 @@ def test_neither_artifact_claims_the_score_primitive_was_exercised_live():
 
     Why it is not cosmetic: the docstring's form is the unsafe direction. It tells an
     operator that `score` — whose 2–10 level `criteria` array is the dominant term in
-    `vet-v1`'s request and the input to the `atomic_min` veto that stops a FUSED candidate
+    `vet-v2`'s request and the input to the `atomic_min` veto that stops a FUSED candidate
     being dropped — has been exercised live, when nothing has ever sent one. A wrong
     `score` shape is benign (400 → `Unavailable` → no verdict), but the ledger this PR
     exists to make honest would be wrong at exactly the primitive with no live evidence.
@@ -487,3 +487,96 @@ def test_no_artifact_understates_a_live_corroborated_shape():
         assert _ECHO_NAMED_AS_CHECK.search(legitimate) is None, (
             f"this is a TRUE statement and must pass the echo check too: {legitimate!r}"
         )
+
+
+# ── §7's numbers must BE a measurement of the payload at this head ─────────
+
+#: The construction §7 states, so the recorded figures can be re-checked rather than
+#: believed. Kept here as constants because a construction that lives only in prose is
+#: the reason the row moved unmeasured through two review rounds (#10077 / #10117).
+_S7_FILLER_TEXT = ("the cache stays warm across restarts because the operator decided that a "
+                   "marker must survive a session that is still being written to")
+_S7_FILLER = _S7_FILLER_TEXT.split()
+_S7_VET_ITEM_CHARS = 55
+_S7_CLASSIFY_ITEM_CHARS = 71
+_S7_NARRATIVE_WORDS = 500
+
+#: The `B` cell of a §7 cost row: ``| `vet-v2`, … | 50,004 B | 11,223 | …``.
+_S7_BYTES_CELL = re.compile(r"^\| `(?P<version>vet-v2|classify-v2)`.*?\| ([\d,]+) B \|",
+                            re.MULTILINE)
+
+
+def _s7_text(chars: int, seed: int = 1) -> str:
+    words, i = [], seed
+    while len(" ".join(words)) < chars:
+        words.append(_S7_FILLER[i % len(_S7_FILLER)])
+        i += 1
+    return " ".join(words)[:chars]
+
+
+def _s7_payloads() -> dict[str, int]:
+    """The two requests §7 tabulates, serialized the way ``_decide`` sends them."""
+    import json
+    import sys
+
+    sys.path.insert(0, str(ROOT))
+    from tortoise import s2_decision_seam as seam
+
+    seen: list = []
+
+    def call(payload: dict) -> dict:
+        seen.append(payload)
+        return {"model": "jev-1.14.0", "answers": {}, "usage": {"input_tokens": 1}}
+
+    candidates = [{"id": f"i{i}", "section": "s",
+                   "text": _s7_text(_S7_VET_ITEM_CHARS, i), "kind": "k"} for i in range(40)]
+    narrative = " ".join(_S7_FILLER[i % len(_S7_FILLER)]
+                         for i in range(_S7_NARRATIVE_WORDS))
+    seam.vet_verdicts(candidates, narrative, transport=call, batch_size=seam.BATCH_MAX)
+    offered = [f"core:kind{i}" for i in range(5)]
+    seam.classify_tail([(f"t{i}", _s7_text(_S7_CLASSIFY_ITEM_CHARS, i), offered)
+                        for i in range(40)],
+                       descriptions={}, transport=call, batch_size=seam.BATCH_MAX)
+    return {version: len(json.dumps(payload).encode("utf-8"))
+            for version, payload in zip(("vet-v2", "classify-v2"), seen, strict=True)}
+
+
+def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
+    """§7's two recorded request sizes must equal a live measurement of the payload.
+
+    THE DEFECT THIS PINS (`tortoise#10077`, tracked as `#10117`): the framing clause is
+    exactly the kind of change that *silently* falsifies a recorded number — the doc keeps
+    a figure that was true of a request the module no longer builds, and every artifact
+    that quotes it inherits the error. §7 is the record an operator uses to decide whether
+    arming the seam is affordable, so a carried-over figure is not cosmetic.
+
+    So the test builds the construction §7 states (40 candidate texts of
+    `_S7_VET_ITEM_CHARS`, a `_S7_NARRATIVE_WORDS`-word narrative, 40 tail texts of
+    `_S7_CLASSIFY_ITEM_CHARS`, top-5 kinds, no descriptions), serializes it with
+    `json.dumps` — the exact bytes the seam puts on the wire — and requires the recorded
+    `B` cell to BE that number. Byte counts are deterministic, so this is an equality and
+    not a tolerance: a future wording change reddens HERE and forces a re-measurement
+    instead of leaving a stale figure in four artifacts.
+
+    Non-vacuity: the same construction measured with the framing removed is what moved these
+    numbers, so the **pre-framing** sizes (`vet-v1` 39,484 B, `classify-v1` 23,292 B) are
+    asserted NOT to be what the rows carry — restoring the old row without re-measuring cannot
+    pass, and neither can a re-measurement that forgot the framing is in the payload.
+
+    No network, no DB, no model: the transport is a stub that captures the payload.
+    """
+    measured = _s7_payloads()
+    recorded = {m.group("version"): int(m.group(2).replace(",", ""))
+                for m in _S7_BYTES_CELL.finditer(DOC.read_text(encoding="utf-8"))}
+    assert set(recorded) == {"vet-v2", "classify-v2"}, (
+        f"§7 must tabulate both prompts by their CURRENT version — found {sorted(recorded)}")
+    assert recorded == measured, (
+        f"§7's recorded request sizes are not this head's payload: recorded {recorded}, "
+        f"measured {measured} — re-measure and update the table, do not carry the old row")
+
+    # The framing is what moved them: the pre-framing figures this record still quotes as
+    # the "clause removed" comparison must NOT be what the table carries.
+    stale = {"vet-v2": 39_484, "classify-v2": 23_292}
+    assert all(recorded[version] != before for version, before in stale.items()), (
+        "the pre-framing sizes are back in the table — the rows must be the FRAMED "
+        f"payload's, not the carried-over figures: recorded {recorded}")
