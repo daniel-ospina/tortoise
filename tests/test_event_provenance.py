@@ -210,7 +210,7 @@ class TestUsesProducesEdges:
         assert ev[0][0] == 1, "the event record must still be folded"
         for label in ("Object", "Subject"):
             n = proj.g.query(
-                f"MATCH (n:{label}) RETURN count(n)"  # noqa: S608 - fixed literal
+                f"MATCH (n:{label}) RETURN count(n)"  # label is a loop literal
             ).result_set
             assert n[0][0] == 0, (
                 f"a bare mention minted a :{label} (D1 forbids it)")
