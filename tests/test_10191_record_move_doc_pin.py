@@ -47,6 +47,7 @@ which runs on every docs-only PR.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from tortoise import record_projection as rp
@@ -99,6 +100,31 @@ def _structural_repoint(src="p1", tgt="Acme Corp", edge_type="aboutObject",
             "edge_type": edge_type, **extra}
 
 
+#: The document both artifacts cite for the precedence half, and the ruling it
+#: must land on. `#10244`'s review (P2) measured the failure this deriver exists
+#: to make impossible: the first fix froze a bare `§11.1`, which resolves to the
+#: edge-cost CENSUS (no `#9417`, no PRECEDENCE clause) — and because the assert
+#: was presence-only, the pin certified the wrong section and no edit could red
+#: it. So the section number is DERIVED from the document here and compared to
+#: the citation: a doc edit that moves the ruling, or a citation edited to point
+#: elsewhere, both fail.
+_STORAGE = "docs/architecture/STORAGE-ARCHITECTURE.md"
+_PRECEDENCE_RULING = "PRECEDENCE — the successor's own live value WINS"
+
+
+def _section_stating_the_precedence_ruling() -> str:
+    """The `## N.` section of STORAGE-ARCHITECTURE.md that states #9417's rule."""
+    text = (ROOT / _STORAGE).read_text(encoding="utf-8")
+    at = text.find(_PRECEDENCE_RULING)
+    assert at != -1, (
+        f"{_STORAGE} no longer states the #9417 ruling the record's `DO NOTHING` "
+        f"rests on ({_PRECEDENCE_RULING!r}) — re-derive the citation before "
+        "freezing a pointer at it")
+    headings = list(re.finditer(r"(?m)^## (\d+)\.", text[:at]))
+    assert headings, f"{_STORAGE} has no numbered `## N.` section before the ruling"
+    return headings[-1].group(1)
+
+
 def _line_with(path: str, anchor: str) -> str:
     """The WHOLE line the anchor sits on (a table row, or one blockquote line)."""
     text = (ROOT / path).read_text(encoding="utf-8")
@@ -114,6 +140,7 @@ def test_the_documented_record_side_move_is_the_move_the_record_emits():
     """ONTOLOGY §3.1 and the INGEST supersede row describe the RECORD's half."""
     lines = {path: _line_with(path, anchor)
              for path, anchor in _DOC_MOVE_ANCHORS.items()}
+    ruling_section = _section_stating_the_precedence_ruling()
 
     statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
     assert len(statements) == 2, statements             # the move, in two halves
@@ -136,12 +163,20 @@ def test_the_documented_record_side_move_is_the_move_the_record_emits():
         assert "terminal" in line, (path, line)
         assert "succ WHERE next_id IS NULL" in insert, insert
         # The successor's own live value wins (#9417) — never `DO UPDATE`.
-        # CITED WITH ITS DOCUMENT: the bare `§11.1` resolved to INGEST's own
-        # "11.1 Derived liveness" and to nothing at all in ONTOLOGY (§11 there is
-        # Reputation), so a presence-only assert froze a pointer to the wrong
-        # section (#10244 review P2).
-        assert "DO NOTHING" in line and "`STORAGE-ARCHITECTURE.md` §11.1" in line, (path, line)
+        # CITED WITH ITS DOCUMENT **and its section derived from the rule**: the
+        # bare `§11.1` resolved to INGEST's own "11.1 Derived liveness", and to
+        # ONTOLOGY §11 (Reputation); with the filename added it resolved to the
+        # edge-cost census, which states neither `#9417` nor the precedence rule
+        # (#10244 review P2). A presence-only assert cannot tell those apart, so
+        # the section number is computed above and compared here.
+        assert "DO NOTHING" in line, (path, line)
+        assert f"`STORAGE-ARCHITECTURE.md` §{ruling_section}" in line, (
+            path, line, f"the ruling is in §{ruling_section}")
         assert "#9417" in line, (path, line)
+        # ... and the carry it rests on is `ON CREATE`, not a bare `SET` (#9417).
+        # The pre-#9417 wording ("the graph's transfer is a bare `MERGE`") names
+        # the RETIRED code, so it is pinned out rather than merely unpinned.
+        assert "ON CREATE" in line, (path, line)
         assert insert.rstrip().endswith("DO NOTHING"), insert
         assert "DO UPDATE" not in insert, insert
         # #5509: a name held by two carriers is a refusal, not a pick.

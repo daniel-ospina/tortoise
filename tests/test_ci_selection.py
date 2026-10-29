@@ -137,6 +137,15 @@ def test_docs_scanning_gates_stay_in_tier1():
         "and a docs-only edit runs only tier1; without this pin a re-staled "
         "`found`-omission claim merges green (#4309 class)"
     )
+    assert "test_10191_record_move_doc_pin.py" in tier1, (
+        "#10244 review (P3): the #10191 record-side MOVE pin must be in tier1 — "
+        "it guards `docs/INGEST_CONTRACT.md`, which is in NON_PYTHON_PREFIXES "
+        "and matches no SOURCE_PATTERNS entry, so an INGEST-only diff selects "
+        "no surface and runs tier1 ONLY. The `core` row and the `durations` row "
+        "both survive a dropped `tier1` row, so nothing would red: the manifest "
+        "stays internally consistent while the pin sleeps on the exact edit it "
+        "exists to catch (#4309/#8474 class, the hole #10244 closed)"
+    )
     assert "test_fly_secret_drift.py" in tier1, (
         "#8614: the runbook's secret-drift guards read docs/infra-runbook.md "
         "(`docs/` is in NON_PYTHON_PREFIXES and the runbook matches no "
