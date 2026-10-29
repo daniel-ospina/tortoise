@@ -309,6 +309,20 @@ def _journal_snapshot_from_create_map(
     unusable vector is omitted here and re-added as an explicit `None` by the
     producer's own `setdefault` in `_emit_event` (PRESENCE IS OWNERSHIP,
     #5004), so the key is still on every snapshot a PointAdded emits.
+
+    The DERIVED identifier alias (#8933) IS an exception to "exactly the
+    properties the `CREATE` writes", and it is the only one: the create door
+    snapshots the caller's intent (`_intended`) BEFORE the alias enters
+    `_create_map`, so `search_keys` reaches the store and never the record.
+    That is deliberate — the alias is DERIVED from `content` by
+    `sparse.identifier_alias`, so a replay re-derives it from the same input
+    (the create door and `projection._revise_point` both do). Journaling it
+    would promote a derived value into the truth, and the record would then be
+    able to disagree with the rule that produced it. A CALLER-supplied
+    `search_keys` is not derived and still rides the record. Pinned by
+    `TestWritePath::test_journal_payload_is_never_mutated` and the two SDK-door
+    parity tests. (#10203 review round 11: this docstring was one exception
+    short of the truth.)
     """
     out: dict = {}
     for key, expr in create_map.items():

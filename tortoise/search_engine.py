@@ -1653,7 +1653,19 @@ def run_fts_query(
     # string through backslash-escaped). A1/A4 (#2070): ``keep_numeric``
     # (the ask-lane numeric-token policy) and ``expansion_terms`` (additive
     # pseudo-relevance-feedback aliases) thread into ``build_or_query`` —
-    # both default off, so the search lane's query bytes are unchanged.
+    # both default off, so neither of THEM moves a query's bytes.
+    #
+    # #8933: that is no longer a claim about the WHOLE call. The identifier
+    # mechanism is a separate, ON-by-default input to ``build_or_query`` that
+    # takes no argument here, so an identifier-SHAPED query does change bytes
+    # (``ERR-4032`` -> ``err|err4032|"err 4032"``) while every other query
+    # stays byte-identical. That is the owner's ruling on #8933, which
+    # reopened the #2070 byte-identity control for exactly that shape; the
+    # bisect switch is ``TORTOISE_IDENTIFIER_TOKENS`` (``.env.example``),
+    # pinned by ``tests/test_identifier_tokens_8933.py``.
+    # (#10203 review round 11: this comment said "the search lane's query
+    # bytes are unchanged" directly above the call the change moved — the two
+    # more stale claims of that family, left in prose by the round-10 F3 fix.)
     from .sparse import build_or_query
     fts_query = build_or_query(
         query, keep_numeric=keep_numeric,
