@@ -1937,9 +1937,18 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
     normalised before the match: these are wrapped prose, and `installer`-style wrapping must not
     decide whether a claim is visible.
 
+    ⛔ AND THE SAME CLAIM WAS REACHED ONE STEP FURTHER: a statement about the LIVE UNIT's own
+    environment. "what this fleet's unit has today" (installer header), "so nothing exports it
+    there" and "nothing exports it yet" (runbook) assert what `runner-autoscale.service` carries,
+    which no checkout can read — the reviewer's remaining item on this is explicitly UNVERIFIED
+    without `systemctl show -p Environment runner-autoscale.service`, which is the check the runbook
+    itself prints. The tree can only speak for the TREE, so the sentences must be tree-scoped ("this
+    tree exports none", "the unit is not readable from here"); asserting the box's state is how the
+    page sent an operator to a heal that reverts #6897's departure while saying it was protected.
+
     Non-vacuity (measured): with the pre-fix wording restored, "BOTH writers read it", "the live
-    pool's own state" and "cannot revert an APPLIED owner departure with no switch involved" each
-    red on their own.
+    pool's own state", "cannot revert an APPLIED owner departure with no switch involved", "— what
+    this fleet's", "so nothing exports it there" and "nothing exports it yet" each red on their own.
     """
     def flat(text: str) -> str:
         return re.sub(r"\s+", " ", text)
@@ -1953,6 +1962,17 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
         "the live fleet is opted in": "the pins were attached WITHOUT the switch",
         "cannot revert an APPLIED owner departure with no switch involved": (
             "unset IS `off`, so a plain repair IS #6897's recorded revert"
+        ),
+        "— what this fleet's": (
+            "the unit's own `Environment` is not readable from a checkout, so the page must tell the "
+            "operator to MEASURE it (`systemctl show -p Environment runner-autoscale.service`) "
+            "instead of asserting what it carries"
+        ),
+        "so nothing exports it there": (
+            "the tree exports none; whether the unit does is a measurement, not a fact this page holds"
+        ),
+        "nothing exports it yet": (
+            "the tree exports none; whether the unit does is a measurement, not a fact this page holds"
         ),
     }
     for artifact, text in (("docs/ops/ci-runner-x64.md", runbook), ("tools/install-ci-runner-x64.sh", installer)):
@@ -1970,7 +1990,11 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
         ),
         "docs/ops/ci-runner-x64.md": (
             runbook,
-            ("and nothing WRITES it", "has ONE reader in this tree (this repair) and NO writer"),
+            (
+                "and nothing WRITES it",
+                "has ONE reader in this tree (this repair) and NO writer",
+                "nothing in this tree exports it",
+            ),
         ),
     }
     for artifact, (text, fragments) in required.items():

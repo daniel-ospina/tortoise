@@ -59,8 +59,8 @@
 #   silently skipped. `_preserve_labels` drops both but reads NO flag: ONE writer here (#10275).
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THAT FLAG IS READ HERE AND NOWHERE ELSE IN THIS TREE, and nothing WRITES it: the install-side
-#   reader/emitter ships with #10275, still open. So `CI_RUNNER_OS_LABEL` unset — what this fleet's
-#   unit has today — takes the `off` arm and DROPS the pin. A repair with no exported flag therefore
+#   reader/emitter ships with #10275, still open. So `CI_RUNNER_OS_LABEL` unset — nothing in this
+#   tree exports it — takes the `off` arm and DROPS the pin. A repair with no exported flag therefore
 #   IS #6897's recorded revert (`CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`), not a no-op: it
 #   prints `version-pinned, not kept=[…]` BEFORE the PUT. Export `CI_RUNNER_OS_LABEL=on` to KEEP one.
 #
