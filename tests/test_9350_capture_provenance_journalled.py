@@ -564,13 +564,15 @@ def test_the_id_pre_read_rides_the_write_retry_funnel(tmp_path):
 # for the hosted lane, whose three sites are still all pinned below.
 @pytest.mark.parametrize("module", ["tortoise/hosted_api.py"])
 def test_every_guarded_stamp_call_narrows_its_write_to_the_journalled_ids(module):
-    """EVERY guarded call site, both lanes — the narrowing is checked in source.
+    """EVERY remaining guarded call site — the narrowing is checked in source.
 
     The helper refuses the shape at RUNTIME, but a guarded site that drops the
     clause only fails when that path is actually executed — and the operator and
-    retry-heal paths are not reached by every capture. This walks the two
-    modules instead, so dropping the clause from any of the six sites (three per
-    lane) reds CI rather than reverting one race away from §17.1. The minted
+    retry-heal paths are not reached by every capture. This walks the module
+    instead, so dropping the clause from any of the three surviving guarded sites
+    reds CI rather than reverting one race away from §17.1. (The `tortoise/sdk.py`
+    arm and its three sites were deleted with `capture_session` — #4282; see the
+    note above the parametrize.) The minted
     stamp is UNGUARDED and passes no ``params`` at all, so it is correctly
     exempt — and the BUCKET SIZES are asserted, because a classifier that
     quietly files a guarded site under `unguarded` would exempt it silently

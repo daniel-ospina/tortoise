@@ -440,10 +440,6 @@ def capture_sdk(tmp_path, monkeypatch):
     return _make
 
 
-@pytest.fixture()
-def no_record_dsn(monkeypatch):
-    monkeypatch.delenv(record_writer.RECORD_DSN_ENV, raising=False)
-    return record_writer.RECORD_DSN_ENV
 
 
 # ════════════════════════════════════════════════════════════════════════════

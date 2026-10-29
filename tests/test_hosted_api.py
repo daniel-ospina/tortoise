@@ -7272,14 +7272,6 @@ class _State:
 
 # ── #1532 P4: capture-path parity (speaker / truncation / quota) ──────────
 
-def _stored_turns(sdk):
-    """[(content, speaker)] ordered by turn id — the SDK/hosted stored-turn
-    byte-identity assertion (#1532 D1/D2)."""
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (t:Point {pointKind:'event'}) "
-        "RETURN t.content, t.speaker ORDER BY t.id").result_set
-    return [(r[0], r[1]) for r in rows]
 
 
 class TestCaptureSpeakerParity:

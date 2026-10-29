@@ -352,8 +352,8 @@ def fixture_gold_consistent(fixture: dict, gold: dict, session_id: str) -> list[
 def aggregate_metrics(session_results: list[dict]) -> dict:
     """Fold per-session suite grades into the canonical metric snapshot.
 
-    ``session_results`` is one dict per replayed session (see
-    ``runner.grade_session``)::
+    ``session_results`` is one dict per replayed session (``runner.grade_session``
+    wrote these before #4282 deleted the run leg; the shape is unchanged)::
 
         {"session_id", "suite", "kta": {"missed": int, "should": int},
          "false_fire": {"fires": int, "silent_required": int},
@@ -446,8 +446,9 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict,
     (same contract as W2-b, harness vocabulary).
 
     ``push_grounded`` says whether the push gold can express POINTER IDENTITY
-    on the replay cells at all (``runner.push_gold_grounding`` — computed from
-    the gold + the cell, never configured).  The push precision floor is
+    on the replay cells at all (``runner.push_gold_grounding`` computed it from
+    the gold + the cell, never configured; #4282 deleted that helper with the run
+    leg, so a re-implementation must derive it the same way).  The push precision floor is
     applied only when it can: the committed push gold names the symbolic ids
     the fixtures were authored with (``pt_lumen_boundary`` …), which no cell
     can mint, so every precision the graded reflex can produce is 0.000 by

@@ -18,38 +18,20 @@ CLOSED. The hosted §5 point loop surfaces the resolved ids and §7 passes the
 refs through the SAME shared ``commit_ops`` helpers these tests cover, so both
 write paths satisfy the graph-id precondition.
 
-These tests drive the REAL capture commit (``sdk.capture_session`` →
+These tests used to drive the REAL capture commit (``sdk.capture_session`` →
 ``_extract_session_v2``) with the extractor seam monkeypatched to a fixed
-payload — no LLM, no network. The pre-existing node is created with a
-non-payload id so ``_find_point_by_content`` genuinely re-keys.
+payload. ⚠️ #4282 deleted that SDK door, so those five end-to-end tests are gone;
+what survives is ``TestRemapHelpers4716``, which pins the two shared
+``commit_ops`` helpers directly — the invariant (a payload id that resolves to a
+different graph id must be remapped before an operator edge is written) is what
+those helpers own, and the excised arms are recorded in #10226.
 """
 from __future__ import annotations
-
-import pytest
 
 from tortoise.commit_ops import (
     remap_operator_endpoint_refs,
     remap_supersession_point_refs,
 )
-from tortoise.sdk import TortoiseSDK
-
-
-@pytest.fixture()
-def sdk(tmp_path):
-    return TortoiseSDK(db_path=str(tmp_path / "t.db"))
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # ── Part 1: the capture commit remap ────────────────────────────────────────
 

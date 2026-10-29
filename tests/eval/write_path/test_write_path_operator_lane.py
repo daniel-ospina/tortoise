@@ -39,7 +39,6 @@ all seven are captured here.
 """
 from __future__ import annotations
 
-import contextlib
 import shutil
 import sys
 from pathlib import Path
@@ -200,32 +199,6 @@ def _tmp_corpus(tmp_path: Path) -> Path:
     return dst
 
 
-@pytest.fixture()
-def _deterministic_lane(monkeypatch, tmp_path):
-    """A hermetic SDK + the deterministic operator extractor installed."""
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
-    import tortoise.extractor_v2 as ev2
-
-    golds = {sid: corpus.load_gold(sid) for sid in OPERATOR_SESSIONS}
-    monkeypatch.setattr(ev2, "extract_session_v2", _extractor(golds))
-    from tortoise.sdk import TortoiseSDK
-
-    workdir = tmp_path / "graph"
-    workdir.mkdir()
-    # A UNIQUE namespace per test (mirrors the benchmark fixture) so a
-    # server-lane redirect never folds onto a previous run's graph.
-    import uuid
-
-    sdk = TortoiseSDK(db_path=str(workdir / "lane.db"),
-                      namespace=f"w2552lane_{uuid.uuid4().hex[:8]}")
-    with contextlib.suppress(Exception):
-        sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
-    yield {"sdk": sdk, "root": _tmp_corpus(tmp_path), "workdir": workdir}
-    with contextlib.suppress(Exception):
-        sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
-    with contextlib.suppress(Exception):
-        sdk.close()
 
 
 def _failure_detail(audit: dict) -> str:

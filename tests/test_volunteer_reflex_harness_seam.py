@@ -12,11 +12,11 @@ the harness's grading vocabulary.
 1. **the under-fire class is fixed, and pinned here.**  The corpus write path
    leaves cell points unmeasured (no posterior α/β — the echo lane's capture
    mints no claim/operator, so ``_promote_and_dream`` no-ops and the EP gate
-   reads the Beta(1,1) neutral 0.5 under its 0.7 floor).  The fix is the
-   harness's ``runner.ep_warm_start`` (#2199 system-default starting belief +
-   the REAL EP pass), which this file exercises through the SAME primitives
-   the runner uses — the cold replay still under-fires, the warmed replay does
-   not.  A drift in either the reflex or the warm-start fails here.
+   reads the Beta(1,1) neutral 0.5 under its 0.7 floor).  The cold/warm corpus
+   replay that pinned the harness's ``runner.ep_warm_start`` (#2199 system-default
+   starting belief + the REAL EP pass) went with ``capture_session`` (#4282), so
+   this file no longer exercises a warm start; what survives are the EP-measured
+   mechanism probes.  A drift in the reflex still fails here.
 2. **the numbers are graded, not merely reported.**  ``config.reflex=graded``
    in the committed baselines makes the standing kta / false-fire bars live.
 """
