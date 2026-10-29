@@ -3788,7 +3788,8 @@ def _named_layer_kinds(props: dict) -> list[tuple[str, str, str]]:
 
 
 #: entity layer → the node label its door mints. Entity identity is
-#: LABEL-SCOPED (``ids.entity_name_id`` hashes ``f"{label}:{name}"``), so the
+#: LABEL-SCOPED (``entity_identity.resolve_or_mint`` is called with a label, and
+#: the fold MERGEs ``(s:Subject {id})`` / ``(o:Object {id})`` separately), so the
 #: same name under the two entity labels is TWO nodes, never one entity seen
 #: twice — which is why a re-route can SPLIT an entity (#9964 review).
 _ENTITY_LAYER_LABEL: dict[str, str] = {"subject": "Subject", "object": "Object"}
@@ -4046,16 +4047,18 @@ def _kind_layer_advisory(note: dict | None, node_id: str | None,
             f"the {layer.capitalize()} the door requested. The kind decides the "
             f"layer (ONTOLOGY §1); "
             # ⛔ The claim is about the GRAPH, never about THIS call. The routed
-            # id is DETERMINISTIC (`_entity_name_id(<label>, name)`), so a re-run
-            # of the very call that first split the entity MERGES onto the node
-            # it already minted — the peer probe below only asks whether the
+            # id is opaque but STABLE for a live name (#3590: the door RESOLVES
+            # the name to its single live holder, so a re-run of the very call
+            # that first split the entity lands on the node it already minted) —
+            # the peer probe below only asks whether the
             # OTHER label holds the name, never whether the routed node is new,
             # so "this write created a SECOND node" was FALSE on every retry
             # (the common case: ingest and capture re-issue writes), while the
             # graph fact it is trying to convey stayed true (#9964 review).
             + (f"⚠️ {_peer_article} :{layer.capitalize()} named {name!r} ALREADY "
-               f"exists ({_peer}), and entity ids are LABEL-scoped "
-               f"(`sha256('<label>:<name>')`), so the graph now holds a SECOND "
+               f"exists ({_peer}), and entity identity is LABEL-SCOPED "
+               f"(a :Subject and an :Object of one name are separate nodes), "
+               f"so the graph now holds a SECOND "
                f"node ({node_id}) beside it rather than replacing it — {name!r} "
                f"has a node under EACH entity label, nothing reconciles them "
                f"for you "
@@ -5483,7 +5486,8 @@ def _bundle_entity_name_outcomes(
     bundles the writer accepts (review round 4), and the item-only read let
     tainted ones through (round 2).
 
-    Only ``Subject``/``Object`` merge by name. An ``Event`` is append-only (its
+    Only ``Subject``/``Object`` are NAME-resolved (and the name decides the
+    landing node, not the id — #3590). An ``Event`` is append-only (its
     own declared ``status`` is the whole story, and the guard reads it from the
     item), and a ``document`` is a ``:Source`` — neither can be addressed here.
     """
@@ -20853,9 +20857,9 @@ class TortoiseSDK:
           referenced or not, on EITHER route, because the ``:Subject`` writer
           (``create_entity(type='subject')``, reached through
           ``create_subject``) validates every item's ``status`` in bundle order
-          before the name MERGE, so a bundle-wide refusal is the only one that
+          before the write, so a bundle-wide refusal is the only one that
           matches the writer (see the loop below);
-        - two endpoints that resolve to the SAME name-merged node (two refs, or
+        - two endpoints that resolve to the SAME landing node (two refs, or
           a ref and the node id) — a self-edge ``create_direct_edge`` refuses.
 
         ⛔ That list is a list of COVERED refusals, not a guarantee that every
@@ -21043,16 +21047,18 @@ class TortoiseSDK:
         #     for `:Object`), so the declaration is dropped and the writer
         #     accepts it — the HOLDER's own array status is caught by the
         #     direct-route leg below (`bad_status`), which is where the raise
-        #     would actually come from. An item that MINTS (a shared name whose
-        #     canonical id no carrier holds) is NOT skipped: #8864/#8902 key that
-        #     merge on the item's own id, so its declared array IS stored.
+        #     would actually come from. An item that MINTS (a shared name with NO
+        #     live carrier) is NOT skipped: #3590's resolve-or-mint keys the
+        #     write on the item's own resolved id, so its declared array IS
+        #     stored.
         #
         # Scoped by the ORDERED simulation the fold performs: an item's declared
         # status is stored only when its write CREATES the node, and only the
-        # FIRST bundle item naming a `(label, name)` can — its id
-        # (`entity_name_id`) is deterministic, so every later same-name item
-        # lands on the node the first one created (or on the canonical carrier)
-        # and `status` is written `ON CREATE` only. Checking every item
+        # FIRST bundle item naming a `(label, name)` can — no carrier exists at
+        # Phase-1 time, so that item MINTS, and every later same-name item
+        # RESOLVES onto the node the first one created (#3590: resolve-or-mint,
+        # not a derived id) — and `status` is written `ON CREATE` only. Checking
+        # every item
         # over-rejected a writer-accepted bundle (measured), and checking only
         # the first-per-name via a `seen` set skipped a genuine create.
         _minted_names: set[tuple[str, str]] = set()
@@ -21311,17 +21317,21 @@ class TortoiseSDK:
         for i, conn, route, vals in conns:  # noqa: B007
             if route != "direct":
                 continue
-            # #7925 review P1: endpoints that resolve to the same NAME-MERGED
-            # node are ONE node (`ids.entity_name_id` + the name MERGE), so a
-            # direct edge between them is a self-edge that
+            # #7925 review P1: endpoints that resolve to the SAME node are ONE
+            # node, so a direct edge between them is a self-edge that
             # `create_direct_edge` refuses with a raw ValueError — after steps
             # 2-3 committed (measured). `_check_connection`'s self-edge test
             # compares REF STRINGS, so it cannot see this identity. The identity
-            # is (label, name) on BOTH sides of the bundle/external boundary
-            # (review round 3): a bundle-local ref and the same node addressed
-            # by its id share it. Only the direct route is affected — a reified
-            # pair goes through `create_operator`, which tolerates the shared
-            # node (measured).
+            # is (label, LANDING ID) on BOTH sides of the bundle/external
+            # boundary (review round 3): a bundle-local ref and the same node
+            # addressed by its id share it. Only the direct route is affected —
+            # a reified pair goes through `create_operator`, which tolerates the
+            # shared node (measured).
+            #
+            # ⛔ #3590: the landing id is resolved-or-minted, never derived from
+            # the name (the retired `ids.entity_name_id` + name MERGE are gone),
+            # and the shared-name case is answered by the mint key below. The
+            # previous text described the retired name-as-identity model.
             merged: dict[tuple[str, str], str] = {}
             for v in vals:
                 if not isinstance(v, str):
@@ -21343,11 +21353,11 @@ class TortoiseSDK:
                 # Compare the NODE each endpoint will land on, never the NAME.
                 # The landing id is what `create_direct_edge` sees, and it
                 # differs by ref kind:
-                #   * a bundle-local entity item writes the deterministic
-                #     `entity_name_id(label, name)` — the SAME id for every item
-                #     naming that name, so two such refs are one node whether the
-                #     first one created it or landed on a carrier (#8864/#8902
-                #     key the fold on the record's own id, which IS that id);
+                #   * a bundle-local entity item lands on the id the create
+                #     RESOLVES or MINTS (below), so two refs are one node exactly
+                #     when they share that landing id — the same id for a shared
+                #     name only when neither lands on a carrier (#3590: no id is
+                #     derived from a name);
                 #   * an external ref lands on the node its id names, so two
                 #     carriers that share a NAME are two different endpoints and
                 #     the edge between them is legal (measured over-rejection:
@@ -21404,21 +21414,21 @@ class TortoiseSDK:
                 section, item = local[v]
                 if section == "entities":
                     # #7925: the entity side of the SAME guard, added with the
-                    # endpoint widening that made it reachable. The entity
-                    # write path MERGEs :Subject/:Object by NAME (the
-                    # deterministic `(label, name)` id is what makes the merge
-                    # idempotent), so a bundle-local entity ref lands on
-                    # whichever node already holds the name — and a
-                    # `create_direct_edge` endpoint that is terminal raises
-                    # mid-write, after the bundle's earlier items committed.
+                    # endpoint widening that made it reachable. A bundle-local
+                    # entity ref lands on the id the create RESOLVES to (single
+                    # live holder) or MINTS, and a `create_direct_edge` endpoint
+                    # that is terminal raises mid-write, after the bundle's
+                    # earlier items committed. ⛔ #3590: the fold MERGEs
+                    # :Subject/:Object by `id`, so idempotency is carried by the
+                    # caller's resolve-or-mint, not by the MERGE key.
                     # Measured (both shapes leave the predecessor point item
                     # behind): a ref naming an EXISTING terminal Subject, and
                     # an item that DECLARES a terminal `status` (the node the
                     # writer mints is born terminal). Phase 2 cannot prevent
                     # that — `_check_endpoint_race` runs AFTER the entity items
                     # are written, which is why this is Phase-1-only. Only
-                    # Subject/Object merge by name; an Event entity item is
-                    # append-only (no name merge) and a document is a
+                    # Subject/Object are name-resolved; an Event entity item is
+                    # append-only (no name resolution) and a document is a
                     # `:Source`.
                     #
                     # #7925 review P1: Event is NOT exempt. `create_event` ->
@@ -21471,14 +21481,13 @@ class TortoiseSDK:
                             and isinstance(name, str) and name:
                         (exists, hit, _, bad_status, _carriers, merges,
                          _target) = _name_holders(elabel, name)
-                        # #8864/#8902: the fold keys the merge on NAME while the
-                        # name has ONE carrier, and on the record's own `id` once
-                        # it has 2+. Every ingest entity item's id IS
-                        # `ids.entity_name_id(label, name)`, so with 2+ carriers
-                        # the item still LANDS on a carrier holding that
-                        # canonical id (ON MATCH) and only MINTS when none does.
-                        # `merges` is that answer and the axes above are the
-                        # merge target's — so a merge reads the target's
+                        # #8864/#8902: the landing node is the RESOLVED holder.
+                        # #3590 retired the name-keyed merge here — `merges` is
+                        # now "resolves to a single live carrier" and the
+                        # 2+ case REFUSES (it does not pick the record's own
+                        # id), so an item never lands on a second carrier by
+                        # naming one. `merges` is that answer and the axes above
+                        # are the landing node's — a resolve reads the target's
                         # terminal/unevaluable axes, while a mint keeps its own
                         # declared status. Branching on the carrier count instead
                         # fails open on the first case and over-rejects on the
@@ -22205,7 +22214,10 @@ class TortoiseSDK:
           policy.
         - Idempotent-ish: points dedup by (content_hash, pointKind) via
           create_point(dedup=True); sources merge by url; Subject/Object
-          merge by name; operator connections dedup by (op_type, input set);
+          resolve-or-mint on the name (#3590: the MERGE key is `id`, so the
+          second item naming a live name RESOLVES to it rather than minting
+          a second carrier); operator connections dedup by (op_type, input
+          set);
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
         - EP-safe: under promotion_policy='gated' every no-status point is
@@ -22553,7 +22565,8 @@ class TortoiseSDK:
                                 "item": item, "result": point,
                                 "deduped": bool(existed)})
 
-        # ── 3. Entities (subject/object merge by name; event/document append) ─
+        # ── 3. Entities (subject/object resolve-or-mint on the name;
+        # event/document append) ─
         for i, item in enumerate(bundle.get("entities") or []):
             viols = []
             self._check_item_shape("entities", i, item, viols)
@@ -36214,11 +36227,14 @@ class TortoiseSDK:
                 id=event["id"],
                 **_journal_record_payload(event),
             )
-        # #452: Subject/Object MERGE by name (content-hash dedup) — the fresh
-        # id_val never lands on a pre-existing node via ON CREATE, but the
-        # MERGE's ON MATCH clause writes it anyway (`o.id=coalesce($id, o.id)` /
-        # `s.id=coalesce($id, s.id)`), so the id this call returns is DERIVED
-        # from the write, not re-read from the graph. The re-fetch that used to
+        # #452: the pre-#3590 shape MERGEd Subject/Object by name (content-hash
+        # dedup) and the MERGE's ON MATCH clause rewrote the id
+        # (`o.id=coalesce($id, o.id)` / `s.id=coalesce($id, s.id)`), so the id
+        # that call returned was DERIVED from the write, not re-read from the
+        # graph. ⛔ #3590 moved the MERGE key to `id` and made the CALLER's
+        # resolve-or-mint supply identity, so this door's job is unchanged but
+        # no longer load-bearing about a name: the id is the one the caller
+        # resolved. The re-fetch that used to
         # live here (`MATCH (n:{label} {name:$name}) RETURN n.id` →
         # `result_set[0][0]`) resolved identity by NAME: with two same-name
         # carriers it returned an ARBITRARY row (backend order), i.e. possibly
@@ -36395,13 +36411,19 @@ class TortoiseSDK:
                                  state: dict | None = None,
                                  name: str | None = None,
                                  provenance: dict | None = None) -> bool | None:
-        # NOTE ON ``name``: RESERVED AND CURRENTLY UNREAD. No producer passes it
-        # (the rename op is deferred to #4769), and `_fold_entity_mutation` does
-        # NOT read it — the fold's `rename` arm applies `state`, so a record
-        # carrying only a top-level `name` unfolds and is reported as a fold
-        # miss. Do NOT treat this field as the way to journal a rename: put the
-        # new name in `state` under `"name"`. #4769 decides whether this field
-        # earns its keep or is deleted.
+        # NOTE ON ``name``: RESERVED AND CURRENTLY UNREAD — and it is now
+        # PERMANENTLY the wrong field for a rename, not merely an unused one.
+        # #4769's producer half LANDED with #3590: a name-bearing write is
+        # labelled ``op="rename"`` by ``classify_entity_mutation_op`` and
+        # ``_update_entity`` journals the applied map as ``state``, so the new
+        # name travels in ``state["name"]`` and ``_fold_entity_mutation``
+        # applies it with the same ``SET n += $s`` as every other state op. No
+        # producer passes this top-level ``name`` and the fold still does NOT
+        # read it (the rename arm applies ``state``, not this field), so a
+        # record carrying ONLY a top-level `name` unfolds and is reported as a
+        # fold miss. The previous text said the rename op was "deferred to
+        # #4769" — false at this head, and the kind of stale contract a next
+        # lane re-derives against (#3590 review, finding 4).
         """Build and emit ONE ``EntityMutated`` record (#3299).
 
         THE only place an ``EntityMutated`` record is constructed — asserted by
@@ -36500,6 +36522,17 @@ class TortoiseSDK:
         (`Object`/`Subject` — the two labels whose ``name`` is a natural key), so
         a Point/Event/Document rename is unaffected: their identity is their
         `id`/`eventId`/`url`, and their `name` is not a key at all.
+
+        ⛔ A NO-OP re-write is not a rename (#3590 review, finding 2). The guard
+        fires on *any* truthy string ``name`` in ``props``, and a read-modify-write
+        caller that re-sends the entity's CURRENT name (the ordinary
+        ``update_entity(id, name=<unchanged>, status=…)`` shape) moves nothing — yet
+        it was refused with ``NameAlreadyHeld`` whenever ANOTHER live carrier also
+        holds that name. That two-carrier state is LEGAL and reachable (D2, and
+        this PR's own fixtures build it), so the old guard made a legal graph
+        un-updatable through the public door. The target's stored name is read in
+        the same label-scoped probe and the label is skipped when it already
+        equals ``new_name``: nothing moves, so nothing can become ambiguous.
         """
         from .entity_identity import live_name_holder_ids
         from .exceptions import NameAlreadyHeld
@@ -36513,9 +36546,17 @@ class TortoiseSDK:
         # provably empty. Two index-servable probes answer the same question.
         for label in ("Object", "Subject"):
             rows = g.query(
-                f"MATCH (n:{label} {{id: $id}}) RETURN 1",
+                f"MATCH (n:{label} {{id: $id}}) RETURN n.name",
                 params={"id": id_val}).result_set
             if not rows:
+                continue
+            # #3590 review (finding 2): the target's OWN name comes back on the
+            # probe that already proved it carries this label, so the no-op arm
+            # costs no extra read. `isinstance` because a stored name may be a
+            # non-string (the writers accept one), and a non-string is never
+            # "already this name".
+            stored = rows[0][0] if rows[0] else None
+            if isinstance(stored, str) and stored == new_name:
                 continue
             holders = [h for h in live_name_holder_ids(g, label, new_name)
                        if h and str(h) != str(id_val)]

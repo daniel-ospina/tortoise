@@ -1201,3 +1201,133 @@ def test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions(
     assert "capture-metadata" in doc and "ingest" in doc, (
         "the exemption no longer names the live in-repo producer that keeps "
         "losing these edges — the recorded guarantee was deleted")
+
+
+def test_the_event_api_registration_door_is_idempotent_on_a_live_name(
+        sdk, tmp_path: Path):
+    """#3590 review (finding 1): ``add_object``/``add_subject`` must not re-mint.
+
+    The fold's MERGE key is ``{id}``, so the duplicate suppression the old
+    name-keyed MERGE gave **by construction** is gone (Cypher ``MERGE`` creates
+    whenever the exact pattern is absent) and this repo declares range indexes,
+    not a uniqueness constraint on ``Object.id``/``Subject.id``. The registration
+    emitters minted a fresh ``ulid()`` per call and never consulted
+    ``entity_identity``, so a routine re-run of the v1 extractor left the name
+    with TWO live carriers — after which every by-name read refuses
+    (``AmbiguousEntityName``), ``create_entity`` raises, and
+    ``update_entity(name=…)`` raises ``NameAlreadyHeld``, for a name the
+    producer registered legitimately.
+
+    FAILS IF: the emitters go back to ``ulid()``. On that tree the two calls
+    return different ids and the fold writes two nodes, so both the id assertion
+    and the length assertion red — this is the ``#452`` idempotent re-mention,
+    at the door D1 (``identity-decision.md``) names as the one that exists to
+    grow the entity set.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    client, events = sdk
+    proj = client._get_proj()
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=proj)
+
+    first = api.add_object("Door Object")
+    second = api.add_object("Door Object")
+    assert first == second, (
+        "a re-registration of a live name minted a SECOND id — the fold MERGEs "
+        f"by id, so the name now has two live holders: {first!r} then {second!r}")
+    assert _name_ids(proj, "Object", "Door Object") == [first], (
+        "the door wrote more than one Object node for one live name")
+
+    first_s = api.add_subject("Door Subject")
+    second_s = api.add_subject("Door Subject")
+    assert first_s == second_s, (first_s, second_s)
+    assert _name_ids(proj, "Subject", "Door Subject") == [first_s]
+
+
+def test_the_event_api_door_still_takes_an_explicit_id_and_refuses_ambiguity(
+        sdk, tmp_path: Path):
+    """The two bounds of the registration door's resolve-or-mint.
+
+    ``explicit_id`` must still win OUTRIGHT — ``mining``/``docs_miner`` pass
+    their own canonical id and are already idempotent that way, so routing the
+    door through ``resolve_or_mint`` may not override them. And a name two LIVE
+    entities hold must REFUSE rather than mint a third carrier: same-name
+    coexistence is legal (D2) but a name-keyed door may not pick a carrier for
+    the caller (route-then-refuse, R8) — the disposition ``create_entity``
+    already takes.
+
+    FAILS IF: the explicit-id arm is dropped (the assert on ``oid`` reds), or
+    the ambiguity arm mints a third node (``AmbiguousEntityName`` is not
+    raised and the count becomes three).
+    """
+    from tortoise.api import EventAPI
+    from tortoise.entity_identity import AmbiguousEntityName
+    from tortoise.log import EventLog
+
+    client, events = sdk
+    proj = client._get_proj()
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=proj)
+
+    oid = api.add_object("Mined Object", id="mined-object-1")
+    assert oid == "mined-object-1", oid
+    assert _name_ids(proj, "Object", "Mined Object") == ["mined-object-1"]
+
+    client.create_entity("object", "Door Dup", _server_id="dup-a",
+                         is_episodic=False)
+    client.create_entity("object", "Door Dup", _server_id="dup-b",
+                         is_episodic=False)
+    assert sorted(_name_ids(proj, "Object", "Door Dup")) == ["dup-a", "dup-b"]
+
+    with pytest.raises(AmbiguousEntityName):
+        api.add_object("Door Dup")
+    assert len(_name_ids(proj, "Object", "Door Dup")) == 2, (
+        "the door minted a THIRD carrier of a doubly held name instead of "
+        "refusing it")
+
+
+def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):
+    """#3590 review (finding 2): a rename that moves nothing is not a rename.
+
+    ``_refuse_ambiguous_rename`` fires on *any* truthy string ``name`` in
+    ``props``, and a read-modify-write caller that re-sends the entity's
+    CURRENT name (the ordinary ``update_entity(id, name=<unchanged>, …)``
+    shape) gets a hard ``NameAlreadyHeld`` whenever ANOTHER live carrier also
+    holds that name — even though no name moved. The two-carrier state is
+    LEGAL (D2) and this PR's own fixtures build it, so the pre-fix guard made a
+    legal graph un-updatable through the public door (reached by
+    ``tortoise_update_entity`` and the hosted PATCH surface, both of which
+    forward a caller props bag).
+
+    FAILS IF: the no-op arm is removed — every assertion below that expects the
+    update to SUCCEED raises ``NameAlreadyHeld`` instead. The negative control
+    is in the same test: a real rename ONTO the other carrier is still refused,
+    so the fix narrows the gate by the no-op case only.
+    """
+    from tortoise.exceptions import NameAlreadyHeld
+
+    client, _ = sdk
+    proj = client._get_proj()
+    client.create_entity("object", "Dup", _server_id="id-noop-a",
+                         is_episodic=False)
+    client.create_entity("object", "Dup", _server_id="id-noop-b",
+                         is_episodic=False)
+
+    # A read-modify-write re-sending the CURRENT name changes only the title.
+    node = client.update_entity("id-noop-a", name="Dup", title="Edited")
+    assert node.get("name") == "Dup", node
+    assert node.get("title") == "Edited", (
+        "the property half of the write was dropped: " + repr(node))
+    assert sorted(_name_ids(proj, "Object", "Dup")) == [
+        "id-noop-a", "id-noop-b"], (
+        "the no-op re-write moved a name it did not change")
+
+    # …and the gate it narrows is STILL a gate: a real move onto a held name.
+    client.create_entity("object", "Mover", _server_id="id-noop-mover",
+                         is_episodic=False)
+    with pytest.raises(NameAlreadyHeld):
+        client.update_entity("id-noop-mover", name="Dup")
+    assert _name_ids(proj, "Object", "Mover") == ["id-noop-mover"], (
+        "a refused rename still moved the name")

@@ -17700,7 +17700,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 6. Entities — routed by KIND (#1370/#4934): declared §5 Subject kinds
     # become :Subject (with subjectKind) so the Subject layer is reachable and
     # the vocabulary does not leak into Object.objectKind; everything else stays
-    # an :Object MERGEd by name (#452) with objectKind + the S5 gate-result flag
+    # an :Object registered through ``create_entity``, which RESOLVES the name to
+    # its single live holder or mints an opaque id (#452 idempotent re-mention;
+    # #3590 moved the MERGE key from the name to that id) with objectKind + the
+    # S5 gate-result flag
     # (passes_frequency_gate written WITH flag, amendment §4.3 #12). aboutObject
     # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
     # gated binder is the only aboutSubject producer. ──

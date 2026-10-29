@@ -307,11 +307,21 @@ def classify_terminalizer_miss(
     ``name_unregistered`` is the sibling caller-decision for
     ``ObjectSuperseded`` only (#3590 D2): the caller has scanned the journal
     and found the record's NAME not established — no ``ObjectRegistered``
-    created it, no ``EntityMutated`` state op carried it into the merge key,
-    and no ``EventRecorded`` mention stub minted it — **and** its ``id`` (when
-    it carries one) not an id the journal established. Both limbs are
-    required; a name alone is NOT the contract, and a caller that sets this
-    flag on a name-only reading exempts a supersede that could have landed.
+    created it and no ``EntityMutated`` state op carried it into the merge key
+    — **and** its ``id`` (when it carries one) not an id the journal
+    established. Both limbs are required; a name alone is NOT the contract, and
+    a caller that sets this flag on a name-only reading exempts a supersede
+    that could have landed.
+
+    ⛔ A THIRD name source — an ``EventRecorded`` mention stub — is RETIRED, not
+    omitted: ``journal_object_established`` no longer counts it because the
+    fold never mints one (#3590 D9; ``_event_plain_merge`` scans an Object, it
+    does not MERGE by a mention's name). Counting it here would tell a reader
+    the oracle and its classifier share a source they do not, and exempt a
+    supersede of a carrier the journal never created — the fail-open the
+    exemption exists to keep closed. The ``:Subject`` about-edge stub
+    (``edges._mint_subject_stub``) is a different label and cannot reach an
+    Object MERGE key.
     Also a journal question this module cannot answer — passed in for the same
     reason as ``target_deleted``, and it must NOT be inferred from the graph,
     because a live-holder probe is exactly the ambiguity the exemption
