@@ -54,6 +54,9 @@ name: ci-queue-health
 # BELOW the `pr_running != 0` clause, so it is unreachable while any PR run is
 # executing (a trim-safe OFFENDER leading that same queue does license trims once
 # no PR run is executing — a queued PR run is never a candidate in any case).
+# That no-action statement is about the READING, never the invocation: the tool
+# cancels the pre-action flood and then reports a post-action re-read, so the arm
+# below reads `cancelled` from the payload and says which case it is.
 # `PR-UNWITNESSED` (the feed was cut at its page cap, so the
 # oldest queued runs — the end the age clause needs — were never read; or the
 # queued PR runs carry no readable `created_at`, so the wait cannot be measured at
@@ -226,6 +229,13 @@ jobs:
           # `::error::<message>`; do not try to escape the commas (P2-1 of the
           # #9118 review).
           verdict="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('verdict','UNKNOWN'))" 2>/dev/null || echo UNKNOWN)"
+          # "Nothing was cancelled" is a claim about THIS INVOCATION, and a reading
+          # cannot support it: `classify_queue` is pure, and the tool cancels the
+          # PRE-action FLOOD candidates and then reports a POST-action re-read — so
+          # a PR-BACKLOGGED reading can carry cancellations in `cancelled` in the
+          # very same payload (#10264 review P3). Read it, and say what happened.
+          cancelled_count="$(python3 -c "import json; print(len(json.load(open('/tmp/ci-queue-health.json')).get('cancelled') or []))" 2>/dev/null || echo 0)"
+          cancelled_count="${cancelled_count:-0}"
           if [ "$rc" -eq 1 ]; then
             echo "::error::${state} — PR CI is NOT slow, it is NOT RUNNING, and it still is after this run's cancellations. See the step summary."
           elif [ "$rc" -eq 2 ]; then
@@ -243,7 +253,16 @@ jobs:
             # unreachable from here. (Quoting the trim scope as the bound would be
             # wrong: a trim-safe offender leading this same queue DOES license
             # trims once no PR run is executing.) The alarm is this annotation.
-            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. Nothing was cancelled: this state is reached only while a PR-event run is executing, and the governor's block sits below that clause, so no trim was considered — its candidates are a trim-safe offender's queued runs, never a queued PR run. The lever is capacity, not the governor."
+            # ... and the cancelled/none clause is read off the PAYLOAD, never
+            # asserted: `cancelled` non-empty in a PR-BACKLOGGED reading means this
+            # run trimmed the pre-action flood, so claiming nothing was cancelled
+            # here would contradict the transition line printed three steps above.
+            if [ "$cancelled_count" -gt 0 ]; then
+              cancel_note="This reading came AFTER this run cancelled ${cancelled_count} pre-action FLOOD candidate(s) (see the transition line above); the state itself reaches no trim."
+            else
+              cancel_note="This run cancelled nothing, and the state reaches no trim: it is reached only while a PR-event run is executing, and the governor's block sits below that clause, so the governor was never reached. Its candidates are a trim-safe offender's queued runs, never a queued PR run."
+            fi
+            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_note} The lever is capacity, not the governor."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
             echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
           fi
