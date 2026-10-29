@@ -2697,10 +2697,10 @@ def _write_capture_turns(
         # Which store the removal targets is the same capability question as the
         # write above: with the record holding the turns there is no node to
         # delete, and the removal is the `EntityMutated` op=delete emitted below
-        # (the record half is a TIER DEMOTE, not a row delete — see
-        # `record_projection._delete_statements`). `PointRetracted` is emitted
-        # ONLY on the graph-held lane: it is in `_GRAPH_EVENT_TYPES`, and on the
-        # record-held lane the turn was never announced there either.
+        # (⛔ TIER-LESS on purpose — `record_read._turns` has NO tier predicate, so a
+        # DEMOTE would go on serving it (`_journal_turn_removal` demotes). `PointRetracted`
+        # is emitted ONLY on the graph-held lane: it is in `_GRAPH_EVENT_TYPES`,
+        # and on the record-held lane the turn was never announced there either.
         if stale and not _record_holds_turns:
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(

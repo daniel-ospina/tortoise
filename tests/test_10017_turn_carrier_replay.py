@@ -589,6 +589,54 @@ def test_the_removal_KEEPS_the_record_row_and_demotes_its_tier():
         "a tier-less `EntityMutated` op=delete must keep its #3299 meaning")
 
 
+def test_the_stale_sweep_journals_a_TIERLESS_delete_not_a_demote(
+        tmp_path, monkeypatch):
+    """The SHORTER-RE-CAPTURE sweep removes the record ROW — deliberately.
+
+    There are TWO removals on the record-held lane and they mean different
+    things (#3300), so this leg pins which one the sweep is, because a comment
+    alone already got it wrong once (`sdk.py`'s `_write_capture_turns` said the
+    sweep's record half was a TIER DEMOTE, while the emission beside it was
+    tier-less).
+
+    * the PURGE's removal (`TortoiseSDK._journal_turn_removal`) is a DEMOTE —
+      the record is the turn's home and the transcript must survive;
+    * this SWEEP's removal is a real row DELETE — a turn the shorter re-capture
+      dropped is no longer in the session, and `record_read._turns` carries NO
+      tier predicate, so demoting instead of deleting would keep SERVING it.
+
+    Mutation that reddens it: pass `cache_tier=rp.RECORD_ONLY_TIER` to the
+    sweep's `_journal_entity_mutation` call (i.e. follow the old comment). The
+    record then carries the tier and `mutations_for` returns the `UPDATE`
+    demote instead of the `DELETE` pair — both assertions below fail.
+    """
+    log_path = _journal(tmp_path)
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
+    try:
+        _capture_with_record_armed(sdk, monkeypatch, turns=CONV)
+        # A SHORTER re-capture: ids at/beyond the new window are stale.
+        _capture_with_record_armed(sdk, monkeypatch, turns=CONV[:1])
+
+        removals = [r for r in _records(log_path)
+                    if r.get("type") == "EntityMutated"
+                    and r.get("op") == "delete"
+                    and r.get("id") in EXPECTED_TURN_IDS]
+        assert [r["id"] for r in removals] == EXPECTED_TURN_IDS[1:], (
+            "the sweep journalled the wrong population (or nothing) — a "
+            "shorter re-capture must record exactly the turns it dropped")
+        for record in removals:
+            assert "cache_tier" not in record, (
+                "the stale-turn sweep carries a tier, which makes its record "
+                "effect the PURGE's demote — that keeps serving a turn the "
+                "session no longer holds")
+            statements = rp.mutations_for(record, org_id="o", graph_id="g")
+            assert [s.sql.split()[0] for s in statements] == ["DELETE", "DELETE"], (
+                f"the sweep's removal must delete the row, not demote it: "
+                f"{[s.sql for s in statements]}")
+    finally:
+        sdk.close()
+
+
 def test_a_tier_scoped_delete_of_a_non_point_is_REFUSED():
     """The tier column exists only on `public.point`; emitting the demote for
     another label would be SQL against a column that is not there."""

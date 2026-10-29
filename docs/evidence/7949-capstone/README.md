@@ -219,7 +219,9 @@ touching the probe or these tests**.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:8597-8612`, `:8873-8887`). An acceptance test of "a non-empty dict"
+{}}` (the early-return path at `extractor_v2.py:8608-8612`), and on the main path as
+`result["classify_later"]` (`extractor_v2.py:8961-8967`) and `result["vet"]`
+(`extractor_v2.py:8971-8975`). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -231,12 +233,12 @@ non-empty S2 stats) fails CLOSED.
 first tightened rule accepted `enabled: true` on its own, reading it as "the extractor's OWN
 statement that the gate was open". It is not that: `enabled` is the FLAG, computed BEFORE the pass
 is reached. `vet_enabled` is computed at `extractor_v2.py:8592`, i.e. BEFORE the
-`if not edus:` early return (`:8508`), which emits literally
-`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8524`), and
-each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8592`), `if vet_enabled and
-complete_list:` (`:8714`). So a session with the flag ON and an empty list emits `enabled: True`
+`if not edus:` early return (`:8596`), which emits literally
+`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8612`), and
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8680`), `if vet_enabled and
+complete_list:` (`:8802`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
-`{}` on its fail-open path, `:8390-8393`). Because `_witness_block` returns the first positive
+`{}` on its fail-open path, `:8478-8481`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
@@ -246,10 +248,10 @@ to look.
 ⛔ **And that cause cites each surface's OWN code — the CLASSIFY pass is not the VET pass.** It was
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
 the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
-classify pass has its own flag (`classify_later`, `:8473`), its own early-return block
-(`:8520-8523`), its own gates — `if classify_later and embed_list:` (`:8604`) around `if items:`
-(`:8607`), and `if classify_later and complete_list:` (`:8729`) around `if items:` (`:8739`) — and its
-own fail-open `except` (`:8620` / `:8750`), so an idle classify block comes from no embed list **or
+classify pass has its own flag (`classify_later`, `:8561`), its own early-return block
+(`:8608-8611`), its own gates — `if classify_later and embed_list:` (`:8692`) around `if items:`
+(`:8695`), and `if classify_later and complete_list:` (`:8817`) around `if items:` (`:8827`) — and its
+own fail-open `except` (`:8708` / `:8838`), so an idle classify block comes from no embed list **or
 no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface
 (`_IDLE_CITES`), and a surface added without its own entry fails loudly rather than borrowing
 another pass's code. Pinned by `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` and by
@@ -262,8 +264,9 @@ cause used to read "the arm forced `TORTOISE_VET=1` … **so the pass RAN**", su
 proves the flag; a classify or vet block can legitimately carry `enabled: True, s2: {}` (an empty
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
-that whether it did work is not observable here; the `#9116` attribution (the surface is emitted
-unconditionally at `:8873`/`:8883` and dropped at `sdk.py:13593`) and the "where the fix must
+that whether it did work is not observable here; the `#9116` attribution (the surfaces
+`result["classify_later"]` at `extractor_v2.py:8961` and `result["vet"]` at `extractor_v2.py:8971`,
+dropped at `sdk.py:13593`) and the "where the fix must
 target" line are unchanged.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
@@ -477,8 +480,8 @@ made V5 pass on a step nobody observed; its derivation figure was also circular 
 defined by the link it measures). `6020cbd5f` (the stamped run THIS one replaces) fixed that rule but
 left two prose defects this round repairs: its flag-on/no-activity cause was templated for the surface
 NAME while every citation in it was the VET pass's, so the S2.3 line sent a reader to code the
-classify pass never runs (`classify_later` at `:8473`, its `if classify_later and …` / `if items:`
-gates at `:8604`/`:8607`/`:8729`/`:8739`), and its absent-surface cause asserted "so the pass RAN"
+classify pass never runs (`classify_later` at `:8561`, its `if classify_later and …` / `if items:`
+gates at `:8692`/`:8695`/`:8817`/`:8827`), and its absent-surface cause asserted "so the pass RAN"
 from the forced-and-read-back flag alone — the very equation `_pass_ran` rejects — so an unobserved
 step read as a pass that ran and was merely hidden. Keeping any of them alongside the corrected run
 would leave two artifacts claiming to be THE measurement. **Superseding is how a row moves: re-run the probe, DELETE
