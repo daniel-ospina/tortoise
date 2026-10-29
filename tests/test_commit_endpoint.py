@@ -2194,7 +2194,16 @@ class Test6bEntitySupersessionGuards:
         erase it from recall's default view)."""
         _seed_objects(client, "g6e-seed", ["e-old"])
         oid = _object_row("e-old")[0][2]
-        assert oid and oid.startswith("obj-"), oid
+        # ⛔ #3590: the create mints an OPAQUE id (`ids.ulid()`), so nothing here
+        # may assert the retired `obj-<sha26(name)>` spelling — `_seed_objects`'
+        # own docstring states the same rule. What the guard needs is that the
+        # reference IS the alias (an id addressing the Object whose NAME is the
+        # successor string); asserting the two differ keeps the fixture from
+        # degenerating into the same-string case, where every successor
+        # candidate trivially equals the target for a reason that has nothing
+        # to do with the id/name alias arm under test.
+        assert oid and isinstance(oid, str), oid
+        assert oid != "e-old", oid
         r = _supersede_commit(client, "g6e-fold", oid, "e-old",
                               evidence="self-reference via id/name alias",
                               entities=[])
