@@ -29,7 +29,6 @@ sys_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, sys_path)
 
 import pytest  # noqa: E402
-from _node_ids import node_id  # noqa: E402
 
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
@@ -65,9 +64,15 @@ class TestSharedNameDoesNotCollapseIds:
                 "objectKind:'company', title:'TWO', status:'live'})"
             )
 
-            created = sdk.create_object("Acme", "company")
-            created_id = created["id"]
-            assert created_id == node_id(proj, "Object", "Acme")
+            # ⛔ #3590 D2: a name held by TWO LIVE carriers is not something a
+            # create may pick between — `resolve_or_mint` refuses it — so this
+            # pins the FOLD with an EXPLICIT-id write, which is the channel that
+            # legally produces a third carrier of a shared name. The property
+            # under test is unchanged: the fold must not re-id the carriers.
+            created = sdk.create_entity("object", "Acme", objectKind="company",
+                                        _server_id="carrier-3",
+                                        is_episodic=False)
+            created_id = created["node"]["id"]
 
             rows = _nodes(proj, "Object", "name")
             ids = _ids(rows)
@@ -96,7 +101,9 @@ class TestSharedNameDoesNotCollapseIds:
                 "objectKind:'company', status:'superseded'})"
             )
 
-            created_id = sdk.create_object("Beta", "company")["id"]
+            created_id = sdk.create_entity(
+                "object", "Beta", objectKind="company",
+                _server_id="carrier-2", is_episodic=False)["node"]["id"]
 
             rows = _nodes(proj, "Object", "status")
             ids = _ids(rows)
@@ -116,7 +123,9 @@ class TestSharedNameDoesNotCollapseIds:
             proj.g.query("CREATE (s:Subject {id:'sub-decoy-1', name:'Bob', status:'live'})")
             proj.g.query("CREATE (s:Subject {id:'sub-decoy-2', name:'Bob', status:'live'})")
 
-            created_id = sdk.create_subject("Bob")["id"]
+            created_id = sdk.create_entity(
+                "subject", "Bob", _server_id="sub-3",
+                is_episodic=False)["node"]["id"]
 
             rows = _nodes(proj, "Subject", "name")
             ids = _ids(rows)
@@ -133,7 +142,9 @@ class TestSharedNameDoesNotCollapseIds:
             proj.g.query("CREATE (o:Object {id:'decoy-1', name:'Acme', status:'live'})")
             proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
 
-            created_id = sdk.create_object("Acme", "company", lane="x")["id"]
+            created_id = sdk.create_entity(
+                "object", "Acme", objectKind="company", lane="x",
+                _server_id="carrier-3", is_episodic=False)["node"]["id"]
 
             assert _by_id(proj, "Object", created_id, "lane") == [["x"]]
             assert _by_id(proj, "Object", "decoy-1", "lane") == [[None]], (
@@ -160,16 +171,29 @@ class TestSingleCarrierPathIsUnchanged:
             sdk.close()
 
     def test_create_twice_stays_idempotent_when_the_name_is_shared(self, tmp_path):
-        """A 2-carrier name does not break the create's idempotency."""
+        """A shared name is REFUSED, on every call — it is never a pick.
+
+        The pre-#3590 contract minted a THIRD node here (the id was derived from
+        the name, so a create never had to choose a carrier). Since #3590 D2 a
+        create RESOLVES to a single live holder or mints on an EMPTY name; a name
+        held by two live carriers is ambiguity a create may not resolve for the
+        caller (`route-then-refuse`, R8). The old body — "a 2-carrier name does
+        not break the create's idempotency" — asserted the retired behaviour, so
+        it is the refusal that is pinned now, on BOTH calls: the first refusal
+        must not have written a third carrier either.
+        """
+        from tortoise.entity_identity import AmbiguousEntityName
+
         sdk = TortoiseSDK(str(tmp_path / "g.db"))
         try:
             proj = sdk._get_proj()
             proj.g.query("CREATE (o:Object {id:'decoy-1', name:'Acme', status:'live'})")
             proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
-            first = sdk.create_object("Acme", "company")["id"]
-            second = sdk.create_object("Acme", "company")["id"]
-            assert first == second
-            assert len(_nodes(proj, "Object")) == 3, _nodes(proj, "Object")
+            for _ in range(2):
+                with pytest.raises(AmbiguousEntityName):
+                    sdk.create_object("Acme", "company")
+            assert sorted(_ids(_nodes(proj, "Object"))) == ["decoy-1", "decoy-2"], (
+                f"a refused create still wrote a carrier: {_nodes(proj, 'Object')}")
         finally:
             sdk.close()
 

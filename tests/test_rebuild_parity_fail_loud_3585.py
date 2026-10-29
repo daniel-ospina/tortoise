@@ -2743,14 +2743,14 @@ def test_second_registration_of_a_name_adds_a_carrier_not_a_rekey(env):
     supersede's id would then address nothing and the same-name coexistence the
     identity model legalises (D2) would be unaddressable.
 
-    ⛔ KNOWN REFERENCE-FOLD DIVERGENCE, filed separately, NOT re-derived here:
-    `journal_object_surviving_keys` DOES re-key on a second registration of one
-    name (its single-carrier branch discards the earlier id), so the reference
-    fold is stricter than the graph and reports `object-superseded-miss` on
-    this journal. That is the fail-CLOSED direction (a false RED, never a false
-    pass), so it is out of this lane's scope and this pin stays on the GRAPH
-    property it can state truthfully — do not "fix" it by asserting the
-    reference fold agrees with a model it does not have.
+    ⛔ The reference-fold divergence this docstring used to file as KNOWN and
+    out of scope ("`journal_object_surviving_keys` DOES re-key on a second
+    registration of one name … do not fix it") is FIXED (#3590 review F1): its
+    registration arm adds a carrier on ANY count and never evicts the earlier
+    id, so the model says `{obj-first-ri, obj-real-ri}` for this journal — the
+    same set the graph holds — and the supersede below is no longer reported as
+    `object-superseded-miss`. The pin stays on the graph property (the model has
+    its own pin in `tests/test_8864_shared_name_merge_key.py`).
     """
     sdk, events = env
     _raw(events, type="ObjectRegistered", id="obj-first-ri", name="ACME-RI",

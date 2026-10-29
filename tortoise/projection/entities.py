@@ -3908,17 +3908,16 @@ class _EntityHandlers:
         # a fresh MERGE has nothing to remove. The pattern carries the SAME key
         # the MERGE below uses (``merge_key``), or this misses its own node.
         #
-        # #8864: WHICH key that is — `name` while it identifies exactly ONE
-        # carrier (the #452 content-hash dedup and the stub adoption below both
-        # depend on name-keying), and `id` once two or more carriers hold it.
-        # A name held by N nodes makes `MERGE (s:Subject {name:$name})` match ALL
-        # of them and the `ON MATCH` id write stamp ONE id onto EVERY one of
-        # them: duplicate-id corruption, after which every id-keyed read folds
+        # ⛔ #3590: the MERGE key is the id — ONE node per id, always. The
+        # pre-#3590 key was `name` (while exactly ONE carrier held it, #8864),
+        # and a name held by N nodes made `MERGE (s:Subject {name:$name})`
+        # match ALL of them and the `ON MATCH` id write stamp ONE id onto EVERY
+        # one: duplicate-id corruption, after which every id-keyed read folds
         # two distinct entities into one result set. The record's id IS the
-        # identity (#3590 R1), so an ambiguous name never has to be resolved to
-        # fold the record — it just stops being the key. (`carriers` is read
-        # above, before the embedding work, because the branch also decides
-        # whether `sid` needs the `_writable_id` gate.)
+        # identity (R1), so a name never has to be resolved to fold the record
+        # — it is not a key at all any more. (`carriers` is gone with the
+        # branch that chose between the keys: `sid` still takes the same
+        # `_writable_id` gate below, on the id that is now the only key.)
         #
         # ⚠️ KNOWN GAP, recorded deliberately (#8902 review P3, filed as #8919):
         # in the `id`-keyed branch the `ON MATCH` below writes the id and the
@@ -4054,15 +4053,15 @@ class _EntityHandlers:
         # only when a new vector is being written; key ``merge_key`` below — the
         # SAME key the MERGE uses, or this misses its own node.
         #
-        # #8864: WHICH key that is — `name` while exactly ONE carrier holds it
-        # (the #452 dedup and the stub adoption above depend on name-keying),
-        # `id` once two or more do. A shared name makes
-        # `MERGE (o:Object {name:$name})` match ALL the carriers and the
-        # `ON MATCH` id write stamp ONE id onto EVERY one of them, i.e.
-        # duplicate-id corruption: two distinct entities then answer every
-        # id-keyed read as one. See `_upsert_subject` for the shared rationale.
-        # (`carriers` is computed with the gates above so the branch can also
-        # decide whether `oid` needs the `_writable_id` gate.)
+        # ⛔ #3590: the MERGE key is the id — ONE node per id, always. The
+        # pre-#3590 key was `name` (while exactly ONE carrier held it, #8864):
+        # a shared name made `MERGE (o:Object {name:$name})` match ALL the
+        # carriers and the `ON MATCH` id write stamp ONE id onto EVERY one of
+        # them, i.e. duplicate-id corruption — two distinct entities then answer
+        # every id-keyed read as one. See `_upsert_subject` for the shared
+        # rationale. (`carriers` is gone with the branch that chose between the
+        # keys; `oid` still takes the same `_writable_id` gate below, on the id
+        # that is now the only key.)
         #
         # ⚠️ KNOWN GAP, recorded deliberately (#8902 review P3, filed as #8919):
         # in the `id`-keyed branch the `ON MATCH` below writes the id and the
@@ -4145,10 +4144,12 @@ class _EntityHandlers:
         concurrent commit folded it between this record's gate probe and the
         fold); direct fold callers can also produce it as an idempotent
         re-fold. folded > 0 = claimed. First-fold stamps are kept on a
-        terminal re-fold (never re-SET). The id→name fallback (#2164 ISSUE B
-        legacy) fires ONLY on matched == 0 (genuine absence) — never when
-        the id node exists but is terminal (a fallback could fold a dup-name
-        carrier or re-claim a terminal target).
+        terminal re-fold (never re-SET). ⛔ #3590 RETIRED the id→name fallback
+        (#2164 ISSUE B legacy) that this paragraph used to describe as firing
+        "ONLY on matched == 0": there is no such fallback left to fire, because
+        under same-name coexistence a name-keyed re-resolution supersedes a
+        DIFFERENT incarnation (#3573's burial class). What replaced it is the
+        unified miss classifier described at the end of this docstring.
 
         ``cas=False`` (the DEFAULT — replay/rebuild surfaces: the pass-1b
         sweep, the apply dispatch, backup restore, consistency, migrate,
@@ -4187,8 +4188,8 @@ class _EntityHandlers:
             return (0, 0)
         # #5370: store the successor name VERBATIM — no 200-char cap. A cap
         # here is LOSSY: a successor named >200 chars is stored on its
-        # Object in full (identity is the NAME — `_upsert_object` MERGEs on
-        # it — and `create_entity` has never capped), but the fold would
+        # Object in full (identity is the id — `_upsert_object` MERGEs on it
+        # since #3590 — and `create_entity` has never capped), but the fold would
         # record only its 200-char prefix — a value that names NO Object.
         # The ask path's name-keyed successor probe
         # (assembly._probe_visible_successors — MATCH (o:Object) WHERE

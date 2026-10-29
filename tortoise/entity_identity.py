@@ -218,6 +218,38 @@ def live_name_holder_ids(g, label: str, name: str, *,
                             name_props=name_props)
 
 
+def _adopt_idless_holder(g, label: str, name: str, node_id: str) -> None:
+    """Stamp a freshly minted ``node_id`` onto the single id-less LIVE holder.
+
+    #3590 review F2: ``MERGE (o:Object {name:$name})`` (a legacy / raw /
+    foreign writer's construction) mints a row with NO id. A create that merely
+    minted a fresh id BESIDE such a row left TWO live carriers of one name —
+    after which :func:`resolve_or_mint` refuses the name
+    (:class:`AmbiguousEntityName`) and there is no by-name repair path at all:
+    the name is create-poisoned, permanently and with nothing recording how it
+    got that way.
+
+    ADOPTING keeps ONE carrier: the row that already holds the name becomes
+    addressable, the caller's write (which MERGEs on ``id``) folds onto it
+    instead of opening a second node, and the name stays create-able. The id is
+    MINTED here — never derived from the name (#3590 R1/R2), and not a reuse of
+    any other entity's id (R5).
+
+    MUST run with the ``(label, name)`` create lock held — every caller of
+    :func:`resolve_or_mint` holds it (:func:`entity_create_lock`, reentrant for
+    the resolve), and the write has to land before the lock is released or a
+    concurrent create re-mints the very second carrier this prevents.
+    """
+    _require_identity_label(label)
+    g.query(
+        f"MATCH (n:{label}) "
+        f"WHERE {_name_predicate(False)} "
+        f"AND {_terminal_excluded('n.status')} "
+        "AND n.id IS NULL "
+        "SET n.id = $id",
+        params={"name": name, "id": node_id})
+
+
 #: One lock per ``(label, name)`` for the CREATE-side resolve-or-mint
 #: (:func:`resolve_or_mint`) **and the write it authorises**. The resolve is
 #: check-then-act and D2 legalises same-name coexistence, so no unique index can
@@ -279,7 +311,10 @@ def resolve_or_mint(g, label: str, name: str, *,
 
     * resolves to the **single live holder** of ``name`` (``created=False``) —
       the idempotent re-mention (#452) — or
-    * **mints** a fresh opaque id (``created=True``) when no live entity holds
+    * **adopt** the single LIVE holder that carries NO id (a legacy / raw row)
+      — stamping a minted id onto it, so the create lands on ONE carrier
+      instead of opening a second one (#3590 review F2), or
+    * **mint** a fresh opaque id (``created=True``) when NO live entity holds
       the name. A terminal holder does not block a create: it is a different
       incarnation, and re-using its id would be id reuse (R5).
 
@@ -307,16 +342,27 @@ def resolve_or_mint(g, label: str, name: str, *,
                                       [h for h in holders if h])
         if holders and holders[0]:
             return str(holders[0]), False
-        # Zero live holders, or one LIVE holder that carries no id (a legacy /
-        # foreign row) — that row cannot be addressed, so it cannot BE the
-        # identity: mint.
-        #
-        # ⛔ The returned id is only half of the contract: the WRITE that makes
-        # it visible must happen before this lock is released, or a concurrent
-        # create passes the same empty-holder check (#3590 review, finding 1).
-        # A caller that cannot write under the lock must wrap resolve+write in
-        # :func:`entity_create_lock` — ``sdk.create_entity`` does.
         from .ids import ulid
+        if holders:
+            # ONE LIVE holder, carrying NO id (a legacy / foreign / raw
+            # ``MERGE (n:Label {name:…})`` row). ⛔ ADOPT it, never mint beside
+            # it (#3590 review F2): a second live carrier makes every later
+            # create of this name refuse `AmbiguousEntityName`, with no
+            # by-name repair path — the name create-poisoned for good, and
+            # silently. Stamping the id here makes that row addressable, and
+            # the caller's write (which MERGEs on `id`) then folds onto it, so
+            # ONE carrier remains. `created=True` because the node carries no
+            # registration of its own: the caller's journal line is what makes
+            # the adopted id replayable.
+            adopted = ulid()
+            _adopt_idless_holder(g, label, name, adopted)
+            return adopted, True
+        # Zero live holders: mint an opaque id. The returned id is only half of
+        # the contract: the WRITE that makes it visible must happen before this
+        # lock is released, or a concurrent create passes the same empty-holder
+        # check (#3590 review, finding 1). A caller that cannot write under the
+        # lock must wrap resolve+write in :func:`entity_create_lock` —
+        # ``sdk.create_entity`` does.
         return ulid(), True
 
 

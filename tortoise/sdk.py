@@ -20705,8 +20705,11 @@ class TortoiseSDK:
             return False, None, None, None, 0, False, None
         # ⛔ #3590 (round-5 review F1): THE TARGET IS THE NODE THE WRITE LANDS
         # ON, and the write now resolves over **LIVE** carriers only
-        # (`entity_identity.resolve_or_mint`): a TERMINAL or id-less sole carrier
-        # does not block a create, so the create MINTS a fresh live node.
+        # (`entity_identity.resolve_or_mint`): a TERMINAL sole carrier does not
+        # block a create (it is another incarnation), and an id-less sole
+        # carrier is ADOPTED — the create stamps a minted id onto it rather
+        # than opening a second live node (#3590 review F2). Either way the
+        # write does not land on the carrier this probe read.
         # Reading the three axes off such a carrier described a different node
         # than the writer used — fail-OPEN on the `#7925` Phase-1 arms (they skip
         # a bundle item whose status IS stored, then the write dies in step 4
@@ -20716,7 +20719,9 @@ class TortoiseSDK:
         # so the guard and `resolve_or_mint` cannot disagree.
         _live = [r for r in rows if not r[1] and r[0]]
         if len(_live) != 1:
-            # 0: terminal-only / id-less-only ⇒ the write MINTS (`merges=False`).
+            # 0: terminal-only / id-less-only ⇒ no stored axis to honour, and
+            # the write opens (or adopts) a node that carries none of them
+            # (`merges=False`).
             # 2+: same-name coexistence, which the create REFUSES rather than
             # picking a carrier ⇒ no target either (#8864 / D2). The two are
             # told apart by the COUNT, which is why it is the live one.
@@ -35923,9 +35928,11 @@ class TortoiseSDK:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
-        ``ObjectRegistered`` on first canonical registration (probe-gated,
-        #2194 — a canonical re-mention never double-journals); SDK-created
-        Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295);
+        ``ObjectRegistered`` on EVERY create (#3590 — the "first canonical
+        registration" probe of #2194 is gone: a re-mention journals again, which
+        is replay-idempotent because the fold is id-keyed and `createdAt` is
+        first-wins); SDK-created Subjects journal ``SubjectAdded`` the same way
+        (#2295's probe is gone with it);
         Documents journal ``DocumentCreated`` on EVERY create (#2296 —
         emit-on-every-write, since each create mints a fresh ulid and
         ``_upsert_document`` MERGEs by that id). Source journals via
