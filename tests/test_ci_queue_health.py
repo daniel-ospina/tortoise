@@ -139,10 +139,20 @@ def test_a_reporting_workflow_below_the_floor_is_not_a_flood():
 
 
 def test_pr_ci_being_served_is_not_a_flood():
+    """An executing PR run rules out the FLOOD absence — it does not rule out a
+    backlog, which is the (`healthy()`) clause below this one.
+
+    The reason line used to read "so PR CI is being served", i.e. it offered an
+    executing run as EVIDENCE OF SERVICE — the exact proposition #10237 exists to
+    refute (2 executing, 32 queued, oldest 527 min, printed as `OK`). It now states
+    the fact it has and names the clause that answers the rest.
+    """
     health = classify(flood_queued(12) + starving_pr_runs(1),
                       in_progress=[run(1, "Python CI", event="pull_request", age_seconds=60)])
     assert health.verdict == Q.OK
-    assert any("being served" in reason for reason in health.reasons)
+    assert any("NOT the absence the flood clause names" in reason
+               for reason in health.reasons)
+    assert not any("being served" in reason for reason in health.reasons)
 
 
 def test_no_queued_pr_run_means_starvation_was_not_witnessed():
@@ -160,9 +170,20 @@ def test_a_fresh_queued_pr_run_has_not_waited_long_enough():
 
 
 def test_an_unreadable_timestamp_does_not_satisfy_the_age_clause():
+    """Nor does it let the tool certify health: an unmeasured wait is not OK.
+
+    `age_seconds` contracts that an unreadable stamp *"must not satisfy (or defeat)
+    the age clause, so the caller treats it as 'not witnessed' AND SAYS SO"*. This
+    shape — a queue of `flood_queued(12)` plus one PR run whose `created_at` is
+    unparseable — used to print `CI: OK(queued=13, pr_running=0, pr_queued=1)`: the
+    wait was neither measured nor refused, i.e. `OK` asserted past a budget that
+    could not be applied. It is now PR-UNWITNESSED, the module's own fail-closed
+    verdict for a wait nobody witnessed (same refusal as a truncated feed).
+    """
     broken = Q.QueuedRun(id=5, name="Python CI", event="pull_request", created_at="not-a-date")
     health = classify([*flood_queued(12), broken])
-    assert health.verdict == Q.OK
+    assert health.verdict == Q.PR_UNWITNESSED
+    assert health.verdict != Q.OK
     assert health.oldest_pr_queued_age_seconds is None
     assert any("no readable timestamp" in reason for reason in health.reasons)
 
@@ -343,7 +364,8 @@ def test_a_truncated_feed_cannot_certify_pr_ci_as_healthy():
     assert health.verdict != Q.OK
     assert health.trimmable == ()                     # nothing is acted on
     assert health.state_line == (
-        "CI: PR-UNWITNESSED(queued=4, pr_running=0, pr_queued=0, feed=truncated)"
+        "CI: PR-UNWITNESSED(queued=4, pr_running=0, pr_queued=0, "
+        "oldest=unmeasured, feed=truncated)"
     )
     assert any("NEWEST-FIRST" in reason for reason in health.reasons)
     assert Q.EXIT_FOR[Q.PR_UNWITNESSED] == Q.EXIT_OK
@@ -712,3 +734,201 @@ def test_an_unnamed_verdict_is_never_exit_0(monkeypatch):
     monkeypatch.setattr(Q, "read_health",
                         lambda *a, **k: dataclasses.replace(flood, verdict="SOMETHING-NEW"))
     assert Q.main([]) == Q.EXIT_UNMEASURABLE
+
+
+# ── PR-BACKLOGGED: PR CI IS being served, and the backlog is still past ────
+# ── anything the queue was ever measured to do (#10237) ───────────────────
+
+def serving_pr_runs(count=2, age_seconds=60):
+    """`count` PR-event runs that are EXECUTING — the state the old clause saw.
+
+    Built from `run()` directly, NOT from the `starving_pr_runs` factory: this
+    fixture is the opposite of starvation, and a reader should not have to hold two
+    definitions of it to believe the setup (PR #10253 review, P3).
+    """
+    return [run(7000 + i, "Python CI", event="pull_request", age_seconds=age_seconds)
+            for i in range(count)]
+
+
+def test_a_pr_backlog_past_the_wait_budget_is_not_ok_while_pr_ci_is_serving():
+    """The measured shape of #10237, 2026-10-28T17:47Z.
+
+    `tools/ci_queue_health.py` on the live repo read:
+
+        CI: OK(queued=54, pr_running=2, pr_queued=32)   oldest PR run waited 527 min
+
+    — i.e. a clean bill of health for a repo whose REQUIRED `python-ci-gate`
+    answers in hours. The starve witness requires `pr_running == 0`, which is the
+    one thing a saturated-but-moving queue never is, so the verdict that exists to
+    say "PR CI is not running" could not fire in exactly the state that wall
+    produces. `OK` is a claim about the QUEUE being healthy; one executing PR run
+    is not evidence that the queued PR work is being served at a usable rate.
+    """
+    health = classify(starving_pr_runs(20, age_seconds=527 * 60),
+                      in_progress=serving_pr_runs(2))
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.verdict != Q.OK
+    assert health.pr_running == 2
+    assert health.pr_queued == 20
+    assert health.state_line == (
+        "CI: PR-BACKLOGGED(queued=20, pr_running=2, pr_queued=20, oldest=31620s)"
+    )
+
+
+def test_a_backlogged_queue_has_no_action_so_it_exits_0_and_is_warned_not_red():
+    """Same reasoning as PR-STARVED: measured, real, and nothing may be cancelled.
+
+    The governor's whole action surface is a trim-safe OFFENDER's queued runs, and
+    a backlogged queue is BY DEFINITION made of the PR work the governor exists to
+    protect. A red run nobody can clear by acting is not an alarm, it is noise, so
+    the alarm is the state line and the workflow's annotation.
+    """
+    health = classify(starving_pr_runs(20, age_seconds=9000),
+                      in_progress=serving_pr_runs(1))
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.trimmable == ()
+    assert Q.EXIT_FOR[Q.PR_BACKLOGGED] == Q.EXIT_OK
+    # ... and it is NOT threaded into the per-PR STARVED report: `starves_pr` is a
+    # claim about ABSENCE ("no PR run is executing"), which is not this state.
+    assert health.starves_pr is False
+
+
+def test_a_pr_backlog_inside_the_wait_budget_is_ok():
+    """The false-alarm bound: a busy queue that starts PR work promptly is healthy."""
+    health = classify(starving_pr_runs(20, age_seconds=1800),
+                      in_progress=serving_pr_runs(2))
+    assert health.verdict == Q.OK
+    assert not any("PR-BACKLOGGED" in r for r in health.reasons)
+
+
+def test_the_pr_wait_budget_is_configurable():
+    """The floor is a measurement, so the measurement can move it without code."""
+    inside = classify(starving_pr_runs(20, age_seconds=1800),
+                      in_progress=serving_pr_runs(2), max_pr_wait_seconds=900)
+    assert inside.verdict == Q.PR_BACKLOGGED
+    outside = classify(starving_pr_runs(20, age_seconds=1800),
+                       in_progress=serving_pr_runs(2), max_pr_wait_seconds=7200)
+    assert outside.verdict == Q.OK
+    assert inside.pr_wait_budget_seconds == 900
+    assert outside.pr_wait_budget_seconds == 7200
+
+
+def test_a_starved_queue_is_starved_not_backlogged():
+    """`pr_running == 0` keeps PR-STARVED: the two states are not interchangeable."""
+    health = classify(starving_pr_runs(20, age_seconds=9000))
+    assert health.verdict == Q.PR_STARVED
+    assert not any("PR-BACKLOGGED" in r for r in health.reasons)
+
+
+def test_a_truncated_feed_still_reports_a_witnessed_backlog():
+    """A positive claim survives truncation — this run WAS read, and it waited."""
+    health = classify(flood_queued(4) + starving_pr_runs(2, age_seconds=9000),
+                      in_progress=serving_pr_runs(1), truncated=True)
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.verdict != Q.PR_UNWITNESSED
+
+
+def test_the_default_wait_budget_sits_past_the_measured_max_first_job_wait():
+    """The default is DERIVED from a measurement, not chosen for convenience.
+
+    `docs/ops/ci-wall-clock.md` §1 measured, over 54 `python-ci` runs on
+    2026-10-27, the wait for a run's FIRST job to start: p50 29.9 min, p95
+    77.0 min, MAX 81.9 min. A budget at or under that max would fire on the
+    measured-normal population and become an annotation nobody reads; 90 min is
+    the first round number past it, so the state fires only beyond anything the
+    queue has been observed to do.
+    """
+    assert Q.DEFAULT_MAX_PR_WAIT_SECONDS == 90 * 60
+    assert Q.DEFAULT_MAX_PR_WAIT_SECONDS > 81.9 * 60
+
+
+def test_the_cli_plumbs_the_wait_budget_and_reports_it(monkeypatch, capsys):
+    seen = {}
+
+    def fake_read_health(repo, **kwargs):
+        seen.update(kwargs)
+        return classify(starving_pr_runs(20, age_seconds=9000),
+                        in_progress=serving_pr_runs(1),
+                        max_pr_wait_seconds=kwargs["max_pr_wait_seconds"])
+
+    monkeypatch.setattr(Q, "read_health", fake_read_health)
+    assert Q.main(["--json", "--max-pr-wait-seconds", "900"]) == Q.EXIT_OK
+    assert seen["max_pr_wait_seconds"] == 900
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "PR-BACKLOGGED"
+    # the applied budget is DECLARED, so a reader can tell a raised floor from a
+    # queue that got better
+    assert payload["pr_wait_budget_seconds"] == 900
+
+
+# ── the two P2 findings of the PR #10253 review, pinned ───────────────────
+
+def test_a_backlogged_queue_reports_its_leader_as_a_fact_not_a_composition():
+    """#9118 P2-2, recurring INSIDE PR-BACKLOGGED (PR #10253 review, issue 1).
+
+    This queue's `pr_running != 0` clause is reached only after the offender
+    clauses declined, which includes the case where a TRIM-SAFE workflow holds the
+    queue's largest share (here: 10 of 14 queued runs are `finding-provenance`, a
+    workflow `--apply` may cancel). The reason line used to assert "a backlogged
+    queue is made of the PR work the governor must protect" — false here, and it
+    points the operator away from the one workflow the governor could trim —
+    while the clause above it said PR CI "is being served", the very proposition
+    the state exists to refute. Both are now facts, not claims.
+    """
+    queued = flood_queued(10) + starving_pr_runs(4, age_seconds=9000)
+    health = classify(queued, in_progress=serving_pr_runs(1))
+    assert health.verdict == Q.PR_BACKLOGGED
+    joined = " ".join(health.reasons)
+    # the leader and its trim-safety are FACTS, in the shape `no_flood()` uses ...
+    assert "Largest share: 'finding-provenance' (10 of 14)" in joined
+    assert "trim-safe offender present: True" in joined
+    # ... the false composition and the "being served" claim are gone ...
+    assert "made of the PR work" not in joined
+    assert "being served" not in joined
+    # ... and the no-action clause names what actually bounds the governor.
+    assert "a queued PR run is never a candidate" in joined
+
+
+def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():
+    """Issue 2 of the PR #10253 review: the budget had a reachable `OK` bypass.
+
+    Queued PR-event runs exist and PR CI IS executing, but every queued stamp is
+    unreadable — reachable, because `QueuedRun.created_at` is
+    `str(run.get("created_at") or "")` and `_parse_time("")` is `None`. The tool
+    printed `CI: OK(queued=14, pr_running=1, pr_queued=4)`: the wait budget could
+    not be applied at all, and the absence of a measurement was reported as health.
+    The state's whole content is a duration, so an unreadable duration is
+    PR-UNWITNESSED — `age_seconds`' own contract ("the caller treats None as 'not
+    witnessed' and says so"), and the same refusal a truncated feed gets.
+    """
+    broken = [Q.QueuedRun(id=2000 + i, name="Python CI", event="pull_request",
+                          created_at="") for i in range(4)]
+    health = classify(flood_queued(10) + broken, in_progress=serving_pr_runs(1))
+    assert health.verdict == Q.PR_UNWITNESSED
+    assert health.verdict != Q.OK
+    assert health.oldest_pr_queued_age_seconds is None
+    # the budget is still DECLARED, so "unmeasured" and "raised floor" stay
+    # distinguishable to a JSON consumer
+    assert health.pr_wait_budget_seconds == Q.DEFAULT_MAX_PR_WAIT_SECONDS
+    # the state line must not hardcode `pr_running=0` for a queue that IS serving
+    assert health.state_line == (
+        "CI: PR-UNWITNESSED(queued=14, pr_running=1, pr_queued=4, "
+        "oldest=unmeasured, feed=read)"
+    )
+    assert Q.EXIT_FOR[Q.PR_UNWITNESSED] == Q.EXIT_OK
+    assert any("wait budget cannot be applied" in reason
+               for reason in health.reasons)
+
+
+def test_the_only_ok_outside_the_seam_has_no_wait_to_measure():
+    """The narrowed guarantee: no queued PR run means no PR wait at all.
+
+    `healthy()` is the single seam every `OK` returns through EXCEPT this clause,
+    and this clause is harmless by construction — with no queued PR-event run there
+    is no wait that could be past a budget. Pinned so a future clause cannot slip a
+    durable `OK` in beside it without this test changing.
+    """
+    health = classify(flood_queued(12))
+    assert health.verdict == Q.OK
+    assert health.pr_queued == 0
+    assert health.oldest_pr_queued_age_seconds is None
