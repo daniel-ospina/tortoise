@@ -6636,6 +6636,185 @@ class TestOperatorSemantics2552:
                        for s in r2["supersessions"])
         assert any("ambiguous" in w for w in r2["warnings"])
 
+    # ── #9906: a point-level ``supersedes`` ref must SURVIVE a fold ─────
+
+    def test_noop_fold_carries_supersedes_ref_to_the_surviving_point(self):
+        """#9906 (the measured drop): a point that folds as NOOP still asserts
+        its reversal.
+
+        Before the fix the NOOP branch ``continue``d past the ``supersede_ref``
+        collection site, so the CORRECTS record was never built — and NOTHING
+        was written to ``warnings`` either: this exact call returned
+        ``stats.noops=1``, ``payload.points=[]``, ``supersessions=[]``,
+        ``warnings=[]``. A consumer of "did this decision get superseded?"
+        therefore could not tell "no reversal was asserted" from "a reversal
+        was asserted and dropped" — and the #8503 receipt reported
+        ``supersede_refusals == 0`` on a run that dropped a replace record.
+
+        A restatement of a prior decision is the NORMAL case for a reversal
+        (it duplicates the claim it replaces), so this was the normal case,
+        not the corner. The fold already resolved the survivor id, so the ref
+        is applied to the SURVIVOR: `supersedes_by` is the existing prior, not
+        a new point, and no payload point is minted.
+        """
+        old_content = ("ship the lease fix all-at-once behind a single "
+                       "global kill flag")
+        # The ref names a DIFFERENT, earlier-session decision (the one this
+        # restatement reverses) — not the duplicate it folds onto.
+        reversed_decision = ("hold the lease fix until the platform team "
+                             "signs off on the rollout")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_dup", "content": old_content,
+                              "kind": "statement"},
+                             {"id": "pt_old_decision",
+                              "content": reversed_decision,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                # duplicates pt_dup verbatim -> NOOP
+                {"content": old_content, "pointKind": "statement",
+                 "supersedes": reversed_decision},
+            ],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1")
+        # the fold still holds — no new point, one noop
+        assert r["stats"]["noops"] == 1, r["stats"]
+        assert r["payload"]["points"] == [], r["payload"]["points"]
+        # …and the reversal is no longer dropped
+        record = next((s for s in r["supersessions"]
+                       if s["superseded"] == "pt_old_decision"), None)
+        assert record is not None, r["supersessions"]
+        assert record["supersedes_by"] == "pt_dup"
+        assert "reversal" in record["evidence"]
+        # it rides the canonical payload channel (the commit id covers it)
+        assert any(s == record for s in r["payload"]["supersessions"])
+        # the record SHAPE is unchanged (#9906: the shape is not the fix)
+        assert set(record) == {"superseded", "supersedes_by", "evidence"}
+        assert r["warnings"] == [], r["warnings"]
+
+    def test_merge_fold_carries_supersedes_ref_to_the_surviving_point(self):
+        """#9906 on the MERGE door (#5006 near-duplicate fusion).
+
+        Same shape as the NOOP door and the same silent drop before the fix:
+        the MERGE branch ``continue``d at the collection site too. The fusion's
+        own premise is that the pair IS one claim, so the candidate's reversal
+        assertion transfers to the survivor.
+        """
+        prior_content = ("ship the lease fix all-at-once behind a single "
+                         "global kill flag")
+        reversed_decision = ("hold the lease fix until the platform team "
+                             "signs off on the rollout")
+        # the prior carries FEWER entities than the candidate -> the #9424 fold
+        # is refused and the flagged pair becomes a MERGE
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_dup", "content": prior_content,
+                              "kind": "statement",
+                              "about_entities": ["lease"]},
+                             {"id": "pt_old_decision",
+                              "content": reversed_decision,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [{"content": prior_content, "pointKind": "statement",
+                        "about_entities": ["lease", "flags", "canary"],
+                        "supersedes": reversed_decision}],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1",
+                            merge_flagged=v2._merge_verdict_keys(prior_content))
+        assert r["stats"]["merges"] == 1, r["stats"]
+        assert r["payload"]["points"] == [], r["payload"]["points"]
+        record = next((s for s in r["supersessions"]
+                       if s["superseded"] == "pt_old_decision"), None)
+        assert record is not None, r["supersessions"]
+        assert record["supersedes_by"] == "pt_dup"
+        assert r["warnings"] == [], r["warnings"]
+
+    def test_same_session_duplicate_carries_supersedes_ref_to_the_survivor(self):
+        """#9906 on the intra-batch door, and WHY it does not break F2.
+
+        The third silent fold in the point loop is ``if n in point_ids:
+        continue`` — a point whose normalized content appeared EARLIER in this
+        same embed list. Before the fix its ref died there too.
+
+        ⚠️ F2 bounds the CORRECTS *TARGET*, not the emitter: "the search index
+        holds only points that existed BEFORE this capture, so a resolved
+        target is an EARLIER-session claim by construction (same-session
+        reversals are state/validity semantics, never a CORRECTS record)".
+        Resolution still runs against ``search`` here, which this capture has
+        not written to — so the target stays cross-session by construction and
+        no same-session→same-session record can be minted at this door. The
+        ``supersedes_by`` side being a same-session point is the ordinary shape
+        of every record this channel emits (the new claim IS this session's).
+        And the duplicate is the SAME claim as the survivor, so "this claim
+        replaces that earlier decision" is equally true of it.
+        """
+        current = "roll out per-service flags before the deployment freeze"
+        reversed_decision = ("hold the lease fix until the platform team "
+                             "signs off on the rollout")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_old_decision",
+                              "content": reversed_decision,
+                              "kind": "statement"}]}
+        embed = {
+            "entities": [], "events": [],
+            "points": [
+                {"content": current, "pointKind": "statement"},
+                # same content, second occurrence -> intra-batch duplicate
+                {"content": current, "pointKind": "statement",
+                 "supersedes": reversed_decision},
+            ],
+            "operators": [],
+        }
+        r = v2.execute_embed(embed, search, session_id="s1")
+        assert len(r["payload"]["points"]) == 1, r["payload"]["points"]
+        survivor = r["payload"]["points"][0]["id"]
+        record = next((s for s in r["supersessions"]
+                       if s["superseded"] == "pt_old_decision"), None)
+        assert record is not None, r["supersessions"]
+        assert record["supersedes_by"] == survivor
+        # F2 holds: the TARGET is the earlier-session prior, never the
+        # same-session survivor
+        assert record["superseded"] != record["supersedes_by"]
+        assert r["warnings"] == [], r["warnings"]
+
+    def test_folded_point_supersede_ref_that_cannot_resolve_still_warns(self):
+        """#9906 gate: carrying the ref must never mean SILENCE.
+
+        The two doors that cannot carry (a fold whose survivor has no graph id,
+        and an empty-content drop) name the ref in ``warnings``, and a carried
+        ref the resolver refuses keeps the resolver's own named refusal. No
+        path in the point loop drops a ref without a line.
+        """
+        old_content = ("ship the lease fix all-at-once behind a single "
+                       "global kill flag")
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_dup", "content": old_content,
+                              "kind": "statement"}]}
+        # 1) a carried ref that resolves to NOTHING is refused by name
+        embed = {"entities": [], "events": [],
+                 "points": [{"content": old_content,
+                             "pointKind": "statement",
+                             "supersedes": "a decision that never existed"}],
+                 "operators": []}
+        r = v2.execute_embed(embed, search, session_id="s1")
+        assert r["stats"]["noops"] == 1, r["stats"]
+        assert r["supersessions"] == [], r["supersessions"]
+        assert any("matches no S3 prior" in w for w in r["warnings"]), \
+            r["warnings"]
+        # 2) the one "cannot carry" form — an empty-content point carrying a
+        # ref — names the ref instead of losing it
+        embed2 = {"entities": [], "events": [],
+                  "points": [{"content": "", "pointKind": "statement",
+                              "supersedes": old_content}],
+                  "operators": []}
+        r2 = v2.execute_embed(embed2, search, session_id="s1")
+        assert r2["supersessions"] == [], r2["supersessions"]
+        assert any("with no surviving point id" in w
+                   for w in r2["warnings"]), r2["warnings"]
+
     def test_supersede_leg_tolerates_frame_edges_only(self):
         """#8503: the leg resolves a FRAME-edge drift and refuses a content one.
 

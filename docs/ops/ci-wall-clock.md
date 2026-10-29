@@ -129,19 +129,71 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 | `test-slow (a…e)` (5 legs) | 18–19 | 8.0–9.9 | 9.9–12.7 | 12.92 | 60 |
 | `test-carve-out` (+`(b)`,`(c)`) | 20–23 | 8.3–8.6 | 8.7–9.2 | 19.85 | 30 |
 | `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | 20 ⚠ thin |
-| `test-d14-hosted-api` | 22 | 4.71 | 7.23 | 8.03 | 20 |
+| `test-d14-hosted-api` | 22 | 4.71 | 7.23 | 8.03 | **40 (was 20)** |
 | `test-concurrency-falkor` | 18 | 2.02 | 2.71 | 2.95 | 15 |
 | `test-track-b` | 17 | 0.93 | 1.09 | 1.18 | 10 |
 | `surface-guard` | 24 | 1.07 | 1.26 | 1.35 | 10 |
 | `changes` | 27 | 0.38 | 0.58 | 1.25 | 5 |
 | `manifest-integrity` | 28 | 0.28 | 0.33 | 0.40 | 5 |
 | `workflow-lint` | 32 | 0.19 | 0.26 | 0.30 | 5 |
+| `ci-introduced-failure` (#9984) | — | not yet measured | — | — | 15 |
 | **`packs-compile`** | 19 | 0.60 | 0.76 | 0.80 | **15 (was none)** |
 | **`python-ci-gate`** (REQUIRED) | 34 | 0.00 | 0.02 | 0.02 | **15 (was none)** |
 
+`ci-introduced-failure` is on the merge path (it is the one job `python-ci-gate`
+delegates a failed test arm to), so its cap is what bounds a stalled required check
+when the predicate job is what wedged. It has no p50/p95 here yet because it landed
+after this sample was taken — take a fresh measurement (`filter=all`, completed jobs
+only, §2's command) before moving the cap, rather than inferring one from a sibling.
+
 ⚠ `test-record-postgres` is the one pre-existing cap that sits closest to its work (15.43 m
 against a 20 m cap). Left unchanged — a measured max under its cap is not a defect — but if it
-ever false-kills, the number to move is 20 → 30 from a fresh measurement, not on suspicion.
+ever false-kills, the number to move is 20 → 40 from a fresh measurement, not on suspicion, for
+the reason below.
+
+⚠ **It IS exposed to the post-step class below — conditionally, on the cache key changing.** What
+keeps its save small is not what the job installs; it is whether the `actions/cache` lookup hits
+the PRIMARY key exactly. A `restore-keys` partial match does not: `restoreImpl.ts:45` extracts the
+matched archive into `~/.cache/pip`, and `saveImpl.ts:50` skips the save POST-step **only** on an
+exact primary-key match, so anything else falls through to `cache.saveCache(…)` and re-tars
+everything the restore just put there. On a `uv.lock` bump every pip site gets a new primary key
+at once, and this job — p50 1.62 m, the fastest of them — is the likely payer: it restores the
+shared 3.6 GB archive and re-saves it, its own `.[test,postgres]` downloads
+(`python-ci.yml:3635`; `[embeddings]`/torch deliberately absent) being a rounding error beside it.
+Its exposure is therefore 12 m in-step + ~1 m setup + ~9 m save ≈ 22 m against 20 → `cancelled` →
+red (#5219), on an event rather than on every run. Moved only from a measurement — nothing has
+measured it cancelled — but the number to move it TO follows the arm-2 rule, not arm 1: 22 × 1.5 →
+**40**, not 2 × 15.43 = 30, because the save this row pays on a key bump is the SHARED archive and
+not its own downloads.
+
+⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
+itself: the sample above counts only jobs whose conclusion is `success` or `failure`, so a job
+killed at its own cap — conclusion `cancelled` — is **invisible here by construction**. Run
+40587081433 / job 122533023160 passed its marker selection, then spent the remaining budget
+uploading a 3.6 GB `~/.cache/pip` archive in the `actions/cache` save POST-step and was cancelled
+at 20 m, which `python-ci-gate` reads as red (#5219). `max 8.03` therefore never saw it. The
+binding term is the job's own in-step `timeout … 15m` plus a ~9 m cold save, not the 8.03 m norm —
+read the cap against the SUM of the job's caps, not against its median.
+
+Every other row was checked against that rule. The discriminating fact is **not** that the
+remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
+write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
+SUM. `test` clears it with room to spare (10 m last-failed pre-phase + the emitted 27 m per-shard
+watchdog + 6 m embedder + ~1 m setup + ~9 m save = 53 m against 90) — and that watchdog comes from
+`uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
+clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
+is how a constant goes stale. FOUR rows do NOT clear it, and all four are recorded here rather than
+moved: nothing has measured any of them being cancelled, and this document's own rule is to move a
+cap from a measurement instead of on suspicion. `test-record-postgres` is the first — 22 m against
+20, on a key bump only, and `20 → 40` if it false-kills (above). `test-slow` sits exactly AT its
+cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
+`test-carve-out` is 9 m past it (10 m embedder + 19 m shard watchdog + ~1 m + ~9 m = 39 m against
+30). The last has the least headroom of all:
+**`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
+`timeout-minutes: 10` embedder provision plus the same ~9 m cold `~/.cache/pip` save** — ≈ 30 m —
+because it installs `install-cpu-torch` and `.[test,embeddings]` (`python-ci.yml:2268-2273`) and so
+writes the same 3.6 GB class of archive as d14 on a cold key. If it does false-kill, the number to
+move is 15 → 50: 30 m × the 1.5 margin ≈ 45, rounded up to the next 10.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 
@@ -163,12 +215,28 @@ document exists to remove.
 | `ai-review-gate` (REQUIRED, entry gate) | 14 | 0.03 | 0.10 | 0.13 | **15 (was none)** |
 | `drift-guard` (merge path, not a required context) | 22 | 0.33 | 0.37 | 0.43 | **15 (was none)** |
 
-**Rule used.** cap = **2 × measured max, rounded to the nearest 5 minutes, floored at 15 m** for
-a job whose failure reds a required context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest
-floor at 15). No cap was raised and no existing cap was lowered: `test` 90, `test-slow` 60 and
+**Rule used.** ONE rule with two arms, and every moved row follows its arm:
+
+- **The job's cold save is NOT the 3.6 GB torch/embeddings archive** — cap = **2 × measured max**,
+  rounded to the nearest 5 minutes, floored at 15 m, for a job whose failure reds a required
+  context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
+  deliberately narrower than "no cache step": `test-record-postgres` DOES mount `~/.cache/pip` on a
+  writable shared key (`python-ci.yml:3624-3631`) and is therefore NOT an arm-1 row — on a key bump
+  its save IS the archive (see the note under the table). Arm 1 applies to a job whose save is
+  small because nothing restores an archive into its cache path, not because its `pip install`
+  line omits torch.
+- **The job's cold save IS that archive** — `2 × max` cannot see the POST-step at all, so the
+  binding term is the SUM of every in-step cap plus ~1 m setup plus the observed cold save, and
+  the cap is **that SUM × 1.5, rounded UP to the next 10 m**. The margin is not decoration: a save
+  killed at the cap reds a required check (#5219), while 10 m of extra exposure costs only a held
+  slot. The worked example is `test-d14-hosted-api`: 15 m in-step + ~1 m + ~9 m save = 25 m →
+  37.5 → **40**, which is the number that ships (#10182).
+
+At the time of the first pass no cap was raised and none was lowered: `test` 90, `test-slow` 60 and
 `test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase + the shard's
-in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode — a
-runner-level kill that loses the pass/fail summary.
+in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode — a runner-level
+kill that loses the pass/fail summary. The one cap moved since is `test-d14-hosted-api` 20 → 40
+(#10182), on the post-step arm.
 
 `python-ci.yml` is now capped on **every** job, and `tests/test_ci_selection.py` asserts both
 that and the derived-required-context invariant, so the next added leg cannot silently inherit
@@ -185,6 +253,7 @@ the 360-minute default.
 | `ai-review-gate` | `ai-review-gate-<PR number>` | true | Already compliant; `pull_request_target` only, so every run is PR-keyed. |
 | `drift-guard` | `drift-guard-<ref>` | true | Already compliant; `pull_request` + `workflow_dispatch`. |
 | `post-merge-validation` | `postmerge-validation` (constant) | false | Serialises; superseded *pending* runs are still dropped by GitHub (§1), which is why `main-lint` keyed its own group on `github.sha`. |
+| `deploy-hosted` | `deploy-hosted` (constant) | false | A RUNNING deploy is never cancelled (#10155; #10109 / #10152 were the stale-production class — production fell hours behind because later merges killed the deploy in flight). A PENDING one is still superseded by the newest push (§4), which is the residual `supabase-deploy`'s flip watcher reports as `UNKNOWN` rather than as a failed flip. The group must stay constant: `supabase-deploy` dispatches this workflow and then watches that run (#3627). |
 | `ci-queue-health` | `ci-queue-health` | false | Deliberate: two governors would cancel each other's kept runs. |
 
 `github.ref` is what makes this branch-scoped: `refs/pull/N/merge` on PRs, `refs/heads/main` on
@@ -255,7 +324,14 @@ same step with the same tail is the investigation.
 ## 6. What this does NOT do
 
 - **It does not bound queue wait.** §1. No `timeout-minutes` can. The lever there is capacity and
-  queue governance (`tools/ci_queue_health.py`, #9115).
+  queue governance (`tools/ci_queue_health.py`, #9115). That tool's `PR-BACKLOGGED` state is what
+  reports the wait itself: a queued PR run older than its wait budget while PR CI is *still*
+  executing is no longer `OK` (#10237 — it printed `CI: OK(queued=54, pr_running=2, pr_queued=32)`
+  with the oldest queued PR run at 527 minutes). The budget's default is derived from this
+  document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
+  measured-normal population rather than on it. Where that wait cannot be MEASURED at all — the
+  queued PR runs carry no readable `created_at` — the tool reports `PR-UNWITNESSED` rather than
+  `OK`: an unmeasured wait is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 20 jobs (max 28) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question.
