@@ -800,7 +800,12 @@ if [ "$MODE" = repair ]; then
     case "$id" in ''|*[!0-9]*) say "WARNING: $agent not found in the repo's runners"; rc=3; continue ;; esac
     body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$LABELS" | sed 's/,/","/g')")"
     if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; continue; fi
-    if printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - >/dev/null 2>&1; then
+    # ⛔ NOT `printf … | gh api … --input -`. With `set -uo pipefail` (line 87) that form reports a
+    # FAILED relabel at random: the writer races a `gh` that never reads stdin and loses with
+    # SIGPIPE/EPIPE, the pipeline status becomes 141, and the `if` reads it as `gh` failing — the
+    # consumer of this seam is a test, and it went red in 2 of 10 pre-fix runs (measured). A
+    # here-string hands `gh` a file-backed stdin, so the only failure left is `gh` itself failing.
+    if gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - >/dev/null 2>&1 <<<"$body"; then
       say "relabelled $agent → $LABELS"
     else
       say "WARNING: relabel FAILED for $agent (id $id)"; rc=3
