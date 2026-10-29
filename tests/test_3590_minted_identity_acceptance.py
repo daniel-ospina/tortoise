@@ -190,6 +190,118 @@ def test_a_create_adopts_the_single_id_less_live_holder(sdk):
     assert _name_ids(proj, "Object", "Legacy") == [adopted]
 
 
+def _statuses(proj, label: str, name: str) -> list:
+    """Every stored ``status`` on the ``label.name`` carriers, as the store has it."""
+    return [r[0] for r in proj.g.query(
+        f"MATCH (n:{label} {{name:$n}}) RETURN n.status",
+        params={"n": name}).result_set]
+
+
+def test_the_adopted_id_less_holder_is_not_a_mint_to_the_phase1_arms(sdk):
+    """#9876 review F2: the ADOPTED shape is NOT a mint (``merges`` is TRUE).
+
+    ``_entity_name_holders`` feeds the ``#7925`` Phase-1 arms, and both read
+    ``merges`` as *"does this write MINTS the node, so its declared status is
+    stored?"*. Adoption is neither a resolve (the id does not exist yet) nor a
+    mint (the write lands on an EXISTING carrier, and the projection's status
+    write is ``ON CREATE``-only, so a matched ``MERGE`` never applies it) —
+    answering ``merges=False`` made both arms refuse a bundle the writer
+    commits.
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    proj.g.query(
+        "MERGE (o:Object {name:$n}) SET o.objectKind='core:strategy'",
+        params={"n": "Legacy"})
+    assert _name_ids(proj, "Object", "Legacy") == [None], (
+        "fixture did not build the id-less live holder")
+
+    exists, hit, _op, bad, carriers, merges, target = \
+        client._entity_name_holders("Object", "Legacy")
+    assert exists is True and carriers == 1, (exists, carriers)
+    assert merges is True, (
+        "the guard reads the ADOPTED carrier as a MINT, so the #7925 arms "
+        "believe a declared status is stored and refuse a bundle the writer "
+        "commits (the writer MERGEs onto the adopted row; ON CREATE never "
+        "fires)")
+    # …and it is NOT a resolve either: the landing id is minted mid-write, so no
+    # id-valued axis can be reported at Phase-1 time (the recorded residual).
+    assert target is None and hit is None and bad is None, (target, hit, bad)
+
+
+def test_a_bundle_naming_the_adopted_holder_is_not_a_born_terminal_mint(sdk):
+    """#9876 review F2, consumer B: the born-terminal arm over-rejected an ADOPT.
+
+    The arm's premise is *"not merging ⇒ this write CREATES the node ⇒ its
+    declared terminal status is stored"*, and it refuses a direct-route edge to
+    a born-terminal endpoint. For the adopted shape the premise is false twice
+    over: the write lands on the existing carrier and the status is dropped —
+    the node stays LIVE, so ``create_direct_edge`` would have written the edge
+    the guard refused.
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    proj.g.query(
+        "MERGE (o:Object {name:$n}) SET o.objectKind='core:strategy'",
+        params={"n": "Legacy"})
+    assert _name_ids(proj, "Object", "Legacy") == [None], (
+        "fixture did not build the id-less live holder")
+
+    bundle = {
+        "entities": [{"ref": "a", "type": "object", "name": "Legacy",
+                      "status": "superseded"},
+                     {"ref": "o", "type": "object", "name": "Other",
+                      "objectKind": "core:strategy"}],
+        # IMPL without `reify`/`mitigation` over two non-Point-bearing endpoints
+        # ⇒ the EFFECTIVE route is 'direct', the route `create_direct_edge`
+        # serves (an Object↔Object pair keeps the direct shape, #8499).
+        "connections": [{"from": "a", "to": "o", "operator": "IMPL"}],
+    }
+    msgs = [v["message"] for v in client._validate_bundle(bundle)]
+    assert not any("resolves into a terminal status" in m for m in msgs), msgs
+    assert not any("born terminal" in m for m in msgs), msgs
+
+    client.ingest(bundle)
+    ids = _name_ids(proj, "Object", "Legacy")
+    assert len(ids) == 1 and ids[0], (
+        f"the bundle did not adopt the id-less carrier: {ids}")
+    # The declared status was NOT stored — the fact that falsifies the arm's
+    # premise, and the reason a direct edge to this node is legal.
+    assert _statuses(proj, "Object", "Legacy") == [None], (
+        "the ingest stored the declared status on the adopted carrier")
+    assert _name_ids(proj, "Object", "Other"), "the bundle wrote nothing"
+
+
+def test_a_bundle_naming_the_adopted_holder_may_declare_an_array_status(sdk):
+    """#9876 review F2, consumer A: the array-status arm over-rejected an ADOPT.
+
+    That arm exists because an ARRAY status the writer really stores makes
+    ``create_direct_edge``'s frozenset test raise ``TypeError`` after steps 2-3
+    committed. For the adopted shape the writer stores nothing — the ``MERGE``
+    matches the row the adopt just stamped — so there is no array to evaluate
+    and no mid-write raise to predict.
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    proj.g.query(
+        "MERGE (o:Object {name:$n}) SET o.objectKind='core:strategy'",
+        params={"n": "Legacy"})
+    assert _name_ids(proj, "Object", "Legacy") == [None], (
+        "fixture did not build the id-less live holder")
+
+    bundle = {"entities": [{"ref": "a", "type": "object", "name": "Legacy",
+                             "status": ["live", "superseded"]}]}
+    msgs = [v["message"] for v in client._validate_bundle(bundle)]
+    assert not any("would store status" in m for m in msgs), msgs
+
+    client.ingest(bundle)
+    ids = _name_ids(proj, "Object", "Legacy")
+    assert len(ids) == 1 and ids[0], (
+        f"the bundle did not adopt the id-less carrier: {ids}")
+    assert _statuses(proj, "Object", "Legacy") == [None], (
+        "the ingest stored the declared array status on the adopted carrier")
+
+
 def test_a_rename_journals_on_the_stable_id_and_survives_replay(sdk):
     """Acceptance 3: rename → ``EntityMutated op=rename``, stable id, old name gone.
 
@@ -766,6 +878,47 @@ def test_a_rename_onto_a_held_name_is_refused(sdk):
     # …and the guard is not a blanket block: a rename onto a FREE name works.
     client.update_entity(mover, name="Freed")
     assert _name_ids(proj, "Object", "Freed") == [mover]
+
+
+def test_a_rename_onto_an_id_less_live_holder_is_refused(sdk):
+    """#9876 review F1: the rename guard counts holders, not truthy ids.
+
+    ``live_name_holder_ids`` is row-per-holder and yields ``None`` for an
+    id-less LIVE row ON PURPOSE — its docstring says filtering the ``None`` out
+    "would silently pick one". The guard filtered it, so a rename onto a name
+    held by an id-less carrier LANDED and left two live carriers of one name:
+    every later by-name resolve then reports ``ambiguous-entity-name``, which is
+    NON-exempt, so ``rebuild_all`` stops over the name this door made ambiguous
+    — with no by-name repair path.
+
+    Mutation that must red this: restoring ``if h and str(h) != …`` in
+    ``TortoiseSDK._refuse_ambiguous_rename``.
+    """
+    from tortoise.exceptions import NameAlreadyHeld
+
+    client, _ = sdk
+    proj = client._get_proj()
+    proj.g.query(
+        "MERGE (o:Object {name:$n}) SET o.objectKind='core:strategy'",
+        params={"n": "Legacy"})
+    assert _name_ids(proj, "Object", "Legacy") == [None], (
+        "fixture did not build the id-less live holder")
+    mover = client.create_entity("object", "Mover", objectKind="core:strategy",
+                                 _server_id="id-mover",
+                                 is_episodic=False)["node"]["id"]
+
+    with pytest.raises(NameAlreadyHeld) as refused:
+        client.update_entity(mover, name="Legacy")
+    # The refusal COUNTS the holder it cannot address by id — a message that
+    # silently dropped it would report the graph as less ambiguous than it is.
+    assert "1 other live Object" in str(refused.value), str(refused.value)
+
+    # Nothing moved: ONE id-less carrier of Legacy (not two) and the mover kept
+    # its own name.
+    assert _name_ids(proj, "Object", "Legacy") == [None], (
+        "the refused rename still landed — the name is now held by two live "
+        "carriers, which is the state this guard exists to prevent")
+    assert _name_ids(proj, "Object", "Mover") == [mover]
 
 
 def test_a_participants_fallback_wires_only_the_resolved_performer(sdk):

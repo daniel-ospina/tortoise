@@ -20736,21 +20736,21 @@ class TortoiseSDK:
         # so the guard and `resolve_or_mint` cannot disagree.
         _live = [r for r in rows if not r[1]]
         if len(_live) != 1 or not _live[0][0]:
-            # 0: terminal-only ⇒ the write MINTS (`merges=False`).
-            # 1 id-less live row: ADOPTED, but its id is minted DURING the write,
-            #     so Phase 1 cannot predict a landing id (`merges=False`,
-            #     `target_id=None`). RESIDUAL, recorded: the three axes are
-            #     id-valued, so an operator-shaped id-less holder cannot be
-            #     reported here and a bundle ending on one is only refused in
-            #     step 4. Legacy/raw graphs only; the adopt path is what keeps
-            #     the name create-able.
-            # 2+: same-name coexistence, which the create REFUSES rather than
-            # picking a carrier ⇒ no target either (#8864 / D2). The three are
-            # told apart by the COUNT, which is why it is the live one.
-            # 2+: same-name coexistence, which the create REFUSES rather than
-            # picking a carrier ⇒ no target either (#8864 / D2). The three are
-            # told apart by the COUNT, which is why it is the live one.
-            return True, None, None, None, len(_live), False, None
+            # 0 (terminal-only) and 2+ (same-name coexistence, which the create
+            #     REFUSES rather than picking a carrier — #8864 / D2): the write
+            #     lands on no single existing carrier, so it MINTS its own node
+            #     and its declared status IS stored (`merges=False`).
+            # 1 id-less live row: ADOPTED — the write lands on that existing
+            #     carrier, so a declared status is dropped exactly as on a
+            #     resolve (`merges=True`) — but its id is stamped DURING the
+            #     write, so Phase 1 predicts no landing id (`target_id=None`) and
+            #     the id-valued axes cannot be reported. RESIDUAL, recorded: an
+            #     operator-shaped or array-status id-less holder is therefore
+            #     only caught in step 4. Legacy/raw graphs only; the adopt path
+            #     is what keeps the name create-able.
+            # The cases are told apart by the live COUNT — and by the target's
+            # own id, which is what separates a MINT from an ADOPT.
+            return True, None, None, None, len(_live), len(_live) == 1, None
         target = _live[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
@@ -21156,9 +21156,11 @@ class TortoiseSDK:
                 (_existing, _hit, _op, _bad, _carriers, _merges,
                  _target) = _name_holders(_elabel, _name)
                 _key = (_elabel, _name)
-                # MERGES (a carrier holds the canonical id) or not the first
-                # naming item (the first one creates it) ⇒ this write does not
-                # store the status.
+                # MERGES (the write lands on an existing carrier — RESOLVED, or
+                # ADOPTED under an id minted mid-write) or not the first naming
+                # item (the first one creates it) ⇒ this write does not store
+                # the declared status (the projection's write is `ON CREATE`
+                # only, so a matched MERGE never applies it).
                 if _merges or _key in _minted_names:
                     continue
                 _minted_names.add(_key)
@@ -21456,10 +21458,12 @@ class TortoiseSDK:
                             # here skipped the landing id for exactly the
                             # shape whose write lands on a fresh node.
                             continue
-                        # Zero LIVE carriers (none at all, or terminal-only /
-                        # id-less-only): the item MINTS. Two minting refs
-                        # naming the SAME name resolve to ONE node (the first
-                        # create makes the holder, the second resolves to it),
+                        # Zero LIVE carriers (none at all, or terminal-only):
+                        # the item MINTS; ONE id-less live carrier: it ADOPTS,
+                        # under an id minted mid-write. Either way no landing id
+                        # is predictable at Phase-1 time — and every ref naming
+                        # the SAME name lands on ONE node (the first create
+                        # makes/adopts the holder, the second resolves to it),
                         # so the name is still a valid endpoint-collision key
                         # here — it is the node's landing identity, not an id.
                         lid = f"mint\x00{ep_name}"
@@ -21555,15 +21559,16 @@ class TortoiseSDK:
                          _target) = _name_holders(elabel, name)
                         # #8864/#8902: the landing node is the RESOLVED holder.
                         # #3590 retired the name-keyed merge here — `merges` is
-                        # now "resolves to a single live carrier" and the
-                        # 2+ case REFUSES (it does not pick the record's own
-                        # id), so an item never lands on a second carrier by
-                        # naming one. `merges` is that answer and the axes above
-                        # are the landing node's — a resolve reads the target's
-                        # terminal/unevaluable axes, while a mint keeps its own
-                        # declared status. Branching on the carrier count instead
-                        # fails open on the first case and over-rejects on the
-                        # second (both measured).
+                        # now "lands on a single live carrier" (resolved, or
+                        # ADOPTED when that carrier is id-less — both drop the
+                        # declared status) and the 2+ case REFUSES (it does not
+                        # pick the record's own id), so an item never lands on a
+                        # second carrier by naming one. `merges` is that answer
+                        # and the axes above are the landing node's — a resolve
+                        # reads the target's terminal/unevaluable axes, while a
+                        # mint keeps its own declared status. Branching on the
+                        # carrier count instead fails open on the first case and
+                        # over-rejects on the second (both measured).
                         name_merge = merges
                         # The operator axis is settled by the label gate above
                         # (`tainted_by_bundle`), and the `outdated` flag
@@ -36607,6 +36612,11 @@ class TortoiseSDK:
         un-updatable through the public door. The target's stored name is read in
         the same label-scoped probe and the label is skipped when it already
         equals ``new_name``: nothing moves, so nothing can become ambiguous.
+
+        ⛔ Every OTHER live holder competes, **id-less or not** (#9876 review
+        F1): ``live_name_holder_ids`` is row-per-holder and contributes ``None``
+        for an id-less legacy / raw row, which is a live competitor all the same
+        — see the filter's own comment below for what filtering it away did.
         """
         from .entity_identity import live_name_holder_ids
         from .exceptions import NameAlreadyHeld
@@ -36632,10 +36642,22 @@ class TortoiseSDK:
             stored = rows[0][0] if rows[0] else None
             if isinstance(stored, str) and stored == new_name:
                 continue
-            holders = [h for h in live_name_holder_ids(g, label, new_name)
-                       if h and str(h) != str(id_val)]
-            if holders:
-                raise NameAlreadyHeld(label, new_name, holders, id_val)
+            holders = live_name_holder_ids(g, label, new_name)
+            # ⛔ Count HOLDERS (live rows), not truthy ids (#9876 review F1).
+            # That list is deliberately row-per-holder and yields ``None`` for
+            # an id-less LIVE row — the legacy / raw shape the create ADOPTS —
+            # so that a refusal site cannot filter it away. An `if h` filter
+            # dropped exactly that holder, so the rename LANDED and left two
+            # live carriers of one name: `resolve_fold_name` then reports
+            # `ambiguous-entity-name`, which is NON-exempt, so `rebuild_all`
+            # stops over the name this door made ambiguous — with no by-name
+            # repair path. The two sibling refusal sites count live ROWS for the
+            # same reason (`entity_identity.resolve_or_mint` compares
+            # `len(holders)`, `_entity_name_holders` counts `_live`).
+            others = [h for h in holders
+                      if h is None or str(h) != str(id_val)]
+            if others:
+                raise NameAlreadyHeld(label, new_name, others, id_val)
 
     def _entity_identity_for(self, label: str, name: str, *,
                              explicit_id: str | None = None) -> str:
