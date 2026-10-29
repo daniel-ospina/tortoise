@@ -38884,6 +38884,20 @@ class TortoiseSDK:
             # No record tenant: the same SDK's capture is refused `no_tenant`
             # and writes its turns to the graph, so the graph is the answer. NOT
             # a read failure — there is nothing to be unverifiable against.
+            #
+            # ⚠️ RECORDED RESIDUAL (#10021 review N2, P3) — the justification
+            # above is a fact about the WRITING process, and this is a READ door:
+            # on a multi-tenant reader (`record_tenant()` is None by design
+            # without a declaration) reading a session whose turns the HOSTED
+            # writer put in the record, this arm answers "the graph is the
+            # store" and the caller serves `turn_points: []` beside the
+            # session's own `turns: N` — the #8447 self-contradicting body —
+            # SILENTLY. The narrowest true statement is that the tenant is
+            # unknowable here, which argues for a WARNING on this arm rather
+            # than a graph answer; not done in #10000 because the arm is
+            # unreachable whenever the SDK is the writer, so it cannot be
+            # measured from this branch. Strictly better than `main` either way
+            # (which never consulted the record at all).
             return None, False
         # `durable=True` is this read door's statement about the WRITER's side:
         # whether the capturing process could journal is not observable here, and
