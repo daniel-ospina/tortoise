@@ -773,8 +773,9 @@ def classify_queue(
             f"(> {min_age_seconds:.0f}s), so PR CI is NOT RUNNING. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
             f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
-            f"no run was trimmed, and the reason line above names the condition "
-            f"that declined to act"
+            f"no run is trimmed in this reading, and the reason line above names "
+            f"the condition that declined to act (a cancellation this invocation "
+            f"made BEFORE this reading is reported in 'cancelled', not here)"
         )
         return health(PR_STARVED)
 
