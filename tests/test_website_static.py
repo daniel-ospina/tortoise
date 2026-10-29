@@ -1252,6 +1252,19 @@ class TestInvestorsProgressCopy:
             "(PR #9283)")
 
 
+#: Directories under the website scan roots that hold BUILD OUTPUT or vendored code,
+#: never a declaration or a page of ours. Shared by both mono scans so they cannot
+#: drift: `dist/` is the dashboard's and blog-admin's bundle, `node_modules/` the
+#: installed tree, and `.wrangler/` (`.gitignore:7`) is what `wrangler dev` emits —
+#: a bundled copy of `website/functions/**`, so a stale bundle carries the PRE-FIX
+#: blog sheet verbatim. Scanning it made both mono guards RED over a correct tree on
+#: any machine that had run the site's own dev server, and told the developer to add
+#: `font-family` to generated code (#10254 review). The repo's other scans already
+#: skip it for the same reason (`tests/test_cross_subdomain_cookie_sync.py:237`,
+#: `tests/test_no_legacy_token_path.py:44`).
+BUILD_OUTPUT_DIRS = ("node_modules", "dist", ".wrangler")
+
+
 class TestMonospaceStackRendersAsAMonoFace:
     """Every mono font declaration must resolve to a real mono face on macOS Chrome (#6870).
 
@@ -1317,7 +1330,7 @@ class TestMonospaceStackRendersAsAMonoFace:
     ROOTS = ("website", "apps")
     MODULES = ("tortoise/oauth.py", "tortoise/render.py")
     #: build output and vendored trees that no declaration of ours lives in
-    SKIP_DIRS = ("node_modules", "dist")
+    SKIP_DIRS = BUILD_OUTPUT_DIRS
     #: everything under here that emits a mono declaration must be in `MODULES`
     PY_ROOT = "tortoise"
 
@@ -2396,6 +2409,19 @@ class TestARenderedCodeElementGetsAMonoFace:
     Each of those is latent — no page in this tree carries such a shape — and closing
     them properly means parsing CSS, not adding a fifth regex.
 
+    One thing it DOES model, because it is the defect's own shape: the family list is
+    **ordered**. The browser takes the first family it has installed (MDN
+    `font-family`; the generics are always installed), so a mono face named *after* a
+    family Chrome certainly reaches is not the face the element gets —
+    `code{font-family:'SF Mono', monospace, Menlo}` renders **Courier**, which is
+    #6870 with `Menlo` one keystroke too late. The list is walked in priority order and
+    refused when a Courier-attracting token (`monospace`, `courier`, `serif`,
+    `sans-serif`) is reached before any `Menlo`; `ui-monospace` is not one of them,
+    because Chrome drops it and the shipped stacks therefore carry it first. What is
+    still not modelled: whether a *named* face is installed (a guard cannot know), and
+    per-character fallback — so a named serif chosen in plain sight stays GREEN, which
+    is the layout-decision boundary the sibling class records.
+
     Three ways an earlier version of this guard went GREEN over a page that renders a
     non-mono face, each closed here:
 
@@ -2452,6 +2478,12 @@ class TestARenderedCodeElementGetsAMonoFace:
     #: ON the measurement on purpose: a gap between the floor and the count is what lets
     #: the scan narrow without a red, so removing a page must move this number.
     MIN_PAGES = 9
+    #: measured 2026-10-28 at this tree: 21 files under `ROOTS` carry their own `<style>`
+    #: block — the set `test_every_page_it_can_decide_on_selects_this_guard` ratchets. A
+    #: SEPARATE constant because it is a separate population: reusing `MIN_PAGES` as that
+    #: test's floor left a 12-page gap, which is the narrowing this file forbids. Equal to
+    #: the measurement on purpose, for the same reason.
+    MIN_DECIDABLE = 21
 
     SUFFIXES = (".html", ".css", ".js", ".ts", ".jsx", ".tsx")
     RENDERS_CODE = re.compile(r"<(code|pre)\b", re.IGNORECASE)
@@ -2488,9 +2520,53 @@ class TestARenderedCodeElementGetsAMonoFace:
     #: (it ignores any value containing `var(--mono`), so nothing else caught it
     #: (#10254 review, round 8).
     MONO = ("menlo",)
+    #: The mirror of `MONO`: a family that makes Chrome reach a NON-mono face before
+    #: any mono face named after it can apply. `font-family` is an ORDERED list and
+    #: the browser uses "the first font in the list that is installed" (MDN
+    #: `font-family`; the generics are always installed), so `Menlo` appended AFTER
+    #: `monospace` is not the face the element gets — `monospace` IS Courier on macOS
+    #: Chrome, the #6870 face. Matching `menlo` anywhere in the resolved value, with
+    #: position ignored, made this guard GREEN over
+    #: `code{font-family:'SF Mono', monospace, Menlo}` — the defect one keystroke too
+    #: late (#10254 review).
+    #: `ui-monospace` is deliberately NOT an attractor: it is a hyphenated generic
+    #: Chrome drops (the sibling's measured table above), which is exactly why the
+    #: shipped stacks carry it first. The boundaries are word-ish, not a substring test,
+    #: so `ui-monospace` cannot match `monospace` and `sans-serif` cannot be read as the
+    #: bare `serif` generic. A NAMED face such as `Georgia` is not here either: naming a
+    #: serif face in plain sight is a layout decision, which is the boundary the sibling
+    #: class records — only the generics/Courier are the Courier defect.
+    COURIER_ATTRACTING = re.compile(
+        r"(?<![\w-])(?:sans-serif|monospace|courier|serif)(?![\w-])")
+
+    @staticmethod
+    def _families(value):
+        """The family tokens of `value`, in the order the browser tries them.
+
+        `font-family` is a comma-separated list, and a `font:` shorthand prefixes the
+        same list with size/weight/line-height — so `font:12px Menlo` is one token that
+        must still be read as Menlo. Split on top-level commas only, so a comma inside a
+        quoted family name (`'Foo, Bar'`) does not split it.
+        """
+        tokens, buf, quote = [], [], None
+        for ch in value:
+            if quote:
+                buf.append(ch)
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+                buf.append(ch)
+            elif ch == ",":
+                tokens.append("".join(buf))
+                buf = []
+            else:
+                buf.append(ch)
+        tokens.append("".join(buf))
+        return [t.strip() for t in tokens if t.strip()]
 
     def _is_mono(self, value, defined, depth=0):
-        """Does `value` name a mono face, once the page's own tokens are substituted?"""
+        """Does `value` give the element a mono face, once the page's tokens are substituted?"""
         # substitute BEFORE reading any face: a `var()` reference names no family of
         # its own, so a keyword found in the un-substituted text is not a decision
         # about what the element computes to. Reading the raw string first is how
@@ -2508,7 +2584,18 @@ class TestARenderedCodeElementGetsAMonoFace:
             # inheriting is the failing case for an element with no author rule: the
             # UA `monospace` sheet would win. A parent that IS mono is out of scope.
             return False
-        return any(m in v for m in self.MONO)
+        # Walk the list in PRIORITY order, not `any(name in value)`: the browser takes
+        # the FIRST family it has installed, so a mono face named after a family the
+        # browser certainly reaches is not the face the element gets. The first token
+        # that names a mono face is a pass; a Courier-attracting token reached first is
+        # a refusal; anything else (an unavailable named face, `ui-monospace`, a serif
+        # face chosen in plain sight) is passed over, exactly as the browser passes it.
+        for family in self._families(v):
+            if any(m in family for m in self.MONO):
+                return True
+            if self.COURIER_ATTRACTING.search(family):
+                return False
+        return False
 
     @staticmethod
     def _var_reference(text, start):
@@ -2680,7 +2767,11 @@ class TestARenderedCodeElementGetsAMonoFace:
         # os.walk with a pruned `dirnames`, NOT `rglob`: rglob materialises the whole
         # tree, `node_modules` included, before any filter can run (see the sibling
         # class's note — it is the same walk, and the same cost).
-        skip = {"node_modules", "dist"}
+        # `.wrangler` is in this set for the reason the shared constant records: it is
+        # a gitignored COPY of `website/functions/**`, so a stale bundle contains the
+        # pre-fix blog sheet and both tests in this class failed on generated code
+        # (#10254 review P3).
+        skip = BUILD_OUTPUT_DIRS
         for root_name in TestARenderedCodeElementGetsAMonoFace.ROOTS:
             root = repo / root_name
             # fail closed: a missing root would narrow the scan silently
@@ -2735,7 +2826,7 @@ class TestARenderedCodeElementGetsAMonoFace:
             selection = select([rel], "pull_request", manifest)
             if guard not in selection["test_files"]:
                 missing.append(f"{rel} (selected surfaces: {selection['surfaces'] or 'none'})")
-        assert decidable >= self.MIN_PAGES, (
+        assert decidable >= self.MIN_DECIDABLE, (
             f"only {decidable} page(s) carry their own <style> under "
             f"{'/'.join(self.ROOTS)} — the scan is not looking at the right tree")
         assert not missing, (
@@ -2787,6 +2878,29 @@ class TestARenderedCodeElementGetsAMonoFace:
              "code{font-family:var(--mono, 'SF Mono', 'Cascadia Code', monospace)}", False),
             ("`SFMono-Regular` on its own is Times too",
              "code{font-family:SFMono-Regular}", False),
+            # A family list is ORDERED: the browser takes the first family it has
+            # installed, so a mono face appended AFTER a family Chrome always reaches
+            # is not the face the element gets. `monospace` IS Courier here, so these
+            # are #6870 itself — and they were GREEN while `menlo` was matched
+            # anywhere in the value (#10254 review).
+            ("a mono face appended after the generic IS the #6870 face again",
+             "code{font-family:monospace, Menlo}", False),
+            ("the generic via the live dashboard's `var()` fallback shape",
+             "code{font-family:var(--mono, ui-monospace, monospace, Menlo)}", False),
+            ("`'SF Mono'`, the generic, then `Menlo` — the defect one keystroke late",
+             "code{font-family:'SF Mono', monospace, Menlo}", False),
+            ("a serif generic reached before the mono face",
+             "code{font-family:serif, Menlo}", False),
+            # …and the other direction, so the ordered rule cannot false-red what
+            # ships: `ui-monospace` is a generic Chrome DROPS (`:1264-1273`), so the
+            # real stack — which carries it first — still resolves to `Menlo`.
+            ("the shipped stack: `ui-monospace` first is not a Courier attractor",
+             "code{font-family:ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace}",
+             True),
+            ("`Menlo` before the generic still wins — order, not presence",
+             "code{font-family:Menlo, monospace}", True),
+            ("a `font:` shorthand naming the mono face is still accepted",
+             "code{font:italic bold 12px/1.4 Menlo}", True),
         ]
         for why, css, expect in cases:
             got = "code" in self._elements_styled_mono(css)
