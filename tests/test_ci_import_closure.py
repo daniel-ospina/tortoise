@@ -714,6 +714,31 @@ def test_a_package_owns_its_dotted_name_over_a_same_named_module():
     assert "tortoise/projection.py" not in clo.modules
 
 
+def test_the_LIVE_shim_records_its_importlib_edge(repo_closure):
+    """P2 (#10143): the finding's own evidence file, pinned in the real tree.
+
+    `tortoise/projection.py` reaches the package ONLY through
+    `_importlib.import_module('tortoise.projection')` (an aliased `importlib`), so
+    the synthetic tests above prove the rule and this one proves the scan of the
+    actual file. Before the alias fix its scan carried NO dependency at all: the
+    file's whole closure was empty, and `classify_miss` would have called a
+    failure here `non-python-dependency` — "no import edge can ever exist" — for
+    a file whose only edge is exactly that call.
+
+    If the deprecated shim is ever deleted, delete this pin with it: its subject
+    is that file's shape, not a general rule.
+    """
+    _manifest, _index, scans, _core, _closures = repo_closure
+    assert "tortoise/projection.py" in scans, (
+        "the deprecated `tortoise/projection.py` shim is gone — if it was "
+        "deleted on purpose, delete this pin too")
+    deps = {d.target for d in scans["tortoise/projection.py"].deps}
+    assert "tortoise.projection" in deps, (
+        "an aliased `_importlib.import_module('tortoise.projection')` must "
+        "resolve to the edge it statically names")
+    assert scans["tortoise/projection.py"].unknown == []
+
+
 def test_import_time_only_reproduces_the_naive_reader_that_under_selects():
     """`--import-time-only` is the trap, kept measurable.
 
