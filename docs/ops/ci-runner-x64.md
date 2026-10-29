@@ -214,7 +214,7 @@ falls back.
      when `CI_RUNNER_OS_LABEL` is `off`/unset and KEEPS it under `on|auto` (printed
      `version-pinned, kept=[…]`). ⛔ WHICH STATE THE LIVE POOL IS IN CANNOT BE READ OFF THIS PAGE:
      the flag has ONE reader in this tree (this repair) and NO writer — the install-side writer ships
-     with #10275, still open — so nothing exports it there, unset resolves to `off`, and a plain
+     with #10275, still open — so nothing in this tree exports it, unset resolves to `off`, and a plain
      `--repair-labels` performs #6897's recorded revert. Export `CI_RUNNER_OS_LABEL=on` to keep the
      pin; the removal is printed as `version-pinned, not kept=[…]` / `removed=[…]` before the PUT.
   2. **A foreign arch marker** (`self-hosted-*` other than `self-hosted-x64`): the pre-#2327 stamp
@@ -379,8 +379,8 @@ is supposed to carry.
 
 - **Why the repair has to read it.** #6897's `OVERRIDES:` marker suspends the version-pin invariant
   and records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. The repair honours
-  that switch, and the honest consequence is that an UNSET flag IS `off`: nothing exports it yet
-  (#10275), so the next manual heal on the live pool — measured 2026-10-29, 7 of 7 x64 runners
+  that switch, and the honest consequence is that an UNSET flag IS `off`: nothing in this tree exports
+  it yet (#10275), so the next manual heal on the live pool — measured 2026-10-29, 7 of 7 x64 runners
   carrying `ubuntu-24.04` — performs that revert unless the operator exports
   `CI_RUNNER_OS_LABEL=on` first. It is a PRINTED removal (`version-pinned, not kept=[…]`,
   `removed=[…]`, both before the PUT), never a silent one; and a repair that ignored the flag would
