@@ -434,7 +434,13 @@ class EventAPI:
                           # on the key here — the sibling keys are registered
                           # at every home for the same reason.
                           "sourceVersion", "sourceVersions",
-                          "sourceVersionTransit", "extractedFromAll"})
+                          "sourceVersionTransit", "extractedFromAll",
+                          # #10010: the FOLD's record FLAG — `_fold_source_evidence`
+                          # mints it on the snapshot it re-emits, and the replay's
+                          # recreate anchor reads it to tell a fold from a
+                          # creation. Server-minted like the keys above, so a
+                          # caller value is refused at this seam too.
+                          "evidence_fold"})
         if _forged:
             raise ValueError(
                 f"{_forged} are server-managed journal fields (embedding "

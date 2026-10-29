@@ -2365,6 +2365,13 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # as the fail-closed boundary IN FRONT of `sdk._sanitize_props` (its
     # backstop), matching the sibling keys' registration at every home.
     "extractedFromAll",
+    # #10010: the FOLD's record FLAG is the same class of record — server-minted
+    # by `_fold_source_evidence` onto the snapshot it re-emits, and read by the
+    # replay's recreate anchor (`projection.record_is_evidence_fold`) to tell a
+    # fold from a creation. A caller value would be a forged replay decision; the
+    # entry here is the fail-closed boundary in front of `sdk._sanitize_props`
+    # (its backstop), matching the sibling keys' registration at every home.
+    "evidence_fold",
     # #3644 / PR #8016 code-review ISSUE 1: the version's TRANSITION facts are
     # server-minted/journalled and name a `:Source` transition — they can never
     # be a legitimate caller prop on ANY entity, so they belong in this

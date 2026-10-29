@@ -1483,6 +1483,12 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_preserved",
+    # #10010 review P1: the dedup fold's RECORD flag (a description of the
+    # record, never node state — `_POINT_HANDLED` drops it on replay too). It
+    # states that this creation-shaped record folded evidence into an EXISTING
+    # Point; without the entry it would fall into the record's `props` jsonb and
+    # `cache_projection._props_from_row` would copy it back onto the node.
+    "evidence_fold",
 })
 
 

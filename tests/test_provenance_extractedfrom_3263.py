@@ -1464,3 +1464,122 @@ def test_falsy_non_string_session_id_warns(prov, caplog):
         sdk.create_point("statement", "zero session id", session_id=0)
     assert any("not a non-empty string" in r.getMessage()
                for r in caplog.records), "falsy non-string session_id was silent"
+
+
+def test_a_fold_onto_a_dead_claim_keeps_its_terminalizer_stamp(prov):
+    """#10010 review P1 — the fold's record is NOT the id's recreate anchor.
+
+    ``_fold_source_evidence`` journals its work by re-emitting a ``PointAdded``
+    for an id that ALREADY EXISTS, and the replay's recreate anchor refuses a
+    terminalizer stamp at or before a creation ("it died with the replaced
+    node"). A fold replaces NOTHING — and folding onto a DEAD claim is not
+    exotic, it is authorised by this very branch: `#7819` is scoped to
+    ``_TEMPORAL_RESTAMP_PROPS`` ("a fold that carries no temporal prop keeps
+    applying, exactly like any other revision of a dead claim"), and
+    ``_find_point_by_content`` applies no status/outdated filter. So the
+    ordinary create → supersede → re-ingest-from-a-second-source sequence below
+    lost the stamp in the rebuild: ``status``/``validTo`` came back from the
+    fold's own snapshot, but ``outdated``/``expiredAt`` (``_POINT_DENY`` — no
+    payload can restore them) and the CORRECTS edge did not, i.e. a DEAD claim
+    served as live.
+
+    Both terminalizers are pinned because they write different columns: a
+    supersede sets ``status``+``outdated``+``expiredAt``+CORRECTS, an invalidate
+    sets the ``outdated`` pair only. Frozen before the fix: the rebuilt node read
+    ``{'status': 'superseded', 'outdated': None, 'expiredAt': None}``.
+    """
+    import json
+
+    from tortoise.projection import EVIDENCE_FOLD_KEY
+
+    sdk, events = prov
+    proj = sdk._get_proj()
+    a, b = "https://example.com/a", "https://example.com/b"
+    superseded_content = "the expansion is funded through next spring"
+    invalidated_content = "the expansion is funded through next autumn"
+
+    superseded = sdk.create_point("statement", superseded_content,
+                                  extractedFrom=a, dedup=True)["id"]
+    successor = sdk.create_point("statement", "the expansion is funded",
+                                 extractedFrom=a)["id"]
+    sdk.supersede_point(superseded, successor)
+    invalidated = sdk.create_point("statement", invalidated_content,
+                                   extractedFrom=a, dedup=True)["id"]
+    correction = sdk.create_point("statement", "the expansion is deferred",
+                                  extractedFrom=a)["id"]
+    sdk.invalidate_point(invalidated, correction)
+
+    live = {pid: sdk.get_point(pid) for pid in (superseded, invalidated)}
+    for pid, row in live.items():
+        assert row.get("outdated") is True, (
+            f"guard: the terminalizer must have stamped {pid} live", row)
+
+    # The FOLD, onto each dead claim — a second source for the SAME content.
+    for content in (superseded_content, invalidated_content):
+        sdk.create_point("statement", content, extractedFrom=b, dedup=True)
+    for pid in (superseded, invalidated):
+        assert _sources_of(proj, pid) == {a, b}, (
+            "guard: this must be a fold onto the dead claim, not a second "
+            f"Point (sources={_sources_of(proj, pid)!r})")
+
+    # The record says what it is — the anchor cannot infer "folded, created
+    # nothing" from the payload's shape.
+    with open(os.path.join(str(events), "events.jsonl")) as fh:
+        records = [json.loads(ln) for ln in fh if ln.strip()]
+    fold_records = [rec for rec in records
+                    if rec.get("type") == "PointAdded"
+                    and (rec.get("point") or {}).get(EVIDENCE_FOLD_KEY)]
+    assert len(fold_records) == 2, (
+        "the fold must FLAG the record it re-emits, or the replay reads it as "
+        f"a creation: {[r.get('point', {}).get('id') for r in records]!r}")
+    assert all(rec["point"].get("extractedFromAll") for rec in fold_records), (
+        "guard: the flagged records must be the folds themselves")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    for pid, before in live.items():
+        after = sdk.get_point(pid)
+        assert after.get("outdated") is True, (
+            "the rebuild dropped the terminalizer stamp and served a dead "
+            f"claim as live: before={before!r} after={after!r}")
+        assert after.get("expiredAt") == before.get("expiredAt"), (
+            f"expiredAt lost across the rebuild: {before!r} -> {after!r}")
+        assert after.get("status") == before.get("status"), (before, after)
+
+
+def test_the_fold_record_flag_is_refused_at_every_prop_boundary(prov):
+    """#10010 review P1 — the fold's RECORD flag is server-minted.
+
+    A caller-supplied value is simultaneously a live/replay parity break (the
+    flag is payload metadata, so it never persists as a node property live) and
+    a FORGED replay decision (the recreate anchor reads it to decide whether a
+    creation-shaped record replaced an incarnation). It therefore gets the
+    ``embedding_preserved`` treatment: hard-rejected at the SDK prop intake, at
+    ``EventAPI`` (the one producer that bypasses that intake) and at the MCP
+    boundary that sits in front of both.
+    """
+    from tortoise import mcp_server
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    sdk, events = prov
+    before = sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+    with pytest.raises(ValueError, match="server-managed journal record flag"):
+        sdk.create_point("statement", "a forged fold flag",
+                         evidence_fold=True)
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == before, \
+        "a rejected Point was still written (orphan)"
+
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=sdk._get_proj())
+    with pytest.raises(ValueError, match="server-managed"):
+        api.add_point("a forged fold flag on the internal seam", {},
+                      evidence_fold=True)
+
+    assert "evidence_fold" in mcp_server._SERVER_MANAGED_PROPS, (
+        "evidence_fold left the MCP server-managed boundary — the sibling "
+        "`extractedFromAll` key is registered here and the flag is the same "
+        "class of server-minted record fact")
+    assert mcp_server._reject_server_managed_props({"evidence_fold": True}), (
+        "the MCP boundary accepted a caller-supplied fold flag")

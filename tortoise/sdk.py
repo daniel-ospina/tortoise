@@ -166,6 +166,10 @@ from .projection import _FULLTEXT_INDEX_LABEL_FIELDS
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
+# #10010: the dedup fold's record flag — spelled in the module that READS it
+# (the replay's recreate anchor), imported here by its only producer so a rename
+# cannot leave the fold emitting a flag nothing recognises.
+from .projection import EVIDENCE_FOLD_KEY
 from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
 from .quota import (
     DOCUMENT_METER_PREDICATE,
@@ -4626,6 +4630,21 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         raise ValueError(
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
             "journal fields and cannot be set via props."
+        )
+    # #10010 review P1: the dedup fold's RECORD flag is server-minted —
+    # `_fold_source_evidence` is its only writer, and the replay's recreate anchor
+    # reads it (`projection.record_is_evidence_fold`) to decide whether a
+    # creation-shaped record replaced an incarnation. A caller-supplied value
+    # would persist LIVE (it is not in `_POINT_HANDLED`'s write path, so the open
+    # prop passthrough takes it) while the replay ALSO read it as a record fact —
+    # simultaneously a live/replay parity break and a forged replay decision.
+    # HARD-REJECT, following the `embedding_preserved` precedent above: there is
+    # no legitimate caller intent for this key, so a silent strip would let the
+    # forgery pass unnoticed.
+    if "evidence_fold" in props:
+        raise ValueError(
+            "'evidence_fold' is a server-managed journal record flag and "
+            "cannot be set via props."
         )
     # #6151 (review P3): `baseline_system_default` is the RECORDED #2199 birth
     # fact — `_apply_source_inheritance` re-injects the system default ONLY on a
@@ -29188,6 +29207,18 @@ class TortoiseSDK:
         # other branch.
         if existing.get("embedding") is not None:
             snapshot["embedding_preserved"] = True
+        # #10010 review P1: this record creates NOTHING — it re-emits an
+        # EXISTING incarnation's snapshot so pass-1a can restate the props and
+        # pass-2 can re-derive the edges. The replay's recreate anchor cannot
+        # tell that from a creation by shape alone, and counting the fold as a
+        # re-creation refused the very terminalizer stamp that killed the
+        # survivor (`outdated`/`expiredAt`/CORRECTS are `_POINT_DENY`, so no
+        # payload restores them): a `rebuild_all` served a dead claim with no
+        # `outdated` flag. The flag is the record telling the plan what it is;
+        # `projection.EVIDENCE_FOLD_KEY` is its one spelling,
+        # `record_is_evidence_fold` its one reader, and the prop-intake
+        # boundaries refuse it as a caller prop (`_sanitize_props`).
+        snapshot[EVIDENCE_FOLD_KEY] = True
         if pairs:
             snapshot["sourceVersionTransit"] = pairs
         else:

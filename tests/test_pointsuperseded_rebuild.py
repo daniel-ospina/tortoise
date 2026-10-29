@@ -1494,6 +1494,67 @@ def test_plan_point_restamp_folds_pins_the_shared_selection(caplog):
     assert fold_seq == {"a": 2}
 
 
+def test_plan_keeps_the_stamp_a_fold_re_emit_would_otherwise_drop():
+    """#10010 review P1 — a dedup FOLD's record is not a recreate BOUNDARY.
+
+    ``_fold_source_evidence`` journals its work by re-emitting a ``PointAdded``
+    for an id that ALREADY EXISTS, and every creation record advances the
+    recreate anchor ("a terminalizer at or before it died with the replaced
+    node"). A fold replaces nothing — that is why it is the first producer to
+    land a re-emit on an ordinary, routinely-superseded claim, and why the
+    anchor has to be able to tell the two apart. Without the record's own flag
+    the plan dropped the stamp half for a dead claim's own terminalizer, and a
+    ``rebuild_all`` served it with ``status='superseded'``/``validTo`` (from the
+    fold's snapshot) but no ``outdated``/``expiredAt`` (``_POINT_DENY`` — only
+    the stamp writes them).
+
+    Pinned on the PLAN rather than on one engine: the plan is the single
+    selection every replay path obeys (``rebuild_all``'s sweep,
+    ``rebuild(log)``, ``recover_from_log``, ``backup.restore``), so this
+    assertion covers all four.
+    """
+    from tortoise.projection import EVIDENCE_FOLD_KEY, plan_point_restamp_folds
+
+    _folded = {"id": "a", "content": "A", EVIDENCE_FOLD_KEY: True}
+
+    # Supersede + a FOLD re-emit: the stamp half survives (the bare re-emit case
+    # WITHOUT the flag is pinned above and must keep dropping it).
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "b", "content": "B"}},
+        {"type": "PointSuperseded", "id": "a", "new_id": "b"},
+        {"type": "PointAdded", "point": dict(_folded)},
+    ])
+    assert decisions[2] == (True, True), (
+        "the fold's record advanced the recreate anchor, so the terminalizer "
+        "that killed this id lost its stamp AND its decay")
+    assert fold_seq == {"a": 2}
+
+    # An INVALIDATE (no canonicalization) is the same class.
+    decisions, _ = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "PointAdded", "point": dict(_folded)},
+    ])
+    assert decisions[1] == (True, True)
+
+    # A fold creates NOTHING, so it must not CONSUME a pending delete either:
+    # the recreate anchor belongs to the record that actually materializes an
+    # incarnation. If the fold consumed it, the REAL recreate would stop being
+    # the delete→recreate boundary and resurrect the dead incarnation's folds.
+    decisions, _ = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "EntityMutated", "id": "a", "op": "delete",
+         "label": "Point"},
+        {"type": "PointAdded", "point": dict(_folded)},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
+    ])
+    assert decisions[1] == (False, False), (
+        "a fold consumed the pending delete, so the real delete→recreate no "
+        "longer bounds the dead incarnation")
+
+
 # ══════════════════════════════════════════════════════════════════════
 # #3305 — the SUCCESSOR arm of the fold's existence gate
 #

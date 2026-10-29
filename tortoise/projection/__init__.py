@@ -7897,6 +7897,53 @@ def _owns_point(label: object) -> bool:
     return not (isinstance(label, str) and label in _NON_POINT_ENTITY_LABELS)
 
 
+#: The FOLD's own record flag — the payload key `_fold_source_evidence` mints on
+#: the `PointAdded` it re-emits to journal a dedup fold (#7704 / #10010 review).
+#:
+#: Payload-only metadata, never a node property (`entities._POINT_HANDLED`), and
+#: refused at every caller-prop boundary (`sdk._sanitize_props`, `api`'s internal
+#: seam, the MCP boundary) — the same treatment `embedding_preserved` gets.
+#:
+#: ⛔ It exists because the REPLAY's recreate anchor is not self-describing. Every
+#: creation record advances `last_recreate` (and `_rebuild_all_replay`'s own
+#: `last_recreate_seq`) — "a terminalizer at or before it died with the replaced
+#: node". A FOLD replaces NOTHING: it re-emits an EXISTING incarnation's snapshot
+#: so pass-1a restates the props and pass-2 re-derives the edges. Counting it as
+#: a re-creation refused the very stamp that killed the claim: the rebuild
+#: reassembled `status`/`validTo` from the fold's own snapshot but dropped
+#: `outdated`/`expiredAt`/CORRECTS, which ONLY the terminalizer stamp writes
+#: (`_POINT_DENY` — no payload can restore them), leaving a dead claim with no
+#: `outdated` flag: the state `entities.py` names as "an invalidated Point with no
+#: `outdated` flag — a dead claim served". Measured on the shape the fold's own
+#: branch authorises (`#7819` is scoped to `_TEMPORAL_RESTAMP_PROPS`, so a fold
+#: carrying no temporal prop applies to a dead claim exactly as any revision
+#: does): create → supersede (or invalidate) → re-ingest the same content from a
+#: second source folds onto the dead id, and a `rebuild_all` then dropped
+#: `outdated`/`expiredAt` while `check_consistency` reds with an action ("replay
+#: the journal") that reproduces the same graph.
+#:
+#: Spelled here, next to the plan that reads it, and IMPORTED by the producer, so
+#: the two cannot drift the way `create_document(type="SourceCreated")` did.
+EVIDENCE_FOLD_KEY = "evidence_fold"
+
+
+def record_is_evidence_fold(ev: dict) -> bool:
+    """Is this creation-shaped record a dedup FOLD rather than a creation?
+
+    Reads both journal shapes the replay tolerates (after ``_norm`` a nested
+    record carries the flag in BOTH places, a flat ``EventAPI`` record in one),
+    so the answer cannot depend on which door minted the record.
+
+    A record that states the flag but is NOT a creation type is still reported
+    here; every caller checks the type first, so the flag alone never decides
+    what the record IS.
+    """
+    point = ev.get("point")
+    if isinstance(point, dict) and point.get(EVIDENCE_FOLD_KEY):
+        return True
+    return bool(ev.get(EVIDENCE_FOLD_KEY))
+
+
 def plan_point_restamp_folds(
     events,
 ) -> tuple[dict[int, tuple[bool, bool]], dict[str, int]]:
@@ -7937,7 +7984,10 @@ def plan_point_restamp_folds(
 
     * ``last_recreate_seq[(Point, id)]`` — the id's LAST ``PointAdded`` /
       ``OperatorAdded`` — bounds the STAMP half. A fold at or before it died
-      with the replaced node. ``PointPromoted`` is deliberately NOT a boundary
+      with the replaced node. A FOLD record is NOT such a boundary
+      (``record_is_evidence_fold``, #10010 review): it re-emits an existing
+      incarnation's snapshot and replaces nothing. ``PointPromoted`` is
+      deliberately NOT a boundary
       (same-node draft→live: it clears neither ``outdated`` nor CORRECTS), so
       seeding from it would silently drop a pre-promote invalidate fold.
     * ``last_ann_drop_seq[(Point, id)]`` — the id's last REAL
@@ -8009,6 +8059,14 @@ def plan_point_restamp_folds(
                     pending_deleted.add(("Point", mid))
             continue
         if t in ("PointAdded", "OperatorAdded"):
+            # #10010 review P1: a FOLD re-emits an EXISTING id's snapshot and
+            # replaces nothing, so it is not a recreate boundary — and it must
+            # not consume a pending delete either, because the recreate anchor
+            # belongs to whichever record actually materialized the incarnation
+            # (`record_is_evidence_fold`). Without this, a fold onto a dead
+            # claim refused that claim's own terminalizer stamp below.
+            if record_is_evidence_fold(ev):
+                continue
             p = ev.get("point")
             if isinstance(p, dict) and isinstance(p.get("id"), str):
                 key = ("Point", p["id"])
@@ -14178,8 +14236,17 @@ class FalkorProjection(
                 # never clears outdated/CORRECTS, so seeding from it would
                 # silently drop a pre-promote invalidate fold).
                 if t in ("PointAdded", "OperatorAdded"):
-                    last_recreate_seq[("Point", p["id"])] = seq
-                    last_recreate_seq_any[p["id"]] = seq
+                    # #10010 review P1: a FOLD re-emits an EXISTING id's
+                    # snapshot and replaces nothing — it is not a recreate
+                    # boundary, and it must not consume a pending delete (the
+                    # next REAL creation owns that anchor). Same predicate as
+                    # ``plan_point_restamp_folds``, so the sweep and the
+                    # chronological pass cannot read one record two ways.
+                    if record_is_evidence_fold(ev):
+                        pass
+                    else:
+                        last_recreate_seq[("Point", p["id"])] = seq
+                        last_recreate_seq_any[p["id"]] = seq
                 # #3689 review P2: the annotator folds' drop boundary is a
                 # REAL delete→recreate, not a bare upsert (see above).
                 # #3689 review P2 + #3860: the annotator folds' drop boundary

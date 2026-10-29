@@ -1679,6 +1679,13 @@ class _EntityHandlers:
         # ACTIVE model as its origin (`stamp_journal_embedding`). Never a node
         # property — the node's vector identity is not a fact about the node.
         "embedding_preserved",
+        # #10010 review P1: journal-payload metadata (`_fold_source_evidence`).
+        # States that this creation-shaped record FOLDED evidence into an
+        # EXISTING Point instead of creating one, which is what the replay's
+        # recreate anchor reads (`projection.record_is_evidence_fold`). Never a
+        # node property: the flag describes the RECORD, and a node carrying it
+        # would be live state the fold never wrote.
+        "evidence_fold",
         # A10 operator-scoped replay extension
         "direction", "label",
         # #7852 W1: the basis the direction chain used. Written by
