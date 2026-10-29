@@ -4880,7 +4880,7 @@ _MARKER_NEGATION_AFTER_RE = re.compile(
 #: The exemption row's OWN vocabulary states the verdict as *"This writer carries
 #: NO property on an about edge"*, so denying the counted class in the class's own
 #: words was the one spelling that red — the direction that forces an editor to
-#: weaken true prose (`#10200` review, cycle 10, executed).
+#: weaken true prose (`#10200` review, cycle 13, executed).
 #: ⚠️ Same ≤ THREE word-tokens, same no-punctuation crossing, and it additionally
 #: requires that no PREDICATE TERMINATOR sits between the marker and the negator
 #: (`_PREDICATE_TERMINATORS`): without that, *"drops the property **and** carries
@@ -4941,7 +4941,7 @@ def _marker_itself_negated(low: str, match) -> bool:
         bool(_MARKER_NEGATION_BEFORE_RE.search(prefix))
         or bool(_MARKER_NEGATION_AFTER_RE.match(low[match.end() :]))
         # … and the OBJECT voice of the same trailing denial, which the
-        # adverbial half above cannot hold (`#10200` review, cycle 10).
+        # adverbial half above cannot hold (`#10200` review, cycle 13).
         or _object_negation_after(low, match)
     )
 
@@ -5025,14 +5025,19 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
        *"drops the property and carries nothing"* keeps its denial — the second
        predicate's negation is not the first marker's. Past that window, or with a
        property noun outside `_PROPERTY_NOUN`, the marker reads as ASSERTED: on a
-       counted row that is fail-OPEN (a denial written as *"it re-materializes no
-       attributes at all on the rebuild pass"* is longer than three tokens and
-       stays green), which is why the window is as wide as the one the adverbial
-       `no longer` half has always used and no wider, and why the OBJECT vocabulary
-       is the same `_PROPERTY_NOUN` `DENIAL_PATTERNS` already reads. The other
-       direction is the one that hurt: an exemption denied with the EXEMPT row's
-       own wording (*"it carries no property on an about edge"*) was a FALSE RED
-       until this bound was read at all (`#10200` review, cycle 13, executed).
+       counted row that is fail-OPEN — *"it is a re-materializing writer that
+       emits nothing at all on the rebuild pass"* is measured GREEN, because
+       `nothing` sits four word-tokens past the marker and `emits` is in no
+       `DENIAL_PATTERNS` frame — which is why the window is as wide as the one the
+       adverbial `no longer` half has always used and no wider, and why the OBJECT
+       vocabulary is the same `_PROPERTY_NOUN` `DENIAL_PATTERNS` already reads. The
+       other direction is the one that hurt: an exemption stated with the COUNTED
+       class's own vocabulary and negated by an object (*"`projection.
+       _rebuild_all_replay` re-materializes nothing on an about edge"*) red through
+       `EXEMPT_COUNTED_MARKERS` until this bound was read at all — and it is the
+       exemption's OWN wording (*"This writer carries NO property on an about
+       edge"*), so the only way to clear it was to delete the record of why the row
+       is exempt (`#10200` review, cycle 13, executed).
     """
     offenders: list[str] = []
     for label, text in sections:
