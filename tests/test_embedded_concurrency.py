@@ -63,8 +63,12 @@ def _writer_env():
 
     EVERY writer spawner in this module must use it — see
     ``_WRITER_THREAD_ENV`` for the measurement that makes it load-bearing.
-    Pinned behaviourally by
-    ``test_every_writer_subprocess_runs_with_a_single_intra_op_thread``.
+    Pinned twice, at the two different claims:
+    ``test_every_writer_subprocess_runs_with_a_single_intra_op_thread`` proves the
+    env BOUNDS torch, and ``test_every_writer_spawner_passes_the_bounded_env``
+    proves each spawner actually HANDS it to its child — a reader that only
+    exercises this helper cannot see a spawner that drops ``env=`` (#10313
+    review, P3: the earlier docstring claimed the pin covered both).
     """
     return {**os.environ, **_WRITER_THREAD_ENV}
 
@@ -256,6 +260,50 @@ def test_every_writer_subprocess_runs_with_a_single_intra_op_thread():
     assert child.stdout.strip() == "1", (
         f"a writer subprocess built a {child.stdout.strip()}-thread intra-op "
         "pool; five of those oversubscribe the runner (#10313)")
+
+
+def test_every_writer_spawner_passes_the_bounded_env():
+    """#10313 review, P3: the SPAWNERS, not just the helper.
+
+    ``test_every_writer_subprocess_runs_with_a_single_intra_op_thread`` above
+    proves that ``_writer_env()`` bounds torch — but it builds that env itself,
+    so dropping ``env=_writer_env()`` from EITHER spawner left the module green
+    while five unbounded writers once again oversubscribed the runner. This pin
+    intercepts ``subprocess.Popen`` and asserts the kwargs each spawner really
+    hands its child, so the deletion reds here by name.
+
+    No server, no writes: the Popen is replaced before the spawner builds its
+    child, so this runs in milliseconds and needs neither the embedded nor the
+    live lane.
+    """
+    import tests.test_embedded_concurrency as mod
+
+    captured = []
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured.append(kwargs)
+            self.pid = -1
+
+    real_popen = mod.subprocess.Popen
+    mod.subprocess.Popen = _FakePopen
+    try:
+        mod._spawn_writer(_canonical_path(), 0, writes=1)
+        mod._spawn_live_writer(0, writes=1)
+    finally:
+        mod.subprocess.Popen = real_popen
+
+    assert len(captured) == 2, (
+        f"both spawners must reach Popen exactly once; saw {len(captured)}")
+    for kwargs in captured:
+        env = kwargs.get("env")
+        assert env is not None, (
+            "a writer spawner passed NO env= — the child then inherits torch's "
+            "default intra-op pool, which is the #10313 oversubscription")
+        for var in _WRITER_THREAD_ENV:
+            assert env.get(var) == "1", (
+                f"a writer spawner handed its child {var}={env.get(var)!r}; "
+                "every writer must be bounded to one intra-op thread (#10313)")
 
 
 def _pid_alive(pid: int) -> bool:
