@@ -19789,6 +19789,25 @@ class TortoiseSDK:
                     "message": f"ingest: {section}[{index}] {_svk} is "
                                f"server-managed and cannot be set on bundle items",
                 })
+        # #10010 review P2: `evidence_fold` is the dedup FOLD's own RECORD flag.
+        # `_sanitize_props` hard-rejects it on presence (it is a server-minted
+        # journal fact — a caller-set value is a live/replay parity break and a
+        # forged recreate anchor), and it is NOT a declared parameter of
+        # `create_point`, so a bundle item's key lands in `**props` and the
+        # sanitizer refuses it. That refusal happens INSIDE step 3's write loop
+        # (`create_point(kind, content, dedup=True, **write_item)`), i.e. after
+        # step 1 (Sources) and every earlier points item committed — the exact
+        # partial-mutation class this gate exists to replace with a zero-mutation
+        # Phase-1 abort. Same door-depth rule as the siblings above: the nested
+        # `props` spelling is flattened by `_coerce_props` and reaches the same
+        # sanitizer, so a top-level-only reader would leave it a mid-write raise.
+        if _item_prop_at_depth(item, "evidence_fold", _door_depth)[0]:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] evidence_fold is "
+                           f"server-managed (the dedup fold's own record "
+                           f"flag) and cannot be set on bundle items",
+            })
         if section == "points":
             # #8400 review P2 (the refusal message used to offer it): `dedup` is
             # NOT a bundle item field. Step 2 writes every points item as

@@ -141,18 +141,22 @@ fi
 #   of this failure — passes `--log "$PYTEST_LOG"` (`${{ runner.temp }}/pytest.log`,
 #   per-runner and therefore per-job, since a runner runs one job at a time).
 #   The other legs still wrote `/tmp/...` literals and still needed the same change.
-# They no longer do. `test-concurrency-falkor`, `test-carve-out` and `test-track-b`
-# now pass `${RUNNER_TEMP:-/tmp}/pytest.log` (and `/trackb.log` for track-b)
-# themselves — writer, `tail`, this reporter, the `grep -c` counters, the skip-guard's
-# argument and the upload `path:` — so signals (1)-(3) below are a backstop against a
-# test that SHELLS OUT to pytest, not the load-bearing defence against a co-tenant,
-# in every pool job this file reports on.
+# They no longer do. `test-concurrency-falkor`, `test-carve-out`, `test-track-b`
+# and `test-slow` all pass `${RUNNER_TEMP:-/tmp}/pytest.log` (and `/trackb.log` for
+# track-b) themselves — writer, `tail`, this reporter, the `grep -c` counters, the
+# skip-guard's argument and the upload `path:` — so signals (1)-(3) below are a
+# backstop against a test that SHELLS OUT to pytest, not the load-bearing defence
+# against a co-tenant, in every pool job this file reports on.
 #
-# ⛔ `test-slow` still writes the bare `/tmp/pytest.log` literal and must NOT be
-# "fixed" for that reason: it is pinned to the HOSTED `ubuntu-24.04` label, whose
-# `/tmp` is the job's own VM, so it has no co-tenant to be fooled by. (It was named
-# as one for months; that claim was wrong and is corrected in `python-ci.yml`,
-# `tests/test_ci_selection.py` and `tests/test_ci_guard_invocation.py`.)
+# ⛔ `test-slow` is IN that set, and its `runs-on: ubuntu-24.04` pin buys NO private
+# `/tmp`. That pin reads like the HOSTED label, but `ubuntu-<version>` is a CUSTOM
+# label this repo's self-hosted pool advertises: `docs/ops/ci-runner-x64.md` measures
+# it ×7 on 2026-10-29, and on run 40861737614 four of `test-slow`'s five shards
+# reported `Machine name: 'cmux'`. So its log path is per-runner for the same reason
+# every other pool leg's is, and "it is version-pinned, therefore its `/tmp` is its
+# own VM" is the WRONG reason that was deleted from `python-ci.yml`,
+# `tests/test_ci_selection.py` and `tests/test_ci_guard_invocation.py` — do not
+# reinstate it here (#7815 / #10028 / #10289).
 # ⚠️ The remaining host-global leg is `test-d14-hosted-api` (`/tmp/pytest-d14.log`,
 # `/tmp/junit-d14.xml`), named at the site as a `⚠️ NAMED RESIDUAL`. Its log basename
 # is unique to that job, so it cannot be clobbered by a co-tenant — only by a stale

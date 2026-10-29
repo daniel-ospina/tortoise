@@ -1554,11 +1554,12 @@ def test_the_fold_record_flag_is_refused_at_every_prop_boundary(prov):
     a FORGED replay decision (the recreate anchor reads it to decide whether a
     creation-shaped record replaced an incarnation). It therefore gets the
     ``embedding_preserved`` treatment: hard-rejected at the SDK prop intake, at
-    ``EventAPI`` (the one producer that bypasses that intake) and at the MCP
-    boundary that sits in front of both.
+    ``EventAPI`` (the one producer that bypasses that intake), at the MCP
+    boundary that sits in front of both, and at ``ingest``'s Phase-1 shape gate.
     """
     from tortoise import mcp_server
     from tortoise.api import EventAPI
+    from tortoise.exceptions import BundleValidationError
     from tortoise.log import EventLog
 
     sdk, events = prov
@@ -1583,3 +1584,31 @@ def test_the_fold_record_flag_is_refused_at_every_prop_boundary(prov):
         "class of server-minted record fact")
     assert mcp_server._reject_server_managed_props({"evidence_fold": True}), (
         "the MCP boundary accepted a caller-supplied fold flag")
+
+    # #10010 review P2: and at `ingest`'s Phase-1 shape gate — the fourth prop
+    # boundary, and the one where a MISSING refusal is a partial mutation rather
+    # than a fail-fast: `evidence_fold` is not a declared `create_point`
+    # parameter, so a bundle item's key lands in `**props`, `_sanitize_props`
+    # raises INSIDE step 3's write loop, and the earlier sections have already
+    # committed. Both spellings — `_coerce_props` flattens the nested one onto
+    # the same sanitizer. Asserted on the REFUSAL and on zero Points written,
+    # because "refused at every prop boundary" is false if it costs an orphan.
+    for spelling in ("top", "nested"):
+        item = {"ref": "p1", "kind": "statement",
+                "content": "a forged fold flag in a bundle"}
+        if spelling == "top":
+            item["evidence_fold"] = True
+        else:
+            item["props"] = {"evidence_fold": True}
+        bundle = {"points": [item]}
+        assert any("evidence_fold" in v["message"]
+                   for v in sdk._validate_bundle(bundle)), (
+            f"ingest's Phase-1 shape gate accepted the {spelling} spelling of "
+            "evidence_fold — the refusal would then happen inside the write "
+            "loop, after the earlier sections committed (partial mutation)")
+        with pytest.raises(BundleValidationError, match="evidence_fold"):
+            sdk.ingest(bundle)
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0] == before, (
+            f"the {spelling} spelling of evidence_fold committed a Point "
+            "before the bundle was refused")
