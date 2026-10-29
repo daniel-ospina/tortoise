@@ -215,7 +215,11 @@ node, which is what the call asked for.
   does the same, both directions — an edit that introduces an identifier keeps the tokens
   and gains the alias, an edit that removes one keeps the tokens and drops only the alias).
   The risk is a property of the *invariant*, not of one door: round 9 found it live on the
-  revise door because only the ADD door was pinned.
+  revise door because only the ADD door was pinned. Both pins are non-vacuous, measured at
+  `b591e0ec9` on a live lane (`docker://:@127.0.0.1:16397/…`, 2 passed) by reverting each fix
+  in place: restoring the unguarded `_NODE_SEARCH_KEYS_VIEW = "n.search_keys"` reds the ADD
+  pin, and restoring the non-list-aware `current = old_search_keys if isinstance(…, str) else ""`
+  reds the REVISE pin (`assert sorted(stored.split()) == ["alpha", "beta", "err4032"]`).
 
 **Threat classes:** (not adversarial) — no gate/enforcement code in this diff.
 
