@@ -54,9 +54,9 @@
 #   the label a leg pins to ESCAPE this pool, so keeping it un-pins `test-slow` / `workflow-lint` /
 #   `finding-provenance` / `mirror-images` onto a bare box whose PATH lacks their tools (measured
 #   2026-10-24: exit 127, `gh: command not found`); (b) a FOREIGN ARCH MARKER (`self-hosted-arm64`
-#   on this x64 box) — the pre-#2327 damage a repair is expected to HEAL. Both are dropped by the
-#   repair and PRINTED, never silently skipped, and the drop mirrors
-#   `tools/runner_autoscale.py::_preserve_labels`, which drops exactly those two classes too.
+#   on this x64 box) — the pre-#2327 damage a repair is expected to HEAL. (b) is ALWAYS dropped; (a)
+#   only under `CI_RUNNER_OS_LABEL=off`/unset (KEPT under `on|auto`). Both are PRINTED, never
+#   silently skipped. `_preserve_labels` drops both but reads NO flag: ONE writer here (#10275).
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ AND THE VERSION-PIN CARVE-OUT OBEYS THE BOX'S OWN CHOICE, so it cannot revert an APPLIED owner
 #   departure with no switch involved: the pin is dropped under `CI_RUNNER_OS_LABEL=off`/unset (the

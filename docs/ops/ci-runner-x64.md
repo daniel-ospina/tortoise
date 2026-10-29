@@ -199,11 +199,11 @@ falls back.
   a union cannot DETACH `ubuntu-latest`, so that invocation used to be accepted, print `removed=[]`,
   say `relabelled …` and exit 0 while the label it was asked to remove stayed attached. Detaching is
   the gate's writer; by hand it is `DELETE repos/<repo>/actions/runners/<id>/labels/ubuntu-latest`.
-- **⚠️ TWO NAMED CARVE-OUTS from that union, and neither is the fallback label** (`:290-306`). Both
-  classes are DROPPED (and printed as `alien-arch, not kept=[…]` / `version-pinned, not kept=[…]`),
-  because keeping either makes a false PASS permanent, and both are exactly what
-  `tools/runner_autoscale.py::_preserve_labels` drops on re-registration — one invariant, two
-  writers, so the two must not disagree:
+- **⚠️ TWO NAMED CARVE-OUTS from that union, and neither is the fallback label** (`:290-306`).
+  `foreign-arch` is ALWAYS dropped; the version pin only under `CI_RUNNER_OS_LABEL=off`/unset, so
+  under `on|auto` it JOINS the union (printed `version-pinned, kept=[…]`, see sub-bullet 1). Both are
+  PRINTED, never silently skipped — keeping either makes a false PASS permanent — and both are what
+  `_preserve_labels` drops on re-registration, except that it reads NO flag yet: ONE writer here:
   1. **`ubuntu-<version>`** (`ubuntu-24.04`, `ubuntu-22.04-arm`, …): the label a leg pins to ESCAPE
      this pool. Preserving it would un-pin `test-slow` / `workflow-lint` / `finding-provenance` /
      `mirror-images` onto a bare box whose `PATH` lacks their tools — the measured 2026-10-24

@@ -440,7 +440,8 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
     decision (not just a style choice): `docs/ops/ci-runner-x64.md:61` — "these runners
-    deliberately **do not** claim any `ubuntu-<version>` label" — and `:70-71`, an out-of-band
+    deliberately **do not** claim any `ubuntu-<version>` label" — and `docs/ops/ci-runner-x64.md:70-71`,
+    an out-of-band
     attachment "cannot survive a re-registration or `tools/install-ci-runner-x64.sh
     --repair-labels`". `tools/runner_autoscale.py::_preserve_labels` already drops the family
     (`VERSION_PINNED_HOSTED_LABEL`), so a union that kept it would leave the two writers with
@@ -482,7 +483,8 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
     the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:220-222`) — and the runbook still sells
-    `--repair-labels` as the manual heal that "re-applies this arch's marker" (`:313-314`). Keeping
+    `--repair-labels` as the manual heal that "re-applies this arch's marker"
+    (`docs/ops/ci-runner-x64.md:340-341`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -1752,6 +1754,140 @@ def test_the_installers_own_self_citations_land_on_the_line_they_name():
     assert not silent, (
         "a self-citation this pin lists is gone from the installer — a pin over refs that were "
         f"re-worded or removed is pinning nothing: {[known[k][0] for k in silent]}"
+    )
+
+
+# ── 8d. the label assertion FIVE OTHER FILES send a reader to ───────────────────────────────
+def test_the_label_assertion_other_files_cite_lands_on_it():
+    """⛔ THIS FILE'S OWN LINE NUMBERS ARE CITED FROM OUTSIDE IT, AND NOTHING PINNED THEM.
+
+    Four fleet workflows and the mirror test in `tests/test_reporting_workflow_concurrency.py` send a
+    reader to `tests/test_ci_runner_x64_install.py:NNN` for the assertion that the installer never
+    hands `config.sh` a foreign arch marker or a version pin. This PR's module docstring grew, the
+    assertion moved and the old number became a BLANK LINE — so all five comments then pointed at
+    nothing, and none of the three pins above could see them: all three read INSTALLER refs. A
+    blank-line target is worse than a stale one, because the reader concludes the assertion is gone.
+
+    Two-way over the scanned surface, like the installer pins: a citing file this pin does not know
+    FAILS (add it rather than leaving it unchecked), a known site that stopped citing FAILS (the pin
+    must not silently shrink), and every citation must land on the ONE line that makes the claim and
+    agree with the others. The scan is bounded to `.github/workflows` (the surface carrying these
+    comments) plus the mirror test — globbing every file under `tests/` for this class would read
+    ~48 MB per run and cover nothing further.
+
+    Non-vacuity (measured): the pre-fix refs red on the landing check — the old number is an empty
+    line — and re-pointing only SOME of the five reds on the agreement check.
+    """
+    here = Path(__file__).read_text().splitlines()
+    assertion = r'^\s*for alien in \("self-hosted-arm64", "ARM64", "ubuntu-24\.04", "ubuntu-22\.04"\):$'
+
+    known = {
+        ".github/workflows/availability-liveness.yml",
+        ".github/workflows/availability-watchdog.yml",
+        ".github/workflows/ci-check-repair.yml",
+        ".github/workflows/ci-queue-health.yml",
+        "tests/test_reporting_workflow_concurrency.py",
+    }
+    scanned = [
+        *(REPO_ROOT / ".github" / "workflows").glob("*.yml"),
+        *(REPO_ROOT / ".github" / "workflows").glob("*.yaml"),
+        REPO_ROOT / "tests" / "test_reporting_workflow_concurrency.py",
+    ]
+    ref = re.compile(r"tests/test_ci_runner_x64_install\.py:(\d+)")
+    cited: dict[str, list[int]] = {}
+    for path in sorted(scanned):
+        assert path.is_file(), f"the pin's own scan surface is missing: {path}"
+        rel = str(path.relative_to(REPO_ROOT))
+        for line in path.read_text().splitlines():
+            for m in ref.finditer(line):
+                cited.setdefault(rel, []).append(int(m.group(1)))
+
+    unknown = sorted(set(cited) - known)
+    assert not unknown, (
+        "file(s) cite this test file's line numbers and this pin does not know them — add them to "
+        f"`known` rather than leaving the refs unchecked: {unknown}"
+    )
+    stale = sorted(known - set(cited))
+    assert not stale, (
+        "this pin still lists file(s) that no longer cite this test file — a pin over refs that "
+        f"were re-worded or removed is pinning nothing: {stale}"
+    )
+
+    lands = [i + 1 for i, line in enumerate(here) if re.match(assertion, line)]
+    assert len(lands) == 1, (
+        f"expected exactly one alien-label assertion in this file, found {lands} — re-anchor this "
+        "pin to the assertion those five comments describe"
+    )
+    hits = {n for numbers in cited.values() for n in numbers}
+    assert hits == set(lands), (
+        f"{sorted(cited)} cite tests/test_ci_runner_x64_install.py:{sorted(hits)} as the alien-label "
+        f"assertion, but it lives at {lands} — re-point every citation (they must also agree with "
+        "each other, or the mirror has silently diverged)"
+    )
+
+
+# ── 8e. this file's citations INTO the runbook ──────────────────────────────────────────────
+def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
+    """⛔ THE RUNBOOK IS EDITED OFTEN; THIS FILE'S CITATIONS INTO IT WERE NEVER PINNED.
+
+    The installer→runbook direction has two pins above. The runbook→THIS-FILE direction had none,
+    which is how `test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals` came to quote the
+    runbook's "the manual heal that re-applies this arch's marker" while citing two lines that are a
+    row of the measurement table and the `## Known residuals` heading. Four docstrings cite the
+    runbook; the whole set is pinned here, two-way, so the next runbook edit reds instead of leaving
+    a quotation whose citation points somewhere else.
+
+    Non-vacuity (measured): with the pre-fix number the landing check reds on its own — those two
+    lines are a `test (c)` row of the measurement table and the `## Known residuals` heading, and
+    neither says "re-applies".
+    """
+    here = Path(__file__).read_text().splitlines()
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+
+    # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
+    anchors: dict[int, str] = {
+        61: r"deliberately \*\*do not\*\* claim any `ubuntu-<version>` label",
+        70: r"an out-of-band attachment cannot survive",
+        220: r"A foreign arch marker",
+        229: r'answers "who answers this `runs-on:` label"',
+        340: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+    }
+
+    ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
+    cited: dict[int, int] = {}
+    for line in here:
+        for m in ref.finditer(line):
+            start = int(m.group(1))
+            cited[start] = int(m.group(2) or start)
+    assert cited, "this file no longer cites the runbook — re-anchor this pin rather than deleting it"
+
+    unknown = sorted(set(cited) - anchors.keys())
+    assert not unknown, (
+        "this file cites runbook line(s) the pin does not know — re-derive them against the runbook "
+        f"and add them to `anchors` rather than leaving them unchecked: {unknown}"
+    )
+    stale = sorted(anchors.keys() - set(cited))
+    assert not stale, (
+        "this pin still lists runbook line(s) nothing here cites — a pin over refs that were "
+        f"re-worded or removed is pinning nothing: {stale}"
+    )
+
+    wrong: list[str] = []
+    for start, end in sorted(cited.items()):
+        assert 1 <= start <= end <= len(doc), (
+            f"cites docs/ops/ci-runner-x64.md:{start}-{end}, past EOF ({len(doc)} lines)"
+        )
+        cited_text = "\n".join(doc[start - 1:end])
+        if not re.search(anchors[start], cited_text):
+            actual = [
+                i + 1
+                for i, line in enumerate(doc)
+                if re.search(anchors[start], line) or re.search(anchors[start].replace(r"\s+", " "), line)
+            ]
+            wrong.append(f":{start}-{end} is {cited_text.strip()!r} (the sentence is at {actual})")
+    assert not wrong, (
+        "this file quotes the runbook but cites a line range that does not say it — re-derive the "
+        "number from the runbook at this head: " + "; ".join(wrong)
     )
 
 
