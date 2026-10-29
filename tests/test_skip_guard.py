@@ -211,15 +211,22 @@ class TestGuardAcceptsCleanLog:
         fast_run = [
             l for l in text.splitlines()  # noqa: E741
             # #10028 / #10264: the gating run's watchdog is the per-shard
-            # EXPRESSION `${{ matrix.watchdog_minutes }}m` — the ONLY pytest
-            # invocation in this file that does not hardcode its budget. That
-            # expression (rather than a `\d+|expression` alternation) is what
-            # selects this job's run and NOT another leg's, which is the retarget
-            # this pin exists to catch: the retired `--junitxml=/tmp/junit.xml`
-            # literal selected `test-slow` (its own literal `40m`), and once
-            # #10264 moved `test-slow` onto the SAME per-job `"$PYTEST_JUNIT"`,
-            # the alternation selected it again — two matches, and the slow leg
-            # checked in place of the gating one.
+            # EXPRESSION `${{ matrix.watchdog_minutes }}m`. That expression is a
+            # NARROWING, not a selection: it matches the TWO legs whose budget
+            # comes from the matrix (`test` and `test-carve-out`) and excludes
+            # only the legs that hardcode a literal. What actually SELECTS this
+            # job's run and NOT another leg's is the `--junitxml="$PYTEST_JUNIT"`
+            # pairing below — `test-carve-out` spells `--junitxml=/tmp/junit.xml`
+            # (hardcoded junit, matrix watchdog), so it matches the expression and
+            # not the pairing. Both halves matter, and the pairing is the
+            # load-bearing one: an editor who drops it as "redundant now that the
+            # expression is unique" retargets this pin onto the carve-out leg.
+            # That retarget is what the pin exists to catch: the retired
+            # `--junitxml=/tmp/junit.xml` literal selected `test-slow` (its own
+            # literal `40m`), and once #10264 moved `test-slow` onto the SAME
+            # per-job `"$PYTEST_JUNIT"`, the retired `\d+|expression` alternation
+            # selected it again — two matches, and the slow leg checked in place
+            # of the gating one.
             if re.search(
                 r"timeout -s INT -k 10 \$\{\{\s*matrix\.watchdog_minutes\s*\}\}m", l)
             and "-m pytest" in l
@@ -243,6 +250,23 @@ class TestGuardAcceptsCleanLog:
         # (measured: the old filter matched exactly one line, and it was
         # test-slow's). Name the count and the selection variable.
         assert len(fast_run) == 1, fast_run
+        # The comment above explains WHY the pairing is load-bearing (the
+        # expression alone is a narrowing, not a selection). Derive that
+        # justification instead of restating it: if the expression alone ever
+        # selects only the gating run, the comment has become the false half and
+        # the pairing looks droppable — which is how this pin retargets.
+        expr_matches = [
+            ln for ln in text.splitlines()
+            if re.search(
+                r"timeout -s INT -k 10 \$\{\{\s*matrix\.watchdog_minutes\s*\}\}m", ln)
+            and "-m pytest" in ln
+        ]
+        assert len(expr_matches) > len(fast_run), (
+            "the watchdog expression alone is claimed to be a NARROWING, not a "
+            "selection: the `--junitxml=\"$PYTEST_JUNIT\"` pairing is what makes "
+            "it unique. The expression now matches only the gating run, so that "
+            f"justification is stale: {expr_matches}"
+        )
         assert "$FILES" in fast_run[0], (
             "the pinned invocation does not expand $FILES — it is not the "
             f"fast-suite gating run: {fast_run[0]}"
