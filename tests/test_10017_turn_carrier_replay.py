@@ -266,6 +266,76 @@ def test_the_carrier_carries_the_ENCODED_identity_stamps(armed_sdk, monkeypatch)
         assert "embedding_preserved" not in keys
 
 
+def _unimportable_embeddings_seam():
+    """Make `from .embeddings import …` raise AT THE CALL SITE (#5148).
+
+    The same condition `tests/test_write_path_unreachable_seam_5148.py`
+    installs, kept local rather than imported because `tests/` is not a
+    package. `tortoise.embeddings` is normally imported transitively at
+    package-import time, so this is not a missing-dependency install: it is a
+    failing import hook, i.e. the environment in which a write must still not
+    depend on an import succeeding.
+    """
+    import builtins
+    import contextlib
+
+    @contextlib.contextmanager
+    def _seam():
+        orig = builtins.__import__
+
+        def fake(name, *args, **kwargs):
+            if "embeddings" in name:
+                raise ImportError("unreachable seam (test)")
+            return orig(name, *args, **kwargs)
+
+        builtins.__import__ = fake
+        try:
+            yield
+        finally:
+            builtins.__import__ = orig
+
+    return _seam()
+
+
+def test_an_unimportable_seam_does_not_KILL_the_armed_capture(
+        armed_sdk, monkeypatch):
+    """#5148 on the carrier: a WRITE must not depend on an import.
+
+    The carrier stamps #5004's attestation itself, and it used to import the
+    seam BARE — the one unguarded site on this file's write path, where
+    `_emit_event` and `_capture_turn_embeddings` both guard it. The degraded
+    environment therefore terminated an ARMED capture hard, and only on that
+    lane: the stale-turn `EntityMutated` deletes were already journaled and
+    folded, and neither the carrier nor the trailing `SessionRecorded` was
+    emitted — the capture raised having partially mutated the record and
+    having stored no turn anywhere.
+
+    The degraded answer is the guarded one: skip the STAMP, keep the WRITE.
+    PRESENCE IS OWNERSHIP still holds because the producer owns every snapshot
+    key (`embedding` is always present, possibly `None`), so the replay cannot
+    invent a vector; only the normalisation/attestation is lost, which is what
+    an unimportable seam costs.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setattr("tortoise.record_writer.write_live_record",
+                        lambda *a, **k: None, raising=False)
+    with _unimportable_embeddings_seam():
+        res = armed_sdk.capture_session(CONV, session_id=SESSION_ID)
+
+    assert res["ok"] is True, res
+    carrier = next(r for r in _records(_journal_of(armed_sdk))
+                   if r["type"] == rp.TURNS_RECORD_TYPE)
+    assert [s["id"] for s in carrier["turns"]] == EXPECTED_TURN_IDS, (
+        "the carrier must still carry the whole transcript")
+    assert all("embedding" in s for s in carrier["turns"]), (
+        "PRESENCE IS OWNERSHIP: the producer owns the field, so skipping the "
+        "stamp must leave the key present for the replay")
+    assert not any(TURN_SNAPSHOT_IDENTITY_KEYS & set(s)
+                   for s in carrier["turns"]), (
+        "no attestation can be minted when the seam is unimportable — a "
+        "stamp that silently attested a model would be worse than none")
+
+
 def test_the_record_writes_one_ROW_per_turn_and_the_tier_goes_to_the_COLUMN():
     """R2's record half: THE ROWS EXIST, and each declares its placement.
 
@@ -518,9 +588,10 @@ def test_the_removal_KEEPS_the_record_row_and_demotes_its_tier():
 
     Measured consequence of getting this wrong, which is why it is a test rather
     than a comment: `_emit_event` feeds every appended record straight to
-    `record_writer.write_records`, so `delete_point`'s delete shape would
-    destroy the copied transcript IMMEDIATELY on the purge run, not only on some
-    later replay.
+    `record_writer.write_live_record` — the ONE production record door
+    (`write_records` is the batch/replay door, not this path) — so
+    `delete_point`'s delete shape would destroy the copied transcript
+    IMMEDIATELY on the purge run, not only on some later replay.
     """
     record = {"type": "EntityMutated", "id": f"{SESSION_ID}_t1",
               "label": "Point", "op": "delete",

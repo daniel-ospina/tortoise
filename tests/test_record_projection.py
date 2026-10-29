@@ -302,8 +302,22 @@ def test_each_declared_type_materializes_or_declares_a_no_effect(record_type):
                 "the raw-turn carrier produced no statement — the capture's "
                 "turns would reach no store at all")
             assert any("INSERT INTO public.point" in s.sql for s in statements)
-            assert not any(s.sql.startswith("INSERT INTO public.node ")
-                           for s in statements)
+            # ⚠️ `public.node` is not a table any migration creates, so an
+            # assert on it is permanently true and guards nothing. The tables
+            # the record's reader actually reads are
+            # `record_projection.NODE_TABLES`; `point` IS one and IS the
+            # turn's record home (§9.1), so the property is "no OTHER node
+            # table" — a node minted anywhere else is one the graph fold does
+            # not have.
+            other_node_tables = tuple(
+                f"INSERT INTO public.{table}"
+                for table, (_label, _key) in rp.NODE_TABLES.items()
+                if table != "point")
+            minted = [s.sql for s in statements
+                      if s.sql.startswith(other_node_tables)]
+            assert not minted, (
+                "the raw-turn carrier minted a node row in a table the graph "
+                f"fold does not write: {minted}")
         else:
             assert statements == []
         # A declared no-op must say WHY. "No reason" is the silent skip.

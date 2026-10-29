@@ -2696,8 +2696,11 @@ def _write_capture_turns(
                      for _i in range(_first_live, prior_turn_max_index + 1)]
         # Which store the removal targets is the same capability question as the
         # write above: with the record holding the turns there is no node to
-        # delete, and the record delete is the `PointRetracted` +
-        # `EntityMutated` pair emitted below (folded as a hard delete).
+        # delete, and on that lane the record delete is `EntityMutated` ALONE —
+        # `PointRetracted` is gated off below, because announcing the deletion of
+        # an entity the change feed never saw created is the asymmetry that gate
+        # removes. The pair is the GRAPH-held lane's shape, where the node really
+        # did exist.
         if stale and not _record_holds_turns:
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(
@@ -2831,10 +2834,30 @@ def _write_capture_turns(
         # `creating=True` is accurate (this capture computed these vectors); the
         # `embedding_preserved` branch still withholds the identity, because
         # THAT vector may predate a model change.
-        from .embeddings import stamp_journal_embedding
-
-        for _record in _turn_records:
-            stamp_journal_embedding(_record["point"], creating=True)
+        #
+        # ⛔ #5148: the seam import is GUARDED, like every other write-path site
+        # that calls it (`_emit_event`, `_capture_turn_embeddings`,
+        # `EventAPI._point`). A bare import here made a degraded environment —
+        # `.embeddings` unimportable at the call site — terminate an armed
+        # capture HARD, and only on this lane: the stale-turn `EntityMutated`
+        # deletes above have already been journaled and folded, and neither the
+        # carrier below nor the trailing `SessionRecorded` is emitted, so the
+        # capture raised having partially mutated the record and having stored
+        # no turn anywhere. A write must not depend on an import.
+        #
+        # Skipping the stamp is SAFE, for the same reason it is safe in
+        # `_emit_event`: the producer owns every snapshot key, so
+        # `embedding` is already PRESENT (possibly `None`) — PRESENCE IS
+        # OWNERSHIP still holds and the replay cannot invent a vector. What is
+        # lost is only the normalisation safety net and the #5004 text-hash /
+        # identity attestation, which is what an unimportable seam costs.
+        try:
+            from .embeddings import stamp_journal_embedding
+        except Exception:  # noqa: BLE001, RUF100
+            stamp_journal_embedding = None
+        if stamp_journal_embedding is not None:
+            for _record in _turn_records:
+                stamp_journal_embedding(_record["point"], creating=True)
         # `contains_session` rides the ENVELOPE (a capture-write structural fact,
         # ONTOLOGY §4.5 — never a node property). The graph fold reads it for
         # `PointAdded` only; the record applies it once per turn

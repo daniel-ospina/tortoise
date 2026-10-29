@@ -225,8 +225,9 @@ def test_the_carrier_declares_no_NODE_but_does_write_the_ROWS():
     §9.1's record home for the turns is `public.point`, and the per-turn
     `PointAdded` records the carrier replaces were the write that put them
     there. So the node half stays empty and the HOME half is the carrier-keyed
-    `_turn_row_statements` — one row per turn, `cache_tier = 'record_only'`, and
-    still no `node_identity` for any of them.
+    `_turn_row_statements` — one row per turn, `cache_tier = 'record_only'`,
+    and NO node minted in any of the record's node tables besides `point` (the
+    turn's record home).
     """
     snap = {"id": f"{SESSION}_t0", "content": "c",
             "pointKind": "event", "speaker": "user",
@@ -242,7 +243,19 @@ def test_the_carrier_declares_no_NODE_but_does_write_the_ROWS():
     # the identity row is the FK anchor the turn's `relation` row needs — the
     # same rows the per-turn `PointAdded` lane wrote. What §4 pins is that the
     # READER plans no node for the row, which is the property that matters.
-    assert not any("INSERT INTO public.node " in st.sql for st in plan)
+    #
+    # The assertion is against `NODE_TABLES` — the tables the reader actually
+    # reads — because an assert on a hypothetical `public.node` table is
+    # permanently true (no migration creates one), i.e. it guards nothing.
+    # `point` IS a node table and IS the turn's record home (§9.1); any OTHER
+    # node table here would be a node the graph fold does not write.
+    other_node_tables = tuple(
+        f"INSERT INTO public.{table}"
+        for table, (_label, _key) in rp.NODE_TABLES.items() if table != "point")
+    minted = [st.sql for st in plan if st.sql.startswith(other_node_tables)]
+    assert not minted, (
+        "the carrier minted a node row in a table the graph fold does not "
+        f"write: {minted}")
     # …and the DECLARED effect stays `NoRecordEffect`: a `NodeSnapshot` here
     # would be a second node-creating path the graph fold does not have.
     assert isinstance(rp.RECORD_MUTATIONS[rp.TURNS_RECORD_TYPE].effect,
