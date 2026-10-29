@@ -482,10 +482,10 @@ def test_an_unregistered_mention_is_exempt_but_an_identity_miss_is_not(
     from tortoise.projection import _replay_write_scope
     from tortoise.projection.nonfolded import (
         EXEMPT_SHAPES,
-        NonFoldedEventsError,
         SHAPE_OBJECT_SUPERSEDED_MISS,
         SHAPE_OBJECT_SUPERSEDED_UNREGISTERED,
         SHAPE_UNFOLDED_MENTION,
+        NonFoldedEventsError,
         collect_non_folded,
     )
 
@@ -919,6 +919,121 @@ def test_a_rename_onto_an_id_less_live_holder_is_refused(sdk):
         "the refused rename still landed — the name is now held by two live "
         "carriers, which is the state this guard exists to prevent")
     assert _name_ids(proj, "Object", "Mover") == [mover]
+
+
+def test_a_create_refusal_records_the_id_less_live_holder_it_counted(sdk):
+    """#9876 review (this head): the create-side refusal must COUNT and REPORT
+    the same holders — and it must RECORD the refusal at all.
+
+    ``resolve_or_mint`` counted with ``len(holders)`` (correct: an id-less LIVE
+    row is a holder) and then built the evidence with
+    ``[h for h in holders if h]`` — the exact filter
+    ``live_name_holder_ids``'s own docstring forbids ("filtering the ``None``
+    out would silently pick one"). Two consequences, both pinned here:
+
+    1. the shipped ``409`` evidence said *"resolves to 1 live carriers"* for a
+       graph holding TWO — a report false for the record it describes, one
+       module away from the ``NameAlreadyHeld`` fix that LABELS such a holder;
+    2. the site raised directly instead of going through ``_refuse``, so it
+       recorded NOTHING: R8 requires a refusal to BE a record, and
+       ``sdk._connect_issue_objects`` catches this exception and continues, so
+       a skipped reference left no structured evidence anywhere.
+
+    Mutation that must red this: restoring ``raise AmbiguousEntityName(…,
+    [h for h in holders if h])`` at ``entity_identity.resolve_or_mint``.
+    """
+    from tortoise.entity_identity import (
+        AmbiguousEntityName,
+        clear_non_folded_entries,
+        non_folded_entries,
+    )
+
+    client, _ = sdk
+    proj = client._get_proj()
+    client.create_entity("object", "Shared", objectKind="core:strategy",
+                         _server_id="obj-carrier", is_episodic=False)
+    # A foreign/raw writer (a bare name-keyed write that mints NO id) opens a
+    # second, id-less LIVE carrier of the same name. CREATE, not MERGE: a
+    # name-keyed MERGE would MATCH the carrier above and open nothing.
+    proj.g.query("CREATE (o:Object {name:$n})", params={"n": "Shared"})
+    assert sorted(_name_ids(proj, "Object", "Shared"),
+                  key=str) == [None, "obj-carrier"], (
+        "fixture did not build the mixed holder set (one id-carrying, one "
+        "id-less, both LIVE)")
+
+    clear_non_folded_entries()
+    with pytest.raises(AmbiguousEntityName) as refused:
+        client.create_entity("object", "Shared", objectKind="core:strategy",
+                             is_episodic=False)
+
+    # (1) The evidence names BOTH carriers — the id-less one is labelled, never
+    # dropped, so the count in the message is truthful.
+    assert len(refused.value.candidate_ids) == 2, refused.value.candidate_ids
+    assert set(refused.value.candidate_ids) == {"obj-carrier", "<id-less>"}, (
+        "the create refusal counted two live carriers and reported only the "
+        f"addressable one: {refused.value.candidate_ids}")
+    assert "resolves to 2 live carriers" in str(refused.value), str(refused.value)
+
+    # (2) And the refusal is RECORDED (R8), not merely raised.
+    entries = non_folded_entries()
+    assert len(entries) == 1, entries
+    assert entries[0].label == "Object" and entries[0].name == "Shared"
+    assert entries[0].shape == "ambiguous-name"
+    assert set(entries[0].candidate_ids) == {"obj-carrier", "<id-less>"}, (
+        "the recorded refusal names a holder set the refusal did not count: "
+        f"{entries[0].candidate_ids}")
+
+
+def test_a_fold_refusal_records_the_id_less_holder_it_counted(sdk):
+    """#9876 review (this head), fold side: ``resolve_fold_name`` counted the
+    id-less LIVE holder and recorded ``candidates`` WITHOUT it.
+
+    ``candidates`` is precisely R8's *"the candidates"*, and the id-less
+    carrier is the shape this PR deliberately classifies: a sole live-but-id-less
+    holder routes to the NON-exempt ``unregistered-reference`` (it fails the
+    run). Recorded as ``candidates=()``, that record said *"refused with no
+    candidates"* for a refusal that happened because there was one; for the
+    mixed shape it named only the addressable holder, sending the operator to
+    repair the wrong thing — and still refusing.
+
+    Mutation that must red this: restoring ``candidates=tuple(ids)`` (the
+    truthy-id list) in ``entity_identity.resolve_fold_name``.
+
+    Read through ``collect_non_folded`` — that is the collector
+    ``resolve_fold_name`` writes to (it imports ``nonfolded.record_non_folded``,
+    which appends to the run-scoped contextvar, NOT to this module's
+    ``non_folded_entries()``).
+    """
+    from tortoise.entity_identity import resolve_fold_name
+    from tortoise.projection.nonfolded import (
+        SHAPE_AMBIGUOUS_ENTITY_NAME,
+        SHAPE_UNREGISTERED_REFERENCE,
+        collect_non_folded,
+    )
+
+    client, _ = sdk
+    proj = client._get_proj()
+
+    # Shape 1: ONE live holder, carrying no id — non-exempt, and the record
+    # must NAME it rather than report an empty candidate set.
+    proj.g.query("MERGE (o:Object {name:$n})", params={"n": "SoleLegacy"})
+    with collect_non_folded() as entries:
+        assert resolve_fold_name(proj.g, "Object", "SoleLegacy") is None
+    assert [e.shape for e in entries] == [SHAPE_UNREGISTERED_REFERENCE], entries
+    assert entries[0].candidates == ("<id-less>",), (
+        "the fold recorded a refusal with NO candidates for a name held by one "
+        f"live-but-id-less carrier: {entries[0].candidates}")
+
+    # Shape 2: mixed — one id-carrying, one id-less — names BOTH.
+    client.create_entity("object", "Mixed", objectKind="core:strategy",
+                         _server_id="obj-mixed", is_episodic=False)
+    proj.g.query("CREATE (o:Object {name:$n})", params={"n": "Mixed"})
+    with collect_non_folded() as entries:
+        assert resolve_fold_name(proj.g, "Object", "Mixed") is None
+    assert [e.shape for e in entries] == [SHAPE_AMBIGUOUS_ENTITY_NAME], entries
+    assert set(entries[0].candidates) == {"obj-mixed", "<id-less>"}, (
+        "the fold recorded only the addressable holder of a two-carrier name: "
+        f"{entries[0].candidates}")
 
 
 def test_a_participants_fallback_wires_only_the_resolved_performer(sdk):

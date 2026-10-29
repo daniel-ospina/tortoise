@@ -27,7 +27,6 @@ from _node_ids import node_id  # noqa: E402
 
 from tortoise.ids import ulid  # noqa: E402
 from tortoise.log import EventLog  # noqa: E402
-from tortoise.projection.nonfolded import NonFoldedEventsError  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 

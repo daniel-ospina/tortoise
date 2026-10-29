@@ -338,8 +338,20 @@ def resolve_or_mint(g, label: str, name: str, *,
     with _holder_lock(label, name):
         holders = live_name_holder_ids(g, label, name)
         if len(holders) > 1:
-            raise AmbiguousEntityName(label, name,
-                                      [h for h in holders if h])
+            # COUNT holders, REPORT holders (#9876 review, this head): the
+            # earlier ``[h for h in holders if h]`` performed exactly the
+            # filter `live_name_holder_ids` forbids, so a name held by one
+            # id-carrying and one id-less LIVE entity reported "resolves to 1
+            # live carriers" for a refusal that happened because there were
+            # TWO — the #8018 class (a report false for the record it
+            # describes). It also bypassed :func:`_refuse`, so the create
+            # side left NO non-folded entry: R8's "a refusal is a record"
+            # was unsatisfied at the one door an SDK caller reaches, and
+            # ``sdk._connect_issue_objects`` swallows the exception. Routing
+            # through ``_refuse`` fixes both halves — it records, and
+            # ``display_holder_ids`` labels the id-less carrier instead of
+            # dropping it (the same evidence `NameAlreadyHeld` ships).
+            _refuse(label, name, display_holder_ids(holders))
         if holders and holders[0]:
             return str(holders[0]), False
         from .ids import ulid
@@ -459,7 +471,15 @@ def resolve_fold_name(g, label: str, name: str, *,
     # ``context=`` raised a TypeError INSIDE the fold (after a rebuild has
     # already wiped the graph), i.e. the fail-closed path crashed instead of
     # recording. Verified against ``nonfolded.NonFoldedEvent``'s fields.
-    record_non_folded(shape, label=label, candidates=tuple(ids),
+    # ``candidates`` is R8's "the candidates" — so it must name every holder the
+    # refusal counted, including the id-less one. ``ids`` (truthy only) stays
+    # the local for the resolve arm and the log line, which says "id-carrying";
+    # the RECORD uses ``display_holder_ids`` (#9876 review, this head): an
+    # id-less LIVE carrier routes to the NON-exempt shapes and would otherwise
+    # be recorded as ``candidates=()`` — "refused with no candidates" for a
+    # refusal that happened because there was one.
+    record_non_folded(shape, label=label,
+                      candidates=tuple(display_holder_ids(holders)),
                       detail=f"name={name!r}" + (
                           f" cause={'ambiguous-holders' if len(holders) > 1 else 'no-live-holder'}"
                           if mention else "") + (
