@@ -285,7 +285,11 @@ def resolve_or_mint(g, label: str, name: str, *,
 
     Two or more LIVE holders is not a choice a create may make for the caller:
     it refuses with :class:`AmbiguousEntityName` (route-then-refuse, R8), so a
-    duplicate-name graph is never create-poisoned by picking one.
+    duplicate-name graph is never create-poisoned by picking one. For the same
+    reason EXACTLY ONE live holder that carries **no id** refuses too —
+    :class:`UnaddressableEntityName`, recorded as ``unaddressable-name`` (#9876
+    review F2): it cannot be the identity, and minting beside it would leave two
+    live carriers and poison the name forever.
 
     ``explicit_id`` wins outright — an explicit-id channel (a connector's
     ``github-issue-{repo}-{n}``, ``_server_id``) supplies the identity, which is
@@ -307,9 +311,23 @@ def resolve_or_mint(g, label: str, name: str, *,
                                       [h for h in holders if h])
         if holders and holders[0]:
             return str(holders[0]), False
-        # Zero live holders, or one LIVE holder that carries no id (a legacy /
-        # foreign row) — that row cannot be addressed, so it cannot BE the
-        # identity: mint.
+        if holders:
+            # Exactly ONE live holder carrying no id — legacy / foreign / raw
+            # (`MERGE (o:Object {name:$name})` mints those). It is unambiguous
+            # but UNaddressable, so it cannot BE the identity.
+            #
+            # ⛔ #3590 (round-11 review F2): REFUSE — do not mint beside it.
+            # Minting leaves TWO live carriers of the name and the name is then
+            # create-poisoned forever: every later create raises
+            # ``AmbiguousEntityName`` and the id-less row has no by-id repair
+            # path, so there is no in-repo way back. Same shape, same
+            # disposition, same record as the READ resolver's
+            # :func:`_record_if_any_holder` → :class:`UnaddressableEntityName`
+            # (route-then-refuse, R8: a refusal is a record, never a silently
+            # passing warning).
+            _record_unaddressable(label, name)
+        # Zero live holders — the create MINTS. (The single-id-less-holder case
+        # returned/raised above, so only a genuinely absent name reaches here.)
         #
         # ⛔ The returned id is only half of the contract: the WRITE that makes
         # it visible must happen before this lock is released, or a concurrent

@@ -20641,17 +20641,32 @@ class TortoiseSDK:
           * **one LIVE carrier** — the item RESOLVES to that holder (idempotent
             re-mention), so THAT node's axes decide; a declared status is
             dropped by the ``ON CREATE``-only status write;
+          * **one LIVE carrier carrying no ``id``** — unaddressable legacy /
+            foreign row: the create REFUSES
+            (``UnaddressableEntityName``, #9876 review F2), so no holder axis
+            applies and the bundle must not commit its earlier items;
           * **2+ LIVE carriers** — the create REFUSES
             (``AmbiguousEntityName``); no carrier is the target and no holder
             axis applies.
 
         ⛔ ``LIVE`` is load-bearing (#3590 round-5 review F1): a TERMINAL
-        carrier, or a live one carrying no ``id``, does NOT block the create —
-        it is a different incarnation (R5) or unaddressable — so such a name
-        MINTs. Reading the axes off it described a node the write never touches,
-        which is both a fail-open (the ``#7925`` arms skipped a write that does
-        store its status, then step 4 died with the earlier items committed) and
-        a false "resolves to terminal" refusal.
+        carrier does NOT block the create — it is a different incarnation (R5),
+        so such a name MINTs. Reading the axes off it described a node the write
+        never touches, which is both a fail-open (the ``#7925`` arms skipped a
+        write that does store its status, then step 4 died with the earlier
+        items committed) and a false "resolves to terminal" refusal. (A live
+        carrier with NO id is NOT the mint shape: it refuses — see above.)
+
+        ⛔ …and ``LIVE`` means every live ROW, id or not (#3590 round-8 review
+        FINDING 2, still live at this head): ``resolve_or_mint`` refuses on
+        ``len(live_name_holder_ids(...)) > 1``, and that list is deliberately
+        row-per-holder so an ID-LESS live holder still counts
+        (``live_name_holder_ids``' own docstring: filtering the None out would
+        "silently pick one"). Filtering ``r[0]`` out here made the guard answer
+        ``merges=True`` for one id-carrier plus one id-less live holder while the
+        create raised ``AmbiguousEntityName`` — Phase 1 green, step 3 raises after
+        the earlier items committed. The COUNT is therefore over live rows; only
+        the TARGET requires an id.
 
         Reading the axes from "any carrier" or from "none of them" both fail:
         the first over-rejects (another carrier's terminal status is not the
@@ -20705,20 +20720,22 @@ class TortoiseSDK:
             return False, None, None, None, 0, False, None
         # ⛔ #3590 (round-5 review F1): THE TARGET IS THE NODE THE WRITE LANDS
         # ON, and the write now resolves over **LIVE** carriers only
-        # (`entity_identity.resolve_or_mint`): a TERMINAL or id-less sole carrier
-        # does not block a create, so the create MINTS a fresh live node.
-        # Reading the three axes off such a carrier described a different node
-        # than the writer used — fail-OPEN on the `#7925` Phase-1 arms (they skip
-        # a bundle item whose status IS stored, then the write dies in step 4
-        # with the earlier items committed) and a false "resolves to terminal"
-        # refusal in the opposite direction. `merges`/`target_id` are therefore
-        # computed from the LIVE holder set, the same predicate the create uses,
-        # so the guard and `resolve_or_mint` cannot disagree.
-        _live = [r for r in rows if not r[1] and r[0]]
-        if len(_live) != 1:
-            # 0: terminal-only / id-less-only ⇒ the write MINTS (`merges=False`).
+        # (`entity_identity.resolve_or_mint`): a TERMINAL sole carrier does not
+        # block a create, so the create MINTS a fresh live node. Reading the
+        # three axes off such a carrier described a different node than the
+        # writer used — fail-OPEN on the `#7925` Phase-1 arms (they skip a bundle
+        # item whose status IS stored, then the write dies in step 4 with the
+        # earlier items committed) and a false "resolves to terminal" refusal in
+        # the opposite direction. `merges`/`target_id` are therefore computed
+        # from the LIVE holder set, the same predicate the create uses, so the
+        # guard and `resolve_or_mint` cannot disagree.
+        _live = [r for r in rows if not r[1]]
+        if len(_live) != 1 or not _live[0][0]:
+            # 0: terminal-only ⇒ the write MINTS (`merges=False`).
+            # 1 id-less live row: unaddressable ⇒ the write REFUSES too
+            # (`merges=False`, and the caller refuses on count==1 && !merges).
             # 2+: same-name coexistence, which the create REFUSES rather than
-            # picking a carrier ⇒ no target either (#8864 / D2). The two are
+            # picking a carrier ⇒ no target either (#8864 / D2). The three are
             # told apart by the COUNT, which is why it is the live one.
             return True, None, None, None, len(_live), False, None
         target = _live[0]
@@ -20860,7 +20877,16 @@ class TortoiseSDK:
           before the write, so a bundle-wide refusal is the only one that
           matches the writer (see the loop below);
         - two endpoints that resolve to the SAME landing node (two refs, or
-          a ref and the node id) — a self-edge ``create_direct_edge`` refuses.
+          a ref and the node id) — a self-edge ``create_direct_edge`` refuses;
+        - an entity item naming a name **2+ LIVE entities already hold** — the
+          create REFUSES it (``entity_identity.resolve_or_mint``,
+          route-then-refuse R8), for every entity item, referenced or not, so
+          the bundle is rejected at validation rather than raising in step 3
+          with the earlier items committed (see the loop below);
+        - an entity item whose name has exactly ONE live holder carrying **no
+          ``id``` — the create refuses that too (``UnaddressableEntityName``;
+          minting beside it would leave two carriers and poison the name),
+          bundle-wide, for the same reason.
 
         ⛔ That list is a list of COVERED refusals, not a guarantee that every
         ``_sanitize_props`` refusal is Phase-1. The residual is the rest of the
@@ -21018,6 +21044,64 @@ class TortoiseSDK:
             if key not in holders:
                 holders[key] = self._entity_name_holders(elabel, name)
             return holders[key]
+        # (#3590) The AMBIGUITY refusal is a bundle-wide WRITER refusal, so it
+        # gets a bundle-wide Phase-1 verdict — the same authority the `outdated`
+        # and `:Subject`-vocabulary loops at the top of this method have, and for
+        # the same measured reason.
+        #
+        # `create_subject`/`create_object` route through
+        # `entity_identity.resolve_or_mint`, which REFUSES a name held by 2+ LIVE
+        # entities (route-then-refuse, R8) and, for the same reason, a name whose
+        # only live holder carries no `id` (`UnaddressableEntityName`) — for
+        # EVERY entity item in bundle order, referenced by a connection or not,
+        # on either route. The per-connection entity leg below only `continue`s
+        # on those shapes (it has no landing id to compare, and the refusal
+        # belongs to the item), so without this loop the refusal surfaced in
+        # step 3. MEASURED at this head:
+        # `_validate_bundle` returned `[]` for
+        # `{"points": [{"content": "must-not-commit"}], "entities": [{"type":
+        # "object", "name": "Acme"}]}` with two live `Acme` carriers, and
+        # `ingest` raised `AmbiguousEntityName` with **Point 1 already committed**
+        # — the #2422/#7925 partial-mutation class exactly.
+        for i, item in enumerate(bundle.get("entities") or []):
+            if not isinstance(item, dict):
+                continue
+            _elabel = _ENTITY_ITEM_LABELS.get(
+                str(item.get("type") or "").strip().lower())
+            _name = item.get("name")
+            if _elabel not in ("Subject", "Object") \
+                    or not isinstance(_name, str) or not _name:
+                continue
+            _holders = _name_holders(_elabel, _name)
+            _live_n, _merges = _holders[4], _holders[5]
+            if _live_n > 1:
+                violations.append({
+                    "section": "entities", "index": i,
+                    "message": f"ingest: entities[{i}] names the {_elabel} "
+                               f"{_name!r}, which {_live_n} LIVE entities "
+                               f"already hold — the create REFUSES to pick "
+                               f"one for you (route-then-refuse) and raises in "
+                               f"step 3 after the earlier items committed. "
+                               f"Rename or retire one carrier first (#3590)",
+                })
+            elif _live_n == 1 and not _merges:
+                # #9876 review F2: ONE live holder carrying no `id`. The create
+                # refuses it (`UnaddressableEntityName`) instead of minting a
+                # second carrier, and the per-connection leg only skips the
+                # item — so without this arm Phase 1 is `[]` and step 3 raises
+                # with the earlier items committed (the same
+                # #2422/#7925 partial-mutation class as the arm above).
+                violations.append({
+                    "section": "entities", "index": i,
+                    "message": f"ingest: entities[{i}] names the {_elabel} "
+                               f"{_name!r}, whose only LIVE holder carries no "
+                               f"`id` — unaddressable legacy raw-write row. The "
+                               f"create REFUSES to mint a second carrier of "
+                               f"that name (it would be create-poisoned) and "
+                               f"raises in step 3 after the earlier items "
+                               f"committed. Give that row an id or retire it "
+                               f"first (#3590)",
+                })
         # ADOPTION / RENAME map (#7925 review round 5) — RETIRED by #3590.
         # It existed because step 3's entity write RE-ADDRESSED a holder: an
         # item naming a holder whose stored id was not the deterministic
@@ -40392,6 +40476,7 @@ class TortoiseSDK:
                     # skipping the item is that contract.
                     from .entity_identity import (
                         AmbiguousEntityName,
+                        UnaddressableEntityName,
                         entity_create_lock,
                         resolve_or_mint,
                     )
@@ -40411,7 +40496,8 @@ class TortoiseSDK:
                                  "issue_number": issue_number,
                                  "url": url},
                                 "ObjectRegistered")
-                    except AmbiguousEntityName as exc:
+                    except (AmbiguousEntityName,
+                            UnaddressableEntityName) as exc:
                         _logger.debug(
                             "_connect_issue_objects: skipping reference %r — "
                             "%s", name, exc)

@@ -8774,10 +8774,11 @@ def journal_object_surviving_keys(
     a key once a name was carried by TWO OR MORE): a name-MERGE over several carriers stamped one id
     onto all of them, so a shared name stopped being a key at all. The model
     therefore maps each name to the SET of ids carrying it, and a registration
-    of a shared name ADDS a carrier instead of replacing the earlier one — a
-    1:1 carrier would report the surviving ids as dead and refuse a supersede
-    `rebuild_all` folds (the fail-CLOSED direction, which is the one error this
-    guard must never make). A delete removes the id that actually carries the
+    ADDS a carrier — on ANY carrier count, not only a shared name — instead of
+    replacing the earlier one: a name-MERGE-free model that evicted would
+    report the surviving ids as dead and refuse a supersede `rebuild_all` folds
+    (the fail-CLOSED direction, which is the one error this guard must never
+    make). A delete removes the id that actually carries the
     node (`_delete_entity_by_id`), so a delete naming a superseded-away id is a
     no-op here too.
     """
@@ -8805,21 +8806,30 @@ def journal_object_surviving_keys(
                     and isinstance(name, str) and name):
                 continue
             carriers = name_to_ids.setdefault(name, set())
-            if len(carriers) > 1:
-                # #8864: the name is SHARED, so this registration keys on the
-                # record's own id — it folds into the node already carrying
-                # `oid` (whose `ON MATCH` writes only the id) or opens ONE new
-                # carrier. No existing carrier is re-id'd away.
-                if oid not in id_to_name:
-                    carriers.add(oid)
-                    id_to_name[oid] = name
-                continue
-            old = next(iter(carriers), None)
-            if old is not None and old != oid:
-                id_to_name.pop(old, None)
-                carriers.discard(old)
-            carriers.add(oid)
-            id_to_name[oid] = name
+            # ⛔ #3590: NO COLLAPSE, on ANY carrier count — the same change
+            # `consistency.py`'s sibling model carries. `_upsert_object` /
+            # `_upsert_subject` MERGE on the record's OWN `id` (never on the
+            # name), so a registration can only ever ADD a carrier of `name`
+            # (folding onto the node that already holds `oid`, whose `ON MATCH`
+            # writes the id and NOT the name) — it never re-ids an earlier
+            # carrier away.
+            #
+            # The 0-or-1 branch used to EVICT `old`, which modelled the retired
+            # name-keyed `MERGE … ON MATCH id = coalesce($id, n.id)` collapse.
+            # One consequence, and it is the fail-CLOSED direction this guard
+            # must never take: `[Reg(A, N), Reg(B, N)]` leaves TWO live nodes in
+            # the graph while the model reported one (`{B}`), so `_survives`
+            # missed an id the journal DID establish, `_supersede_name_
+            # unregistered` was False (the name had a registration), the shape
+            # classified as a NON-EXEMPT `object-superseded-miss` — and `rebuild`
+            # / `recover_from_log` refused a journal `rebuild_all` folds, while
+            # `consistency` reported a `non-folded` divergence on a faithful
+            # graph. Pinned by
+            # `test_8864_shared_name_merge_key.py::…mention_minted_OBJECT_stub`
+            # (#9876 review P1).
+            if oid not in id_to_name:
+                carriers.add(oid)
+                id_to_name[oid] = name
         elif t == "EventRecorded":
             # #3590: `_event_plain_merge` no longer MINTS Object/Subject name
             # stubs for a mention — the fold RESOLVES the name and, when it
