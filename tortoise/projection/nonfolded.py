@@ -554,8 +554,8 @@ _MISS_NAME_ONLY_DELETED_REMEDY = (
 def refusal_remedy(refused) -> str:
     """The third part of a refusal: what the caller can actually DO.
 
-    ⛔ TWO epistemically different records share the fail-the-run set and they
-    do NOT share a remedy (#10183's admission test, #10204):
+    ⛔ THREE limbs share the fail-the-run set and they do NOT share a remedy
+    (#10183's admission test, #10204, #10211 review round 8):
 
     * a genuine divergence — the journal established the target and the fold
       missed it — is REPAIRABLE, and "reconcile the journal" names the three
@@ -564,11 +564,24 @@ def refusal_remedy(refused) -> str:
       nothing out of order, and no producer to journal, so prescribing
       "reconcile the journal" is a remedy the caller cannot perform. Its real
       remedy is to SUPPLY the address, which is why it is still allowed to
-      refuse rather than being exempted.
+      refuse rather than being exempted;
+    * the `object-superseded-miss` shape carries BOTH halves above — a genuine
+      divergence AND a CONSERVATIVE sub-case (a name-only record over a target
+      the journal HARD-DELETED under an id the record does not carry) that
+      reconciling does not repair. So the miss shape receives the reconcile
+      sentence **joined by** the deleted-target-id sentence, never one swapped
+      for the other: the divergence half is still repaired by reconciling, and
+      the conservative half still needs the id.
 
     So the reconcile prescription is emitted for every shape EXCEPT a refused
     set that is solely the no-address shape; such a set never prescribes a
-    repair that does not exist — and a MIXED set carries both.
+    repair that does not exist — and a MIXED set carries every applicable
+    sentence. ⚠️ The miss limb is necessarily SET-scoped: `refused` is a set of
+    records whose causes are not distinguishable from the shape alone, so this
+    home cannot emit the deleted-target-id sentence for only the conservative
+    ones. That is why the per-record receipt in `projection.rebuild_all`
+    enumerates the same three causes and names case (3) itself — the two homes
+    must agree about the sub-case, not merely coexist (`#10224`).
     ⚠️ NOT "only when a record could be reconciled" (#10211 review round 7):
     `unknown-event-type`, `unimplemented-op` and `unknown-op` also receive the
     reconcile sentence, and nothing in them is reconcilable — the repair is to
@@ -590,7 +603,9 @@ def refusal_remedy(refused) -> str:
     if SHAPE_OBJECT_SUPERSEDED_MISS in shapes:
         # #10211 review round 8: the miss shape has TWO causes and only one of
         # them is reconciled. Emitting the reconcile sentence alone contradicts
-        # the per-record receipt's case (3) for the same record.
+        # the per-record receipt's case (3) for the same record. JOINED, not
+        # swapped — see this function's docstring for the limb and why the
+        # sentence is set-scoped rather than per-record.
         parts.append(_MISS_NAME_ONLY_DELETED_REMEDY)
     if SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS in shapes:
         parts.append(_NO_ADDRESS_REMEDY)

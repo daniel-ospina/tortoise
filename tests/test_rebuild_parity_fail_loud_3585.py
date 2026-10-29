@@ -2630,6 +2630,45 @@ def test_miss_remedy_does_not_contradict_the_per_record_hard_deleted_case():
     assert MISS_NAME_ONLY_DELETED_INSTRUCTION not in _only_no_addr, _only_no_addr
 
 
+def test_refusal_remedy_docstring_states_every_limb_it_emits():
+    """PIN `#10211` review round 8 (follow-up): the remedy's OWN HOME must
+    describe every limb it emits, not the subset it emitted first.
+
+    `refusal_remedy` is documented as the single home for the remedy split, so a
+    lane re-deriving the split reads THIS docstring before the body. It framed
+    the split as "TWO epistemically different records" and enumerated exactly
+    two — divergence and no-address — while the function emits a THIRD sentence
+    for the miss shape's conservative sub-case. A home whose prose is NARROWER
+    than its predicate is the defect class this PR already fixed once for
+    `EXEMPT_SHAPES` (commit `12faa006`): the next editor deleting the miss limb
+    as undocumented noise would restore the very contradiction round 8 removed,
+    with nothing but a test name to warn them.
+
+    FAILS IF: the docstring reverts to the two-limb framing ("TWO epistemically
+    different"), OR drops any of the three limbs by name — the reconcile
+    sentence, the SUPPLY-the-address limb, or the miss shape's deleted-target-id
+    limb and its JOINED-not-swapped rule.
+    """
+    from tortoise.projection.nonfolded import refusal_remedy
+
+    doc = refusal_remedy.__doc__ or ""
+    assert "TWO epistemically different" not in doc, (
+        "the docstring is back to a two-limb framing, but the function emits a "
+        "third sentence for the miss shape")
+    assert "THREE limbs" in doc, doc
+    # Limb 1 — the divergence repair, by the phrase the seller of the remedy uses.
+    assert "reconcile the journal" in doc, doc
+    # Limb 2 — the no-address record: supply the address, never reconcile.
+    assert "SUPPLY the address" in doc, doc
+    # Limb 3 — the miss shape's conservative sub-case, and the JOIN rule.
+    assert "HARD-DELETED" in doc, doc
+    assert "deleted-target-id sentence" in doc, doc
+    assert "joined by" in doc, (
+        "the docstring no longer states that the miss sentence is JOINED to the "
+        "reconcile sentence rather than swapped for it — the swap is the "
+        "incomplete-remedy half of the round-8 finding")
+
+
 def test_exempt_shapes_names_every_state_op_that_can_carry_a_name():
     """PIN `#10211` review round 8: the RECORD of the bound must not be narrower
     than the bound, in the FAIL-OPEN direction.
