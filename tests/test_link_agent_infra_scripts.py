@@ -978,6 +978,41 @@ class TestPinAgreement:
             f"the pin read crashed instead of returning a verdict: {result.stderr}"
         )
 
+    def test_check_and_pin_check_together_are_REFUSED_not_half_answered(
+        self, repo: Path, git_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #10250 review ISSUE 1 (P2) — the combination must not silently answer ONE question.
+
+        ``--check`` and ``--pin-check`` are two different assertions, and ``AGENTS.md``'s setup
+        block lists them on adjacent lines, so passing both is the natural thing for a lane to
+        do. ``main`` answers the PIN question first and returns, so before the
+        ``mutually_exclusive_group`` the combination exited **0** on a box whose pin was clean
+        while the pointer assertion never ran. This fixture is exactly that box: the pin is fine
+        and the pointer is absent, so a green exit here would be a pass over a setup that is
+        broken — the fail-open family this whole module is against.
+        """
+        pin = git_commit(git_infra, "the pinned commit")
+        env = self._env(self._home(tmp_path, pin))
+        assert not os.path.lexists(repo / "scripts"), "the fixture already has a pointer"
+
+        result = run_tool(
+            "--check", "--pin-check", "--repo", str(repo), "--infra", str(git_infra), env=env
+        )
+        assert result.returncode == 2, (
+            f"the two assertion modes must be REFUSED together (this tool's config-error class, "
+            f"2) instead of half-answered — rc={result.returncode}, stdout={result.stdout!r}, "
+            f"stderr={result.stderr!r}"
+        )
+        assert "--check" in result.stderr and "--pin-check" in result.stderr, (
+            "the refusal does not name both flags, so the caller cannot tell what to split: "
+            f"{result.stderr!r}"
+        )
+        assert "pin:" not in result.stdout, (
+            "one question was answered anyway — that is the silent half-answer, and it is what "
+            f"turns a broken pointer into a green exit: {result.stdout!r}"
+        )
+        assert not os.path.lexists(repo / "scripts"), "the refusal materialised the pointer"
+
     def test_check_quiet_stays_quiet_even_over_a_stale_checkout(
         self, repo: Path, git_infra: Path, tmp_path: Path
     ) -> None:

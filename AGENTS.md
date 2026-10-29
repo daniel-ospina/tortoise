@@ -21,6 +21,8 @@
 > question is the one #10114 cost 18–25 PRs across three outages to learn to ask: a correct link
 > into a checkout older than the pin read as a healthy setup. `--check` now prints that drift as a
 > `!` note (its exit code is unchanged — the link IS correct), and `--pin-check` makes it a verdict.
+> They are separate invocations on purpose and are REFUSED together (`--check --pin-check` exits 2)
+> rather than silently answering only the cheaper question — run each on its own line.
 
 ---
 

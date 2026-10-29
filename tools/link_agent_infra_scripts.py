@@ -33,6 +33,14 @@ link: 0 = the checkout is at the pin or carries it, **or** this machine records 
 loud, never silence); 1 = drift (behind / diverged / the pin commit is absent from the checkout);
 2 = cannot verify (the pin file is empty or unreadable, or the checkout is not a git repo).
 
+The two assertion modes answer DIFFERENT questions and are refused together (exit 2, via an
+argparse ``mutually_exclusive_group``). Before that guard, ``--check --pin-check`` answered the
+pin question first and returned, so it exited **0** on a box whose pin was clean while the
+pointer assertion never ran — with a dangling pointer that is a green exit over a broken setup,
+which is the fail-open-in-an-assertion-mode family this tool exists to close. The combination is
+reachable by construction: ``AGENTS.md``'s setup block lists the two commands on adjacent lines
+(PR #10250 review, P2).
+
 ``--check`` deliberately keeps the pointer-only contract above: a CORRECT link into a stale
 checkout is exit 0. The staleness is then reported as a ``!`` note on stderr on every NON-QUIET
 run, because the defect this closes (#10114) is a setup step that reads green over a tree the box
@@ -391,13 +399,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Materialise the machine-local `scripts` symlink from $AGENT_INFRA_PATH (#9475)."
     )
-    parser.add_argument("--check", action="store_true", help="assert, do not change anything")
-    parser.add_argument(
+    # ⛔ Two ASSERTION modes, so they are mutually exclusive rather than "the first one wins".
+    # `main` answers the pin question first and RETURNS; without this group, `--check --pin-check`
+    # therefore exited 0 on a clean pin while the pointer assertion never ran — a fail-open green
+    # in the exact surface a lane reads first (`AGENTS.md` puts both commands on adjacent lines).
+    # argparse refuses the combination with its own usage error and status 2, which is this tool's
+    # config-error class: the illegal call is NAMED instead of half-answered.
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--check", action="store_true", help="assert, do not change anything")
+    modes.add_argument(
         "--pin-check",
         action="store_true",
         help=(
             "assert the CHECKOUT is the tree this box is pinned to (HARNESS-PIN): 0 = at/contains "
-            "it or no pin recorded, 1 = drift, 2 = cannot verify. Never touches the link"
+            "it or no pin recorded, 1 = drift, 2 = cannot verify. Never touches the link. "
+            "Not combinable with --check: they answer different questions, so run both"
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="report the action, change nothing")
