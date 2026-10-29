@@ -406,8 +406,11 @@ WHAT IS PINNED (one entry per test, in file order)
    CLASS the tables put a writer in, stated in a sentence that actually names
    it. Every earlier leg compared the documents' NUMERALS to the tables, so a
    sentence could say the opposite of the table it sat next to and stay green;
-   measured on one five-line behavioural fix, five review cycles were green
-   while §13 called a counted writer an exemption.
+   measured on one five-line behavioural fix, four review cycles were green
+   while §13 called a counted writer an exemption. ⛔ The numeral is not typed
+   here twice: `test_the_pin_index_states_the_9417_cycle_count_its_own_leg_does`
+   reads this entry against the count the leg's own block states, so a count
+   changed in one place cannot leave the other stale.
 34. `test_no_corrected_passage_denies_a_verdict_the_census_counts` — the
    contradiction half: a passage may not call a counted writer an exemption or
    say it drops / carries no property, unless the sentence is explicitly about
@@ -426,6 +429,26 @@ WHAT IS PINNED (one entry per test, in file order)
    `"re-materializ"` were DEAD on arrival — 0 occurrences each, for ever — and
    an exemption asserted to "write the attribute set by property MAP" stayed
    green. A dead marker is worse than a missing one: it reads as coverage.
+37. `test_the_producer_evidence_block_cites_the_emitters_by_symbol` — the
+   `#:` block that justifies `DIRECT_EDGE_CREATED_ATTR_GUARDS` is the census's
+   evidence pointer for *"exactly two emitters"*, and it cited `sdk.py` LINE
+   NUMBERS that had moved onto `poll_events`, `list_batch` and `assess_source`.
+   This file asserts the documents cite by SYMBOL and enforced that on the
+   corrected passages (leg 6) while its own pointer carried bare numbers. The
+   emitters are DERIVED from the AST and must be named in the block, and a
+   re-typed `file.py:<N>` reds.
+38. `test_the_pin_index_states_the_9417_cycle_count_its_own_leg_does` — a
+   NUMERAL in the index that disagrees with the leg it indexes. This entry put
+   that count at *five* where leg 33's block and the ledger both say four, and
+   nothing red on it because the index legs pin the entry SET, the FILE ORDER
+   and one entry's content at that entry's own subject. The count is typed ONCE
+   and every place that states it — index, leg, ledger — must agree.
+39. `test_the_ledger_records_every_review_cycle_the_record_cites` — the
+   correction ledger must not stop before the artifact it indexes. Measured at
+   the `#10200` review: the ledger ended at round 6 (cycle 7) while this module
+   cited a cycle 9 review four times, so the rounds that introduced the widest
+   denial frames and `EXEMPT_COUNTED_PATTERNS` had no entry at all. NEWER than
+   the ledger is the defect; older is the label convention, not a gap.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -746,11 +769,19 @@ FALSE_POSITIVE_ATTR_VOCAB: frozenset[str] = frozenset(
 #: no attribute at all. ⛔ NOT `sdk.create_edge`: `#9827` added that door's own
 #: emission and the mint-level one REPLACED it, so a census naming the door here
 #: describes a producer the tree does not have (`#10200` review: the tree holds
-#: exactly two emitters, `sdk.py:8493` and `sdk.py:23117`, and `create_edge`
-#: says so in place at `sdk.py:41317`). A producer that started passing one would land that
+#: exactly two emitters — `_record_structural_edge`'s
+#: `_emit_event("DirectEdgeCreated", …)` and `create_direct_edge`'s — and
+#: `create_edge` says so in place, in the note that opens *"ONE PRODUCER, ON
+#: PURPOSE, AND THIS DOOR IS NOT IT"*). ⛔ The emitters are cited by SYMBOL, not
+#: by `sdk.py:<N>`: a bare line number in this paragraph is the same unpinned
+#: prose this PR removed from the documents, it reads as CURRENT the moment the
+#: symbol moves, and the `#10200` review followed the three numbers it used to
+#: carry into `poll_events`, `list_batch` and `assess_source`. A producer that started passing one would land that
 #: property on a live and replayed about edge while every other leg stayed
 #: green, so the two halves are pinned together by
-#: `test_every_direct_edge_created_producer_is_safe_for_an_about_edge`.
+#: `test_every_direct_edge_created_producer_is_safe_for_an_about_edge`,
+#: and the citation rule by
+#: `test_the_producer_evidence_block_cites_the_emitters_by_symbol`.
 #:
 #: The value is the STATEMENT-level proof for an attribute-carrying producer,
 #: asserted against its own function body — not a claim about intent.
@@ -6595,4 +6626,232 @@ def test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce():
         f"tuple, so they exempt nothing and pin nothing: {declared_not_markers}. "
         "Delete the entry (if its reason belongs to a live neighbour) or add the "
         "marker to the family it belongs to"
+    )
+
+
+#: The `#9417` fix's review-cycle count — ONE value for the three statements
+#: this file makes about it.
+#:
+#: `#10149`'s own record lists exactly four cycles on that five-line fix (1 and 2
+#: returned findings, 3 and 4 were GREEN while §13 said the opposite of the
+#: code), and this module states the count in three places: the PIN-INDEX entry
+#: that introduces leg 33, leg 33's own block, and leg 33's docstring. Measured
+#: at the `#10200` review, cycle 10: the pin index said FIVE where the other two
+#: said four — the index disagreeing with the leg it indexes, i.e. exactly the
+#: defect class this census exists to close, in the file that closes it.
+_REVIEW_CYCLES_ON_NINE_FOUR_ONE_SEVEN = 4
+
+#: A `<number word> review cycles` statement — the shape all three use. Plural on
+#: purpose: *"a third review cycle"* is a different claim (an ordinal about
+#: `#9403`) and is not what this count is about.
+_REVIEW_CYCLE_COUNT_STATEMENT = re.compile(r"(\w+)\s+review cycles\b")
+
+#: The ledger's own statement of the same count, so the two artifacts are
+#: compared against each other rather than each against a typed literal twice.
+_LEDGER_CYCLE_COUNT_STATEMENT = re.compile(r"measured (\w+) times on the five-line\b")
+
+#: The ledger records every `#10200` round and the cycle it closed, in the
+#: heading shape `review round N (cycle M)`.
+_LEDGER_ROUND = re.compile(r"review round (\d+) \(cycle (\d+)\)")
+
+#: Every `cycle N` / `cycles N and M` inside a window after a `#10200` mention.
+#: The window is bounded because the module mentions many reviews, and only the
+#: `#10200` cycles are what the ledger is a record OF.
+_DOCUMENTED_CYCLE = re.compile(r"cycle[s]?\s+(\d+)(?:\s+and\s+(\d+))?")
+_TWO_THOUSAND_TWENTY_ONE = "#10200"
+_CYCLE_WINDOW = 140
+
+#: The `#:` block that justifies `DIRECT_EDGE_CREATED_ATTR_GUARDS` — the census's
+#: evidence pointer for *"exactly two emitters"*, sliced by its own markers so a
+#: block that moves fails by NAME instead of passing unread.
+_PRODUCER_EVIDENCE_START = "#: ⛔ This map is not bookkeeping"
+_PRODUCER_EVIDENCE_END = "DIRECT_EDGE_CREATED_ATTR_GUARDS: dict"
+
+#: A backticked `file.py:<n>` / `file.sql:<n>` citation. The documents may carry
+#: one only when it is qualified with the revision it was measured at (leg 6);
+#: this file's RECORD may not carry one at all — a number here is the artifact a
+#: lane audits when §13 and the code disagree, and it reads as CURRENT the moment
+#: the symbol moves (the `#10200` review, cycle 10, followed the three numbers the
+#: `DIRECT_EDGE_CREATED_ATTR_GUARDS` block used to carry into `poll_events`,
+#: `list_batch` and `assess_source`).
+_BARE_LINE_CITATION = re.compile(r"`[\w./-]+\.(?:py|sql):\d+`")
+
+
+def test_the_producer_evidence_block_cites_the_emitters_by_symbol():
+    """The block above `DIRECT_EDGE_CREATED_ATTR_GUARDS` is the census's evidence
+    pointer for *"exactly two `DirectEdgeCreated` emitters"* — the paragraph a
+    lane reads when §13 and the code disagree. It carried `sdk.py:8493`,
+    `sdk.py:23117` and `sdk.py:41317`; at the reviewed head those three land in
+    `poll_events`, `list_batch` and `assess_source`, while the emitters are the
+    `_emit_event("DirectEdgeCreated", …)` calls in `_record_structural_edge` and
+    `create_direct_edge`. A lane following the numbers must conclude either that
+    the record is stale or that the producers are unenumerated.
+
+    That is this file's own rule turned on itself — it asserts the documents cite
+    by SYMBOL (*"the SYMBOL is authoritative and no line number is asserted"*)
+    and enforces it on the corrected passages (leg 6) while its own evidence
+    pointer carried bare numbers. So both halves are asserted here, and the
+    emitter names are DERIVED from the AST rather than restated: a third producer
+    reds through `test_every_direct_edge_created_producer_is_safe_for_an_about_edge`,
+    and a re-typed number reds here.
+    """
+    source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index(_PRODUCER_EVIDENCE_START)
+    block = source[start : source.index(_PRODUCER_EVIDENCE_END, start)]
+
+    numbered = _BARE_LINE_CITATION.findall(block)
+    assert not numbered, (
+        "the producer-evidence block cites line numbers as if they were "
+        f"current: {numbered}. Name the SYMBOL instead — this file's own rule is "
+        "*\"the SYMBOL is authoritative and no line number is asserted\"*, and it "
+        "enforces exactly that on the corrected passages (leg 6). The emitters "
+        "are `_record_structural_edge`'s `_emit_event(\"DirectEdgeCreated\", …)` "
+        "and `create_direct_edge`'s"
+    )
+
+    emitters = {
+        symbol
+        for symbol, _lineno, _kwargs in _direct_edge_created_emissions(
+            "tortoise/sdk.py"
+        )
+    }
+    assert emitters, (
+        "the AST found no `DirectEdgeCreated` emitter in `tortoise/sdk.py`, so "
+        "this leg has lost its subject — re-derive the citation rule against the "
+        "tree before trusting it"
+    )
+    unnamed = sorted(symbol for symbol in emitters if symbol not in block)
+    assert not unnamed, (
+        "the producer-evidence block does not name these emitters, so a reader "
+        f"following it cannot find them: {unnamed}. It names them by SYMBOL, and "
+        "the symbols come from the code — add the enclosing function to the "
+        "block rather than a line number"
+    )
+
+
+def test_the_pin_index_states_the_9417_cycle_count_its_own_leg_does():
+    """The pin index is a summary of each leg, so a NUMERAL in it that disagrees
+    with the leg it indexes is the same defect this census exists to close — a
+    count typed in two places instead of derived in one.
+
+    Measured at the `#10200` review, cycle 10: entry 33 put that count at
+    *five* while leg 33's own block says four, and `#10149`'s record lists
+    exactly four (cycles 1 and 2 returned findings; 3 and 4 were green while §13
+    said the opposite of the code). Nothing red on it, because
+    `test_the_pin_index_names_every_leg` pins the entry SET and FILE ORDER and
+    `test_the_pin_index_entry_for_the_9_6_retraction_states_no_measured_distance`
+    pins one entry's CONTENT, at that entry's own subject.
+
+    Three statements are compared, not one pair, and the ledger's own statement
+    of the same count is the fourth: the numeral is typed ONCE, in
+    `_REVIEW_CYCLES_ON_NINE_FOUR_ONE_SEVEN`, and every artifact that states it
+    must agree with that value. Silence is not agreement — a passage that stops
+    stating the count entirely reds rather than passing unmeasured.
+    """
+    words = {word: number for number, word in NUMBER_WORDS.items()}
+    source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
+        encoding="utf-8"
+    )
+    stated: list[tuple[int, str, int]] = []
+    for match in _REVIEW_CYCLE_COUNT_STATEMENT.finditer(source):
+        word = match.group(1).lower()
+        if word not in words:
+            continue
+        stated.append((source[: match.start()].count("\n") + 1, match.group(0), words[word]))
+    assert stated, (
+        "no `<number word> review cycles` statement found in this file — the "
+        "count this leg pins has moved or been reworded, so the leg would pass "
+        "without measuring anything"
+    )
+    disagreeing = [
+        f"module line {line} says {text!r} = {value}"
+        for line, text, value in stated
+        if value != _REVIEW_CYCLES_ON_NINE_FOUR_ONE_SEVEN
+    ]
+
+    ledger = (
+        ROOT / "docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md"
+    ).read_text(encoding="utf-8")
+    recorded = _LEDGER_CYCLE_COUNT_STATEMENT.findall(ledger)
+    assert recorded, (
+        "the ledger no longer states how many review cycles the `#9417` fix "
+        "took — re-derive the count from `#10149`'s own record and restate it "
+        "there before trusting this leg"
+    )
+    ledger_values = sorted({words[word.lower()] for word in recorded if word.lower() in words})
+    assert len(ledger_values) == 1, (
+        "the ledger states the `#9417` cycle count more than one way "
+        f"({recorded}) — one value, stated once"
+    )
+    if ledger_values[0] != _REVIEW_CYCLES_ON_NINE_FOUR_ONE_SEVEN:
+        disagreeing.append(
+            f"the ledger says {recorded[0]!r} = {ledger_values[0]}"
+        )
+
+    assert not disagreeing, (
+        "the `#9417` review-cycle count is stated inconsistently — every place "
+        "that states it must read the same value, because a count typed twice is "
+        "the defect class this census exists to close:\n  "
+        + "\n  ".join(disagreeing)
+        + f"\n\nOne value, in `_REVIEW_CYCLES_ON_NINE_FOUR_ONE_SEVEN` "
+        f"({_REVIEW_CYCLES_ON_NINE_FOUR_ONE_SEVEN}). Re-derive it from `#10149`'s "
+        "record of the four cycles before changing it anywhere"
+    )
+
+
+def test_the_ledger_records_every_review_cycle_the_record_cites():
+    """The correction ledger indexes this instrument: it is where a future lane
+    learns what the census now pins and why, and its own doctrine is that a bound
+    left out of it is a bound a lane will rely on.
+
+    Measured at the `#10200` review, cycle 10: the ledger stopped at *round 6
+    (cycle 7)* while this module cited a cycle 9 review in four places — so the
+    rounds that introduced the widest denial frames and the newest vocabulary
+    table had NO entry, while earlier instrument-only rounds were all recorded. A
+    ledger that ends before the artifact it indexes is the *"a rule that only
+    exists in dead code is not a rule"* failure in prose: the closures still exist
+    in the code and nothing describes them.
+
+    The invariant is one-sided on purpose — NEWER than the ledger is the defect
+    (the ledger falling behind); older cycles than it records are fine, because
+    rounds 1–3 predate the `(cycle N)` label convention. It reds on the current
+    head's own gap, not on a re-derivation of history.
+    """
+    source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
+        encoding="utf-8"
+    )
+    cited: set[int] = set()
+    for mention in re.finditer(re.escape(_TWO_THOUSAND_TWENTY_ONE), source):
+        window = source[mention.end() : mention.end() + _CYCLE_WINDOW]
+        for match in _DOCUMENTED_CYCLE.finditer(window):
+            cited.update(int(group) for group in match.groups() if group)
+    assert cited, (
+        f"this module cites no `{_TWO_THOUSAND_TWENTY_ONE}` review cycle at all, "
+        "so this leg measures nothing — re-derive it against the file's comment "
+        "shape before trusting it"
+    )
+
+    ledger = (
+        ROOT / "docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md"
+    ).read_text(encoding="utf-8")
+    rounds = [
+        (int(round_number), int(cycle))
+        for round_number, cycle in _LEDGER_ROUND.findall(ledger)
+    ]
+    assert rounds, (
+        "the ledger records no `review round N (cycle M)` heading, so its own "
+        "index shape has changed and this leg cannot read it"
+    )
+    newest_recorded = max(cycle for _round, cycle in rounds)
+    newest_cited = max(cited)
+    assert newest_cited <= newest_recorded, (
+        f"this module cites the `{_TWO_THOUSAND_TWENTY_ONE}` review at cycle "
+        f"{newest_cited}, but the correction ledger stops at cycle "
+        f"{newest_recorded} (rounds recorded: "
+        f"{', '.join(f'{r}/{c}' for r, c in rounds)}) — so the newest closures "
+        "have no ledger entry and a lane reading the ledger does not learn what "
+        "the instrument now pins. Add the missing round(s) to "
+        "`docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`"
     )
