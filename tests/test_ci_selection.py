@@ -6386,12 +6386,16 @@ def test_test_slow_legs_write_per_job_pytest_artifacts():
     of the leg's own summary and fell closed — `STALE session summary` /
     `INCOMPLETE` — and the job went red on a run that passed every test.
 
-    MEASURED, `test-slow (a)` on that run: `365 passed, 2 skipped` in 2378.86s,
-    its own `pytest exit code: 0` banner printed three lines under
-    `##[error]test leg INCOMPLETE`, and the leg concluded `failure`. The same
-    sharing made legs (b)-(e) print the IDENTICAL six FAILED nodeids (one
-    leg's set, read four times) and made the #964 heartbeat DECREASE inside a
-    "single" session (444 passed -> 353 passed).
+    MEASURED, `test-slow (a)` on that run: its own manifest declared 367
+    expected nodeids, its own run reported `365 passed, 2 skipped` (= 367) in
+    2378.86s, and its own `pytest exit code: 0` banner printed — yet the leg
+    concluded `failure` via `STALE session summary (NOT this leg's verdict)` /
+    `##[error]test leg INCOMPLETE`. The same sharing made legs (b) and (e)
+    print FAILED nodeids for `tests/test_epic903_fixtures.py`,
+    `tests/test_epic903_scheduler.py` and `tests/test_graph_diagnostics.py`,
+    though the only progress line either leg's log carries is
+    `tests/test_ci_selection.py::` — tests they never ran. And leg (b)'s #964
+    heartbeat DECREASED inside a "single" session (444 passed -> 353 passed).
 
     Non-vacuous on the pre-fix workflow: each assertion below is false of the
     literals that stood there (`--junitxml=/tmp/junit.xml`, `> /tmp/pytest.log`,

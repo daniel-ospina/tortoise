@@ -1873,17 +1873,22 @@ jobs:
       # names that exact residue in its own "NAMED RESIDUAL" header ("The other
       # legs still write `/tmp/...` literals and still need the same change").
       #
-      # MEASURED (run 40808264676, `test-slow (a)`): the leg's own pytest exited
-      # **0** after `365 passed, 2 skipped` in 2378.86s — a fully GREEN leg — and
-      # the job still concluded `failure`, because a sibling leg's
-      # `> /tmp/pytest.log` truncated the file between this leg's `tail` and its
-      # attribution read. `pytest-attribution.sh` therefore printed
-      # `STALE session summary (NOT this leg's verdict)` / `INCOMPLETE`, and the
-      # REQUIRED check went red on a green run; the leg's own
-      # `pytest exit code: 0` banner sits three lines under that error.
-      # The same sharing makes four legs report ONE leg's FAILED nodeid set
-      # (legs (b)-(e) all listed the identical six) and makes the #964 heartbeat
-      # DECREASE inside a "single" session (444 passed -> 353 passed).
+      # MEASURED (run 40808264676, `test-slow (a)`): the leg's own manifest
+      # declared **367** expected nodeids, its own run reported
+      # `365 passed, 2 skipped` (= 367) in 2378.86s, and its own
+      # `pytest exit code: 0` banner printed — a fully GREEN leg — yet the job
+      # still concluded `failure`, because a sibling leg's `> /tmp/pytest.log`
+      # truncated the file between this leg's `tail` and its attribution read.
+      # `pytest-attribution.sh` therefore printed `STALE session summary (NOT
+      # this leg's verdict)` / `INCOMPLETE` under that exit code.
+      # The same sharing made legs (b) and (e) print FAILED nodeids for
+      # `tests/test_epic903_fixtures.py`, `tests/test_epic903_scheduler.py` and
+      # `tests/test_graph_diagnostics.py` — files whose only progress line in
+      # those legs' logs is `tests/test_ci_selection.py`, i.e. tests they never
+      # ran — and made the #964 heartbeat DECREASE inside a "single" session
+      # (444 passed -> 353 passed). The six nodeids genuinely belong to legs (c)
+      # and (d), which do run those files; neither of those legs' own sets is
+      # recoverable from the tail.
       #
       # `runner.temp` is `<runner_install>/_work/_temp`, and a runner executes one
       # job at a time, so this is per-JOB unique even when several runner installs
