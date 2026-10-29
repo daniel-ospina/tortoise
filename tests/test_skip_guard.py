@@ -274,7 +274,9 @@ class TestGuardAcceptsCleanLog:
             "the pinned invocation is the single-process `test-slow` leg, not "
             f"the sharded fast-suite gating run: {fast_run[0]}"
         )
-        assert fast_run, "fast-suite pytest invocation not found"
+        # (No `assert fast_run` here: `assert len(fast_run) == 1` above and the
+        # two `fast_run[0]` reads already fail first, so an emptiness guard on
+        # this line could never be the message a reader sees.)
         assert "-r fEs" in fast_run[0], (
             "fast-suite pytest must report skips in the summary (-r fEs): -v "
             "truncates skip reasons at 80 cols and a trailing -rfE replaces the "
