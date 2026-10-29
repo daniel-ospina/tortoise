@@ -24,9 +24,15 @@ the corrected reading:
    ``:8697``), ``search_graph`` (S3, ``:8713``), ``run_s4`` (the gap filler,
    ``:8734``), and ``execute_embed`` (S5+S6, ``:8933``). The SYMBOL is
    authoritative and the line is a convenience — the three FILE-NAMED cites
-   above are resolved against the tree by the bundle's pin (the eight bare step
-   cites are pinned only where the README's step table repeats the same
-   numbers, so tree drift shows up there), and no line here is claimed to be
+   above are resolved against the tree by the bundle's pin, and these eight
+   bare step cites are re-read by that same pin file
+   (`tests/test_7949_capstone_verdict_check.py`,
+   `test_the_readmes_line_citations_resolve_to_the_symbols_they_name`). They
+   need that separate leg because a bare `:NNNN` carries no filename, so the
+   bundle's own sweep (`_BUNDLE_CITE`) cannot see them: `#10243` moved
+   `extractor_v2.py` by +88 and all eight went stale while every pin stayed
+   green, which this sentence used to deny by pointing at a README cross-pin
+   `#10211` had already invalidated. No line here is claimed to be
    self-detecting on its own. (No derivation head is named here on purpose: the
    stamps such a sentence used to name re-staled the moment `main` moved, and a
    claim that can only re-stale is not worth keeping.) So the capstone drives
