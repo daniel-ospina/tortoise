@@ -27,6 +27,8 @@ security: unscoped reads return nothing, exactly as the production app role's do
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import tortoise.sdk as sdk_mod
@@ -1510,7 +1512,7 @@ def test_a_record_row_above_the_live_id_space_is_not_a_complete_transcript():
     Mutation: drop the `max(held) > turn_max_index` arm — this leg serves four
     turns for a one-turn session and answers COMPLETE.
     """
-    residue = _RlsConn(narrative=[(None, None, 0, 4)],
+    residue = _RlsConn(narrative=[(None, None, 0, 1)],
                        turn_rows=[_turn_row(0, "[user] a"),
                                   _turn_row(1, "[assistant] b"),
                                   _turn_row(2, "[user] c"),
@@ -1537,6 +1539,96 @@ def test_a_record_row_above_the_live_id_space_is_not_a_complete_transcript():
     assert answer.answered and len(answer.turns) == 4, (
         "an APPEND's four rows against a window length of 2 and a live end of "
         "3 were refused — the fix must see residue, not length")
+
+
+def test_the_residue_is_not_served_by_either_door():
+    """⛔ #10021 review P3: DETECTION IS NOT A GUARD — the residue was served.
+
+    The leg above pins that `_shortfall` SEES the residue. That was the whole
+    guard, and it left the body untouched: `merge_turn_payloads` merged every
+    `answer.turns` row and `served_turn_count` deliberately tolerates
+    `served > expected` when the record answered, so a 4-row answer against a
+    1-turn session published `{"turns": 4, "turn_points": [4 rows]}` with only
+    a WARNING to show for it. Both doors now hand the session's live id-space
+    end (`sess[12]` / `_turn_max_index`) to the merge, which drops every row
+    above it from EITHER store — where the residue sits is not what makes it
+    residue, and the failed sweep that leaves it can leave it in both.
+
+    Mutation: drop the `turn_max_index` filter in `merge_turn_payloads` (or stop
+    passing the mark from either door) — the served body holds four rows again
+    and the count publishes four beside a one-turn session.
+    """
+    residue = _RlsConn(narrative=[(None, None, 0, 1)],
+                       turn_rows=[_turn_row(0, "[user] a"),
+                                  _turn_row(1, "[assistant] b"),
+                                  _turn_row(2, "[user] c"),
+                                  _turn_row(3, "[assistant] d")])
+    answer = record_read.session_turns(residue, org_id="org-1", graph_id="g-1",
+                                       session_id="sess", turn_max_index=0)
+    assert not answer.answered and len(answer.turns) == 4, (
+        "the fixture no longer produces the residue shape")
+
+    # The graph copy holds the same residue (the sweep wrote neither half), so
+    # the filter has to be applied on BOTH sides of the union.
+    graph_turns = [{"id": f"sess_t{i}", "role": "user", "content": c,
+                    "created_at": None}
+                   for i, c in enumerate(("a", "b", "c", "d"))]
+    merged = record_read.merge_turn_payloads(answer, graph_turns,
+                                             turn_max_index=0)
+    assert [p["id"] for p in merged] == ["sess_t0"], (
+        f"the residue reached the served body: {[p['id'] for p in merged]}")
+
+    # AND the two numbers in the body agree: the count is the length of the
+    # transcript actually served, never the window length that contradicts it.
+    served, refusal = record_read.served_turn_count(
+        answer=answer, served=len(merged), declared=1)
+    assert (served, refusal) == (1, ""), (served, refusal)
+
+    # THE HEALTHY APPEND IS UNTOUCHED: nothing sits above `offset + count - 1`,
+    # so the same filter is invisible on a whole transcript.
+    append = _RlsConn(narrative=[(None, None, 0, 2)],
+                      turn_rows=[_turn_row(0, "[user] a"),
+                                 _turn_row(1, "[assistant] b"),
+                                 _turn_row(2, "[user] c"),
+                                 _turn_row(3, "[assistant] d")])
+    answer = record_read.session_turns(append, org_id="org-1", graph_id="g-1",
+                                       session_id="sess", turn_max_index=3)
+    merged = record_read.merge_turn_payloads(answer, [], turn_max_index=3)
+    assert [p["id"] for p in merged] == [
+        "sess_t0", "sess_t1", "sess_t2", "sess_t3"], (
+        "an APPEND lost turns to the residue filter — the mark bounds the whole "
+        "id space, so a live turn can never sit above it")
+
+    # A row the reader cannot PLACE (no `_t<i>` index) is kept, not silently
+    # dropped: the filter degrades the way the ordering does, and invents no id
+    # space.
+    unplaceable = record_read.TurnAnswer(
+        answered=True,
+        turns=(record_read.Turn(turn_id="legacy-row", index=0, content="x",
+                                speaker="user"),))
+    merged = record_read.merge_turn_payloads(unplaceable, [], turn_max_index=0)
+    assert [p["id"] for p in merged] == ["legacy-row"]
+
+    # ⛔ AND EACH DOOR HANDS THE MARK OVER (a fix in the merge is worth nothing
+    # if a door keeps calling it without one). Structural on purpose: the hosted
+    # route is async over a live projection and the SDK twin needs a graph, so
+    # this pins the CALL, and the functional half is above.
+    import inspect as _inspect
+
+    import tortoise.hosted_api as ha
+    from tortoise.sdk import TortoiseSDK
+
+    for door, src in (("hosted_api.get_session_detail",
+                       _inspect.getsource(ha.get_session_detail)),
+                      ("sdk._read_captured_session",
+                       _inspect.getsource(TortoiseSDK._read_captured_session))):
+        m = re.search(r"merge_turn_payloads\((.*?)\)\n", src, re.S)
+        assert m is not None, (
+            f"{door} no longer merges the two stores at all — the union this "
+            f"file pins is gone")
+        assert "turn_max_index" in m.group(1), (
+            f"{door} merges WITHOUT the session's live id-space end, so the "
+            f"residue the read just detected reaches the client again")
 
 
 class _RecordingSeam:
@@ -1715,3 +1807,49 @@ def test_a_record_with_no_account_is_not_narrated_as_a_divergence(
     assert "TurnAnswer.NO_ACCOUNT" in hosted_code, (
         "the hosted door narrates the no-account shape at the same level as a "
         "divergence — the endpoint half of the finding is unfixed")
+
+
+def test_the_write_path_vocabulary_names_every_refusal_the_door_returns():
+    """⛔ #10021 review P3: the vocabulary's ONE home described a set of five.
+
+    ``record_writer`` gained ``no_tenant_carried`` — the nil tenant split from a
+    MALFORMED carried pair — and the producer's own docs say so, but
+    ``status_vocabulary`` (which declares itself *"the vocabulary's ONE home"*)
+    still enumerated *"one of five"* and listed the five, omitting the token the
+    door now returns. Nothing pinned it, so nothing reddened: it just told a
+    consumer to branch on a closed list one value too small.
+
+    The pin is mechanical about the part that can drift: EVERY token the seam
+    returns must be named in that map, and the map must point at
+    ``LIVE_WRITE_REFUSALS`` as the declaration it INDEXES rather than the
+    authority it is not. Mutation: delete the ``no_tenant_carried`` bullet, or
+    restore a typed count in place of the pointer — this reddens.
+    """
+    from tortoise import status_vocabulary
+    from tortoise.record_writer import LIVE_WRITE_REFUSALS
+
+    doc = status_vocabulary.__doc__ or ""
+    # `unarmed` is not a `RecordWrite.refusal`: an unarmed call returns None
+    # (`write_live_record`), and the token exists for the pre-write predicate.
+    returned = [t for t in LIVE_WRITE_REFUSALS if t != "unarmed"]
+    # `write_failed` is the attempt's own arm, so it is not in the pre-socket
+    # tuple but IS a refusal a consumer must branch on.
+    returned.append("write_failed")
+    missing = [t for t in returned if t not in doc]
+    assert not missing, (
+        f"`record_writer` can return refusal={missing} and "
+        "`status_vocabulary` — the vocabulary's ONE home — does not name them; "
+        "a consumer building a closed list from that map is told a set it is "
+        "too small by")
+    assert "LIVE_WRITE_REFUSALS" in doc, (
+        "the map must point at the set's declaration (`record_writer."
+        "LIVE_WRITE_REFUSALS` + the attempt's `write_failed`) instead of being "
+        "mistaken for it — a typed count in the map is what drifted")
+    assert "one of five" not in doc, (
+        "the refusal set is not five: `no_tenant_carried` made it six, and a "
+        "typed count here re-stales the moment the door grows another")
+    assert "one of six" in doc, (
+        "the map should state the set's size it was last checked against")
+    # The pointer is not decoration: the module that declares the set is alive
+    # and still carries the token the map was missing.
+    assert "no_tenant_carried" in LIVE_WRITE_REFUSALS
