@@ -232,6 +232,12 @@ not any more, and this note is the relay rather than a reversal — no owner rul
 comparison above is kept, and (a) is recorded as **not adopted** for the reason stated. A lane that
 finds (a) named first in git history should read this paragraph, not the earlier one.
 
+**OVERRIDES:** §2.3's earlier "(a) is preferred" ordering — a D1 `consent_tickets` table on the
+session origin, redeemed over a server-to-server call — because the control plane is the seam the AS
+already holds at the redemption call site (`cp` is passed into `issue_auth_code`), so (b) adds no new
+route, no server-to-server authentication and no new failure domain on the consent path; recorded
+on issue #3524 and shipped in `20261030000001`.
+
 **Signing key.** `CONSENT_TOKEN_SECRET` — a **dedicated** secret, provisioned on both platforms and
 declared in `config/required-bindings.yml` so the deploy preflight fails closed until it exists. It must
 **not** be the service-role key (key reuse across purposes) and must **not** be the anon key (the consent

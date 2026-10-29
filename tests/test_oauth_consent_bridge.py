@@ -1544,6 +1544,12 @@ def test_the_spec_records_the_jti_mechanism_as_DECIDED_not_open() -> None:
         "§2.3 records the decision without its reason — the comparison has to stay readable, or "
         "the next lane re-opens a choice that was taken for a stated reason"
     )
+    # …and the departure is MARKED, so a lane holding the earlier preference (or a vendor page
+    # arguing for (a)) meets the ruling where the adoption would happen instead of "tidying it up".
+    assert "**OVERRIDES:**" in flat, (
+        "§2.3 reverses a recorded preference without the OVERRIDES marker AGENTS.md requires — an "
+        "unmarked departure reads as an accident of history, not as a ruling"
+    )
 
     # The pre-decision FRAMING must be gone: a preference ORDER is what made (a) look buildable.
     assert "in order of preference" not in flat, (
