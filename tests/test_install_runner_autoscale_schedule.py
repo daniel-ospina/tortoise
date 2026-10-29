@@ -20,6 +20,7 @@ Each test whose docstring carries a ``Mutation:`` line names the edit that turns
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -633,6 +634,12 @@ def test_the_os_label_mode_is_pinned_for_the_timer_only_when_it_can_mean_anythin
     assert res.returncode == 0, (res.stdout, res.stderr)
     assert "Environment=CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
     assert "Environment=CI_RUNNER_OS_LABEL=off" not in res.stdout, res.stdout
+    # ⛔ AND THE RENDER IS SILENT. The unit body is an UNQUOTED heredoc, so a backtick in ANY line
+    # of it — a comment included — is executed as a command substitution before `cat` writes.
+    # Measured before the fix: the OS-label rationale's backticks produced two "command not found"
+    # lines on stderr and a unit whose comment had lost `ubuntu-24.04` and `--status`. stderr is
+    # the channel an operator reads to decide whether the install worked, so noise here is the bug.
+    assert "command not found" not in res.stderr, res.stderr
 
     sb_cron = _sandbox(tmp_path / "cron", uname="Linux")
     prov_cron = sb_cron["repo"] / "tools" / "install-ci-runner-x64.sh"
@@ -650,6 +657,85 @@ def test_the_os_label_mode_is_pinned_for_the_timer_only_when_it_can_mean_anythin
     )
     assert res.returncode == 0, (res.stdout, res.stderr)
     assert "CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+
+
+# `<<DELIM`, `<<-DELIM`, `<<'DELIM'`, `<<"DELIM"` — but never `<<<`, which is a here-string.
+_HEREDOC_OPEN = re.compile(r"<<(?P<dash>-?)\s*(?P<quote>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)")
+
+
+def _unquoted_heredoc_bodies(text: str) -> list[tuple[int, list[str]]]:
+    """Return (1-based body start line, body lines) for every UNQUOTED heredoc in `text`.
+
+    A QUOTED delimiter (`<<'PY'`) is excluded on purpose: it makes the body fully literal, which
+    is why `tools/run_affected.sh:223`'s `<<'PY'` may carry backticks in its python source.
+    """
+    bodies: list[tuple[int, list[str]]] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = None if "<<<" in line else _HEREDOC_OPEN.search(line)
+        if match is None:
+            i += 1
+            continue
+        delim = match.group("delim")
+        strip_tabs = match.group("dash") == "-"
+        start = i + 2  # 1-based line number of the first body line
+        body: list[str] = []
+        i += 1
+        while i < len(lines):
+            probe = lines[i].lstrip("\t") if strip_tabs else lines[i]
+            if probe == delim:
+                break
+            body.append(lines[i])
+            i += 1
+        if not match.group("quote"):
+            bodies.append((start, body))
+        i += 1
+    return bodies
+
+
+def test_no_unquoted_heredoc_body_in_this_installer_can_run_a_command_substitution():
+    """This file's measured rule — no backtick in an UNQUOTED heredoc body — enforced by suite.
+
+    The bodies are unquoted (they expand the pinned paths), so bash performs command substitution
+    on a backticked span before `cat` writes a byte. Measured twice: a backticked `gh` in one of
+    these comments executed the shim, which found no credential and launched the interactive
+    device flow, so the installer hung for its whole timeout having written NOTHING; and the
+    systemd service body later regained two backticks, so every render printed two
+    "command not found" lines and wrote a unit whose comment had lost the label it names. Both
+    renders were green in this suite, because the assertions read stdout and the damage is in the
+    RENDERED text plus stderr.
+
+    Mutation: put a backtick in any line of any unquoted body -> RED, naming the line.
+    Mutation: the scanner stops finding the bodies -> the coverage assertion -> RED, never a
+    vacuous pass.
+    """
+    bodies = _unquoted_heredoc_bodies(SCRIPT.read_text(encoding="utf-8"))
+
+    # Coverage first: a scanner that finds nothing (a reformatted file, a quoting change) must not
+    # read as "clean". The file renders four schedules: the interpreter probe, the systemd
+    # service, the systemd timer and the launchd plist.
+    assert len(bodies) >= 4, (
+        "the heredoc scanner found only %d unquoted bodies — it is no longer reading this file, "
+        "so a clean verdict would be vacuous" % len(bodies)
+    )
+    assert any("Environment=CI_RUNNER_OS_LABEL" in line for _, body in bodies for line in body), (
+        "the systemd service body was not among the scanned bodies — the incident's own site must "
+        "be covered for this guard to mean anything"
+    )
+
+    offenders = [
+        (start + offset, line.strip())
+        for start, body in bodies
+        for offset, line in enumerate(body)
+        if "`" in line
+    ]
+    assert not offenders, (
+        "backtick(s) inside an UNQUOTED heredoc body — bash runs each one as a command "
+        "substitution at render time (see the RESOLVED ONCE block at the top of this installer). "
+        "Use plain quotes instead. Offending lines (file line, text): %r" % (offenders,)
+    )
 
 
 def test_systemd_units_render_with_path_and_the_active_check(tmp_path):

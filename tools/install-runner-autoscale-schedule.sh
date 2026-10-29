@@ -157,8 +157,17 @@ INSTALLED="$INSTALL_DIR/runner_autoscale.py"
 # pinned paths), so ANY backtick in them — including one inside a comment — runs as a command
 # substitution at render time. Measured: a backticked "gh" in a comment executed the shim, the
 # shim found no credential and launched the interactive device flow, and the installer hung for
-# its whole timeout having written NOTHING. So: no backticks in this file, and the gh directory is
-# resolved from real file candidates (no execution) and pinned.
+# its whole timeout having written NOTHING. So: NO backtick in an UNQUOTED heredoc BODY in this
+# file — plain code-fencing quotes read the same to a human and cannot execute. (Backticks in the
+# prose OUTSIDE the heredocs are not expanded, which is why the rest of this file may use them.)
+# The gh directory is resolved from real file candidates (no execution) and pinned.
+#
+# PINNED BY SUITE, not by this comment:
+# tests/test_install_runner_autoscale_schedule.py::
+#   test_no_unquoted_heredoc_body_in_this_installer_can_run_a_command_substitution
+# scans every unquoted body below and REDS on a backtick. It was re-broken once (the systemd
+# service body's OS-label rationale) and the suite was green while every render printed two
+# "command not found" lines and wrote a unit whose comment had lost the label it names.
 GH_BIN=""
 GH_DIR=""
 for _c in /usr/bin/gh /usr/local/bin/gh /opt/homebrew/bin/gh "$HOME/bin/gh"; do
@@ -348,8 +357,8 @@ Environment=RUNNER_AUTOSCALE_STATE_DIR=$STATE_DIR
 Environment=PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 $( [ -n "$PROVISIONER" ] && printf 'Environment=RUNNER_AUTOSCALE_PROVISIONER=%s\n' "$PROVISIONER" )
 # ⛔ AND THE OS-LABEL MODE WITH IT, or the FILL leg this unit exists to reach registers runners
-# WITHOUT `ubuntu-24.04` while the pool's older runners still carry it — coverage decaying one fill
-# at a time, with `--status` green at every step until the last carrier is replaced.
+# WITHOUT ubuntu-24.04 while the pool's older runners still carry it — coverage decaying one fill
+# at a time, with --status green at every step until the last carrier is replaced.
 $( [ -n "$PROVISIONER" ] && printf 'Environment=CI_RUNNER_OS_LABEL=%s\n' "$OS_LABEL_MODE" )
 ExecStart=$PYTHON $INSTALLED${ARGV_TAIL}
 # A pass is idempotent, so a non-zero exit is a RECORD, not a reason to retry in a tight loop:
