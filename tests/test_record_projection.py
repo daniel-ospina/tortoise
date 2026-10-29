@@ -1586,7 +1586,8 @@ def test_the_fold_ref_selector_is_the_records_own():
     # invented provenance. BOTH selectors now carry the same CONTAINER gate —
     # the fold side in `_point_source_refs` (`projection/entities.py:1079-1086`:
     # `str` is one ref, `list`/`tuple` is that series, anything else `[]`), the
-    # record side in `_point_raw_refs` (`record_projection.py:2694`). So the
+    # record side in `_point_raw_refs` (`record_projection.py:3064`, the
+    # container gate itself at `:3076-3081`). So the
     # dict fans out to NOTHING on either lane and lands no row rather than a row
     # for a key nobody named as a source. The assertion below is the pin that it
     # STAYS that way on both — a reader who believed the fold side still
