@@ -1,8 +1,10 @@
 """#10191 — the RECORD half of a 2b repoint is a MOVE: the docs say it, the plan does it.
 
-Split out of ``tests/test_record_projection.py`` so this half can be registered
-in ``core`` + ``tier1`` (the ``test_7818_ontology_record.py`` /
-``test_5142_ontology_record.py`` shape). The reason is measured, not stylistic:
+A NEW module, not a file moved out of ``tests/test_record_projection.py`` — that
+module gains a comment that points here and nothing else (0 deletions), because
+the doc↔code half had to run where that module cannot. Registered in ``core`` +
+``tier1`` (the ``test_7818_ontology_record.py`` / ``test_5142_ontology_record.py``
+split shape). The reason for the second registration is measured, not stylistic:
 a ``docs/INGEST_CONTRACT.md``-only diff matches no ``SOURCE_PATTERNS`` entry
 (``docs/`` is in ``NON_PYTHON_PREFIXES``), so the selector returns
 ``surfaces: []`` and runs **tier1 only**. ``test_record_projection.py`` is
