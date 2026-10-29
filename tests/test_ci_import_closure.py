@@ -666,10 +666,10 @@ def test_real_suite_core_surface_is_derived(repo_closure):
     del index, scans
     expected = len([f for f in manifest["surfaces"]["core"] if f.endswith(".py")])
     # EXACTLY, not `>= expected * 0.95` (#10143 review P2). The comment claimed
-    # exact basename resolution while the assertion tolerated 5 % — at 745
+    # exact basename resolution while the assertion tolerated 5 % — at 752
     # members that is up to 37 core files silently ceasing to resolve with every
     # test still green, and every published percentage is a ratio over this
-    # count. Measured today: all 745 resolve. `core_test_files` now reports an
+    # count. Measured today: all 752 resolve. `core_test_files` now reports an
     # unresolvable member instead of dropping it, so the failure names the file.
     unresolved: list[str] = []
     core = core_test_files(manifest, unresolved)
@@ -1455,8 +1455,7 @@ def test_ground_truth_counts_the_check_runs_it_saw_and_caches_only_a_read_one(
 
 
 def _stub_validate(monkeypatch, ci, truth_stub, *, changed=("tortoise/lazy.py",),
-                   select_files=(), cache: Path | None = None,
-                   core=("tests/test_t.py",)):
+                   select_files=(), cache: Path | None = None):
     """Drive `cmd_validate` over one synthetic PR and return its exit code.
 
     `cache` is not decoration: `cmd_validate` runs
@@ -1465,17 +1464,17 @@ def _stub_validate(monkeypatch, ci, truth_stub, *, changed=("tortoise/lazy.py",)
     redirect it writes into the CHECKOUT — while declaring a `tmp_path` that
     reads as isolation. Pass `cache=tmp_path`.
 
-    `core` is not either: `derived` starts from `current_rel - core_rel`, so a
-    pin that leaves a file OUT of the synthetic `core` cannot exercise the
-    subtraction at all — which is how an always-on leg's file was certified as
-    "on both sides" while the shipped code dropped it (#10143 review at
-    `a746139ba`, F2). A pin about `core` membership must put the file IN `core`.
+    ⚠️ `core` here is `["tests/test_t.py"]`, which is NOT the real manifest's shape
+    for an always-on leg: `derived` starts from `current_rel - core_rel`, so a pin
+    whose subject must survive that subtraction has to put the file IN `core` — and
+    give it a closure. A pin about `core` membership therefore builds its own world
+    (#10143 review at `a746139ba`, F2).
     """
     import argparse
 
     idx, scans, closures = _cli_world()
     data = {"scans": scans, "closures": closures,
-            "core": list(core)}
+            "core": ["tests/test_t.py"]}
     if cache is not None:
         monkeypatch.setattr(ci, "CACHE_DIR", cache)
     monkeypatch.setattr(ci, "_load_all", lambda *a, **k: ({}, data, idx))
