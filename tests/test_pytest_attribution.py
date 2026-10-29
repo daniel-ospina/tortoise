@@ -1098,6 +1098,16 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 # tests' business, above.)
 
 
+#: THE INVENTORY SPLIT BELOW IS DERIVED, NOT RESTATED (2026-10-29, #10244 review). The
+#: prose in `test_every_pytest_log_tail_is_followed_by_the_reporter` used to carry the
+#: split by hand, and it drifted the moment `test-slow` migrated: the comment still
+#: claimed 2 per-runner sites and 3 `/tmp` literals after the migration made it 3 and
+#: 2, inside the very function the next `/tmp` migrator reads. These two numbers are
+#: asserted against the workflows by `test_the_stated_inventory_matches_the_workflows`,
+#: so a further migration reds the guard instead of silently falsifying its map.
+_STATED_PER_RUNNER_PYTEST_LOG_SITES = 3
+_STATED_LITERAL_PYTEST_LOG_SITES = 2
+
 #: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
 #: workflows, so match the SHAPE, not one spelling. Anchored (`^tail`), so a comment
 #: that merely mentions the spelling cannot be counted as a site.
@@ -1159,8 +1169,9 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log`-named tails in python-ci.yml (2 of them the per-runner
-    `"$PYTEST_LOG"`, not a `/tmp` literal), 1 `trackb.log` (the must-pass
+    #9300): 5 `pytest.log`-named tails in python-ci.yml (3 of them the per-runner
+    `"$PYTEST_LOG"`, not a `/tmp` literal — see the DERIVED split pinned by
+    `test_the_stated_inventory_matches_the_workflows`), 1 `trackb.log` (the must-pass
     Track B member, whose log name does not contain "pytest" — it was the coverage
     gap a first cut missed), 1 `pmv-pytest.log` in post-merge-validation.yml, and 1
     `pytest-d14.log`, written through `| tee` rather than a tail (this file counts
@@ -1183,10 +1194,10 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
     # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
-    # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
-    # `"$PYTEST_LOG"` since #10028, then the three `/tmp/pytest.log` literals
-    # `test-slow` (300), `test-concurrency-falkor` (120) and `test-carve-out` (200) —
-    # plus `trackb.log`,
+    # `test`'s last-failed pre-phase (200), `test` (300) and `test-slow` (300) through
+    # the per-runner `"$PYTEST_LOG"` (the fast job since #10028, `test-slow` since the
+    # #10028 residue that PR closed), then the TWO remaining `/tmp/pytest.log` literals
+    # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
@@ -1196,6 +1207,55 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     # A drop here means a leg was lost, not that it got safer; an ADDITION is fine,
     # which is why this is a floor.
     assert tails >= 8, f"only {tails} pytest-log sites found (expected >= 8) — a leg was renamed or dropped"
+
+
+def test_the_stated_inventory_matches_the_workflows() -> None:
+    """The inventory the floor above STATES must equal the inventory it MEASURES.
+
+    The floor is a bound; the prose above it is a MAP — "which legs are still on a
+    `/tmp/pytest.log` literal, and which moved to the per-runner `"$PYTEST_LOG"`" — and
+    it is the map the next incremental `/tmp` migration reads before it edits a job.
+    A bound keeps being satisfied while the map goes wrong, which is how the pre-#10028
+    split (2 per-runner, 3 literals) survived `test-slow`'s migration: the comment sat
+    in the same function as the floor, said 2 and 3, and the truth was 3 and 2.
+
+    The numbers are DERIVED here from `capture_site` — the same reading the floor uses —
+    rather than re-read out of the prose, so this cannot become a tautology. Stated
+    counts live in `_STATED_PER_RUNNER_PYTEST_LOG_SITES` /
+    `_STATED_LITERAL_PYTEST_LOG_SITES`; migrating one more leg without updating them
+    reds this test, and restoring the pre-fix split makes it fail on the pre-fix code.
+    """
+    per_runner = literal = 0
+    for workflow in ATTRIBUTION_WORKFLOWS:
+        for line in workflow.read_text().splitlines():
+            target = capture_site(line)
+            if target is None:
+                continue
+            # The `pytest.log`-named tails, and ONLY those: `trackb.log`,
+            # `pmv-pytest.log` and the `pytest-d14.log` tee site are the other three
+            # sites in the inventory and are named separately above the floor.
+            if target != _RUNNER_TEMP_LOG and not target.endswith("/pytest.log"):
+                continue
+            if target == _RUNNER_TEMP_LOG:
+                per_runner += 1
+            else:
+                literal += 1
+
+    assert per_runner == _STATED_PER_RUNNER_PYTEST_LOG_SITES, (
+        f"the prose says {_STATED_PER_RUNNER_PYTEST_LOG_SITES} per-runner "
+        f'`"$PYTEST_LOG"` legs, the workflows have {per_runner} — update BOTH the stated '
+        "count and the comment block above the floor"
+    )
+    assert literal == _STATED_LITERAL_PYTEST_LOG_SITES, (
+        f"the prose says {_STATED_LITERAL_PYTEST_LOG_SITES} `/tmp/pytest.log` literal "
+        f"legs, the workflows have {literal} — update BOTH the stated count and the "
+        "comment block above the floor"
+    )
+    # The five `pytest.log`-named tails the inventory enumerates. Asserting the total as
+    # well means a migration that changes BOTH sides cannot pass by swapping them.
+    assert per_runner + literal == 5, (
+        f"{per_runner + literal} `pytest.log`-named tails, the inventory enumerates 5"
+    )
 
 
 def test_a_comment_mentioning_the_tee_shape_is_not_a_capture_site() -> None:
