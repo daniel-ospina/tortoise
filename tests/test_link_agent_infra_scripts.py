@@ -1423,3 +1423,86 @@ class TestDefaultPinPathIsCallTime:
             "with HOME unset the base must be harness-up's own fallback, not Path.home()'s "
             f"passwd lookup ({Path.home()})"
         )
+
+
+class TestEmptyAndUnresolvableArguments:
+    """A passed-but-EMPTY or unresolvable path is a caller error, never a silent substitution.
+
+    Every case here was measured on the tree it fixes. They share one shape — ``if explicit:``
+    (truthiness) makes ``--flag ''`` indistinguishable from "no flag", and ``pathlib`` raises
+    ``RuntimeError`` (not ``OSError``/``ValueError``) for an unresolvable ``~user`` or a symlink
+    loop — so each produced a GREEN or a TRACEBACK where the contract promises exit 2.
+    """
+
+    def _env(self, tmp_path: Path, **extra: str) -> dict[str, str]:
+        home = tmp_path / "home"
+        (home / ".pi" / "agent" / "state").mkdir(parents=True)
+        env = {**os.environ, "HOME": str(home), "HARNESS_PIN": "", "CELL_HOME": ""}
+        env.update(extra)
+        return env
+
+    def test_an_EMPTY_infra_is_an_error_not_the_current_directory(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """``--infra ''`` must not be read as ``.`` — measured: it exited **0** against the CWD."""
+        result = run_tool("--check", "--repo", str(repo), "--infra", "", env=self._env(tmp_path))
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "EMPTY" in result.stderr, result.stderr
+        assert "ok:" not in result.stdout, (
+            f"an empty --infra was judged against the CWD instead of being refused: {result.stdout!r}"
+        )
+
+    def test_an_EMPTY_pin_does_not_name_the_default_record(self, tmp_path: Path) -> None:
+        """``--pin ''`` must not fall through to ``$HARNESS_PIN``/the box record.
+
+        ``--infra`` is a REAL checkout here on purpose: with ``--infra ''`` too, the infra guard
+        fires first and the test would pass even if the ``--pin`` guard regressed — a vacuous
+        pass of exactly the kind this file's ``run_tool`` asserts against.
+        """
+        infra = tmp_path / "infra"
+        (infra / "scripts").mkdir(parents=True)
+        result = run_tool(
+            "--pin-check", "--repo", str(tmp_path), "--infra", str(infra), "--pin", "",
+            env=self._env(tmp_path),
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "--pin was passed but is EMPTY" in result.stderr, (
+            f"the empty --pin did not reach its own guard: {result.stderr!r}"
+        )
+
+    def test_an_unresolvable_infra_is_exit_2_not_a_traceback(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """``expanduser()`` raises ``RuntimeError`` — it must surface as exit 2, never exit 1."""
+        result = run_tool(
+            "--check", "--repo", str(repo), "--infra", "~definitely-no-such-user-xyz/ai",
+            env=self._env(tmp_path),
+        )
+        assert result.returncode == 2, (
+            f"rc={result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "Traceback" not in result.stderr, result.stderr
+
+    def test_an_unresolvable_AGENT_INFRA_PATH_default_is_exit_2(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        result = run_tool(
+            "--check", "--repo", str(repo),
+            env=self._env(tmp_path, AGENT_INFRA_PATH="~definitely-no-such-user-xyz/ai"),
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "Traceback" not in result.stderr, result.stderr
+
+    def test_an_unresolvable_repo_is_exit_2_not_drift(self, tmp_path: Path) -> None:
+        """A symlink loop raises ``RuntimeError`` from ``Path.resolve()``, outside the old ``try``.
+
+        Exit 1 means "the link is missing, dangling, or points somewhere else" — a repo path that
+        cannot be RESOLVED is none of those, and its printed remedy (``git checkout``) cannot run.
+        """
+        loop = tmp_path / "loop"
+        loop.symlink_to(loop)
+        result = run_tool(
+            "--check", "--repo", str(loop), "--infra", str(tmp_path), env=self._env(tmp_path)
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "Traceback" not in result.stderr, result.stderr

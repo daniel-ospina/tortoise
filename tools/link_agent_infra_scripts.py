@@ -146,8 +146,25 @@ def resolve_infra(explicit: str | None) -> Path:
     a relative target under ``--repo`` and dangle, while ``materialise`` reported success (PR #9541
     review P1: the #9475 symptom reinstated by its own fix, reported as a healthy link).
     """
-    if explicit:
-        cand = Path(explicit).expanduser()
+    # ⛔ ``explicit is not None``, NEVER ``explicit`` (PR #10250 review ROUND 7 ISSUE 2). A truthiness
+    # test makes ``--infra ''`` (a lane's unset ``--infra "$SOME_VAR"``) indistinguishable from
+    # "no flag", so it silently fell through to ``$AGENT_INFRA_PATH`` — and ``--check --infra ''``
+    # exited **0** without ever consulting the value passed, the false green this whole branch
+    # exists to prevent. In the WRITE path it would repoint ``scripts/`` from a checkout nobody
+    # named. Mutable here: the `--pin ''` shape was the same defect, on the same line pattern.
+    if explicit is not None:
+        if not explicit.strip():
+            # ``Path("")`` is ``.`` — an EMPTY explicit value would otherwise be silently
+            # reinterpreted as the CWD, which on a lane that ran
+            # ``--infra "$AN_UNSET_VAR"`` from a checkout is a GREEN over a checkout nobody
+            # named (measured: ``--check --infra ''`` exited 0 against the CWD's own ``scripts/``).
+            # A passed-but-empty value is a caller error, never a default and never ``.``.
+            raise ConfigError(
+                "--infra was passed but is EMPTY. --infra is AUTHORITATIVE when passed, so an "
+                "empty value is not 'unset' and will not be read as the current directory: pass "
+                "a real checkout path, or pass nothing and set AGENT_INFRA_PATH."
+            )
+        cand = _expand(explicit)
         if not (cand / LINK_NAME).is_dir():
             raise ConfigError(
                 f"--infra {cand} has no {LINK_NAME}/ directory, so there is nothing to point at. "
@@ -159,8 +176,10 @@ def resolve_infra(explicit: str | None) -> Path:
 
     candidates: list[Path] = []
     if os.environ.get("AGENT_INFRA_PATH"):
-        candidates.append(Path(os.environ["AGENT_INFRA_PATH"]).expanduser())
-    candidates.append(Path.home() / "agent-infra")
+        candidates.append(_expand(os.environ["AGENT_INFRA_PATH"]))
+    # ``Path.home()`` can raise ``RuntimeError`` too, so it goes through the same guard: an
+    # unexpandable candidate is "cannot verify", never a traceback on the DRIFT exit code.
+    candidates.append(_expand("~/agent-infra"))
 
     tried: list[str] = []
     for cand in candidates:
@@ -235,7 +254,24 @@ def resolve_pin(explicit: str | None) -> Path | None:
     no pin at all: a GitHub runner, a fresh dev box, or a clone of agent-infra that was never
     installed as a harness. That is an ANSWER ("unrecorded"), not a pass and not a failure.
     """
-    if explicit:
+    # ⛔ ``explicit is not None``, never ``explicit`` (PR #10250 review ROUND 7 ISSUE 1). With a
+    # truthiness test, ``--pin "$AN_UNSET_VAR"`` — an empty value a lane DID pass — was silently
+    # replaced by the default record, and the verdict then named a sha the operator never asked
+    # about, at exit 0 when that record happened to be satisfied. That is the contract stated two
+    # paragraphs up ("--pin is AUTHORITATIVE … never silently replaced by the default"), and the
+    # same defect as agent-infra's ``harness-up --repo ''`` (#2351). An empty value now reaches
+    # ``pin_state`` as ``PIN_UNREADABLE`` → exit 2 ("cannot verify"), never a silent substitution.
+    if explicit is not None:
+        if not explicit.strip():
+            # ``Path("")`` is ``.``, so an empty ``--pin`` would be judged as "the current
+            # directory" and reported as an unreadable record named ``.`` — exit class 2 by
+            # luck rather than by design, with a message naming a path nobody passed. A
+            # passed-but-empty value is a caller error with a name.
+            raise ConfigError(
+                "--pin was passed but is EMPTY. --pin is AUTHORITATIVE when passed, so an empty "
+                "value is not 'unset' and will not be replaced by the default record: pass a real "
+                "pin file, or pass nothing and let $HARNESS_PIN / the box record answer."
+            )
         return _expand(explicit)
     env = os.environ.get(PIN_ENV)
     if env:
@@ -556,8 +592,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    dest = Path(args.repo).resolve() / LINK_NAME
     try:
+        # ⛔ INSIDE the try (PR #10250 review ROUND 7 ISSUE 4). ``Path.resolve()`` raises
+        # ``RuntimeError`` — not ``OSError`` — for a symlink loop (``pathlib.check_eloop``),
+        # so a ``--repo`` pointing at one escaped as a TRACEBACK and the interpreter exited **1**.
+        # Exit 1 is documented as "the link is missing, dangling, or points somewhere else", which
+        # a repo path that cannot be resolved is not; and ``tools/agent_infra_drift_check.py``
+        # imports ``main`` and wraps only ``ConfigError``, so it crashed the CI drift gate too.
+        dest = Path(args.repo).resolve() / LINK_NAME
         infra = resolve_infra(args.infra)
         src = infra / LINK_NAME
         pin = resolve_pin(args.pin)
@@ -591,6 +633,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except ConfigError as exc:
         print(f"⛔ {exc}", file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError) as exc:
+        # The catch-all that keeps the DRIFT exit code honest: an unresolvable or unreadable
+        # PATH is "cannot verify" (2), never exit 1, whose printed remedy sends an operator to
+        # `git fetch && git checkout` for something that is not a stale checkout at all.
+        print(f"⛔ cannot verify: {exc}", file=sys.stderr)
         return 2
 
 
