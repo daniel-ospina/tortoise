@@ -149,6 +149,47 @@ def test_two_creates_of_one_live_name_are_one_entity(sdk):
     assert first == second, (first, second)
 
 
+def test_a_create_adopts_the_single_id_less_live_holder(sdk):
+    """#3590 review F2: a create ADOPTS an id-less holder — never mints beside it.
+
+    ``MERGE (o:Object {name:$name})`` (a legacy / raw / foreign writer's
+    construction) leaves a LIVE holder carrying NO id. Minting a fresh id beside
+    it makes TWO live carriers of one name, and from then on every resolve of
+    that name raises ``AmbiguousEntityName`` — the name is create-poisoned, with
+    no by-name repair path, silently and permanently. The write must land on ONE
+    carrier, and the name must stay create-able.
+
+    Mutation that must red this: restoring the mint-on-id-less arm in
+    ``entity_identity.resolve_or_mint`` (i.e. deleting ``_adopt_idless_holder``).
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    proj.g.query(
+        "MERGE (o:Object {name:$n}) SET o.objectKind='core:strategy'",
+        params={"n": "Legacy"})
+    assert _name_ids(proj, "Object", "Legacy") == [None], (
+        "fixture did not build the id-less live holder")
+
+    created = client.create_entity("object", "Legacy",
+                                   objectKind="core:strategy",
+                                   is_episodic=False)
+    ids = _name_ids(proj, "Object", "Legacy")
+    assert len(ids) == 1, (
+        "the create minted a SECOND live carrier beside the id-less holder — "
+        f"the name is now create-poisoned: {ids}")
+    adopted = ids[0]
+    assert adopted, ids
+    assert created["node"]["id"] == adopted, (created, adopted)
+
+    # …and the name is still create-able: a second create RESOLVES to the one
+    # adopted carrier instead of refusing `AmbiguousEntityName` forever.
+    again = client.create_entity("object", "Legacy",
+                                 objectKind="core:strategy",
+                                 is_episodic=False)
+    assert again["node"]["id"] == adopted, (again, adopted)
+    assert _name_ids(proj, "Object", "Legacy") == [adopted]
+
+
 def test_a_rename_journals_on_the_stable_id_and_survives_replay(sdk):
     """Acceptance 3: rename → ``EntityMutated op=rename``, stable id, old name gone.
 
@@ -1286,85 +1327,6 @@ def test_the_event_api_door_still_takes_an_explicit_id_and_refuses_ambiguity(
     assert len(_name_ids(proj, "Object", "Door Dup")) == 2, (
         "the door minted a THIRD carrier of a doubly held name instead of "
         "refusing it")
-
-
-def test_a_single_id_less_live_holder_refuses_instead_of_minting_second_carrier(
-        sdk):
-    """#9876 review F2: a create must not MINT on top of an id-less live holder.
-
-    A raw / legacy `/ foreign `:Object` row (`MERGE (o:Object {name:$name})`, the
-    shape `live_name_holder_ids` documents) is LIVE and unambiguous but carries
-    no `id`, so it cannot BE an identity. The pre-fix `resolve_or_mint` fell
-    through the `holders[0]` check and MINted: the id-less row stayed live, the
-    name had TWO live carriers, and from then on EVERY create raised
-    `AmbiguousEntityName` and `update_entity(name=…)` raised `NameAlreadyHeld` —
-    create-poisoned, with no by-id repair path for the unaddressable row. That
-    contradicted the PR body's round-5 row ("fixed — refuse/adopt, never two
-    carriers"); the code neither refused nor adopted.
-
-    FAILS IF: the mint comes back — `create_entity` returns an id instead of
-    raising, and the name has two live rows.
-    """
-    from tortoise.entity_identity import (
-        UnaddressableEntityName,
-        clear_non_folded_entries,
-        non_folded_entries,
-    )
-
-    client, _events = sdk
-    proj = client._get_proj()
-    clear_non_folded_entries()
-    proj.g.query("MERGE (o:Object {name:'Legacy Only'}) "
-                 "SET o.status = 'live'")
-    assert _name_ids(proj, "Object", "Legacy Only") == [None], (
-        "the fixture is not the id-less shape this pin is about")
-
-    with pytest.raises(UnaddressableEntityName):
-        client.create_entity("object", "Legacy Only", is_episodic=False)
-
-    assert _name_ids(proj, "Object", "Legacy Only") == [None], (
-        "the refused create still minted a second live carrier")
-    assert [e.shape for e in non_folded_entries()] == ["unaddressable-name"], (
-        non_folded_entries())
-
-
-def test_a_bundle_naming_an_unaddressable_holder_is_refused_in_phase1(sdk):
-    """The same refusal is a Phase-1 verdict, not a step-3 raise (#2422 class).
-
-    Step 3 writes EVERY entity item, so an item naming a name whose only live
-    holder carries no `id` raises `UnaddressableEntityName` there — after the
-    point items committed, unless Phase 1 refuses the bundle whole. The
-    per-connection entity leg only skips such an item (it has no landing id to
-    compare), so the bundle-wide loop is what carries the verdict.
-
-    FAILS IF: the Phase-1 arm is dropped — `_validate_bundle` goes `[]`, `ingest`
-    raises `UnaddressableEntityName` (NOT a `BundleValidationError`) and the
-    point has already committed.
-    """
-    from tortoise.exceptions import BundleValidationError
-
-    client, _events = sdk
-    proj = client._get_proj()
-    proj.g.query("MERGE (o:Object {name:'Bundled Legacy'}) "
-                 "SET o.status = 'live'")
-    bundle = {
-        "points": [{"kind": "statement", "content": "must-not-commit"}],
-        "entities": [
-            {"ref": "a", "type": "object", "name": "Bundled Legacy"},
-            {"ref": "b", "type": "object", "name": "Bundled Fresh"},
-        ],
-        "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
-    }
-    msgs = [v["message"] for v in client._validate_bundle(bundle)]
-    assert any("carries no `id`" in m for m in msgs), msgs
-    with pytest.raises(BundleValidationError, match="carries no `id`"):
-        client.ingest(bundle)
-    assert proj.g.query(
-        "MATCH (n:Point {content:'must-not-commit'}) RETURN count(n)"
-    ).result_set == [[0]], "the refused bundle committed its point item"
-    assert _name_ids(proj, "Object", "Bundled Legacy") == [None]
-    assert _name_ids(proj, "Object", "Bundled Fresh") == [], (
-        "the refused bundle minted the second entity item")
 
 
 def test_a_noop_name_rewrite_on_a_doubly_held_name_is_not_refused(sdk):

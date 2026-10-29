@@ -20641,10 +20641,12 @@ class TortoiseSDK:
           * **one LIVE carrier** — the item RESOLVES to that holder (idempotent
             re-mention), so THAT node's axes decide; a declared status is
             dropped by the ``ON CREATE``-only status write;
-          * **one LIVE carrier carrying no ``id``** — unaddressable legacy /
-            foreign row: the create REFUSES
-            (``UnaddressableEntityName``, #9876 review F2), so no holder axis
-            applies and the bundle must not commit its earlier items;
+          * **one LIVE carrier carrying no ``id``** — a legacy / foreign / raw
+            row: the create ADOPTS it, stamping a minted id onto it (#9876
+            review F2), so the write lands on ONE carrier and the name stays
+            create-able. That id does not exist yet at Phase-1 time, so no
+            landing id is predictable here (``merges=False``, ``target_id=None``)
+            and the holder axes — which are id-valued — cannot be reported;
           * **2+ LIVE carriers** — the create REFUSES
             (``AmbiguousEntityName``); no carrier is the target and no holder
             axis applies.
@@ -20655,7 +20657,8 @@ class TortoiseSDK:
         never touches, which is both a fail-open (the ``#7925`` arms skipped a
         write that does store its status, then step 4 died with the earlier
         items committed) and a false "resolves to terminal" refusal. (A live
-        carrier with NO id is NOT the mint shape: it refuses — see above.)
+        carrier with NO id is the ADOPTED shape above — the write lands on that
+        node, but under an id minted mid-write.)
 
         ⛔ …and ``LIVE`` means every live ROW, id or not (#3590 round-8 review
         FINDING 2, still live at this head): ``resolve_or_mint`` refuses on
@@ -20721,19 +20724,29 @@ class TortoiseSDK:
         # ⛔ #3590 (round-5 review F1): THE TARGET IS THE NODE THE WRITE LANDS
         # ON, and the write now resolves over **LIVE** carriers only
         # (`entity_identity.resolve_or_mint`): a TERMINAL sole carrier does not
-        # block a create, so the create MINTS a fresh live node. Reading the
-        # three axes off such a carrier described a different node than the
-        # writer used — fail-OPEN on the `#7925` Phase-1 arms (they skip a bundle
-        # item whose status IS stored, then the write dies in step 4 with the
-        # earlier items committed) and a false "resolves to terminal" refusal in
-        # the opposite direction. `merges`/`target_id` are therefore computed
-        # from the LIVE holder set, the same predicate the create uses, so the
-        # guard and `resolve_or_mint` cannot disagree.
+        # block a create (it is another incarnation), and an id-less sole
+        # carrier is ADOPTED — the create stamps a minted id onto it rather
+        # than opening a second live node (#3590 review F2).
+        # Reading the three axes off such a carrier described a different node
+        # than the writer used — fail-OPEN on the `#7925` Phase-1 arms (they skip
+        # a bundle item whose status IS stored, then the write dies in step 4
+        # with the earlier items committed) and a false "resolves to terminal"
+        # refusal in the opposite direction. `merges`/`target_id` are therefore
+        # computed from the LIVE holder set, the same predicate the create uses,
+        # so the guard and `resolve_or_mint` cannot disagree.
         _live = [r for r in rows if not r[1]]
         if len(_live) != 1 or not _live[0][0]:
             # 0: terminal-only ⇒ the write MINTS (`merges=False`).
-            # 1 id-less live row: unaddressable ⇒ the write REFUSES too
-            # (`merges=False`, and the caller refuses on count==1 && !merges).
+            # 1 id-less live row: ADOPTED, but its id is minted DURING the write,
+            #     so Phase 1 cannot predict a landing id (`merges=False`,
+            #     `target_id=None`). RESIDUAL, recorded: the three axes are
+            #     id-valued, so an operator-shaped id-less holder cannot be
+            #     reported here and a bundle ending on one is only refused in
+            #     step 4. Legacy/raw graphs only; the adopt path is what keeps
+            #     the name create-able.
+            # 2+: same-name coexistence, which the create REFUSES rather than
+            # picking a carrier ⇒ no target either (#8864 / D2). The three are
+            # told apart by the COUNT, which is why it is the live one.
             # 2+: same-name coexistence, which the create REFUSES rather than
             # picking a carrier ⇒ no target either (#8864 / D2). The three are
             # told apart by the COUNT, which is why it is the live one.
@@ -20882,11 +20895,7 @@ class TortoiseSDK:
           create REFUSES it (``entity_identity.resolve_or_mint``,
           route-then-refuse R8), for every entity item, referenced or not, so
           the bundle is rejected at validation rather than raising in step 3
-          with the earlier items committed (see the loop below);
-        - an entity item whose name has exactly ONE live holder carrying **no
-          ``id``` — the create refuses that too (``UnaddressableEntityName``;
-          minting beside it would leave two carriers and poison the name),
-          bundle-wide, for the same reason.
+          with the earlier items committed (see the loop below).
 
         ⛔ That list is a list of COVERED refusals, not a guarantee that every
         ``_sanitize_props`` refusal is Phase-1. The residual is the rest of the
@@ -21051,13 +21060,11 @@ class TortoiseSDK:
         #
         # `create_subject`/`create_object` route through
         # `entity_identity.resolve_or_mint`, which REFUSES a name held by 2+ LIVE
-        # entities (route-then-refuse, R8) and, for the same reason, a name whose
-        # only live holder carries no `id` (`UnaddressableEntityName`) — for
-        # EVERY entity item in bundle order, referenced by a connection or not,
-        # on either route. The per-connection entity leg below only `continue`s
-        # on those shapes (it has no landing id to compare, and the refusal
-        # belongs to the item), so without this loop the refusal surfaced in
-        # step 3. MEASURED at this head:
+        # entities (route-then-refuse, R8) — for EVERY entity item in bundle
+        # order, referenced by a connection or not, on either route. The
+        # per-connection entity leg below only `continue`s on that shape (it has
+        # no landing id to compare, and the refusal belongs to the item), so
+        # without this loop the refusal surfaced in step 3. MEASURED at this head:
         # `_validate_bundle` returned `[]` for
         # `{"points": [{"content": "must-not-commit"}], "entities": [{"type":
         # "object", "name": "Acme"}]}` with two live `Acme` carriers, and
@@ -21072,8 +21079,7 @@ class TortoiseSDK:
             if _elabel not in ("Subject", "Object") \
                     or not isinstance(_name, str) or not _name:
                 continue
-            _holders = _name_holders(_elabel, _name)
-            _live_n, _merges = _holders[4], _holders[5]
+            _live_n = _name_holders(_elabel, _name)[4]
             if _live_n > 1:
                 violations.append({
                     "section": "entities", "index": i,
@@ -21083,24 +21089,6 @@ class TortoiseSDK:
                                f"one for you (route-then-refuse) and raises in "
                                f"step 3 after the earlier items committed. "
                                f"Rename or retire one carrier first (#3590)",
-                })
-            elif _live_n == 1 and not _merges:
-                # #9876 review F2: ONE live holder carrying no `id`. The create
-                # refuses it (`UnaddressableEntityName`) instead of minting a
-                # second carrier, and the per-connection leg only skips the
-                # item — so without this arm Phase 1 is `[]` and step 3 raises
-                # with the earlier items committed (the same
-                # #2422/#7925 partial-mutation class as the arm above).
-                violations.append({
-                    "section": "entities", "index": i,
-                    "message": f"ingest: entities[{i}] names the {_elabel} "
-                               f"{_name!r}, whose only LIVE holder carries no "
-                               f"`id` — unaddressable legacy raw-write row. The "
-                               f"create REFUSES to mint a second carrier of "
-                               f"that name (it would be create-poisoned) and "
-                               f"raises in step 3 after the earlier items "
-                               f"committed. Give that row an id or retire it "
-                               f"first (#3590)",
                 })
         # ADOPTION / RENAME map (#7925 review round 5) — RETIRED by #3590.
         # It existed because step 3's entity write RE-ADDRESSED a holder: an
@@ -36007,9 +35995,11 @@ class TortoiseSDK:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
-        ``ObjectRegistered`` on first canonical registration (probe-gated,
-        #2194 — a canonical re-mention never double-journals); SDK-created
-        Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295);
+        ``ObjectRegistered`` on EVERY create (#3590 — the "first canonical
+        registration" probe of #2194 is gone: a re-mention journals again, which
+        is replay-idempotent because the fold is id-keyed and `createdAt` is
+        first-wins); SDK-created Subjects journal ``SubjectAdded`` the same way
+        (#2295's probe is gone with it);
         Documents journal ``DocumentCreated`` on EVERY create (#2296 —
         emit-on-every-write, since each create mints a fresh ulid and
         ``_upsert_document`` MERGEs by that id). Source journals via
@@ -40476,7 +40466,6 @@ class TortoiseSDK:
                     # skipping the item is that contract.
                     from .entity_identity import (
                         AmbiguousEntityName,
-                        UnaddressableEntityName,
                         entity_create_lock,
                         resolve_or_mint,
                     )
@@ -40496,8 +40485,7 @@ class TortoiseSDK:
                                  "issue_number": issue_number,
                                  "url": url},
                                 "ObjectRegistered")
-                    except (AmbiguousEntityName,
-                            UnaddressableEntityName) as exc:
+                    except AmbiguousEntityName as exc:
                         _logger.debug(
                             "_connect_issue_objects: skipping reference %r — "
                             "%s", name, exc)

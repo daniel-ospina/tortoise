@@ -1769,8 +1769,11 @@ class _EdgeHandlers:
         carriers, the ids) ``resolve_about_link`` resolved; ``None`` means the
         live path must RESOLVE-OR-MINT the ``:Subject`` stub the cascade's
         fallback named (``_mint_subject_stub`` — the name-keyed construction
-        live and replay share; the SDK door has normally already registered it,
-        in which case this resolves that node). Writing by the RESOLVED internal id — rather than
+        live and replay share; the caller may have registered that name already,
+        in which case this resolves that node. ⛔ NOT "the SDK door has normally
+        registered it": since D1 (RULED 2026-10-26) the door mints nothing for a
+        mention, so nothing is registered for an unregistered reference — the
+        stub is what makes the link wire on both passes). Writing by the RESOLVED internal id — rather than
         re-matching the name inside the MERGE — is what makes the journaled link
         and the edge the same decision, with no second read that could answer
         differently. Every resolved id is written, so the live edge set is
