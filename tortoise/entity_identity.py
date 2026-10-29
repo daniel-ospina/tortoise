@@ -337,21 +337,22 @@ def resolve_or_mint(g, label: str, name: str, *,
         return str(explicit_id), True
     with _holder_lock(label, name):
         holders = live_name_holder_ids(g, label, name)
-        if len(holders) > 1:
-            # COUNT holders, REPORT holders (#9876 review, this head): the
-            # earlier ``[h for h in holders if h]`` performed exactly the
-            # filter `live_name_holder_ids` forbids, so a name held by one
-            # id-carrying and one id-less LIVE entity reported "resolves to 1
-            # live carriers" for a refusal that happened because there were
-            # TWO — the #8018 class (a report false for the record it
-            # describes). It also bypassed :func:`_refuse`, so the create
-            # side left NO non-folded entry: R8's "a refusal is a record"
-            # was unsatisfied at the one door an SDK caller reaches, and
-            # ``sdk._connect_issue_objects`` swallows the exception. Routing
-            # through ``_refuse`` fixes both halves — it records, and
-            # ``display_holder_ids`` labels the id-less carrier instead of
-            # dropping it (the same evidence `NameAlreadyHeld` ships).
-            _refuse(label, name, display_holder_ids(holders))
+        # COUNT holders, REPORT holders (#9876 review, this head): the
+        # earlier ``[h for h in holders if h]`` performed exactly the
+        # filter `live_name_holder_ids` forbids, so a name held by one
+        # id-carrying and one id-less LIVE entity reported "resolves to 1
+        # live carriers" for a refusal that happened because there were
+        # TWO — the #8018 class (a report false for the record it
+        # describes). It also bypassed :func:`_refuse`, so the create
+        # side left NO non-folded entry: R8's "a refusal is a record"
+        # was unsatisfied at the one door an SDK caller reaches, and
+        # ``sdk._connect_issue_objects`` swallows the exception. Routing
+        # through ``_refuse`` fixes both halves — it records, and
+        # ``display_holder_ids`` labels the id-less carrier instead of
+        # dropping it (the same evidence `NameAlreadyHeld` ships).
+        # The threshold itself lives in `refuse_if_ambiguous` so the
+        # pre-flight probe (`refuse_ambiguous_create`) cannot disagree.
+        refuse_if_ambiguous(label, name, holders)
         if holders and holders[0]:
             return str(holders[0]), False
         from .ids import ulid
@@ -639,6 +640,45 @@ def display_holder_ids(candidate_ids) -> list:
     id-less holder that made the read ambiguous in the first place.
     """
     return [c if c is not None else "<id-less>" for c in candidate_ids]
+
+
+def refuse_if_ambiguous(label: str, name: str, holders) -> None:
+    """Refuse a CREATE whose name 2+ LIVE entities hold — records and raises.
+
+    ⛔ THE ONE REFUSAL PREDICATE (#9876 review, this head). ``holders`` is the
+    raw :func:`live_name_holder_ids` row list (id-less LIVE rows INCLUDED, per
+    that function's own contract), and ``len(holders) > 1`` is the create's
+    route-then-refuse (R8) threshold. Two sites ask it and both call here, so
+    they cannot answer differently:
+
+    * :func:`resolve_or_mint` — the write door, which already holds the rows;
+    * :func:`refuse_ambiguous_create` — the READ-ONLY pre-flight probe a
+      caller runs before its first write (``hosted_api``'s commit path), so
+      the refusal it predicts is byte-identical to the one the door raises.
+
+    Recording BEFORE raising keeps the R8 evidence (the non-folded entry) even
+    though the caller catches the exception — and it is why a pre-flight probe
+    that short-circuits the door does not silently lose the record.
+    """
+    if len(holders) > 1:
+        _refuse(label, name, display_holder_ids(holders))
+
+
+def refuse_ambiguous_create(g, label: str, name: str) -> None:
+    """The **read-only** pre-flight twin of :func:`resolve_or_mint`'s refusal.
+
+    Same predicate, same evidence, ONE graph read — no lock, no mint, no write:
+    a caller that must refuse an ambiguous create BEFORE its first write (the
+    hosted commit path, where the create lands at step 6 of the write phase and
+    everything before it has already been journaled) probes here instead of
+    re-deriving "is this name doubly held?". Re-deriving it is how the two
+    answers drift: the count that refuses is LIVE ROWS, id-less included.
+
+    Raises :class:`AmbiguousEntityName` after recording the non-folded entry;
+    returns ``None`` when the create would proceed (0 or 1 live holder — a
+    terminal holder does not block a create, R5).
+    """
+    refuse_if_ambiguous(label, name, live_name_holder_ids(g, label, name))
 
 
 class UnaddressableEntityName(ValueError):
