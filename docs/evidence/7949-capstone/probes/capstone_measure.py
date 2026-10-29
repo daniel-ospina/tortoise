@@ -52,16 +52,19 @@ gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
 UNSET for the same reason: it also switches S2.2 on, so an ambient value would
 silently change the arm. The ``arm:`` line is that read-back, never a typed
 literal — a run that cannot read a flag back as set REFUSES rather than printing a
-claim nothing supports. They are still UNWITNESSABLE through
-``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
-first attributed: ``extract_session_v2`` DOES build the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8873-8879`` and
-``result["vet"]`` at ``:8883-8887``); they are dropped at the meta fold,
-``tortoise/sdk.py:13402`` (``"stats": out.get("stats") or {}`` inside
-``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
-rather than worked around: working around
-it would mean reading a wrapper's state, which is the instrumentation E4's row
-forbids.
+claim nothing supports. **The seam has since LANDED (#9116), so this module no
+longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
+receipt could not carry them and the failure was ONE LAYER UP from where it was
+first attributed: ``extract_session_v2`` built the surfaces
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8961-8967`` and
+``result["vet"]`` at ``:8971-8975``) while the meta fold dropped them with
+``"stats": out.get("stats") or {}``. The fold now calls
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:13625``), which copies each
+stage's own counts onto ``stats["step_witness"]`` — so this module READS that seam
+(:func:`_witness_block`) instead of citing the gap. A run measured at a stamp
+BEFORE the seam still reports S2.2/S2.3 unobserved, and that is the run's own
+answer, not a workaround: reading a wrapper's state instead is the
+instrumentation E4's row forbids.
 
 📌 CITE CONVENTION (this bundle). Every ``file:line`` is re-derived from the tree
 at the head the bundle is stamped at, and is paired with the SYMBOL it names —
@@ -148,7 +151,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13683`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13906`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -163,7 +166,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13683 "
+    "the capture path at tortoise/sdk.py:13906 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
@@ -188,7 +191,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE",)
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2372`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2377`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -783,26 +786,26 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8504 and "
-        ":8524), and each VET pass is gated on the LIST — `if vet_enabled and "
-        "embed_list:` (:8592), `if vet_enabled and complete_list:` (:8714) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8592 and "
+        ":8612), and each VET pass is gated on the LIST — `if vet_enabled and "
+        "embed_list:` (:8680), `if vet_enabled and complete_list:` (:8802) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :8390-8393)."
+        "returns {} on its fail-open path, :8478-8481)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:8473 (and set False when its classifier cannot "
-        "be constructed, :8498), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:8561 (and set False when its classifier cannot "
+        "be constructed, :8586), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:8520-8523), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:8608-8611), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:8604) around `if items:` "
-        "(:8607), `if classify_later and complete_list:` (:8729) around "
-        "`if items:` (:8739) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:8692) around `if items:` "
+        "(:8695), `if classify_later and complete_list:` (:8817) around "
+        "`if items:` (:8827) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :8620 / :8750)."
+        "empty stats (its fail-open `except` at :8708 / :8838)."
     ),
 }
 
@@ -814,26 +817,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:8520-8524, :8873-8887) — so an acceptance test of "a non-empty dict"
+    {}}`` (:8608-8612, :8961-8975) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8504`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:8507``, whose
-    ``if not edus:`` early return (``:8508``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:8524``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8592`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:8595``, whose
+    ``if not edus:`` early return (``:8596``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:8612``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:8592``) and ``if vet_enabled and complete_list:``
-    (``:8714``). So a session whose conversation produced no list emits
+    embed_list:`` (``:8680``) and ``if vet_enabled and complete_list:``
+    (``:8802``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:8390-8393``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:8478-8481``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at ``:8473``, its own early-return
+    is different code (``classify_later`` at ``:8561``, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -1095,7 +1098,7 @@ def point_composition_line(composition: dict | None) -> str:
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2372, t.is_episodic=true, wired only by CONTAINS), and "
+        f"tortoise/sdk.py:2377, t.is_episodic=true, wired only by CONTAINS), and "
         f"operator Points are written by create_operator (tortoise/sdk.py — the "
         f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
         f"(measured: {operators_anchored} of {operators} anchored). Whether an "
@@ -1173,7 +1176,7 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"classes cannot carry a derivation link AT ALL and are named "
         f"rather than folded into the figure: the turn rows carry none BY "
         f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2372, t.is_episodic=true, wired only by "
+        f"tortoise/sdk.py:2377, t.is_episodic=true, wired only by "
         f"CONTAINS), and the operator Points are written by "
         f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
         f"operator writer), which never writes extractedFrom. So "
