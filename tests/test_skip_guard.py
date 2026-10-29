@@ -206,12 +206,14 @@ class TestGuardAcceptsCleanLog:
         trailing -rfE would suppress the skip summary the guard depends on.
         -r fEs is the order-independent superset (f=FAILED, E=ERROR, s=SKIPPED).
 
-        The SELECTION is the fragile half: three separate jobs now run a
-        watchdog-wrapped `python -m pytest`, so the selector carries one term
-        per leg it must exclude (the `$PYTEST_JUNIT_LF` pre-phase, and since
-        #10028 the single-process `test-slow` leg). A term that stops
-        discriminating does not error — it silently compares another leg's
-        command line — which is why the count floor below is load-bearing."""
+        The SELECTION is the fragile half: EIGHT watchdog-wrapped `python -m
+        pytest` command lines in this file match the duration prefix, and TWO of
+        them write `--junitxml="$PYTEST_JUNIT"` — the fast gating run and, since
+        #10028, the single-process `test-slow` leg. So the selector carries one
+        exclusion term per leg it must NOT read (the `$PYTEST_JUNIT_LF`
+        pre-phase, and the slow leg). A term that stops discriminating does not
+        error — it silently compares another leg's command line — which is why
+        the count floor below is load-bearing."""
         workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" \
             / "python-ci.yml"
         text = workflow.read_text()
@@ -253,7 +255,7 @@ class TestGuardAcceptsCleanLog:
             # selection at exactly one.
             and '-n "$XDIST_WORKERS"' in l
         ]
-        # A retarget here is INVISIBLE without these two floors: every pytest
+        # A retarget here is INVISIBLE without these floors: every pytest
         # invocation in this file carries `-r fEs`, and the retired literal still
         # matched the `test-slow` leg, so reading the WRONG job passed silently
         # (measured: the old filter matched exactly one line, and it was
