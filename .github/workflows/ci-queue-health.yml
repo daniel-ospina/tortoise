@@ -47,10 +47,15 @@ name: ci-queue-health
 # and prints `was CI: FLOOD(...) -> cleared N of M`. `PR-STARVED` (no PR run
 # executing, a queued PR run past the age floor, and no trim-safe offender to
 # blame) is an `::warning` at exit 0: the state is real, and there is nothing the
-# governor may cancel. `PR-UNWITNESSED` (the feed was cut at its page cap, so the
-# oldest queued runs — the end the age clause needs — were never read) is also an
-# `::warning` at exit 0: it names what was NOT measured instead of inferring
-# health. Neither can block a merge, because a `schedule`-event run is
+# governor may cancel. `PR-BACKLOGGED` (PR CI IS executing, and a queued PR run has
+# waited past the wait budget — the shape that used to print `CI: OK`, measured
+# 2026-10-28 on #10237) is an `::warning` at exit 0 for the same reason: the only
+# runs the governor may cancel belong to a trim-safe OFFENDER, and a queued PR run
+# is never a candidate. `PR-UNWITNESSED` (the feed was cut at its page cap, so the
+# oldest queued runs — the end the age clause needs — were never read; or the
+# queued PR runs carry no readable `created_at`, so the wait cannot be measured at
+# all) is also an `::warning` at exit 0: it names what was NOT measured instead of
+# inferring health. Neither can block a merge, because a `schedule`-event run is
 # a NON-CODE event: the merge rail's own `NON_CODE_EVENTS` set excludes
 # `schedule|issues|issue_comment` from the merge decision, so a red scheduled run
 # never gates a PR.
@@ -205,8 +210,8 @@ jobs:
           # only inside a summary nobody opens. The tool's exit code already follows
           # its REPORTED verdict (1 = a FLOOD still stands, 2 = could not measure),
           # so `rc` is a payload-derived alarm; the verdict is read as well for the
-          # PR-STARVED / PR-UNWITNESSED warnings, which are real states with no
-          # action available.
+          # PR-STARVED / PR-BACKLOGGED / PR-UNWITNESSED warnings, which are real
+          # states with no action available.
           #
           # ⛔ THE STATE LINE GOES IN THE MESSAGE, NEVER IN A `title=` PROPERTY.
           # GitHub parses a workflow command's property section as `key=value`
@@ -224,8 +229,17 @@ jobs:
             echo "::warning::CI: UNKNOWN — the queue could not be measured, so nothing was changed and nothing is certified healthy."
           elif [ "$verdict" = "PR-STARVED" ]; then
             echo "::warning::${state} — PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. No trim-safe offender can be blamed, so there is nothing the governor may cancel."
+          elif [ "$verdict" = "PR-BACKLOGGED" ]; then
+            # #10237 ask 3 — "the job must fail loudly rather than hang". A queue
+            # that IS serving PR work while the backlog behind it waits past the
+            # measured budget is the shape that used to read `CI: OK` (measured
+            # 2026-10-28T17:47Z: pr_running=2, pr_queued=32, oldest 527 min).
+            # Nothing here is cancellable — the governor's only action surface is a
+            # trim-safe OFFENDER's queued runs, and a queued PR run is never a
+            # candidate — so the alarm is this annotation.
+            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. Nothing was cancelled (the governor only cancels a trim-safe offender's queued runs; a queued PR run is never a candidate); the lever is capacity, not the governor."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
-            echo "::warning::${state} — the queued feed was cut at the page cap while no PR-event run is executing, so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; raise --max-pages to read further back."
+            echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; see the step summary for the dimension that was not measured."
           fi
-          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED or PR-UNWITNESSED (warned); 1 = FLOOD stands; 2 = could not measure)"
+          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED, PR-BACKLOGGED or PR-UNWITNESSED (five exit-0 shapes, all but OK and cleared warned); 1 = FLOOD stands; 2 = could not measure)"
           exit "$rc"

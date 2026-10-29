@@ -273,7 +273,7 @@ def _assert_snapshot_contract(snapshot: dict, *, optional=frozenset(),
     assert not (keys - allowed), (
         f"{context}: the writer's per-turn snapshot gained {sorted(keys - allowed)}; "
         "TURNS_SNAPSHOT_KEYS is the contract step 7 inherits, so both move together")
-    assert (rp.TURNS_SNAPSHOT_KEYS - rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS) <= keys, (
+    assert keys >= (rp.TURNS_SNAPSHOT_KEYS - rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS), (
         f"{context}: the snapshot lost {sorted((rp.TURNS_SNAPSHOT_KEYS - rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS) - keys)} — "
         "only the unattestable pair may be absent")
     omitted = keys & rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS

@@ -83,11 +83,12 @@ __all__ = [
     "Turn",
     "TurnAnswer",
     "merge_turn_payloads",
+    "served_turn_count",
     "session_text",
     "session_turns",
-    "served_turn_count",
     "source_narrative",
     "source_session",
+    "turn_high_water",
     "turn_payloads",
     "turn_prior_vectors",
 ]
@@ -408,6 +409,12 @@ def _shortfall(turns: Sequence[Turn], turn_count: int | None,
       the caller cannot name it — degrade, never invent). It is the session's
       LIVE end, not a peak: the writer lowers it on a shorter re-capture (see
       ``session_turns``), so a shrink is not reported as a missing tail.
+    * it holds a row ABOVE the id space's end (``max(index) > turn_max_index``) —
+      residue from a shorter re-capture whose surplus sweep did not land, the
+      mirror of the bullet above and the direction `served_turn_count` cannot
+      refuse (a LONGER transcript is also the honest APPEND shape, #10021 review
+      P2). An append writes ``turn_max_index = turn_offset + count - 1``, so it
+      can never leave a row above the mark; residue can.
 
     A record that HOLDS FEWER than its own count, or whose ids start above 0,
     skip an index, or stop short of the mark has not answered for the session —
@@ -429,6 +436,22 @@ def _shortfall(turns: Sequence[Turn], turn_count: int | None,
         return (f"the record's turn rows stop at index {max(held)} while the "
                 f"session's turn ids reach {turn_max_index} — the tail is "
                 "missing, so this is a partial transcript")
+    if turn_max_index is not None and max(held) > turn_max_index:
+        # ⛔ THE MARK IS A WITNESS IN BOTH DIRECTIONS (#10021 review P2). Only
+        # the SHORT side was read above, so rows ABOVE the session's live
+        # id-space end — a shorter re-capture whose surplus sweep did not land
+        # (the record delete is journal-emitted and can be refused) — answered
+        # COMPLETE and were served as this session's transcript. An APPEND
+        # cannot produce this shape: it writes `turn_max_index =
+        # turn_offset + count - 1` (`sdk._write_session_and_turns`), so for a
+        # healthy append `max(held) <= turn_max_index` always. A row above the
+        # live end is residue, and `served_turn_count` deliberately tolerates a
+        # LONGER served set when the record answered, so nothing downstream
+        # would have questioned it either — this comparison is the only one that
+        # can, and the datum is already in hand.
+        return (f"the record holds turn rows up to index {max(held)} while the "
+                f"session's turn ids reach only {turn_max_index} — rows the "
+                "session no longer owns, so this is not its transcript")
     return None
 
 
@@ -507,7 +530,7 @@ def merge_turn_payloads(answer: TurnAnswer, other: Sequence[dict]) -> list[dict]
     return [merged[turn_id] for turn_id in sorted(order, key=_order_key)]
 
 
-def served_turn_count(*, answer: "TurnAnswer | None", served: int,
+def served_turn_count(*, answer: TurnAnswer | None, served: int,
                       declared: int | None,
                       read_failed: bool = False) -> tuple[int | None, str]:
     """The ``turns`` a detail body may publish beside ``served`` rows — or why not.
@@ -665,6 +688,67 @@ def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
             status=status if isinstance(status, str) else None,
         )
     return out
+
+
+def turn_high_water(conn: Any, *, org_id: str, graph_id: str,
+                    session_id: str) -> int | None:
+    """The HIGHEST turn index the RECORD holds for this session — or ``None``.
+
+    The record's own answer to the question `sdk._write_capture_turns` asks
+    before it removes a shorter re-capture's surplus (#10021 review P2). The
+    bound of that sweep used to come from ONE place: the graph `:Session`'s
+    ``turn_max_index``, read only when a probe of the graph `:Session` node said
+    the session already existed. That is a fact about the GRAPH, and the bound it
+    supplies is a fact about the RECORD's residue — the two coincide only while
+    every captured session also has a live graph node, which §2.0/§9.1
+    explicitly deny (the graph is the cache; D7 is measured with it destroyed).
+    With the node gone, a 4-turn session re-captured as 1 turn swept NOTHING and
+    the record kept ``_t0.._t3``, which both serving doors then presented as a
+    COMPLETE transcript (``record_read._shortfall`` refuses a SHORT answer, and
+    a longer one is the append shape it deliberately serves).
+
+    ⛔ IT IS THE ROW SET'S ANSWER, NOT THE NARRATIVE'S. ``turn_count`` on
+    ``session_narrative`` is a WINDOW length (an append leaves ``offset + count``
+    rows against it — see :func:`served_turn_count`), so it cannot name the last
+    index; a row the session no longer owns is only visible in the ids.
+
+    ``None`` means "the record holds no turn row for this session", which is a
+    clean answer (a fresh capture), not a failure — a FAILED read raises, so the
+    caller's ``except`` can tell the two apart and decline to sweep rather than
+    sweep an invented range. Scoped like :func:`_turns`: an unscoped read here
+    would report "no rows" for every session under the production role.
+    """
+    from tortoise.record_projection import scope_connection
+
+    if not session_id:
+        raise RecordReadError("turn_high_water needs a session id")
+    scope_connection(conn, org_id)
+    cursor = _cursor(conn)
+    # The same sargable range + anchored regex `_turns` uses, projected down to
+    # the KEY: the index lives in the id, and only a key-per-row scan can order
+    # `_t9` before `_t10` (a lexical `max(node_key)` cannot).
+    cursor.execute(
+        f"SELECT node_key FROM public.{POINT_TABLE} "
+        f"WHERE org_id = %s AND graph_id = %s AND is_episodic IS TRUE "
+        f"AND node_key >= %s AND node_key < %s AND node_key ~ %s",
+        (org_id, graph_id, session_id + "_t", session_id + "_u",
+         _turn_pattern(session_id)),
+    )
+    highest: int | None = None
+    for row in _rows(cursor):
+        key = row[0] if row else None
+        if not isinstance(key, str):
+            continue
+        try:
+            index = _turn_index(key, session_id)
+        except RecordReadError:
+            # The regex above already refused every key without a parseable
+            # index, so this is unreachable from a real row set; skip rather
+            # than abort a sweep bound on one damaged key.
+            continue
+        if highest is None or index > highest:
+            highest = index
+    return highest
 
 
 def _cursor(conn: Any):
