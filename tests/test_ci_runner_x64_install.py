@@ -904,6 +904,8 @@ def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Pat
     Mutation: the refusal back to a PREFIX test (`/^\$/`) -> the four CONTENT fixtures below (an
     expression INSIDE a label, a YAML alias, a space-bearing scalar) are emitted as literal labels,
     no `!` is printed, and `--status` exits 0 with fabricated `= 0 of N … a report` rows -> RED.
+    Mutation: drop `|| v ~ /^[>|]/` -> the two BLOCK-SCALAR fixtures below print the INDICATOR as a
+    label (`⛔ >- = 0 of 1 … a report, not a block`) and exit 0 over the incident state -> RED.
     Control: a `group:` with genuinely NO `labels:` key stays a report — there is no label to check,
     which is a real read (pinned by the case above).
     """
@@ -953,6 +955,21 @@ def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Pat
         # printed several FABRICATED labels (one row per fragment, exit 0).
         "space-bearing scalar": (
             "jobs:\n  a:\n    runs-on: self-hosted-x64 ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # ⛔ A BLOCK-SCALAR INDICATOR IS THE SCALAR HEADER, NOT A LABEL, AND IT PASSED THE PREDICATE.
+        # `${{`, whitespace and `^[*&]` miss `>` / `|`, so the INDICATOR was printed as a label name
+        # (`⛔ >- = 0 of 1 … a report, not a block`), the scalar VALUE on the next line was consumed
+        # as an unreadable continuation, and the block cleared at exit 0 — over exactly the incident
+        # state, with a `--status && …` guard told coverage was fine. These are ordinary YAML for a
+        # single string (the folded/literal spelling of the same `ubuntu-24.04` the case above
+        # refuses at exit 5), which is why the refusal cannot be a same-line-scalar assumption.
+        "folded block scalar": (
+            "jobs:\n  a:\n    runs-on: >-\n      ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "literal block scalar": (
+            "jobs:\n  a:\n    runs-on: |\n      ubuntu-24.04\n"
             "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
         ),
     }

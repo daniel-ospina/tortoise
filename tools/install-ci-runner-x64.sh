@@ -448,11 +448,11 @@ if [ "$MODE" = status ]; then
         # instrument meant to surface the all-PR-BLOCKED state exited 0 over it. `${{` ANYWHERE is
         # the predicate a comparable applies (actionlint `ast.go` `ContainsExpression` is
         # `strings.Index(s, "${{")`, not a prefix test) and what the EXIT contract in this file
-        # promises. Whitespace and a YAML alias (`*pool`) are refused for the same reason — no
-        # static label set — and because neither survives the unquoted `for label in
-        # $coverage_labels` below: it word-splits, so a space-bearing token would be printed as
-        # several FABRICATED labels instead of refused as one unreadable block.
-        if (v ~ /\$\{\{/ || v ~ /[ \t]/ || v ~ /^[*&]/) { bad++; return }
+        # promises. Whitespace and a YAML alias (`*pool`) are refused for the same reason (a token
+        # word-splits through the unquoted `for label in $coverage_labels` into FABRICATED labels)
+        # — and so is a BLOCK-SCALAR INDICATOR (`>`, `>-`, `|`, `|+`): that is the scalar HEADER,
+        # not a label, so `runs-on: >-` printed `⛔ >- = 0 of 1` and exited 0 with its value unread.
+        if (v ~ /\$\{\{/ || v ~ /[ \t]/ || v ~ /^[*&]/ || v ~ /^[>|]/) { bad++; return }
         print v; got++
       }
       function flowlist(s,   n, i, a) {
