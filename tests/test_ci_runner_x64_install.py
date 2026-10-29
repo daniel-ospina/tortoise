@@ -1579,6 +1579,63 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     )
 
 
+# ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────
+def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
+    """A `runs-on: ubuntu-24.04` job whose file was never told about the mitigation stays invisible.
+
+    Three sites still asserted the premise this change inverts, because the inventory was written
+    from memory rather than read off the tree: `python-ci.yml` (`test-slow`, the leg #6897 was
+    filed about — *"`ubuntu-24.04` is claimed by NO self-hosted runner"*), the `workflow-lint`
+    STEP comment (*"pinned to a HOSTED label … so it has its own egress IP"*, 22 lines under the
+    header that says the opposite), and `finding-provenance.yml` (*"a version-pinned label no
+    self-hosted runner claims removes the ambiguity"*) — and `finding-provenance` was not named in
+    the runbook's accepted-cost list at all, so its two jobs became pool-eligible with nobody
+    having recorded the cost.
+
+    So this pins the INVENTORY against the TREE, two ways: every workflow that carries a
+    job-level `runs-on: ubuntu-24.04` must be named in the runbook's accepted-cost list, the stated
+    job count must be the measured one, and each such file must itself name the mitigation (a file
+    whose pin the mitigation makes servable and that never mentions it is the shape that stayed
+    false for a whole round of review).
+
+    Mutation: drop the `finding-provenance` bullet -> RED on both arms (the file is pinned twice
+    but named nowhere, and its own comment still asserts the reverse).
+    """
+    wf_dir = REPO_ROOT / ".github" / "workflows"
+    pinned = {
+        path.name: len(re.findall(r"^    runs-on: ubuntu-24\.04$", path.read_text(), re.MULTILINE))
+        for path in sorted([*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")])
+    }
+    pinned = {name: n for name, n in pinned.items() if n}
+    total = sum(pinned.values())
+    assert total == 9, (
+        "the `runs-on: ubuntu-24.04` job count moved — re-derive the runbook's accepted-cost list "
+        f"and this pin together, do not assume {total} is right: {pinned}"
+    )
+
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    start = runbook.index("⛔ **The mitigation is label-WIDE")
+    section = runbook[start : runbook.index("These are **accepted costs", start)]
+
+    words = {6: "six", 8: "eight", 9: "nine"}
+    assert f"all **{words[total]}**" in section, (
+        "the runbook no longer states the measured number of legs the mitigation makes servable, or "
+        f"states a different one than the tree has ({total}): {section[:400]!r}"
+    )
+
+    for name, n in pinned.items():
+        assert name in section, (
+            f"{name} pins {n} job(s) to `ubuntu-24.04`, so the mitigation makes {'them' if n > 1 else 'it'} "
+            "pool-eligible — but the runbook's accepted-cost list does not name the file, so its cost is "
+            "unrecorded. Add a bullet (or re-derive the count) rather than widening this assertion."
+        )
+        assert "CI_RUNNER_OS_LABEL" in (wf_dir / name).read_text(), (
+            f"{name} pins a job to `ubuntu-24.04` and never mentions `CI_RUNNER_OS_LABEL`: its in-file "
+            "comment still reads as if the pool cannot answer that label, which is the premise this "
+            "mitigation makes FALSE (measured: 7 of 12 runners carry it)"
+        )
+
+
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
 def test_memory_ci_runners_exit_contract_is_intent_gated():
     """`MEMORY.md` is the shortcut file an agent reads MID-CODE, so its exit contract must match.

@@ -45,9 +45,9 @@ set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm6
 and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
 
 - `ARM64`/`X64` are **ornaments** — no job matches on them, and none can (a `runs-on` naming
-  either would have to name `self-hosted` too, which the repo forbids: `.github/workflows/python-ci.yml:1761`
+  either would have to name `self-hosted` too, which the repo forbids: `.github/workflows/python-ci.yml:1775`
   is "Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`", and the reason is
-  recorded at `:1748-1750` — a `self-hosted` pin removes the GitHub-hosted half of the race, so
+  recorded at `:1762-1764` — a `self-hosted` pin removes the GitHub-hosted half of the race, so
   during a hosted outage the required leg WAITS and "the aggregate stays pending — not answered
   yet" instead of being answered by the pool).
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
@@ -208,10 +208,11 @@ side.** Three consequences a reader must not miss:
 If the owner takes the recorded recommendation instead, the pool revert is
 `CI_RUNNER_OS_LABEL=off` plus `--repair-labels` — still one command.
 
-⛔ **The mitigation is label-WIDE, and SIX of the nine legs it now makes servable are pinned for
+⛔ **The mitigation is label-WIDE, and EIGHT of the nine legs it now makes servable are pinned for
 reasons that are NOT speed.** A label cannot be scoped to "the legs it starves": the moment the pool
-carries `ubuntu-24.04`, all **nine** `runs-on: ubuntu-24.04` jobs become eligible for it. Six of
-those pins exist to keep the job OFF the fleet, and none is about the watchdog:
+carries `ubuntu-24.04`, all **nine** `runs-on: ubuntu-24.04` jobs become eligible for it. Eight of
+those pins exist to keep the job OFF the fleet, and none is about the watchdog — `test-slow` is the
+only leg whose pin is about speed, and the mitigation buys it nothing (above):
 
 - `.github/workflows/mirror-images.yml` — *"a hosted runner has its own egress IP, so these pulls
   cannot spend the quota the self-hosted fleet shares; running it on the fleet would spend the very
@@ -235,11 +236,20 @@ those pins exist to keep the job OFF the fleet, and none is about the watchdog:
   mitigation is engaged — the instruments that exist to surface that outage become pool-eligible and
   go quiet precisely when they matter. Their four in-file comment blocks asserted the invariant this
   change reverses and were corrected in the same change.
+- `.github/workflows/finding-provenance.yml` — **both** of its jobs (`classify`, `provenance`) are
+  pinned on a fourth reason: **the runner tool contract (#9018)**, not egress, quota or topology.
+  The pool's service `PATH` is a minimal non-login one with no `gh`, so a pool-served run reds as
+  `gh: command not found` / 127 — a red that reads as a product failure and is not. Measured
+  2026-10-24: 38 of the 39 `classify` failures were on `pi-runner-vm-*` holding this same label
+  (run 40141219586). Both jobs now carry `runner-tools.sh ensure gh`, which provides the tool or
+  fails NAMING it — so the pin is a belt, not the brace. Its in-file comment also stated the
+  invariant as current ("a version-pinned label no self-hosted runner claims") and was corrected in
+  the same change.
 
-These are **accepted costs of the temporary mitigation, stated as costs**, and all six revert with
+These are **accepted costs of the temporary mitigation, stated as costs**, and all eight revert with
 it. If the mitigation becomes permanent, the scoping fix is to put the starved required legs on a
-label the pool answers and leave `mirror-images` / `workflow-lint` / the four observers on one only
-hosted answers.
+label the pool answers and leave `mirror-images` / `workflow-lint` / the four observers /
+`finding-provenance` on one only hosted answers.
 
 **The escape hatch, and the proof it works.** `ubuntu-24.04` is an **OS fact**, not a fallback label:
 `CI_RUNNER_OS_LABEL=on` (or `=auto`, which derives it from `/etc/os-release`) rides it on every label

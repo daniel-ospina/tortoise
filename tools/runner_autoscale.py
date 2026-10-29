@@ -654,11 +654,17 @@ def _host_is_the_os_release() -> bool:
     `CI_RUNNER_OS_NAME` / `CI_RUNNER_OS_RELEASE` are the INSTALLER's own seams, honoured here for
     the same reason it honours them: the box reading this code is not always the box being labelled,
     and a test that cannot drive the read cannot pin it.
+
+    ⛔ BOTH READ THE `:-` SPELLING, so a SET-BUT-EMPTY export means the DEFAULT, not the empty
+    string: `os.environ.get(k) or default`, never `os.environ.get(k, default)` — the latter applies
+    its default only when the key is ABSENT, which made `CI_RUNNER_OS_RELEASE=` (an empty export)
+    resolve to `open("")` here while the installer read `/etc/os-release`. Pinned by
+    `tests/test_runner_autoscale.py::test_a_set_but_empty_os_release_seam_reads_the_default_file_like_the_installer`.
     """
     if (os.environ.get("CI_RUNNER_OS_NAME") or platform.system()) != "Linux":
         return False
     try:
-        release = os.environ.get("CI_RUNNER_OS_RELEASE", "/etc/os-release")
+        release = os.environ.get("CI_RUNNER_OS_RELEASE") or "/etc/os-release"
         with open(release, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if line.startswith("VERSION_ID="):

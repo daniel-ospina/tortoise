@@ -1352,6 +1352,43 @@ def test_resolve_labels_matches_the_installer_on_every_os_label_arm(
     )
 
 
+def test_a_set_but_empty_os_release_seam_reads_the_default_file_like_the_installer(monkeypatch):
+    """`CI_RUNNER_OS_RELEASE=` must mean the REAL `/etc/os-release`, on both sides of the mirror.
+
+    The installer spells it `${CI_RUNNER_OS_RELEASE:-/etc/os-release}`; this module spelled it
+    `os.environ.get("CI_RUNNER_OS_RELEASE", "/etc/os-release")`, where the default applies only
+    when the key is ABSENT. So an EMPTY export — which is what `export X=$SOME_UNSET_VAR` produces,
+    and how an env file drops a seam — made the installer read the real release while this
+    derivation tried to `open("")`, got `OSError`, and declined. On an `ubuntu-24.04` box that is
+    the installer claiming the label and the autoscaler's mirror refusing to re-apply it, on the
+    unattended path, with nothing else saying why. Same class as the `get(k, "off")` bug in
+    `_os_labels` three functions away.
+
+    Host-independent by construction: the DEFAULT PATH is intercepted, so the assertion is about
+    which file the empty value resolves to, not about this box's release. Mutation: restore
+    `get("CI_RUNNER_OS_RELEASE", "/etc/os-release")` -> the read is `""` -> RED.
+    """
+    import builtins
+
+    monkeypatch.setenv("CI_RUNNER_OS_NAME", "Linux")
+    monkeypatch.setenv("CI_RUNNER_OS_RELEASE", "")
+    seen: list[str] = []
+    real_open = builtins.open
+
+    def spy(path, *args, **kwargs):
+        seen.append(str(path))
+        if str(path) == "/etc/os-release":
+            raise FileNotFoundError(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+    assert RA._host_is_the_os_release() is False  # the intercepted default file does not exist
+    assert seen == ["/etc/os-release"], (
+        "an EMPTY `CI_RUNNER_OS_RELEASE` must resolve to the default file (`:-`, the installer's "
+        f"spelling), not to the empty path: read {seen}"
+    )
+
+
 def test_an_unknown_os_label_value_refuses_rather_than_defaulting_to_off(monkeypatch):
     """A typo is not `off`: refuse, the way the installer does.
 
