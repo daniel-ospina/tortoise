@@ -2391,10 +2391,17 @@ class TestARenderedCodeElementGetsAMonoFace:
     `website/404.html`'s `<code>` were **Courier** while every sibling page was
     **Menlo**, because those two files rendered the element and never styled it.
 
-    Scope is the self-contained page: a file carrying its own `<style>` block, i.e.
-    the marketing pages, the 404, and the blog renderer's inline sheet. A React
-    component styled by a separate stylesheet is out of scope — this test cannot see
-    across files, and pretending otherwise would pin nothing.
+    Scope is the self-contained page: a file under `ROOTS` carrying its own `<style>`
+    block, i.e. the marketing pages, the 404, and the blog renderer's inline sheet. A
+    React component styled by a separate stylesheet is out of scope — this test cannot
+    see across files, and pretending otherwise would pin nothing. Two more emitters are
+    self-contained with their own sheet and are deliberately OUTSIDE `ROOTS` because
+    they are not pages this tree serves for reading: `tortoise/oauth.py:2145` (the MCP
+    consent page) and `tortoise/render.py:94` (the renderer's own document), both of
+    which the sibling declaration guard scans. Neither renders `<code>`/`<pre>` today,
+    so no live element is missed — and
+    `test_the_out_of_root_emitters_render_no_code` pins that precondition, so growing
+    one there reds with the repair named instead of slipping past this scan.
 
     WHAT THIS PINS: every self-contained page that renders `<code>`/`<pre>` carries a
     rule naming that element whose family resolves to a mono face. That is the shape
@@ -3002,3 +3009,54 @@ class TestARenderedCodeElementGetsAMonoFace:
             assert got == expect, (
                 f"{'false green' if got else 'false red'}: {why}\n  css: {css}\n"
                 f"  guard says mono={got}, CSS computes mono={expect}")
+
+    #: the self-contained emitters this guard's `ROOTS` does NOT reach, each carrying the
+    #: `<style>` block that makes it a page the sibling declaration guard scans.
+    OUT_OF_ROOT_EMITTERS = ("tortoise/oauth.py", "tortoise/render.py")
+
+    def test_the_out_of_root_emitters_render_no_code(self):
+        """The scope limit is stated, so its precondition is pinned instead of assumed.
+
+        `Scope` above names two self-contained emitters that carry their own sheet but
+        sit outside `ROOTS` (`tortoise/`, not `website/` + `apps/`), and that sentence is
+        only true while neither renders a `<code>`/`<pre>`: an element there is one this
+        scan cannot see, so the Courier defect (#6870) would have no guard on that
+        surface at all. A narrow, deliberate exclusion is exactly the kind of claim that
+        rots silently, so the precondition is measured here rather than trusted.
+
+        Non-vacuity: the same predicate is applied first to the pages INSIDE `ROOTS`, and
+        must find at least `MIN_PAGES` of them — a predicate that had stopped seeing
+        elements would otherwise pass this test by finding nothing anywhere.
+        """
+        repo = Path(__file__).resolve().parent.parent
+
+        def _visible(rel):
+            text = (repo / rel).read_text(errors="replace")
+            return self.COMMENT.sub(" ", self.INERT.sub(" ", text))
+
+        inside = [rel for rel in
+                  (p.relative_to(repo).as_posix() for p in self._sources(repo))
+                  if self.RENDERS_CODE.search(_visible(rel))]
+        assert len(inside) >= self.MIN_PAGES, (
+            "this predicate finds no element even on the pages this guard scans "
+            f"({inside}) — it is not measuring what it claims")
+        assert not any(rel in inside for rel in self.OUT_OF_ROOT_EMITTERS), (
+            "an out-of-root emitter is inside `ROOTS` after all — the scope note in this "
+            "class is now wrong")
+
+        grew = []
+        for rel in self.OUT_OF_ROOT_EMITTERS:
+            text = _visible(rel)
+            assert self.STYLE.search(text), (
+                f"{rel} no longer carries its own `<style>` block — the scope note in "
+                "this class names it as a self-contained page, so either the note or "
+                "this list is now stale")
+            if self.RENDERS_CODE.search(text):
+                grew.append(rel)
+        assert not grew, (
+            "these self-contained emitters sit OUTSIDE this guard's ROOTS and have grown "
+            "a `<code>`/`<pre>` element — that element has no mono rule this scan can "
+            "see, which is the #6870 defect on a surface with no guard. Either give the "
+            "element a mono family inside the emitter, or declare the file in `ROOTS` "
+            "and extend the ratchet, so the exclusion stays deliberate:\n  "
+            + "\n  ".join(grew))

@@ -808,9 +808,15 @@ SOURCE_PATTERNS = {
                    # #10254 review (P2): the ELEMENT-level guard
                    # (`tests/test_website_static.py::
                    # TestARenderedCodeElementGetsAMonoFace`) declares `apps/` in its
-                   # `ROOTS`, and `apps/graph-viz/index.html` is the one page under
-                   # it that carries its own `<style>` block — i.e. the only subject
-                   # in that root the guard can DECIDE on. It renders no `<code>`/
+                   # `ROOTS`, and `apps/graph-viz/index.html` is the one subject in
+                   # that root the guard can DECIDE on that NO leg ran. Two files
+                   # under `apps/graph-viz/` carry their own `<style>` block at this
+                   # head — this one and `src/components/ontology/HierarchyChart.tsx:645`
+                   # — and the second already selects this surface through the
+                   # `apps/graph-viz/src/` row above, so it needs no entry of its own
+                   # (#10254 review: the earlier wording called this page "the only
+                   # subject the guard can DECIDE on", which the measurement
+                   # contradicts). It renders no `<code>`/
                    # `<pre>` today, which is precisely why it needs naming: the
                    # moment someone re-copies a Courier-rendering snippet into that
                    # page, the guard would flag it and no leg would run it.
