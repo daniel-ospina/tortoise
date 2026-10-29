@@ -26,6 +26,16 @@ def _fresh_sdk() -> TortoiseSDK:
     return TortoiseSDK(os.path.join(tempfile.mkdtemp(), "t.db"))
 
 
+def _oid(sdk, name: str, label: str = "Object") -> str:
+    """The MINTED id ``name`` carries — #3590 made the supersede fold id-keyed
+    only, so every fold below addresses its target by id, never by name."""
+    rows = sdk._get_proj().g.query(
+        f"MATCH (n:{label} {{name:$n}}) RETURN n.id",
+        params={"n": name}).result_set
+    assert rows, f"fixture did not create {label} {name!r}"
+    return rows[0][0]
+
+
 # ── Payload contract (Step 1) ─────────────────────────────────────────
 
 class TestPayloadContract:
@@ -113,8 +123,12 @@ class TestProjectionFold:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "strategy-A", objectKind="core:strategy")
+            # #3590: the fold is ID-KEYED ONLY — an id-less record addresses
+            # nothing (the name branch is retired; see
+            # `test_fold_returns_match_count`'s (3b) case).
             sdk._get_proj()._fold_object_superseded({
-                "id": "", "name": "strategy-A", "supersedes_by": "strategy-B"})
+                "id": _oid(sdk, "strategy-A"), "name": "strategy-A",
+                "supersedes_by": "strategy-B"})
             proj = sdk._get_proj()
             rows = proj.g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
@@ -130,10 +144,11 @@ class TestProjectionFold:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "strategy-A", objectKind="core:strategy")
-            # the journaled event shape (id + name + supersedes_by)
+            # the journaled event shape (id + name + supersedes_by) — the id is
+            # the address; #3590 retired the name-keyed fallback.
             sdk._get_proj().apply({
                 "type": "ObjectSuperseded",
-                "id": "", "name": "strategy-A",
+                "id": _oid(sdk, "strategy-A"), "name": "strategy-A",
                 "supersedes_by": "strategy-B"})
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status",
@@ -545,7 +560,8 @@ class TestProjectionFold:
         try:
             sdk.create_entity("object", "strategy-A", objectKind="core:strategy")
             sdk._get_proj()._fold_object_superseded({
-                "name": "strategy-A", "supersedes_by": "B"})
+                "id": _oid(sdk, "strategy-A"), "name": "strategy-A",
+                "supersedes_by": "B"})
             # a re-mention (ObjectRegistered) must NOT reset status
             sdk.create_entity("object", "strategy-A", objectKind="core:strategy")
             rows = sdk._get_proj().g.query(
@@ -595,9 +611,15 @@ class TestProjectionFold:
             #     terminal target; stored values unchanged
             assert fold({"id": oid, "name": "strategy-A",
                           "supersedes_by": "strategy-B"}, cas=True) == (0, 1)
-            # (3b) name-branch CAS (legacy no-id shape)
+            # (3b) #3590 RETIRED the name branch: an id-less record is
+            #      UNADDRESSABLE whatever name it carries, so it folds nothing
+            #      even when a live carrier holds that name (the name-keyed
+            #      fold could supersede a DIFFERENT incarnation under
+            #      same-name coexistence — #3573's burial class). Its miss is
+            #      classified one level up (rebuild_all's sweep / the
+            #      reference fold's classifier), not here.
             assert fold({"id": "", "name": "strategy-A",
-                          "supersedes_by": "strategy-B"}, cas=True) == (0, 1)
+                          "supersedes_by": "strategy-B"}, cas=True) == (0, 0)
             assert fold({"id": "", "name": "no-such-object",
                           "supersedes_by": "strategy-B"}, cas=True) == (0, 0)
             rows = sdk._get_proj().g.query(
@@ -624,9 +646,11 @@ class TestProjectionFold:
             sdk.create_entity("object", "cas-C", objectKind="core:strategy")
             fold = proj._fold_object_superseded
             ts1 = "2026-09-07T00:00:00Z"
+            cas_a = _oid(sdk, "cas-A")
             # cas=True EXPLICIT (the default is False/blind — replay parity)
-            assert fold({"name": "cas-A", "supersedes_by": "cas-B",
-                         "ts": ts1}, cas=True) == (1, 1)
+            assert fold({"id": cas_a, "name": "cas-A",
+                         "supersedes_by": "cas-B", "ts": ts1},
+                        cas=True) == (1, 1)
             rows = proj.g.query(
                 "MATCH (o:Object {name:$n}) "
                 "RETURN o.status, o.supersededBy, o.supersededAt",
@@ -634,8 +658,9 @@ class TestProjectionFold:
             assert rows and rows[0] == ["superseded", "cas-B", ts1], rows
             # divergent re-fold → CAS keeps first stamps, reports the loss
             ts2 = "2026-09-07T01:00:00Z"
-            assert fold({"name": "cas-A", "supersedes_by": "cas-C",
-                         "ts": ts2}, cas=True) == (0, 1)
+            assert fold({"id": cas_a, "name": "cas-A",
+                         "supersedes_by": "cas-C", "ts": ts2},
+                        cas=True) == (0, 1)
             rows = proj.g.query(
                 "MATCH (o:Object {name:$n}) "
                 "RETURN o.status, o.supersededBy, o.supersededAt",
@@ -695,12 +720,13 @@ class TestProjectionFold:
             sdk.create_entity("object", "bl-B", objectKind="core:strategy")
             sdk.create_entity("object", "bl-C", objectKind="core:strategy")
             fold = proj._fold_object_superseded
+            bl_a = _oid(sdk, "bl-A")
             ts1 = "2026-09-07T00:00:00Z"
             # default cas=False (no cas= arg) — blind, pre-CAS parity
-            assert fold({"name": "bl-A", "supersedes_by": "bl-B",
+            assert fold({"id": bl_a, "name": "bl-A", "supersedes_by": "bl-B",
                          "ts": ts1}) == (1, 1)
             ts2 = "2026-09-07T01:00:00Z"
-            assert fold({"name": "bl-A", "supersedes_by": "bl-C",
+            assert fold({"id": bl_a, "name": "bl-A", "supersedes_by": "bl-C",
                          "ts": ts2}) == (1, 1)
             rows = proj.g.query(
                 "MATCH (o:Object {name:$n}) "
@@ -765,7 +791,8 @@ class TestWorkItemFold:
             # #2164 capture fold: supersede the work item (repo convention —
             # the projection fold invoked by the commit path).
             sdk._get_proj()._fold_object_superseded({
-                "name": "TASK-9", "supersedes_by": "TASK-9-v2"})
+                "id": _oid(sdk, "TASK-9"), "name": "TASK-9",
+                "supersedes_by": "TASK-9-v2"})
             # completed family first — pre-fix this SET clobbers → completed.
             sdk.create_event("closed", "github.issue.closed", object="TASK-9")
             rows = sdk._get_proj().g.query(
@@ -866,7 +893,8 @@ class TestReadSide:
             sdk.create_entity("object", "old-strategy", objectKind="core:strategy")
             sdk.create_entity("object", "new-strategy", objectKind="core:strategy")
             sdk._get_proj()._fold_object_superseded({
-                "name": "old-strategy", "supersedes_by": "new-strategy"})
+                "id": _oid(sdk, "old-strategy"), "name": "old-strategy",
+                "supersedes_by": "new-strategy"})
             default = [o["content"] for o in sdk.recall_state(
                 kind="core:strategy", limit=10, object_centric=True)
                 if o.get("entity_type") == "object"]
