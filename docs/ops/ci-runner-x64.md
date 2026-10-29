@@ -23,7 +23,7 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
 | `ubuntu-latest` | 75 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
-| `ubuntu-24.04` | 9 | **GitHub-hosted only** — pinned on purpose (`test-slow`, `workflow-lint`, `finding-provenance` ×2, `mirror-images`, and the four fleet observers `availability-liveness:check`, `availability-watchdog:probe`, `ci-check-repair:repair`, `ci-queue-health:queue-health`) |
+| `ubuntu-24.04` | 9 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
 Counts are JOBS (not files), measured 2026-10-27 at `a97a6b1` + the four-observer pin. Only `runs-on:`
 lines that name a single `ubuntu-*` label are counted; the `ubuntu-latest` row was previously
@@ -58,9 +58,12 @@ and an unreadable state is a refusal (exit 2), never a guess. The gate's state s
 of truth for when the pool serves CI. What changes is only *which architecture* may serve the
 fallback — which the decision never specified. The separate decision that pins legs to
 `ubuntu-<version>` (the pool is ~2x slower and killed `test-slow` at its watchdog, #6897/#7867)
-is untouched: these runners deliberately **do not** claim any `ubuntu-<version>` label — including
-the arm64 spellings GitHub also publishes (`ubuntu-24.04-arm`, `ubuntu-22.04-arm`,
-`ubuntu-26.04-arm`), which `_preserve_labels` drops too — the installer cannot emit one, and
+is **not** reversed by this section — it is **suspended while it deadlocks**, and only for the legs it
+starves. The installer's default stays `off`, so it still does **not** claim any `ubuntu-<version>`
+label unless an operator passes `CI_RUNNER_OS_LABEL=on|auto`; the live pool is opted IN as the
+temporary mitigation described in the label contract above. Arm64 spellings GitHub also publishes
+(`ubuntu-24.04-arm`, `ubuntu-22.04-arm`,
+`ubuntu-26.04-arm`), which `_preserve_labels` drops too — the installer refuses to emit them, and
 `tools/runner_autoscale.py::_preserve_labels` DROPS rather than preserves one on re-registration,
 so an out-of-band attachment cannot survive a re-registration or
 `tools/install-ci-runner-x64.sh --repair-labels`. That is NOT the same as "cannot become
@@ -71,12 +74,71 @@ Nothing ASSERTS the LIVE label set: `read_pool()` reads it on every autoscale pa
 `_preserve_labels` drops a pin from it, but no test and no gate compares it to the invariant above.
 Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a runner's labels are re-cut.
 
+## The label contract — a label no runner answers silently blocks EVERY PR
+
+**The rule:** every `runs-on:` label that any workflow in `.github/workflows/` names must have at
+least one **self-hosted** runner answering it. Not "usually", not "when hosted is healthy" — a label
+with no self-hosted answer can only be served by GitHub-**hosted**, and on this account hosted is
+effectively unavailable.
+
+**Measured 2026-10-28**, in jobs completed by the runner that ran them: **one 60-minute window had 25
+on self-hosted and 1 on hosted**; a later 30-minute window completed 92 jobs (3.1 jobs/min) with the
+queue still holding 200+ jobs against ~12 runner slots and the oldest run waiting **8 hours**. Hosted
+is not "slow here" — at that rate it cannot carry a required matrix at all.
+
+**The incident it explains.** `workflow-lint` and `test-slow (a–e)` in `.github/workflows/python-ci.yml`
+say `runs-on: ubuntu-24.04`. The self-hosted pool advertised `self-hosted-x64,ubuntu-latest` only, so
+those six legs were *unschedulable*. `python-ci-gate` is the **required** aggregate whose `needs:`
+includes every one of them, and a `needs:` job that never runs is never dispatched — so the gate never
+reported, and **every tortoise PR stayed `BLOCKED`** for the whole day: no red, no green, nothing to
+merge on. The gate was found queued **8 hours** on a run whose every other job had completed.
+
+**The decision this forces, stated as a decision.** Serving those legs from this pool costs what
+#6897 measured — the pool is ~2x slower, so a 20m watchdog leg can be KILLED here that hosted
+finished, i.e. a **red on healthy code**. Leaving them pinned costs a gate that is **never
+dispatched**: no red, no green, and **no merges at all**. On 2026-10-28 the second cost was the one
+being paid, so the pool carries `ubuntu-24.04` as a temporary, explicitly-flagged mitigation — and the
+installer's default stays `off`, so a fresh box does not silently reverse #6897. Flipping the default
+is the one-line change if the owner prefers the other trade; reverting the pool is
+`CI_RUNNER_OS_LABEL=off` plus a label reset.
+
+**The escape hatch, and the proof it works.** `ubuntu-24.04` is an **OS fact**, not a fallback label:
+`CI_RUNNER_OS_LABEL=on` (or `=auto`, which derives it from `/etc/os-release`) rides it on every label
+arm, so `--fallback off` cannot drop it. The 8-hour-stuck gate **dispatched within a minute** of the
+label being added, on `pi-runner-cmux-x64-6`, and completed in 6 s.
+
+**Verify it — do not assume it.** `tools/install-ci-runner-x64.sh --status` now ends with a
+`label-coverage` block: it reads every `runs-on:` label out of the workflows and prints how many
+runners answer it, marking any zero-answer label `⛔ UNCOVERED`. Run it from the repo root. A fresh
+box, a re-provisioned pool, or a new workflow with a new `runs-on:` value all show up there instead
+of as an unexplained all-PR block.
+
+**Adding capacity (the second half).** One runner instance = one concurrent job, so extra instances
+are the only lever on throughput besides trimming the matrix:
+
+```bash
+# on the box, reusing an existing install; registration token from the repo API
+sudo cp -a /opt/gh-runner-x64-4 /opt/gh-runner-x64-5
+sudo rm -rf /opt/gh-runner-x64-5/{.runner,.runner_migrated,.credentials,.credentials_rsaparams,.service,.env,.path,_work,_diag}
+sudo chown -R "$(id -un):$(id -gn)" /opt/gh-runner-x64-5
+cd /opt/gh-runner-x64-5 && ./config.sh --unattended --replace --url https://github.com/<owner>/<repo> \
+  --token "$TOK" --name <new-name> --labels self-hosted-x64,ubuntu-latest,ubuntu-24.04 --work "$PWD/_work"
+sudo ./svc.sh install "$(id -un)" && sudo ./svc.sh start     # NOT nohup: a reboot must not lose it
+```
+
+⛔ **`.runner_migrated` counts as "already configured"** — a copied directory that keeps it (or
+`.runner`) makes `config.sh` refuse with *"Cannot configure the runner because it is already
+configured"*. Remove every one of the files listed above, not just `.runner`.
+⛔ **Never start the same registration twice.** A `nohup`'d `run.sh` plus the systemd unit means two
+listeners polling under one name: they steal each other's jobs and one exits mid-job. After
+installing the unit, confirm **one** `Runner.Listener` per directory and kill the other.
+
 ## What is installed
 
 | | |
 | --- | --- |
 | Runner names | `pi-runner-x64-1`, `pi-runner-x64-2` |
-| Labels | `self-hosted`, `Linux`, `X64` (host-derived) + `self-hosted-x64` (custom, this arch's own) + `ubuntu-latest` while the fallback is engaged |
+| Labels | `self-hosted`, `Linux`, `X64` (host-derived) + `self-hosted-x64` (custom, this arch's own) + `ubuntu-latest` while the fallback is engaged + `ubuntu-24.04` **only** when an operator opts in with `CI_RUNNER_OS_LABEL=on|auto` (default `off`; the live pool is opted in as the temporary mitigation described in the label contract above) |
 | Directories | `/opt/gh-runner-x64` (instance 1), `/opt/gh-runner-x64-2` (instance 2) |
 | Service units | `actions.runner.daniel-ospina-tortoise.pi-runner-x64-<N>.service` (system mode, **enabled**) |
 | Version | pinned to the pool's `2.337.0`, tarball sha256 pinned in the installer |
@@ -143,17 +205,18 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:479` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:301` (arch refusal dies at `:306`) and `uninstall` `:354` ·
-  guards at `:301-350` (forks `:309`, disk `:329`, cpu/memory `:336`) · sha256 pin + registration
-  at `:490-500` (verify `:490`, token `:493`, one argv `:498-499`, `config.sh` `:500`) · systemd
-  install/start at `:510-512` · label resolution at `:177-219` (`fallback_engaged` `:181`,
-  `resolve_labels` `:192`) · `repair` `:241` · `--print-labels` `:274`.
-- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
+- `--count N` → `tools/install-ci-runner-x64.sh:571` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:393` (arch refusal dies at `:398`) and `uninstall` `:446` ·
+  guards at `:393-438` (forks `:401`, disk `:421`, cpu/memory `:428`) · sha256 pin + registration
+  at `:582-592` (verify `:582`, token `:585`, one argv `:590-591`, `config.sh` `:592`; the run at
+  `:574` is the dry-run echo) · systemd install/start at `:602-604` · label resolution at
+  `:205-252` (`fallback_engaged` `:207`, `resolve_os_label` `:218`, `resolve_labels` `:237`) ·
+  `repair` `:333` · `--print-labels` `:366`.
+- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:166-171`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:353-462`; the proof is `is_runner_install` at `:173`, which accepts `.runner` or
+  gone** (`:446-554`; the proof is `is_runner_install` at `:199`, which accepts `.runner` or
   `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -165,16 +228,20 @@ falls back.
   registration and all**, and reported (exit 3): the unit would otherwise survive pointing at a
   deleted working directory, and a still-registered runner would lose the only local record that a
   retry — and `--status` — can read, so `--uninstall` reported a clean removal while exiting 0.
-- **Exit codes** (`:53-66`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
+- **Exit codes** (`:65-78`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
   refused — headroom, arch, an undecidable fallback, or an uninstall target that is not provably
   a runner, with nothing downloaded or registered, so re-run with a smaller `--count` · `3`
   operation failed — download, sha256 verify, extract, token mint, `config.sh`, `svc.sh` (including
   a unit removal that failed, whose target directory is then left intact, or a deregistration that
-  failed, likewise left intact), a tool missing from PATH, or a failed remote read.
+  failed, likewise left intact), a tool missing from PATH, or a failed remote read · `4`
+  label-coverage could not read the workflows, so it has no verdict — no `.github/workflows/*.yml`
+  where `--status` was run, or workflows that name no single-label `runs-on:` at all. Nothing was
+  read, so nothing was cleared: re-run `--status` from the repo root, because an empty read is not
+  a coverage verdict (a `0`-runner label inside a real read is `0` with its own ⛔ line, not `4`).
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:301`, the `MODE = install`
-  block; the refusal itself dies at `:306`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:393`, the `MODE = install`
+  block; the refusal itself dies at `:398`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 
@@ -257,8 +324,9 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    marker and syncs the fallback label to the gate's state by hand, with no re-registration.
 2. **The pool is still the slower class for long legs.** These runners are not pinned off the
    fast matrix (`test (a)…(i)`), so a 20m watchdog leg can still be killed here if this box
-   turns out slower than hosted under load. That is the #6897 measurement, unchanged; the
-   version-pinned hosted legs stay pinned.
+   turns out slower than hosted under load. That is the #6897 measurement, unchanged — and while hosted
+   is unavailable the version-pinned legs are exactly the ones this pool now has to serve, at that
+   measured risk. The rest of the fast matrix is unaffected.
 3. **`ubuntu-latest` remains ambiguous by design.** Any job asking for it can land on
    GitHub-hosted, an ARM64 runner, or one of these — that ambiguity is what the fallback is
    for, and why the legs that need a specific class are version-pinned.

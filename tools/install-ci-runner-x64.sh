@@ -30,12 +30,24 @@
 #
 # ⛔ ARCH LABELS ARE NOT INTERCHANGEABLE. A runner is registered with `self-hosted-x64`
 #   (its own distinct pool marker, mirroring `self-hosted-arm64`) — NEVER with
-#   `self-hosted-arm64`, and never with `ubuntu-<version>`. Claiming another arch's label
-#   would let an x86 box serve an arch-specific job and produce a wrong artifact, which is a
-#   false PASS rather than a queue delay. `ubuntu-<version>` stays claimed by NO self-hosted
-#   runner: it is the version-pinned HOSTED label that `test-slow` / `workflow-lint` /
-#   `finding-provenance` / `mirror-images` are pinned to on purpose (they need the hosted
-#   class or a fresh egress IP).
+#   `self-hosted-arm64`. Claiming another arch's label would let an x86 box serve an arch-specific
+#   job and produce a wrong artifact, which is a false PASS rather than a queue delay.
+#
+# ⛔ `ubuntu-<version>` STAYS UNCLAIMED BY DEFAULT — and this script can now emit it on request.
+#   The pin is a recorded decision (#6897/#7867): the pool is ~2x slower and killed `test-slow` at
+#   its 20m watchdog, so those legs were pinned to GitHub-hosted on purpose. `CI_RUNNER_OS_LABEL`
+#   therefore defaults to `off`: nothing is claimed unless an operator asks.
+#   ⚠️ WHY THE ARM EXISTS AT ALL: a hosted-only label is only safe while hosted exists. Measured
+#   2026-10-28, hosted was effectively unavailable (1 completed job in an hour against 25 on
+#   self-hosted), so the pinned legs did not get a "queue delay" — they NEVER RAN, `python-ci-gate`
+#   waited for them forever, and EVERY PR stayed BLOCKED. The gate was found queued 8 HOURS on a run
+#   whose every other job had finished; it dispatched within a minute of `ubuntu-24.04` being added
+#   to the pool. So the arms are the documented escape from a deadlock, not a new default:
+#   `CI_RUNNER_OS_LABEL=on` (or `=auto`) claims the OS fact this box actually is (`/etc/os-release`).
+#   ⛔ THE COST IS NAMED, NOT ASSUMED AWAY: on this pool a watchdog-bounded leg can be KILLED where
+#   hosted finished it (#6897) — a red on healthy code. That is a red somebody sees, unlike a gate
+#   that is never dispatched. Choosing between the two is an owner decision, recorded in
+#   `docs/ops/ci-runner-x64.md`; this flag is how either choice is applied without another code change.
 #
 # USAGE
 #   tools/install-ci-runner-x64.sh --count 2                  # install/repair runners 1..2
@@ -62,6 +74,8 @@
 #        failed systemd unit removal, or a failed `config.sh remove`, included — that target is then
 #        LEFT intact rather than deleted out from under an enabled unit or a live registration), a
 #        tool missing from PATH, or a failed remote read (`--status`).
+#     4  label-coverage could not read the workflows, so it has NO verdict — run `--status` from
+#        the repo root. An empty read is not a clean bill of health.
 set -uo pipefail
 
 # The help text is the file's OWN header, cut at the closing `set` line rather than a frozen line
@@ -85,6 +99,18 @@ ARCH_LABEL="self-hosted-x64"
 ARM_POOL_LABEL="self-hosted-arm64"
 # The fallback label the gate attaches/detaches — never permanent (see header).
 FALLBACK_LABEL="ubuntu-latest"
+# ⛔ THE OS-RELEASE LABEL IS AN OS FACT, NOT A FALLBACK — and omitting it blocks EVERY PR.
+# The required legs `workflow-lint` and `test-slow (a–e)` in .github/workflows/python-ci.yml name
+# `runs-on: ubuntu-24.04`. The only other pool that answers that label is GitHub-HOSTED, and hosted
+# is effectively unavailable here (measured 2026-10-28: 1 completed hosted job/hour against 92 jobs
+# on self-hosted in 30 min). A runner that omits it therefore makes those legs UNSCHEDULABLE, and
+# `python-ci-gate` — the REQUIRED aggregate whose `needs:` includes them — is never dispatched, so
+# every PR stays BLOCKED no matter how much capacity the fleet has.
+# Measured the same night: the gate had been queued 8h on a run whose every other job had completed,
+# and it dispatched within a minute of this label being added (on pi-runner-cmux-x64-6).
+# Derived from /etc/os-release below in the `auto` arm only (`on` claims it unconditionally, which is
+# why `on` is the wrong value on a box that is not 24.04); an unrecognised value is a usage error.
+OS_LABEL="ubuntu-24.04"
 # Measured on a real job (2026-10-22, this box, `legal-e2e`): one python process saturated a
 # core (99.3%) with apt at 46% alongside — i.e. ~1.0-1.5 cores per concurrent job, plus the
 # per-job docker/FalkorDB it starts. 2 cores/job is the sizing unit, and 2 cores are held back
@@ -189,8 +215,28 @@ fallback_engaged() {
   [ "$n" -gt 0 ] && echo on || echo off
 }
 
+resolve_os_label() { # sets OS_LABELS ("" or ",ubuntu-24.04"); OFF by default, never guessed
+  OS_LABELS=""
+  case "${CI_RUNNER_OS_LABEL:-off}" in
+    on)  OS_LABELS=",$OS_LABEL"; return 0 ;;
+    off) return 0 ;;
+    auto)
+      [ "$(uname -s)" = Linux ] || return 0
+      # The subshell keeps os-release's NAME/VERSION_ID out of this script's environment.
+      # shellcheck disable=SC1091
+      ( . /etc/os-release 2>/dev/null && [ "${VERSION_ID:-}" = "${OS_LABEL#ubuntu-}" ] ) && OS_LABELS=",$OS_LABEL"
+      return 0 ;;
+    # ⛔ AN UNKNOWN VALUE IS REFUSED, never a silent no-op: `CI_RUNNER_OS_LABEL=true|ON|1` used to
+    # print a label list with no `ubuntu-24.04` and exit 0, so an operator who mistyped believed the
+    # deadlock escape was applied while every PR stayed BLOCKED — the exact silent failure this flag
+    # exists to remove. Nothing has been installed at this point, so the exit is 1 (usage).
+    *) die "CI_RUNNER_OS_LABEL must be off|on|auto (got '$CI_RUNNER_OS_LABEL')" 1 ;;
+  esac
+}
+
 resolve_labels() { # sets LABELS; exit 2 when the state cannot be read
   local engaged
+  resolve_os_label
   case "$FALLBACK" in
     on)  LABELS="$ARCH_LABEL,$FALLBACK_LABEL" ;;
     off) LABELS="$ARCH_LABEL" ;;
@@ -202,7 +248,7 @@ resolve_labels() { # sets LABELS; exit 2 when the state cannot be read
       # does not send (measured: `{self-hosted-x64}` planned, `{self-hosted-x64,ubuntu-latest}` sent
       # on an engaged pool). Repair mode calls `need gh` before this, so the read is available.
       if [ "$DRY" = 1 ] && [ "$MODE" != repair ]; then
-        LABELS="$ARCH_LABEL"
+        LABELS="$ARCH_LABEL$OS_LABELS"
         say "fallback: auto — decided at install time from the ARM64 pool's state (not read in a dry run)"
         return 0
       fi
@@ -216,6 +262,9 @@ resolve_labels() { # sets LABELS; exit 2 when the state cannot be read
       fi ;;
     *) die "--fallback must be auto|on|off (got '$FALLBACK')" 1 ;;
   esac
+  # The OS fact rides along on every arm: it is not a fallback state, so `--fallback off` must not
+  # drop it — dropping it is what leaves the required ubuntu-24.04 legs with no self-hosted answer.
+  LABELS="$LABELS$OS_LABELS"
 }
 
 # ── status ─────────────────────────────────────────────────────────────────────
@@ -232,6 +281,49 @@ if [ "$MODE" = status ]; then
     state="$(systemctl is-enabled "$unit" 2>/dev/null || echo missing)/$(systemctl is-active "$unit" 2>/dev/null || echo inactive)"
     say "dir=$d unit=$unit enabled/active=$state"
   done
+  # ── label coverage: the contract this script exists to keep ──────────────────────────────────
+  # A `runs-on:` label with NO self-hosted answer can only be served by GitHub-HOSTED, and hosted is
+  # effectively unavailable here (measured 2026-10-28: 1 completed hosted job/hour against 92 jobs on
+  # self-hosted in 30 min). That is the shape that left `python-ci-gate` queued for 8 HOURS on a run
+  # whose every other job had finished: `workflow-lint` and `test-slow (a–e)` ask for `ubuntu-24.04`,
+  # no runner answered it, so the required aggregate was never dispatched and every PR stayed BLOCKED.
+  # Run this from the repo root — it reads the workflows to learn which labels must be answerable.
+  say "label-coverage — labels the workflows name vs runners answering them:"
+  pool="$(gh api "repos/$REPO/actions/runners?per_page=100" --jq '.runners[].labels[].name' 2>/dev/null | sort | uniq -c)" || exit 3
+  uncovered=0
+  labels_seen=0
+  for label in $(grep -rhoE 'runs-on:[[:space:]]*(\[[^]]*\]|[A-Za-z0-9._/-]+)' .github/workflows/*.yml 2>/dev/null \
+      | sed -E 's/^runs-on:[[:space:]]*//; s/^\[//; s/\]$//' | tr ',' '\n' \
+      | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^"//; s/"$//' \
+      | grep -vE '^(\$|[[:space:]]*$)' | sort -u); do
+    labels_seen=$((labels_seen + 1))
+    n="$(printf '%s\n' "$pool" | awk -v want="$label" '$2==want{s+=$1} END{printf "%d", s+0}')"
+    if [ "$n" -eq 0 ]; then
+      say "  ⛔ $label = 0 runners — only GitHub-hosted can answer it, and hosted is not available here."
+      say "     A required leg naming it never runs, so python-ci-gate is never dispatched and every PR stays BLOCKED."
+      uncovered=1
+    else
+      say "  $label = $n runner(s)"
+    fi
+  done
+  [ "$uncovered" = 0 ] || say "⛔ UNCOVERED label(s) above — --repair-labels re-applies this script's label set, which includes $OS_LABEL when CI_RUNNER_OS_LABEL is on|auto."
+  # ⛔ "NOTHING TO CHECK" IS NOT "ALL COVERED". Run from a directory with no .github/workflows (or on
+  # a repo whose workflows name no single-label runs-on) the loop above prints its header, zero rows,
+  # and exits 0 — a clean bill of health from the one instrument meant to prove coverage. Refuse
+  # instead, with its own exit code so a caller can tell it apart from a real zero-answer label.
+  if [ ! -d .github/workflows ] || ! ls .github/workflows/*.yml >/dev/null 2>&1; then
+    say "⛔ label-coverage read NOTHING: no .github/workflows/*.yml in $(pwd) — run --status from the repo root. An empty read is not a coverage verdict."
+    exit 4
+  fi
+  # ⛔ AND THE DIRECTORY EXISTING IS NOT THE SAME PREDICATE: a repo whose workflows are all `uses:`
+  # re-usable-workflow callers (or any shape with no single-label `runs-on:`) satisfies the arm above
+  # and still yields ZERO rows. Counting the labels the loop actually FOUND is the only read that
+  # distinguishes "covered" from "did not look" — measured: a dir with one `uses:`-only workflow
+  # printed the header, no rows, and exited 0.
+  if [ "$labels_seen" -eq 0 ]; then
+    say "⛔ label-coverage parsed .github/workflows/*.yml in $(pwd) and found NO runs-on label to check — an empty read is not a coverage verdict."
+    exit 4
+  fi
   exit 0
 fi
 
