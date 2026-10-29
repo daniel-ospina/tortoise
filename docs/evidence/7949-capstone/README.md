@@ -100,9 +100,13 @@ population under a log declaring both ON. Pinned by
 `::test_a_flag_that_does_not_read_back_refuses_the_run` and `::test_the_run_happens_inside_the_forced_arm`.
 
 `probes/capstone_measure.py` is the instrument this row needed and PR #9089 did not have.
-`capstone_run.py` drives the real entry point and then reads four step witnesses off a receipt
-that carries none (#9116), so it refuses at G5 for **every** input and its table is 0/5
-`BLOCKED` with no numbers (#9737). The measurement probe keeps that refusal contract intact and
+`capstone_run.py` drives the real entry point and then reads its step witnesses off the receipt it
+gets back — `stats["step_witness"]`, the `#9116` seam (see "The eight steps" below). Before that
+seam the receipt carried `stats` alone, so the probe read four witnesses off a surface that was
+not there, refused at G5 for **every** input and its table was 0/5 `BLOCKED` with no numbers
+(#9737). It now refuses on what the stage's own block says — or, on a receipt with no
+`step_witness` at all (a replay, a keyless capture, the M2 lane), as the **INSTRUMENT** gap, never
+as a pipeline that skipped the work. The measurement probe keeps that refusal contract intact and
 measures the other way round: G0 reads the frozen record out of the **commit**
 (`git show <sha>:docs/evidence/7949-capstone/preregistration.json`), G1 compares this checkout's
 `fixtures_hash` with the frozen pin (the freeze the record actually made — `capstone_run.py`'s
@@ -221,9 +225,9 @@ a non-empty `s2` or `union`, with `enabled` not `false`. The FLAG alone is never
 below). When it is not a witness, the cause reports the number of keys it really inspected instead
 of quoting a remembered one. A step is never *assigned* unwitnessed, and every step ends up in
 exactly one of the two sets (a hole or an overlap refuses the run). So the epic's own GREEN gate —
-V5, all eight steps observed — stays reachable: landing `#9116` makes both rows OBSERVABLE, and
-S2.2 then flips on a re-run at a post-seam head (S2.3 flips only once its pass does work, which
-the measured corpus' idle classify pass does not). It did **not** come for free and this bundle
+V5, all eight steps observed — stays reachable: `#9116`'s seam makes both rows OBSERVABLE (each
+step's own block is on the receipt), and S2.2 then flips on a re-run at a post-seam head (S2.3
+flips only once its pass does work, which the measured corpus' idle classify pass does not). It did **not** come for free and this bundle
 does not claim it did: the seam landed with this probe's observer rewritten (`observe_steps`
 reads `stats['step_witness']` instead of guessing at a surface the receipt never carried) and
 with the pin that certified the old unreachability replaced by the one that pins the wiring.
@@ -564,10 +568,14 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   closes *inference* (green rows with no artifact), not forgery.
 - **Nothing about the five dependencies beyond their state** — the states above are a fresh read
   (2026-10-23), but *why* each is open is the issue body's decomposition, not re-derived.
-- **The two unwitnessed steps stay unwitnessed for THIS run.** `capture_session`'s receipt
-  carries no step surface (#9116), so S2.2/S2.3 are `UNOBSERVED` for every input this probe can be
-  handed TODAY — but the probe now decides that from the surfaces it actually holds, so landing
-  #9116 flips both rows with no probe edit (see "The eight steps" above).
+- **The two unwitnessed steps stay unwitnessed for THIS run.** The scored log was measured before
+  `#9116`'s seam, when `capture_session`'s receipt carried no step surface, so S2.2/S2.3 are
+  `UNOBSERVED` there for every input. The seam has since LANDED — `stats["step_witness"]` names
+  every stage's own facts — and the probe's `observe_steps` was rewritten to read it (the observer
+  is part of this change, not something a re-run gets for free). A re-run at a post-seam head moves
+  **S2.2**; **S2.3 does not flip**, because its classify pass is IDLE on this corpus and the witness
+  says so (`enabled: true`, empty `s2`/`union`), so G5 still refuses there (see "The eight steps"
+  above).
 
 ## Reproduce
 
@@ -577,10 +585,11 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
     tests/test_7949_capstone_verdict_check.py tests/test_7949_capstone_measure.py \
     -q -p no:cacheprovider
 
-# THE MEASURED RUN — a provider key and a searchable backend are required, and
-# #9116 still bounds the OBSERVATION (S2.2/S2.3/S3/S6 have no receipt witness for
-# capstone_run.py; the measurement probe recovers S3/S6 from the live graph and
-# reports S2.2/S2.3 unobserved). It writes its own file — never over capstone.log.
+# THE MEASURED RUN — a provider key and a searchable backend are required. #9116's
+# seam has LANDED: the receipt carries stats["step_witness"], and the probe reads
+# S2.2/S2.3 there (it still recovers S3/S6 from the live graph). What still bounds a
+# re-run is the CORPUS, not the receipt — the classify pass is IDLE on it, so S2.3
+# is unobserved and G5 still refuses. It writes its own file — never over capstone.log.
 # ⛔ AND THE FILE IT SUPERSEDES IS DELETED: exactly ONE scored log may exist, and
 # both the test and the pre-registration gate refuse a second one.
 # NO ARM EXPORTS: the probe forces TORTOISE_VET/TORTOISE_CLASSIFY_LATER itself,
@@ -673,7 +682,7 @@ gap, never as "the pipeline skipped VET/classify/search/commit". A receipt that 
 still does not witness a step is the run's own answer, quoted from the witness's values — a flag
 gated the pass off, or the stage produced nothing.
 
-## Dependency state (fresh read, 2026-10-23)
+## Dependency state (fresh read, 2026-10-23; the `#9116` row re-read at this PR's head)
 
 | issue | state |
 |---|---|
@@ -682,7 +691,7 @@ gated the pass off, or the stage produced nothing.
 | `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its receipt is cited by E4 (`2/15`) |
 | `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
 | `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
-| `#9116` the receipt carries no step surface | **OPEN** — the run's own blocker: 2 of 8 steps cannot be witnessed |
+| `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, `S2.3` only once its classify pass does work (IDLE on this corpus), and V5's 8/8 scoping is the owner's open decision on the issue |
 | `#9736` E3's denominator vs the owner-approved model | **OPEN** — E3's blocker |
 | `#9738` E5's disclosure and population reconciliation | **OPEN** — E5's blocker |
 | `#5333` may any pass remove/relocate an Object (owner ruling) | **OPEN** — E1's blocker (the mechanism that must move the share) |
@@ -690,6 +699,8 @@ gated the pass off, or the stage produced nothing.
 | `#8503` the planted operator edges are not formed | **OPEN** — E4's blocker |
 | `#9596` the operator receipt's retrievability is unmeasured | **OPEN** — the E4 artifact's own caveat |
 
-A row moves to a different verdict only by RE-RUNNING the probe, never by reading an issue's
-state — which is why E1/E2 stay `BLOCKED` even though #9076 closed, and why E3/E4/E5 are `RED`
-rather than "blocked by a closed child".
+A **scored** row moves to a different verdict only by RE-RUNNING the probe, never by reading an
+issue's state — which is why E1/E2 stay `BLOCKED` even though #9076 closed, and why E3/E4/E5 are
+`RED` rather than "blocked by a closed child". (The table above is the dependencies' own state,
+not a scoreboard — `#9116`'s landing is recorded there because the seam shipped, and the S2.2/S2.3
+rows above keep the count the frozen run measured.)

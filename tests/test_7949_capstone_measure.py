@@ -1202,6 +1202,115 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
     assert f"IMPL={measured.group(1)} INPUT={measured.group(2)} " \
            f"NAND={measured.group(3)}" in s5_row, s5_row
 
+
+# ── the bundle's STATE LEDGER must describe the seam that SHIPPED ──────────
+#
+# #10214 review (P2): the two documents this PR edits carried FIVE present-tense
+# statements describing the PRE-seam receipt — "carries no step surface (#9116)",
+# "carries none (#9116) … refuses at G5 for **every** input and its table is 0/5",
+# "landing #9116 flips both rows with no probe edit", and the two state rows still
+# marked **OPEN** — while the SAME diff shipped the seam and a pin asserting G5 can
+# now COMPLETE (`test_a_completed_run_is_reachable_now_that_the_seam_landed`). A
+# reader who trusts them re-runs the probe expecting 8/8, gets 7/8, and
+# mis-attributes it — exactly the misattribution the G5 three-state split exists to
+# prevent. The bundle sweeps its `file:line` cites and pins its vocabulary
+# (REFUSED is not RED), but nothing read its STATE, which is why the five survived
+# ten review rounds and a green CI.
+
+README_DOC = _REPO / "docs/evidence/7949-capstone/README.md"
+E1E5_PROOFS = _REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md"
+
+#: Present-tense shapes that assert the PRE-seam receipt as the CURRENT state.
+#: The PAST-tense forms ("it refused at G5 for every input", "carried none") stay
+#: allowed on purpose: the seam's absence IS what the frozen log measured, and
+#: deleting that history would delete the reason the measurement probe exists.
+_BUNDLE_PRE_SEAM_PRESENT_TENSE = (
+    "carries no step surface",
+    "carries none (#9116)",
+    "flips both rows with no probe edit",
+    "refuses at G5 for **every** input",
+)
+
+
+def _state_row(text: str, heading: str, issue: str) -> str:
+    """The one row of `heading`'s table that tracks `issue`'s own state.
+
+    Scoped to the section, then to the ROW, because these two documents carry
+    several tables: `#9116` also appears in the eight-step table (its witness
+    column, which is not a state) and in the closure table's prose.
+    """
+    section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+    lines = section.splitlines()
+    row = None
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith("|") or f"`{issue}`" not in line:
+            continue
+        # The table's HEADER may name the issue too ("the `#9116` row re-read at
+        # this PR's head"); a header is the row whose successor is the `|---|`
+        # separator, so it is not the datum — skip it and keep looking.
+        following = next((ln for ln in lines[index + 1:] if ln.strip()), "")
+        if re.match(r"\|\s*:?-{3,}", following):
+            continue
+        row = line
+        break
+    assert row is not None, (
+        f"{heading!r} no longer tracks {issue}: the state ledger a lane reads "
+        "was deleted rather than corrected")
+    return row
+
+
+def test_the_bundle_does_not_state_the_pre_seam_receipt_as_the_current_one():
+    """A lane reading this bundle must be told the receipt HAS the step surface.
+
+    Three assertions, because the failure had three shapes: (1) prose that still
+    says the receipt "carries no step surface" in the present tense; (2) the
+    README's dependency table marking `#9116` **OPEN** after this PR closes it;
+    and (3) the E-row audit's closure table doing the same, 28 lines after the
+    same file states the seam "has since LANDED" — a document contradicting
+    itself on the one question it exists to answer.
+
+    The claim is bound to the CODE, not just to the prose: if `sdk.py`'s meta fold
+    stops calling `_capture_stats_with_step_witness`, the bundle is wrong again
+    and this reds with it, so the two cannot drift apart silently.
+
+    Non-vacuity: at the pre-fix head both documents carry "carries no step
+    surface" (README :104 and :568), "carries none (#9116)" (:104),
+    "flips both rows with no probe edit" (:570), and both state rows read
+    "**OPEN**" (README's Dependency-state row, E1-E5-PROOFS :210), so every
+    assertion below reds there.
+    """
+    readme = README_DOC.read_text()
+    proofs = E1E5_PROOFS.read_text()
+
+    for name, text in (("README.md", readme), ("E1-E5-PROOFS.md", proofs)):
+        for phrase in _BUNDLE_PRE_SEAM_PRESENT_TENSE:
+            assert phrase not in text, (
+                f"{name} still states the pre-seam receipt as the current one "
+                f"({phrase!r}); `#9116`'s seam shipped in this PR, so the receipt "
+                "carries `stats['step_witness']` — say that, and keep the frozen "
+                "log's 6/8 as the HISTORY it is")
+
+    for doc, text, heading in (
+            ("README.md", readme, "## Dependency state"),
+            ("E1-E5-PROOFS.md", proofs, "## Honest closure verdict")):
+        row = _state_row(text, heading, "#9116")
+        assert "**OPEN**" not in row, (
+            f"{doc}'s {heading.lstrip('# ')!r} row still reports `#9116` as OPEN; "
+            "this PR lands it (its body says `Fixes #9116`), so the ledger a future "
+            "lane reads would send it to re-derive a seam that is already here")
+        assert "LANDED" in row, (
+            f"{doc}'s {heading.lstrip('# ')!r} row must name `#9116` as LANDED and "
+            "say what still bounds the run (S2.3's idle classify pass, and V5's "
+            f"8/8 scoping); it reads: {row}")
+
+    # The prose is only allowed to claim this because the fold really does it.
+    sdk = (_REPO / "tortoise" / "sdk.py").read_text()
+    assert '"stats": _capture_stats_with_step_witness(' in sdk, (
+        "the bundle now names `#9116` as LANDED, but `_extract_session_v2`'s meta "
+        "fold does not call `_capture_stats_with_step_witness`: the seam is gone, "
+        "so the documents are lying again — restore the fold or the pre-seam text")
+
+
 # ── the bundle's OWN `file:line` cites must RESOLVE (not merely be spelled) ──
 #
 # The literal-string assertions above pin the SPELLING of a cite, so they pass on
