@@ -4642,9 +4642,16 @@ _COUNT_WINDOW = 61
 #: *"The census counts 6 writers. The declared false positive is X"* was read as
 #: stating SIX — a false red on two true sentences, and the exact over-claim this
 #: module exists to refuse: the docstring above promised a bound the code did not
-#: have (`#10200` review, executed both directions). The period is NOT added to
-#: `_CLAUSE_BREAKS`: `_clause_at` and the history escape read that tuple, and a
-#: sentence is a WIDER bound than a clause, so the two are kept apart on purpose.
+#: have (`#10200` review, cycle 15, executed both directions). The period is NOT
+#: added to `_CLAUSE_BREAKS`: `_clause_at` and the history escape read that tuple,
+#: and a sentence is a WIDER bound than a clause, so the two are kept apart on
+#: purpose. The round is recorded in
+#: `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md` as `review round 14 (cycle 15)`,
+#: and citing it HERE is what makes
+#: `test_the_ledger_records_every_review_cycle_the_record_cites` read in both
+#: directions: a round the ledger omits is a bound the next lane relies on with
+#: nothing describing it, and the leg could not see this one while the comments
+#: carried no cycle number.
 #: ⚠️ STATED, not implied: `[.!?]` followed by whitespace is the same candidate set
 #: comparable sentence segmenters start from (NLTK Punkt's `sent_end_chars`), and
 #: requiring the WHITESPACE is what keeps a dotted symbol in the same sentence
@@ -6696,8 +6703,9 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
     # end. That tuple holds no full stop, and nothing else here split sentences
     # first, so the numeral in the sentence BEFORE the phrase was attached to it
     # — a false red on two true sentences, both directions (`#10200` review,
-    # executed before the fix: `before` returned 6, `after` returned 6). The
-    # comment above already claimed `.` was among the separators; it was not.
+    # cycle 15, executed before the fix: `before` returned 6, `after` returned
+    # 6). The comment above already claimed `.` was among the separators; it was
+    # not.
     next_sentence = (
         (
             "probe",
