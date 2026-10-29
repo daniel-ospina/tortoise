@@ -4399,23 +4399,27 @@ class TestSessionDetail:
 
         The sibling tests cover the two obvious states — the graph copy is
         EMPTY (refuse) and the graph copy is COMPLETE (serve). This one is the
-        third, and it is the state an ordinary arming day leaves behind:
-        `sdk._write_capture_turns`' stale-turn sweep is gated on the write
-        predicate (`sdk.py:2696`, `if stale and not _record_holds_turns`), so a
-        session captured BEFORE arming and re-captured after it keeps its old,
-        SHORTER turn nodes and NOTHING removes them. With the record then
+        third, and its shape is still reachable at this head by a route that is
+        NOT the sweep's gate (that gate is gone: the sweep runs on
+        `if _stale_bound >= _first_live`, #10021) — a capture whose record write
+        for the HIGHEST turns is refused mid-capture lands those turns in the
+        graph (`sdk._write_capture_turns`' per-turn fallback), and a LATER
+        record outage then makes the record's own `turn_count` the only count
+        the door can trust while the graph copy is short of it. With the record
         unreachable, the fallback yields 2 turn_points while the response's own
         `turns` (the Session's `turn_count`) says 4 — the caller cannot tell the
         transcript is short, and the body even contradicts itself.
 
         The fixture patches the SDK init so captured turns land in the GRAPH, so
-        the armed re-capture cannot be replayed end to end here. The state it
+        the armed capture cannot be replayed end to end here. The state it
         leaves is reproduced directly and ASSERTED: `turn_count` 4 on the
         Session, with the last two turn nodes removed so the copy is a strict
         prefix (ids `_t0`/`_t1`).
 
-        Mutation: restore `and not turns` (test only emptiness) — this REDs on
-        the 200, which is the silent truncation.
+        Mutation: drop the `served < expected` arm of
+        `record_read.served_turn_count` — or restore the old emptiness-only test
+        (`and not turns`) beside it — and this REDs on the 200, which is the
+        silent truncation.
         """
         sid = "detail-record-down-stale-prefix"
         r = client.post("/v1/sessions", json={
@@ -4529,15 +4533,26 @@ class TestSessionDetail:
         session's own count is a transcript the session no longer has.
 
         `<` saw only truncation, so the direction the guard could not see is the
-        one that survived: the stale-turn sweep is gated on the write predicate
-        (`sdk.py:2696`), so after a SHORTER re-capture the older, LONGER node set
-        stays in the graph. With the record unreachable the endpoint then served
-        those points at 200 beside its own `turns: 2` — a body that contradicts
-        itself, and a transcript that is not the session's.
+        one that survived. ⛔ NOT the sweep's gate: at this head the sweep runs
+        unconditionally over `max(graph mark, record high-water)` (#10021), so a
+        re-capture DOES remove the surplus. The superset is still reachable two
+        ways, and the fixture builds the second:
+
+          * a sweep whose journal half failed — the removal is journal-emitted,
+            so a refused append leaves the graph nodes in place;
+          * a graph copy written BEFORE the record was armed, on a session with
+            no `turn_max_index`: the bound then falls back to
+            `coalesce(s.turn_max_index, s.turn_count, 0)`, which substitutes a
+            WINDOW length for the mark, and the record holds no rows to raise it
+            (an unarmed capture wrote none).
+
+        With the record unreachable the endpoint then served those points at 200
+        beside its own `turns: 2` — a body that contradicts itself, and a
+        transcript that is not the session's.
 
         Shape: capture 4 turns, then set the Session's `turn_count` to 2 leaving
-        all four nodes in place — the state a 2-turn re-capture leaves when the
-        sweep is skipped. Both the node count and the count are ASSERTED.
+        all four nodes in place — the residue a skipped or failed sweep leaves.
+        Both the node count and the count are ASSERTED.
 
         Mutation: restore `len(turns) < _expected_turns` — this REDs on the 200.
         """

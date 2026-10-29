@@ -522,7 +522,8 @@ def census(graph, graph_name: str, page_size: int | None = None) -> dict:
 
     # NO CAUSE IS NAMED HERE. A disagreement between the declared window length
     # and the attached turns is a MEASUREMENT; on a journal+record deployment
-    # (`sdk._record_holds_turns`) the writer sets `turn_count` and deliberately
+    # (`record_writer.record_holds_turns`, read by `sdk._write_capture_turns`) the
+    # writer sets `turn_count` and deliberately
     # puts no turns in the graph, which is a correct state that looks identical
     # to a loss. Attributing it to "legacy captures without turn_count
     # following" would be a cause this census never measured — `verify` decides,
