@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -94,6 +95,50 @@ def _rendered_annotation(line):
             out.append(char)
         i += 1
     return "".join(out)
+
+
+def _flatten_workflow(text, *, strip_comment_markers=True):
+    """The workflow as ONE lowercased line, optionally without per-line `# ` markers.
+
+    `strip_comment_markers=False` is the naive normalisation a guard falls into: a
+    claim wrapped across two comment lines keeps the continuation's leading `#`, so
+    the phrase stops being findable (it normalises to `nothing the # governor may
+    cancel`). Both branches live in THIS function so the control below exercises the
+    same expression the guard does — see `test_the_no_action_clause_names_the_bound_
+    that_actually_binds`.
+    """
+    if strip_comment_markers:
+        return " ".join(line.lstrip("# ").strip() for line in text.splitlines()).lower()
+    return " ".join(text.split()).lower()
+
+
+#: `elif [ "$verdict" = "<VERDICT>" ]; then` — the arm that renders one verdict.
+_ARM_START_RE = re.compile(r'^\s*elif \[ "\$verdict" = "([A-Z-]+)" \]; then\s*$')
+#: Anything that ends the arm: the next branch, the closing `fi`, or the trailer echo.
+_ARM_END_RE = re.compile(r'^\s*(?:el)?if \[ |^\s*fi\s*$|^\s*echo "ci-queue-health exit=')
+
+
+def _verdict_arms(workflow_text):
+    """`{verdict: arm body}` for every `elif [ "$verdict" = "<V>" ]` arm.
+
+    Guards that need "this arm still does X" must read the ARM, not a file-wide
+    occurrence count of the text: a count reds the suite when an unrelated arm
+    legitimately starts using the same fragment (#10264 review P3).
+    """
+    arms, current = {}, None
+    for line in workflow_text.splitlines():
+        start = _ARM_START_RE.match(line)
+        if start:
+            current = start.group(1)
+            arms[current] = []
+            continue
+        if current is None:
+            continue
+        if _ARM_END_RE.match(line):
+            current = None
+            continue
+        arms[current].append(line)
+    return {verdict: "\n".join(lines) for verdict, lines in arms.items()}
 
 
 # ── the incident: one reporting workflow, no PR run executing ──────────────
@@ -1088,20 +1133,26 @@ def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_noth
     #   3. exact-case patterns miss a claim restored SENTENCE-INITIALLY —
     #      "Nothing the governor may cancel." is the most likely reintroduction and
     #      matched none of them, so everything is lowercased.
-    flat = " ".join(line.lstrip("# ").strip()
-                    for line in wf.splitlines()).lower()
+    flat = _flatten_workflow(wf)
     assert "nothing the governor may cancel" not in flat
     assert "no trim-safe offender can be blamed" not in flat
     assert "no trim-safe offender to blame" not in flat
-    # THE CONTROL — and it must be a phrase that lives ONLY in comment prose AND
-    # WRAPS across a line break. A phrase that also appears in an un-commented
-    # `echo` line proves nothing: it stays findable with the `# `-strip removed, so
-    # a regression of step 2 (the mechanism this guard exists to protect) would
-    # pass unnoticed. Hence the second half of the control.
-    control = ("a trim-safe offender can be present when the queue is "
-               "merely pr-dominated")
-    assert control in flat                       # the strip DID make it contiguous
-    assert control not in " ".join(wf.split()).lower()  # ... and only the strip does
+    # THE CONTROL — derived from the MECHANISM, never transcribed from the file's
+    # own prose wrapping. The property the guard needs is "step 2 is load-bearing":
+    # a claim straddling a comment line break is contiguous ONLY after the `# `-strip.
+    # A hand-written control reds the suite the day a comment is REFLOWED, which is
+    # an honest edit this test would then refuse (#10264 review P3, measured: joining
+    # two header comment lines onto one turned the previous control's second half
+    # False). So the sample straddles BY CONSTRUCTION, and it goes through the SAME
+    # helper the guard uses — a regression of the helper (dropping the strip) still
+    # reds this control, which is what makes it a control rather than a restatement.
+    sample = "# the bound the governor cannot cross\n# on one long comment line\n"
+    straddling = "the bound the governor cannot cross on one long comment line"
+    assert straddling in _flatten_workflow(sample)           # the strip joins it
+    assert straddling not in _flatten_workflow(
+        sample, strip_comment_markers=False)                 # ... and only the strip
+    # ... and the real file still carries comment prose for that strip to act on
+    assert any(line.lstrip().startswith("#") for line in wf.splitlines())
     # THE ANNOTATION ITSELF must survive the SHELL, not just this text comparison.
     # Every guard above is text-level, and no amount of normalisation interprets
     # the shell — which is what let the P1 through: the `PR-BACKLOGGED` line wrote
@@ -1125,7 +1176,18 @@ def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_noth
     # still loses it at runtime, which is exactly the shape that shipped.
     backlogged = next(line for line in anns if "PR CI IS executing" in line)
     assert "pr_running > 0" in _rendered_annotation(backlogged)
-    assert wf.count("${cancel_lead}") == 2
+    # ... and BOTH no-action arms speak from the PAYLOAD. Pinned on the ARMS, not on
+    # `wf.count("${cancel_lead}") == 2`: a file-wide count reds the suite the day a
+    # third arm legitimately reuses the lead — a false block on an honest edit — while
+    # it says nothing about the property that matters, which is "each of these arms
+    # reads `cancelled` instead of asserting it" (#10264 review P3).
+    arms = _verdict_arms(wf)
+    no_action = [v for v in ("PR-STARVED", "PR-BACKLOGGED") if v in arms]
+    assert no_action == ["PR-STARVED", "PR-BACKLOGGED"], sorted(arms)
+    for verdict in no_action:
+        body = arms[verdict]
+        assert "${cancel_lead}" in body, (verdict, body)
+        assert "This run cancelled nothing" not in body, (verdict, body)
 
 
 def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():
