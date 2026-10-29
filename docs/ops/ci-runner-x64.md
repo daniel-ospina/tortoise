@@ -174,6 +174,13 @@ falls back.
   not the batch: it reports exit 3 and continues, because with `--count 2` an earlier runner's PUT
   may already have succeeded and exit 2 promises "nothing was changed" (`:84-100`). The same holds
   for the loop's illegal-label and empty-union guards.
+  ⛔ **OVERRIDES:** `PUT …/runners/<id>/labels` is GitHub's **Set custom labels** verb, whose own
+  description is "Remove all previous custom labels and set the new custom labels" — a REPLACE of
+  the runner's custom set, and exactly what `resolve_labels` alone computed here. A repair PUTs
+  `current ∪ computed` instead, because a replace cannot tell "this label is not wanted" from "a
+  workflow targets it": it stripped `ubuntu-latest` from the only pool answering the REQUIRED
+  `python-ci-gate` aggregate (runs 40898791192 / 40901844458 — `jobs=0`, every PR blocked). The only
+  removals left are the two named carve-outs below, and both are PRINTED.
   ⛔ **`--repair-labels --fallback off` is REFUSED (exit 2, before any read or PUT)** (`:440-447`):
   a union cannot DETACH `ubuntu-latest`, so that invocation used to be accepted, print `removed=[]`,
   say `relabelled …` and exit 0 while the label it was asked to remove stayed attached. Detaching is
@@ -223,8 +230,8 @@ falls back.
   runner is skipped and the rest of the batch still runs, so the code cannot be 2.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:529`, the `MODE = install`
-  block; the refusal itself dies at `:534`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:562`, the `MODE = install`
+  block; the refusal itself dies at `:567`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 

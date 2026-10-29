@@ -428,8 +428,8 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:258-263`) — and the runbook still sells
-    `--repair-labels` as the manual heal that "re-applies this arch's marker" (`:275-276`). Keeping
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:199-201`) — and the runbook still sells
+    `--repair-labels` as the manual heal that "re-applies this arch's marker" (`:313-314`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -703,7 +703,8 @@ def test_label_coverage_reads_yaml_workflows_too(tmp_path: Path):
     GitHub accepts both `.yml` and `.yaml`, and the reader globbed only `*.yml` — so a `.yaml`
     workflow's `runs-on:` was dropped while the block still printed "every one has an online
     self-hosted answer". The repo has 0 `.yaml` workflows today, which is exactly why nothing caught
-    it: the block's own contract (`:259-262`) is that an unread label must never read as healthy.
+    it: the block's own contract (`docs/ops/ci-runner-x64.md:205-207`) is that an unread label must
+    never read as healthy.
 
     Non-vacuity: with the glob reverted to `*.yml` the `macos-14` row never appears and the summary
     claims full coverage off a surface it did not read.
@@ -1250,6 +1251,139 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
     )
 
 
+# ── 8a2. the REST of the runbook's installer refs (the map pin above reads ONE bullet) ─────────
+def test_every_runbook_installer_ref_lands_on_the_line_it_names():
+    """⛔ THE MAP PIN ABOVE READS THE FIRST BULLET; THE RUNBOOK CITES THE INSTALLER IN ALL OF THEM.
+
+    `test_the_runbooks_installer_line_map_lands_on_what_it_names` starts at the first
+    `install-ci-runner-x64.sh:NNN` and stops at the first blank line, so it pins ONE bullet of a
+    section whose other bullets carry ~27 more bare `:NNN` refs — the same file, the same drift, and
+    nothing watched them. Measured: the `--print-labels` bullet still said "the refusal itself dies
+    at `:534`" after two commits had inserted 33 lines above it (`:534` is the comment `# every
+    install.`, and the `die` is at `:567`) while the map bullet had been re-derived and stayed green.
+
+    So every citation in the installer section is pinned here against what its sentence claims that
+    line holds. The table is deliberately two-way: a citation this pin does not know is a FAIL (add
+    it rather than leaving it unchecked), and an entry the runbook stopped citing is a FAIL too (the
+    pin must not silently shrink). A number in `anchors` is therefore expected to move TOGETHER with
+    the runbook when the installer shifts — re-derive both, which is exactly the manual step that
+    was skipped. And because a number-keyed table cannot see a SWAP between two numbers it already
+    knows, the claims in the sentence that broke are also re-checked from the sentence itself: a
+    `MODE = …` block ref must land on that block's own `if [ "$MODE" = … ]` line, and "the refusal
+    dies at `:NNN`" must land on a `die`, not on the comment that explains it.
+
+    Non-vacuity (measured): the pre-fix pair `:529`/`:534` reds three ways — neither number is in
+    `anchors`, `:529` is the `--print-labels` prelude comment rather than the `MODE = install` block,
+    and `:534` is `# every install.` rather than the `die`. Swapping `:562` for the already-pinned
+    `:535` (the `--print-labels` block) reds the `MODE = install` sentence check.
+    """
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+    start = next(
+        (i for i, line in enumerate(runbook) if "tools/install-ci-runner-x64.sh:" in line), None
+    )
+    assert start is not None, "the runbook no longer cites the installer — re-anchor this pin"
+    end = next(
+        (i for i in range(start + 1, len(runbook)) if runbook[i].startswith("## ")), len(runbook)
+    )
+    installer = INSTALLER.read_text().splitlines()
+
+    # `install-ci-runner-x64.sh:740` AND the bare `:740` the section writes after the first one. The
+    # lookbehind keeps `config.sh:76-81` (a DIFFERENT file, cited in the `--uninstall` paragraph) out.
+    ref = re.compile(r"(?:install-ci-runner-x64\.sh|(?<![A-Za-z0-9_.\-])):(\d+)(?:-\d+)?")
+    cited = {int(m.group(1)) for line in runbook[start:end] for m in ref.finditer(line)}
+    assert cited, (
+        "the runbook's installer section cites no installer line — re-anchor this pin rather than "
+        "deleting it"
+    )
+
+    # cited number -> a regex the line at that number must match, i.e. what the sentence names
+    anchors: dict[int, str] = {
+        84: r"^# EXIT — the one distinction",  # "Exit codes (`:84-100`)"
+        180: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # "--count is validated ONCE"
+        213: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        217: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        221: r"^fallback_engaged\(\) \{",
+        232: r"^resolve_labels\(\) \{",
+        261: r"label algebra: the UNION",  # "the union's label algebra at"
+        285: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        303: r"label coverage: which",  # "the label-coverage block"
+        323: r"^workflow_files\(\) \{",  # "read from BOTH `.yml` and `*.yaml`"
+        360: r"^label_coverage\(\) \{",
+        405: r"── status ──",  # "the `--status` block that calls it"
+        440: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        465: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        535: r'MODE" = labels',  # "`--print-labels`"
+        562: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        567: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        570: r"FORK HEADROOM FIRST",  # "forks"
+        590: r"DISK NEXT",  # "disk"
+        597: r"CPU LAST",  # "cpu/memory"
+        615: r'MODE" = uninstall',  # "`uninstall`" / "`--uninstall` deletes only what it can PROVE"
+        740: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        751: r"SHA256_LINUX_X64",  # "sha256 pin" / "verify"
+        754: r"registration-token",  # "token"
+        759: r"set -- --unattended",  # "one argv"
+        761: r'\./config\.sh "\$@"',  # "`config.sh`"
+        771: r"svc\.sh install",  # "systemd install/start"
+    }
+
+    unknown = sorted(cited - anchors.keys())
+    assert not unknown, (
+        "the runbook cites installer line(s) this pin does not know — re-derive them against the "
+        f"installer and add them to `anchors` rather than leaving them unchecked: {unknown}"
+    )
+    stale = sorted(anchors.keys() - cited)
+    assert not stale, (
+        "this pin still lists installer line(s) the runbook no longer cites — a pin over refs that "
+        f"were re-derived or removed is pinning nothing: {stale}"
+    )
+
+    wrong: list[str] = []
+    for n, expect in sorted(anchors.items()):
+        assert 1 <= n <= len(installer), f"the runbook cites :{n}, past EOF ({len(installer)} lines)"
+        if not re.search(expect, installer[n - 1]):
+            actual = [i + 1 for i, line in enumerate(installer) if re.search(expect, line)]
+            wrong.append(f":{n} is {installer[n - 1].strip()!r} (anchor is at {actual})")
+    assert not wrong, (
+        "the runbook cites an installer line that is not what the sentence names — re-derive the "
+        "number (and this pin's entry) from the installer: " + "; ".join(wrong)
+    )
+
+    # ⛔ THE TABLE ABOVE IS KEYED BY NUMBER, SO IT CANNOT SEE A SWAP BETWEEN TWO NUMBERS IT ALREADY
+    # KNOWS (both are cited somewhere, both land on something). The two claims in the broken
+    # sentence are therefore re-checked from the SENTENCE, which is what a reader actually follows.
+    region_text = "\n".join(runbook[start:end])
+
+    # "the `MODE = install` block" must point at THAT block's own `if [ "$MODE" = … ]` line — the
+    # failure this whole file warns about ("a fixer sent to :327 edits the capacity guard on the
+    # destructive path") is exactly a mode ref landing one guard away.
+    mode_refs = list(re.finditer(r"`MODE = (install|uninstall|repair|labels)`", region_text))
+    assert mode_refs, "the runbook no longer names a `MODE = …` block — re-anchor this pin"
+    for m in mode_refs:
+        mode = m.group(1)
+        before = re.findall(ref, region_text[max(0, m.start() - 120): m.start()])
+        assert before, (
+            f"the runbook's `MODE = {mode}` sentence cites no installer line — re-anchor this pin"
+        )
+        n = int(before[-1])
+        assert re.search(rf'^if \[ "\$MODE" = {mode} \]', installer[n - 1]), (
+            f"the runbook sends a reader to :{n} for the `MODE = {mode}` block, but that line is "
+            f"{installer[n - 1].strip()!r} — re-derive the number for THAT block"
+        )
+
+    # "the refusal itself dies at `:NNN`" must point at the `die` that refuses, not at a comment
+    # explaining it (the pre-fix `:534` was `# every install.`).
+    dies = list(re.finditer(r"dies at `:(\d+)`", region_text))
+    assert dies, "the runbook no longer points at the arch refusal — re-anchor this pin"
+    for m in dies:
+        n = int(m.group(1))
+        assert 1 <= n <= len(installer), f"the runbook cites :{n}, past EOF ({len(installer)} lines)"
+        assert re.search(r"\bdie\b", installer[n - 1]), (
+            f"the runbook says the refusal 'dies at :{n}', but that line is "
+            f"{installer[n - 1].strip()!r} — a comment, not the refusal"
+        )
+
+
 # ── 8b. the citations the runbook's map does NOT cover ──────────────────────────────────────
 def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_names():
     """⛔ THE MAP PIN ABOVE COVERS ONE BULLET; THE REST OF THE TREE CITES THE INSTALLER TOO.
@@ -1301,6 +1435,86 @@ def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_nam
     repair = re.search(r"whole-set relabel \(`:(\d+)-\d+`\)", memory)
     assert repair, "MEMORY.md no longer cites the repair's line range — re-anchor this pin"
     land("MEMORY.md", int(repair.group(1)), r'^if \[ "\$MODE" = repair \]')
+
+
+# ── 8c. the installer's OWN self-citations ──────────────────────────────────────────────────
+def test_the_installers_own_self_citations_land_on_the_line_they_name():
+    """⛔ THE INSTALLER CITES ITSELF, AND THOSE REFS WERE THE SAME WRONG-TARGET CLASS.
+
+    Two refs inside `tools/install-ci-runner-x64.sh` point at its own lines by number, and both
+    pointed at the wrong one at this head: "the false PASS this file forbids at `:42-46`" (`:42-46`
+    is the OVERRIDES union/refusal paragraph; the arch rule is `:62-69`) and "`set -o pipefail` is
+    on (`:77`)" (`:77` is a `--print-labels` USAGE row; `set -uo pipefail` is `:101`). Neither is
+    covered by any other pin — an operator sent to `:42-46` for the rule that a foreign arch marker
+    is a false PASS reads a paragraph about the fallback label instead.
+
+    Pinned here the way the cross-file pin does it: the citing COMMENT PARAGRAPH names the
+    construct, and the line it points at must contain it. A self-citation whose paragraph names
+    nothing in `known` FAILS (add the fragment) and a `known` fragment nothing cites FAILS (the pin
+    must not silently shrink).
+
+    Non-vacuity: the pre-fix pair reds both ways — `:42-46` is not the `ARCH LABELS ARE NOT
+    INTERCHANGEABLE` block, and `:77` is not `set -uo pipefail`.
+    """
+    src = INSTALLER.read_text().splitlines()
+
+    # (a fragment of the citing comment paragraph, a regex the CITED line must match)
+    known: list[tuple[str, str]] = [
+        ("the false PASS this file forbids", r"ARCH LABELS ARE NOT INTERCHANGEABLE"),
+        ("`set -o pipefail` is on", r"^set -uo pipefail$"),
+    ]
+
+    # contiguous `#` runs (blank lines and code end a paragraph, which is what keeps a phrase from
+    # claiming a citation in an unrelated block further down)
+    blocks: list[tuple[int, int, str]] = []
+    first: int | None = None
+    for i, line in enumerate([*src, ""]):
+        if line.lstrip().startswith("#"):
+            if first is None:
+                first = i
+        elif first is not None:
+            blocks.append((first, i, "\n".join(src[first:i])))
+            first = None
+
+    def block_of(idx: int) -> str:
+        for begin, stop, text in blocks:
+            if begin <= idx < stop:
+                return text
+        return src[idx]
+
+    ref = re.compile(r"(?<![A-Za-z0-9_.\-]):(\d+)(?:-\d+)?")
+    seen = 0
+    used: set[int] = set()
+    for i, line in enumerate(src):
+        if not line.lstrip().startswith("#"):
+            continue
+        for m in ref.finditer(line):
+            n = int(m.group(1))
+            paragraph = block_of(i)
+            claimed = [k for k, (frag, _) in enumerate(known) if frag in paragraph]
+            assert claimed, (
+                f"install-ci-runner-x64.sh:{i + 1} cites its own line :{n} but its paragraph names "
+                "no construct this pin knows — add the sentence fragment to `known` rather than "
+                f"leaving the ref unchecked: {paragraph!r}"
+            )
+            assert 1 <= n <= len(src), (
+                f"install-ci-runner-x64.sh:{i + 1} cites :{n}, past EOF ({len(src)} lines)"
+            )
+            landed = [k for k in claimed if re.search(known[k][1], src[n - 1])]
+            assert landed, (
+                f"install-ci-runner-x64.sh:{i + 1} cites install-ci-runner-x64.sh:{n} as "
+                f"{known[claimed[0]][0]!r}, but that line is {src[n - 1].strip()!r} — re-derive the "
+                "number"
+            )
+            used.update(claimed)
+            seen += 1
+
+    assert seen, "the installer no longer cites its own lines — re-anchor this pin"
+    silent = sorted(k for k in range(len(known)) if k not in used)
+    assert not silent, (
+        "a self-citation this pin lists is gone from the installer — a pin over refs that were "
+        f"re-worded or removed is pinning nothing: {[known[k][0] for k in silent]}"
+    )
 
 
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────

@@ -280,7 +280,7 @@ list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
 # It must be dropped by a repair: `self-hosted-arm64` is a CUSTOM label (GitHub returns only
 # `self-hosted`, `Linux`/`macOS`/`Windows` and `X64`/`ARM64`/`ARM` as read-only), so a union that
 # keeps it leaves an x86 box advertising an arm64 pool — the false PASS this file forbids at
-# `:42-46`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
+# `:62-69`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
 # puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too.
 is_foreign_arch_label() {
   case "$1" in
@@ -316,7 +316,7 @@ is_version_pinned_hosted_label() {
 # GitHub accepts BOTH `.yml` and `.yaml`. Globbing only `*.yml` silently dropped a `.yaml`
 # workflow, so the coverage block below printed "every one has an online self-hosted answer" over a
 # file it never read — the same false-clean one level down that this whole block exists to expose.
-# ⛔ EXISTING FILES ONLY, and that is not cosmetic: `set -o pipefail` is on (`:77`) and a glob that
+# ⛔ EXISTING FILES ONLY, and that is not cosmetic: `set -o pipefail` is on (`:101`) and a glob that
 # matches nothing is passed through LITERALLY, so handing `…/*.yaml` to grep makes grep exit 2 on a
 # missing path and the whole read report "cannot read" on a tree that HAS workflows (measured while
 # fixing this: every label-coverage arm went SKIPPED). One path per line; empty when there are none.
