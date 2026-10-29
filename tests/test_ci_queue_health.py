@@ -996,9 +996,11 @@ def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_noth
     sees before and after its own cancels at the default `keep=5`:
 
       PRE  10 `finding-provenance` + 6 queued `pull_request` runs, none executing
-           -> FLOOD, and the governor trims the 5 oldest (ids 1000-1004).
-      POST the 5 KEPT candidates have started and so have LEFT the queued feed;
-           the offender is now 5 of 11 and the 6 PR runs dominate
+           -> FLOOD, and the governor trims the 5 OLDEST (ids 1000-1004, because
+           `keep=5` keeps the NEWEST five).
+      POST the five runs this invocation TRIMMED have left the queued feed and the
+           five it KEPT (ids 1005-1009) remain: the offender is now 5 of 11 and the
+           6 PR runs dominate
            -> `offender_queued < global_max` -> `PR-STARVED`, `trimmable == ()`,
               while `cancelled` still names [1000-1004].
 
@@ -1008,11 +1010,15 @@ def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_noth
     the operator-facing alarm contradicting its own payload.
     """
     pre = flood_queued(10) + starving_pr_runs(6, age_seconds=9000)
-    post = flood_queued(5) + starving_pr_runs(6, age_seconds=9000)
+    post = flood_queued(5, start=1005) + starving_pr_runs(6, age_seconds=9000)
 
     flood = classify(pre)
     assert flood.verdict == Q.FLOOD
     assert [r.id for r in flood.trimmable] == [1000, 1001, 1002, 1003, 1004]
+    # the KEPT runs are exactly the ones that survive into the post-action feed
+    trimmed = {t.id for t in flood.trimmable}
+    kept = {r.id for r in pre if r.name == "finding-provenance" and r.id not in trimmed}
+    assert {r.id for r in post if r.name == "finding-provenance"} == kept
 
     starved = classify(post)
     assert starved.verdict == Q.PR_STARVED
@@ -1026,14 +1032,32 @@ def test_a_starved_reading_after_a_trim_never_claims_the_invocation_trimmed_noth
     # "nothing can be blamed", which is false while a trim-safe offender is present
     assert "another workflow holds more of the queue" in joined
     assert "trim-safe offender present: True" in joined
+    assert "Largest share: 'Python CI' (6 of 11)" in joined
 
     # ... and BOTH no-action arms are payload-derived, sharing one lead
     wf = (Path(__file__).resolve().parents[1]
           / ".github/workflows/ci-queue-health.yml").read_text()
-    warnings = [line for line in wf.splitlines() if "::warning" in line]
-    assert warnings
-    assert not any("nothing the governor may cancel" in line for line in warnings)
-    assert not any("No trim-safe offender can be blamed" in line for line in warnings)
+    # ⛔ COMMENT-STRIPPED AND NORMALISED, over the WHOLE FILE — not per line, and
+    # not just the `echo` lines. Two ways a naive guard goes inert here (#10264
+    # review P2 — the first version of this guard was INERT for both):
+    #   1. it scanned only `::warning` lines, but the retired claim also lived in
+    #      the file's own HEADER prose;
+    #   2. `" ".join(wf.split())` alone is NOT enough, because a claim wrapped
+    #      across two comment lines keeps the continuation's `#`, so it normalises
+    #      to "nothing the # governor may cancel". Stripping each line's LEADING
+    #      `# ` first is what makes the phrase contiguous again.
+    flat = " ".join(line.lstrip("# ").strip() for line in wf.splitlines())
+    assert "nothing the governor may cancel" not in flat
+    assert "No trim-safe offender can be blamed" not in flat
+    assert "no trim-safe offender to blame" not in flat
+    # the scan is not vacuous: it DOES see the live PR-STARVED claim, which is
+    # what proves the pattern and the normalisation actually reach the text
+    assert "this state reaches no trim" in flat
+    # the annotation scan is restricted to REAL annotation lines, not every prose
+    # comment that merely mentions `::warning`
+    anns = [line for line in wf.splitlines()
+            if line.strip().startswith('echo "::warning::')]
+    assert anns
     assert wf.count("${cancel_lead}") == 2
 
 

@@ -62,12 +62,16 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               job cancellation (Actions limits, "Job queue time"), which for a
               required merge check is indistinguishable from a hang.
   PR-STARVED  per REPO — no PR-event run is executing and a queued PR-event run
-              has waited past ``min_age_seconds``, but the queue's largest share
-              is NOT a trim-safe offender (it is PR work itself, or a workflow no
-              allow-list covers). It is the same "PR CI is not running" reality
-              as FLOOD with no action available, so it is WARNED about and never
-              reported as ``OK``: a flood inflates the PR backlog it starves, so
-              this is the LATE STAGE of the measured incident, not a corner case.
+              has waited past ``min_age_seconds``, and the dominance clause
+              declined: the queue's largest non-PR share is below the dominance
+              floor, OR below the PR share (the queue is PR-dominated). A
+              trim-safe offender may well be PRESENT in the second case, so this
+              is not "nothing could be blamed" — the reason line names the clause
+              that declined. It is the same "PR CI is not running" reality
+              as FLOOD with no trim reached for THIS READING, so it is WARNED about
+              and never reported as ``OK``: a flood inflates the PR backlog it
+              starves, so this is the LATE STAGE of the measured incident, not a
+              corner case.
               (ISSUE 3 of the #9118 review: clause order used to return ``OK``
               here, which is a clean bill of health for a CI that is not running.)
   PR-UNWITNESSED
@@ -176,7 +180,8 @@ Exit codes (fail-closed, matching ``tools/ci_check_repair.py``):
      REPORTED (post-action) verdict, so a cleared queue is 0 and the pre-action
      state line stays available in ``pre_action_state_line`` with ``cleared``
      naming the difference. ``PR-STARVED`` is also 0: the state is real and
-     warned about, but no action is available (nothing trim-safe to blame).
+     warned about, and the reading reaches no trim — the dominance clause is what
+     declined, which is NOT the same as "nothing could have been blamed".
      ``PR-BACKLOGGED`` is 0 for exactly that reason — the bound is the CLAUSE
      ORDER: this state requires ``pr_running > 0`` and the governor's block sits
      BELOW that clause, so the state reaches no cancellation at all (its
@@ -997,8 +1002,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ci_queue_health.py",
         description=(
             "The REPO-LEVEL CI queue state (#9115) — FLOOD names the workflow that "
-            "is starving PR CI; PR-STARVED says PR CI is not running with nothing "
-            "trim-safe to blame; PR-BACKLOGGED says PR CI IS running and the "
+            "is starving PR CI; PR-STARVED says PR CI is not running and the "
+            "dominance clause declined; PR-BACKLOGGED says PR CI IS running and the "
             "backlog behind it is past any measured wait (#10237). Exit: 0 "
             "OK/PR-STARVED/PR-BACKLOGGED, 1 FLOOD, 2 could not measure."
         ),
