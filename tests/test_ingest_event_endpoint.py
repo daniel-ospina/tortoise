@@ -2093,6 +2093,17 @@ def test_single_carrier_declared_terminal_status_is_still_dropped(sdk):
 # still asserted, against the node the write actually lands on.
 
 
+def _canonical(label: str, name: str) -> str:
+    """A fixture-owned carrier id (#3590 retired the name-derived one).
+
+    Nothing in `tortoise/` derives an id from a name any more, so the fixture
+    states the id it wants its carrier to hold; it only has to be stable and
+    distinct from the decoy's. Not a name derivation — a literal the FIXTURE
+    chooses.
+    """
+    return f"carrier-{label.lower()}-{name.lower()}"
+
+
 def _one_live_carrier(sdk, status: str = "live", **extra) -> str:
     """ONE live `:Object` carrier of `Acme` under a fixture-owned id."""
     props = f", status:'{status}'"
@@ -2317,6 +2328,8 @@ def test_two_bundle_refs_to_one_shared_name_are_a_self_edge(sdk):
         sdk.ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
+    assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 0, (
+        "the self-edge refusal committed a node")
     assert _count(sdk, "MATCH (o:Object {id:$id}) RETURN count(o)",
                   {"id": _canonical("Object", "Acme")}) == 0
 
@@ -2425,21 +2438,28 @@ def test_endpoint_naming_a_live_carrier_is_the_same_endpoint_as_the_ref(sdk):
     """
     sdk._get_proj().g.query(
         "CREATE (:Object {id:'legacy-ulid-1', name:'Acme', status:'live'})")
-    for route in ({"operator": "IMPL"}, {"operator": "IMPL", "reify": True}):
-        for frm, to in (("legacy-ulid-1", "p2"), ("p2", "legacy-ulid-1")):
-            bundle = {
-                "points": [{"ref": "p1", "kind": "statement",
-                            "content": "must-not-commit"},
-                           {"ref": "p2", "kind": "statement",
-                            "content": "anchor"}],
-                "entities": [{"ref": "a", "type": "object", "name": "Acme"}],
-                "connections": [{"from": frm, "to": to, **route}],
-            }
-            msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
-            assert any("address the same endpoint" in m for m in msgs), (
-                route, frm, msgs)
-            with pytest.raises(BundleValidationError):
-                sdk.ingest(bundle)
+    # ⛔ DIRECT route only: a REIFIED pair (`reify: True`) goes through
+    # `create_operator`, which tolerates a shared node — the arm's recorded
+    # scope, stated at `sdk._check_endpoints` ("Only the direct route is
+    # affected"). Asserting the reified pair here would pin the opposite.
+    #
+    # The collision this guard exists for: TWO different tokens resolving to ONE
+    # node — the carrier's stored id, and the bundle ref naming it. (An
+    # id-vs-Point pair exercises nothing here, and `a` vs `a` is caught earlier
+    # as a literal `frm == tos` self-edge.)
+    for frm, to in (("legacy-ulid-1", "a"), ("a", "legacy-ulid-1")):
+        bundle = {
+            "points": [{"ref": "p1", "kind": "statement",
+                        "content": "must-not-commit"},
+                       {"ref": "p2", "kind": "statement",
+                        "content": "anchor"}],
+            "entities": [{"ref": "a", "type": "object", "name": "Acme"}],
+            "connections": [{"from": frm, "to": to, "operator": "IMPL"}],
+        }
+        msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+        assert any("address the same endpoint" in m for m in msgs), (frm, to, msgs)
+        with pytest.raises(BundleValidationError):
+            sdk.ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
     # the carrier kept its own id and no edge was written
