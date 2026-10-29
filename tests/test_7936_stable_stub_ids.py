@@ -92,6 +92,36 @@ def _stub_ids(sdk: TortoiseSDK) -> dict:
     return {(r[0], r[1]): r[2] for r in rows}
 
 
+def _legacy_stub(sdk: TortoiseSDK, label: str, name: str) -> str:
+    """Build the PRE-#3590 name-stub shape a PERSISTED graph still carries.
+
+    ``_event_plain_merge`` minted it (``MERGE (n:<label> {name:$name}) ON CREATE
+    SET n.id=$name, n._stub=true``) and #3590 retired the mint (D9: the
+    projection is not the minter; D1: a bare mention creates nothing), so
+    ``create_event`` no longer produces one — the fixture this class was written
+    against is gone, which is why it raised ``KeyError`` here.
+
+    The DISCRIMINATOR GUARD is NOT retired with the mint: a graph built before
+    the change still holds these nodes, so a caller able to CLEAR ``_stub`` on
+    one still re-opens the measured hole (a forged exclusion stops the later
+    ``ObjectRegistered``/``SubjectAdded`` being journaled, the node vanishes on
+    rebuild, live != replay). This rebuilds that shape directly, exactly as the
+    file's other legacy pins build a pre-change graph out of a raw record.
+    """
+    kind = "subjectKind" if label == "Subject" else "objectKind"
+    # `title`/`status` are part of the shape, not decoration: the projection's
+    # own MERGE chain writes them on CREATE (`… o.title=coalesce($title,''),
+    # o.status=coalesce($st,'live')`), so a persisted stub carries them. Omit
+    # them and the adoption assertion below reports live != replay for a reason
+    # the forge had nothing to do with.
+    sdk._get_proj().g.query(
+        f"MERGE (n:{label} {{name:$n}}) "
+        f"ON CREATE SET n.id=$n, n._stub=true, n.{kind}='other', "
+        f"n.title='', n.status='live'",
+        params={"n": name})
+    return name
+
+
 def _rebuild(sdk: TortoiseSDK, events: Path) -> None:
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
@@ -459,10 +489,7 @@ class TestStubDiscriminatorIsNotCallerWritable:
         """The direct-write door (`update_entity`) must refuse `_stub`."""
         sdk, events = _journal(tmp_path)
         try:
-            sdk.create_event(
-                "probe event", "test", object="probe-object",
-                subject="probe-subject",
-                startedAt="2026-01-01T00:00:00Z")
+            _legacy_stub(sdk, label, name)
             stub_id = _stub_ids(sdk)[(label, name)]
             with pytest.raises(ValueError, match="_stub"):
                 sdk.update_entity(stub_id, _stub=False)
@@ -479,9 +506,7 @@ class TestStubDiscriminatorIsNotCallerWritable:
         still journaled, and live == replay."""
         sdk, events = _journal(tmp_path)
         try:
-            sdk.create_event(
-                "probe event", "test", object="probe-object",
-                startedAt="2026-01-01T00:00:00Z")
+            _legacy_stub(sdk, "Object", "probe-object")
             stub_id = _stub_ids(sdk)[("Object", "probe-object")]
             with pytest.raises(ValueError, match="_stub"):
                 sdk.update_entity(stub_id, _stub=False)
