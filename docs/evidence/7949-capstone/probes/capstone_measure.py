@@ -55,8 +55,8 @@ literal — a run that cannot read a flag back as set REFUSES rather than printi
 claim nothing supports. They are still UNWITNESSABLE through
 ``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` DOES build the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8961-8967`` and
-``result["vet"]`` at ``:8971-8975``); they are dropped at the meta fold,
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
+``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold,
 ``tortoise/sdk.py:13473`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
 rather than worked around: working around
@@ -781,7 +781,7 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8592 and "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596 and "
         ":8612), and each VET pass is gated on the LIST — `if vet_enabled and "
         "embed_list:` (:8680), `if vet_enabled and complete_list:` (:8802) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
@@ -791,7 +791,7 @@ _IDLE_CITES: dict[str, str] = {
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:8561 (and set False when its classifier cannot "
+        "tortoise/extractor_v2.py:8565 (and set False when its classifier cannot "
         "be constructed, :8586), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
         "'restamp_overrides': 0, 'slot_rekeys': 0} (:8608-8611), and each "
@@ -818,7 +818,7 @@ def _pass_ran(block: dict) -> bool | None:
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8592`` and
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8596`` and
     ``edus = _edus_from_conversation(...)`` follows at ``:8595``, whose
     ``if not edus:`` early return (``:8596``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:8612``) — with the flag ON. The
@@ -1292,7 +1292,7 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"or a failed fail-open pass) is indistinguishable from this one, so "
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8971-8975. It is DROPPED one layer up, at "
+            f"tortoise/extractor_v2.py:8975-8979. It is DROPPED one layer up, at "
             f"the meta fold tortoise/sdk.py:13473 (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
@@ -1327,7 +1327,7 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"from this one, so this run does not claim the pass ran. Its "
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8961-8967. It "
+            f"tortoise/extractor_v2.py:8965-8971. It "
             f"is DROPPED at the same meta fold, tortoise/sdk.py:13473 "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "

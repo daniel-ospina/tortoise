@@ -198,8 +198,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists**: `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:8971-8975`. Whether it then DID work is not observable through the receipt — the missing surface is exactly the instrument — so this row does not claim it ran. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:13473` (`"stats": out.get("stats") or {}` inside `_extract_session_v2`) — measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8961-8967` and dropped at the same fold, `tortoise/sdk.py:13473` |
+| S2.2 VET | ❌ **#9116** | the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists**: `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:8975-8979`. Whether it then DID work is not observable through the receipt — the missing surface is exactly the instrument — so this row does not claim it ran. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:13473` (`"stats": out.get("stats") or {}` inside `_extract_session_v2`) — measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8965-8971` and dropped at the same fold, `tortoise/sdk.py:13473` |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -221,7 +221,7 @@ touching the probe or these tests**.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:8597-8612`, `:8961-8975`). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:8601-8616`, `:8965-8979`). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -232,7 +232,7 @@ non-empty S2 stats) fails CLOSED.
 ⛔ **And the FLAG is not ACTIVITY** — the sharper half, and the one this rule got wrong first. The
 first tightened rule accepted `enabled: true` on its own, reading it as "the extractor's OWN
 statement that the gate was open". It is not that: `enabled` is the FLAG, computed BEFORE the pass
-is reached. `vet_enabled` is computed at `extractor_v2.py:8592`, i.e. BEFORE the
+is reached. `vet_enabled` is computed at `extractor_v2.py:8596`, i.e. BEFORE the
 `if not edus:` early return (`:8596`), which emits literally
 `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8612`), and
 each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8680`), `if vet_enabled and
@@ -625,13 +625,13 @@ number's resolution is checked against the tree when it is re-derived.)
 
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
-| S0 READ | `_edus_from_conversation` `:8595` | `stats["edus"]`, `stats["chunks"]` | ✅ |
-| S1 NARRATE | `run_s1` `:8628` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
-| S2.1 EXTRACT | `run_s2` `:8652` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:8681` | `result["vet"]` — built at `extractor_v2.py:8971-8975`, DROPPED at the meta fold `sdk.py:13473` | ❌ **#9116** |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:8697` | `result["classify_later"]` — built at `extractor_v2.py:8961-8967`, dropped at the same fold | ❌ **#9116** |
-| S3 RESOLVE | `search_graph` `:8713` | `result["search"]` | ❌ **#9116** — but `stats["search_queries"]`/`stats["search_degraded"]` ARE on it, which is how `capstone_measure.py` witnesses S3 |
-| S5 CONNECT | `execute_embed` `:8933` (+ `run_s4` `:8734` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
+| S0 READ | `_edus_from_conversation` `:8599` | `stats["edus"]`, `stats["chunks"]` | ✅ |
+| S1 NARRATE | `run_s1` `:8632` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S2.1 EXTRACT | `run_s2` `:8656` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+| S2.2 VET | `_run_vet_pass` `:8685` | `result["vet"]` — built at `extractor_v2.py:8975-8979`, DROPPED at the meta fold `sdk.py:13473` | ❌ **#9116** |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:8701` | `result["classify_later"]` — built at `extractor_v2.py:8965-8971`, dropped at the same fold | ❌ **#9116** |
+| S3 RESOLVE | `search_graph` `:8717` | `result["search"]` | ❌ **#9116** — but `stats["search_queries"]`/`stats["search_degraded"]` ARE on it, which is how `capstone_measure.py` witnesses S3 |
+| S5 CONNECT | `execute_embed` `:8937` (+ `run_s4` `:8738` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]` | ❌ **#9116** — the committed `:Point` nodes and their `eventId` stamps in the live graph are the witness `capstone_measure.py` uses |
 
 `capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself, which
