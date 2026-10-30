@@ -170,6 +170,33 @@ def _truthy(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _opts_in(value: object) -> bool:
+    """Whether a `TORTOISE_TEST_CARVE_OUT` value says "URI-less embedded".
+
+    TWO spellings count, because both are in the tree:
+
+    * a literal truthy spelling — `_truthy` above, which is how `ci.yml`,
+      `deploy-pages.yml`, `evals-on-demand.yml` and `perf-lane.yml` set it;
+    * a non-empty EXPRESSION — `TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}`,
+      which is how the repo's two WIDEST embedded jobs set it
+      (`python-ci.yml:1542` in `test`, `:2380` in `test-slow`: the variable is
+      exported at step scope and can be EMPTY on the docker lane, so the
+      expression is all a text scan ever sees).
+
+    An expression is admitted DELIBERATELY, and the direction is fail-closed: a
+    job that sets one MAY run URI-less, so it joins the population whose cap
+    must clear the age arm. Admission can only ADD jobs to the `uncapped` and
+    `widest` assertions — never excuse one from them — so "maybe opted in" is
+    strictly safer here than "no". (Review @ `1e9b96be5`, ISSUE 2: with
+    `_truthy` alone those two jobs were admitted only through the
+    reaper-invocation half, and a future expression-only job would have been
+    admitted by nothing — invisible to `uncapped == []`, which is the direction
+    that lets the proof go false silently.)
+    """
+    text = str(value).strip()
+    return True if "${{" in text else _truthy(text)
+
+
 def _workflow_files(workflows_dir: Path | None = None) -> list[Path]:
     """Every workflow file — BOTH `.yml` and `.yaml`.
 
@@ -208,8 +235,10 @@ def _embedded_lane_job_outer_timeouts(
     exist.
 
     A job is admitted on either signal it cannot own a server without: it
-    invokes this reaper, or it opts into the URI-less embedded lane (at any
-    level — workflow `env:` is inherited by every job). The marker is the
+    invokes this reaper, or it opts into the URI-less embedded lane — at workflow
+    `env:` level (inherited by every job), at job level, or at step level, and in
+    either spelling `_opts_in` accepts (a truthy literal, or a non-empty
+    `${{ … }}` expression). The marker is the
     carve-out env var rather than the string "pytest" deliberately —
     `ci.yml::flip-gate` runs pytest from inside `verify-cutover`, so a `pytest`
     scan cannot see the exact job this population was widened for. The residual
@@ -234,7 +263,7 @@ def _embedded_lane_job_outer_timeouts(
             envs.extend(
                 step.get("env") for step in job.get("steps") or [] if isinstance(step, dict)
             )
-            opted_in = any(_truthy((env or {}).get(_CARVE_OUT)) for env in envs)
+            opted_in = any(_opts_in((env or {}).get(_CARVE_OUT)) for env in envs)
             if not (invokes_reaper or opted_in):
                 continue
             cap = job.get("timeout-minutes")
@@ -334,6 +363,41 @@ def test_the_embedded_lane_scan_reads_every_workflow_extension(tmp_path):
         "the population scan did not read every workflow extension, so a `.yaml` "
         "workflow that can own an embedded redislite server is invisible to the "
         f"age-arm proof: {found}"
+    )
+
+
+def test_an_expression_valued_carve_out_is_admitted(tmp_path):
+    """NON-VACUOUS: reds if `_opts_in` falls back to literal spellings only.
+
+    The repo's two widest embedded jobs opt in the way a text scan cannot spell:
+    `TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}` (`python-ci.yml:1542` in
+    `test`, `:2380` in `test-slow`). They are admitted today by the
+    reaper-invocation half, so this hole is INVISIBLE on the real tree — which is
+    exactly why it needs its own fixture: a job that sets the expression and does
+    not run the reaper would otherwise be admitted by nothing, and if it were
+    uncapped the age-arm proof would go false while `uncapped == []` kept
+    reporting green (review @ `1e9b96be5`, ISSUE 2).
+
+    The fixture job is deliberately UNCAPPED and the expected value is `None`:
+    admission is what this pins, and `None` is the state the assertions above
+    refuse — so reading the expression as "not opted in" drops the job instead of
+    mis-reading its cap.
+    """
+    (tmp_path / "expr-leg.yml").write_text(
+        "jobs:\n"
+        "  expr-lane:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: pytest -q\n"
+        "        env:\n"
+        "          TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}\n"
+    )
+
+    found = _embedded_lane_job_outer_timeouts(tmp_path)
+    assert found == {"expr-leg.yml:expr-lane": None}, (
+        "an expression-valued `TORTOISE_TEST_CARVE_OUT` is not admitted, so a job "
+        "that opts into the URI-less embedded lane this way — the form both "
+        f"widest embedded jobs use — is invisible to the age-arm proof: {found}"
     )
 
 

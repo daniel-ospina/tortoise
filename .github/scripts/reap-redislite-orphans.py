@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Reap redislite servers that are PROVABLY orphaned — never a live peer's (#3653).
 
+⛔ SCOPE of that promise: THIS tool's two arms. It does not reach the 30-minute
+`find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf` litter
+sweep that shares the same step — that arm deletes by mtime with no liveness
+check at all and CAN unlink a live peer's socket directory (#3653's remaining
+half; the arithmetic is in `DEFAULT_MAX_AGE_MINUTES`). Read the headline as
+"never by this tool's own decision", not as "nothing in this step can".
+
 ## Why this exists
 
 `python-ci.yml` cleaned stale embedded-redis litter with a bare, host-global:
@@ -151,9 +158,15 @@ _SOCKET_FLAG = "unixsocket"
 # `python3` before the project venv or `tools/` is importable. The pins above
 # are what keep the mirror honest.
 WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES = 90
-# `timeout -s INT -k 10` gives a cancelled leg 10 s after SIGINT before SIGKILL,
-# and the runner then tears the step down. Minutes of slack over the bound,
-# deliberately small: the bound itself already carries the margin.
+# Slack over the JOB bound — NOT over the leg's in-step watchdog. A job
+# cancelled at its `timeout-minutes` is not gone at that instant: the runner
+# cancels it, then tears its container down, and the server this tool can meet
+# belongs to a DIFFERENT job on the same host, so that teardown can still be in
+# flight while the reaper looks. 5 minutes covers that gap, and it is deliberately
+# small because the bound it is added to already carries the margin.
+# (The `timeout -s INT -k 10 …` in each leg's `run:` is the INNER pytest
+# watchdog: it stops pytest, never the job, so it is not the clock this number
+# is measured against.)
 CANCEL_SLACK_MINUTES = 5
 DEFAULT_MAX_AGE_MINUTES = WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES + CANCEL_SLACK_MINUTES
 

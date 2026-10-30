@@ -437,6 +437,22 @@ def _wire(page: Page, *, inv: dict | None = None,
             # specs register their OWN route for this path AFTER `_wire`, and
             # Playwright matches routes in reverse registration order, so this arm
             # does not shadow them.
+            #
+            # #10327 measured the same read failing from the OTHER side, and it is
+            # why the create-org clicks below stopped passing `force=True`: the
+            # menu renders the retry row ABOVE `+ Create new organization`
+            # (main.jsx:10934-10940 → 10969), so a FAILED read moves that button
+            # DOWN by the row's height — exactly 40px on this fixture (y 367.78 →
+            # 407.78) — at an arbitrary moment after the menu mounts. A click whose
+            # point was computed before the shift is then dispatched into the alert
+            # row and SWALLOWED: no dialog, no error, menu still open (dashboard-e2e
+            # reds on runs 41038160303 and 41029185303). `force=True` disables the
+            # actionability check that retries such a click, so the click sites no
+            # longer set it.
+            # ⛔ ONE arm, not two. `main` grew this same answer under #9191 while
+            # #10327 was open; a second identical `path.endswith(...) and method ==
+            # "GET"` arm below is UNREACHABLE, and a dead copy of the fix is the one
+            # a maintainer finds first (review @ 1e9b96be5, ISSUE 1).
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"invites": []}))
             return
@@ -450,25 +466,6 @@ def _wire(page: Page, *, inv: dict | None = None,
                           body=json.dumps([{"user_id": "u-e2e-identity",
                                             "role": "owner", "status": "active",
                                             "email": "identity-e2e@premise-labs.dev"}]))
-            return
-        if path.endswith("/v1/invites/pending") and method == "GET":
-            # #10327: ANSWER this read instead of letting it fall to the 404
-            # catch-all below. The account menu fetches it when it opens and
-            # renders the result ABOVE "+ Create new organization"; a failed
-            # read grows a `role=alert` retry row there (main.jsx:10934-10940,
-            # 10969), moving the button DOWN by the row's height — measured on
-            # the pre-fix tree at exactly 40px (y 367.78 → 407.78) at an
-            # arbitrary moment after the menu mounts. The three create-org
-            # specs click that button, so a click whose point was computed
-            # before the shift is dispatched into the alert row and SWALLOWED:
-            # no dialog, no error, menu still open — the dashboard-e2e red on
-            # runs 41038160303 (this PR) and 41029185303 (feat/5086-tm), both
-            # timing out on `dialog`/`Organization name` after the click.
-            # An empty list is the state this fixture means (no invites); the
-            # two invite specs below register their OWN route for this path and
-            # run first, so their fixtures are unaffected.
-            route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"invites": []}))
             return
         route.fulfill(status=404, content_type="application/json", body="{}")
 
@@ -910,6 +907,9 @@ def test_the_account_menu_settles_instead_of_404ing_its_invites(page: Page):
     # The retryable-error row `loadPendingInvites` writes on a failed fetch:
     # `{ _loadError: 'Could not load invites — reopen the menu to retry' }`.
     expect(menu.get_by_text("Could not load invites")).to_have_count(0)
+    # …and its ARIA shape, not just its text (#10327): the row `loadPendingInvites`
+    # grows is a `role=alert`, and that is the node a stale click point lands in.
+    expect(menu.get_by_role("alert")).to_have_count(0)
     # …and the item the create-org arms click is present and stable, not re-rendered
     # under them: this resolves BEFORE any click, so a regression here is a clear
     # assertion rather than a detached-node click 30 s downstream.
@@ -1145,37 +1145,6 @@ def test_pending_invites_in_menu(page: Page):
     menu.get_by_role("button", name="Decline").click()
     expect(menu.get_by_text("Invites")).to_have_count(0)
     expect(menu.get_by_text("Bravo")).to_have_count(0)
-
-
-def test_account_menu_invite_read_is_answered_by_the_fixture(page: Page):
-    """#10327: the shared fixture must ANSWER `/v1/invites/pending`, not 404 it.
-
-    The account menu renders that read ABOVE "+ Create new organization"
-    (main.jsx:10934-10940 → 10969). A FAILED read inserts a retry `role=alert`
-    row there, and the create-org button below it moves DOWN by the row's
-    height at an arbitrary moment after the menu mounts — measured on this
-    file's own fixture at exactly 40px (y 367.78 → 407.78). The three
-    create-org specs click that button, so a click whose point was computed
-    before the shift dispatches into the alert row and is SWALLOWED: no
-    dialog, no error, menu still open. That is the dashboard-e2e red on
-    runs 41038160303 (this PR) and 41029185303 (feat/5086-tm).
-
-    Pinned on the FIXTURE's answer (not on a rendered position) because the
-    200 is what makes the menu's geometry deterministic for every clicking
-    spec here: a 404 reds this assertion directly.
-    """
-    _seed(page)
-    _wire(page, inv=_inventory(login_methods=1))
-    page.goto(DASHBOARD_URL)
-    with page.expect_response("**/v1/invites/pending**") as resp_info:
-        _open_account_menu(page)
-    assert resp_info.value.status == 200, (
-        f"_wire must answer /v1/invites/pending, got {resp_info.value.status} "
-        "(the catch-all 404 makes the menu grow a retry row above the create-org button)")
-    menu = page.locator(".account-menu")
-    expect(menu.get_by_role("button", name="+ Create new organization")).to_be_visible()
-    # ...so no retry row is inserted above that button.
-    expect(menu.get_by_role("alert")).to_have_count(0)
 
 
 _TWO_TEAMS = [
