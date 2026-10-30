@@ -399,7 +399,12 @@ owed (`agent-infra#2918`).
   `tests/test_s2_decision_record_5087.py` re-measures the **byte** columns exactly (they are
   the tripwire: a payload change moves those bytes first) and pins the published
   `B ≈ tok` pairs to the recorded cells instead (PR #10302 review round 6, P1 + P2; the
-  re-count recipe lives on `_S7_TOKEN_CELLS`). The upstream
+  re-count recipe lives on `_S7_TOKEN_CELLS`). It pins the **table** the same way: the `tok`
+  cell of each row above is asserted **equal** to the recorded cell, and the `$` cell is
+  re-derived from it at `4.2e-8 \$/token` over the row's own item count — before that
+  equality existed, a token-only edit to this table (`| 50,004 B | 9,999 |`) changed no
+  assertion anywhere, because the pair matcher below requires the `B ≈ tok` form a table row
+  does not have (PR #10302 review round 7, P2). The upstream
   tokenizer is not published, so read the token counts as **±15%**, and the
   dollars as an estimate of the same order — not a receipt. The first real call is
   what produces a receipt, and on the VENDOR endpoint that receipt is a **token

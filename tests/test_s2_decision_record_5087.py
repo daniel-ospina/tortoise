@@ -505,9 +505,44 @@ _S7_VET_ITEM_CHARS = 55
 _S7_CLASSIFY_ITEM_CHARS = 71
 _S7_NARRATIVE_WORDS = 500
 
-#: The `B` cell of a §7 cost row: ``| `vet-v2`, … | 50,004 B | 11,223 | …``.
-_S7_BYTES_CELL = re.compile(r"^\| `(?P<version>vet-v2|classify-v2)`.*?\| ([\d,]+) B \|",
-                            re.MULTILINE)
+#: A §7 cost row, ALL FOUR cells:
+#: ``| `vet-v2`, **40 items** / … | 50,004 B | 11,223 | **\$0.00047** → **\$0.0000118/item** |``.
+#:
+#: ⚠️ The `tok` and `$` cells are captured, not just the `B` cell (PR #10302 review round 7,
+#: P2 — the same finding the section's own §8 row calls "the inert-enforcer shape"). Round 6
+#: made the token column a RECORDED proxy on the argument that the recorded cells still *pin*
+#: the published ones — but `_S7_TOKEN_CELLS` was consumed only as a whitelist that EXCUSED a
+#: pair from `_unmarked_legacy_figures`, and §7 publishes its cells as a **table row**, which
+#: `_V1_FIGURE` (it requires the `B ≈ tok` form) never matches. So the table's `tok` and `$`
+#: cells were pinned by nothing: `| 50,004 B | 11,223 |` → `| 50,004 B | 9,999 |` left every
+#: assertion green, on the artifact an operator prices the seam from.
+_S7_COST_ROW = re.compile(
+    r"^\| `(?P<version>vet-v2|classify-v2)`[^|]*?\b(?P<items>[\d,]+) (?:tail )?items\b[^|]*?"
+    r"\| (?P<b>[\d,]+) B \| (?P<tok>[\d,]+) \| "
+    r"\*\*\\?\$(?P<cost>[\d.]+)\*\* → \*\*\\?\$(?P<per_item>[\d.]+)/item\*\* \|",
+    re.MULTILINE)
+
+#: §7's own prose statement of the `tok` cell as a per-item count —
+#: ``**281 tokens/item** here (11,223 / 40)`` — which derives from the cell above it and is
+#: the form a reader compares against the 343 tokens/item comparator a few lines down.
+_S7_TOKENS_PER_ITEM = re.compile(
+    r"\*\*(?P<per>[\d,]+) tokens/item\*\* here \((?P<tok>[\d,]+) / (?P<items>\d+)\)")
+
+#: The vendor's documented input-token price, quoted as `4.2e-8 \$` per token in §7's
+#: "The price" derivation (and `\$42`/`\$0.042` per Btok/Mtok). The `$` column is that rate
+#: applied to the `tok` column, so it must re-derive from it — a rate change moves both.
+_S7_USD_PER_INPUT_TOKEN = 4.2e-8
+
+
+def _s7_cost_cells(text: str) -> dict[str, dict[str, int | float]]:
+    """§7's four published cells per version, parsed out of the table itself."""
+    return {m.group("version"): {
+                "items": int(m.group("items").replace(",", "")),
+                "bytes": int(m.group("b").replace(",", "")),
+                "tok": int(m.group("tok").replace(",", "")),
+                "cost": float(m.group("cost")),
+                "per_item": float(m.group("per_item")),
+            } for m in _S7_COST_ROW.finditer(text)}
 
 #: The §7 ``tok`` cells — a RECORDED `cl100k_base` proxy, deliberately NOT re-derived here.
 #: Both columns of the table, because §7 publishes the framed request and the clause-removed
@@ -527,8 +562,11 @@ _S7_BYTES_CELL = re.compile(r"^\| `(?P<version>vet-v2|classify-v2)`.*?\| ([\d,]+
 #:
 #: The **`B` cells are still measured exactly** and are the tripwire: any payload change that
 #: moves these token counts moves those bytes first, and `test_section_7_cost_rows_…` reds on
-#: it. These two dicts then pin the PUBLISHED pairs — a `39,544 B ≈ 9,999 tok`-shaped edit in
-#: the artifacts is neither of them and reds `_unmarked_legacy_figures`.
+#: it. These two dicts then pin the PUBLISHED cells in BOTH forms the artifacts use them — a
+#: `39,544 B ≈ 9,999 tok`-shaped edit is neither of them and reds `_unmarked_legacy_figures`,
+#: and a **table** edit (`| 50,004 B | 9,999 |`) reds the `tok` equality in
+#: `test_section_7_cost_rows_…`, which also re-derives the `$` column from these cells at
+#: `4.2e-8 $/token` (PR #10302 review round 7, P2: the table form was pinned by nothing).
 #:
 #: Re-measure on a dev box (`uv sync --group dev`, which does install `tiktoken`): build
 #: `_s7_requests(framed=…)` and run
@@ -632,10 +670,11 @@ def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
     No network, no DB, no model: the transport is a stub that captures the payload.
     """
     measured = _s7_payloads()
-    recorded = {m.group("version"): int(m.group(2).replace(",", ""))
-                for m in _S7_BYTES_CELL.finditer(DOC.read_text(encoding="utf-8"))}
-    assert set(recorded) == {"vet-v2", "classify-v2"}, (
-        f"§7 must tabulate both prompts by their CURRENT version — found {sorted(recorded)}")
+    doc_text = DOC.read_text(encoding="utf-8")
+    cells = _s7_cost_cells(doc_text)
+    assert set(cells) == {"vet-v2", "classify-v2"}, (
+        f"§7 must tabulate both prompts by their CURRENT version — found {sorted(cells)}")
+    recorded = {version: cell["bytes"] for version, cell in cells.items()}
     assert recorded == measured, (
         f"§7's recorded request sizes are not this head's payload: recorded {recorded}, "
         f"measured {measured} — re-measure and update the table, do not carry the old row")
@@ -647,12 +686,84 @@ def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
         "the superseded pre-framing row is back in the table — the rows must be the FRAMED "
         f"payload's, not the carried-over figures: recorded {recorded}")
 
+    # ── the `tok` column: pinned to the recorded proxy ────────────────────
+    # This is the half round 6's design LEFT INERT (review round 7, P2). The proxy exists
+    # because no deterministic test can re-derive it, so its whole value is the equality
+    # below — without it a token-only edit to §7 ships green.
+    published_tok = {version: cell["tok"] for version, cell in cells.items()}
+    assert published_tok == _S7_TOKEN_CELLS, (
+        f"§7's recorded token cells are not the recorded proxy: published {published_tok}, "
+        f"recorded {_S7_TOKEN_CELLS} — either the payload changed (re-measure BOTH columns "
+        "with `tiktoken`, recipe on `_S7_TOKEN_CELLS`) or a cell was edited by hand; the "
+        "cost column below is derived from these, so a stale token cell silently reprices "
+        "the seam")
+
+    # ── the `$` column must re-derive from the `tok` column ───────────────
+    # `$0.00047` and `$0.0000118/item` are the rate applied to 11,223 tokens over 40 items —
+    # if they can drift from the token cell they are derived from, the table prices the seam
+    # off a figure nothing counted.
+    for version, cell in cells.items():
+        want_total = round(cell["tok"] * _S7_USD_PER_INPUT_TOKEN, 5)
+        assert cell["cost"] == want_total, (
+            f"§7's `{version}` cost cell does not re-derive from its token cell at "
+            f"{_S7_USD_PER_INPUT_TOKEN:g} $/token: published ${cell['cost']}, derived "
+            f"${want_total} from {cell['tok']:,} tokens — re-derive the column, or correct "
+            "the rate in §7's derivation and `_S7_USD_PER_INPUT_TOKEN` together")
+        want_per_item = round(cell["tok"] * _S7_USD_PER_INPUT_TOKEN / cell["items"], 7)
+        assert cell["per_item"] == want_per_item, (
+            f"§7's `{version}` per-item cell does not re-derive from {cell['tok']:,} tokens "
+            f"over {cell['items']} items: published ${cell['per_item']}, derived "
+            f"${want_per_item}")
+
+    # ── the same count in §7's prose ──────────────────────────────────────
+    # ``**281 tokens/item** here (11,223 / 40)`` carries the identical cell in the form a
+    # reader compares against the 343 tokens/item comparator, and no `B ≈ tok` matcher sees
+    # it either.
+    prose = _S7_TOKENS_PER_ITEM.search(doc_text)
+    assert prose is not None, (
+        "§7 no longer states the tokens-per-item figure as `**<n> tokens/item** here "
+        "(<tok> / <items>)` — if the sentence was reworded, re-anchor this guard rather "
+        "than dropping it: the prose cell derives from the `tok` column and drifts with it")
+    assert int(prose.group("tok").replace(",", "")) == _S7_TOKEN_CELLS["vet-v2"], (
+        f"§7's prose quotes {prose.group('tok')} tokens where the recorded `vet-v2` cell is "
+        f"{_S7_TOKEN_CELLS['vet-v2']:,}")
+    assert int(prose.group("items")) == cells["vet-v2"]["items"] == 40, (
+        f"§7's prose divides by {prose.group('items')} items but the row tabulates "
+        f"{cells['vet-v2']['items']} — the per-item count is derived from both")
+    assert int(prose.group("per").replace(",", "")) == round(
+        _S7_TOKEN_CELLS["vet-v2"] / cells["vet-v2"]["items"]), (
+        f"§7's prose states {prose.group('per')} tokens/item, which is not "
+        f"{_S7_TOKEN_CELLS['vet-v2']:,} / {cells['vet-v2']['items']} = "
+        f"{round(_S7_TOKEN_CELLS['vet-v2'] / cells['vet-v2']['items'])}")
+
+    # ── non-vacuity, in-test: the edit that shipped green must now red ─────
+    # The finding was proved by making a token-ONLY edit to the row and watching every
+    # assertion stay green (the bytes still matched). Run that exact edit through the same
+    # parser, so a future `tok` comparison that is accidentally inert reddens here.
+    row = next(line for line in doc_text.splitlines() if line.startswith("| `vet-v2`,"))
+    assert _V1_FIGURE.search(row) is None, (
+        "a §7 table row now matches the `B ≈ tok` matcher, so the separate token-cell "
+        f"capture this test needs would be redundant — re-check the finding: {row}")
+    edited = row.replace(
+        f"| {cells['vet-v2']['bytes']:,} B | {_S7_TOKEN_CELLS['vet-v2']:,} |",
+        f"| {cells['vet-v2']['bytes']:,} B | 9,999 |", 1)
+    assert edited != row, f"the token-only mutation did not apply to the row: {row}"
+    mutated = _s7_cost_cells(doc_text.replace(row, edited, 1))["vet-v2"]
+    assert mutated["bytes"] == measured["vet-v2"], (
+        "the mutation must be token-ONLY (bytes untouched) or it proves the byte guard "
+        f"rather than this one: mutated {mutated}")
+    assert mutated["tok"] != _S7_TOKEN_CELLS["vet-v2"], (
+        "a token-only edit to §7's row leaves the token comparison green — the guard is "
+        "inert, which is exactly the defect it was added for")
+
 
 #: A published figure pair: ``39,544 B ≈ 9,103 tok``. Whitespace-tolerant, because the
 #: artifacts are hard-wrapped at ~95 columns and a figure that wraps mid-pair is exactly
 #: the one a line-anchored regex would silently stop watching (the pre-fix row wrapped:
-#: ``39,484 B ≈ 9,265`` / ``tok``).
-_V1_FIGURE = re.compile(r"(?P<b>[\d,]+)\s*B\s*≈\s*(?P<t>[\d,]+)\s+tok")
+#: ``39,484 B ≈ 9,265`` / ``tok``). The unit alternation covers the OTHER wrap the CHANGELOG
+#: actually uses — ``50,004 B ≈ 11,223`` / ``input tokens`` — because `\s+tok` cannot match
+#: `input tokens`, so that pair sat outside this guard as well (PR #10302 review round 7).
+_V1_FIGURE = re.compile(r"(?P<b>[\d,]+)\s*B\s*≈\s*(?P<t>[\d,]+)\s+tok(?:en)?s?\b")
 
 #: What makes a legacy pair readable as HISTORY rather than as a usable baseline.
 #: Round 5 of PR #10302's review (P2) found two different pre-framing figures in these
