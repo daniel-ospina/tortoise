@@ -283,8 +283,8 @@ x64 pool for a bare `ubuntu-<version>`, the arm64 pool for an `-arm` spelling, t
 otherwise), so a two-architecture pool is not misread as erosion. When `0 < n < m` the line also
 prints `⚠️ PARTIAL`. ⛔ **An OFFLINE runner is not an answer** — GitHub defines it as "not connected
 to GitHub", so it cannot be handed a job — so offline carriers are excluded from BOTH sides of the
-ratio and printed as context instead (`Offline, so NOT counted as an answer: K runner(s) in the pool
-are not \`online\`, J of them carrying <label>`). Without that split, 7 carriers all offline
+ratio and printed as context instead (``Offline, so NOT counted as an answer: K runner(s) in the pool
+are not `online`, J of them carrying <label>``). Without that split, 7 carriers all offline
 printed `7 of 7` and exited 0 under `CI_RUNNER_OS_LABEL=on`: the incident this block exists to
 surface, reported green.
 The EXIT is decided per CLASS, not "any zero-answer label":
