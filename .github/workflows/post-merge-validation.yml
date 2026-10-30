@@ -341,9 +341,6 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-          TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
-          find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
-          echo "tempdir cleaned"
       - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
         if: needs.dedup-check.outputs.skip != 'true'
         # ~130MB; persisted so the pre-cache step below is a no-op on

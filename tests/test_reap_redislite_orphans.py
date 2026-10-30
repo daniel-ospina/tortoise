@@ -202,6 +202,50 @@ def test_every_cleaning_job_invokes_the_scoped_reaper():
         )
 
 
+#: the three logical lines of the tempdir cleanup that follows the scoped reaper
+_CLEANUP_MARKERS = ("gettempdir())", "-mmin +30", 'echo "tempdir cleaned"')
+
+
+def _cleanup_runs(text):
+    """Every maximal run of consecutive tempdir-cleanup lines in `text`."""
+    runs, cur = [], []
+    for line in text.splitlines():
+        if any(m in line for m in _CLEANUP_MARKERS) and not line.lstrip().startswith("#"):
+            cur.append(line.strip())
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def test_no_ci_step_duplicates_its_tempdir_cleanup():
+    """The tempdir trio is ONE cleanup; a second copy is a mechanical artifact.
+
+    NON-VACUOUS: this reds on the pre-fix tree, naming all five steps that carried
+    the trio twice — `python-ci.yml` x4 and `post-merge-validation.yml` x1. That is
+    the shape `0e32f415c` produced by inserting the scoped-reaper lines ABOVE the
+    existing cleanup instead of replacing it: the commands are idempotent, so
+    nothing fails, but the duplicate reads as intentional to the next editor and
+    the step's body then claims two cleanups it does not need (#10254 round-13
+    note). The invariant is per STEP, which is why it is asserted over runs of
+    consecutive cleanup lines rather than over the file's total count.
+    """
+    offenders: list[str] = []
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        for run in _cleanup_runs(path.read_text()):
+            if len(run) != 3:
+                offenders.append(
+                    f"{path.name}: {len(run)} cleanup lines starting at {run[0][:52]!r}")
+    assert offenders == [], (
+        "the tempdir cleanup is emitted more than once in a single step — the trio "
+        "(`TMPD=…`, `find … -mmin +30`, `echo \"tempdir cleaned\"`) is one cleanup, "
+        "and a second copy is a mechanical-edit artifact that reads as intentional:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
 @pytest.mark.parametrize("leg", EMBEDDED_LEGS)
 def test_every_embedded_leg_invokes_the_scoped_reaper(leg):
     """Each of the four cleaning legs must call the scoped tool, not nothing."""
