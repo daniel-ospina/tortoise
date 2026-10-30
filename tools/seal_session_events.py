@@ -60,6 +60,7 @@ import re
 import sys
 import tempfile
 import zlib
+from errno import EMLINK, ENOSYS, ENOTSUP, EOPNOTSUPP, EPERM
 from dataclasses import dataclass
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -81,6 +82,9 @@ ARCHIVE_DIRNAME = "archive"
 #: still on this file", and it is the guard that does not depend on which clock
 #: the producer picked.
 SETTLE_GRACE_SECONDS = 3600
+#: ``os.link`` failures that mean "this filesystem has no hard links", not
+#: "something is broken": the publish falls back to an exclusive create.
+_NO_HARD_LINK_ERRNOS = frozenset({ENOTSUP, EOPNOTSUPP, EPERM, EMLINK, ENOSYS})
 
 _DAY_FILE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.jsonl$")
 
@@ -292,23 +296,25 @@ def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
                   "first)")
 
 
-def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str) -> tuple[str, str]:
-    """Publish an archive WITHOUT ever replacing bytes this run did not verify.
+def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
+                        digest: str) -> tuple[str, str]:
+    """Publish an archive WITHOUT ever destroying bytes this run did not verify.
 
-    Returns ``(verdict, detail)`` where verdict is one of:
+    Returns ``(verdict, detail)``:
 
-    * ``published`` — the entry is now ours (linked atomically, or a provable
-      SUPERSET of what a peer had);
+    * ``published`` — the entry is now ours (linked atomically, or written
+      O_EXCL on a filesystem with no hard links);
     * ``identical`` — a peer published exactly our bytes first;
-    * ``theirs-newer`` — a peer's archive holds bytes we never read (it appended
-      while we compressed): that is MORE evidence than ours, so it is kept;
+    * ``theirs-newer`` — a peer's archive is a strict SUPERSET of ours (it
+      appended while we compressed): more evidence than we hold, kept;
+    * ``disagree`` — two divergent archives: both are kept, a human decides;
     * ``unreadable`` — we could not publish, or the peer's archive does not read.
 
-    ``os.replace`` as a blind writer is the defect this helper removes: the
-    change test is a stat, not a transaction, so a peer that appends + seals +
-    unlinks between the check and the replace would have its newer archive
-    replaced by our stale snapshot and the loss reported as ``sealed``
-    (#6388 review, P0). ``os.link`` is atomic and answers EEXIST instead.
+    Two rules, each earned by a review round. (a) ``os.replace`` is never used
+    as a blind writer: the change test is a stat, not a transaction. (b) The
+    supersede path reads the peer's archive and then moves it ASIDE instead of
+    replacing it — a read-then-replace is still a stale CAS, and the window it
+    leaves is a silent record loss (#6388 reviews).
     """
     try:
         os.link(tmp, target)
@@ -316,7 +322,23 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str) -> t
     except FileExistsError:
         pass
     except OSError as e:
-        return "unreadable", f"could not publish to {target}: {e}"
+        if e.errno not in _NO_HARD_LINK_ERRNOS:
+            return "unreadable", f"could not publish to {target}: {e}"
+        # No hard-link support (exFAT/SMB/FAT/overlay): an exclusive create is
+        # still no-clobber, and a torn write leaves an archive `_unreadable_archives`
+        # reds while the plain source is untouched.
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            pass  # a peer got there first: fall through to the raced branch
+        except OSError as e2:
+            return "unreadable", f"could not publish to {target}: {e2}"
+        else:
+            with os.fdopen(fd, "wb") as out:
+                out.write(gzip.compress(plain, mtime=0))
+                out.flush()
+                os.fsync(out.fileno())
+            return "published", ""
     try:
         raced = gzip.decompress(target.read_bytes())
     except (OSError, EOFError, zlib.error) as e:
@@ -324,9 +346,32 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str) -> t
     if _sha256(raced) == digest:
         return "identical", ""
     if plain.startswith(raced):
-        os.replace(tmp, target)   # provably a superset of theirs: safe
-        return "published", ""
-    return "theirs-newer", "a peer's archive holds bytes we did not read — kept theirs"
+        # Ours is a strict superset, so theirs is a stale prefix. Move it ASIDE
+        # (never replace it) and link ours into place; a third run that wins the
+        # gap leaves both copies on disk and is reported, not overwritten.
+        aside = target.with_name(f"{target.name}.superseded-{_sha256(raced)[:8]}")
+        try:
+            os.replace(target, aside)
+        except FileNotFoundError:
+            aside = None
+        except OSError as e:
+            return "disagree", (f"could not move the stale archive aside ({e}) "
+                                "— left both copies in place")
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            return "disagree", (f"a third run published {target} while this run "
+                                f"superseded {aside} — left both copies in place")
+        except OSError as e:
+            return "unreadable", (f"the stale archive was moved to {aside} but "
+                                  f"{target} could not be written: {e}")
+        return "published", (f"superseded a stale prefix; the previous archive is "
+                             f"kept at {aside}" if aside else "")
+    if raced.startswith(plain):
+        return "theirs-newer", ("a peer's archive holds bytes we did not read — "
+                                "kept theirs")
+    return "disagree", ("a peer's archive disagrees and is not a superset — "
+                        "left both copies in place")
 
 
 def seal_one(root: Path, path: Path) -> Sealed:
@@ -399,6 +444,7 @@ def seal_one(root: Path, path: Path) -> Sealed:
     published = False
     removed = False
     already_gone = False
+    source_absent = False
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=str(target.parent),
@@ -423,8 +469,9 @@ def seal_one(root: Path, path: Path) -> Sealed:
             # A peer removed the source while we were compressing. Our `tmp`
             # holds exactly the bytes WE read, which says nothing about what a
             # peer's archive holds — never publish it blind.
+            source_absent = True
             verdict, detail = _publish_no_clobber(tmp, target, plain, digest)
-            if verdict == "unreadable":
+            if verdict in ("unreadable", "disagree"):
                 return Sealed(day, "conflict", len(plain),
                               _size_or_zero(target), detail)
             if verdict == "theirs-newer":
@@ -438,7 +485,7 @@ def seal_one(root: Path, path: Path) -> Sealed:
             return Sealed(day, "conflict", len(plain), 0,
                           "file changed while sealing — source kept")
         verdict, detail = _publish_no_clobber(tmp, target, plain, digest)
-        if verdict == "unreadable":
+        if verdict in ("unreadable", "disagree"):
             return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                           detail)
         if verdict == "theirs-newer":
@@ -470,7 +517,11 @@ def seal_one(root: Path, path: Path) -> Sealed:
             return Sealed(day, "verify-failed", len(plain), _size_or_zero(target),
                           f"archive published but the source was NOT removed "
                           f"({e}) — both copies are on disk")
-        return Sealed(day, "verify-failed", len(plain), 0,
+        if source_absent:
+            return Sealed(day, "verify-failed", len(plain),
+                          _size_or_zero(target),
+                          f"the source was already gone and publishing failed: {e}")
+        return Sealed(day, "verify-failed", len(plain), _size_or_zero(target),
                       f"seal failed: {e} — source kept")
     finally:
         if tmp is not None:
@@ -650,6 +701,8 @@ def main(argv: list[str] | None = None) -> int:
         for path in unreadable:
             print(f"  {path.name}", file=sys.stderr)
         return EXIT_ERROR
+    unproven = [p for p in vanished
+                if not _already_gone(root, _day_of(p) or today, 0).ok]
     if args.check:
         broken = []
         try:
@@ -664,11 +717,17 @@ def main(argv: list[str] | None = None) -> int:
             for path in broken:
                 print(f"  {path.name}", file=sys.stderr)
             return EXIT_DRIFT
+        if unproven:
+            print(f"UNPROVEN ABSENCE: {len(unproven)} day file(s) disappeared "
+                  "and no readable archive proves the day was sealed:",
+                  file=sys.stderr)
+            for path in unproven:
+                print(f"  {path.name}", file=sys.stderr)
+            return EXIT_DRIFT
         if not pending:
-            if vanished:  # a peer finished them between the scan and the stat
+            if vanished:  # each one PROVED archived above
                 print(f"ok — {len(vanished)} day file(s) disappeared mid-scan "
                       "(a peer sealed them)", file=sys.stderr)
-                return EXIT_OK
             if deferred:
                 print(f"nothing to seal — {len(deferred)} day file(s) are "
                       f"inside the {SETTLE_GRACE_SECONDS} s settle grace "
@@ -689,6 +748,12 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_DRIFT
 
+    if unproven:
+        print(f"{len(unproven)} day file(s) disappeared and no readable archive "
+              "proves the day was sealed:", file=sys.stderr)
+        for path in unproven:
+            print(f"  {path.name}", file=sys.stderr)
+        return EXIT_ERROR
     rows = [seal_one(root, path) for path in pending]
     _report(rows, stream=sys.stdout)
     if not rows:

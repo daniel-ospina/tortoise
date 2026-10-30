@@ -747,6 +747,81 @@ def test_the_source_present_publish_cannot_clobber_a_peer_archive(tmp_path, monk
     assert result.ok, result
 
 
+def test_a_stale_prefix_is_moved_aside_not_replaced(tmp_path):
+    """Superseding a stale prefix must not DESTROY the peer's archive: the old
+    copy stays on disk under a `.superseded-<sha8>` name, so a read-then-replace
+    race can never leave a record only in memory.
+
+    Mutation: the aside `os.replace` + `os.link` replaced by a bare
+    `os.replace(tmp, target)` (the cycle-8 shape) REDs the aside assertion.
+    """
+    day = TODAY - timedelta(days=9)
+    stale = b'{"n": 1}\n'
+    full = b'{"n": 1}\n{"n": 2}\n'
+    path = _write(tmp_path, day, full)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(stale, mtime=0))
+
+    result = seal.seal_one(tmp_path, path)
+
+    assert result.status == "sealed", result
+    assert gzip.decompress(target.read_bytes()) == full
+    asides = sorted(p for p in target.parent.iterdir()
+                    if ".superseded-" in p.name)
+    assert asides, "the previous archive must be kept, never replaced"
+    assert gzip.decompress(asides[0].read_bytes()) == stale
+
+
+def test_an_absent_day_with_no_archive_is_drift_not_a_quiet_ok(tmp_path, capsys):
+    """A candidate that vanished is only a win if an archive PROVES it; with no
+    archive anywhere its records exist nowhere.
+
+    Mutation: the `unproven` filter deleted (trusting `vanished` as success)
+    REDs here at exit 0.
+    """
+    ghost = tmp_path / f"{(TODAY - timedelta(days=30)).isoformat()}.jsonl"
+
+    real_scandir = seal.os.scandir
+
+    class _Ghost:
+        name = ghost.name
+        path = str(ghost)
+
+    def fake_scandir(path):
+        entries = list(real_scandir(path))
+        if not entries:
+            return entries
+        return entries
+
+    # Simulate the peer: the entry is listed, then gone before the stat.
+    real_stat = seal.Path.stat
+
+    def racing_stat(self, *a, **k):
+        if self == ghost:
+            raise FileNotFoundError(2, "gone")
+        return real_stat(self, *a, **k)
+
+    ghost.touch()
+    seen = []
+
+    def scan_then_remove(path):
+        entries = list(real_scandir(path))
+        ghost.unlink(missing_ok=True)
+        return entries
+
+    seal.os.scandir = scan_then_remove
+    try:
+        code = seal.main(["--root", str(tmp_path), "--today", TODAY.isoformat(),
+                          "--keep-days", "7", "--check"])
+    finally:
+        seal.os.scandir = real_scandir
+    err = capsys.readouterr().err
+
+    assert code == seal.EXIT_DRIFT, (code, err)
+    assert "UNPROVEN ABSENCE" in err or "no readable archive" in err, err
+
+
 def test_a_differing_archive_is_never_clobbered(tmp_path):
     """Two copies that disagree: NEITHER is discarded — a human decides.
 
