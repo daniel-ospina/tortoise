@@ -4882,10 +4882,11 @@ surfaces:
   # pointer had moved by three). Dual-registered (`core` + `tier1`) for the same reason as the
   # extractor-v4 doc guards above: `docs/` is in `NON_PYTHON_PREFIXES`, so a docs-only diff takes
   # `select()`'s early return and runs `tier1` only — and a docs-only diff is exactly the change
-  # that can split the table again. File reads of the design record, the changelog, the seam
-  # module and the seam test, plus the §7 payload construction through a stub transport; no
-  # network/DB/graph/model (PR #10302 review round 7, P3: this said "One file read", the
-  # pre-#10117 shape — the file reads FOUR artifacts and builds two full requests since).
+  # that can split the table again. File reads of the design record, the changelog,
+  # `docs/00_index.md`, the seam module and the seam test, plus the §7 payload construction
+  # through a stub transport; no network/DB/graph/model (PR #10302 review round 7, P3: this
+  # said "One file read", the pre-#10117 shape — the file reads FIVE artifacts and builds two
+  # full requests since; the index is read because its `#5087` row publishes the same §7 pair).
   - test_s2_decision_record_5087.py
   # #5008: the S5 EMBED gate — `tortoise/embed_gate.py` (the predicate, whose
   # rule set IS `tortoise/value_gate.py`'s: one rule set, two questions,

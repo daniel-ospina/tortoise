@@ -66,6 +66,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "architecture" / "S2-DECISION-SEAM.md"
+#: The docs index also publishes §7's FRAMED pair, on the `#5087` row — a fourth artifact
+#: carrying the same two numbers. Until review round 7 no test read it at all.
+INDEX = ROOT / "docs" / "00_index.md"
 
 #: A GFM table delimiter row: `|---|---|`, `| :-- | --: |`, … (≥3 dashes per column).
 _DELIMITER_ROW = re.compile(r"^\|(\s*:?-{3,}:?\s*\|)+$")
@@ -856,6 +859,17 @@ def test_the_pre_framing_baseline_is_a_measurement_and_a_superseded_row_is_marke
             f"{artifact.name} must publish the measured clause-removed baseline "
             f"{sorted(measured.values())} — found {sorted(published)}; the framing's cost "
             "percentage is derived from it")
+
+    # The index publishes the FRAMED pair too (its `#5087` row), in `B ≈ tok` form, and it
+    # was the one named victim of round 7's Issue 1 that no test read AT ALL — a token-only
+    # edit there was invisible while the same edit to §7's table reds the sibling test. It
+    # is checked for `unmarked` only: the index quotes the framed request, never the
+    # clause-removed baseline, so it is not a baseline publisher.
+    unmarked = _unmarked_legacy_figures(INDEX.read_text(encoding="utf-8"), measured, framed)
+    assert not unmarked, (
+        f"{INDEX.name} publishes figures that are neither this head's measurement nor "
+        f"marked superseded: {unmarked} — its `#5087` row must carry the measured pair, "
+        "not a transcription of it")
 
     # Non-vacuity, in-test: the PRE-FIX sentence (verbatim from the changelog at
     # `952640ecab`, kept as a fixture rather than a checkout) must be flagged by the very
