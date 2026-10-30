@@ -4925,12 +4925,20 @@ def test_granularity_sweep_ci(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
 
+    _pin_no_embedder(monkeypatch)  # #4821: the waived-leg status must be fixed
+
     def _run():
         return run_sweep(
             _mini(), chunk_turns_values=(1, 2, 4), context_cap=8000,
             max_chunks_per_session=2, ingest_mode="v2",
             reader=MockReader(), judge=MockJudge(),
             ks=(5, 10, 20), work_dir=str(tmp_path),
+            # #4821: the sweep takes the SAME explicit waiver the rest of the
+            # suite takes (``--skip-preflight``) — its subject is the wiring +
+            # the D2 selection rule, not the dense leg. The env is PINNED below
+            # so the recorded status is deterministic either way: a waiver on a
+            # host WITH an embedder records 'enabled', not 'unavailable'.
+            dense_leg_required=False,
         )
 
     results, winner = _run()
@@ -4939,6 +4947,8 @@ def test_granularity_sweep_ci(tmp_path, monkeypatch):
     assert all(r["context_tokens_mean"] <= 8000 for r in results)
     assert winner is not None
     assert winner["chunk_turns"] in (1, 2, 4)
+    # #4821: the waived leg is RECORDED on every cell (never silent)
+    assert all(r["vector_strategy"] == "unavailable" for r in results)
     # determinism: two consecutive runs select the same winner
     _, winner2 = _run()
     assert winner2["chunk_turns"] == winner["chunk_turns"]
@@ -4957,6 +4967,159 @@ def test_granularity_sweep_ci(tmp_path, monkeypatch):
         assert all(v <= 2 for v in per_session.values())
     finally:
         sdk.close()
+
+
+# ── #4821: the sweep cannot bypass the dense-leg gate ─────────────────────
+#
+# `sweep_granularity.py` was a SECOND CLI entry point into the harness that
+# called `run_evaluation(...)` directly (line 105), so it never ran the
+# dense-leg pre-flight that `run.py`'s `run_main` gates every run with
+# (R3 #1542, fail-closed since #4718). In an env with no embedder it
+# completed KEYWORD-ONLY and printed `SELECTED granularity: chunk_turns = X`
+# — the only artifact an operator sees, since per-cell reports are not saved
+# — handing a degraded instrument's choice to the pilot (step 3) and the
+# 500-Q run (step 5).
+#
+# The gate now runs in `run_sweep` through the SAME seam `run_main` uses
+# (`gate_dense_leg` → `run_measured_evaluation`), so there is one path to a
+# measurement and one place the dense-leg status is threaded from. A THIRD
+# entry point cannot quietly re-introduce the class:
+# `test_no_entry_point_bypasses_the_dense_leg_gate` fails if any module in
+# the package calls `run_evaluation` directly.
+
+
+def _pin_no_embedder(monkeypatch):
+    """The env #4718 makes fatal: the pinned model cannot load."""
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
+
+
+def test_sweep_granularity_requires_dense_leg_by_default(monkeypatch, capsys):
+    """#4821 (a) THE BYPASS: a sweep with the default posture and no
+    embedder fails closed BEFORE any cell runs, with the gate's own
+    attributable message — no keyword-only table, no selected granularity.
+
+    RED when the fix is deleted: pre-fix, ``run_sweep`` called
+    ``run_evaluation`` directly, so no SystemExit happened and every cell
+    completed keyword-only."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    _pin_no_embedder(monkeypatch)
+    cells: list[int] = []
+    monkeypatch.setattr(sg, "run_measured_evaluation",
+                        lambda *a, **k: cells.append(1))
+    with pytest.raises(SystemExit) as ei:
+        sg.run_sweep(_mini(), chunk_turns_values=(1,), ingest_mode="v2",
+                     reader=MockReader(), judge=MockJudge(), limit=1)
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "EMBEDDER PRE-FLIGHT FAILED" in err
+    assert "no_embedder" in err
+    assert "NO measurement" in err
+    assert cells == [], "a cell ran despite the failed gate"
+
+
+def test_sweep_granularity_waiver_labels_but_never_selects(
+        monkeypatch, tmp_path, capsys):
+    """#4821 (b)+(c): the ``--skip-preflight`` waiver still lets the sweep
+    run (the documented debugging/offline escape hatch), but the receipt can
+    never read as a measurement — each cell's ``vector_strategy`` /
+    ``embedding_coverage`` come from that cell's report methodology, and the
+    winner line never uses the SELECTED vocabulary.
+
+    RED when the fix is deleted: pre-fix the cells carried no dense-leg
+    fields at all and the winner was printed as ``SELECTED granularity``
+    from a keyword-only run."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    _pin_no_embedder(monkeypatch)
+    results, _winner = sg.run_sweep(
+        _mini(), chunk_turns_values=(1,), context_cap=8000,
+        ingest_mode="deterministic", reader=MockReader(), judge=MockJudge(),
+        limit=1, work_dir=str(tmp_path), dense_leg_required=False)
+    assert results
+    # (c) the receipt cannot claim density it did not measure
+    assert results[0]["vector_strategy"] == "unavailable"
+    assert results[0]["embedding_coverage"] in (None, 0.0)
+    assert sg._dense_leg_verified(results) is False
+    capsys.readouterr()
+    # (b) ... and the artifact says so, in the operator's own vocabulary
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000, measured=False)
+    out = capsys.readouterr()
+    assert "SELECTED granularity" not in out.out
+    assert "NOT A MEASUREMENT" in out.err
+    assert "UNMEASURED candidate granularity" in out.out
+
+
+def test_sweep_granularity_cli_waiver_is_the_only_way_through(
+        monkeypatch, tmp_path):
+    """#4821 (a) at the CLI: the entry point refuses before loading the
+    dataset (no output file), and the waiver is the only route through —
+    which then records the dense leg as waived + unmeasured in the JSON.
+
+    RED when the fix is deleted: ``main`` had no gate at all, so the first
+    invocation exited 0 and wrote a payload with no ``dense_leg`` block."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    _pin_no_embedder(monkeypatch)
+    out = tmp_path / "sweep.json"
+    argv = ["--data", str(MINI), "--mock", "--limit", "1",
+            "--output", str(out)]
+    with pytest.raises(SystemExit) as ei:
+        sg.main(argv)
+    assert ei.value.code == 1
+    assert not out.exists(), "a receipt was written by a refused sweep"
+    assert sg.main([*argv, "--skip-preflight"]) == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["dense_leg"]["waived"] is True
+    assert payload["dense_leg"]["required"] is False
+    assert payload["dense_leg"]["measured"] is False
+    assert payload["dense_leg"]["embedder"]["reason"] == "no_embedder"
+    assert all(r["vector_strategy"] == "unavailable"
+               for r in payload["results"])
+
+
+def test_no_entry_point_bypasses_the_dense_leg_gate():
+    """#4821 structural guard: within the LongMemEval package, a direct
+    ``run_evaluation(...)`` call is allowed ONLY in ``run.py``, where the
+    gate lives and where ``run_measured_evaluation`` is defined.
+
+    This is what makes the fix hold for entry points that do not exist yet:
+    a third CLI module that calls ``run_evaluation`` directly turns this RED
+    instead of landing a second silent bypass. The fix is to route it through
+    ``run_measured_evaluation(..., embedder_status=gate_dense_leg(...))``
+    (as ``sweep_granularity.run_sweep`` now does), not to add a name here.
+    """
+    import ast
+
+    pkg = Path(__file__).resolve().parent.parent / "tools/longmem_eval"
+    offenders: dict[str, int] = {}
+    for path in sorted(pkg.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        hits = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                if ((isinstance(fn, ast.Name) and fn.id == "run_evaluation")
+                        or (isinstance(fn, ast.Attribute)
+                            and fn.attr == "run_evaluation")):
+                    hits += 1
+            # An import is as good as a call: `from .run import run_evaluation
+            # as _x` is the same bypass under a different name, and a guard
+            # that only reads call names is one alias away from green.
+            elif isinstance(node, ast.ImportFrom) and (
+                    (node.module or "").endswith("run")):
+                hits += sum(1 for a in node.names
+                            if a.name == "run_evaluation")
+        if hits:
+            offenders[path.name] = hits
+    assert set(offenders) == {"run.py"}, (
+        "an entry point reaches run_evaluation() directly, bypassing the "
+        f"dense-leg gate (#4821): {offenders!r} — route it through "
+        "run_measured_evaluation(embedder_status=gate_dense_leg(...))")
 
 
 # ── R1 #1540: E2E-1/E2E-10 integration scenarios + robustness ─────────────
