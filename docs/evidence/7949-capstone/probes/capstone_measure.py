@@ -213,7 +213,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2573-2598 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:14432 "
+    "the capture path at tortoise/sdk.py:14647 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:614-622 "
@@ -241,7 +241,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2376`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2399`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
