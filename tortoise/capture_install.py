@@ -1345,6 +1345,30 @@ def _sha256_file(path: Path) -> str | None:
         return None
 
 
+def _install_guard(harness: str, home: Path) -> tuple[Path, str]:
+    """The root and label the seam INSTALLER's symlink guard is scoped to.
+
+    ONE declaration with THREE consumers — ``_install_pi``, ``_install_openclaw``
+    and the remedy text in :func:`assert_seam_target` — because a remedy is only
+    as good as the repair it hands out, and a re-derived guard root hands out a
+    command that FAILS (#5351: "the other one recommends a command that fails").
+
+    The roots are NOT the same, which is why this cannot be one constant: Pi
+    guards the install home, OpenClaw guards its STATE directory
+    (``$OPENCLAW_STATE_DIR``, else ``~/.openclaw``).  The difference is load-
+    bearing — "I linked the installed plugin at the copy in my repo", the
+    ordinary shape, puts the target under ``$HOME`` but outside ``~/.openclaw``:
+    a ``$HOME``-scoped guard ACCEPTS it and the message would then promise
+    ``tortoise install openclaw`` replaces it, while ``_install_openclaw``
+    refuses exactly that leaf through this same root.
+    """
+    if harness == "openclaw":
+        # The plugin directory is ``<state>/extensions/tortoise``, so the state
+        # directory the installer guards is its parent's parent (#2120).
+        return (openclaw_home(home).parents[1], "OpenClaw state dir")
+    return (home, "install home")
+
+
 def assert_seam_target(harness: str,
                        *,
                        home: str | os.PathLike[str] | None = None,
@@ -1466,7 +1490,26 @@ def assert_seam_target(harness: str,
                 f"{loaded} → {e.__class__.__name__}: {e}. Fix the path, then "
                 f"re-run `tortoise install {harness}`.")
     resolved = loaded.resolve()
-    if not resolved.is_file():
+    # This stat needs its own `except`: `Path.is_file()` RE-RAISES every
+    # `OSError` outside pathlib's ignored set (ENOENT/ENOTDIR/EBADF/ELOOP), so
+    # an EACCES arrives as a `PermissionError` — measured on this repo's 3.12
+    # pin, where `is_file()` under a mode-000 directory raises even though the
+    # `resolve()` one line above hands back a path for it (non-strict
+    # `realpath` swallows what the predicate re-raises).  The predicates'
+    # error handling has changed across releases; an explicit errno-
+    # discriminating stat is the only version-stable answer, which is why
+    # `hook_install._read_hook_version` guards its `is_file()` the same way
+    # (`test_read_hook_version_returns_none_for_a_non_searchable_parent`).
+    # The reachable window is a TOCTOU race — the `os.stat(loaded)` above
+    # already followed this path — but a caller (`doctor`, the startup check)
+    # must get a verdict, never a traceback.
+    try:
+        regular = resolved.is_file()
+    except OSError as e:
+        return (f"the capture extension {harness} loads cannot be inspected: "
+                f"{resolved} → {e.__class__.__name__}: {e}. Fix that path, "
+                f"then re-run `tortoise install {harness}`.")
+    if not regular:
         # A directory / FIFO / socket is not divisible into bytes, and READING
         # a FIFO would block — report it without hashing, exactly as
         # `detect_artifact_install` does for the same path.
@@ -1524,9 +1567,13 @@ def assert_seam_target(harness: str,
     # consumers derive — the same rule `__main__._artifact_detail_would_refuse`
     # applies to rendered findings).  Its text already names the user's step,
     # so this reuses it instead of authoring a second copy of the advice.
-    refused = _symlink_escape(
-        Path(home) if home is not None else Path.home(), loaded,
-        label="install home")
+    # Its ROOT is per-harness and comes from the same declaration the installers
+    # read (`_install_guard`): `$HOME` for Pi, the OpenClaw STATE directory for
+    # OpenClaw — reusing Pi's root for the sibling harness would accept a link
+    # `_install_openclaw` refuses and hand out a command that fails.
+    guard_root, guard_label = _install_guard(
+        harness, Path(home) if home is not None else Path.home())
+    refused = _symlink_escape(guard_root, loaded, label=guard_label)
     # `via` is NOT the test for this: a symlinked ANCESTOR (macOS `/tmp` →
     # `/private/tmp`) sets `via` while the installer accepts the install, and a
     # symlinked leaf that resolves INSIDE the home is accepted too (the atomic
@@ -1583,7 +1630,8 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
             "incomplete (broken package?). Reinstall tortoise."))
     payload = src.read_bytes()
 
-    escape = _symlink_escape(home, dst, label="install home")
+    guard_root, guard_label = _install_guard(harness, home)
+    escape = _symlink_escape(guard_root, dst, label=guard_label)
     if escape:
         return InstallResult(harness, error=f"Refusing: {escape}")
     non_regular = _refuse_non_regular(dst)
@@ -1828,8 +1876,9 @@ def _install_openclaw(home: Path, *, dry_run: bool) -> InstallResult:
             "package?). Reinstall tortoise."))
 
     entry_dst = plugin_dir / OPENCLAW_ENTRY_NAME
+    guard_root, guard_label = _install_guard(harness, home)
     for target in (entry_dst, settings_path):
-        escape = _symlink_escape(state, target, label="OpenClaw state dir")
+        escape = _symlink_escape(guard_root, target, label=guard_label)
         if escape:
             return InstallResult(harness, error=f"Refusing: {escape}")
     non_regular = _refuse_non_regular(entry_dst)
