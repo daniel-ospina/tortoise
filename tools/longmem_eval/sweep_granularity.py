@@ -31,8 +31,11 @@ load, naming the reason and stating that no measurement was produced.
 ``--skip-preflight`` is the ONE explicit waiver (debugging / offline wiring)
 and must not be confused with ``--mock``: it lets the sweep CONTINUE when the
 embedder cannot load, and the outcome is then recorded rather than implied —
-every cell carries ``vector_strategy`` / ``embedding_coverage`` from its own
-report methodology (``unavailable`` when the leg could not load), the table
+every cell carries ``vector_strategy`` (from its own report methodology:
+``unavailable`` when the leg could not load) and ``embedding_coverage`` (D3's
+per-question coverage pooled over that cell's outcomes, with the
+``points_embedded`` / ``points_total`` sums beside it — ``report["retrieval"]``
+never carries the key, so reading one there always yielded ``None``), the table
 prints ``NOT MEASURED``, and the winner line never says SELECTED. A waiver
 taken on a host where the embedder DOES load is a no-op on all of that: the
 cells record ``enabled``, because that is what ran.
@@ -71,6 +74,40 @@ DEFAULT_SWEEP_KS = (5, 10, 20)
 def _selection_metric_label(ingest_mode: str) -> str:
     return ("evidence_recall@10" if ingest_mode == "v2"
             else "turn_recall@10 (view-only)")
+
+
+def _cell_dense_leg_receipt(outcomes: list[dict]) -> dict:
+    """The cell's dense-leg receipt, computed from the per-question outcomes.
+
+    ``embedding_coverage`` is a PER-QUESTION field — R3 #1542 **D3** records
+    the literal ``embedding_coverage = (embedded_pts / total_pts) if
+    total_pts else None`` *in the outcome* (``points_total``,
+    ``points_embedded``, ``embedding_coverage``), and ``report.py`` never
+    emits it anywhere. So ``report["retrieval"]`` has no such key: reading
+    ``ret.get("embedding_coverage")`` (#4821's first cut) yielded ``None``
+    for a fully-embedded MEASURED sweep and for a keyword-only one alike,
+    which made half of the receipt dead — a field that is unconditionally
+    null testifies to nothing.
+
+    Apply D3's own ratio to the cell's whole point population instead, which
+    is the same quantity at the grain the sweep reports:
+    ``sum(points_embedded) / sum(points_total)``. D3's pinned shapes fall out
+    of it unchanged — ``1.0`` with the embedder, ``0.0`` without it, ``None``
+    when the cell measured no points at all (a zero-session question, or a
+    resumed pre-R3 checkpoint whose outcomes predate the keys: D3 requires
+    that be visible as ``None``, never silently mixed).
+
+    The component sums ride the row alongside it so the ratio is checkable
+    from the artifact, not taken on trust.
+    """
+    total = sum(int(o.get("points_total") or 0) for o in outcomes)
+    embedded = sum(int(o.get("points_embedded") or 0) for o in outcomes)
+    return {
+        "points_total": total,
+        "points_embedded": embedded,
+        "embedding_coverage": (
+            round(embedded / total, 4) if total else None),
+    }
 
 
 def _dense_leg_verified(results: list[dict]) -> bool:
@@ -129,9 +166,12 @@ def run_sweep(
     Returns ``(results, winner)`` where each result records the per-config
     aggregates (evidence/chunk-evidence/session/turn recall@10,
     context_tokens_mean, context_point_count_mean) **plus the dense-leg
-    receipt fields** ``vector_strategy`` and ``embedding_coverage`` copied
-    from that cell's report, and the winner is the D2 selection (None in
-    deterministic mode or when no config is eligible).
+    receipt fields** — ``vector_strategy`` copied from that cell's report
+    methodology, and ``embedding_coverage`` / ``points_embedded`` /
+    ``points_total`` pooled from that cell's per-question outcomes (D3 places
+    coverage on the outcome, not on the report aggregate) — and the winner is
+    the D2 selection (None in deterministic mode or when no config is
+    eligible).
 
     #4821 — the dense-leg gate. This function used to call ``run_evaluation``
     directly, so it never ran the pre-flight that ``run.py``'s ``run_main``
@@ -179,7 +219,11 @@ def run_sweep(
             # point that scores a keyword-only run as if it were hybrid has
             # to lie in these two fields, not merely forget a flag.
             "vector_strategy": methodology.get("vector_strategy"),
-            "embedding_coverage": ret.get("embedding_coverage"),
+            # D3's per-question coverage, pooled over this cell's outcomes —
+            # `report["retrieval"]` carries no `embedding_coverage` at all
+            # (see _cell_dense_leg_receipt), so reading one there always
+            # yielded None, on healthy runs too.
+            **_cell_dense_leg_receipt(outcomes),
         })
     return results, _select_winner(results, ingest_mode=ingest_mode,
                                    context_cap=context_cap)

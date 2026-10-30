@@ -5041,7 +5041,14 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     assert results
     # (c) the receipt cannot claim density it did not measure
     assert results[0]["vector_strategy"] == "unavailable"
-    assert results[0]["embedding_coverage"] in (None, 0.0)
+    # D3's pinned shape for a measured cell on a no-embedder host: the points
+    # exist and NONE of them is embedded, so coverage is 0.0 — observable. The
+    # pre-fix code read `report["retrieval"]["embedding_coverage"]`, a key D3
+    # never puts on the report aggregate, so this was unconditionally None and
+    # the `in (None, 0.0)` disjunction could never fail for any behaviour.
+    assert results[0]["embedding_coverage"] == 0.0
+    assert results[0]["points_total"] > 0
+    assert results[0]["points_embedded"] == 0
     assert sg._dense_leg_verified(results) is False
     capsys.readouterr()
     # (b) ... and the artifact says so, in the operator's own vocabulary
@@ -5052,6 +5059,83 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     assert "SELECTED granularity" not in out.out
     assert "NOT A MEASUREMENT" in out.err
     assert "UNMEASURED candidate granularity" in out.out
+
+
+def test_sweep_granularity_receipt_witnesses_a_HEALTHY_dense_cell(
+        monkeypatch, capsys):
+    """#4821 (c): the coverage field must be able to testify — a fully
+    embedded cell reads 1.0, not ``None``.
+
+    ``embedding_coverage`` is a PER-QUESTION value (R3 #1542 D3 records it in
+    the outcome; ``report.py`` never emits it anywhere), so a cell receipt
+    that reads ``report["retrieval"]["embedding_coverage"]`` is dead: it is
+    ``None`` for coverage 1.0 and 0.0 alike, and the table printed
+    ``embedding_coverage=[None, None, None]`` immediately followed by
+    ``(MEASURED)`` on a run where every point was embedded.
+
+    RED when the fix is deleted: the stub below returns the REAL report shape
+    (no coverage key on ``retrieval``) with fully-embedded outcomes, so
+    pre-fix this asserts 1.0 against ``None``."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    outcomes = [
+        {"question_id": "q0", "points_total": 6, "points_embedded": 6},
+        {"question_id": "q1", "points_total": 4, "points_embedded": 4},
+    ]
+    # The aggregate the sweep actually gets: `retrieval` carries recall +
+    # context means and NO `embedding_coverage` — D3 keeps it per question.
+    report = {
+        "retrieval": {"evidence_recall@k": {"10": 0.75},
+                      "chunk_evidence_recall@k": {"10": 0.5},
+                      "session_recall@k": {"10": 1.0},
+                      "turn_recall@k": {"10": 0.9},
+                      "context_tokens_mean": 100.0,
+                      "context_point_count_mean": 3.0},
+        "methodology": {"vector_strategy": "enabled"},
+    }
+    monkeypatch.setattr(sg, "run_measured_evaluation",
+                        lambda *a, **k: (outcomes, report))
+    monkeypatch.setattr(sg, "gate_dense_leg",
+                        lambda **k: {"available": True, "reason": None})
+
+    results, _winner = sg.run_sweep(
+        _mini(), chunk_turns_values=(1,), ingest_mode="v2", limit=1)
+
+    assert results[0]["embedding_coverage"] == 1.0
+    assert results[0]["points_total"] == 10
+    assert results[0]["points_embedded"] == 10
+    assert results[0]["vector_strategy"] == "enabled"
+    assert sg._dense_leg_verified(results) is True
+    capsys.readouterr()
+    sg._print_table(results, ingest_mode="v2", context_cap=8000,
+                    max_chunks_per_session=6)
+    out = capsys.readouterr().out
+    # the headline symptom: a MEASURED line whose coverage is null
+    assert "embedding_coverage=[1.0]  (MEASURED)" in out
+    assert "[None" not in out
+
+
+def test_sweep_granularity_receipt_is_None_when_no_point_was_measured(
+        monkeypatch):
+    """D3's pinned zero-denominator shape survives the pooling: a cell whose
+    questions measured no points reports ``None`` (not ``0.0``), and a resumed
+    pre-R3 checkpoint's outcomes (no coverage keys at all) do too — visible,
+    never silently mixed."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    report = {"retrieval": {}, "methodology": {"vector_strategy": "enabled"}}
+    monkeypatch.setattr(sg, "gate_dense_leg",
+                        lambda **k: {"available": True, "reason": None})
+    for outcomes in (
+        [{"question_id": "q0", "points_total": 0, "points_embedded": 0}],
+        [{"question_id": "q0"}],  # pre-R3 resumed outcome
+    ):
+        monkeypatch.setattr(sg, "run_measured_evaluation",
+                            lambda *a, _o=outcomes, **k: (_o, report))
+        results, _w = sg.run_sweep(
+            _mini(), chunk_turns_values=(1,), ingest_mode="v2", limit=1)
+        assert results[0]["embedding_coverage"] is None
+        assert results[0]["points_total"] == 0
 
 
 def test_sweep_granularity_cli_waiver_is_the_only_way_through(
