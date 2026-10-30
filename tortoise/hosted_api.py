@@ -41761,9 +41761,16 @@ async def oauth_authorize(request: Request):
         if target is not None:
             from urllib.parse import urlencode
             sep = "&" if "?" in target else "?"
-            return RedirectResponse(
-                target + sep + urlencode(
-                    {"error": exc.error, "state": params["state"]}))
+            # RFC 6749 §4.1.2.1: `state` is returned only when the client SENT
+            # one. Emitting an empty `state=` for a state-less request was the
+            # shipped shape until review round 13 — dropped, because
+            # `parse_qs` and every conforming parser discard a blank value, so
+            # the param advertised a round-trip no client could observe while
+            # reading as if one existed.
+            relay = {"error": exc.error}
+            if params["state"]:
+                relay["state"] = params["state"]
+            return RedirectResponse(target + sep + urlencode(relay))
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/authorize")

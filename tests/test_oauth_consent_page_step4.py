@@ -380,18 +380,23 @@ def test_an_authorize_request_WITHOUT_state_is_the_clients_error_not_a_dead_end(
     from urllib.parse import parse_qs, urlsplit
     parts = urlsplit(r.headers["location"])
     assert f"{parts.scheme}://{parts.netloc}{parts.path}" == REDIRECT, parts
-    q = {k: v[0] for k, v in parse_qs(parts.query).items()}
+    q = {k: v[0] for k, v in parse_qs(parts.query, keep_blank_values=True).items()}
     assert q["error"] == "invalid_request", q
     # ⛔ The TARGET is what discriminates: without the refusal this request would
     # 302 to `{app}/auth?next=…` (the bounce), which is the dead end — the app's
-    # `start.ts` answers a state-less `next` with a bare JSON 400. `q` also proves
-    # the relay carried `state` (empty here), i.e. this is the authorize error
-    # shape and not some other redirect.
+    # `start.ts` answers a state-less `next` with a bare JSON 400.
     assert "/auth?next=" not in r.headers["location"], (
         "a request the app's own routes will refuse must not be forwarded there")
-    # …and it is the authorize-error shape, not some other redirect: the relay
-    # adds `state` only when the request has one, so its ABSENCE here is expected
-    # and its presence would be a lie about the flow. What matters is the code.
+    # …and it is the authorize-error shape, not some other redirect. `state` is
+    # returned ONLY when the client sent one (RFC 6749 §4.1.2.1), and this request
+    # sent none — so it must be ABSENT, not present-and-blank. `keep_blank_values`
+    # is load-bearing: without it `parse_qs` silently drops a blank `state=` and
+    # this assertion would pass on a relay that still emitted one (measured — the
+    # pre-round-13 relay did exactly that, which is why the comment here used to
+    # claim a conditional the code did not have).
+    assert "state" not in q, (
+        f"a state-less request must get an error redirect with NO `state` param, "
+        f"not one carrying an empty value no conforming parser can observe: {q}")
     assert set(q) <= {"error", "state", "error_description"}, q
 
 
@@ -1995,16 +2000,53 @@ def test_the_state_requirement_is_MARKED_as_a_departure_where_a_reader_adopts():
         "#3524. That is the exact gap this row closes; re-relay the line and restore the link.")
 
     # ── the behaviour the marker claims, so the marker cannot outlive it ──
+    #
+    # ⛔ Asserted PER CALL SITE, not by counting `require_state=True` in the raw
+    # source. A count is decided by prose and by position: it REDS when a lane
+    # writes the prohibition as a comment (`# redemption must NOT pass
+    # require_state=True`) while the code is correct, and it PASSES when the
+    # keyword is MOVED from the render path to redemption — which is the exact
+    # pair of harms this assertion exists to catch. Both were measured. An AST
+    # walk reads arguments, so no comment and no move can fool it.
+    import ast
+
     hosted = HOSTED_API.read_text(encoding="utf-8")
-    assert "require_state=True" in hosted, (
-        "the doc now advertises a `state` requirement that `hosted_api.py` no "
-        "longer enforces — a marker outliving its behaviour is the next lane's "
-        "false premise")
-    assert hosted.count("require_state=True") == 1, (
-        f"`require_state=True` appears {hosted.count('require_state=True')} times in "
-        "hosted_api.py; it belongs on the PAGE-RENDER path ONLY. Redemption must "
-        "not adopt it — §2.1's `bind` admits `state: null` and that token must "
-        "still redeem")
+    calls = [
+        n for n in ast.walk(ast.parse(hosted))
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "validate_authorize_params"
+    ]
+
+    def _kw(call, name):
+        for keyword in call.keywords:
+            if keyword.arg == name:
+                return keyword.value
+        return None
+
+    def _names(node):
+        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+    # The two call sites differ by their SOURCE of params, so they are identified
+    # by that and not by which one happens to carry the keyword (identifying by
+    # the keyword is what makes a move invisible).
+    render = [c for c in calls if "params" in _names(c)]
+    redeem = [c for c in calls if "body" in _names(c)]
+    assert (len(render), len(redeem)) == (1, 1), (
+        f"expected exactly one render-path and one redemption call to "
+        f"`validate_authorize_params` in hosted_api.py, found {len(render)} and "
+        f"{len(redeem)}; the per-call-site assertions below assume that shape")
+
+    render_state = _kw(render[0], "require_state")
+    assert isinstance(render_state, ast.Constant) and render_state.value is True, (
+        "the page-render path no longer passes `require_state=True`, so the page "
+        "again accepts a state-less request the app's sign-in leg cannot "
+        "complete — the doc above still promises it is refused")
+
+    assert _kw(redeem[0], "require_state") is None, (
+        "redemption adopted `require_state`; §2.1's `bind` admits `state: null` "
+        "and such a token must still be redeemable — the refusal is about the "
+        "PAGE, not the flow")
 
     oauth_src = OAUTH.read_text(encoding="utf-8")
     assert re.search(
