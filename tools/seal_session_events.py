@@ -296,6 +296,65 @@ def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
                   "first)")
 
 
+def _create_exclusive(target: Path, plain: bytes) -> None:
+    """Write the archive with ``O_EXCL``; a torn/failed write is removed.
+
+    ``os.fdopen(...).write`` happens IN the canonical file here, so a failure
+    (ENOSPC, EIO) would leave a truncated archive at the one path every reader
+    trusts — a permanent red this tool must not manufacture. The partial file is
+    removed before the error propagates, and the plain source was never touched.
+    """
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(gzip.compress(plain, mtime=0))
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(target)
+        raise
+
+
+def _publish_bytes(tmp: Path, target: Path, plain: bytes) -> None:
+    """Put our verified bytes at ``target`` without clobbering.
+
+    ``FileExistsError`` means somebody got there first (the caller decides what
+    that means); a filesystem with no hard links (exFAT/SMB/FAT/overlay) falls
+    back to an exclusive create, so the no-clobber contract holds everywhere.
+    """
+    try:
+        os.link(tmp, target)
+        return
+    except FileExistsError:
+        raise
+    except OSError as e:
+        if e.errno not in _NO_HARD_LINK_ERRNOS:
+            raise
+    _create_exclusive(target, plain)
+
+
+def _preserve_aside(src: Path, aside: Path) -> None:
+    """Keep the peer's archive under a NEW name, never over one.
+
+    A hard link keeps both names on the same inode for free; a filesystem with
+    no links gets an exclusive copy (``"xb"``), so an existing aside is never
+    overwritten and ``FileExistsError`` still means "another run owns that name".
+    """
+    try:
+        os.link(src, aside)
+        return
+    except (FileExistsError,):
+        raise
+    except OSError as e:
+        if e.errno not in _NO_HARD_LINK_ERRNOS:
+            raise
+    with open(aside, "xb") as out:
+        out.write(src.read_bytes())
+        out.flush()
+        os.fsync(out.fileno())
+
+
 def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
                         digest: str) -> tuple[str, str]:
     """Publish an archive WITHOUT ever destroying bytes this run did not verify.
@@ -307,38 +366,24 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
     * ``identical`` — a peer published exactly our bytes first;
     * ``theirs-newer`` — a peer's archive is a strict SUPERSET of ours (it
       appended while we compressed): more evidence than we hold, kept;
-    * ``disagree`` — two divergent archives: both are kept, a human decides;
-    * ``unreadable`` — we could not publish, or the peer's archive does not read.
+    * ``disagree`` — divergent archives, or a third run won the gap: every copy
+      stays on disk and the detail names where this run's bytes went;
+    * ``unreadable`` — we could not publish, or an archive does not read.
 
-    Two rules, each earned by a review round. (a) ``os.replace`` is never used
-    as a blind writer: the change test is a stat, not a transaction. (b) The
-    supersede path reads the peer's archive and then moves it ASIDE instead of
-    replacing it — a read-then-replace is still a stale CAS, and the window it
-    leaves is a silent record loss (#6388 reviews).
+    Three rules, each earned by a review round. (a) ``os.replace`` is never a
+    blind writer: the change test is a stat, not a transaction. (b) A supersede
+    never REPLACES the peer's archive: it hard-links it aside (atomic, keeps
+    both) under a name that is never reused, then publishes ours. (c) A run that
+    loses the gap keeps its own bytes on disk too — a verdict that says "both
+    copies stay" must be true.
     """
     try:
-        os.link(tmp, target)
+        _publish_bytes(tmp, target, plain)
         return "published", ""
     except FileExistsError:
         pass
     except OSError as e:
-        if e.errno not in _NO_HARD_LINK_ERRNOS:
-            return "unreadable", f"could not publish to {target}: {e}"
-        # No hard-link support (exFAT/SMB/FAT/overlay): an exclusive create is
-        # still no-clobber, and a torn write leaves an archive `_unreadable_archives`
-        # reds while the plain source is untouched.
-        try:
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            pass  # a peer got there first: fall through to the raced branch
-        except OSError as e2:
-            return "unreadable", f"could not publish to {target}: {e2}"
-        else:
-            with os.fdopen(fd, "wb") as out:
-                out.write(gzip.compress(plain, mtime=0))
-                out.flush()
-                os.fsync(out.fileno())
-            return "published", ""
+        return "unreadable", f"could not publish to {target}: {e}"
     try:
         raced = gzip.decompress(target.read_bytes())
     except (OSError, EOFError, zlib.error) as e:
@@ -346,27 +391,42 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
     if _sha256(raced) == digest:
         return "identical", ""
     if plain.startswith(raced):
-        # Ours is a strict superset, so theirs is a stale prefix. Move it ASIDE
-        # (never replace it) and link ours into place; a third run that wins the
-        # gap leaves both copies on disk and is reported, not overwritten.
-        aside = target.with_name(f"{target.name}.superseded-{_sha256(raced)[:8]}")
+        # Ours is a strict superset: theirs is a stale prefix. PRESERVE it.
+        stale_sha = _sha256(raced)[:8]
+        aside = target.with_name(f"{target.name}.superseded-{stale_sha}")
+        attempt = 0
+        while True:
+            try:
+                _preserve_aside(target, aside)
+                break
+            except FileExistsError:
+                attempt += 1
+                aside = target.with_name(
+                    f"{target.name}.superseded-{stale_sha}-{attempt}")
+            except OSError as e:
+                return "disagree", (f"could not preserve the stale archive ({e}) "
+                                    "— left it and the source in place")
         try:
-            os.replace(target, aside)
-        except FileNotFoundError:
-            aside = None
+            os.unlink(target)   # the inode survives via `aside`
         except OSError as e:
-            return "disagree", (f"could not move the stale archive aside ({e}) "
-                                "— left both copies in place")
+            return "disagree", (f"the stale archive is kept at {aside} but "
+                                f"{target} could not be cleared: {e}")
         try:
-            os.link(tmp, target)
+            _publish_bytes(tmp, target, plain)
         except FileExistsError:
+            lost = target.with_name(f"{target.name}.unpublished-{digest[:8]}")
+            with contextlib.suppress(OSError):
+                os.link(tmp, lost)
             return "disagree", (f"a third run published {target} while this run "
-                                f"superseded {aside} — left both copies in place")
+                                f"superseded {aside}; this run's bytes are kept "
+                                f"at {lost}")
         except OSError as e:
-            return "unreadable", (f"the stale archive was moved to {aside} but "
+            with contextlib.suppress(OSError):
+                os.link(aside, target)   # put theirs back
+            return "unreadable", (f"the stale archive is kept at {aside} but "
                                   f"{target} could not be written: {e}")
-        return "published", (f"superseded a stale prefix; the previous archive is "
-                             f"kept at {aside}" if aside else "")
+        return "published", ("superseded a stale prefix; the previous archive is "
+                             f"kept at {aside}")
     if raced.startswith(plain):
         return "theirs-newer", ("a peer's archive holds bytes we did not read — "
                                 "kept theirs")
@@ -702,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {path.name}", file=sys.stderr)
         return EXIT_ERROR
     unproven = [p for p in vanished
-                if not _already_gone(root, _day_of(p) or today, 0).ok]
+                if (d := _day_of(p)) is None or not _already_gone(root, d, 0).ok]
     if args.check:
         broken = []
         try:
@@ -725,9 +785,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {path.name}", file=sys.stderr)
             return EXIT_DRIFT
         if not pending:
-            if vanished:  # each one PROVED archived above
-                print(f"ok — {len(vanished)} day file(s) disappeared mid-scan "
-                      "(a peer sealed them)", file=sys.stderr)
             if deferred:
                 print(f"nothing to seal — {len(deferred)} day file(s) are "
                       f"inside the {SETTLE_GRACE_SECONDS} s settle grace "
@@ -735,9 +792,12 @@ def main(argv: list[str] | None = None) -> int:
                       file=sys.stderr)
                 for path in deferred:
                     print(f"  {path.name}", file=sys.stderr)
-                return EXIT_OK
-            print(f"ok — no plain day file older than {args.keep_days} days "
-                  f"under {root}")
+            if vanished:  # each one PROVED archived above
+                print(f"ok — {len(vanished)} day file(s) disappeared mid-scan "
+                      "(a peer sealed them)", file=sys.stderr)
+            if not deferred and not vanished:
+                print(f"ok — no plain day file older than {args.keep_days} days "
+                      f"under {root}")
             return EXIT_OK
         print(f"UNSEALED: {len(pending)} day file(s) older than "
               f"{args.keep_days} days under {root}:", file=sys.stderr)
@@ -749,11 +809,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_DRIFT
 
     if unproven:
-        print(f"{len(unproven)} day file(s) disappeared and no readable archive "
-              "proves the day was sealed:", file=sys.stderr)
+        print(f"UNPROVEN ABSENCE: {len(unproven)} day file(s) disappeared and "
+              "no readable archive proves the day was sealed:", file=sys.stderr)
         for path in unproven:
             print(f"  {path.name}", file=sys.stderr)
-        return EXIT_ERROR
+        return EXIT_DRIFT
     rows = [seal_one(root, path) for path in pending]
     _report(rows, stream=sys.stdout)
     if not rows:
@@ -763,13 +823,13 @@ def main(argv: list[str] | None = None) -> int:
         if unreadable:
             print(f"nothing sealable — but {len(unreadable)} day file(s) could "
                   f"not be stat'd (run --check)", file=sys.stderr)
-        elif deferred:
+        if deferred:
             print(f"nothing sealable — {len(deferred)} day file(s) are inside "
                   f"the {SETTLE_GRACE_SECONDS} s settle grace", file=sys.stderr)
-        elif vanished:
+        if vanished:
             print(f"nothing sealable — {len(vanished)} day file(s) disappeared "
                   "mid-scan (a peer sealed them)", file=sys.stderr)
-        else:
+        if not (unreadable or deferred or vanished):
             print(f"nothing to seal — no plain day file older than "
                   f"{args.keep_days} days under {root}")
     bad = [r for r in rows if not r.ok]

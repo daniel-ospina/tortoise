@@ -8,6 +8,7 @@ seals a file a live hook is still appending to, fails these rows.
 from __future__ import annotations
 
 import gzip
+import errno
 import importlib.util
 import os
 import sys
@@ -747,6 +748,80 @@ def test_the_source_present_publish_cannot_clobber_a_peer_archive(tmp_path, monk
     assert result.ok, result
 
 
+def test_a_no_hard_link_filesystem_still_supersedes_a_stale_prefix(tmp_path):
+    """exFAT/SMB/FAT/overlay have no hard links. The fallback must cover the
+    SUPERSEDE too, not just the plain create: otherwise moving the stale archive
+    aside leaves the canonical path missing and `--apply` errors forever.
+
+    Mutation: `_preserve_aside`/`_publish_bytes` reduced to a bare `os.link`
+    REDs here (no archive at the canonical path, status "conflict").
+    """
+    day = TODAY - timedelta(days=9)
+    stale = b'{"n": 1}\n'
+    full = b'{"n": 1}\n{"n": 2}\n'
+    path = _write(tmp_path, day, full)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(stale, mtime=0))
+
+    real_link = seal.os.link
+
+    def no_links(*a, **k):
+        raise OSError(errno.ENOTSUP, "no hard links here")
+
+    seal.os.link = no_links
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        seal.os.link = real_link
+
+    assert result.status == "sealed", result
+    assert target.exists(), "the canonical archive must exist on a no-link FS"
+    assert gzip.decompress(target.read_bytes()) == full
+    asides = [p for p in target.parent.iterdir() if ".superseded-" in p.name]
+    assert asides and gzip.decompress(asides[0].read_bytes()) == stale
+
+
+def test_a_failed_exclusive_create_leaves_no_partial_archive(tmp_path):
+    """A torn write in the O_EXCL fallback must not strand a truncated archive
+    at the canonical path: that is a red no run could ever clear.
+
+    Mutation: the `os.unlink(target)` in `_create_exclusive`'s except removed
+    REDs here (a 10-byte archive survives).
+    """
+    day = TODAY - timedelta(days=3)
+    path = _write(tmp_path, day, b'{"n": 1}\n')
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    real_link, real_fsync = seal.os.link, seal.os.fsync
+
+    def no_links(*a, **k):
+        raise OSError(errno.ENOTSUP, "no hard links here")
+
+    calls = []
+
+    def full_disk(fd):
+        # The FIRST fsync is the temp file (a safe failure: the source is kept).
+        # The SECOND lands inside the exclusive create of the canonical archive,
+        # which is the torn write under test.
+        calls.append(fd)
+        if len(calls) > 1:
+            raise OSError(errno.ENOSPC, "no space left")
+
+    seal.os.link = no_links
+    seal.os.fsync = full_disk
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        seal.os.link, seal.os.fsync = real_link, real_fsync
+
+    assert result.status == "conflict", result
+    assert "no space left" in result.detail
+    assert not target.exists(), "a half-written archive must be removed"
+    assert path.exists(), "the plain source is never touched"
+
+
 def test_a_stale_prefix_is_moved_aside_not_replaced(tmp_path):
     """Superseding a stale prefix must not DESTROY the peer's archive: the old
     copy stays on disk under a `.superseded-<sha8>` name, so a read-then-replace
@@ -783,29 +858,10 @@ def test_an_absent_day_with_no_archive_is_drift_not_a_quiet_ok(tmp_path, capsys)
     ghost = tmp_path / f"{(TODAY - timedelta(days=30)).isoformat()}.jsonl"
 
     real_scandir = seal.os.scandir
-
-    class _Ghost:
-        name = ghost.name
-        path = str(ghost)
-
-    def fake_scandir(path):
-        entries = list(real_scandir(path))
-        if not entries:
-            return entries
-        return entries
-
-    # Simulate the peer: the entry is listed, then gone before the stat.
-    real_stat = seal.Path.stat
-
-    def racing_stat(self, *a, **k):
-        if self == ghost:
-            raise FileNotFoundError(2, "gone")
-        return real_stat(self, *a, **k)
-
     ghost.touch()
-    seen = []
 
     def scan_then_remove(path):
+        """List the entry, then unlink it: the scan/stat gap a peer creates."""
         entries = list(real_scandir(path))
         ghost.unlink(missing_ok=True)
         return entries
