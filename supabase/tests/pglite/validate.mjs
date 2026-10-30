@@ -711,6 +711,17 @@ const suites = [
   // named here never runs, and "the suite exists" is then mistaken for "the suite
   // passes". Add the entry in the same commit as the file.
   '20261013000002_oauth_mint_rpcs.sql',  // #3025
+  // #3524 §9 step 1 — the consent token's single-use register. The claim is
+  // decided BY THE PRIMARY KEY (`INSERT … ON CONFLICT DO NOTHING RETURNING`), and
+  // that is unprovable from Python: the fake control plane is single-threaded and
+  // its own comment says a SELECT-then-INSERT implementation would still pass it.
+  // This suite is also the only place the REVOKE/RLS posture is executed — with
+  // the public anon key able to DELETE a spent nonce, a captured consent token
+  // replays into a second authorization code. NOTE: this list is EXPLICIT, not a
+  // glob — a suite file that is not named here never runs, and "the suite exists"
+  // is then mistaken for "the suite passes". Add the entry in the same commit as
+  // the file.
+  '20261030000001_oauth_consent_tickets.sql',  // #3524
   // #10025 — the default graph's stable-id row, and the ONE-live-default-row
   // invariant the singular `rows[0]` readers rely on: the partial unique index
   // is executed (a second live row is rejected, a tombstone beside an active one
