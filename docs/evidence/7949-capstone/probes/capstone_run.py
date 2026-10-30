@@ -16,7 +16,7 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:13196``, called at ``:12233``) →
+   (``sdk.py:12645``, called at ``:11682``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
    ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
    ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
@@ -25,12 +25,17 @@ the corrected reading:
    ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``). The SYMBOL is
    authoritative and the line is a convenience: the three FILE-NAMED cites
    above are resolved against the tree by the bundle's pin, and these eight
-   bare step cites need their own leg
+   bare step cites are re-read by that same pin file
    (`tests/test_7949_capstone_verdict_check.py`,
-   `test_the_readmes_line_citations_resolve_to_the_symbols_they_name`) because
-   a bare `:NNNN` carries no filename, so the bundle's own sweep
-   (`_BUNDLE_CITE`) cannot see them. No line here is claimed to be
-   self-detecting on its own. So the capstone drives
+   `test_the_readmes_line_citations_resolve_to_the_symbols_they_name`). They
+   need that separate leg because a bare `:NNNN` carries no filename, so the
+   bundle's own sweep (`_BUNDLE_CITE`) cannot see them: `#10243` moved
+   `extractor_v2.py` by +88 and all eight went stale while every pin stayed
+   green, which this sentence used to deny by pointing at a README cross-pin
+   `#10211` had already invalidated. No line here is claimed to be
+   self-detecting on its own. (No derivation head is named here on purpose: the
+   stamps such a sentence used to name re-staled the moment `main` moved, and a
+   claim that can only re-stale is not worth keeping.) So the capstone drives
    the REAL entry point — it does not compose the step functions, which the
    issue explicitly forbids.
 2. **``docs/evidence/7949-capstone/`` did not exist and still does not exist as

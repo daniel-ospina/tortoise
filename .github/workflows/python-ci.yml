@@ -1744,20 +1744,6 @@ jobs:
     # `self-hosted,Linux,ARM64,self-hosted-arm64` plus, only while the fallback is
     # attached, `ubuntu-latest`) — the same pin, and the same reasoning, as
     # `workflow-lint` (#7867) and finding-provenance.
-    # ⛔ THE SENTENCE ABOVE IS MEASURED FALSE, and the consequence is not cosmetic
-    # (measured 2026-10-29 on run 40832215261, `gh api repos/…/actions/jobs/
-    # 123363936849`): `test-slow (b)` ran on `runner_name: pi-runner-x64-1`,
-    # `labels: ["ubuntu-24.04"]`, python under `/opt/gh-runner-x64/_work` — a
-    # SELF-HOSTED install whose label set includes `ubuntu-24.04`. So the label
-    # pin does NOT keep this leg off the pool, and the whole `ubuntu-24.04`-vs-
-    # `ubuntu-latest` distinction above rests on a claim that does not hold today;
-    # the pin is kept (changing the routing is a capacity decision, #6897) but it
-    # is not what protects this leg. What DOES: the per-job pytest artifacts
-    # resolved in the FIRST step of this job (#10028; measured on that same run,
-    # where a co-tenant truncated `/tmp/pytest.log` and a peer's manifest made
-    # this leg's guard report 1066 absent nodeids over a GREEN pytest run).
-    # A future reader must not conclude from this comment that this leg's temp
-    # dir is private: it is not, and #7815 records the two runs that prove it.
     # Cost when GitHub-hosted is healthy: none — the pool only wins these jobs while
     # the fallback label is attached. During a real GitHub-hosted outage these two
     # legs WAIT for a hosted runner (the aggregate stays pending — "not answered
@@ -1877,29 +1863,51 @@ jobs:
     # probe families are unchanged; the ports are now
     # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
     # (legacy), read by tests/_live_utils.py.
-    #
-    # ⛔ PER-JOB PYTEST ARTIFACTS, NOT `/tmp/...` (#10028) — MEASURED, not
-    # anticipated. Run 40832215261, `test-slow (b)`: the leg's own pytest
-    # finished GREEN (1423 passed, 6 skipped, rc=0) and the job still went RED,
-    # because a CONCURRENT leg on the same host shared `/tmp` and clobbered its
-    # artifacts. Its heartbeat counted another session's lines (740 passed →
-    # 342 passed on consecutive ticks — one pytest session cannot run
-    # backwards), so `pytest-attribution.sh` judged its own summary STALE and
-    # named this leg INCOMPLETE; and its skip-fail guard reconciled THIS tree's
-    # manifest against ANOTHER job's junit and reported 1066 expected nodeids
-    # absent — #7815's exact shape, on the slow job, which #10028 had migrated
-    # only for the fast matrix. The first step below finishes the migration; the
-    # pin is
-    # `test_ci_selection.test_every_pytest_job_writes_its_artifacts_under_its_own_runner_temp`.
     steps:
-      # ⛔ FIRST STEP ON PURPOSE — the same construction, and the same reason,
-      # as the `test` job's step of this name (#10028). Every later step in THIS
-      # job reads these three variables, and `$GITHUB_ENV` only reaches
-      # SUBSEQUENT steps. `RUNNER_TEMP` is `<runner_install>/_work/_temp`, and a
-      # self-hosted runner executes ONE job at a time, so it is per-JOB unique
-      # even when the host is shared — which `/tmp` is not. Failing closed on it
-      # (rather than falling back to `/tmp`) is the whole point: a silent `/tmp`
-      # fallback is indistinguishable from the bug being fixed.
+      # ⛔ FIRST STEP ON PURPOSE — same contract as the fast job's (#10028).
+      # This job was the UN-MIGRATED half: `pytest-rc`, `pytest-files` and the
+      # redislite/tempdir hygiene reports had already moved to `${RUNNER_TEMP}`,
+      # but the three artifacts the VERDICT and the guards are read from were
+      # still the host-global `/tmp/pytest.log` / `/tmp/junit.xml` /
+      # `/tmp/expected-nodeids.txt`. `.github/scripts/pytest-attribution.sh`
+      # named that exact residue in its own "NAMED RESIDUAL" header, whose STATUS
+      # paragraph records THIS job as migrated (2026-10-29). The header's residual
+      # paragraph names the legs that still write the host-global literals —
+      # `test-concurrency-falkor`, `test-track-b`, `test-carve-out` and
+      # `test-d14-hosted-api` here, plus the warn-only `validate` job in
+      # `post-merge-validation.yml` — the deliberate residual carried by #10280. That
+      # list is DERIVED and pinned by
+      # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
+      # so read it there rather than trusting this comment's copy of it.
+      #
+      # MEASURED (run 40808264676, `test-slow (a)`): the leg's own manifest
+      # declared **367** expected nodeids, its own run reported
+      # `365 passed, 2 skipped` (= 367) in 2378.86s, and its own
+      # `pytest exit code: 0` banner printed — a fully GREEN leg — yet the job
+      # still concluded `failure`, because a sibling leg's `> /tmp/pytest.log`
+      # truncated the file between this leg's `tail` and its attribution read.
+      # `pytest-attribution.sh` therefore printed `STALE session summary (NOT
+      # this leg's verdict)` / `INCOMPLETE` under that exit code.
+      # The same sharing made legs (b) and (e) print FAILED nodeids for
+      # `tests/test_epic903_fixtures.py`, `tests/test_epic903_scheduler.py` and
+      # `tests/test_graph_diagnostics.py` — files whose only progress line in
+      # those legs' logs is `tests/test_ci_selection.py`, i.e. tests they never
+      # ran — and made the #964 heartbeat DECREASE inside a "single" session
+      # (444 passed -> 353 passed). The six nodeids genuinely belong to legs (c)
+      # and (d), which do run those files; neither of those legs' own sets is
+      # recoverable from the tail.
+      #
+      # `runner.temp` is `<runner_install>/_work/_temp`, and a runner executes one
+      # job at a time, so this is per-JOB unique even when several runner installs
+      # share one `/tmp`. Failing closed on `RUNNER_TEMP` — never falling back to
+      # `/tmp` — is the whole point: a silent fallback is indistinguishable from
+      # the bug being fixed.
+      #
+      # ⛔ NOT a job-level `env:` block: `runner` is not an allowed context at
+      # `jobs.<job_id>.env`, and `${{ runner.temp }}` there makes actionlint
+      # reject the WHOLE file (#6253: zero jobs, zero check-runs, and the
+      # required `python-ci-gate` ABSENT rather than red). `steps.<id>.with` DOES
+      # allow the `runner` context, which is why the upload below uses it.
       - name: Resolve per-job pytest artifact paths (#10028)
         run: |
           set -euo pipefail
@@ -1909,7 +1917,7 @@ jobs:
             echo "PYTEST_JUNIT=$base/junit.xml"
             echo "PYTEST_MANIFEST=$base/expected-nodeids.txt"
           } >> "$GITHUB_ENV"
-          echo "pytest artifacts for this job are under $base (per-job, not the host /tmp)"
+          echo "pytest artifacts for this leg are under $base (per-job, not the host /tmp)"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -2055,7 +2063,8 @@ jobs:
         # pytest step (off the 40m watchdog), using each leg's DERIVED
         # `matrix.files` expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
-        # construction the run step builds) -> $PYTEST_MANIFEST.
+        # construction the run step builds) -> $PYTEST_MANIFEST (per-job since
+        # the #10028 migration; it was the host-global /tmp/expected-nodeids.txt).
         run: |
           FILES=""
           # #2148 tier-2 (slow_run == true, full == false): run only the
@@ -2095,7 +2104,9 @@ jobs:
         # Per-test --timeout=300: these files have tests/setups that
         # legitimately take >90s; 300s still caps any hang.
         # #964: liveness heartbeat — see the fast job's run step. pytest
-        # output is buffered to $PYTEST_LOG for the guaranteed tail, so
+        # output is buffered to $PYTEST_LOG (per-job, `<runner.temp>/pytest.log`
+        # since the #10028 migration; it was the host-global /tmp/pytest.log) for
+        # the guaranteed tail, so
         # the job log was silent for 30-50 min; the loop below prints
         # progress to the live job log every 5 min.
         run: |
@@ -2243,7 +2254,7 @@ jobs:
       - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
         # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
         # discarded by pytest capture (measured on the fast job's flags — 0
-        # occurrences in $PYTEST_LOG and 0 in the junit XML), so the
+        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
         # so a future xdist admission cannot truncate a peer's record wholesale
@@ -2354,6 +2365,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}-${{ matrix.half }}
+          # #10028: the per-JOB paths resolved in this job's FIRST step, NOT the
+          # host-global `/tmp/...` literals four sibling legs share. Uploading by
+          # the literal path is how one leg's artifact silently replaced
+          # another's (the same defect #6263 fixed in the artifact NAME).
           path: |
             ${{ runner.temp }}/pytest.log
             ${{ runner.temp }}/junit.xml

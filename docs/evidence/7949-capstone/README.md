@@ -238,11 +238,7 @@ is reached. `vet_enabled` is computed at `extractor_v2.py:8596`, i.e. BEFORE the
 each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8684`), `if vet_enabled and
 complete_list:` (`:8806`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
-`{}` on its fail-open path, `:8478-8481`). ⚠️ THESE BARE `:NNNN` CONTINUATIONS ARE A SECOND COPY of
-the offsets the probe carries in `_IDLE_CITES` — that table is the bundle's declared single home and
-the one a pin reads; a bare continuation names its file only once, so no sweep resolves it
-(`tests/test_7949_capstone_measure.py`, `_BUNDLE_RULES`' coverage note). Re-derive these from the tree
-at the head you are stamping, and take `_IDLE_CITES` as the answer when the two disagree. Because `_witness_block` returns the first positive
+`{}` on its fail-open path, `:8478-8481`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
@@ -294,7 +290,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:475`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2432-2457`,
-reached from the capture path at `sdk.py:14305` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:13754` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
@@ -616,7 +612,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt that hides four steps)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:13196`; called at `:12233`) →
+`sdk._extract_session_v2` (`sdk.py:12645`; called at `:11682`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:8484`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
