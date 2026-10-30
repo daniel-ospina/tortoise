@@ -1254,7 +1254,7 @@ def converge(
             # out of band becomes permanent. ⛔ THE COST WHILE THE #6897 MITIGATION IS ENGAGED: the
             # installer now attaches that label (`CI_RUNNER_OS_LABEL=on|auto`, #10275), so a runner
             # re-registered HERE loses a pin it legitimately carried; `--repair-labels` restores it
-            # (it keeps the class while the flag is `on|auto`) and `--status`' `label-coverage` is
+            # (it keeps `$OS_LABEL`, dropping the rest of the family) and `--status`' `label-coverage` is
             # what makes the gap visible rather than silent.
             # Deriving a whole fresh set is still the
             # failure this preserves against: it drops any custom/tier label (and the fallback
