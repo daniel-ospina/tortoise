@@ -1956,7 +1956,7 @@ def test_every_test_name_the_runbook_names_exists():
     Non-vacuity: with the pre-fix runbook text (`test_the_changes_job_carries_no_job_scope_env`
     against the pre-rename module) this reds with `NAME-MISSING`.
     """
-    import ast
+    import ast  # local: a top-level import would shift this file's own cited line numbers (8d)
 
     doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
     refs = sorted(set(_RUNBOOK_TEST_REF.findall(doc)))
