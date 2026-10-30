@@ -66,9 +66,12 @@ def _clean_non_folded_record():
 def _create_subject_rows(sdk, name, ids):
     """Raw-CREATE one live Subject per id under ``name``.
 
-    The SDK's own write path MERGEs on ``{name}`` on main, so it can only ever
-    produce ONE carrier. Two live same-name Subjects are the D2 shape an
-    explicit-id writer produces; a raw write is how a test reaches it.
+    The SDK's own ``create_entity`` door does not MERGE on ``{name}`` — since
+    #3590 the write is keyed on the record's own ``id`` and the door RESOLVES
+    the name first, adopting the single live holder — so no public writer
+    produces two carriers of one name by accident. Two live same-name Subjects
+    are the D2 shape an EXPLICIT-ID writer produces; a raw write is how a test
+    reaches it directly.
     """
     proj = sdk._get_proj()
     for sid in ids:

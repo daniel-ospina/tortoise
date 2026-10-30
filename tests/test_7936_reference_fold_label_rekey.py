@@ -49,7 +49,6 @@ from tortoise.consistency import (
     _STATUS_COMPARED_LABELS,
     check_consistency,
     projection_state_path,
-    record_projection_state,
 )
 from tortoise.consistency import (
     _GRAPH_VIEW_LABELS as _GRAPH_VIEW_LABELS_HOME,
