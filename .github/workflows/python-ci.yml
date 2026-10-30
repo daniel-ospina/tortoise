@@ -937,8 +937,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2092,8 +2094,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2619,8 +2623,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -3081,13 +3087,48 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Cache pip dependency caches (#7612)
+      - name: Restore pip dependency caches (#7612, RESTORE-ONLY — #10182)
         # #7612: ephemeral runners, no dependency cache — every job downloaded
         # its wheels cold on every run. Placed BEFORE install-cpu-torch so torch
         # (140 wheels, ~3.2 GB) is served from the cache as well.
         # Coverage-neutral: pip-only job, no uv.lock to enforce; pip's cache is
         # content-addressed and cannot substitute a different version.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY, and this job is the one that must be
+        # (`actions/cache/restore` has no post step — the post save is what
+        # #10182 established is charged against this job's `timeout-minutes`
+        # like any other step).
+        #
+        # MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008):
+        # the restore was a PARTIAL hit (1 s, via `restore-keys`), so the post
+        # step reserved the exact key and began a ~3.6 GB save. Every WORK step
+        # was green — pytest finished at 18:10:55 — and then `Post Cache pip
+        # dependency caches` ran 18:12:33 → 18:29:46, when the job's 30m cap
+        # elapsed (`The job has exceeded the maximum execution time of 30m0s`).
+        # The leg reported `cancelled`, which `python-ci-gate` reads as red BY
+        # DESIGN (#5219: a cancelled leg certifies nothing) — so a green shard
+        # reddened a REQUIRED check on a diff that never touched this job.
+        #
+        # This job cannot amortize that save, and no cap can make it able to.
+        # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
+        # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
+        # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
+        # (floor-clamped, `carve_shards: 3`) + ~1.5m setup/provision, i.e. ~9m
+        # of headroom against a ~9m COLD save and none at all against a slow
+        # one. Raising the cap instead would re-open #3239's stale-head
+        # exposure (the cap IS that exposure) and buy finite headroom under an
+        # UNBOUNDED term — the save has no timeout of its own.
+        #
+        # Nothing is lost by not saving here: the key is SHARED
+        # (`pip-<os>-<hash uv.lock>`), and it is written on EVERY run by
+        # `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`.
+        # This job only ever READ it.
+        #
+        # `continue-on-error`: a cache-SERVICE error (transport/503) must never
+        # red this leg — a miss is the fail-open case, and install-cpu-torch
+        # downloads the pinned CPU wheel either way.
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -3109,8 +3150,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |

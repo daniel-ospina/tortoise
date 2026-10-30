@@ -437,6 +437,22 @@ def _wire(page: Page, *, inv: dict | None = None,
             # specs register their OWN route for this path AFTER `_wire`, and
             # Playwright matches routes in reverse registration order, so this arm
             # does not shadow them.
+            #
+            # #10327 measured the same read failing from the OTHER side, and it is
+            # why the create-org clicks below stopped passing `force=True`: the
+            # menu renders the retry row ABOVE `+ Create new organization`
+            # (main.jsx:10934-10940 → 10969), so a FAILED read moves that button
+            # DOWN by the row's height — exactly 40px on this fixture (y 367.78 →
+            # 407.78) — at an arbitrary moment after the menu mounts. A click whose
+            # point was computed before the shift is then dispatched into the alert
+            # row and SWALLOWED: no dialog, no error, menu still open (dashboard-e2e
+            # reds on runs 41038160303 and 41029185303). `force=True` disables the
+            # actionability check that retries such a click, so the click sites no
+            # longer set it.
+            # ⛔ ONE arm, not two. `main` grew this same answer under #9191 while
+            # #10327 was open; a second identical `path.endswith(...) and method ==
+            # "GET"` arm below is UNREACHABLE, and a dead copy of the fix is the one
+            # a maintainer finds first (review @ 1e9b96be5, ISSUE 1).
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"invites": []}))
             return
@@ -814,7 +830,19 @@ def test_create_team_success(page: Page):
     menu = page.locator(".account-menu")
     expect(menu.get_by_role("button", name="+ Create new organization")).to_be_visible()
     expect(menu.get_by_text("Switch organization")).to_have_count(0)  # single-team: no switch label
-    menu.get_by_role("button", name="+ Create new organization").click(force=True)  # menu closes + dialog opens → unmounts
+    # #10327: NOT `force=True` here. Force disables Playwright's "receives
+    # pointer events" actionability check (playwright.dev/python/docs/
+    # actionability → "Forcing actions": force "will not check that the target
+    # element actually receives click events"), which is the ONLY check that
+    # notices a menu item that moved between the click point being computed and
+    # the event being dispatched — the #10327 dashboard-e2e flake (the menu
+    # grew an invite-alert row above this button, the click landed in the row
+    # and the handler never ran). `_wire` now answers /v1/invites/pending, and
+    # this click stays non-forced so any FUTURE async insertion above the
+    # button is retried instead of silently swallowed. The menu unmounting when
+    # the dialog opens is not a hazard: it happens in the click HANDLER, after
+    # dispatch.
+    menu.get_by_role("button", name="+ Create new organization").click()  # menu closes + dialog opens → unmounts
     # W1 (#1997) + #2494: the create dialog renders as 'Create a new
     # organization' with an 'Organization name' input. Since #2789 the dialog
     # is named by its own heading (aria-labelledby → the name-mode <h3>, which
@@ -879,6 +907,9 @@ def test_the_account_menu_settles_instead_of_404ing_its_invites(page: Page):
     # The retryable-error row `loadPendingInvites` writes on a failed fetch:
     # `{ _loadError: 'Could not load invites — reopen the menu to retry' }`.
     expect(menu.get_by_text("Could not load invites")).to_have_count(0)
+    # …and its ARIA shape, not just its text (#10327): the row `loadPendingInvites`
+    # grows is a `role=alert`, and that is the node a stale click point lands in.
+    expect(menu.get_by_role("alert")).to_have_count(0)
     # …and the item the create-org arms click is present and stable, not re-rendered
     # under them: this resolves BEFORE any click, so a regression here is a clear
     # assertion rather than a detached-node click 30 s downstream.
@@ -918,7 +949,8 @@ def test_create_team_free_capped_gate(page: Page):
 
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
-    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click(force=True)  # menu closes → unmounts
+    # #10327: non-forced — see the actionability note in test_create_team_success.
+    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click()  # menu closes → unmounts
     page.get_by_label("Organization name").fill("blocked")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render
     # #2789: the limit mode NAMES the dialog from its own heading
@@ -976,7 +1008,8 @@ def test_create_team_pre_checked_at_cap(page: Page):
 
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
-    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click(force=True)
+    # #10327: non-forced — see the actionability note in test_create_team_success.
+    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click()
     dialog = page.get_by_role("dialog", name="You can only have one free organization")
     expect(dialog).to_contain_text("You can only have one free organization", timeout=15000)
     # The name input is NOT shown — no rejection-after-typing flow.
