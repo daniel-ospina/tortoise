@@ -696,11 +696,15 @@ unpaired aggregates). Protocol for the follow-up:
 The 3-point micro-test that SELECTS the granularity knob before the pilot:
 
 ```bash
-# offline smoke (deterministic ingest implied by --mock):
+# offline smoke (deterministic ingest implied by --mock).
+# --skip-preflight WAIVES the dense leg exactly as for `run.py` above (#4718):
+# the sweep now runs the same pre-flight, so without it a host with no embedder
+# stops before the dataset load. Drop the flag to REQUIRE the real leg — the
+# waived sweep records `vector_strategy="unavailable"` and prints NOT MEASURED.
 python -m tools.longmem_eval.sweep_granularity --data tests/fixtures/longmemeval_mini.json \
-    --limit 5 --mock
+    --limit 5 --mock --skip-preflight
 
-# real v2 sweep (needs provider keys / --extractor-model):
+# real v2 sweep (needs the embedder + provider keys / --extractor-model):
 python -m tools.longmem_eval.sweep_granularity --split s --limit 20
 ```
 
