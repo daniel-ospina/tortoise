@@ -19,9 +19,11 @@ cell is a context-token/underfill view only, NOT a granularity selector.
 and the 500-Q run (step 5); the report's methodology records the chosen
 value (D7 — ``chunk_turns`` in the report methodology).
 
-``--mock`` implies deterministic ingest when ``--ingest-mode`` is unset — a
-mock run must be fully offline; real v2 sweeps need ``--extractor-model`` /
-provider keys.
+``--mock`` implies deterministic ingest when ``--ingest-mode`` is unset, and a
+mock run needs no provider keys; real v2 sweeps need ``--extractor-model`` /
+provider keys. ``--mock`` does **NOT** waive the dense-leg gate (#4718) —
+``--skip-preflight`` does — so since #4821 a mock run on a host with no
+loadable embedder stops before the dataset load unless that waiver is passed.
 
 **Dense-leg contract (#4821, R3 #1542, #4718).** The sweep runs the SAME
 dense-leg (embedder) gate as ``run.py``'s ``run_main`` — ``gate_dense_leg`` /
@@ -413,9 +415,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="ingestion mode (default v2 — the V3 primary path; "
                         "--mock implies deterministic when unset)")
     p.add_argument("--mock", action="store_true",
-                   help="offline: MockReader + MockJudge (implies deterministic "
-                        "ingest when --ingest-mode unset — a mock run must be "
-                        "fully offline)")
+                   help="offline mode: MockReader + MockJudge, no API keys "
+                        "(implies deterministic ingest when --ingest-mode "
+                        "unset). Does NOT waive the dense-leg gate (#4718) — "
+                        "use --skip-preflight for that")
     p.add_argument("--chunk-turns", default="1,2,4",
                    help="comma-separated sweep points (default 1,2,4)")
     p.add_argument("--context-cap", type=_positive_int,

@@ -5187,6 +5187,66 @@ def test_sweep_granularity_cli_waiver_is_the_only_way_through(
     assert all(r["embedding_coverage"] == 0.0 for r in payload["results"])
 
 
+def _option_help_block(help_text, flag):
+    """The de-wrapped help text of ONE argparse option (its continuation
+    lines are indented past the option column, so the block ends at the next
+    line that starts a new option)."""
+    lines = help_text.splitlines()
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.startswith("  " + flag + " ")), None)
+    if start is None:
+        return ""
+    block = [lines[start]]
+    for ln in lines[start + 1:]:
+        if ln.startswith("  -"):
+            break
+        block.append(ln)
+    return " ".join(" ".join(block).split())
+
+
+def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys):
+    """#4821 (`--mock` contract): since the sweep gates the dense leg BEFORE the
+    dataset load, `--mock` is no longer an offline-only run — a mock sweep on a
+    host with no loadable embedder refuses unless `--skip-preflight` is passed.
+    Both the module docstring and `--mock`'s `--help` said "a mock run must be
+    fully offline" and named no waiver, which is the contract this PR makes
+    false; `--help` is the surface an operator consults first, and the module
+    docstring is where this PR moved the sweep's contract.
+
+    Non-vacuity: on the pre-fix strings ("must be fully offline", no waiver
+    sentence) every assertion below reds — the docstring paragraph and the
+    `--mock` help both still carry the claim. `--skip-preflight` is asserted
+    inside the `--mock` block, not merely anywhere in `--help`, where its own
+    option would satisfy it for free."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    doc = sg.__doc__ or ""
+    assert "``--mock``" in doc, "the mock paragraph moved — re-anchor this test"
+    mock_para = doc.split("``--mock``", 1)[1].split("\n\n", 1)[0]
+    assert "fully offline" not in mock_para, (
+        "the docstring still promises a fully-offline mock run, which the "
+        "dense-leg gate makes false")
+    assert "does **NOT** waive the dense-leg gate" in mock_para, (
+        "the docstring never says the mock run does not waive the gate")
+
+    with pytest.raises(SystemExit) as ei:
+        sg.main(["--help"])
+    assert ei.value.code == 0
+    help_text = capsys.readouterr().out
+    # argparse wraps each option's help, and `--mock` is also mentioned by the
+    # usage line AND by `--ingest-mode`'s help, so slice the `--mock` option's
+    # own two-column block (it starts at the option column; every following
+    # line is indented deeper) rather than a bare substring search.
+    mock_help = _option_help_block(help_text, "--mock")
+    assert mock_help, "`--mock` has no help block — re-anchor this test"
+    assert "fully offline" not in mock_help, (
+        "`--mock --help` still promises a fully-offline run")
+    assert "Does NOT waive the dense-leg gate" in mock_help, (
+        "`--mock --help` does not say the gate survives the mock run")
+    assert "--skip-preflight" in mock_help, (
+        "`--mock --help` names no way to actually run offline")
+
+
 # ── #4821 review P2: the PERMITTING direction must be proven too ──────────
 #
 # The contract has two directions and only the refusing one was pinned: every
