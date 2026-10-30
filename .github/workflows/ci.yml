@@ -2460,6 +2460,20 @@ jobs:
     # `bash .github/scripts/verify-cutover --live` with prod creds right
     # before dispatching the flip (sequence in supabase-deploy.yml).
     runs-on: ubuntu-latest
+    # OUTER CAP (#10327 review, ISSUE 1): this job OWNS an embedded redislite
+    # server — `verify-cutover` runs ten pytest files on FalkorDBLite from
+    # inside a shell script (the URI-less opt-in below) — and it shares its
+    # host with `python-ci.yml`'s legs, whose setup runs
+    # `.github/scripts/reap-redislite-orphans.py --apply`. Uncapped it inherits
+    # GitHub's 360-minute default, and the reaper's proof ("older than the
+    # widest job `timeout-minutes`") can never cover a job permitted to live
+    # 360 minutes: a server this job still owns would look orphaned.
+    # Measured 2 m on 2026-10-30 and 3 m 07 s in the 2026-09-02 ci audit
+    # (`pip install -e '.[test]'` + the gate); 30 m is the runner-stall
+    # allowance, not the work — the same reasoning as `test-isolation`'s 15 m.
+    # ⛔ Keep it UNDER `DEFAULT_MAX_AGE_MINUTES` (95): the pin at
+    # `tests/test_reap_redislite_orphans.py` reds otherwise.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

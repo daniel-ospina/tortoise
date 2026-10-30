@@ -35,13 +35,19 @@ It kills a redislite server only when the server is provably nobody's:
    suite's directory is never removed (the session teardown refuses while a
    live server holds the root — `#3752`). This is the actual #1005 litter: the
    tempdirs left by failed runs.
-2. **The process is older than every leg's OUTER cancel bound.** A redislite
-   server older than the widest `jobs.<job_id>.timeout-minutes` among the jobs
-   that run this step cannot belong to a running leg, because GitHub cancels the
-   job at that bound. It is a JOB bound, not a `matrix.watchdog_minutes` bound:
-   the watchdog only stops pytest, so it bounds neither the setup/pre-phase
-   around it nor — see the derivation at `DEFAULT_MAX_AGE_MINUTES` — the 55
-   minutes the repo's own policy lets that watchdog reach.
+2. **The process is older than every embedded lane's OUTER cancel bound.** A
+   redislite server older than the widest `jobs.<job_id>.timeout-minutes` among
+   the jobs that can OWN one cannot belong to a running leg, because GitHub
+   cancels the job at that bound. "Can own one" is the embedded lanes — the
+   jobs that invoke this reaper, plus every job that opts into the URI-less
+   embedded run (`TORTOISE_TEST_CARVE_OUT`, how a suite reaches a redislite
+   server at all: `tests/_embedded.py::_carve_out_opted_in`) — and NOT merely
+   the five that run this step: this tool enumerates the host's process table,
+   so it can meet a server belonging to a job that never installs it. It is a
+   JOB bound, not a `matrix.watchdog_minutes` bound: the watchdog only stops
+   pytest, so it bounds neither the setup/pre-phase around it nor — see the
+   derivation at `DEFAULT_MAX_AGE_MINUTES` — the 55 minutes the repo's own
+   policy lets that watchdog reach.
 
 Everything else is KEPT, including every unmeasurable case (unreadable
 `/proc`, unknown age, unparsable argv): a cleanup step that fails is a leak,
@@ -91,10 +97,29 @@ _SOCKET_FLAG = "unixsocket"
 #   2. The HARD bound on a running leg is the job's OUTER `timeout-minutes` —
 #      GitHub cancels the job there (workflow syntax, `jobs.<job_id>.timeout-
 #      minutes`) — and that cap bounds SETUP + the last-failed pre-phase + the
-#      gated run together, so it is strictly wider than any inner watchdog. The
-#      widest among the jobs that invoke this reaper is `test` at 90
-#      (`python-ci.yml`); `test-slow` 60, `test-carve-out` 30,
-#      `test-concurrency-falkor` 15, `post-merge-validation.yml::validate` 60.
+#      gated run together, so it is strictly wider than any inner watchdog. An
+#      UNCAPPED job is not "small but unbounded": it carries GitHub's
+#      360-minute default, under which no age arm is a proof at all.
+#
+# The POPULATION this proof quantifies over is "jobs that can own an embedded
+# redislite server", not "jobs that run this line" — the process table this
+# tool reads is the HOST's, and ownership is decided by argv + age, never by
+# which workflow started the server. Membership is read mechanically from the
+# two signals a workflow cannot own a server without: it invokes this reaper,
+# or it sets the URI-less embedded opt-in (`TORTOISE_TEST_CARVE_OUT`, read
+# through the declared contract in `tests/_embedded.py`) — the marker, not the
+# string "pytest", because a job may run pytest from INSIDE a shell script
+# (`ci.yml::flip-gate` → `verify-cutover`), which no `pytest` text scan sees.
+# The pin also carries an explicitly frozen expected set and two by-name
+# exemptions for the requests-only e2e suites, so this population cannot drift
+# silently in either direction.
+#
+# At the time of writing the widest is `test` at 90 (`python-ci.yml`);
+# `evals-on-demand.yml::evals` 90, `test-slow` 60,
+# `post-merge-validation.yml::validate` 60, `perf-lane` 45, `test-d14-hosted-api`
+# 40, `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
+# it was UNCAPPED at 360 and invisible to an earlier, narrower population),
+# `test-record-postgres`/`legal-e2e`/`blog-write-e2e` 20, and the rest 15.
 #
 # A server YOUNGER than the widest outer cancel bound can still belong to a live
 # leg, so reaping on age is only a proof ABOVE it. The invariant is
@@ -102,7 +127,7 @@ _SOCKET_FLAG = "unixsocket"
 #     DEFAULT_MAX_AGE_MINUTES > widest job `timeout-minutes` (>= the 55 ceiling)
 #
 # and both halves are pinned against their live sources by
-# `tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_every_reaper_job_outer_timeout`
+# `tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_every_embedded_lane_job_outer_timeout`
 # and `::test_the_age_arm_clears_the_widest_permitted_leg_watchdog`. Raising the
 # ceiling, or a job's outer cap, reds this file's own suite — instead of
 # silently turning the proof back into a live-peer kill (the #3653 defect).
@@ -116,12 +141,12 @@ _SOCKET_FLAG = "unixsocket"
 # stdlib-only and 3.9-clean, and it runs in a setup step under the runner's
 # `python3` before the project venv or `tools/` is importable. The pins above
 # are what keep the mirror honest.
-WIDEST_REAPER_JOB_TIMEOUT_MINUTES = 90
+WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES = 90
 # `timeout -s INT -k 10` gives a cancelled leg 10 s after SIGINT before SIGKILL,
 # and the runner then tears the step down. Minutes of slack over the bound,
 # deliberately small: the bound itself already carries the margin.
 CANCEL_SLACK_MINUTES = 5
-DEFAULT_MAX_AGE_MINUTES = WIDEST_REAPER_JOB_TIMEOUT_MINUTES + CANCEL_SLACK_MINUTES
+DEFAULT_MAX_AGE_MINUTES = WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES + CANCEL_SLACK_MINUTES
 
 
 def socket_dir_from_argv(argv: list[str]) -> str | None:

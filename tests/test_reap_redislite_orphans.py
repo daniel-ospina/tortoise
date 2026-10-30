@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "reap-redislite-orphans.py"
@@ -122,74 +123,147 @@ def test_undeterminable_ownership_is_kept(reaper):
 # the numbers moved, because every boundary test passed `45 * 60` in by hand.
 # These two pins bind the constant to its sources, so drift REDS instead of
 # silently restoring the live-peer kill (#3653).
+#
+# ROUND 2 (#10327 review, ISSUE 1): the first population was "jobs that invoke
+# the reaper", but the proof quantifies over "jobs that can OWN a redislite
+# server" — the tool reads the HOST's process table, and ownership is argv +
+# age, never which workflow started the server. `ci.yml::flip-gate` sits in the
+# gap: it runs `verify-cutover`, which runs ten pytest files on FalkorDBLite
+# from inside a shell script, on a host that `python-ci.yml`'s legs also use —
+# and it had NO job-level cap, i.e. GitHub's 360-minute default, so no age arm
+# could cover it. Both assertions below stayed green while the proof was false
+# for that job. The population is now the embedded lanes (see
+# `_embedded_lane_job_outer_timeouts`), and `flip-gate` is capped at 30 in the
+# workflow and named in `expected` so it cannot lose that cap silently.
+
+# Jobs that set the embedded opt-in for a suite that owns NO server. Both run
+# `tests/e2e/…` request-only suites (no redislite import anywhere under
+# `tests/e2e/` outside `tests/e2e/hosted`, whose own job caps at 15) and say so
+# in the workflow (`deploy-pages.yml`: "this suite is requests-only (no embedded
+# DB server)"). Exempted BY NAME, with the reason here: a new job cannot be
+# exempt silently, and an exemption that later grows a server reds only if it
+# drops this list — which is why the names, not a pattern, are what is written.
+_NO_EMBEDDED_SERVER_JOBS = frozenset(
+    {
+        "deploy-pages.yml:verify-legal",
+        "deploy-pages.yml:verify-blog",
+    }
+)
+
+# `tests/_embedded.py::_carve_out_opted_in` accepts these spellings (the #4097
+# contract); a workflow that opts in with any of them runs URI-less embedded.
+# Read from the YAML, not an indent scan: workflows set it at STEP level
+# (`ci.yml::flip-gate`) AND at WORKFLOW level (`perf-lane.yml:68`,
+# `evals-on-demand.yml:110`), where every job inherits it. An indent scan sees
+# neither the inheritance nor the jobs underneath it — it reads the workflow
+# `env:` block and the `on:` triggers as if they were JOBS.
+_CARVE_OUT = "TORTOISE_TEST_CARVE_OUT"
 
 
-def _reaper_job_outer_timeouts() -> dict[str, int | None]:
-    """Job-level `timeout-minutes` for every job that invokes the scoped reaper.
+def _truthy(value: object) -> bool:
+    """The `is_truthy` spellings `tests/_embedded.py` accepts (#4097)."""
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _job_strings(node: object) -> list[str]:
+    """Every scalar under a job, so `run:` bodies are searched too."""
+    if isinstance(node, dict):
+        return [s for k, v in node.items() for s in (str(k), *_job_strings(v))]
+    if isinstance(node, list):
+        return [s for item in node for s in _job_strings(item)]
+    return [] if node is None else [str(node)]
+
+
+def _embedded_lane_job_outer_timeouts() -> dict[str, int | None]:
+    """Job-level `timeout-minutes` for every job that can OWN a redislite server.
 
     Keyed `<workflow>:<job>`. GitHub cancels a job at its OWN `timeout-minutes`
     (workflow syntax: "the maximum number of minutes to let a job run before
-    GitHub automatically cancels it"), so that cap — not any inner pytest
-    watchdog — bounds how long a live leg's redislite server can possibly exist.
-    Job-level caps sit at a 4-space indent; step-level ones are deeper and are
-    NOT the bound, so the match is anchored on exactly four spaces.
+    GitHub automatically cancels it", default 360), so that cap — not any inner
+    pytest watchdog — bounds how long a live leg's redislite server can possibly
+    exist.
+
+    A job is admitted on either signal it cannot own a server without: it
+    invokes this reaper, or it opts into the URI-less embedded lane (at any
+    level — workflow `env:` is inherited by every job). The marker is the
+    carve-out env var rather than the string "pytest" deliberately —
+    `ci.yml::flip-gate` runs pytest from inside `verify-cutover`, so a `pytest`
+    scan cannot see the exact job this population was widened for. The residual
+    (a URI-set job whose suite constructs embedded anyway, through the
+    `tests/_embedded.py` no-redirect registry) is recorded in the module's
+    derivation block, not silently absorbed: the reaper-invoking half covers
+    today's such jobs, and every one of them is capped below the arm.
     """
     found: dict[str, int | None] = {}
     for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
-        job: str | None = None
-        block: list[str] = []
-        jobs: list[tuple[str, list[str]]] = []
-        for line in path.read_text().splitlines():
-            key = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
-            if key:
-                if job is not None:
-                    jobs.append((job, block))
-                job, block = key.group(1), []
-            elif job is not None:
-                block.append(line)
-        if job is not None:
-            jobs.append((job, block))
-        for name, body in jobs:
-            if not any("reap-redislite-orphans.py" in ln for ln in body):
+        workflow = yaml.safe_load(path.read_text()) or {}
+        workflow_env = workflow.get("env") or {}
+        for name, job in (workflow.get("jobs") or {}).items():
+            if not isinstance(job, dict):  # e.g. `jobs: <id>:` with a null body
                 continue
-            cap = None
-            for ln in body:
-                m = re.match(r"^    timeout-minutes:\s*(\d+)\s*(?:#.*)?$", ln)
-                if m:
-                    cap = int(m.group(1))
-                    break
-            found[f"{path.name}:{name}"] = cap
+            key = f"{path.name}:{name}"
+            if key in _NO_EMBEDDED_SERVER_JOBS:
+                continue
+            strings = _job_strings(job)
+            invokes_reaper = any("reap-redislite-orphans.py" in s for s in strings)
+            envs = [workflow_env, job.get("env")]
+            envs.extend(
+                step.get("env") for step in job.get("steps") or [] if isinstance(step, dict)
+            )
+            opted_in = any(_truthy((env or {}).get(_CARVE_OUT)) for env in envs)
+            if not (invokes_reaper or opted_in):
+                continue
+            cap = job.get("timeout-minutes")
+            found[key] = None if cap is None else int(cap)
     return found
 
 
-def test_the_age_arm_clears_every_reaper_job_outer_timeout(reaper):
-    """NON-VACUOUS: this reds on the pre-fix `DEFAULT_MAX_AGE_MINUTES = 45`
-    (45 does not clear `python-ci.yml::test`'s 90-minute outer cancel bound).
+def test_the_age_arm_clears_every_embedded_lane_job_outer_timeout(reaper):
+    """NON-VACUOUS, twice over.
 
-    A job with NO `timeout-minutes` inherits GitHub's 360-minute default, and no
-    age arm can be a proof under that, so an un-capped reaper job reds here too.
+    On the pre-fix arm (`DEFAULT_MAX_AGE_MINUTES = 45`) this reds: 45 clears
+    neither `python-ci.yml::test`'s 90-minute outer cancel bound nor the 55-min
+    watchdog ceiling the sibling pin covers.
+
+    On the pre-fix POPULATION (`jobs that invoke the reaper` only) it also reds,
+    which is the #10327 review's ISSUE 1: `ci.yml::flip-gate` carries no
+    job-level `timeout-minutes`, so it inherits GitHub's 360-minute default and
+    no age bound can prove ownership of a server it still owns. Widening the
+    admission rule is exactly what makes that case visible instead of keeping
+    both assertions green while the proof is false for that job.
     """
-    caps = _reaper_job_outer_timeouts()
+    caps = _embedded_lane_job_outer_timeouts()
 
     expected = {f"python-ci.yml:{leg}" for leg in EMBEDDED_LEGS}
     expected.add("post-merge-validation.yml:validate")
+    # The carve-out half of the population: named so a job that loses its
+    # discovery (a moved script, a renamed env var) reds instead of quietly
+    # narrowing the proof. `flip-gate` is the one ISSUE 1 was filed for.
+    expected.update(
+        {
+            "ci.yml:flip-gate",
+            "python-ci.yml:test-carve-out",
+            "python-ci.yml:test-d14-hosted-api",
+            "evals-on-demand.yml:evals",
+            "perf-lane.yml:perf-lane",
+        }
+    )
     assert expected <= set(caps), (
-        "a job that invokes the scoped reaper was not discovered — this pin would "
-        f"otherwise go vacuous: missing {sorted(expected - set(caps))}"
+        "a job that can own an embedded redislite server was not discovered — this "
+        f"pin would otherwise go vacuous: missing {sorted(expected - set(caps))}"
     )
 
     uncapped = sorted(job for job, cap in caps.items() if cap is None)
     assert uncapped == [], (
-        "a reaper-invoking job carries no job-level `timeout-minutes`, so it inherits "
-        "GitHub's 360-minute default and no age bound can prove ownership: "
-        + ", ".join(uncapped)
+        "an embedded-lane job carries no job-level `timeout-minutes`, so it inherits "
+        "GitHub's 360-minute default and no age bound can prove ownership: " + ", ".join(uncapped)
     )
 
     widest = max(c for c in caps.values() if c is not None)
-    assert widest == reaper.WIDEST_REAPER_JOB_TIMEOUT_MINUTES, (
-        f"`WIDEST_REAPER_JOB_TIMEOUT_MINUTES` mirrors a stale measurement: it says "
-        f"{reaper.WIDEST_REAPER_JOB_TIMEOUT_MINUTES} min, the workflows now cap the "
-        f"widest reaper-invoking job at {widest} min "
+    assert widest == reaper.WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES, (
+        f"`WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES` mirrors a stale measurement: it says "
+        f"{reaper.WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES} min, the workflows now cap the "
+        f"widest embedded-lane job at {widest} min "
         f"({sorted(j for j, c in caps.items() if c == widest)}) — re-derive the "
         "constant and its comment instead of trusting the stored number"
     )
@@ -437,10 +511,11 @@ def test_no_ci_step_duplicates_its_tempdir_cleanup():
         for run in _cleanup_runs(path.read_text()):
             if len(run) != 3:
                 offenders.append(
-                    f"{path.name}: {len(run)} cleanup lines starting at {run[0][:52]!r}")
+                    f"{path.name}: {len(run)} cleanup lines starting at {run[0][:52]!r}"
+                )
     assert offenders == [], (
         "the tempdir cleanup is emitted more than once in a single step — the trio "
-        "(`TMPD=…`, `find … -mmin +30`, `echo \"tempdir cleaned\"`) is one cleanup, "
+        '(`TMPD=…`, `find … -mmin +30`, `echo "tempdir cleaned"`) is one cleanup, '
         "and a second copy is a mechanical-edit artifact that reads as intentional:\n  "
         + "\n  ".join(offenders)
     )
