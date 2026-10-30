@@ -3399,6 +3399,10 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
         866: r"test_the_changes_job_carries_no_job_scope_env",
+        # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
+        # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
+        25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
+        26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -3658,11 +3662,11 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
     """⛔ THE DROP'S RATIONALE WAS TRUE ON `main` AND SELF-REFUTING AT THIS HEAD (#10275 review).
 
     Two comment sites said the pool *never* carries a version-pinned label and cited
-    `docs/ops/ci-runner-x64.md:25-26` as the warrant — while `:26`, the row this very PR rewrote,
-    says the pool claims `ubuntu-24.04` as the temporary #6897 mitigation. The PR had corrected that
-    absolute on nine other surfaces (six workflow comments, `test_runner_tool_contract.py`, the
-    runbook, `MEMORY.md`), so these two were the residue of a re-derivation that moved the numbers
-    (1417 -> 272 / 1523) without re-pointing the claim.
+    `docs/ops/ci-runner-x64.md:25-26` as the warrant — while `docs/ops/ci-runner-x64.md:26`, the row
+    this very PR rewrote, says the pool claims `ubuntu-24.04` as the temporary #6897 mitigation. The
+    PR had corrected that absolute on nine other surfaces (six workflow comments,
+    `test_runner_tool_contract.py`, the runbook, `MEMORY.md`), so these two were the residue of a
+    re-derivation that moved the numbers (1417 -> 272 / 1523) without re-pointing the claim.
 
     The `:1527-1529` half was the load-bearing one: *"no workflow is starved by that"* is FALSE under
     the mitigation — a job naming the label wants the hosted IMAGE, and during a hosted outage it
