@@ -136,22 +136,27 @@ fi
 # `${RUNNER_TEMP}` (#10280); both matrix jobs already pass one, so for them the
 # signals below are a backstop rather than the load-bearing defence.
 #
-# ⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS (2026-10-29, #10028). `python-ci.yml`'s
+# ⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS (2026-10-29, #10028) AND TO
+# `test-concurrency-falkor` (2026-10-30, #10280's first leg). `python-ci.yml`'s
 # `test` job — the fast matrix, NINE legs, and the largest share of this failure —
 # passes `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and
 # therefore per-job, since a runner runs one job at a time), and `test-slow`'s FIVE
-# legs now pass it too. That second half was a measured false red, not a tidy-up:
+# legs now pass it too. Each half was a measured false red, not a tidy-up:
 # run 40808264676's `test-slow (a)` printed its own `365 passed, 2 skipped` (= its
 # manifest's 367 expected nodeids) AND its own `pytest exit code: 0` banner, and the
 # job still concluded `failure`, because a sibling's `> /tmp/pytest.log` truncated
-# the file between the leg's `tail` and this reporter's read. For those two jobs
-# signals (1)-(3) are a backstop against a test that shells out to pytest, not the
-# load-bearing defence against a co-tenant.
+# the file between the leg's `tail` and this reporter's read. `test-concurrency-falkor`
+# is the third and newest: run 40985248910 (PR #10214) had a co-tenant leg write
+# `/tmp/pytest.log` for 19 minutes across its 3-minute window, so this reporter read the
+# CO-TENANT's session (`288 passed`, `test_smoke_embedded`, `test_eval_ingest_retry`,
+# NUL holes → `grep: binary file matches`) and correctly refused it — and
+# `ci-introduced-failure` then blocked the PR on three nodeids that leg never ran. For
+# those three jobs signals (1)-(3) are a backstop against a test that shells out to
+# pytest, not the load-bearing defence against a co-tenant.
 #
 # The legs that still write `/tmp/...` literals, and still need the same change, are
 # the deliberate residual named on #10280, which carries the rest of the migration:
 #
-#   `test-concurrency-falkor`   (`/tmp/pytest.log`)      — `python-ci.yml`
 #   `test-track-b`              (`/tmp/trackb.log`)      — `python-ci.yml`
 #   `test-carve-out`            (`/tmp/pytest.log`)      — `python-ci.yml`
 #   `test-d14-hosted-api`       (`/tmp/pytest-d14.log`)  — `python-ci.yml`
@@ -165,7 +170,7 @@ fi
 # change — and naming a leg that HAS migrated is a red too, because an over-wide residual
 # sends the next lane to migrate work that is already done.
 #
-# `test-track-b` is the sharpest of the five: it is #10280's own ROOT measurement (its
+# `test-track-b` is the sharpest of the four: it is #10280's own ROOT measurement (its
 # shared `/tmp/expected-nodeids.txt` + `/tmp/junit.xml` produced `4 expected nodeids ->
 # 640 absent`), i.e. the leg where a shared manifest/JUnit makes a false PASS on a
 # required check reachable. `validate` is the warn-only job, so for it the consequence is

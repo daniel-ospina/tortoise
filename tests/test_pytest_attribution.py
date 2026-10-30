@@ -1105,8 +1105,11 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 #: 2, inside the very function the next `/tmp` migrator reads. These two numbers are
 #: asserted against the workflows by `test_the_stated_inventory_matches_the_workflows`,
 #: so a further migration reds the guard instead of silently falsifying its map.
-_STATED_PER_RUNNER_PYTEST_LOG_SITES = 3
-_STATED_LITERAL_PYTEST_LOG_SITES = 2
+#:
+#: 3/2 → 4/1 when `test-concurrency-falkor` migrated (#10280's first leg to go, forced
+#: by a measured false red on PR #10214 rather than by tidiness).
+_STATED_PER_RUNNER_PYTEST_LOG_SITES = 4
+_STATED_LITERAL_PYTEST_LOG_SITES = 1
 
 #: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
 #: workflows, so match the SHAPE, not one spelling. Anchored (`^tail`), so a comment
@@ -1169,7 +1172,7 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log`-named tails in python-ci.yml (3 of them the per-runner
+    #9300): 5 `pytest.log`-named tails in python-ci.yml (4 of them the per-runner
     `"$PYTEST_LOG"`, not a `/tmp` literal — see the DERIVED split pinned by
     `test_the_stated_inventory_matches_the_workflows`), 1 `trackb.log` (the must-pass
     Track B member, whose log name does not contain "pytest" — it was the coverage
@@ -1196,8 +1199,9 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
     # `test`'s last-failed pre-phase (200), `test` (300) and `test-slow` (300) through
     # the per-runner `"$PYTEST_LOG"` (the fast job since #10028, `test-slow` since the
-    # #10028 residue that PR closed), then the TWO remaining `/tmp/pytest.log` literals
-    # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
+    # #10028 residue that PR closed), `test-concurrency-falkor` (120) since #10280's
+    # first leg, then the ONE remaining `/tmp/pytest.log` literal `test-carve-out`
+    # (200) — plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
@@ -1255,6 +1259,49 @@ def test_the_stated_inventory_matches_the_workflows() -> None:
     # well means a migration that changes BOTH sides cannot pass by swapping them.
     assert per_runner + literal == 5, (
         f"{per_runner + literal} `pytest.log`-named tails, the inventory enumerates 5"
+    )
+
+
+def test_no_two_legs_capture_the_same_host_global_log() -> None:
+    """A host-global log path may belong to ONE leg — two owners is not a red, it is NO VERDICT.
+
+    This is the invariant the per-leg MIGRATION is for, stated directly instead of being
+    reached through the migration's own bookkeeping (a count can be updated in step with a
+    regression and stay green). Two jobs that capture the same `/tmp/*.log` on a host whose
+    runner installs share one `/tmp` overwrite each other's file: the second writer TRUNCATES
+    the first's header away, and every reader of that path — the `tail`, the reporter's
+    session-ownership check, the `grep '^(FAILED|ERROR) '` that the admin rail derives a
+    failure SET from, and the skip-guard's manifest — then describes a session the leg did
+    not run.
+
+    ⛔ MEASURED, and the reason this pin exists (run 40985248910, PR #10214).
+    `test-concurrency-falkor` (runner `gh-runner-x64-4`) and `test-carve-out`
+    (`gh-runner-x64-8`) both wrote `/tmp/pytest.log`; the carve-out leg wrote for 19
+    minutes over the concurrency leg's 3-minute window, and the concurrency job's log is
+    the carve-out session — `288 passed`, `test_smoke_embedded`, `test_eval_ingest_retry`,
+    none of them its own tests, with `grep` reporting `binary file matches` over the NUL
+    holes. Its reporter said `test leg INCOMPLETE — no pytest summary; failure set
+    unobservable` (correct, fail-closed), and `ci-introduced-failure` then BLOCKED the PR
+    on those three FOREIGN nodeids — a required check decided by a log its leg never wrote.
+
+    The migration already moved `test`, `test-slow` and (in this change)
+    `test-concurrency-falkor` to the per-runner `"$PYTEST_LOG"`; the rest is #10280. This
+    pin is what makes the next leg's migration non-optional: a NEW job that reuses an
+    existing host-global path reds here even if every stated count was updated to match.
+    """
+    owners: dict[str, set[str]] = {}
+    for workflow in ATTRIBUTION_WORKFLOWS:
+        for job, target in _capture_site_jobs(workflow):
+            # A per-runner target is already per-job unique — only host-global paths can
+            # collide, and a site attributed to no job cannot be reasoned about here.
+            if job is None or not target.startswith("/tmp/"):
+                continue
+            owners.setdefault(target, set()).add(job)
+    shared = {target: sorted(jobs) for target, jobs in owners.items() if len(jobs) > 1}
+    assert shared == {}, (
+        "two legs capture ONE host-global log path, so neither leg's file is its own — "
+        "its tail, its attribution read and its failure set describe the co-tenant "
+        f"(#10280): {shared}. Give the leg a per-runner path under $RUNNER_TEMP."
     )
 
 
@@ -1341,7 +1388,6 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
     # update the header's scope in the same change (that is the point of the pin).
     assert residual == [
         "test-carve-out",
-        "test-concurrency-falkor",
         "test-d14-hosted-api",
         "test-track-b",
         "validate",
