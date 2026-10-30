@@ -275,10 +275,10 @@ def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
     and remove a day at any point after we selected it, and absence then means
     SUCCESS — but only if an archive holding the record still exists and reads.
     ``_size_or_zero`` cannot tell "absent" from "unreadable" from "0 bytes", so
-    the verdict is derived from a real decompress here, in ONE place: the four
-    sites that can observe absence each used to build their own sentence, and
-    that duplication is how one of them shipped claiming luck as evidence
-    (#6388 review cycle 7, P0/P1).
+    the verdict is derived from a real decompress HERE. The publish-derived
+    absence verdicts are not centralised (they know the archive is the inode this
+    run just verified); what is centralised is the rule that an absence claim
+    must be proved by reading an archive (#6388 review, P0/P1).
     """
     target = archive_path(root, day)
     try:
@@ -290,6 +290,43 @@ def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
     return Sealed(day, "already-sealed", plain_bytes, _size_or_zero(target),
                   "the source was already gone (a concurrent run sealed it "
                   "first)")
+
+
+def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str) -> tuple[str, str]:
+    """Publish an archive WITHOUT ever replacing bytes this run did not verify.
+
+    Returns ``(verdict, detail)`` where verdict is one of:
+
+    * ``published`` — the entry is now ours (linked atomically, or a provable
+      SUPERSET of what a peer had);
+    * ``identical`` — a peer published exactly our bytes first;
+    * ``theirs-newer`` — a peer's archive holds bytes we never read (it appended
+      while we compressed): that is MORE evidence than ours, so it is kept;
+    * ``unreadable`` — we could not publish, or the peer's archive does not read.
+
+    ``os.replace`` as a blind writer is the defect this helper removes: the
+    change test is a stat, not a transaction, so a peer that appends + seals +
+    unlinks between the check and the replace would have its newer archive
+    replaced by our stale snapshot and the loss reported as ``sealed``
+    (#6388 review, P0). ``os.link`` is atomic and answers EEXIST instead.
+    """
+    try:
+        os.link(tmp, target)
+        return "published", ""
+    except FileExistsError:
+        pass
+    except OSError as e:
+        return "unreadable", f"could not publish to {target}: {e}"
+    try:
+        raced = gzip.decompress(target.read_bytes())
+    except (OSError, EOFError, zlib.error) as e:
+        return "unreadable", f"the archive at {target} is unreadable: {e}"
+    if _sha256(raced) == digest:
+        return "identical", ""
+    if plain.startswith(raced):
+        os.replace(tmp, target)   # provably a superset of theirs: safe
+        return "published", ""
+    return "theirs-newer", "a peer's archive holds bytes we did not read — kept theirs"
 
 
 def seal_one(root: Path, path: Path) -> Sealed:
@@ -384,38 +421,15 @@ def seal_one(root: Path, path: Path) -> Sealed:
         # an alarm that can never be cleared (#6388 review cycle 2).
         if _source_gone(path):
             # A peer removed the source while we were compressing. Our `tmp`
-            # holds exactly the bytes WE read — which says nothing about what a
-            # peer's archive holds, so it must never be published blind: a race
-            # that appended and sealed would lose the tail to our stale
-            # snapshot (#6388 review cycle 7, P0). `os.link` is atomic and
-            # answers EEXIST instead of overwriting.
-            try:
-                os.link(tmp, target)
-            except FileExistsError:
-                try:
-                    raced = gzip.decompress(target.read_bytes())
-                except (OSError, EOFError, zlib.error) as e:
-                    return Sealed(day, "conflict", len(plain),
-                                  _size_or_zero(target),
-                                  "the source vanished and the archive a peer "
-                                  f"published is unreadable ({e}) — kept theirs")
-                if _sha256(raced) == digest:
-                    pass  # identical: our copy is redundant
-                elif plain.startswith(raced):
-                    os.replace(tmp, target)  # our snapshot is the superset
-                else:
-                    # The peer's archive holds bytes we never read (it appended
-                    # and sealed while we compressed). That is MORE evidence
-                    # than ours, not less: the day IS sealed, ours is stale.
-                    # Kept theirs; the verdict says so rather than alarming.
-                    return Sealed(day, "already-sealed", len(plain),
-                                  _size_or_zero(target),
-                                  "the source vanished and a peer's archive "
-                                  "holds bytes we did not read — kept theirs")
-            except OSError as e:
-                return Sealed(day, "verify-failed", len(plain),
-                              _size_or_zero(target),
-                              f"could not publish while the source vanished: {e}")
+            # holds exactly the bytes WE read, which says nothing about what a
+            # peer's archive holds — never publish it blind.
+            verdict, detail = _publish_no_clobber(tmp, target, plain, digest)
+            if verdict == "unreadable":
+                return Sealed(day, "conflict", len(plain),
+                              _size_or_zero(target), detail)
+            if verdict == "theirs-newer":
+                return Sealed(day, "already-sealed", len(plain),
+                              _size_or_zero(target), detail)
             _fsync_dir(target.parent)
             return Sealed(day, "sealed", len(plain), _size_or_zero(target),
                           "the source was already gone; this run's verified "
@@ -423,7 +437,13 @@ def seal_one(root: Path, path: Path) -> Sealed:
         if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), 0,
                           "file changed while sealing — source kept")
-        os.replace(tmp, target)
+        verdict, detail = _publish_no_clobber(tmp, target, plain, digest)
+        if verdict == "unreadable":
+            return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                          detail)
+        if verdict == "theirs-newer":
+            return Sealed(day, "already-sealed", len(plain),
+                          _size_or_zero(target), detail)
         published = True
         _fsync_dir(target.parent)
         # The LAST belt: the file changed between the publish above and this
@@ -431,8 +451,8 @@ def seal_one(root: Path, path: Path) -> Sealed:
         # stale-prefix arm above heals this state on the next run.
         if _source_gone(path):
             return Sealed(day, "sealed", len(plain), _size_or_zero(target),
-                          "the source was already gone; this run's verified "
-                          "bytes are archived")
+                          "the source was already gone — this run published "
+                          "verified bytes of its own")
         if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                           "file changed while sealing — source kept")
@@ -615,9 +635,11 @@ def main(argv: list[str] | None = None) -> int:
 
     unreadable: list[Path] = []
     deferred: list[Path] = []
+    vanished: list[Path] = []
     try:
         pending = eligible(root, keep_days=args.keep_days, today=today,
-                           unreadable=unreadable, deferred=deferred)
+                           unreadable=unreadable, deferred=deferred,
+                           vanished=vanished)
     except OSError as e:
         print(f"cannot list {root}: {e}", file=sys.stderr)
         return EXIT_ERROR
@@ -643,6 +665,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {path.name}", file=sys.stderr)
             return EXIT_DRIFT
         if not pending:
+            if vanished:  # a peer finished them between the scan and the stat
+                print(f"ok — {len(vanished)} day file(s) disappeared mid-scan "
+                      "(a peer sealed them)", file=sys.stderr)
+                return EXIT_OK
             if deferred:
                 print(f"nothing to seal — {len(deferred)} day file(s) are "
                       f"inside the {SETTLE_GRACE_SECONDS} s settle grace "
@@ -675,6 +701,9 @@ def main(argv: list[str] | None = None) -> int:
         elif deferred:
             print(f"nothing sealable — {len(deferred)} day file(s) are inside "
                   f"the {SETTLE_GRACE_SECONDS} s settle grace", file=sys.stderr)
+        elif vanished:
+            print(f"nothing sealable — {len(vanished)} day file(s) disappeared "
+                  "mid-scan (a peer sealed them)", file=sys.stderr)
         else:
             print(f"nothing to seal — no plain day file older than "
                   f"{args.keep_days} days under {root}")

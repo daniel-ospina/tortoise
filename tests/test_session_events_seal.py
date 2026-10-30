@@ -462,14 +462,25 @@ def test_a_source_removed_by_a_concurrent_run_is_a_success_not_a_false_alarm(tmp
     b = _write(tmp_path, TODAY - timedelta(days=10), b'{"session_id": "race-b"}\n')
 
     monkeypatch.setattr(seal, "_changed_since", lambda *args, **kwargs: False)
-    real_replace = seal.os.replace
+    # The publish seam is `os.link` now (never a blind os.replace — a peer's
+    # archive must not be clobbered); the race is injected at BOTH so this row
+    # keeps covering the path it was written for whichever seam publishes.
+    real_link, real_replace = seal.os.link, seal.os.replace
 
-    def racing_replace(src, dst, *args, **kwargs):
-        real_replace(src, dst, *args, **kwargs)
+    def _peer_unlink():
         for peer in (a, b):
             if peer.exists():
                 peer.unlink()  # the concurrent run's unlink, first
 
+    def racing_link(src, dst, *args, **kwargs):
+        real_link(src, dst, *args, **kwargs)
+        _peer_unlink()
+
+    def racing_replace(src, dst, *args, **kwargs):
+        real_replace(src, dst, *args, **kwargs)
+        _peer_unlink()
+
+    monkeypatch.setattr(seal.os, "link", racing_link)
     monkeypatch.setattr(seal.os, "replace", racing_replace)
 
     result = seal.seal_one(tmp_path, a)
@@ -703,6 +714,37 @@ def test_absence_without_a_readable_archive_is_not_success(tmp_path):
     target.write_bytes(b"not gzip at all")
     corrupt = seal.seal_one(tmp_path, path)
     assert not corrupt.ok, corrupt
+
+
+def test_the_source_present_publish_cannot_clobber_a_peer_archive(tmp_path, monkeypatch):
+    """The SECOND publish path: the source is still present when we check, so the
+    change test passes, and a peer finishes (append + seal + unlink) before our
+    publish. A blind `os.replace` there replaces the peer's NEWER archive with
+    our stale snapshot and reports `sealed` (#6388 review, P0).
+
+    Mutation: `_publish_no_clobber`'s `os.link` first attempt replaced by a bare
+    `os.replace(tmp, target)` REDs here — the tail is lost, unalarmed.
+    """
+    day = TODAY - timedelta(days=9)
+    path = _write(tmp_path, day, b'{"n": 1}\n')
+    target = seal.archive_path(tmp_path, day)
+    full = b'{"n": 1}\n{"n": 2}\n'
+
+    real_link = seal.os.link
+
+    def racing_link(src, dst, *args, **kwargs):
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(gzip.compress(full, mtime=0))
+            path.unlink()  # the peer finished the day first
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(seal.os, "link", racing_link)
+    result = seal.seal_one(tmp_path, path)
+    monkeypatch.undo()
+
+    assert gzip.decompress(target.read_bytes()) == full, "the peer's tail survives"
+    assert result.ok, result
 
 
 def test_a_differing_archive_is_never_clobbered(tmp_path):
