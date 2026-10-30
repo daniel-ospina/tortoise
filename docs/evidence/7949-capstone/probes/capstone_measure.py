@@ -121,6 +121,29 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+def _sdk_line(code: str) -> int:
+    """The ONE line of ``tortoise/sdk.py`` carrying ``code`` — READ, never typed.
+
+    The meta fold moves on every merge that touches ``sdk.py`` above it (#9964
+    inserted 326 lines; main's own commits move it too), so a typed cite in a
+    cause this probe emits is stale the moment the branch is merged — and a stale
+    cite sends the #9116 fixer to the wrong line. The SYMBOL-quoting convention
+    documented at the top of this file is what this implements: the number is a
+    convenience, re-derived from the tree on each run.
+    """
+    hits = [n for n, line in enumerate(
+        (ROOT / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines(), 1)
+        if code in line]
+    if len(hits) != 1:  # pragma: no cover - a moved/ambiguous cite is a refusal
+        raise AssertionError(
+            f"`{code}` is on {len(hits)} lines of sdk.py {hits} — one expected")
+    return hits[0]
+
+
+#: The meta fold's cite, in the exact shape the causes below print it — derived
+#: from the tree at run time (see ``_sdk_line``), never typed.
+META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line('"stats": out.get("stats")')}"
+
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
@@ -1293,14 +1316,14 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8971-8975. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:13473 (\"stats\": out.get(\"stats\") "
+            f"the meta fold {META_FOLD_CITE} (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:13473 is the line its fix "
+            f"#9116 is the seam, and {META_FOLD_CITE} is the line its fix "
             f"must target; reading a wrapper instead is the instrumentation "
             f"E4's row forbids")
 
@@ -1328,12 +1351,12 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8961-8967. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:13473 "
+            f"is DROPPED at the same meta fold, {META_FOLD_CITE} "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:13473 is the line its fix must target")
+            f"{META_FOLD_CITE} is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "
