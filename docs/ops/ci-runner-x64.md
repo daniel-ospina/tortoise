@@ -34,12 +34,17 @@ The architecture labels are **derived by GitHub from the host at registration** 
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
 and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
 
-- `ARM64`/`X64` are **ornaments** — no job matches on them, and none can (a `runs-on` naming
+- `ARM64`/`X64` are **ornaments** on main — no job matches on them there (a `runs-on` naming
   either would have to name `self-hosted` too, which the repo forbids: `.github/workflows/python-ci.yml:1556`
   is "Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`", and the reason is
   recorded at `:1544-1546` — a `self-hosted` pin removes the GitHub-hosted half of the race, so
   during a hosted outage the required leg WAITS and "the aggregate stays pending — not answered
-  yet" instead of being answered by the pool).
+  yet" instead of being answered by the pool). ⛔ **That sentence is about the DEFAULT, and since
+  PR #10186 it is no longer unconditionally true**: the fast matrix's OPT-IN mode
+  (`CI_SHARD_ROUTING=pool-split`, below) names `[self-hosted, self-hosted-x64]` **explicitly** on
+  the odd `test` rows, which is a deliberate departure from the rule quoted above and carries its
+  own **OVERRIDES:** marker there. It is opt-in, never the default, and it is exactly as exposed as
+  that rule warns — four required legs become a pin with no hosted alternative.
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
   (`fallback_on`) attaches it, `:290` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
@@ -360,6 +365,11 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
 3. **`ubuntu-latest` remains ambiguous by design.** Any job asking for it can land on
    GitHub-hosted, an ARM64 runner, or one of these — that ambiguity is what the fallback is
    for, and why the legs that need a specific class are version-pinned.
+4. **The fast matrix's OPT-IN makes four required legs a `self-hosted` pin**
+   (`CI_SHARD_ROUTING=pool-split`; off by default). That departure is recorded, with its outage
+   exposure and its `OVERRIDES:` marker, in *The fast-matrix split is OPT-IN* below. It is a
+   residual of the OPT-IN, never of main's behaviour: unset, empty, `hosted-only` or any typo
+   leaves every row on `ubuntu-latest`.
 
 ## The box's own choice: `CI_RUNNER_OS_LABEL`
 
@@ -419,13 +429,45 @@ does. A typo or a fork with no `vars` therefore fails SAFE, never onto the conte
 `python-ci.yml`'s `test` job takes its class from `matrix.runner` only, so there is no second copy
 of the mode to drift.
 
-The lever is set at **job scope** on `python-ci.yml`'s `changes` job, because that job emits
-`fast_matrix` from two steps — `--emit-push-matrix` (every event) and `--split` (tier-2 PRs, where its
-output OVERRIDES the push matrix). Scoped to one step, the variable is silently absent on the other
-and the PR surface never splits (measured on head `3db8f7d78`, where only the push step carried it);
+The lever is attached to the two **matrix EMITTER STEPS** on `python-ci.yml`'s `changes` job —
+`push-matrix` (`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs, where its
+output OVERRIDES the push matrix). BOTH carry it: scoped to one step the variable is silently absent
+on the other and the PR surface never splits (measured on head `3db8f7d78`, where only the push step
+carried it). It is deliberately **not** job-scoped — an earlier cut did that and redded a required
+fast shard, because that job also owns the capstone pre-registration gate step and
+`tests/test_capstone_preregistration_9075.py` refuses ANY `env:` key above it (`_SAFE_JOB_ENV` is
+empty for every job; a key there can hook the gate's interpreter or shell and exit 0 with the check
+never running). Step scope on both emitters is the shape that keeps the gate clean AND the lever
+live;
 `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`
-discovers the emitters from their `run:` commands, so a third one cannot miss the lever either.
+discovers the emitters from their `run:` commands, so a third one cannot miss the lever either, and
+`::test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate` derives the allowance from
+the pin itself.
+
+### What `pool-split` costs, stated as residuals — read these before you set it
+
+1. ⛔ **Four required legs become a `self-hosted` PIN with no hosted alternative.** Odd shards
+   `test (b)`, `(d)`, `(f)`, `(h)` name `[self-hosted, self-hosted-x64]` and nothing else, so a pool
+   outage, a contended box, or a lost runner holds those four checks **pending** instead of being
+   answered by GitHub-hosted — the exact trade the `never to self-hosted` rule above was written to
+   refuse. The even rows keep `ubuntu-latest`, which is itself not hosted-only (see residual 3 of
+   *Known residuals*), so both halves are ambiguous in opt-in mode — the pin removes the *hosted
+   answer*, not the *pool answer*.
+
+   **OVERRIDES:** the runbook's own "never to `self-hosted`" rule (and `python-ci.yml:1556`) — the
+   split exists to use pool capacity, which a `ubuntu-latest` request cannot do deterministically
+   (the fallback race decides), so the opt-in buys deterministic pool routing at the cost of the
+   hosted fallback on those four legs. It is opt-in, off by default, and this marker is what makes
+   it deliberate instead of an accident a later lane would tidy away.
+2. ⛔ **The hosted half is `ubuntu-latest`, not `ubuntu-24.04`.** A leg routed to the "hosted" side
+   can still be taken by the pool through the fallback race — measured on this head's own run
+   `40571265490`, where `test (g)` (routed to hosted) was taken by `pi-runner-x64-2` and killed at
+   30 m 11 s. Closing it means version-pinning the even rows, which drops the outage fallback: a
+   separate decision, not taken here.
+3. **Every pool leg is a watchdog risk, not a wrong answer.** On the runs above the pool legs died
+   with the suite green (2767 passed / 0 failed at a 30 m bound; 1602 passed / 0 failed). A killed
+   leg is still a red required check — so do not set `pool-split` to "try it out".
 
 Changing the DEFAULT is a decision, and its home is #6897: it needs idle pool capacity at schedule
 time **and** a pool job wall within ~1.2x hosted on these rows, neither of which the runs above
-show. Do not set `pool-split` to "try it out" — a killed leg is a required check.
+show.
