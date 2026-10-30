@@ -20,22 +20,28 @@ the corrected reading:
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
    ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
    ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
-   ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
-   ``:8700``), ``search_graph`` (S3, ``:8717``), ``run_s4`` (the gap filler,
-   ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``). The SYMBOL is
-   authoritative and the line is a convenience — the three FILE-NAMED cites
-   above are resolved against the tree by the bundle's pin, and EACH of the
-   eight bare step cites is resolved by the same pin
+   ``kind_classifier.classify_items`` (S2.3, ``:8700``),
+   ``_apply_classify_kinds`` (S2.3, ``:8701``), ``search_graph`` (S3,
+   ``:8717``), ``run_s4`` (the gap filler, ``:8738``), and ``execute_embed``
+   (S5+S6, ``:8937``). ONE cite per symbol, on the line that symbol is on:
+   S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
+   ``a``/``b`` pair cite could carry is only ever checkable for one of them —
+   that pair form is how ``_apply_classify_kinds`` sat on ``:8700`` (naming
+   ``classify_items``' line) while the README's one-symbol row was right. The
+   SYMBOL is authoritative and the line is a convenience — the three
+   FILE-NAMED cites above are resolved against the tree by the bundle's pin,
+   and EACH of the nine bare step cites is resolved by the same pin
    (``tests/test_7949_capstone_verdict_check.py::
    test_the_probes_line_citations_resolve_too``, which requires the cited line
    to carry the symbol it is cited for), so a merge that moves them reds a
    registered test instead of shipping a number that names unrelated code.
    They need that separate leg because a bare ``:NNNN`` carries no filename, so
    the bundle's own sweep (``_BUNDLE_CITE``) cannot see them: ``#10243`` moved
-   ``extractor_v2.py`` by +88 and all eight went stale while every other pin
-   stayed green, which an earlier sentence here used to deny by pointing at a
-   README cross-pin ``#10211`` had already invalidated. No line in that list is
-   claimed to be self-detecting on its own. (No derivation head is named here on purpose: the
+   ``extractor_v2.py`` by +88 and every cite in the list went stale while every
+   other pin stayed green, which an earlier sentence here used to deny by
+   pointing at a README cross-pin ``#10211`` had already invalidated. No line in
+   that list is claimed to be self-detecting on its own. (No derivation head is
+   named here on purpose: the
    stamps such a sentence used to name re-staled the moment `main` moved, and a
    claim that can only re-stale is not worth keeping.) So the capstone drives
    the REAL entry point — it does not compose the step functions, which the

@@ -1994,23 +1994,33 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         assert symbol.split(".")[-1] in text, (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not")
-    # (c) The probe's eight bare step cites (#10211). They name a SYMBOL and a
+    # (c) The probe's nine bare step cites (#10211). They name a SYMBOL and a
     # bare `:NNNN` with no filename, so rule (b) cannot see them (it reads the
     # README) and the bundle's own sweep cannot either (`_BUNDLE_CITE` requires
     # `file.py:line`). Nothing watched them: `#10243` moved `extractor_v2.py` by
-    # +88 and all eight went stale while both pin files stayed green. Same rule
+    # +88 and every cite went stale while both pin files stayed green. Same rule
     # as (b), applied to the file that carries them.
+    #
+    # #10214 review (blocking): this sweep accepted the cite if EITHER symbol of
+    # a `a`/`b` PAIR appeared on the line (`any`), so the S2.3 pair
+    # (`classify_items`/`_apply_classify_kinds` at `:8700`) passed here on
+    # `classify_items` alone while `_apply_classify_kinds` sat on `:8701`. A pair
+    # cite claims BOTH symbols are on that line, so the test for it is `all` —
+    # and the probe now carries one cite per symbol anyway, which is the shape
+    # the README's step table already had. Non-vacuity: restoring the pair at
+    # `:8700` reds both this rule (all → False on `_apply_classify_kinds`) and
+    # the population assert below (8 vs 9).
     probe = re.sub(r"`{2}", "`", PROBE.read_text())
     step_pairs = re.findall(
         r"`([A-Za-z_][\w.]*)`(?:\s*/\s*`([A-Za-z_][\w.]*)`)?"
         r"\s*\((?:S[\d.]+(?:\+S\d+)?|the gap filler),[^`]*`:(\d+)`",
         probe)
-    assert len(step_pairs) >= 8, (
+    assert len(step_pairs) >= 9, (
         f"the probe's step list is gone or was reformatted: {step_pairs}")
     for first, second, lineno in step_pairs:
         text = sources["extractor_v2"][int(lineno) - 1]
         named = [s.split(".")[-1] for s in (first, second) if s]
-        assert any(sym in text for sym in named), (
+        assert all(sym in text for sym in named), (
             f"the probe cites `{first}`"
             + (f" / `{second}`" if second else "")
             + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
@@ -2763,8 +2773,9 @@ def test_a_row_that_blames_the_landed_pre_registration_says_it_landed():
 def test_the_probes_line_citations_resolve_too():
     """The README is pinned; the PROBE carried the same numbers with no pin at all.
 
-    #9089 review P2: the probe docstring cites the same entry point and the same eight step call
-    sites, and `test_the_readmes_line_citations_resolve_to_the_symbols_they_name` reads only
+    #9089 review P2: the probe docstring cites the same entry point and the same step call sites
+    (nine cites over the eight steps, after the S2.3 pair was split — see below), and
+    `test_the_readmes_line_citations_resolve_to_the_symbols_they_name` reads only
     `README.md` — so a merge-up that moves `sdk.py` re-stales the probe silently, which is exactly
     how the earlier rounds went stale. Same check, other file.
 
@@ -2781,6 +2792,15 @@ def test_the_probes_line_citations_resolve_too():
     (`:8507` is `extract_session_v2`'s docstring prose, `:8646` is a blank line, `:8845` a comment
     about `aboutObject`), so all eight assertions red; `sdk.py:11611` is a comment inside an
     unrelated M2 paragraph, so the call-site assertion reds as well.
+
+    #10214 review (blocking): the cites were previously carried as a PAIR —
+    `` ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3, ``:8700``) `` — and one
+    line number cannot be right for two symbols on two different lines. This loop reads the LAST
+    symbol of a pair, so it asserted `_apply_classify_kinds` against `classify_items`' line and the
+    pin red-ed in CI while the README's one-symbol row (`:8701`) stayed right. The pair is now two
+    cites on their own lines, so BOTH symbols are pinned, and the population is 9 (eight steps;
+    S2.3 makes two calls). Non-vacuity of the fix: restoring the pair at `:8700` reds this loop on
+    both counts — the population assert (8 vs 9) and `_apply_classify_kinds` against `:8700`.
     """
     probe = PROBE.read_text()
     sdk = (_REPO / "tortoise/sdk.py").read_text().splitlines()
@@ -2801,7 +2821,8 @@ def test_the_probes_line_citations_resolve_too():
         f"probe cites the entry point at extractor_v2.py:{module_line}, which is "
         f"{extractor[module_line - 1].strip()!r}")
 
-    # (b) The eight step call sites: `` ``symbol`` (LABEL, ``:NNNN``) `` into the same file. The
+    # (b) The nine step call cites: `` ``symbol`` (LABEL, ``:NNNN``) `` into the same file, ONE
+    # cite per symbol on the line that symbol is on. The
     # line WRAPS (`run_s4` and `_apply_classify_kinds` split their paren group), so the text is
     # whitespace-normalised before matching — the unit is the cite, not the physical line.
     flat = re.sub(r"\s+", " ", probe)
@@ -2813,7 +2834,8 @@ def test_the_probes_line_citations_resolve_too():
             r"``([A-Za-z_][\w.]*)``\s*\(([^()]*?)``:(\d+)``\)", flat)
         if ".py:" not in inner
     ]
-    assert len(steps) == 8, f"the probe's eight step cites are gone: {steps}"
+    assert len(steps) == 9, (
+        f"the probe's nine step cites are gone (eight steps; S2.3 makes two calls): {steps}")
     for symbol, lineno in steps:
         text = extractor[lineno - 1]
         assert symbol.split(".")[-1] in text, (
