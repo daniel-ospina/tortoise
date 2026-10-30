@@ -46,6 +46,7 @@ import pytest
 import tortoise.log as log_mod
 import tortoise.projection as projection_mod
 import tortoise.record_projection as rp
+import tortoise.record_read as record_read
 import tortoise.sdk as sdk_mod
 from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
@@ -69,6 +70,15 @@ TURN_SNAPSHOT_KEYS = frozenset({
     "id", "content", "pointKind", "speaker", "is_episodic", "status",
     "createdAt", "embedding",
 })
+
+#: The pair a capture may OMIT from the carrier, and only together (#10021 P1).
+#: `record_projection._upsert_statement` writes `status`/`createdAt` from
+#: EXCLUDED ABSOLUTELY, so a capture that could not READ the record's prior row
+#: omits both rather than asserting its own `now`/`draft` over a stored turn —
+#: that is a re-stamp and a demotion on the store of record. Kept here as the
+#: same kind of longhand copy as `TURN_SNAPSHOT_KEYS`, and pinned to
+#: `rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS` in the leg below.
+TURN_SNAPSHOT_UNATTESTABLE_KEYS = frozenset({"status", "createdAt"})
 
 #: The keys that ride on ONE branch only (#5004): `embedding_preserved` when the
 #: write PRESERVED a prior vector and so withholds the origin, or the three
@@ -115,18 +125,95 @@ def _turn_ids(sdk) -> list[str]:
 # ════════════════════════════════════════════════════════════════════════════
 
 
+def _applied_seam(*_a, **_k):
+    """A `write_live_record` stand-in that reports the record TOOK the write.
+
+    ⛔ NOT `lambda *a, **k: None` (#10000/#10021). `None` is that contract's
+    spelling for *not armed — nothing attempted*, and the writer's store decision
+    reads it as "the record did not take these turns" and RESCUES them into the
+    GRAPH. The legs below assert the graph stayed EMPTY, which is a property of a
+    record write that APPLIED; a refused one is *supposed* to reach the graph, and
+    that path has its own pin in `tests/test_10000_turns_record_only.py`
+    (`test_a_partially_refused_capture_is_served_from_both_stores`).
+    """
+    from tortoise.record_writer import RecordWrite, RecordWriteOutcome
+
+    return RecordWrite(outcome=RecordWriteOutcome.APPLIED, events=1,
+                       statements=1, first_seq=1, last_seq=1)
+
+
 def _capture_with_record_armed(sdk, monkeypatch, turns=CONV) -> None:
-    """Capture on the record-held lane, with Postgres stubbed out entirely."""
+    """Capture on the record-held lane, with Postgres stubbed out entirely.
+
+    ⛔ THE TENANT IS ARMED HERE TOO, not only on the `armed_sdk` fixture: a leg
+    that builds its OWN SDK (the MIXED-generation leg does, because it needs a
+    feed it can inspect across two captures) would otherwise run un-tenanted,
+    and an un-tenanted capture is CORRECTLY the graph lane (`no_tenant` ⇒ the
+    record cannot hold the write) — so the leg would assert the carrier never
+    arrives and report the store decision as a defect. `_bind_record_tenant` is
+    idempotent, so re-arming on the fixture's SDK costs nothing.
+
+    ⛔ AND THE PREDICATE IS ASSERTED, not assumed (#10076 review P1). The whole
+    file was previously green-on-the-wrong-lane because the DSN alone does NOT
+    make the record capable: `record_holds_turns` resolves the tenant from the
+    SDK and answers `no_tenant` without one, so every leg took the GRAPH lane
+    and the ones that assert a carrier record could not pass. Re-deriving the
+    same question here means a future fixture that forgets a half of the
+    capability fails at the SETUP, naming the missing half, instead of
+    surfacing as a carrier leg that mysteriously emits `PointAdded`.
+
+    ⛔ AND THE RECORD'S RESIDUE READ IS MODELLED. `_record_turn_residue` asks
+    POSTGRES for the turn rows at/above this window (`turn_keys_at_or_above`);
+    the DSN here is synthetic and no driver is installed, so the read raises and
+    degrades to `None` — which is right in production but leaves the SHORTER
+    re-capture legs with no population to sweep, because on the RECORD-HELD lane
+    the graph cannot name the surplus either (the turns are deliberately not
+    graph nodes). So the ids the record HOLDS are carried in
+    ``sdk._stub_record_turn_rows`` and mutated at the one place the real writer
+    mutates the record (after a capture lands), while the sweep consumes them
+    through the SAME seam its production caller uses. The read itself is pinned
+    against a connection fake in `tests/test_10000_turns_record_only.py`; this
+    file is not a second test of it.
+    """
+    sdk._bind_record_tenant("org-1", "g-1")
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     monkeypatch.setattr("tortoise.record_writer.write_live_record",
-                        lambda *a, **k: None, raising=False)
+                        _applied_seam, raising=False)
+
+    from tortoise.record_writer import record_holds_turns
+
+    assert record_holds_turns(
+        journal_configured=sdk._get_event_log() is not None,
+        tenant=getattr(sdk, "_record_tenant", None)) is True, (
+        "this capture cannot be put on the record-held lane, so the leg below "
+        "would assert about the GRAPH lane and pass for the wrong reason — "
+        "the record needs an armed DSN, a journal AND a tenant")
+
+    held = getattr(sdk, "_stub_record_turn_rows", {})
+    monkeypatch.setattr(
+        sdk_mod, "_record_turn_residue",
+        lambda _sdk, sid, first, _held=held: sorted(
+            tid for tid in _held.get(sid, ())
+            if int(tid.rpartition("_t")[2]) >= first))
+
     res = sdk.capture_session(turns, session_id=SESSION_ID)
     assert res["ok"] is True
+    held[SESSION_ID] = [f"{SESSION_ID}_t{i}" for i in range(len(turns))]
+    sdk._stub_record_turn_rows = held
 
 
 @pytest.fixture()
 def armed_sdk(tmp_path, monkeypatch):
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=_journal(tmp_path))
+    # ⛔ A TENANT IS PART OF "THE RECORD CAN HOLD THIS WRITE" (#10000/#10021).
+    # The carrier is gated on `record_writer.record_holds_turns` — the WRITE
+    # door's own predicate (journal + DSN + a tenant + a closed breaker), which
+    # is the same declaration that decided to SKIP the graph write. A DSN alone
+    # is not the capability: without a tenant the record refuses the write
+    # `no_tenant`, so skipping the graph would lose the turn, and the graph lane
+    # is then the correct answer. `tests/test_10000_turns_record_only.py` asks
+    # the same question the same way (`_bind_tenant`).
+    sdk._bind_record_tenant("org-1", "g-1")
     try:
         yield sdk
     finally:
@@ -182,6 +269,7 @@ def test_the_payload_expectation_here_IS_the_declared_contract():
     """
     assert TURN_SNAPSHOT_KEYS == rp.TURNS_SNAPSHOT_KEYS
     assert TURN_SNAPSHOT_BRANCH_KEYS == rp.TURNS_SNAPSHOT_OPTIONAL_KEYS
+    assert TURN_SNAPSHOT_UNATTESTABLE_KEYS == rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS
 
 
 def test_the_carrier_carries_the_writers_own_keys(armed_sdk, monkeypatch):
@@ -205,9 +293,16 @@ def test_the_carrier_carries_the_writers_own_keys(armed_sdk, monkeypatch):
     allowed = TURN_SNAPSHOT_KEYS | TURN_SNAPSHOT_BRANCH_KEYS
     for snapshot in carrier["turns"]:
         keys = frozenset(snapshot)
-        assert keys >= TURN_SNAPSHOT_KEYS, (
+        assert keys >= (TURN_SNAPSHOT_KEYS - TURN_SNAPSHOT_UNATTESTABLE_KEYS), (
             "the carrier's snapshot drifted from the writer's payload — "
-            f"missing={sorted(TURN_SNAPSHOT_KEYS - keys)}")
+            f"missing={sorted((TURN_SNAPSHOT_KEYS - TURN_SNAPSHOT_UNATTESTABLE_KEYS) - keys)}")
+        # #10021 P1: the un-attestable pair is omitted TOGETHER or not at all.
+        # A capture whose prior-row read raised cannot claim the stored turn is
+        # `now`/`draft`, and half the pair is the shape no producer emits.
+        assert (TURN_SNAPSHOT_UNATTESTABLE_KEYS & keys) in (
+            frozenset(), TURN_SNAPSHOT_UNATTESTABLE_KEYS), (
+            "the un-attestable pair must be omitted together or carried "
+            f"together: saw {sorted(keys)}")
         assert keys <= allowed, (
             "the carrier carries a key the writer's payload contract does not "
             f"declare — extra={sorted(keys - allowed)}")
@@ -220,6 +315,34 @@ def test_the_carrier_carries_the_writers_own_keys(armed_sdk, monkeypatch):
     # The session link rides the ENVELOPE, exactly as it does for `PointAdded`
     # (#3947) — never a per-turn key the live write does not set.
     assert carrier["contains_session"] == SESSION_ID
+
+
+def test_the_carrier_carries_the_prior_rows_status_and_created_at(
+        armed_sdk, monkeypatch):
+    """The OTHER arm of #10021's omission rule, on the carrier lane.
+
+    A capture that CAN read the record's prior row journals that row's
+    `status`/`createdAt` — the values a replay must leave alone. Without this
+    leg the omission arm above is the only pinned behaviour, and a writer that
+    simply dropped the pair everywhere would satisfy it.
+    """
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {
+            f"{SESSION_ID}_t0": record_read.PriorTurn(
+                content="[user] hi", embedding=None,
+                created_at="2026-01-01T00:00:00+00:00", status="established"),
+        })
+    _capture_with_record_armed(armed_sdk, monkeypatch)
+    carrier = next(r for r in _records(_journal_of(armed_sdk))
+                   if r["type"] == rp.TURNS_RECORD_TYPE)
+    snapshot = carrier["turns"][0]
+    assert snapshot["createdAt"] == "2026-01-01T00:00:00+00:00", (
+        "a re-capture re-stamped the record's created_at on the carrier "
+        "instead of journalling the value it read")
+    assert snapshot["status"] == "established", (
+        "a re-capture demoted a promoted turn to draft on the store of record "
+        "(#10000 review P1, on the carrier lane)")
 
 
 def test_the_carrier_carries_the_ENCODED_identity_stamps(armed_sdk, monkeypatch):
@@ -244,7 +367,7 @@ def test_the_carrier_carries_the_ENCODED_identity_stamps(armed_sdk, monkeypatch)
 
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     monkeypatch.setattr("tortoise.record_writer.write_live_record",
-                        lambda *a, **k: None, raising=False)
+                        _applied_seam, raising=False)
     proj = armed_sdk._get_proj()
     sdk_mod._write_session_and_turns(
         proj, armed_sdk, SESSION_ID, CONV, now="2026-10-25T00:00:00+00:00",
@@ -383,7 +506,7 @@ def test_the_carrier_survives_an_unimportable_embeddings_seam(
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     monkeypatch.setattr("tortoise.record_writer.write_live_record",
-                        lambda *a, **k: None, raising=False)
+                        _applied_seam, raising=False)
     # ⛔ BUILD THE STORE BEFORE POISONING THE SEAM. `TortoiseSDK._get_proj()` is
     # LAZY, and on a non-embedded lane `FalkorProjection.__init__` reads
     # `EMBEDDING_DIM` from this very module
