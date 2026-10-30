@@ -1566,8 +1566,22 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     ⛔ The arch marker is RE-DERIVED from this box, never preserved: a mis-registered runner can
     carry the OTHER arch's marker, and passing it straight back lets an x86 box register with
     `self-hosted-arm64` — a false PASS (an arm64 job built on x86), not a queue delay.
+    ⛔ AND THE MARKER TEST IS CASE-INSENSITIVE, DELIBERATELY — `x.lower()`, unlike the host-derived
+    compare below. The two classes are NOT the same: the host names are vendor-fixed spellings, but
+    `self-hosted-<arch>` is a CUSTOM label whose spelling is whatever created it, and docs.github.com
+    "apply labels" says "Labels are case-insensitive" — so `Self-Hosted-Arm64` IS the arm64 marker
+    and still answers a lower-case `runs-on:`. An exact-case test here lets a mixed-case stamp
+    survive re-registration while the docstring above promises it is re-derived.
+
+    ⛔ THE HOST-DERIVED MATCH IS EXACT-CASE, like the repair's `is_host_label`
+    (`tools/install-ci-runner-x64.sh`) — `ONE invariant, two writers` is only true if both compare
+    the same way. GitHub returns `Linux`/`X64`/`macOS`/`Windows`/`self-hosted`, so a LOWER-CASED
+    compare adds nothing to the class and silently drops an operator's own `linux` or `x64` label on
+    re-registration — while `--repair-labels` keeps it. Filtering a label out of this argv IS a
+    removal: a label one writer keeps and the other deletes is the divergence this function's
+    shared-constant comment forbids.
     """
-    host_derived = {"self-hosted", "linux", "macos", "windows", "x64", "arm64", "arm"}
+    host_derived = {"self-hosted", "Linux", "macOS", "Windows", "X64", "ARM64", "ARM"}
     arch = ARCH_LABEL.get(machine.lower())
     keep = [
         x
