@@ -92,18 +92,22 @@ def _aggregate_embedding_coverage(outcomes: list[dict]) -> float | None:
     embedded, ``0.0`` when none was. Questions that carry no coverage data
     (a pre-R3 checkpoint resume) are excluded rather than counted as zero —
     an unknown is not a miss. ``None`` when the cell knows about no points at
-    all, which is the honest shape for "not checked" (D5)."""
-    totals = [o.get("points_total") for o in outcomes]
-    embedded = [o.get("points_embedded") for o in outcomes]
-    known_total = sum(t for t in totals if isinstance(t, int))
-    known_embedded = sum(e for e in embedded if isinstance(e, int))
-    if known_total:
-        return round(known_embedded / known_total, 4)
-    per_q = [o.get("embedding_coverage") for o in outcomes
-             if o.get("embedding_coverage") is not None]
-    if per_q:
-        return round(sum(per_q) / len(per_q), 4)
-    return None
+    all, which is the honest shape for "not checked" (D5).
+
+    Derived from :func:`_points_census`, so this number and the published
+    census can never disagree (#4821 review P3). The old body fell back to
+    averaging the per-question ``embedding_coverage`` values whenever the
+    census looked empty, which is unreachable from a real report —
+    ``retrieve.py`` emits ``points_total`` / ``points_embedded`` /
+    ``embedding_coverage`` from ONE query, so a non-``None`` coverage always
+    implies a truthy ``points_total``. The fallback was also the one path
+    that could publish a NUMERIC coverage while ``_points_census`` reported
+    the cell unknown, which would have silently defeated
+    ``_dense_leg_verified``'s zero-coverage arm."""
+    census = _points_census(outcomes)
+    if not census["points_total"]:
+        return None
+    return round(census["points_embedded"] / census["points_total"], 4)
 
 
 def _points_census(outcomes: list[dict]) -> dict:
@@ -119,7 +123,14 @@ def _points_census(outcomes: list[dict]) -> dict:
 
     A cell that knows about no points therefore reports ``None`` for BOTH
     halves, and a cell that embedded none of N reports ``(N, 0)`` — a real
-    zero, which ``_dense_leg_verified`` reads as not-measured."""
+    zero, which ``_dense_leg_verified`` reads as not-measured.
+
+    One honest wrinkle (#4821 review P3): a cell whose outcomes all report
+    ``points_total == 0`` is a KNOWN zero and lands in the same ``None/None``
+    shape as an unknown. Harmless here — a cell with no points can neither
+    reach the context cap nor produce evidence recall, so it is never a
+    winner — but it means "unknown" in this pair covers two states, and the
+    coverage arm treats both as un-refuted rather than inventing a zero."""
     totals = [o.get("points_total") for o in outcomes]
     embedded = [o.get("points_embedded") for o in outcomes]
     known_total = sum(t for t in totals if isinstance(t, int))
@@ -165,7 +176,17 @@ def _dense_leg_verified(results: list[dict]) -> bool:
     published; zero-of-N is not a measurement of the dense leg. A cell that
     knows nothing about its points (``points_total is None``, a pre-R3
     resume) is not refuted by this arm; the ``vector_strategy`` arm still
-    governs it."""
+    governs it.
+
+    KNOWN RESIDUAL (recorded, not implied — #4821 review P3). This predicate
+    reads the WRITE-time witness only. A cell with full write coverage whose
+    QUERY-side encode degrades (the vector leg skipped, an FTS-only pool)
+    still reads MEASURED, because the retrieval-time witness is not consulted
+    here. That witness exists and is already projected per question
+    (``run.py``'s ``legs`` / ``match_source_counts``), so closing this is a
+    matter of threading it into this one predicate — a follow-up, not a
+    silent gap. Same class as the write-side defect this arm closes, reached
+    from the read side."""
     if not results:
         return False
     for r in results:
@@ -478,7 +499,15 @@ def main(argv: list[str] | None = None) -> int:
         "max_chunks_per_session": args.max_chunks_per_session,
         "pool_depth": DEFAULT_POOL_SIZE,
         "results": results,
-        "winner": winner,
+        # #4821 review P3: a not-measured run must not hand out a knob in the
+        # MACHINE-readable artifact either. `dense_leg.measured` and the exit
+        # code already say so, but `payload.winner.chunk_turns` is the machine
+        # equivalent of an operator reading SELECTED — a usable value with no
+        # null to notice. When the leg was not measured the knob is withheld
+        # and the candidate is named for what it is.
+        "winner": winner if measured else None,
+        **({} if (measured or winner is None)
+           else {"unmeasured_candidate": winner}),
         # #4821: the dense-leg receipt. A sweep can be waived, but it can never
         # be READ as a measurement: `measured` is derived from the per-cell
         # vector_strategy (each cell's report methodology), and the gate's own
@@ -491,8 +520,10 @@ def main(argv: list[str] | None = None) -> int:
             "gate": ("gate_dense_leg (tools/longmem_eval/run.py) — REQUIRED "
                      "unless --skip-preflight"),
         },
-        "note": ("winner None in deterministic mode (D2: knob-insensitive) or "
-                 "when no config is eligible — see selection_rule"),
+        "note": ("winner None in deterministic mode (D2: knob-insensitive), "
+                 "when no config is eligible, or when the dense leg was not "
+                 "MEASURED (then `unmeasured_candidate` holds what would "
+                 "have won) — see selection_rule"),
     }
     if args.output:
         Path(args.output).write_text(

@@ -5310,14 +5310,22 @@ def test_sweep_granularity_v2_waived_sweep_never_exits_zero(
     assert sg.main(argv) == 1, (
         "a v2 sweep whose dense leg was NOT measured returned 0 — a script "
         "could land a keyword-only sweep as a step-2 result")
-    assert json.loads(out.read_text(encoding="utf-8"))["dense_leg"][
-        "measured"] is False
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["dense_leg"]["measured"] is False
+    # #4821 review P3: the MACHINE-readable artifact must not hand out a knob
+    # for a run it labels not-a-measurement. `payload.winner.chunk_turns` is
+    # the machine equivalent of an operator reading SELECTED.
+    assert payload["winner"] is None
+    assert payload["unmeasured_candidate"]["chunk_turns"] == 1
 
     # NON-VACUITY: the same argv with a MEASURED cell returns 0, so the 1
     # above is caused by `not measured` and by nothing else on the path.
     monkeypatch.setattr(sg, "run_sweep",
                         lambda *a, **k: ([_sweep_cell()], winner))
     assert sg.main(argv) == 0
+    measured_payload = json.loads(out.read_text(encoding="utf-8"))
+    assert measured_payload["winner"] == winner
+    assert "unmeasured_candidate" not in measured_payload
 
 
 def test_no_entry_point_bypasses_the_dense_leg_gate():
@@ -5344,6 +5352,17 @@ def test_no_entry_point_bypasses_the_dense_leg_gate():
     ⛔ AND IT WALKS SUBPACKAGES. ``pkg.glob("*.py")`` made a future
     ``tools/longmem_eval/<sub>/entry.py`` invisible to the guard while still
     letting it reach the measurement.
+
+    SCOPE AND RESIDUAL, stated so the promise is not read wider than it is
+    (#4821 review P3). The rule is "the NAME" only for a STATICALLY SPELLED
+    name: a dynamic reach such as ``operator.attrgetter("run_evaluation")``,
+    ``vars(R)["run_evaluation"]``, or ``getattr`` bound to a local first
+    (``g = getattr; g(R, ...)``) is not seen. None of those is reachable by
+    accident — the plain alias/import/call forms the guard exists for ARE
+    caught — so this is a deliberate bound, not a hole in the covered class.
+    The walk is also bounded to ``tools/longmem_eval``: an entry point added
+    under ``tools/*.py`` or ``graph-scripts/`` is out of scope (no such caller
+    of ``run_evaluation`` exists today).
     """
     import ast
 
