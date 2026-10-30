@@ -568,6 +568,59 @@ class EventAPI:
                         corrects=corrects)
         return ev["event_id"]
 
+    def _registration_id(self, label: str, name: str,
+                         explicit_id: str | None = None) -> str:
+        """The id a REGISTRATION emitter writes: the live holder's, or a MINTED one.
+
+        #3590 (D1/R1/R2, and the review's finding 1): ``ObjectRegistered`` /
+        ``SubjectAdded`` ARE the explicit registration doors — D1's own text
+        (``identity-decision.md``) says the entity set grows only from them —
+        but a registration still has to be IDEMPOTENT, the way every other
+        create door is (``#452``: a re-mention of a live name resolves to the
+        live holder).
+
+        ⛔ What changed and why this is not optional: the fold's MERGE key is now
+        ``{id}`` (``projection.entities._upsert_subject`` / ``_upsert_object``),
+        so the *by-construction* duplicate suppression the old name-keyed MERGE
+        provided is GONE — Cypher's ``MERGE`` creates whenever the exact pattern
+        is absent (primary source: `neo4j.com/docs/cypher-manual/current/
+        clauses/merge/`, "if the exact pattern is not found, MERGE acts like
+        CREATE"), and this repo declares range indexes, not a uniqueness
+        constraint on ``Object.id``/``Subject.id``. So the anti-duplicate
+        property has to be carried by the CALLER, and a door that minted a
+        fresh ULID per call would leave a routine re-run of the v1 extractor
+        with TWO live carriers of one name — after which every by-name read
+        refuses (``AmbiguousEntityName``), ``create_entity`` raises, and
+        ``update_entity(name=…)`` raises ``NameAlreadyHeld``, for a name the
+        producer registered legitimately.
+
+        ``explicit_id`` wins outright (``mining``/``docs_miner`` pass their own
+        canonical id): an explicit-id channel supplies the identity, which is
+        exactly what an opaque-id model allows and what ``add_object(id=…)``
+        promises. It is never a name derivation.
+
+        ``AmbiguousEntityName`` is propagated, NOT swallowed into a third
+        carrier: same-name coexistence is legal (D2) but a name-keyed door may
+        not pick a carrier for the caller — route-then-refuse (R8), the same
+        disposition ``create_entity`` takes.
+
+        ⛔ The caller MUST hold :func:`~tortoise.entity_identity.entity_create_lock`
+        across this resolve AND the ``_emit`` that makes the holder visible —
+        otherwise the empty-holder check is a TOCTOU window rather than a guard
+        (the same finding round 5 fixed for ``create_entity``).
+        """
+        if explicit_id:
+            return str(explicit_id)
+        # `getattr` — not `self.projection.g` — because projection-less lanes
+        # (the `__main__` demo, `m0.py`) and in-memory doubles have no graph to
+        # resolve against; they journal only, so there is no second carrier to
+        # avoid and the plain mint is right.
+        g = getattr(self.projection, "g", None)
+        if g is None:
+            return ulid()
+        from .entity_identity import resolve_or_mint
+        return resolve_or_mint(g, label, name)[0]
+
     def add_subject(self, name: str, subject_kind: str | None = None) -> str:
         """Emit SubjectAdded event. Returns the subject's id.
 
@@ -576,35 +629,54 @@ class EventAPI:
         ``coalesce($sk, s.subjectKind)`` as a real value, so a bare re-mention
         reset a user-authored kind. The ``'other'`` default is the fold's ON
         CREATE arm.
+
+        The id is resolved-or-minted (``_registration_id``), never a fresh ULID
+        per call: the fold MERGEs Subject by ``id``, so re-minting would leave
+        the name with two LIVE holders and poison it for every later by-name
+        read (#3590 review, finding 1).
         """
-        sid = ulid()
-        ev: dict = {"id": sid, "name": name, "createdAt": now_iso()}
-        subject_kind = named_kind(subject_kind)
-        if subject_kind is not None:
-            ev["subject_kind"] = subject_kind
-        self._emit("SubjectAdded", **ev)
+        from .entity_identity import entity_create_lock
+        with entity_create_lock("Subject", name):
+            sid = self._registration_id("Subject", name)
+            ev: dict = {"id": sid, "name": name, "createdAt": now_iso()}
+            subject_kind = named_kind(subject_kind)
+            if subject_kind is not None:
+                ev["subject_kind"] = subject_kind
+            self._emit("SubjectAdded", **ev)
         return sid
 
     def add_object(self, name: str, object_kind: str | None = None, *,
                    id: str | None = None, **props) -> str:
         """Emit ObjectRegistered event. Returns the object's id.
 
-        ``id``: deterministic canonical id override (epic #264 plan §4.1 —
-        obj_sha256 scheme); default ulid() unchanged (back-compat). Extra props
-        (e.g. canonical_name, title) are persisted by the projection's
-        extra-props handler. The projection MERGEs Object by name — a re-run
-        with the same name never creates a duplicate node (idempotent
-        reification, DE2E-1/DE2E-8).
+        ``id``: explicit canonical id override (epic #264 plan §4.1 —
+        obj_sha256 scheme), which wins outright. WITHOUT it the id is
+        resolved-or-minted through ``entity_identity.resolve_or_mint`` — the
+        live holder's id for an existing single live carrier, a fresh ULID
+        otherwise (``_registration_id``).
+
+        ⛔ The projection MERGEs Object by ``id`` since #3590, so this door's
+        idempotency is carried HERE, by the caller, and no longer by the MERGE
+        key: a re-run with the same name resolves to the same node instead of
+        minting a duplicate (DE2E-1/DE2E-8), and a second live carrier of one
+        name is what the resolve REFUSES rather than creates. The previous
+        text claimed the MERGE did it — false at this head, which is exactly the
+        poisoning this door now prevents (#3590 review, finding 1).
+
+        Extra props (e.g. canonical_name, title) are persisted by the
+        projection's extra-props handler.
 
         ``object_kind`` defaults to ``None`` (**absent**) since #9572 — the
         Object twin of ``add_subject``'s fabricated default.
         """
-        oid = id or ulid()
-        ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}
-        object_kind = named_kind(object_kind)
-        if object_kind is not None:
-            ev["object_kind"] = object_kind
-        self._emit("ObjectRegistered", **ev)
+        from .entity_identity import entity_create_lock
+        with entity_create_lock("Object", name):
+            oid = self._registration_id("Object", name, explicit_id=id)
+            ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}
+            object_kind = named_kind(object_kind)
+            if object_kind is not None:
+                ev["object_kind"] = object_kind
+            self._emit("ObjectRegistered", **ev)
         return oid
 
     def add_document(self, doc_id: str, title: str, *,

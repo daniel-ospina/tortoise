@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Reap redislite servers that are PROVABLY orphaned — never a live peer's (#3653).
 
+⛔ SCOPE of that promise: THIS tool's two arms. It does not reach the 30-minute
+`find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf` litter
+sweep that shares the same step — that arm deletes by mtime with no liveness
+check at all and CAN unlink a live peer's socket directory (#3653's remaining
+half; the arithmetic is in `DEFAULT_MAX_AGE_MINUTES`). Read the headline as
+"never by this tool's own decision", not as "nothing in this step can".
+
 ## Why this exists
 
 `python-ci.yml` cleaned stale embedded-redis litter with a bare, host-global:
@@ -35,9 +42,19 @@ It kills a redislite server only when the server is provably nobody's:
    suite's directory is never removed (the session teardown refuses while a
    live server holds the root — `#3752`). This is the actual #1005 litter: the
    tempdirs left by failed runs.
-2. **The process is older than the longest leg watchdog.** A redislite server
-   older than the widest `matrix.watchdog_minutes` bound cannot belong to a
-   running leg, because that leg would already have been killed.
+2. **The process is older than every embedded lane's OUTER cancel bound.** A
+   redislite server older than the widest `jobs.<job_id>.timeout-minutes` among
+   the jobs that can OWN one cannot belong to a running leg, because GitHub
+   cancels the job at that bound. "Can own one" is the embedded lanes — the
+   jobs that invoke this reaper, plus every job that opts into the URI-less
+   embedded run (`TORTOISE_TEST_CARVE_OUT`, how a suite reaches a redislite
+   server at all: `tests/_embedded.py::_carve_out_opted_in`) — and NOT merely
+   the five that run this step: this tool enumerates the host's process table,
+   so it can meet a server belonging to a job that never installs it. It is a
+   JOB bound, not a `matrix.watchdog_minutes` bound: the watchdog only stops
+   pytest, so it bounds neither the setup/pre-phase around it nor — see the
+   derivation at `DEFAULT_MAX_AGE_MINUTES` — the 55 minutes the repo's own
+   policy lets that watchdog reach.
 
 Everything else is KEPT, including every unmeasurable case (unreadable
 `/proc`, unknown age, unparsable argv): a cleanup step that fails is a leak,
@@ -51,7 +68,7 @@ project's own interpreter.
 Usage:
     python3 .github/scripts/reap-redislite-orphans.py                  # dry run
     python3 .github/scripts/reap-redislite-orphans.py --apply          # kill
-    python3 .github/scripts/reap-redislite-orphans.py --max-age-minutes 45 --apply
+    python3 .github/scripts/reap-redislite-orphans.py --max-age-minutes 95 --apply
 
 Exit codes: 0 = ran (dry or apply) — INCLUDING when it found nothing to look at;
 2 = something this tool was told to read could not be read (`--proc-json`, or the
@@ -74,12 +91,108 @@ import sys
 _IS_REDIS = re.compile(r"(?:^|/)(redis-server)$")
 _SOCKET_FLAG = "unixsocket"
 
-# Default: comfortably above the widest leg watchdog measured on this matrix
-# (27 min in `test`), so a server this old provably outlived any leg that could
-# own it. Deliberately NOT lowered to the 30-minute dir-litter floor the same
-# step uses for `find`: a directory carries no live-process risk, a SIGTERM to
-# a live server does.
-DEFAULT_MAX_AGE_MINUTES = 45
+# ── the age arm: DERIVED from the cancel bound, never a remembered measurement ─
+#
+# This arm is a PROOF ("no running leg can own this server"), so its threshold
+# has to clear the longest a leg can possibly stay alive — and "the widest leg
+# watchdog" is not that length. Two repo facts settle the real bound:
+#
+#   1. A `test` leg's pytest watchdog is DERIVED, and the policy explicitly
+#      permits it to reach 55 min: `tools/ci_selection.py::WATCHDOG_CEILING_MIN`,
+#      emitted per leg by `fast_matrix_include()` and consumed as
+#      `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m`.
+#   2. The HARD bound on a running leg is the job's OUTER `timeout-minutes` —
+#      GitHub cancels the job there (workflow syntax, `jobs.<job_id>.timeout-
+#      minutes`) — and that cap bounds SETUP + the last-failed pre-phase + the
+#      gated run together, so it is strictly wider than any inner watchdog. An
+#      UNCAPPED job is not "small but unbounded": it carries GitHub's
+#      360-minute default, under which no age arm is a proof at all.
+#
+# The POPULATION this proof quantifies over is "jobs that can own an embedded
+# redislite server", not "jobs that run this line" — the process table this
+# tool reads is the HOST's, and ownership is decided by argv + age, never by
+# which workflow started the server. Membership is read mechanically from the
+# two signals a job needs in order to own one: it invokes this reaper, or it sets
+# the URI-less embedded opt-in (`TORTOISE_TEST_CARVE_OUT`, read through the
+# declared contract in `tests/_embedded.py`) — the marker, not the string
+# "pytest", because a job may run pytest from INSIDE a shell script
+# (`ci.yml::flip-gate` → `verify-cutover`), which no `pytest` text scan sees.
+# The pin also carries an explicitly frozen expected set and two by-name
+# exemptions for the requests-only e2e suites, so this population cannot drift
+# silently in either direction.
+#
+# ⛔ WHAT THE SCAN CANNOT SEE, recorded rather than absorbed. Two residuals, both
+# in the false-PASS direction, so neither may be quietly dropped:
+#
+#   a) A URI-set job can still keep an embedded server: `TEST_NO_REDIRECT_STEMS`
+#      in `tests/_embedded.py` exempts a handful of files from the docker
+#      redirect precisely so they KEEP constructing embedded (that module's own
+#      comment: "Without this exemption a URI-set session redirects the
+#      fixture's explicit `db_path` construction to the server"). A job that runs
+#      one of those stems with `TORTOISE_DB_URI` set, no carve-out and no reaper
+#      step is admitted by NEITHER signal. No workflow→file mapping is derivable
+#      here — the shard split is computed by `tools/ci_selection.py` at run time —
+#      so this is stated, not scanned: today those stems run inside
+#      `python-ci.yml::test`/`test-slow`, which the reaper half admits and which
+#      are capped below this arm. A job that starts running them elsewhere has to
+#      add itself to the pin's population by hand.
+#   b) The population is CI JOBS; `classify()` quantifies over EVERY `redis-server`
+#      on the host, and the runners are shared with the agent fleet
+#      (`python-ci.yml`: "jobs landing on local hardware compete with the agent
+#      fleet"). A fleet `pytest` holding a session-scoped server for longer than
+#      this arm has no `timeout-minutes` at all, so no workflow-derived arm can
+#      prove anything about it. Pre-existing, not introduced here (the shipped 45
+#      was strictly worse), but it is why this arm is a bound on OUR legs and not
+#      a licence to reap anything older.
+#
+# At the time of writing the widest is `test` at 90 (`python-ci.yml`);
+# `evals-on-demand.yml::evals` 90, `test-slow` 60,
+# `post-merge-validation.yml::validate` 60, `perf-lane` 45, `test-d14-hosted-api`
+# 40, `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
+# it was UNCAPPED at 360 and invisible to an earlier, narrower population),
+# `test-record-postgres`/`legal-e2e`/`blog-write-e2e` 20, and the rest 15.
+#
+# A server YOUNGER than the widest outer cancel bound can still belong to a live
+# leg, so reaping on age is only a proof ABOVE it. The invariant is
+#
+#     DEFAULT_MAX_AGE_MINUTES > widest job `timeout-minutes` (>= the 55 ceiling)
+#
+# and both halves are pinned against their live sources by
+# `tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_every_embedded_lane_job_outer_timeout`
+# and `::test_the_age_arm_clears_the_widest_permitted_leg_watchdog`. Raising the
+# ceiling, or a job's outer cap, reds this file's own suite — instead of
+# silently turning the proof back into a live-peer kill (the #3653 defect).
+#
+# NOT the same question as the 30-minute dir-litter floor the same step gives
+# `find`, and NOT a safe floor to borrow: that arm deletes by mtime ALONE, with
+# no liveness check at all, and its 30 minutes sit BELOW both the 55-minute
+# watchdog ceiling and the 90-minute job cap this arm is derived from — so it
+# CAN unlink a running peer's socket directory (redislite's `mkdtemp` dir, whose
+# mtime is set at instance start). That is not harmless litter: the unlinked
+# socket is exactly the "socket dir gone" input the first arm below reaps on.
+# It is #3653's REMAINING HALF — the issue's own "Candidates for the deleter"
+# names this `find`, and its "Suggested direction" asks for the pid/socket
+# liveness check that would make the floor safe. Closing it is a behavioural
+# change and is deliberately not attempted here. This ARM is not lowered toward
+# that floor for the reason it is not lowered at all: a conservative arm costs a
+# leak the orphan gate reports; a too-low arm costs somebody else's red PR.
+#
+# Mirrored as literals rather than imported: this script is deliberately
+# stdlib-only and 3.9-clean, and it runs in a setup step under the runner's
+# `python3` before the project venv or `tools/` is importable. The pins above
+# are what keep the mirror honest.
+WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES = 90
+# Slack over the JOB bound — NOT over the leg's in-step watchdog. A job
+# cancelled at its `timeout-minutes` is not gone at that instant: the runner
+# cancels it, then tears its container down, and the server this tool can meet
+# belongs to a DIFFERENT job on the same host, so that teardown can still be in
+# flight while the reaper looks. 5 minutes covers that gap, and it is deliberately
+# small because the bound it is added to already carries the margin.
+# (The `timeout -s INT -k 10 …` in each leg's `run:` is the INNER pytest
+# watchdog: it stops pytest, never the job, so it is not the clock this number
+# is measured against.)
+CANCEL_SLACK_MINUTES = 5
+DEFAULT_MAX_AGE_MINUTES = WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES + CANCEL_SLACK_MINUTES
 
 
 def socket_dir_from_argv(argv: list[str]) -> str | None:
@@ -273,8 +386,8 @@ def classify(row: dict, max_age_s: float) -> tuple[bool, str]:
         return False, f"age unmeasurable and {socket_dir} still exists — fail closed"
     if age >= max_age_s:
         return True, (
-            f"age {int(age)}s >= {int(max_age_s)}s — older than the widest leg "
-            "watchdog, so no running leg can own it"
+            f"age {int(age)}s >= {int(max_age_s)}s — older than every leg's outer "
+            "cancel bound, so no running leg can own it"
         )
     return False, (
         f"age {int(age)}s < {int(max_age_s)}s — could be a concurrent leg's live instance"

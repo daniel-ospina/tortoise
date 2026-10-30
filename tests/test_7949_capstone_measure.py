@@ -970,7 +970,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     the tree (`_EXTRACTOR_SITES[k]["result"]`), never typed — a range's END moves
     with every key added to the emitted block, exactly as the start moves with
     every insert above it. The
-    drop is the meta fold at `tortoise/sdk.py:14157` — **re-derived from the tree at
+    drop is the meta fold at `tortoise/sdk.py:14191` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4; #9750's 40-line helper at
@@ -1071,7 +1071,7 @@ def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
                      "other=15 (anchored 0)",
                      "total=326", "STRUCTURALLY INCAPABLE",
                      "create_operator", "never writes extractedFrom",
-                     "BY CONSTRUCTION", "tortoise/sdk.py:2377",
+                     "BY CONSTRUCTION", "tortoise/sdk.py:2376",
                      # the denominator is stated as the WRITER class, and the
                      # residual is inside it
                      "supposed-to-derive", "the class where a LOST derivation "

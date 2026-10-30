@@ -937,8 +937,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -1979,7 +1981,8 @@ jobs:
     # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
     # (legacy), read by tests/_live_utils.py.
     steps:
-      # ⛔ FIRST STEP ON PURPOSE — same contract as the fast job's (#10028).
+      # ⛔ FIRST STEP ON PURPOSE — same contract as the fast job's (#10028)
+      # and as `test-concurrency-falkor`'s (#10280).
       # This job was the UN-MIGRATED half: `pytest-rc`, `pytest-files` and the
       # redislite/tempdir hygiene reports had already moved to `${RUNNER_TEMP}`,
       # but the three artifacts the VERDICT and the guards are read from were
@@ -1988,10 +1991,9 @@ jobs:
       # named that exact residue in its own "NAMED RESIDUAL" header, whose STATUS
       # paragraph records THIS job as migrated (2026-10-29). The header's residual
       # paragraph names the legs that still write the host-global literals —
-      # `test-concurrency-falkor`, `test-track-b`, `test-carve-out` and
-      # `test-d14-hosted-api` here, plus the warn-only `validate` job in
-      # `post-merge-validation.yml` — the deliberate residual carried by #10280. That
-      # list is DERIVED and pinned by
+      # `test-track-b`, `test-carve-out` and `test-d14-hosted-api` here, plus the
+      # warn-only `validate` job in `post-merge-validation.yml` — the deliberate
+      # residual carried by #10280. That list is DERIVED and pinned by
       # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
       # so read it there rather than trusting this comment's copy of it.
       #
@@ -2003,6 +2005,7 @@ jobs:
       # truncated the file between this leg's `tail` and its attribution read.
       # `pytest-attribution.sh` therefore printed `STALE session summary (NOT
       # this leg's verdict)` / `INCOMPLETE` under that exit code.
+      #
       # The same sharing made legs (b) and (e) print FAILED nodeids for
       # `tests/test_epic903_fixtures.py`, `tests/test_epic903_scheduler.py` and
       # `tests/test_graph_diagnostics.py` — files whose only progress line in
@@ -2011,6 +2014,25 @@ jobs:
       # (444 passed -> 353 passed). The six nodeids genuinely belong to legs (c)
       # and (d), which do run those files; neither of those legs' own sets is
       # recoverable from the tail.
+      #
+      # ⛔ THE VERDICT ITSELF IS THE ARTIFACT THAT CAN BE ANOTHER LEG'S, and it
+      # needs no kill to go wrong. MEASURED on THIS PR (run 40921262252,
+      # `test-slow (a)`, job 123636659746, head 80c15dfe9): pytest exited **0**
+      # with `814 passed, 3 skipped`, and the leg still redded in the
+      # `Skip-fail guard` step — `850 expected nodeid(s) absent from the
+      # junitxml testcases` — because `/tmp/expected-nodeids.txt` held a
+      # CO-TENANT's manifest (its `… and 800 more` list is
+      # `tests/test_capture_session.py` and
+      # `tests/test_3311_multilabel_status_vocab.py`, files this leg never ran)
+      # while `/tmp/junit.xml` held this leg's. The log this run uploaded proves
+      # the sharing independently: its FIRST 5 KB carry a FOREIGN session header
+      # (`…-- /opt/gh-runner-x64/…`) while this job's own env says
+      # `pythonLocation: /opt/gh-runner-x64-2/…`, and a 62 KB NUL HOLE
+      # (offsets 5304..67993) sits where this leg's progress lines used to be.
+      # Both are registrations on ONE host (`gh api …/actions/runners` lists
+      # `self-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04` for each — which is
+      # also why this job's `runs-on: ubuntu-24.04` did not keep it off the pool;
+      # that routing drift is #10289, not this change).
       #
       # `runner.temp` is `<runner_install>/_work/_temp`, and a runner executes one
       # job at a time, so this is per-JOB unique even when several runner installs
@@ -2072,8 +2094,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2536,6 +2560,20 @@ jobs:
     # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair and
     # the health gate moved with it. The probe family is unchanged; the port is
     # now $TORTOISE_TEST_DOCKER_PORT, read by tests/_live_utils.py.
+    #
+    # ⛔ PER-JOB PYTEST ARTIFACTS (first step, #10280). This leg was one of the
+    # six #10280 names as still writing host-global `/tmp` artifacts, and it bit
+    # on THIS job (run 40884374618, job 123539933295): the live-concurrency step
+    # wrote `/tmp/pytest.log`, a co-tenant job on the same self-hosted host
+    # truncated it mid-run, and this leg's own `tail` and `pytest-attribution.sh`
+    # then read `tests/test_backfill_sources.py` / `tests/test_billing.py` —
+    # files it never runs — so it reported "test leg INCOMPLETE — no pytest
+    # summary; failure set unobservable" and the rail could attribute nothing.
+    # The inverse direction is worse and equally reachable: the skip-fail guard
+    # below greps this file for its three nodeids, so a peer's log makes a leg
+    # that ran NOTHING look certified. `$GITHUB_ENV` only reaches SUBSEQUENT
+    # steps, hence first, and it FAILS CLOSED on a missing `RUNNER_TEMP` — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
     steps:
       # #10280: this leg's log is PER-JOB. `/tmp` is ONE namespace across every
       # runner install on a shared self-hosted host, so a `/tmp/pytest.log`
@@ -2585,8 +2623,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2669,6 +2709,8 @@ jobs:
           # Skip-fail guard: live tests must RUN here, never skip (vacuity).
           # Matches BOTH pytest output formats (-v progress: "nodeid SKIPPED";
           # -rs summary: "SKIPPED [N] tests/file.py:line").
+          # This grep is WHY the log must be this job's OWN (#10280): a peer's
+          # log would certify a leg that ran nothing.
           if grep -E '(test_seq_is_monotonic_under_concurrency_live_falkor|test_next_seq_ceiling_is_atomic_across_workers_live_falkor|test_concurrent_writers_live_falkor_no_lost_writes) SKIPPED|SKIPPED \[[0-9]+\] tests/(test_event_store|test_embedded_concurrency)\.py' "$PYTEST_LOG"; then
             echo "❌ live tests SKIPPED — the job would be green while testing nothing"
             rc=1
@@ -3042,13 +3084,48 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Cache pip dependency caches (#7612)
+      - name: Restore pip dependency caches (#7612, RESTORE-ONLY — #10182)
         # #7612: ephemeral runners, no dependency cache — every job downloaded
         # its wheels cold on every run. Placed BEFORE install-cpu-torch so torch
         # (140 wheels, ~3.2 GB) is served from the cache as well.
         # Coverage-neutral: pip-only job, no uv.lock to enforce; pip's cache is
         # content-addressed and cannot substitute a different version.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY, and this job is the one that must be
+        # (`actions/cache/restore` has no post step — the post save is what
+        # #10182 established is charged against this job's `timeout-minutes`
+        # like any other step).
+        #
+        # MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008):
+        # the restore was a PARTIAL hit (1 s, via `restore-keys`), so the post
+        # step reserved the exact key and began a ~3.6 GB save. Every WORK step
+        # was green — pytest finished at 18:10:55 — and then `Post Cache pip
+        # dependency caches` ran 18:12:33 → 18:29:46, when the job's 30m cap
+        # elapsed (`The job has exceeded the maximum execution time of 30m0s`).
+        # The leg reported `cancelled`, which `python-ci-gate` reads as red BY
+        # DESIGN (#5219: a cancelled leg certifies nothing) — so a green shard
+        # reddened a REQUIRED check on a diff that never touched this job.
+        #
+        # This job cannot amortize that save, and no cap can make it able to.
+        # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
+        # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
+        # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
+        # (floor-clamped, `carve_shards: 3`) + ~1.5m setup/provision, i.e. ~9m
+        # of headroom against a ~9m COLD save and none at all against a slow
+        # one. Raising the cap instead would re-open #3239's stale-head
+        # exposure (the cap IS that exposure) and buy finite headroom under an
+        # UNBOUNDED term — the save has no timeout of its own.
+        #
+        # Nothing is lost by not saving here: the key is SHARED
+        # (`pip-<os>-<hash uv.lock>`), and it is written on EVERY run by
+        # `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`.
+        # This job only ever READ it.
+        #
+        # `continue-on-error`: a cache-SERVICE error (transport/503) must never
+        # red this leg — a miss is the fail-open case, and install-cpu-torch
+        # downloads the pinned CPU wheel either way.
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -3070,8 +3147,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
