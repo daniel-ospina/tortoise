@@ -102,6 +102,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = REPO_ROOT / "tools" / "install-ci-runner-x64.sh"
 BASH = shutil.which("bash") or "/bin/bash"
@@ -509,6 +511,43 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
     assert "alien-arch, not kept=[self-hosted-arm64]" in r.stderr, r.stderr
     assert "removed=[self-hosted-arm64]" in r.stderr, r.stderr
     assert "version-pinned, not kept=[]" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("marker", ["Self-Hosted-Arm64", "SELF-HOSTED-ARM64"])
+def test_a_mixed_case_foreign_arch_marker_is_dropped_too(tmp_path: Path, marker: str):
+    """⛔ THE FOREIGN-ARCH CARVE-OUT IS CASE-INSENSITIVE, AND IT USED TO NOT BE.
+
+    GitHub's own words, docs.github.com "apply labels": **"Labels are case-insensitive."** So a
+    mixed-case spelling is not a different label — `Self-Hosted-Arm64` answers a lower-case
+    `runs-on: self-hosted-arm64` exactly as the lower-case marker does, and the false PASS this
+    carve-out exists to prevent (an arm64 job won by an x86 box, a wrong artifact) is unchanged by
+    the spelling. The pre-fix pattern (`case "$1" in self-hosted-*)`) therefore let the marker
+    escape: it was not `alien-arch, not kept`, not in `removed=`, and the PUT attached it — the
+    repair reporting success over a false arch claim.
+
+    Unlike `is_host_label`, case-insensitivity is CORRECT here and this arm is the boundary between
+    the two: the host-owned names are vendor-fixed spellings (and filtering one of those WOULD be a
+    removal), while `self-hosted-<arch>` is a CUSTOM label whose spelling is whatever created it.
+
+    Non-vacuity: with the pre-fix exact-case pattern the marker survives into the PUT, so both the
+    set assertion and the `removed=` line red.
+    """
+    stub, env = _repair_runner(
+        tmp_path,
+        pool="0",
+        labels=f"self-hosted,Linux,X64,self-hosted-x64,{marker},ubuntu-latest",
+    )
+
+    r = _run("--repair-labels", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    put = _put_body(stub)
+    assert marker not in put, (
+        f"a mixed-case arm64 marker is the SAME label to GitHub, so an x86 runner must not keep "
+        f"it: {put}"
+    )
+    assert set(put) == {"self-hosted-x64", "ubuntu-latest"}, put
+    assert f"alien-arch, not kept=[{marker}]" in r.stderr, r.stderr
+    assert f"removed=[{marker}]" in r.stderr, r.stderr
 
 
 def test_the_version_pin_carve_out_obeys_the_boxes_own_choice(tmp_path: Path):

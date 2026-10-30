@@ -286,9 +286,9 @@ list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
 # `self-hosted`, `Linux`/`macOS`/`Windows` and `X64`/`ARM64`/`ARM` as read-only), so a union that
 # keeps it leaves an x86 box advertising an arm64 pool — the false PASS this file forbids at
 # `:67-74`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
-# puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too.
+# puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too. ⛔ MATCHED CASE-INSENSITIVELY (`tr`), UNLIKE `is_host_label` ABOVE — the exact-case rule does NOT transfer to this class: docs.github.com "apply labels" states "Labels are case-insensitive", and a CUSTOM label's spelling is whatever created it, so `Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64 marker and still answer a lower-case `runs-on:` — an exact-case test here is how a mixed-case stamp escapes both heal paths and keeps the false PASS alive.
 is_foreign_arch_label() {
-  case "$1" in
+  case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
     "$ARCH_LABEL") return 1 ;;
     self-hosted-*) return 0 ;;
   esac

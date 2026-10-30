@@ -1425,6 +1425,12 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     ⛔ The arch marker is RE-DERIVED from this box, never preserved: a mis-registered runner can
     carry the OTHER arch's marker, and passing it straight back lets an x86 box register with
     `self-hosted-arm64` — a false PASS (an arm64 job built on x86), not a queue delay.
+    ⛔ AND THE MARKER TEST IS CASE-INSENSITIVE, DELIBERATELY — `x.lower()`, unlike the host-derived
+    compare below. The two classes are NOT the same: the host names are vendor-fixed spellings, but
+    `self-hosted-<arch>` is a CUSTOM label whose spelling is whatever created it, and docs.github.com
+    "apply labels" says "Labels are case-insensitive" — so `Self-Hosted-Arm64` IS the arm64 marker
+    and still answers a lower-case `runs-on:`. An exact-case test here lets a mixed-case stamp
+    survive re-registration while the docstring above promises it is re-derived.
 
     ⛔ THE HOST-DERIVED MATCH IS EXACT-CASE, like the repair's `is_host_label`
     (`tools/install-ci-runner-x64.sh`) — `ONE invariant, two writers` is only true if both compare
@@ -1439,7 +1445,7 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     keep = [
         x
         for x in current
-        if x and x not in host_derived and not x.startswith("self-hosted-")
+        if x and x not in host_derived and not x.lower().startswith("self-hosted-")
         and not VERSION_PINNED_HOSTED_LABEL.fullmatch(x)
     ]
     if not arch:
