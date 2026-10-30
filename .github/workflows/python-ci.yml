@@ -225,23 +225,31 @@ jobs:
     # PyPI marks the whole matrix `skipped` for up to the 360-minute default.
     # Mirrors manifest-integrity's bound for the same reason.
     timeout-minutes: 5
-    # ⛔ #6897: the runner-split OPT-IN is JOB-scoped on purpose, never
-    # step-scoped. `changes` emits `fast_matrix` from TWO steps — `push-matrix`
+    # ⛔ #6897: the runner-split OPT-IN is carried by BOTH matrix emitters,
+    # never by one — and never by this JOB.
+    #
+    # `changes` emits `fast_matrix` from TWO steps — `push-matrix`
     # (`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs,
     # whose output OVERRIDES the push matrix, see `outputs:` below) — and the
     # selector reads the mode from the ENVIRONMENT (`resolve_shard_routing`).
     # Attached to ONE step the lever is silently dead on the other: measured on
     # head `3db8f7d78`, a tier-2 PR with `CI_SHARD_ROUTING=pool-split` set in
     # the repo variables still emitted nine `["ubuntu-latest"]` rows, i.e. the
-    # PR / main surface the lever exists for never split. Job scope is the
-    # smallest scope that reaches EVERY emitter, so a third emitter added later
-    # cannot miss it either — pinned by
-    # `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`.
+    # PR surface the lever exists for never split.
+    #
+    # ⛔ NOT job scope (#10186 review): this job also owns the capstone
+    # pre-registration gate step, and `tests/test_capstone_preregistration_9075.py`
+    # allow-lists the `env:` keys above that step with an EMPTY job allow-list,
+    # because any key there can hook the interpreter (`BASH_ENV`, a `PYTHONPATH`
+    # `sitecustomize.py`, `LD_PRELOAD`, `PATH`) and let `python3` exit 0 with the
+    # real check never running. A job-scope lever reds that pin in a required
+    # fast shard. The emitters carry it instead; the emitters are DISCOVERED
+    # from their `run:` commands by
+    # `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`,
+    # so a third emitter added later cannot silently miss the lever either.
     #
     # Empty when the operator has not opted in, which the selector reads as
     # hosted-only: the fail-safe direction, main's behaviour row for row.
-    env:
-      CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
     outputs:
       python: ${{ steps.select.outputs.python }}
       full: ${{ steps.select.outputs.full }}
@@ -378,12 +386,12 @@ jobs:
         # split step below overrides it).
         #
         # #6897: the OPT-IN for the pool split arrives as the
-        # `CI_SHARD_ROUTING` repo variable — set at JOB scope (see the `env:`
-        # block on this job, which is why BOTH emitters see it) and resolved
-        # inside the selector (`resolve_shard_routing`) rather than in an
-        # expression, so the mode has exactly one implementation and
-        # `tests/test_ci_selection.py` can pin it. Unset/any other value =
-        # hosted-only.
+        # `CI_SHARD_ROUTING` repo variable — set on THIS step and on `split`
+        # (the two emitters; see the job-level note above for why not on the
+        # job) and resolved inside the selector (`resolve_shard_routing`)
+        # rather than in an expression, so the mode has exactly one
+        # implementation and `tests/test_ci_selection.py` can pin it.
+        # Unset/any other value = hosted-only.
         #
         # #6135: the emitted `fast_matrix` is the COMPLETE GHA matrix object
         # (`{include: [...]}`) — one entry per shard, each carrying its own
@@ -394,6 +402,8 @@ jobs:
         # of include rows is whatever the selector emits — nothing here counts
         # shards.
         id: push-matrix
+        env:
+          CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
         run: |
           MATRIX=$(python3 tools/ci_selection.py --emit-push-matrix)
           # #1472 regression fix: SPACE-JOINED strings inside the matrix (the
@@ -444,6 +454,11 @@ jobs:
         # ALWAYS empty and would crash --split with empty stdin (#1492).
         id: split
         if: github.event_name == 'pull_request' && steps.select.outputs.full == 'false'
+        # #6897/#10186: the SECOND emitter `fast_matrix` can come from, so it
+        # carries the same opt-in as `push-matrix`. Omitted here, the lever is
+        # dead on exactly the event type every PR uses.
+        env:
+          CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
         run: |
           SPLIT=$(echo '${{ steps.select.outputs.test_files }}' | python3 tools/ci_selection.py --split)
           echo "fast_matrix=$(echo "$SPLIT" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["fast_matrix"]))')" >> "$GITHUB_OUTPUT"
