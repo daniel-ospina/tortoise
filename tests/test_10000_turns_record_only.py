@@ -1615,6 +1615,72 @@ def test_the_record_high_water_is_the_sweep_bound_when_the_graph_is_gone(
         "surplus turn and both doors serve them as a complete transcript")
 
 
+def test_a_write_breaker_does_not_hide_the_records_surplus_from_the_sweep(
+        sdk, monkeypatch):
+    """⛔ #10021 review P1: the sweep's RECORD read is not gated on the WRITE door.
+
+    `_record_turn_high_water` was consulted only under `_record_first` — the
+    write door's own predicate, `consult_breaker=True` included — so the one
+    datum that names the RECORD's surplus was read only when THIS capture could
+    write to the record. That is the conflation this change exists to remove:
+    one failed connect opens the breaker for `LIVE_WRITE_BREAKER_SECONDS` (60 s,
+    a fixed cooldown, so the record may already be healthy again), and a SHORTER
+    re-capture inside that window swept NOTHING — the record was never asked,
+    `prior_turn_max_index` had already been lowered by this capture's own MERGE,
+    and `prior_graph_turns` is empty by construction for a record-holding session
+    (its turns are not graph nodes). The record keeps `_t0.._t3` while the
+    session declares one turn, and from then on BOTH serving doors refuse that
+    session (`record_read._shortfall`'s residue arm -> `served_turn_count` ->
+    `RecordUnavailable` / HTTP 503) until a later record-first capture of the
+    same session, which for a once-captured session may never come. The write
+    path reports success throughout.
+
+    Mutation: restore `if _record_first:` around the `_record_turn_high_water`
+    call — the seam receives no delete record and the surplus survives both
+    stores. This leg is the sibling above with the WRITE breaker open, so the
+    two differ in exactly the one input the fix is about.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(sdk_mod, "_record_prior_vectors", lambda *a, **k: {})
+    # The record's own highest index, as the read below returns it for `_t0.._t3`.
+    monkeypatch.setattr(sdk_mod, "_record_turn_high_water", lambda *a, **k: 3)
+    # The breaker is a MODULE GLOBAL: pin it so this leg neither inherits a
+    # sibling's trip nor leaks its own (monkeypatch restores the original value
+    # even though `_trip_live_breaker` mutates the global afterwards).
+    monkeypatch.setattr(record_writer, "_breaker_open_until", 0.0)
+    _bind_tenant(sdk)
+    turns = [{"role": "user", "content": f"t{i}"} for i in range(4)]
+    _capture(sdk, "breaker-session", turns)
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (s:Session {id:$sid}) DETACH DELETE s",
+                 params={"sid": "breaker-session"})
+    seam.records.clear()
+
+    # A record connect failed within the last 60 s (the state ANY armed lane
+    # reaches after one blip): the WRITE door refuses, so this capture's turn
+    # belongs in the graph — while the RECORD still holds the surplus above it.
+    record_writer._trip_live_breaker()
+    assert record_writer.record_holds_turns(
+        journal_configured=True, tenant=("org-1", "g-1")) is False, (
+        "the fixture did not close the WRITE door, so this leg would just be "
+        "the sibling above (no breaker, `_record_first` true)")
+    _capture(sdk, "breaker-session", turns[0:1], session_existed=False)
+
+    deleted = sorted(r["id"] for r in seam.records
+                     if r.get("type") == "EntityMutated"
+                     and r.get("op") == "delete")
+    assert deleted == ["breaker-session_t1", "breaker-session_t2",
+                       "breaker-session_t3"], (
+        "a shorter re-capture during a record-write refusal swept nothing from "
+        f"the record (deleted={deleted!r}) — the record keeps every surplus "
+        "turn, the lowered mark hides it from every later capture, and both "
+        "serving doors then refuse the session outright")
+
+
 def test_the_record_high_water_read_orders_by_index():
     """`record_read.turn_high_water` answers the RESIDUE bound, not a count.
 

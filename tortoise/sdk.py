@@ -2773,7 +2773,10 @@ def _write_capture_turns(
 
     The sweep's BOUND is the union of every place residue can be named:
     ``prior_turn_max_index`` (the graph mark, read before the MERGE lowers it),
-    ``_record_turn_high_water`` on a record-first lane, and ``prior_graph_turns``
+    ``_record_turn_high_water`` whenever a tenant resolves and the record can
+    carry the delete records — INDEPENDENT of whether this capture can WRITE
+    the record, because a reader must not inherit the write breaker (#10021
+    review P1) — and ``prior_graph_turns``
     — the graph's own ``CONTAINS``-wired turn ids, which is the only one of the
     three a ``SET`` cannot destroy (#10021 review P2).
 
@@ -3014,7 +3017,44 @@ def _write_capture_turns(
     # the read side served four turns as COMPLETE.
     _first_live = turn_offset + len(turn_rows)
     _stale_bound = prior_turn_max_index
-    if _record_first:
+    # ⛔ THE RECORD'S BOUND IS A READ, AND A READER MUST NOT INHERIT THE WRITE
+    # BREAKER (#10021 review P1). This asked `_record_first` — the WRITE door's
+    # predicate, breaker included — so the one datum that names the RECORD's
+    # residue (`_record_turn_high_water`) was read only when THIS capture could
+    # WRITE to the record, which is the conflation the whole change exists to
+    # remove. The reachable failure: a record connect fails once, the breaker
+    # stays open for `LIVE_WRITE_BREAKER_SECONDS` (60 s, a fixed cooldown, not a
+    # probe) — so the record may be healthy again — and a SHORTER re-capture
+    # inside that window swept nothing, because neither store could name the
+    # surplus: the record was never asked, `prior_turn_max_index` was already
+    # lowered by this capture's own MERGE, and `prior_graph_turns` is empty by
+    # construction for a record-holding session (its turns are not graph nodes).
+    # The record then kept `_t0.._t3` while the session declared one turn, and
+    # from that moment BOTH serving doors refuse it (`record_read._shortfall`'s
+    # residue arm -> `served_turn_count` -> `RecordUnavailable` / HTTP 503) until
+    # a later record-first capture of that same session — which, for a session
+    # captured once, may never come. The write path reports success throughout.
+    #
+    # So the gate is the SAME one declaration asked the way the two READ doors
+    # ask it (`sdk._record_turn_answer`, `hosted_api._record_tenant_for_read`):
+    # `consult_breaker=False`. It still refuses `unarmed` / `malformed_dsn` /
+    # `no_tenant`(-`_carried`) and a journal that cannot carry the delete records,
+    # because those are facts about WHERE a past capture's turns went; it no
+    # longer refuses on `circuit_open`, which is a fact about the last 60 s of
+    # THIS process. The cost is one bounded read on a capture that write-refuses
+    # (the read doors pay the same connect on every request); the alternative is
+    # a transcript no door can serve.
+    # ⚠️ The `no_durable_journal` arm is refused ON PURPOSE: the record half of
+    # the removal is the `EntityMutated` op=delete pair emitted below, which
+    # reaches the record through the journal, so a scratch buffer sweeps nothing
+    # here either — the journal-less/scratch arm is out of this fix's reach by
+    # construction, not by oversight.
+    _record_readable = record_holds_turns(
+        journal_configured=_journal_configured,
+        durable=_journal_configured and getattr(_log, "durable", True),
+        tenant=getattr(sdk, "_record_tenant", None),
+        consult_breaker=False)
+    if _record_readable:
         _record_bound = _record_turn_high_water(sdk, session_id)
         if _record_bound is not None and _record_bound > _stale_bound:
             _stale_bound = _record_bound
