@@ -353,8 +353,9 @@ request, top-5 kinds offered with **no** kind descriptions, measured on
 same requests measure **39,544 B ≈ 9,103 tok** (`vet-v1`) and **23,332 B ≈ 6,594 tok**
 (`classify-v1`) with the clause removed — within **0.15%** of the 39,484 B this table
 carried before, which is what makes the two figures comparable rather than merely
-newer. The framing itself is therefore **+10,460 B / +2,120 tok (+23%)** on `vet-v2`
-and **+5,230 B / +1,080 tok (+16%)** on `classify-v2`: it rides in **every** question's
+newer. The framing itself is therefore **+10,460 B / +2,120 tok (+23% of tokens)** on `vet-v2`
+and **+5,230 B / +1,080 tok (+16% of tokens)** on `classify-v2` (as BYTES those deltas are +26.5%
+and +22.4% — the percentages are quoted on tokens because the price is per input token): it rides in **every** question's
 `instructions` (~131 B / ~27 tok per question), because the vendor evaluates the
 questions **independently** against one `state`, so one clause in one question cannot
 cover the other 79. ⚠️ A clause placed **once** in a `state` element would cost ~130 B
@@ -512,7 +513,7 @@ behind it, not a hope.
 | round 14: `_decide_tail_seam` stops folding `input_tokens` (the receipt) | ✅ `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` reddens on `seam["input_tokens"] == 6112` — measured on a `/tmp` copy, 1 failed / 12 passed, restored `diff`-identically |
 | `_decide_tail_seam` REPLACES `model_served` with the batch's own value instead of accumulating it (the pre-fix code) | ✅ `test_an_armed_tail_reports_its_own_calls_beside_the_llm_counter` reddens on `["jev-1.14.0", "jev-1.15.0"]` — measured in the worktree with the fold reverted to `seam["model_served"] = served`: `1 failed, 12 deselected`, reading `'jev-1.15.0'` (the last batch's version, claimed for the whole tail), restored `diff`-identically. ⚠️ The row exists because the single-batch assertions were GREEN under it: only a second batch can see a last-write. |
 | round 14: `_api_key`'s `.env` term reverts to a single file-order scan that returns on the first name it matches | ✅ the guards test reddens on the shadowing case (an empty `TYPESAFE_API_KEY=` line above a populated `JEV_API_KEY=` line reported no key) — measured the same way |
-| `UNTRUSTED_STATE_FRAMING` emptied (the framing dropped from every question) | ✅ `test_every_question_frames_state_as_untrusted_data` reddens reporting all three properties for all 12 questions of a two-candidate request — measured in the worktree by making `_framed` return the bare question (the equivalent mutation), `1 failed, 13 passed`, restored `diff`-identically |
+| `UNTRUSTED_STATE_FRAMING` emptied (the framing dropped from every question) | ✅ `test_every_question_frames_state_as_untrusted_data` reddens reporting all three properties for all **four** questions of a two-candidate request — 4 questions × 3 properties = **12 gap reports**, which is the count a reader will see in the failure output — measured in the worktree by making `_framed` return the bare question (the equivalent mutation), `1 failed, 13 passed`, restored `diff`-identically |
 | the prohibition clause dropped, the shape kept (the `#8175` regression) | ✅ the test's own non-vacuity half reds on `forbids_following_instructions` alone — the clause can be present, correctly placed, and still say nothing that stops it being followed |
 | the wrong field named (`narrative` for `state`) | ✅ reds on `names_state_as_data`: a framing that points at the wrong input leaves the actual untrusted text unnamed |
 | the element binding dropped (`answer only from element id={ref}`) | ✅ reds on `binds_the_answer_to_the_named_element`, which is the half `#10176` needs in-band meanwhile |
