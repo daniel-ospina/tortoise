@@ -22,7 +22,7 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (95 test functions / 97 collected, incl. the harness
+- Pins: `tests/test_ci_import_closure.py` (98 test functions / 100 collected, incl. the harness
   mutation check and the two verdict-rule pins — re-derive with
   `grep -c '^def test_' tests/test_ci_import_closure.py` and
   `pytest --collect-only -q`; a count written here without that command is a snapshot, not a fact)

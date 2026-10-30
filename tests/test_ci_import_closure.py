@@ -29,10 +29,9 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.ci_import_closure import REPO as _REPO  # noqa: E402
-
 from tools.ci_import_closure import (  # noqa: I001
     DIRECT, MISS_NO_PATH, MISS_NOT_PYTHON, MISS_TAINTED, PACKAGE_INIT,
+    REPO as _REPO,
     Closure, ModuleIndex, Scanner, UNKNOWN_DYNAMIC_ATTR, UNKNOWN_DYNAMIC_CALL,
     UNKNOWN_LOADER, UNKNOWN_SYNTAX, UNKNOWN_UNRESOLVED, artifact_names_for_job,
     classify_miss, compute_closures, core_test_files, derived_core_selection,
@@ -2800,8 +2799,6 @@ def _core_counts_at(sha: str) -> dict | None:
     tests_tree = _git("ls-tree", "-r", "--name-only", sha, "--", "tests")
     if manifest_text is None or tests_tree is None:
         return None
-    from tools import ci_import_closure as ci
-
     from tools import ci_selection
 
     manifest = yaml.safe_load(manifest_text)
