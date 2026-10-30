@@ -203,6 +203,21 @@ def test_docs_scanning_gates_stay_in_tier1():
     )
 
 
+    assert "test_substrate_map.py" in tier1, (
+        "#5086 review (P1-2): the substrate map's drift guard must be in tier1 — "
+        "the map IS a document (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`), "
+        "and `docs/` is in NON_PYTHON_PREFIXES and the map matches no "
+        "SOURCE_PATTERNS entry, so the docs-only edit that let the map go stale "
+        "three times selects no surface and runs tier1 ONLY. Registered in "
+        "`core` alone it ran on `tortoise/` diffs, i.e. on the one half of the "
+        "map that is not the artifact that went stale (#4309 class, same dual "
+        "registration as the sibling doc guards above). ⚠️ This row is the MAP's "
+        "arm only: `docs/00_index.md`, the other file the guard reads, is in "
+        "`CORE_ALSO`, so an index-only edit measures `surfaces=['core']` and "
+        "needs no tier1 row (#5086 review P3, cycle 6)"
+    )
+
+
 def test_v4_membership_gate_runs_on_both_architecture_docs():
     """#9778 review (P2): pin the SELECTION, not just the manifest string.
 
@@ -255,6 +270,65 @@ def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
         "edited one digit, or deleted and merge green (#10108 review P1, "
         "#4309 class)"
     )
+
+
+def test_substrate_map_guard_runs_on_the_diffs_it_guards():
+    """#5086 review (P1-2): pin the SELECTION on all four arms, not the string.
+
+    `tests/test_substrate_map.py` re-measures
+    `docs/architecture/SUBSTRATE-REBUILD-MAP.md` against the tree. Four distinct
+    diffs can break it, and before this fix NONE of them selected it — the row had
+    been appended to the `ep:` list rather than `core:`, and neither `core` nor
+    the early return reaches the file anyway:
+
+    - a **docs-only** edit of the map → measured `surfaces=[]`, tier-1 set WITHOUT
+      the pin; `tier1` is the only surface that runs, so the row above is the
+      whole fix. (This is the arm that went stale three times, and the ONLY one
+      that needs `tier1`.)
+    - a **tool-only** edit of `tools/substrate_map_check.py` → measured
+      `surfaces=[]` (a flat `NON_PYTHON_PREFIXES` entry, no `SOURCE_PATTERNS`
+      match), so the tool's own test never ran on the PR editing the tool. Closed
+      by `CORE_ALSO` in `tools/ci_selection.py` (#1349/#3332/#3616 class).
+    - a **`docs/00_index.md`** edit — the OTHER file the guard reads for the
+      registration claim — is `CORE_ALSO` too, so it measures
+      `surfaces=['core']` and reaches the pin through the `core` row. Pinned here
+      because the fix-pass notes and the `tier1` comment both claimed this arm was
+      a docs-only early return; it is not (#5086 review P3, cycle 6).
+    - a **`tortoise/`** symbol move (what the interface map places) → `core`,
+      through the `tortoise/` prefix fallback.
+
+    Measured after the fix: docs `surfaces=[]` + pin present, tool
+    `surfaces=['core']` + pin present, index `surfaces=['core']` + pin present,
+    `tortoise/projection/edges.py` `surfaces=['core', ...]` + pin present.
+    """
+    docs = _sel(["docs/architecture/SUBSTRATE-REBUILD-MAP.md"])
+    assert docs["full"] is False
+    assert docs["surfaces"] == [], docs["surfaces"]
+    assert "test_substrate_map.py" in docs["test_files"], (
+        "a docs-only edit of the map must run the guard that re-measures it — "
+        "otherwise it goes stale a fourth time with every gate green"
+    )
+
+    tool = _sel(["tools/substrate_map_check.py"])
+    assert tool["full"] is False
+    assert "test_substrate_map.py" in tool["test_files"], (
+        "a tool-only edit must run the tool's own negative controls — `tools/` "
+        "is swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing "
+        "that keeps this out of the docs-only early return"
+    )
+
+    index = _sel(["docs/00_index.md"])
+    assert index["surfaces"] == ["core"], index["surfaces"]
+    assert "test_substrate_map.py" in index["test_files"], (
+        "the registration claim reads `docs/00_index.md`, and that path is in "
+        "CORE_ALSO — so an index-only edit is `core`, NOT the docs-only early "
+        "return the `tier1` comment used to describe it (#5086 review P3, "
+        "cycle 6: measured, not reasoned)"
+    )
+
+    symbol_move = _sel(["tortoise/projection/edges.py"])
+    assert "core" in symbol_move["surfaces"], symbol_move["surfaces"]
+    assert "test_substrate_map.py" in symbol_move["test_files"]
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
@@ -1404,6 +1478,27 @@ def test_the_docker_lane_seam_forces_the_full_matrix():
     `core` and the other surfaces' consumers never ran on the PR that made it.
     """
     result = _sel(["tests/_live_utils.py"])
+    assert result["full"] is True, result
+    assert result["test_files"] == "ALL", result
+
+
+def test_the_minted_identity_id_helper_forces_the_full_matrix():
+    """#3590 round-5 review F4: `tests/_node_ids.py` is a CROSS-SURFACE helper.
+
+    It replaced the retired `entity_name_id` derivation in every test that needs
+    "the id of this name", and it is imported from modules registered on several
+    surfaces — `test_sdk_group3.py` (sdk), `test_capture_session.py` /
+    `test_ingest_event_endpoint.py` / `test_event_provenance.py` /
+    `test_status_folds_2729.py` (core), `test_7936_stable_stub_ids.py`
+    (core + sdk) and others. It is NOT a `test_*.py` file, so the manifest never
+    classifies it: without its `SHARED_MODULES` entry a helper-only change
+    selected `core` only and a break it induced in a sdk/api test never ran on
+    the PR that made it (the #1349/#3332/#3910 under-selection class). Same
+    reason — and same shape — as the `_live_utils.py` pin above; the generic
+    `test_every_shared_module_entry_selects_the_full_matrix` cannot catch the
+    entry going MISSING, which is the failure this names.
+    """
+    result = _sel(["tests/_node_ids.py"])
     assert result["full"] is True, result
     assert result["test_files"] == "ALL", result
 
@@ -7890,6 +7985,70 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
         f"the carve-out cap ({cap}m) dwarfs the measured pytest step "
         f"({measured}m) — the cap IS the stale-head exposure, and 90m against "
         f"this work is exactly the defect #3239 reports")
+
+
+def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
+    """#10182/#5219: the carve-out job must be RESTORE-ONLY on the pip cache.
+
+    `actions/cache` saves in a POST step, and (#10182) that post step is charged
+    against the job's `timeout-minutes` like any other step. This job cannot
+    amortize such a save, and no cap it is allowed to carry can: the cap above
+    is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
+    at the ceiling), while ONE shard already spends its 19m floor-clamped
+    watchdog plus ~1.5m of setup/provision — and the SAVE has no timeout of its
+    own, so a slow one is unbounded, not merely large. Headroom amortizes a
+    bounded cost; it cannot amortize an unbounded one.
+
+    MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008): the
+    restore was a PARTIAL hit, so the post step reserved the exact key and began
+    a ~3.6 GB save. Every WORK step passed — pytest finished at 18:10:55, the
+    orphan gate said 'no orphans' at 18:10:53 — and then `Post Cache pip
+    dependency caches` ran 18:12:33 → 18:29:46 against a 17:59:19 start, when
+    `The job has exceeded the maximum execution time of 30m0s`. GitHub reported
+    `cancelled`, which `python-ci-gate` reads as red BY DESIGN (#5219: a
+    cancelled leg certifies nothing) — so a GREEN shard reddened a REQUIRED
+    check on a diff that never touched this job.
+
+    Nothing is lost by not saving here: the key is SHARED
+    (`pip-<os>-<hash uv.lock>`) and is still written on EVERY run by
+    `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`, so this
+    job only ever READ it. The ~90 MB HF embedding cache in the same job is
+    deliberately left alone (measured 1m38s to save, and it is the leg's
+    provisioning path — an uncached load skip-reds the dense assertion #4387);
+    the pip cache is the ~3.6 GB term that does not fit.
+
+    Non-vacuous in both directions: the pre-fix step is a bare `actions/cache@v4`
+    on this path, which reds the first assertion; and the presence + shape of
+    the restore is asserted too, so DELETING the cache step cannot pass.
+    """
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+
+    def _path_of(step: dict) -> object:
+        return (step.get("with") or {}).get("path")
+
+    pip_caches = [s for s in job.get("steps", []) if _path_of(s) == "~/.cache/pip"]
+    assert pip_caches, (
+        "the carve-out job no longer restores the shared pip cache at all — every "
+        "shard would then download torch (140 wheels, ~3.2 GB) cold")
+    saving = [s.get("uses") for s in pip_caches
+              if str(s.get("uses") or "").startswith("actions/cache@")]
+    assert not saving, (
+        f"the carve-out job carries an implicit post-step cache SAVE {saving} on "
+        "~/.cache/pip — that save is charged against the job's `timeout-minutes` "
+        "(#10182) and this job's cap is pinned at <= 3x its measured pytest step, "
+        "so the save can never be amortized. Use `actions/cache/restore@` here "
+        "(#5219: the cancel it causes reds a REQUIRED check on a green shard).")
+    restores = [s for s in pip_caches
+                if s.get("uses") == "actions/cache/restore@v4"]
+    assert len(restores) == 1, (
+        "the carve-out's pip cache step must be exactly one "
+        f"`actions/cache/restore@v4` (found {len(restores)} of {len(pip_caches)} "
+        "pip-cache steps in that shape)")
+    assert restores[0].get("continue-on-error") is True, (
+        "the carve-out's pip-cache restore must be `continue-on-error: true` — a "
+        "cache-SERVICE error (transport/503) must never red the leg; a miss is "
+        "the fail-open case and install-cpu-torch downloads the pinned CPU "
+        "wheel either way")
 
 
 def _carve_matrix() -> dict:

@@ -66,9 +66,12 @@ def _clean_non_folded_record():
 def _create_subject_rows(sdk, name, ids):
     """Raw-CREATE one live Subject per id under ``name``.
 
-    The SDK's own write path MERGEs on ``{name}`` on main, so it can only ever
-    produce ONE carrier. Two live same-name Subjects are the D2 shape an
-    explicit-id writer produces; a raw write is how a test reaches it.
+    The SDK's own ``create_entity`` door does not MERGE on ``{name}`` — since
+    #3590 the write is keyed on the record's own ``id`` and the door RESOLVES
+    the name first, adopting the single live holder — so no public writer
+    produces two carriers of one name by accident. Two live same-name Subjects
+    are the D2 shape an EXPLICIT-ID writer produces; a raw write is how a test
+    reaches it directly.
     """
     proj = sdk._get_proj()
     for sid in ids:
@@ -948,8 +951,6 @@ _ALLOWED_KEYED = {
         # `tortoise/vector_write.py::clear_embedding`, whose MATCH pattern is
         # built at runtime and passed as an argument, so this #3633 sweep cannot
         # see it. The read is dispositioned in that module's seam.
-        'self._persist_extra_props( "MATCH (n:Subject {id: $id})" if name_is_shared else "MATCH (n:Subject {name: $name})", {"id": sid} if name_is_shared else {"name": name}, ev, self._SUBJECT_HANDLED, )': 1,
-        'self._persist_extra_props( "MATCH (n:Object {id: $id})" if name_is_shared else "MATCH (n:Object {name: $name})", {"id": oid} if name_is_shared else {"name": name}, ev, self._OBJECT_HANDLED, )': 1,
         # #2729: the pack-declared fold dispatcher. `_fold_object_status`
         # MATCHes the Event's target by NAME (the prop the event carries) and
         # guards on the declaring kind, case-folded + form-widened
@@ -966,21 +967,15 @@ _ALLOWED_KEYED = {
         # abort the whole event write — a failure mode the pre-#2729 built-in
         # fold never had (it never read `objectKind`). Same sites, same S3
         # ownership; only the coercion is new.
-        'rows = self.g.query( "MATCH (o:Object {name:$n}) " "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds " " AND (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status = $status " "RETURN count(o) AS n", params={"n": target_name, "kinds": kinds, "status": status, "excluded": excluded}, ).result_set': 1,
         # The companion MISS probe (distinguishes "the terminal guard refused"
         # from "no Object of the declaring kind exists", which is reported as
         # `status_fold_unapplied`). Same name-keyed MATCH, same disposition.
-        'present = self.g.query( "MATCH (o:Object {name:$n}) " "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds " "RETURN count(o) AS n", params={"n": target_name, "kinds": kinds}, ).result_set': 1,
         # The built-in connector compatibility half — parametrized by #2729
         # (was the two literal `SET o.status='in_progress'`/`'completed'`
         # statements this PR replaced). Same name-keyed coordinate, same S3
         # ownership; the `$declared` guard is what makes a declared-lifecycle
         # kind own its state. The `IS NULL` disjuncts keep the pre-#2729
         # tolerance for an absent OR non-string `objectKind` (#2729 review P1).
-        'self.g.query( "MATCH (o:Object {name:$n}) " "WHERE (o.objectKind IS NULL " " OR toStringOrNull(o.objectKind) IS NULL " " OR NOT (toLower(toStringOrNull(o.objectKind)) IN $declared)) " " AND (o.status IS NULL OR NOT (o.status IN $excluded)) " "SET o.status=$status", params={"n": name, "status": builtin_status, "declared": sorted(index.kind_forms), "excluded": excluded}, )': 1,
-        'result = self.g.query( "MATCH (o:Object {name:$name}) " + live, params={"name": name, **common_params})': 2,
-        'self.g.query( "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) " "MERGE (s)-[:performs]->(e)", params={"name": subj, "eid": eid}, )': 1,
-        'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:produces]->(o)", params={"name": obj, "eid": eid}, )': 1,
         # Refreshed for #5593: `main` rewrote both lifecycle predicates to
         # read the shared OBJECT vocabulary (`NOT (o.status IN $excluded)` +
         # `_terminal_object_statuses()` -> `commit_ops.OBJECT_TERMINAL_STATUSES`)
@@ -991,8 +986,11 @@ _ALLOWED_KEYED = {
         # `live` uses for Points (`TERMINAL_EXCLUDED_STATUSES` also carries
         # `outdated`), so it does not make this predicate drift-free against
         # the resolver. Do not restate it as "the same constant".
-        'self.g.query( "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) " "MERGE (e)-[:uses]->(o)", params={"name": use_name, "eid": eid}, )': 1,
-        'self.g.query( "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) " "MERGE (s)-[:participatesIn]->(e)", params={"name": subj, "eid": eid}, )': 1,
+        # ⛔ RETIRED (#3590 round-5 review F2): the `participatesIn` fallback no
+        # longer MERGEs by name. `_event_plain_merge` now wires it on the SAME
+        # resolved performer id as the `performs` arm, so there is no name-keyed
+        # site left here to disposition — and leaving the entry would make the
+        # sweep clear a pattern that no longer exists.
     },
     'tortoise/near_dup_merge.py': {
         # Twin of sdk.py's local `about_entities` claim loop (entry "E" below),

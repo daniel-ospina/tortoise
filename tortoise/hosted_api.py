@@ -96,6 +96,11 @@ from tortoise.config import _resolve_event_log_path
 from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
     EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
 )
+from tortoise.entity_identity import (  # #3590: identity is a minted id, a name is a label
+    AmbiguousEntityName,  # #9876: the create's route-then-refuse, mapped to 422 here
+    refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
+    resolve_fold_name,  # #3590 fold-side name resolution
+)
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
@@ -17054,6 +17059,109 @@ def _narrative_carrier(story_arc, summary, *, session_id: str,
     }
 
 
+def _ambiguous_entity_refusal(exc) -> HTTPException:
+    """The ONE 422 body for a create-side ambiguity refusal (#9876 review).
+
+    ``entity_identity.AmbiguousEntityName`` already carries the machine-readable
+    coordinates (``label``, ``name``, ``candidate_ids``) precisely so a
+    boundary does not have to string-match the message — so this relabels the
+    exception into the repo's validation posture (422) and nothing else.
+
+    ⛔ THE 500'S ADVICE IS WRONG FOR IT AND MUST NOT RIDE ALONG. That detail
+    says "the commit is replay-safe (retry with the same client_commit_id)",
+    and this refusal is DETERMINISTIC: a same-payload retry re-raises it
+    identically (the same argument the two sibling clauses in the handler make
+    for themselves — `InvertedSupersedeWindow` and `UnapprovedKindNamespace`).
+    So the body must name the conflicting carriers and tell the client what to
+    CHANGE instead. A retryable-looking answer for a permanent refusal is the
+    one thing an idempotency contract must never send (AIP-193/AIP-194: a
+    non-transient state refusal is not a retryable failure — only UNAVAILABLE
+    is, and a 5xx whose advice never comes true turns one bad payload into an
+    infinite client loop).
+
+    ``candidate_ids`` keeps the resolver's own display form, so an ID-LESS live
+    carrier reads ``"<id-less>"`` — the evidence that made the read ambiguous,
+    never dropped (the #8018 class).
+    """
+    return HTTPException(
+        status_code=422,
+        detail={
+            "error_code": "AMBIGUOUS_ENTITY_NAME",
+            "code": "ambiguous_entity_name",
+            "message": (
+                f"{exc} — rename or retire one of the carriers before naming "
+                f"it in a commit; the create will not pick one for you"
+            ),
+            "label": exc.label,
+            "name": exc.name,
+            "candidate_ids": list(exc.candidate_ids),
+        },
+    )
+
+
+def _refuse_ambiguous_commit_entities(sdk, reconcile) -> None:
+    """Refuse a commit naming a doubly-held entity BEFORE the first write.
+
+    #9876 review (this head), the blocking half: ``_execute_commit_writes``
+    reaches ``sdk.create_entity`` at **step 6**, and that door calls
+    ``resolve_or_mint``, which REFUSES a name two or more LIVE entities hold
+    (route-then-refuse, R8). Steps 2/2b/3/3b/4/5 have already journaled and
+    written by then — events, the Document transcript, the session Source and
+    the Points — so the refusal landed as the retry-advising fail-closed 500 on
+    top of a half-written commit, and every later POST of the same payload
+    produced the same 500. That is the #2422/#7925 partial-mutation class this
+    PR closes on the SDK bundle door (`sdk._validate_bundle`'s bundle-wide
+    ambiguity loop), reached here through the production capture entry point.
+
+    MIRRORS THAT LOOP, with the parts this path needs:
+
+    * the item set is the one step 6 WRITES (``plan.reconcile.entities``), not
+      ``payload.entities`` — reconcile is what the write phase iterates;
+    * the LABEL is the same routing step 6 uses (``writable_kind`` then
+      ``is_subject_kind``), so the probe asks about the label the create lands
+      on — probing ``:Object`` for a subject-kind item would answer about a
+      different node set;
+    * the PREDICATE is not re-implemented: ``refuse_ambiguous_create`` is the
+      READ-ONLY twin of the door's own ``refuse_if_ambiguous``, over the same
+      ``live_name_holder_ids`` primitive — LIVE rows, id-less included, because
+      a filter on truthy ids is exactly what let a 2+ LIVE carrier miss pass a
+      guard (#8018);
+    * it RECORDS the non-folded entry before raising (R8), which the door would
+      have done — a probe that short-circuits the door must not lose the record.
+
+    ⛔ PLACEMENT IS THE GUARANTEE, and it is why this is called from the handler
+    region BEFORE ``CommitRecordStore.acquire``: a refusal here writes NOTHING
+    (no :CommitRecord either), so the graph is exactly as it was and a corrected
+    payload is a genuine FIRST attempt (a leftover `partial` record would make
+    the retry a re-adjudication without the first-adjudication hard-25 band —
+    the same reason the 429 gate discards the attempt it created). It also runs
+    AFTER the L1 replay return, so an idempotent re-POST of an already-written
+    commit still answers 200 `duplicate:true` and is never refused.
+
+    NOT a whole-commit guarantee against every writer: a name can become doubly
+    held between this probe and the write (a concurrent create), which is what
+    the handler's boundary clause (the 422 mapping) is the last resort for.
+    """
+    from tortoise.kind_fallbacks import writable_kind
+    from tortoise.subject_binding import is_subject_kind
+
+    if reconcile is None:  # an L1 replay plans no reconciliation
+        return
+    g = sdk._get_proj().g
+    probed: set[tuple[str, str]] = set()
+    for er in reconcile.entities:
+        kind = writable_kind(er.entity.kind)
+        label = "Subject" if is_subject_kind(kind or "") else "Object"
+        name = er.entity.name
+        if (label, name) in probed:
+            continue
+        probed.add((label, name))
+        try:
+            refuse_ambiguous_create(g, label, name)
+        except AmbiguousEntityName as exc:
+            raise _ambiguous_entity_refusal(exc) from exc
+
+
 def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
@@ -17292,6 +17400,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 
     # ── 3b. Extracted occurrences — Event NODES (issue #1013: never points
     # with pointKind event). Content-addressed ev_<sha> ids; MERGE-safe. ──
+    #: (eventId, Object name) pairs the events mention — wired in step 6a, after
+    #: step 6 has REGISTERED the entities (see the note at the append site).
+    _deferred_about_objects: list[tuple[str, str]] = []
     for ev in (payload.events or []):
         proj.g.query(
             "MERGE (e:Event {eventId:$eid}) "
@@ -17323,14 +17434,15 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 continue
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
-            # edge for NEW entities. MERGE creates the :Object on demand
-            # (consistent with step 6's MERGE-by-name semantics).
-            proj.g.query(
-                "MATCH (e:Event {eventId:$eid}) "
-                "MERGE (o:Object {name:$name}) "
-                "MERGE (e)-[:aboutObject]->(o)",
-                params={"eid": ev.id, "name": name},
-            )
+            # edge for NEW entities, so the write resolved-or-minted on demand.
+            # ⛔ #3590 removes the mint (a fold-time mint is not replay-
+            # deterministic, and an id may not be derived from a name — the
+            # projection is not the minter, D9), so the ORDER is now the whole
+            # fix: the reference is DEFERRED to step 6a, after step 6 has
+            # registered the entity with its real minted id. Resolving HERE
+            # found no holder for a name this payload introduces and dropped the
+            # edge for exactly the case P2-4 was filed about.
+            _deferred_about_objects.append((ev.id, name))
 
     # ── 4. Source bridge: the session Source (#4005 — the canonical
     # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
@@ -17685,7 +17797,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 6. Entities — routed by KIND (#1370/#4934): declared §5 Subject kinds
     # become :Subject (with subjectKind) so the Subject layer is reachable and
     # the vocabulary does not leak into Object.objectKind; everything else stays
-    # an :Object MERGEd by name (#452) with objectKind + the S5 gate-result flag
+    # an :Object registered through ``create_entity``, which RESOLVES the name to
+    # its single live holder or mints an opaque id (#452 idempotent re-mention;
+    # #3590 moved the MERGE key from the name to that id) with objectKind + the
+    # S5 gate-result flag
     # (passes_frequency_gate written WITH flag, amendment §4.3 #12). aboutObject
     # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
     # gated binder is the only aboutSubject producer. ──
@@ -17718,6 +17833,38 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
+            )
+
+    # ── 6a. Event→aboutObject, AFTER the entities exist. The reference is
+    # RESOLVED, never minted (#3590 D9): a fold-time / wiring-time mint is not
+    # replay-deterministic and an id may not be derived from a name. That makes
+    # the ORDER load-bearing — step 3b journals/writes the events before step 6
+    # registers their targets, so resolving there found no holder for a name
+    # this very payload introduces and dropped the edge, which is exactly the
+    # #1272 P2-4 case the retired `MERGE (o:Object {name:$name})` existed to
+    # cover. A name that still resolves to nothing is left UNWIRED (and recorded
+    # by `resolve_fold_name`) rather than fabricated.
+    # ⛔ `mention=True` is the ATTRIBUTION classification (#9876 review). This is
+    # an about-edge NAME — one of the uses D1's `unfolded-mention` row enumerates
+    # verbatim (`identity-decision.md`: "an `EventRecorded`'s `subject` / `object`
+    # / `uses[]`, an `about_entities` status-fold target, **or an about-edge
+    # name** — resolved to no single live holder … **in its ATTRIBUTION use**").
+    # The edge is attribution: a miss drops ONE link and moves no entity's state.
+    # Without the flag this site records `unregistered-reference` /
+    # `ambiguous-entity-name` — NON-exempt — for a write where nothing was
+    # folded, while the replay pass resolves the SAME reference exemptly
+    # (`projection/entities.py:4896` status-fold target, `:5275`
+    # `EventRecorded.object`), i.e. one reference with two dispositions, the
+    # live/replay parity break R8 forbids.
+    for _eid, _name in _deferred_about_objects:
+        _resolved = resolve_fold_name(proj.g, "Object", _name,
+                                      context="session-commit aboutObject",
+                                      mention=True)
+        if _resolved:
+            proj.g.query(
+                "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
+                "MERGE (e)-[:aboutObject]->(o)",
+                params={"eid": _eid, "oid": _resolved},
             )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
@@ -18065,6 +18212,19 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         state = _load_commit_graph_state(sdk, payload)
         plan = plan_commit(payload, state, record)
 
+        # [3c] #9876 review (this head) — the create-side AMBIGUITY refusal, as
+        # a PRE-WRITE probe. `_execute_commit_writes` reaches
+        # `sdk.create_entity` at step 6, and that door refuses a name 2+ LIVE
+        # entities hold; steps 2/2b/3/3b/4/5 have written by then, so the
+        # refusal used to land as the retry-advising 500 on top of a
+        # half-written commit (and re-landed identically on every later POST).
+        # Asking the SAME question here — before `store.acquire`, so not even a
+        # :CommitRecord is left behind — makes it a clean 422 that writes
+        # nothing, and keeps a corrected payload a genuine FIRST attempt.
+        # Position is also why it sits AFTER the L1 replay return above: an
+        # idempotent re-POST must still answer `duplicate:true`, never a refusal.
+        _refuse_ambiguous_commit_entities(sdk, plan.reconcile)
+
         # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
         # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
         # duplicate (if fully_written) or completes the remainder (held|partial).
@@ -18352,6 +18512,18 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
                     "predecessor_validFrom": exc.predecessor_valid_from,
                 },
             )
+        except AmbiguousEntityName as exc:
+            # #9876 review (this head): the boundary of last resort for the
+            # create-side route-then-refuse. `[3c]` refuses the same shape
+            # BEFORE the first write, so reaching this clause means the name
+            # became doubly held between that probe and the write (a concurrent
+            # create) — or a create this commit emits from a leg the probe does
+            # not enumerate (the supersession/synthesis writers). Same
+            # determinism as the two clauses above: a same-payload retry
+            # re-raises identically, so the retry-advising 500 below is
+            # actively wrong for it, and the client must be told WHICH carriers
+            # conflict so it can rename or retire one.
+            raise _ambiguous_entity_refusal(exc)  # noqa: B904
         except UnapprovedKindNamespace as exc:
             # #5475: the SDK/entity funnel now refuses a kind naming a pack this
             # graph has not approved, and this door reaches that funnel

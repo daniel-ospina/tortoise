@@ -1100,10 +1100,16 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
         "pip install -e . --quiet\n"
         "python3 tools/bridge_table.py --check\n"
         "python3 tools/mcp_rename_table.py --check\n"
-        "python3 tools/sdk_surface.py --check"
+        "python3 tools/sdk_surface.py --check\n"
+        # #5086: the doc↔tree guard joins the same step for the same `#4454`
+        # reason (a docs-only edit selects no surface), plus one of its own: its
+        # `measured_at_commit` ancestry claim needs HISTORY, and this job is the
+        # one that checks out at `fetch-depth: 0` (#5086 review P1-1). Listed
+        # here, not exempted: the exactness of this assertion is the point.
+        "python3 tools/substrate_map_check.py --check"
     )
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the three "
+        "the drift step must invoke EXACTLY the installer plus the four "
         "`--check` commands — no shell operator, no `echo` decoy, no wrapper, no "
         f"trailing anything, or a real failure reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"

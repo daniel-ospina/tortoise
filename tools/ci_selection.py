@@ -313,6 +313,19 @@ SHARED_MODULES = (
     # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`)
     # cannot see it and this registration has to be made by hand.
     "tests/_change_feed_isolation.py",
+    # #3590 round-5 review F4: the minted-identity id RESOLVER
+    # (`tests/_node_ids.py`) replaced the retired `entity_name_id` derivation in
+    # the tests that need "the id of this name", and it is imported ACROSS
+    # surfaces — `test_sdk_group3.py` (sdk), `test_capture_session.py` /
+    # `test_ingest_event_endpoint.py` / `test_event_provenance.py` /
+    # `test_status_folds_2729.py` (core), `test_7936_stable_stub_ids.py`
+    # (core + sdk), and roughly a dozen more. Same class as `_live_utils.py`
+    # above: it is NOT a `test_*.py` file, so the manifest never classifies it —
+    # without this entry a helper-only change selected `core` only, and a break
+    # it induced in a sdk/api test would never run on the PR that made it (the
+    # #1349/#3332/#3910 under-selection class). Note `--integrity` cannot see
+    # this gap: it rglobs `test_*.py` only.
+    "tests/_node_ids.py",
     # this PR (#1436 / #5084 remainder): the in-process live-skip gate
     # (`tests/_live_gate.py`) is imported at conftest MODULE level and is applied
     # from `pytest_runtest_setup` — i.e. it runs before EVERY test on EVERY
@@ -2311,7 +2324,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # on the very change that can break them (#6138-review-P1 class).
              # Kept here so `_selection_relevant` claims it in `_keep_changed`
              # and the core fallback stays alive.
-             "integrations/cli-extraction/extract_turns.py")
+             "integrations/cli-extraction/extract_turns.py",
+             # #5086 review P1-2: the substrate map's drift guard
+             # (`tests/test_substrate_map.py`, registered `core` + `tier1`) has TWO
+             # arms a filter can swallow, and this entry closes the tool half.
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry and nothing in
+             # SOURCE_PATTERNS matches the tool, so a `tools/substrate_map_check.py`
+             # -only diff came back `changed == []`, took the docs-only early
+             # return and fell to tier-1 smoke — the tool's own test would not run
+             # on the PR editing the tool. MEASURED before this entry
+             # (`select()` in-process): `select(["tools/substrate_map_check.py"])`
+             # → surfaces=[], full=False, and the pin ABSENT from test_files.
+             # After: surfaces=['core'], pin present. The DOC half
+             # (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`) is deliberately NOT
+             # claimed here: a docs-only diff must stay on the tier-1 path, which is
+             # why the file is dual-registered there — see the `tier1` row's comment
+             # and config/ci-surfaces.yml's `core`-home row.
+             # Pinned by tests/test_ci_selection.py::
+             # test_substrate_map_guard_runs_on_the_diffs_it_guards.
+             "tools/substrate_map_check.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
