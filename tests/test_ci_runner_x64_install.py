@@ -544,9 +544,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:546-548`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:560-562`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:702-703`). Keeping
+    (`docs/ops/ci-runner-x64.md:716-717`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -624,11 +624,24 @@ def test_the_version_pin_carve_out_obeys_the_boxes_own_choice(tmp_path: Path):
       * `on`     → the pin THIS BOX CAN CLAIM (`ubuntu-24.04`) is KEPT and printed as
                    `version-pinned, kept=[…]`; the rest of the family — `ubuntu-24.04-arm`, an
                    ARM64 image — stays DROPPED and is printed on `not kept=` / `removed=`;
-      * `auto`   → same (the box may claim one);
+      * `auto` on a host whose `/etc/os-release` reports 24.04 → same (the box claims one);
+      * `auto` on any OTHER host (22.04, non-Linux) → DROPPED. The DECLINE is the answer: the
+                   repair reads the RESOLUTION (`$OS_LABELS`), not the flag's spelling;
       * unset    → dropped (the pre-departure invariant `_preserve_labels` also enforces);
       * `yes`    → REFUSED before any mode runs (exit 1). The flag is validated ONCE, before the
                    dispatch, so an unrecognised value cannot reach this carve-out at all — the
                    pre-#10275 code read it as `off`, which made a typo look like a working revert.
+
+    ⛔ THE DECLINING-`auto` ARMS ARE THE POINT OF THIS TEST AT THIS HEAD (#10275). The carve-out
+    used to read `case "${CI_RUNNER_OS_LABEL:-off}" in on|auto)`, i.e. the FLAG SPELLING, so a box
+    that had just printed `os-label: auto DECLINED — … ubuntu-24.04 not claimed` went on to KEEP the
+    pin and re-PUT it — and a repair only UNIONS, so that claim the box had itself declined became
+    PERMANENT until an operator ran an explicit `off` repair. `--status`, in the same script,
+    already read the resolution for the identical flag and reported the pool as NOT asked. The
+    `auto` arms therefore set BOTH seams (`CI_RUNNER_OS_NAME` / `CI_RUNNER_OS_RELEASE`): without
+    them the arm only ever exercised whatever host the suite happens to run on, which is insensitive
+    to the one property `auto` is defined by and cannot tell "reads the resolution" from "ignores
+    the resolution".
 
     ⛔ THE KEEP IS NARROWED TO `$OS_LABEL`, NOT THE WHOLE CLASS. `resolve_os_label` can only ever
     emit `ubuntu-24.04`, and a label names an IMAGE: keeping `ubuntu-24.04-arm` on an x86_64 runner
@@ -639,20 +652,32 @@ def test_the_version_pin_carve_out_obeys_the_boxes_own_choice(tmp_path: Path):
 
     Non-vacuity: with the flag ignored (an unconditional drop, the shape review rejected) the `on`
     arm reds on the PUT set and on the `kept=` line; with the flag inverted (an unconditional keep)
-    the unset arm reds on `ubuntu-24.04` appearing in the PUT; and with the keep widened back to the
+    the unset arm reds on `ubuntu-24.04` appearing in the PUT; with the keep widened back to the
     whole family the `on` arm reds on `ubuntu-24.04-arm` appearing in the PUT and on the `kept=`
-    line.
+    line; and with the pre-fix FLAG-SPELLING read (`case "${CI_RUNNER_OS_LABEL:-off}" in on|auto)`)
+    the declining-`auto` arms red on the PUT set, on `kept=[]`, on `not kept=` and on `removed=` —
+    measured against the pre-fix code at `b5ff9b24a`.
     """
-    # `on` / `auto`: the box has opted in, so the pin it can actually claim survives — and ONLY it
-    for value in ("on", "auto"):
+    rel24 = tmp_path / "os-release-24"
+    rel24.write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+    rel22 = tmp_path / "os-release-22"
+    rel22.write_text('NAME="Ubuntu"\nVERSION_ID="22.04"\n')
+
+    # `on`, and `auto` on a host that REPORTS the pinned release: the box has opted in, so the pin
+    # it can actually claim survives — and ONLY it
+    for value, seams in (
+        ("on", {}),
+        ("auto", {"CI_RUNNER_OS_NAME": "Linux", "CI_RUNNER_OS_RELEASE": str(rel24)}),
+    ):
         stub, env = _repair_runner(tmp_path / f"opt-{value}", pool="1", labels=POOL_LABELS)
         env["CI_RUNNER_OS_LABEL"] = value
+        env.update(seams)
         r = _run("--repair-labels", "--count", "1", env=env)
         assert r.returncode == 0, r.stderr
         put = _put_body(stub)
         assert "ubuntu-24.04" in put, (
-            f"CI_RUNNER_OS_LABEL={value} is the box's recorded state — a repair must not strip the "
-            f"pin it opted into: {put}"
+            f"CI_RUNNER_OS_LABEL={value} is the box's recorded state, and this host CLAIMS the pin "
+            f"— a repair must not strip it: {put}"
         )
         assert "ubuntu-24.04-arm" not in put, (
             f"keeping `ubuntu-24.04-arm` PUTs an ARM64 image claim onto an x86_64 runner — the "
@@ -666,6 +691,40 @@ def test_the_version_pin_carve_out_obeys_the_boxes_own_choice(tmp_path: Path):
         assert "NOT KEPT: 'ubuntu-24.04-arm'" in r.stderr, (
             f"the reason must be printed, not left to be inferred from `not kept=`: {r.stderr}"
         )
+        # …and the log says WHICH reading decided it, so it cannot disagree with `--status`
+        assert "resolved claim=ubuntu-24.04" in r.stderr, r.stderr
+
+    # ⛔ A DECLINING `auto` IS THE SAME ANSWER AS `off`: the resolution claimed nothing, so nothing is
+    # kept — even though the runner already carries the pin, and even though the FLAG spelling is
+    # still `auto`. Keeping it here is what makes a declined claim permanent.
+    for case, seams in (
+        ("rel-22.04", {"CI_RUNNER_OS_NAME": "Linux", "CI_RUNNER_OS_RELEASE": str(rel22)}),
+        ("not-linux", {"CI_RUNNER_OS_NAME": "Darwin"}),
+    ):
+        stub, env = _repair_runner(tmp_path / f"declined-{case}", pool="1", labels=POOL_LABELS)
+        env["CI_RUNNER_OS_LABEL"] = "auto"
+        env.update(seams)
+        r = _run("--repair-labels", "--count", "1", env=env)
+        assert r.returncode == 0, r.stderr
+        assert "DECLINED" in r.stderr, (
+            f"the premise of this arm is that `auto` DECLINED on this host: {r.stderr}"
+        )
+        put = _put_body(stub)
+        assert not {"ubuntu-24.04", "ubuntu-24.04-arm"} & set(put), (
+            f"`auto` declined on this host, so the box claimed nothing — a repair that keeps (and "
+            f"re-PUTs) the pin makes a claim the box itself declined PERMANENT, and it is the false "
+            f"PASS the carve-out exists to stop: {put}"
+        )
+        assert "version-pinned, kept=[]" in r.stderr, r.stderr
+        assert "version-pinned, not kept=[ubuntu-24.04,ubuntu-24.04-arm]" in r.stderr, r.stderr
+        assert "removed=[ubuntu-24.04,ubuntu-24.04-arm]" in r.stderr, (
+            f"the drop is a REMOVAL and must be printed as one: {r.stderr}"
+        )
+        assert "resolved claim=none" in r.stderr, (
+            f"the `removed=` line must print the resolution that decided the carve-out — printing "
+            f"the flag alone is how the log agreed with the writer even where it was wrong: "
+            f"{r.stderr}"
+        )
 
     # unset (and an explicit `off`): the pre-departure invariant — the pin is dropped and printed
     for value in ("", "off"):
@@ -676,6 +735,7 @@ def test_the_version_pin_carve_out_obeys_the_boxes_own_choice(tmp_path: Path):
         put = _put_body(stub)
         assert not {"ubuntu-24.04", "ubuntu-24.04-arm"} & set(put), put
         assert "version-pinned, kept=[]" in r.stderr, r.stderr
+        assert "resolved claim=none" in r.stderr, r.stderr
 
     # an unrecognised value NEVER REACHES the carve-out: the flag is validated once, before every
     # mode, so this is a usage error with nothing read and nothing PUT.
@@ -2907,41 +2967,41 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
 
     # cited number -> a regex the line at that number must match, i.e. what the sentence names
     anchors: dict[int, str] = {
-        109: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
-        235: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
-        268: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        272: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        276: r"^fallback_engaged\(\) \{",
-        299: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
-        304: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
-        336: r"^resolve_labels\(\) \{",
-        375: r"label algebra: the UNION",  # "the union's label algebra at"
-        399: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        427: r"── status ──",  # the `--status` block
-        450: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        790: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        798: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        807: r"found NO runs-on label to check",  # zero labels -> exit 4
-        373: r"^\}$",  # "whose body ends at its `}` on"
-        1025: r"exit 5",  # the uncovered verdict
-        1047: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        1072: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1196: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1228: r'MODE" = labels',  # "`--print-labels`"
-        1255: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1260: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1263: r"FORK HEADROOM FIRST",  # "forks"
-        1283: r"DISK NEXT",  # "disk"
-        1290: r"CPU LAST",  # "cpu/memory"
-        1307: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1308: r'MODE" = uninstall',  # "`uninstall`"
-        1433: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1436: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1444: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1447: r"registration-token",  # "token"
-        1452: r"^    set -- --unattended",  # "one argv"
-        1454: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1464: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
+        237: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
+        270: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        274: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        278: r"^fallback_engaged\(\) \{",
+        301: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
+        306: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
+        338: r"^resolve_labels\(\) \{",
+        377: r"label algebra: the UNION",  # "the union's label algebra at"
+        401: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        429: r"── status ──",  # the `--status` block
+        452: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        792: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        800: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        809: r"found NO runs-on label to check",  # zero labels -> exit 4
+        375: r"^\}$",  # "whose body ends at its `}` on"
+        1027: r"exit 5",  # the uncovered verdict
+        1049: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        1074: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1221: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1253: r'MODE" = labels',  # "`--print-labels`"
+        1280: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1285: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1288: r"FORK HEADROOM FIRST",  # "forks"
+        1308: r"DISK NEXT",  # "disk"
+        1315: r"CPU LAST",  # "cpu/memory"
+        1332: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1333: r'MODE" = uninstall',  # "`uninstall`"
+        1458: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1461: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1469: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1472: r"registration-token",  # "token"
+        1477: r"^    set -- --unattended",  # "one argv"
+        1479: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1489: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -3230,11 +3290,11 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
         90: r"DROPS the whole class on re-registration",
-        546: r"A foreign arch marker",
-        702: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        560: r"A foreign arch marker",
+        716: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        813: r"test_the_changes_job_carries_no_job_scope_env",
+        836: r"test_the_changes_job_carries_no_job_scope_env",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -3282,7 +3342,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:813` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:836` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
