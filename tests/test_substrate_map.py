@@ -20,6 +20,7 @@ unregistered test file).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,40 @@ DOC = REPO / "docs" / "architecture" / "SUBSTRATE-REBUILD-MAP.md"
 
 def _doc() -> str:
     return DOC.read_text(encoding="utf-8")
+
+
+#: §5's `:Document` measurement, as the document states it: LINES across FILES.
+#: The `files` half is optional in the PATTERN so a document that states only a
+#: line count is compared on that number (rather than reported as "the sentence is
+#: gone") — its absence is then the failure, not an unparsed match.
+_LABEL_CLAIM = re.compile(
+    r"occurs on \*\*(\d+)\*\*\s+lines(?:\s+across\s+\*\*(\d+)\*\*\s+files)?"
+)
+
+_COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
+
+
+def _label_hits() -> tuple[int, int, int]:
+    """`(lines, files, narrow)` for `:Document` under `tortoise/`.
+
+    Measured directly rather than through `subprocess`, so a broken `git` cannot
+    make the claim and its check agree by both failing: `git grep -n` prints one
+    line per MATCHING LINE, `git grep -l` one per FILE — the exact distinction
+    §5's figure got wrong.
+    """
+    lines = files = narrow = 0
+    for path in sorted((REPO / "tortoise").rglob("*.py")):
+        hits = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if ":Document" in line
+        ]
+        if not hits:
+            continue
+        files += 1
+        lines += len(hits)
+        narrow += sum(1 for line in hits if re.search(r"\(\w*:Document", line))
+    return lines, files, narrow
 
 
 def _ancestry_is_verifiable_here() -> bool:
@@ -175,8 +210,9 @@ def test_the_d10_retirement_mechanism_is_checked(monkeypatch) -> None:
     Reachable: `migrate_kinds.py` does not declare `build_master_list`, so
     retargeting the pair is a real file that genuinely lacks the symbol — exactly
     what deleting the migration would leave behind. The `:Document` label itself
-    is deliberately NOT regex-checked (17 prose mentions at this head), so the
-    retirement is guarded through these two symbols instead.
+    is deliberately NOT regex-checked (55 prose lines across 17 files at this
+    head — pinned by `test_the_document_label_prose_count_is_the_LINE_count`), so
+    the retirement is guarded through these two symbols instead.
     """
     monkeypatch.setattr(
         smc,
@@ -394,6 +430,73 @@ def test_the_json_manifest_names_what_it_does_not_check() -> None:
     # The unverified channel is part of the manifest: a caller must be able to see
     # WHICH claim a state error stopped, instead of inferring it from the exit code.
     assert "unverified" in result, result
+
+
+def test_the_document_label_prose_count_is_the_LINE_count() -> None:
+    """Fails if §5's `:Document` figure is a FILE count wearing a line's name.
+
+    Reachable — and it WAS the shipped state: §5 read *":Document occurs on **17**
+    lines under `tortoise/` at `4f68a2aa7`"*, but 17 is `git grep -l`'s FILE count;
+    `git grep -n` (`git grep -c` too — "the number of matching lines", per the
+    git-grep manual) counts **55** LINES at exactly that commit, which is also 55
+    at this head. The number is load-bearing: it is the evidence §5 records for
+    the decision NOT to regex-check the label, so it is the number a reader
+    re-examining that decision quotes — and it was wrong by 3x.
+
+    §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
+    still matching exactly **two** RST literals is what makes *"a guard would have
+    needed a hand-maintained allowlist"* a measurement rather than an assertion.
+    """
+    doc = _doc()
+    match = _LABEL_CLAIM.search(doc)
+    assert match, (
+        "§5's `:Document` measurement sentence is gone or was reworded — re-measure "
+        "it rather than dropping it; the no-regex-check decision rests on it"
+    )
+    claimed_lines = int(match.group(1))
+    claimed_files = int(match.group(2)) if match.group(2) else None
+    lines, files, narrow = _label_hits()
+    assert claimed_files is not None, (
+        f"§5 states {claimed_lines} lines but no file count — the tree has {lines} "
+        f"lines across {files} files; state BOTH, because confusing the two is the "
+        "defect this pins"
+    )
+    assert (claimed_lines, claimed_files) == (lines, files), (
+        f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
+        f"{lines} lines across {files} files — re-measure the claim (§5)"
+    )
+    assert narrow == 2, (
+        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 2 "
+        "RST literals §5 records — the exclusion argument needs re-measuring"
+    )
+
+
+def test_the_summary_line_agrees_with_the_named_holes_section() -> None:
+    """Fails if §1's headline count contradicts §8's, as it did when shipped.
+
+    Reachable — and it WAS the shipped state: §1 said the map "describes … four
+    named holes", then **one clause later** "no live hole of the two it names".
+    The count and the phrase naming the count disagreed inside a sentence pair,
+    while §8 (*"The issue body names two holes"*), D5 (*"The hole count went
+    2 → 1"*) and the source (#5086's body: WS-B and WS-D are the two workstreams
+    no epic references) all say **two**. §1 is the section whose premise is
+    *"Everything below that carries a state token was read, not remembered"*, so
+    a self-contradicting number there is the one place it cannot be tolerated.
+
+    The check is a CONSISTENCY one (the two sections must agree) rather than a
+    pin on `two`: a re-cut at a new `measured_at_commit` may legitimately change
+    the count, and when it does both sections must move together.
+    """
+    doc = _doc()
+    summary = re.search(r"(\w+)\s+named holes", smc._section(doc, "## 1."))
+    named = re.search(r"names (\w+) holes", smc._section(doc, "## 8."))
+    assert summary and named, (summary, named)
+    for word in (summary.group(1), named.group(1)):
+        assert word in _COUNT_WORDS, f"unparsed hole count {word!r} — the wording moved"
+    assert summary.group(1) == named.group(1), (
+        f"§1 says {summary.group(1)!r} named holes; §8 says the body names "
+        f"{named.group(1)!r} — the two must agree (§8/D5 are the measurement)"
+    )
 
 
 def test_cli_exit_codes() -> None:

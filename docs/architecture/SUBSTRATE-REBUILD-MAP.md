@@ -62,10 +62,12 @@ git rev-parse HEAD            # 4f68a2aa73be4572c3ea88367981ca874ca0e54b
 | lane issues closed | **6 of 7** — `#5093` `#5094` `#5096` `#5097` `#5149` `#5150` |
 
 **The load-bearing consequence:** the map a lane would read today (the #5086
-body plus ten comments) describes **seven live lanes, five live epics and four
-named holes**. Measured, it is **one live lane, four live epics, and no live
-hole of the two it names**. A lane that trusted the issue body would plan against
-a workstream that is ~60 % shipped.
+body plus ten comments) describes **seven live lanes, five live epics and two
+named holes**. Measured, it is **one live lane, four live epics, and one live
+hole of the two it names** — WS-B is closed outright, while WS-D keeps two of
+its three issues open and only its approval gate (#2725) is closed (§8, D5). A
+lane that trusted the issue body would plan against a workstream that is ~60 %
+shipped.
 
 ---
 
@@ -225,10 +227,13 @@ symbol pair this guard does check: the writers' retired-key allowlist
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **17** lines under `tortoise/`
-at `4f68a2aa7`, and every one of them is prose that *names the retired label* —
-a docstring, a comment, or an RST literal in `migrate_kinds.py:63` describing
-the pre-D10 shape. A pattern loose enough to catch a mint also catches those,
+and the reason is measured: `:Document` occurs on **55** lines across **17**
+files under `tortoise/` at `4f68a2aa7` (`git grep -n ':Document'` → 55 lines,
+`git grep -l ':Document'` → 17 files — the file count is not the line count), and
+every one of those lines is prose that *names the retired label* —
+a docstring, a comment, a printed message, or an RST literal in
+`migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
+catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches two RST
 literals. A guard carrying a hand-maintained allowlist of docstrings is a guard
 nobody can trust, so the label claim stays evidence recorded here rather than a
