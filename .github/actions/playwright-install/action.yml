@@ -1,8 +1,8 @@
 name: playwright-install
 description: >-
-  Install a Playwright browser AND the system dependencies it needs — with apt
-  told to WAIT for its lock instead of losing the race against a co-tenant job on
-  the same runner host.
+  Install a Playwright browser AND the system dependencies it needs — retrying
+  through a co-tenant's apt lock instead of losing the race against it on the
+  same runner host.
 
   WHY (#10214). `python -m playwright install --with-deps <browser>` shells out to
   `apt-get install` for the browser's system libraries, and apt-get's DEFAULT is
@@ -19,13 +19,26 @@ description: >-
   never ran. The red described a neighbour's apt, not this branch, and re-running
   it is a coin flip on who else is installing at that moment.
 
-  THE FIX is apt's own mechanism, not a wrapper: `DPkg::Lock::Timeout`
-  (apt.conf(5), the DPkg group) makes an apt invocation WAIT that many seconds for
-  the lock instead of failing. It is written ONCE into `Dir::Etc::Parts`
-  (`/etc/apt/apt.conf.d/`, which every apt tool reads at startup), so it reaches
-  the `apt-get` calls Playwright makes INTERNALLY — which a `-o` flag on our own
-  command line cannot, because we do not issue that call. `ensure-rsync` already
-  passes the same option for the same race; this makes it the job's default.
+  THE FIX has two parts, and apt's SOURCE says which covers which (#10337):
+
+  (a) `DPkg::Lock::Timeout` (the `Dpkg` group; apt's own default table declares
+  `Version::2.0::Dpkg::Lock::Timeout` — apt-private/private-cmndline.cc — and
+  apt's config lookup is case-insensitive, so this spelling binds) written ONCE
+  into `Dir::Etc::Parts` (`/etc/apt/apt.conf.d/`, which every apt tool reads at
+  startup), so it reaches the `apt-get` calls Playwright makes INTERNALLY — which
+  a `-o` flag on our own command line cannot, because we do not issue that call.
+  `ensure-rsync` already passes the same option for the same race; this makes it
+  the job's default.
+
+      ⚠️ WHAT IT DOES NOT COVER: not the lock the red above named. apt takes
+      `/var/lib/apt/lists/lock` through `pkgAcquire::GetLock` →
+      `::GetLock(flCombine(Lock, "lock"))`, and on the release the runners ship
+      (2.8.y, as on main) that is `GetLock(string File, bool Errors)` — there is
+      no timeout parameter on that path for this option to feed. It is a
+      `Dpkg`-group option and it stays one.
+
+  (b) The bounded 3-attempt retry below is therefore the mechanism that covers a
+  contended LISTS lock — it is not a belt-and-braces extra around (a).
 inputs:
   browser:
     description: Playwright browser name (chromium, firefox, webkit).
@@ -57,12 +70,12 @@ runs:
           echo "::error::$conf does not carry DPkg::Lock::Timeout — apt will NOT wait for the lock"
           exit 1
         }
-        # Bounded retry for the residual the timeout cannot cover: a co-tenant
-        # holding the lock for longer than LOCK_TIMEOUT. Same three-attempt shape
-        # (and backoff) as the wrangler install loops, and the last attempt is
-        # HARD — falling through would report a green step for an install that
-        # never happened, and every suite behind it would fail on a missing
-        # browser instead of saying so here.
+        # Bounded retry — the only thing here that covers a contended LISTS lock
+        # (see (b) in the description: the apt.conf fragment does not reach that
+        # path, #10337). Same three-attempt shape (and backoff) as the wrangler
+        # install loops, and the last attempt is HARD — falling through would
+        # report a green step for an install that never happened, and every suite
+        # behind it would fail on a missing browser instead of saying so here.
         for attempt in 1 2 3; do
           if python -m playwright install --with-deps "$BROWSER"; then
             exit 0

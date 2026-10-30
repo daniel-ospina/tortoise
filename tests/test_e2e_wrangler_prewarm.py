@@ -1355,8 +1355,12 @@ def test_no_document_uploads_from_the_repository_root() -> None:
 #: preview boot and the whole suite behind it never ran).
 INLINE_PLAYWRIGHT_INSTALL = re.compile(r"\bpython -m playwright install\b")
 
-#: The one place a browser install may live now: the composite action that makes
-#: apt WAIT for its lock before installing.
+#: The one place a browser install may live now: the composite action that
+#: retries through a co-tenant's apt lock before installing. (It also writes a
+#: `Dpkg::Lock::Timeout` apt.conf fragment, which covers the DPKG lock — NOT the
+#: `/var/lib/apt/lists/lock` named above: apt's lists-lock path,
+#: `pkgAcquire::GetLock` → `::GetLock(string, bool)`, takes no timeout. The retry
+#: is the mitigation for the measured red. See #10337.)
 PLAYWRIGHT_ACTION = "./.github/actions/playwright-install"
 
 #: Its document, as `_workflow_paths()` labels it. Exempt from the INLINE arm
