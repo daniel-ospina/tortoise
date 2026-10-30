@@ -22,19 +22,21 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 77 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
+| `ubuntu-latest` | 76 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
 | `ubuntu-24.04` | 9 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
-Counts are JOBS (not files), re-measured 2026-10-29 on this branch (`yaml.safe_load` each workflow,
-count each job's `runs-on`): **77 / 9** — the same label set `--status`'s `label-coverage` block
-reads (it counted 85 / 12 before it stripped whole-line comments), though that block reports RUNNER
-counts per label, not job counts: measured on the live pool it prints `ubuntu-24.04 = 7 of 7
+Counts are JOBS (not files), re-measured 2026-10-30 at this head (`yaml.safe_load` each workflow,
+count each job's `runs-on`): **76 / 9** — the label classes `--status`'s `label-coverage` block
+measures, though that block reports RUNNER counts per label, not job counts: measured on the live
+pool it prints `ubuntu-24.04 = 7 of 7
 online runner(s)` (a bare version pin is measured against the x64 sub-pool, its own denominator,
 and only ONLINE runners are counted — an offline runner cannot be handed a job) and
 `ubuntu-latest = 0 of 12 online runner(s)` (a report — the gate is simply not routing that label
-here). The 77 / 9
-figure above counts only jobs whose `runs-on` names a single `ubuntu-*` label; `--status` reads
-every documented `runs-on` form (scalar, array, block sequence, and a `group:`/`labels:` mapping)
+here). ⛔ On THIS tree that block refuses instead — `exit 4` and NO row — because one job has no
+static label set at all (see *Verify it*); it counted 85 / 12 before it stripped whole-line
+comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so ONE job
+here is in neither; `--status` reads every documented `runs-on` form (scalar, array, block
+sequence, and a `group:`/`labels:` mapping)
 and refuses with `exit 4` rather than guess on an expression it cannot resolve to a static label
 set — including when the expression is only ONE member of a list that otherwise parses, since a
 parsed sibling must not answer for an unparsed one (GitHub documents both the combined
@@ -287,6 +289,30 @@ ratio and printed as context instead (``Offline, so NOT counted as an answer: K 
 are not `online`, J of them carrying <label>``). Without that split, 7 carriers all offline
 printed `7 of 7` and exited 0 under `CI_RUNNER_OS_LABEL=on`: the incident this block exists to
 surface, reported green.
+
+⛔ **On THIS tree that read refuses — `exit 4`, and ZERO `<label> = <n> of <m>` rows — and that is
+the instrument working, not a broken check.** The no-verdict arms run BEFORE any per-label verdict,
+so `.github/workflows/python-ci.yml:716`'s `runs-on: ${{ fromJSON(matrix.runner) }}` (#10186 — the
+selector emits the per-row label array) makes the whole block no-verdict here: it prints
+`⛔ label-coverage could not read 1 runs-on: block(s) as a STATIC label set`, then exits `4`. The
+inventory above is therefore a HAND measurement, never this read's transcript, and a `--status && …`
+gate on this tree stops at that refusal rather than reporting coverage. Teaching the extractor to
+resolve the expression is not a parser fix: the label array is computed by
+`tools/ci_selection.py::fast_matrix_include`, not written in the workflow, so resolving it would mean
+executing the selector inside the instrument. The two reads that still answer — neither of them a
+read of workflow syntax:
+
+- **the refused job's label set** — the selector's default routing (`hosted-only`) gives every row
+  `["ubuntu-latest"]`; the opt-in `pool-split` also alternates `["self-hosted", "self-hosted-x64"]`
+  in. Either way that job sits inside the `ubuntu-latest` class, so the refusal leaves no class
+  unmeasured;
+- **who answers a label** — the pool-side read the block itself makes,
+  `gh api --paginate repos/daniel-ospina/tortoise/actions/runners`, which reads the pool and is
+  unaffected by how a workflow spells its `runs-on:`.
+
+Re-run the block on a tree whose `runs-on:` values are all static (or after #10186's `fromJSON` row
+is reverted) to get the `<label> = <n> of <m>` rows back.
+
 The EXIT is decided per CLASS, not "any zero-answer label":
 
 - a bare `ubuntu-<version>` with **no** answer is verdicted **only when this pool is asked to serve

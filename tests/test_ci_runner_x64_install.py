@@ -501,7 +501,7 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
     """⛔ THE UNION'S NAMED CARVE-OUT (a): `ubuntu-<version>` is DROPPED, not carried forward.
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
-    decision (not just a style choice): `docs/ops/ci-runner-x64.md:90-92` —
+    decision (not just a style choice): `docs/ops/ci-runner-x64.md:92-94` —
     "`_preserve_labels` DROPS the whole class on re-registration … so an attachment survives a
     repair that re-applies it (`--repair-labels` keeps only the box's own label under `on|auto`) and does NOT
     survive a re-registration". `tools/runner_autoscale.py::_preserve_labels` already drops the
@@ -544,9 +544,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:560-562`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:586-588`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:716-717`). Keeping
+    (`docs/ops/ci-runner-x64.md:742-743`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -3289,12 +3289,12 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
 
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
-        90: r"DROPS the whole class on re-registration",
-        560: r"A foreign arch marker",
-        716: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        92: r"DROPS the whole class on re-registration",
+        586: r"A foreign arch marker",
+        742: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        836: r"test_the_changes_job_carries_no_job_scope_env",
+        862: r"test_the_changes_job_carries_no_job_scope_env",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -3342,7 +3342,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:836` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:862` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3401,8 +3401,8 @@ _TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_aut
 _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
     25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
-    85: r"still does \*\*not\*\* claim any",
-    90: r"DROPS the whole class on re-registration",
+    87: r"still does \*\*not\*\* claim any",
+    92: r"DROPS the whole class on re-registration",
 }
 
 
@@ -3723,6 +3723,146 @@ def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
             "comment still reads as if the pool cannot answer that label, which is the premise this "
             "mitigation makes FALSE (measured: 7 of 12 runners carry it)"
         )
+
+
+# A GitHub Actions expression opener, spelled without braces-in-f-string hazards.
+_EXPR = "$" + "{{"
+
+
+def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_path: Path):
+    r"""The `ubuntu-latest` row is a MEASUREMENT, and the page must not sell a read it cannot get.
+
+    Both halves of this pin were false at `f83a7d1c1`, and nothing redded: the branch's own merge
+    brought in `#10186`, which replaced one literal `runs-on: ubuntu-latest` with
+    `runs-on: ${{ fromJSON(matrix.runner) }}` in `python-ci.yml`. Two consequences, neither
+    re-derived against the tree the merge produced:
+
+      1. the inventory is **76** `ubuntu-latest` jobs, not the 77 the page states (a number this PR
+         added itself);
+      2. that one non-static block makes `--status`' `label-coverage` read refuse with `exit 4`
+         BEFORE it verdicts any label — so the page's *Verify it* section told the operator to
+         confirm the mitigation with a read that prints the header, the refusal, and ZERO
+         `<label> = <n> of <m>` rows, while the PR body's transcript showed `rc 0` with two rows.
+
+    The refusal is CORRECT (a partial read is not a coverage verdict, pinned by 3b-ii); what was
+    wrong is a page and a verification transcript that assume this tree has no expression block.
+    So this pin holds both directions: the numbers must be the measured ones, and the refusal
+    paragraph must be present exactly while the tree still HAS a job the extractor cannot read.
+
+    Non-vacuity (measured at `f83a7d1c1`): with the pre-fix doc restored the count arms RED on
+    `77 != 76` and the *Verify it* arms RED on a section that never names `python-ci.yml:716`,
+    `exit 4`, or the `STATIC label set` refusal; deleting the `fromJSON` block (or making it static)
+    reds the last arm, which is the signal to delete the paragraph in the same change.
+    """
+    # Local import: a module-level one shifts this file's line numbers, and five other files cite
+    # `tests/test_ci_runner_x64_install.py:228` by number (pinned by
+    # `test_the_label_assertion_other_files_cite_lands_on_it`).
+    import yaml
+
+    wf_dir = REPO_ROOT / ".github" / "workflows"
+    counts = {"ubuntu-latest": 0, "ubuntu-24.04": 0}
+    unreadable: list[tuple[str, str, object]] = []
+
+    for path in sorted([*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")]):
+        workflow = yaml.safe_load(path.read_text()) or {}
+        for job, body in (workflow.get("jobs") or {}).items():
+            if not isinstance(body, dict) or "runs-on" not in body:
+                continue
+            value = body["runs-on"]
+            labels = value.get("labels") if isinstance(value, dict) else value
+            if labels is None:  # a `group:` with no `labels:` names no static label — skipped, as
+                continue  # the extractor's `group:`-only arm does (it is a report, not a refusal)
+            labels = [labels] if isinstance(labels, str) else labels
+            if any(_EXPR in str(m) for m in labels):
+                unreadable.append((path.name, job, value))
+                continue
+            for label in labels:
+                if label in counts:
+                    counts[label] += 1
+
+    assert counts["ubuntu-24.04"] == 9, (
+        "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
+        f"{counts}"
+    )
+    assert counts["ubuntu-latest"] == 76, (
+        "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
+        "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
+        f"not assume {counts['ubuntu-latest']} is right: {counts}"
+    )
+
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+
+    row = re.search(r"^\| `ubuntu-latest` \| (\d+) \|", runbook, re.MULTILINE)
+    assert row is not None, (
+        "the runbook no longer carries an `ubuntu-latest` count row — re-anchor this pin rather "
+        "than deleting it"
+    )
+    assert int(row.group(1)) == counts["ubuntu-latest"], (
+        f"the runbook's `ubuntu-latest` row says {row.group(1)}, the tree has "
+        f"{counts['ubuntu-latest']} jobs whose `runs-on:` names that single label"
+    )
+
+    stated = re.search(r"count each job's `runs-on`\): \*\*(\d+) / (\d+)\*\*", runbook)
+    assert stated is not None, (
+        "the runbook no longer states its re-measured `N / M` total — re-anchor this pin rather "
+        "than deleting it"
+    )
+    assert (int(stated.group(1)), int(stated.group(2))) == (
+        counts["ubuntu-latest"],
+        counts["ubuntu-24.04"],
+    ), (
+        f"the runbook states {stated.group(1)} / {stated.group(2)}, the tree measures "
+        f"{counts['ubuntu-latest']} / {counts['ubuntu-24.04']}"
+    )
+
+    # ⛔ AND THE REFUSAL PARAGRAPH IS TRUE ONLY WHILE THE TREE HAS A BLOCK IT CANNOT READ. The
+    # extractor's own arm (3b-ii) is what makes it correct; this is the RUNBOOK side, which is
+    # where an operator learns that the ``<label> = <n> of <m>`` transcript does not exist here.
+    assert unreadable, (
+        "no workflow names a non-static `runs-on:` any more, so this tree's `--status` DOES report "
+        "coverage rows — the runbook's 'on THIS tree that read refuses' paragraph is now false and "
+        "must be deleted in the same change as this assertion: "
+        f"{(REPO_ROOT / 'docs' / 'ops' / 'ci-runner-x64.md')}"
+    )
+    start = runbook.index("**Verify it \u2014 do not assume it.**")
+    section = runbook[start : runbook.index("The EXIT is decided per CLASS", start)]
+    for rel, job, value in unreadable:
+        needle = f"{rel}:{_line_of(REPO_ROOT / '.github' / 'workflows' / rel, f'runs-on: {value}')}"
+        assert needle in section, (
+            f"`{rel}::{job}` names `runs-on: {value}`, so `--status` refuses on THIS tree — but the "
+            f"runbook's *Verify it* section never cites `{needle}`. A page that tells the operator "
+            "to verify with a read that returns no verdict, and does not say so, sends them to a "
+            "transcript that cannot exist here."
+        )
+    assert "`exit 4`" in section and "STATIC label set" in section, (
+        "the *Verify it* section no longer states that this tree's coverage read REFUSES with exit "
+        f"4 (and why) — an operator reads it as a broken instrument: {section[-600:]!r}"
+    )
+
+    # ── behaviour, not prose: the read the page tells you to run, on the tree it ships in.
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"),
+        cwd=REPO_ROOT,
+    )
+    assert r.returncode == 4, (
+        "`--status` on THIS tree must refuse (4) rather than report coverage over the blocks it "
+        f"could not read — the runbook says so; got {r.returncode}: {r.stderr}"
+    )
+    assert "STATIC label set" in r.stderr, r.stderr
+    assert "online runner(s)" not in r.stderr, (
+        "a partial read printed per-label answer rows — the no-verdict arms must run BEFORE the "
+        f"loop, or a refusal is outvoted by the labels that did parse: {r.stderr}"
+    )
+
+
+def _line_of(path: Path, needle: str) -> int:
+    for i, line in enumerate(path.read_text().splitlines(), start=1):
+        if needle in line:
+            return i
+    raise AssertionError(f"{path} no longer contains {needle!r} — re-anchor this pin")
+
 
 
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────

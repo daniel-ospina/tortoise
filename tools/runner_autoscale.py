@@ -37,7 +37,7 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   survive a
   re-registration. The invariant stays OBSERVED, not ASSERTED: `read_pool()` reads the live label
   set on every pass and `_preserve_labels` drops a pin from it, but no test and no gate compares
-  the live set to the invariant (`docs/ops/ci-runner-x64.md:90-92`), so re-measure it after any runner
+  the live set to the invariant (`docs/ops/ci-runner-x64.md:92-94`), so re-measure it after any runner
   is registered -- `tools/install-ci-runner-x64.sh --status`' `label-coverage` block prints `N of M`
   and exits 5 exactly when the pool is ASKED for the label and answers with none (#10275).
 
@@ -278,7 +278,7 @@ ARCH_LABEL = {
 #: job pinned to one of those is escaping this pool exactly as a bare version pin does. The suffixed
 #: shape is in the class as defence in depth over the WHOLE hosted version family, NOT because it is
 #: the likeliest one to be attached here: this runbook is the x64 pool
-#: (`docs/ops/ci-runner-x64.md:13`), and the ARM64 VMs register their own markers (`:50-51`), so an
+#: (`docs/ops/ci-runner-x64.md:13`), and the ARM64 VMs register their own markers (`:52-53`), so an
 #: `-arm` pin on this box is the LEAST likely — and it is dropped anyway. A custom label that merely
 #: starts `ubuntu-<digits>` (e.g. `ubuntu-2204-tools`) is NOT in the class and must still be
 #: preserved.

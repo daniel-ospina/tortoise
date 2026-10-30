@@ -5790,7 +5790,7 @@ def test_the_changes_job_carries_no_job_scope_env():
     `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
     assertions below fail on that tree.
 
-    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:448`
+    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:474`
     and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1590`)
     both send an operator here by name, and both advertised
     `test_the_changes_job_carries_no_job_scope_env` while the function carried a
