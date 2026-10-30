@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
-from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.sdk import TortoiseSDK
 
 TEST_DB = os.environ.get("TEST_DB_PATH", "/tmp/tortoise_test_122.db")
@@ -34,11 +33,26 @@ def sdk():
 # ── Part 1: uses/produces edges ──────────────────────────────────────────
 
 class TestUsesProducesEdges:
-    """Events should auto-create Subject-performs->Event, Event-produces->Object,
-    and Event-uses->Object edges via _upsert_event."""
+    """An event wires Subject-performs->Event, Event-produces->Object and
+    Event-uses->Object edges via _upsert_event — to entities the producer
+    REGISTERED.
+
+    ⛔ #3590 D1 (owner-RULED 2026-10-26): "an unresolvable mention drops its
+    link, records the miss, and mints nothing." The fold used to MERGE a
+    name-keyed Object/Subject stub for every name a record mentioned; it now
+    RESOLVES the name to its single live holder and otherwise leaves the edge
+    unwired. So every positive row below registers the entity FIRST, and
+    `test_an_unregistered_mention_mints_nothing` is the pin on the retirement
+    itself (the pre-#3590 tree mints three stubs for that record).
+    """
 
     def test_performs_edge_created(self, sdk):
-        """_upsert_event with subject creates performs edge."""
+        """_upsert_event with subject creates performs edge.
+
+        The subject is REGISTERED first: since #3590 D1 the fold resolves a
+        mention instead of minting it, so an unregistered name would wire
+        nothing (see the retirement pin at the end of this class)."""
+        sdk.create_subject("alice", "engineer")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -61,7 +75,11 @@ class TestUsesProducesEdges:
         assert r[0][0] is True
 
     def test_produces_edge_created(self, sdk):
-        """_upsert_event with object creates produces edge."""
+        """_upsert_event with object creates produces edge.
+
+        The object is REGISTERED first (#3590 D1: the fold resolves a mention,
+        it does not mint it)."""
+        sdk.create_object("release-v1.0", "release")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -85,7 +103,11 @@ class TestUsesProducesEdges:
         assert r[0][0] is True
 
     def test_uses_edge_created(self, sdk):
-        """_upsert_event with uses list creates uses edges."""
+        """_upsert_event with uses list creates uses edges.
+
+        Both `uses[]` targets are REGISTERED first (#3590 D1)."""
+        sdk.create_object("dataset-a", "dataset")
+        sdk.create_object("dataset-b", "dataset")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -107,6 +129,7 @@ class TestUsesProducesEdges:
 
     def test_uses_single_string(self, sdk):
         """_upsert_event with uses as a single string works."""
+        sdk.create_object("paper-xyz", "paper")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -125,7 +148,13 @@ class TestUsesProducesEdges:
 
     def test_uses_deduplicates_duplicate_entries(self, sdk):
         """_upsert_event with uses containing duplicates must not create
-        duplicate edges — MERGE is idempotent on the pattern level (#146)."""
+        duplicate edges — MERGE is idempotent on the pattern level (#146).
+
+        Both targets are REGISTERED first (#3590 D1), so the count this pins
+        is really about the edge MERGE rather than about how many stubs the
+        fold could have minted."""
+        sdk.create_object("a", "dataset")
+        sdk.create_object("b", "dataset")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -154,6 +183,43 @@ class TestUsesProducesEdges:
         assert r_total[0][0] == 2, (
             f"Expected 2 total uses edges, got {r_total[0][0]}"
         )
+
+    def test_an_unregistered_mention_mints_nothing(self, sdk):
+        """#3590 D1 — a bare mention is NOT an entity.
+
+        FAILS IF: a `subject` / `object` / `uses[]` mention mints an Object or
+        a Subject again (the pre-#3590 name-keyed stub MERGE), or wires an edge
+        to it. It DOES require the event itself to be recorded: the record is
+        the evidence the link was dropped, not lost.
+        REACHABLE: every fold arm with no registered holder — the shape the
+        retired stub path existed for."""
+        proj = sdk._get_proj()
+        proj.apply({
+            "type": "EventRecorded",
+            "id": "ev-mention",
+            "eventId": "ev-mention",
+            "eventKind": "analysis",
+            "subject": "nobody-registered",
+            "object": "no-such-object",
+            "uses": ["no-such-input"],
+            "startedAt": "2024-01-01T00:00:00Z",
+        })
+        ev = proj.g.query(
+            "MATCH (e:Event {eventId:'ev-mention'}) RETURN count(e)"
+        ).result_set
+        assert ev[0][0] == 1, "the event record must still be folded"
+        for label in ("Object", "Subject"):
+            n = proj.g.query(
+                f"MATCH (n:{label}) RETURN count(n)"  # label is a loop literal
+            ).result_set
+            assert n[0][0] == 0, (
+                f"a bare mention minted a :{label} (D1 forbids it)")
+        edges = proj.g.query(
+            "MATCH (:Event {eventId:'ev-mention'}) "
+            "-[r:performs|produces|uses]->() RETURN count(r)"
+        ).result_set
+        assert edges[0][0] == 0, (
+            "a mention wired an edge to an entity nothing registered")
 
     def test_create_event_wires_about_subject(self, sdk):
         """create_event with aboutSubject creates aboutSubject edge."""
@@ -1015,7 +1081,12 @@ class TestNegativePaths:
     # ── create_event with uses containing empty strings ───────────────
 
     def test_create_event_uses_with_empty_strings(self, sdk):
-        """create_event with uses containing empty strings skips them gracefully."""
+        """create_event with uses containing empty strings skips them gracefully.
+
+        `valid-input` is REGISTERED first (#3590 D1 — a mention is resolved,
+        never minted), so the surviving edge is the one the fold can actually
+        wire; an empty string is not a writable MERGE key at all."""
+        sdk.create_object("valid-input", "dataset")
         ev = sdk.create_event("ev-empty-uses", "analysis",
                               uses=["", "valid-input", ""],
                               subject="test-agent")
@@ -1045,77 +1116,81 @@ class TestNegativePaths:
 # consistency digest. Before #7936 it was a RANDOM ulid. Its exact SHAPE was
 # never the contract #151 protects: the load-bearing half is `id != name`
 # below (the stub must not take the entity NAME as its id).
+#
+# ⛔ #3590 D1 retired the mint these three arms measured. `_event_plain_merge`
+# no longer creates a stub for `subject` / `object` / `uses[]`, so the
+# id-shape question is moot for them, and the arms that asserted a node (via a
+# self-comparison, `sid == node_id(proj, …)` — the same name→id read stated
+# twice) were red for it. What survives is pinned in
+# `TestAnUnregisteredMentionMintsNothing` below.
+
+
+class TestAnUnregisteredMentionMintsNothing:
+    """#3590 D1 (owner-RULED 2026-10-26): a mention is the LINK, never a
+    creation — an unresolvable mention drops its link, records the miss, and
+    mints nothing.
+
+    These three arms replace the retired `…_has_entity_name_id` pins, which
+    required the fold to CREATE a node per mention. D1 forbids that, so their
+    premise is now empty (`MATCH (n {name:…})` returns 0 rows) and their
+    replacement assertion had degenerated into a self-comparison: `node_id`
+    (`tests/_node_ids.py`) IS the `MATCH (n:Label {name:$name}) RETURN n.id`
+    read, so `sid == node_id(proj, …)` held for ANY fold — including one whose
+    stub id was a random `ulid()` (`#9876` review P1, `test-quality-gap`).
+
+    #151's real property survives as an ABSENCE here: a name mentioned in
+    prose can never become an id, because no node is written at all. The
+    presence half (an id is never the name) is `_mint_subject_stub`'s
+    residual — the `aboutSubject` mint whose `ON CREATE SET s.id=$name` is the
+    open #8914, deliberately NOT pinned as correct here.
+    """
+
+    @pytest.mark.parametrize("ref_key,label,name", [
+        ("subject", "Subject", "stub-agent-1"),     # performs
+        ("object", "Object", "artifact-stub-1"),    # produces
+        ("uses", "Object", "input-stub-1"),         # uses[]
+    ])
+    def test_a_fold_mention_of_an_unregistered_name_writes_no_node(
+            self, sdk, ref_key, label, name):
+        from tortoise.projection.nonfolded import (
+            SHAPE_UNFOLDED_MENTION,
+            collect_non_folded,
+            refused_events,
+        )
+
+        proj = sdk._get_proj()
+        record = {
+            "type": "EventRecorded",
+            "id": "ev-3590-1",
+            "eventId": "ev-3590-1",
+            "eventKind": "test",
+            "subject": "stub-agent-1",
+            "object": "artifact-stub-1",
+            "uses": ["input-stub-1"],
+            "startedAt": "2024-01-01T00:00:00Z",
+        }
+        with collect_non_folded() as entries:
+            proj.apply(record)
+
+        rows = proj.g.query(
+            f"MATCH (n:{label} {{name:$n}}) RETURN n.id",
+            params={"n": name}).result_set
+        assert rows == [], (
+            f"the fold MINTED a :{label} out of a bare `{ref_key}` mention "
+            f"(D1): {rows}")
+
+        miss = [e for e in entries if e.shape == SHAPE_UNFOLDED_MENTION]
+        assert miss, (
+            "the dropped mention left NO record — D1 requires the miss to be "
+            f"recorded (entries: {[str(e) for e in entries]})")
+        assert not refused_events(entries), (
+            "an unregistered mention was classified as a producer omission "
+            f"that fails the run: {[str(e) for e in refused_events(entries)]}")
 
 
 class TestStubEntityIdIsNotTheName:
-    """#151: `_upsert_event` auto-created Subject/Object stubs carry a real id
-    for the name — never the entity name itself (#7936: the canonical
-    `entity_name_id`, formerly a random ulid)."""
-
-    def test_performs_stub_subject_has_entity_name_id(self, sdk):
-        """Stub Subject created via performs edge gets the canonical id, not
-        the entity name."""
-        proj = sdk._get_proj()
-        proj.apply({
-            "type": "EventRecorded",
-            "id": "ev-ulid-1",
-            "eventId": "ev-ulid-1",
-            "eventKind": "test",
-            "subject": "stub-agent-1",
-            "startedAt": "2024-01-01T00:00:00Z",
-        })
-        r = proj.g.query(
-            "MATCH (s:Subject {name:'stub-agent-1'}) RETURN s.id, s.name"
-        ).result_set
-        assert len(r) == 1
-        sid, name = r[0][0], r[0][1]
-        assert name == "stub-agent-1"
-        assert sid == _entity_name_id("Subject", "stub-agent-1"), sid
-        assert sid != name, f"id must not be the entity name ({sid!r} == {name!r})"
-
-    def test_produces_stub_object_has_entity_name_id(self, sdk):
-        """Stub Object created via produces edge gets the canonical id, not
-        the entity name."""
-        proj = sdk._get_proj()
-        proj.apply({
-            "type": "EventRecorded",
-            "id": "ev-ulid-2",
-            "eventId": "ev-ulid-2",
-            "eventKind": "build",
-            "subject": "ci-bot",
-            "object": "artifact-stub-1",
-            "startedAt": "2024-01-01T00:00:00Z",
-        })
-        r = proj.g.query(
-            "MATCH (o:Object {name:'artifact-stub-1'}) RETURN o.id, o.name"
-        ).result_set
-        assert len(r) == 1
-        oid, name = r[0][0], r[0][1]
-        assert name == "artifact-stub-1"
-        assert oid == _entity_name_id("Object", "artifact-stub-1"), oid
-        assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
-
-    def test_uses_stub_object_has_entity_name_id(self, sdk):
-        """Stub Object created via uses edge gets the canonical id, not the
-        entity name."""
-        proj = sdk._get_proj()
-        proj.apply({
-            "type": "EventRecorded",
-            "id": "ev-ulid-3",
-            "eventId": "ev-ulid-3",
-            "eventKind": "analysis",
-            "subject": "analyst",
-            "uses": ["input-stub-1"],
-            "startedAt": "2024-01-01T00:00:00Z",
-        })
-        r = proj.g.query(
-            "MATCH (o:Object {name:'input-stub-1'}) RETURN o.id, o.name"
-        ).result_set
-        assert len(r) == 1
-        oid, name = r[0][0], r[0][1]
-        assert name == "input-stub-1"
-        assert oid == _entity_name_id("Object", "input-stub-1"), oid
-        assert oid != name, f"id must not be the entity name ({oid!r} == {name!r})"
+    """#151's surviving half: a stub that IS minted must not take the name as
+    its id (see the module comment above and `_mint_subject_stub`, #8914)."""
 
     def test_stub_preserves_existing_id_on_merge(self, sdk):
         """When the Subject already exists via `_upsert_subject` (with its own

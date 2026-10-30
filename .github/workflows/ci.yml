@@ -794,11 +794,30 @@ jobs:
         # already has the package installed cannot exhibit the failure mode:
         # inject a line into a listed artifact -> exit 1 naming the file;
         # restore -> exit 0.
+        #
+        # #5086: the substrate-map drift guard
+        # (`tools/substrate_map_check.py`, pinning
+        # `docs/architecture/SUBSTRATE-REBUILD-MAP.md` against the tree) is the
+        # second such guard and joins this step for the SAME reason, plus one of
+        # its own. Same reason: a docs-only edit of the map selects NO surface, so
+        # the guard's own test (`tests/test_substrate_map.py`, `core` + `tier1`)
+        # reaches it only through the curated `tier1` list — and `docs` is the
+        # REQUIRED, path-filter-free context that cannot inherit that skip.
+        # Extra reason, and it is why it must be HERE rather than only in the
+        # matrix: one of the guard's five claims is that the map's
+        # `measured_at_commit` is an ancestor of HEAD, which needs HISTORY. The
+        # `test` job checks out at the default `fetch-depth: 1`, so the object is
+        # absent there and the tool reports that claim UNVERIFIED (exit 2) rather
+        # than blaming the document (#5086 review P1-1). This job checks out at
+        # `fetch-depth: 0` (see the checkout above), so this is where the ancestry
+        # claim is actually proved. `--check` is verify-only; stdlib only, so it
+        # needs nothing from the `pip install` above (kept for its siblings).
         run: |
           pip install -e . --quiet
           python3 tools/bridge_table.py --check
           python3 tools/mcp_rename_table.py --check
           python3 tools/sdk_surface.py --check
+          python3 tools/substrate_map_check.py --check
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -1036,13 +1055,20 @@ jobs:
           # (fatal) are indistinguishable here. The differ decides from the report
           # — `Linting: N` must equal the changed-set count, and the findings
           # parsed must equal the Summary count.
-          set +e
-          xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3 \
-            > "$RUNNER_TEMP/mdlint-pr.txt" 2>&1
-          md_rc=$?
-          set -e
-          cat "$RUNNER_TEMP/mdlint-pr.txt"
-          echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
+          #
+          # #10265: the invocation is a script we own, NOT `npx` — see its header
+          # for the measured `sh: 1: markdownlint-cli2: not found` on two
+          # different runner pools, where npx execs a shared `_npx` cache's bin
+          # through `sh` and a partial link there reds this REQUIRED check. The
+          # script installs the PINNED linter into a private prefix, invokes it by
+          # ABSOLUTE path, and refuses to publish a report the pinned banner did
+          # not produce — so an absent linter fails HERE, naming the linter,
+          # instead of surfacing in the differ as a finding about the diff.
+          bash .github/scripts/docs-markdownlint.sh \
+            --label "Markdownlint (changed files)" \
+            --cli2 markdownlint-cli2@0.23.3 \
+            --files-from "$RUNNER_TEMP/pr-md.nul" \
+            --output "$RUNNER_TEMP/mdlint-pr.txt"
       - name: Link check (changed files)
         if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
         run: |
@@ -1170,13 +1196,14 @@ jobs:
           # NUL-delimited ARGV via xargs — a filename is data, never shell text.
           # #7435: captured, not adjudicated — the differ below decides. The exit
           # code is not the verdict (xargs rewrites it).
-          set +e
-          xargs -0 -a "$RUNNER_TEMP/changed-md.nul" \
-            npx --yes markdownlint-cli2@0.23.3 > "$RUNNER_TEMP/mdlint-mh.txt" 2>&1
-          md_rc=$?
-          set -e
-          cat "$RUNNER_TEMP/mdlint-mh.txt"
-          echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
+          # #10265: the same producer as the PR path, same reasons — see the script
+          # header for the measured `npx` failure that reds this required check on
+          # a runner whose shared npm cache cannot exec its own bin.
+          bash .github/scripts/docs-markdownlint.sh \
+            --label "Markdownlint (main health, changed files)" \
+            --cli2 markdownlint-cli2@0.23.3 \
+            --files-from "$RUNNER_TEMP/changed-md.nul" \
+            --output "$RUNNER_TEMP/mdlint-mh.txt"
       - name: Link check (main health, changed files)
         if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
         run: |
@@ -1826,6 +1853,11 @@ jobs:
     # (empty HEAD side); #1181's monitor move had dropped per-PR coverage of
     # the mocked welcome flows (the python matrix excludes tests/e2e/).
     timeout-minutes: 15
+    # #10283: preview state is PER-JOB and per-run — the helper's `dir` verb
+    # computes it from `$RUNNER_TEMP` (per-runner-agent even on a shared host),
+    # and its `alloc` verb hands each server a port it has just verified free.
+    # (Not a job-level `env:`: the `runner` context is unavailable there and
+    # actionlint reds it.)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -1894,40 +1926,50 @@ jobs:
           cd website/apps/dashboard
           npm ci
       - name: Start wrangler pages dev preview (website/ = Pages root)
+        id: marketing
         run: |
           cd website
+          PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           for attempt in 1 2; do
-            wrangler pages dev . --port 8788 --ip 127.0.0.1 \
+            # #10283: a per-run/per-job port, verified FREE before it is handed
+            # back — on a shared host a fixed literal let a peer job take the
+            # port while this job's readiness probe happily graded the PEER's
+            # checkout (the #2757 shape).
+            PREVIEW_PORT="$(bash "$PREVIEW" alloc --name marketing --base 8788)" || exit 1
+            wrangler pages dev . --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
-              > /tmp/wrangler.log 2>&1 &
-            echo $! > /tmp/wrangler.pid
+              > "$PREVIEW_STATE/marketing.log" 2>&1 &
+            # The pid THIS job started, recorded with its /proc start time —
+            # the only handle any teardown is allowed to signal.
+            # `|| true`: `record` exits 4 when the pid is already gone (the
+            # fast-exit wrangler named above). Tolerating it is what keeps the
+            # log dump + retry reachable under the runner's `bash -e`.
+            bash "$PREVIEW" record --name marketing --pid $! || true
             for i in $(seq 1 240); do
-              if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
-                echo "wrangler dev ready after ${i}s (attempt ${attempt})"
+              # `ready` (not just a bare curl) also requires our recorded pid to be
+              # ALIVE, and the port to answer HTTP 200 — not merely to accept a
+              # connect. It does NOT prove the LISTENER is ours (mapping the port to
+              # a pid needs `ss`/`lsof`, which the runner image does not guarantee),
+              # so `alloc`'s pre-boot free-check is what keeps a peer's server from
+              # being graded.
+              if bash "$PREVIEW" ready --name marketing; then
+                echo "preview ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
+                echo "port=${PREVIEW_PORT}" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               sleep 1
             done
             echo "attempt ${attempt} timed out — retrying"
-            kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
-            pkill -f 'wrangler.*8788' 2>/dev/null || true
-            pkill workerd 2>/dev/null || true
-            # NO rm of /tmp/wrangler.log here: attempt 2's relaunch truncates
-            # with > anyway, and deleting after the LAST attempt would remove
-            # the only evidence before the final cat (review P1 — a double
-            # failure must still surface wrangler's own diagnostics).
+            # Scoped: the recorded pid and its descendants, nothing else. The
+            # old `pkill workerd` / `pkill -f 'wrangler.*8788'` here killed a
+            # CONCURRENT job's previews on this host (#10283).
+            bash "$PREVIEW" stop --name marketing
             sleep 3
           done
-          # Final cleanup: flush the log + free :8788 before surfacing it
-          # below — a future failure must NOT be a black box.
-          kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
-          pkill -f 'wrangler.*8788' 2>/dev/null || true
-          pkill workerd 2>/dev/null || true
-          sleep 2
-          echo "::error::wrangler dev server failed to start (2 attempts)"
-          echo "--- /tmp/wrangler.log ---"
-          cat /tmp/wrangler.log || true
-          echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
+          echo "::error::the website preview failed to start (2 attempts)"
+          echo "--- ${PREVIEW_STATE}/marketing.log ---"
+          cat "${PREVIEW_STATE}/marketing.log" || true
           exit 1
       # #8826: `/welcome` is not served by this Pages root, so no
       # `wrangler pages dev` preview can exercise it. On every host this project
@@ -1938,7 +1980,7 @@ jobs:
       - name: Run welcome page E2E (loopback WELCOME_URL; /welcome 301s to the app origin) (#373/#1511)
         run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
         env:
-          WELCOME_URL: http://127.0.0.1:8788/welcome
+          WELCOME_URL: http://127.0.0.1:${{ steps.marketing.outputs.port }}/welcome
           # #4932: this job must NOT grade a branch against PRODUCTION's copy of
           # the onboarding document. ONBOARDING_SKILL_URL is deliberately left
           # unset, so before this flag the per-PR run fetched the deployed
@@ -1998,6 +2040,13 @@ jobs:
         run: node --experimental-strip-types tests/test_blog_markdown.mjs
       - name: Run blog SEO meta + agent-limiter harness (#8293)
         run: node --experimental-strip-types tests/test_blog_seo_meta.mjs
+      - name: Stop the preview server (scoped to this job's pid)
+        if: always()
+        # #10283: `stop-all` signals the pid this job RECORDED (and its
+        # descendants) and nothing else. Never reintroduce `pkill workerd` /
+        # `pkill -f 'npx wrangler …'` here: several runner agents share one host,
+        # so a pattern kill is machine-global and reds a concurrent PR's preview.
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/preview-server.sh" stop-all
 
   legal-e2e:
     runs-on: ubuntu-latest
@@ -2007,6 +2056,11 @@ jobs:
     # p50 1.79m, p95 8.91m, max 9.25m (n=26) — 20m clears the measured max by
     # >2× and stays above the runner-stall floor. See docs/ops/ci-wall-clock.md.
     timeout-minutes: 20
+    # #10283: preview state is PER-JOB and per-run — the helper's `dir` verb
+    # computes it from `$RUNNER_TEMP` (per-runner-agent even on a shared host),
+    # and its `alloc` verb hands each server a port it has just verified free.
+    # (Not a job-level `env:`: the `runner` context is unavailable there and
+    # actionlint reds it.)
     # Full legal-page suite (#657) — ~1000 assertions across 10 plan checks
     # (privacy/tos/license/dpa content, consent + pricing content, mocked
     # signup/signin flows, mobile render, full link crawl). The suite is
@@ -2072,53 +2126,53 @@ jobs:
           echo "::error::could not install wrangler ${WRANGLER_VERSION} after 3 attempts"
           exit 1
       - name: Start wrangler pages dev preview (website/ = Pages root)
+        id: marketing
         run: |
           cd website
+          PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           # The binary is the one the install step above verified against
           # config/wrangler-version (#8816) — no spec here, so nothing can drift.
           # 2026-09-04 ~04:00Z a runner-fleet cold-npx stall broke this boot on
-          # EVERY PR (#2178/#2211): /tmp/wrangler.log stayed EMPTY because a cold
-          # install never finished inside the readiness budget. That fetch now
-          # happens before the clock starts, and a failure to get it reds loudly.
+          # EVERY PR (#2178/#2211): the log stayed EMPTY because a cold install
+          # never finished inside the readiness budget. That fetch now happens
+          # before the clock starts, and a failure to get it reds loudly.
           #
           # --compatibility-date pinned: wrangler defaults to "today", but the
           # bundled workerd lags a day behind (max date < today) → dev server
           # fails to start. Any stable date ≤ workerd's max works; the
           # middleware uses only stable APIs (next()/ASSETS.fetch).
           for attempt in 1 2; do
-            wrangler pages dev . --port 8788 --ip 127.0.0.1 \
+            # #10283: per-run/per-job port, verified FREE first (see the job's
+            # `env:` note). No shared 8788 literal, and no /tmp pid file that a
+            # peer job's write could point at ITS server.
+            PREVIEW_PORT="$(bash "$PREVIEW" alloc --name marketing --base 8788)" || exit 1
+            wrangler pages dev . --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
-              > /tmp/wrangler.log 2>&1 &
-            echo $! > /tmp/wrangler.pid
+              > "$PREVIEW_STATE/marketing.log" 2>&1 &
+            bash "$PREVIEW" record --name marketing --pid $! || true
             # Wait for the dev server to accept connections (first start also
             # downloads workerd + bundles website/functions/_middleware.ts).
+            # `ready` also requires OUR recorded pid to be ALIVE and the port to
+            # answer HTTP 200 — not just to accept a connect. It does NOT prove the
+            # listener is ours (same `ss`/`lsof` caveat), so the per-job `alloc`
+            # free-check is what keeps a peer's server on the same port from being
+            # graded (#2757).
             for i in $(seq 1 240); do
-              if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
-                echo "wrangler dev ready after ${i}s (attempt ${attempt})"
+              if bash "$PREVIEW" ready --name marketing; then
+                echo "preview ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
+                echo "port=${PREVIEW_PORT}" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               sleep 1
             done
             echo "attempt ${attempt} timed out — retrying"
-            kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
-            pkill -f 'wrangler.*8788' 2>/dev/null || true
-            pkill workerd 2>/dev/null || true
-            # NO rm of /tmp/wrangler.log here: attempt 2's relaunch truncates
-            # with > anyway, and deleting after the LAST attempt would remove
-            # the only evidence before the final cat (review P1 — a double
-            # failure must still surface wrangler's own diagnostics).
+            bash "$PREVIEW" stop --name marketing
             sleep 3
           done
-          # Final cleanup: flush the log + free :8788 before surfacing it
-          # below — a future failure must NOT be a black box.
-          kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
-          pkill -f 'wrangler.*8788' 2>/dev/null || true
-          pkill workerd 2>/dev/null || true
-          sleep 2
-          echo "::error::wrangler dev server failed to start (2 attempts)"
-          echo "--- /tmp/wrangler.log ---"
-          cat /tmp/wrangler.log || true
-          echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
+          echo "::error::the website preview failed to start (2 attempts)"
+          echo "--- ${PREVIEW_STATE}/marketing.log ---"
+          cat "${PREVIEW_STATE}/marketing.log" || true
           exit 1
       # #4054: the auth surface (/auth, /signup, /welcome, /invite-accept) moved
       # to the `tortoise-dashboard` Pages project, so this suite needs a LOCAL
@@ -2131,31 +2185,40 @@ jobs:
           npm ci
           npm run build
       - name: Start wrangler pages dev preview (dashboard dist = app origin, :8790)
+        id: app
         run: |
           cd website/apps/dashboard
+          PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           # `--d1 SESSIONS`: the auth pages' session probe is `/api/session`,
           # which resolves the HttpOnly `__Host-session` cookie against the D1
           # `sessions` table. Without the binding a request carrying a cookie
           # answers 503 ("store unreachable") instead of 401/200.
           for attempt in 1 2; do
-            wrangler pages dev dist --port 8790 --ip 127.0.0.1 \
+            PREVIEW_PORT="$(bash "$PREVIEW" alloc --name app --base 8790)" || exit 1
+            wrangler pages dev dist --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 --d1 SESSIONS \
-              > /tmp/wrangler-app.log 2>&1 &
-            echo $! > /tmp/wrangler-app.pid
+              > "$PREVIEW_STATE/app.log" 2>&1 &
+            # `|| true`: exit 4 means wrangler already died, so there is
+            # nothing to record. `ready` then reds on its own — the loop still
+            # retries and still dumps `app.log`, instead of `bash -e` aborting
+            # the step with only `exit code 4` and no diagnostics.
+            bash "$PREVIEW" record --name app --pid $! || true
             for i in $(seq 1 240); do
-              if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
-                echo "wrangler (app) ready after ${i}s (attempt ${attempt})"
+              if bash "$PREVIEW" ready --name app; then
+                echo "preview (app) ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
+                echo "port=${PREVIEW_PORT}" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               sleep 1
             done
             echo "attempt ${attempt} timed out — retrying"
-            kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
-            pkill -f 'wrangler.*8790' 2>/dev/null || true
+            bash "$PREVIEW" stop --name app
             sleep 3
           done
-          echo "::error::wrangler (app) dev server failed to start (2 attempts)"
-          tail -50 /tmp/wrangler-app.log || true
+          echo "::error::the dashboard preview failed to start (2 attempts)"
+          echo "--- ${PREVIEW_STATE}/app.log ---"
+          tail -50 "${PREVIEW_STATE}/app.log" || true
           exit 1
       - name: Run legal pages E2E suite (#657)
         # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
@@ -2167,27 +2230,27 @@ jobs:
         # RUN_LEGAL_E2E gate, same wrangler dev server; it ran nowhere in CI
         # before (welcome-e2e collects it without RUN_LEGAL_E2E → self-skips).
         run: >
-          RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788
-          APP_BASE_URL=http://127.0.0.1:8790
-          TORTISE_HOST=http://127.0.0.1:8788 TORTISE_HOST_CHECK=1
-          LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
+          RUN_LEGAL_E2E=1 LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1 TORTISE_HOST_CHECK=1
           python -m pytest tests/e2e/test_legal_pages.py tests/e2e/test_signup_form_safety_e2e.py
           -q -p no:cacheprovider
         env:
+          # #10283: the two ports are allocated at boot and exported through the
+          # steps' outputs — NOT the shared 8788/8790 literals.
+          BASE_URL: http://127.0.0.1:${{ steps.marketing.outputs.port }}
+          APP_BASE_URL: http://127.0.0.1:${{ steps.app.outputs.port }}
+          TORTISE_HOST: http://127.0.0.1:${{ steps.marketing.outputs.port }}
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
           # enforcement opt-in.
           TORTOISE_TEST_CARVE_OUT: "1"
-      - name: Stop wrangler dev server
+      - name: Stop wrangler dev servers (scoped to this job's pids)
         if: always()
-        # kill npx + its wrangler/workerd children (each job gets its own
-        # runner VM, so pkill can't touch other jobs)
-        run: |
-          kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
-          kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
-          pkill -f 'wrangler.*8788' 2>/dev/null || true
-          pkill -f 'wrangler.*8790' 2>/dev/null || true
-          pkill workerd 2>/dev/null || true
-          true
+        # #10283: `stop-all` signals the pids THIS job recorded (and their
+        # descendants) and nothing else. Never reintroduce the old
+        # `kill $(cat /tmp/wrangler.pid)` + `pkill workerd` teardown: the pid
+        # files were shared by every job on the host, and `pkill workerd` is
+        # machine-global — it killed a PEER job's previews eight seconds before
+        # this job's last spec ran (`ERR_CONNECTION_REFUSED` on :8790).
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/preview-server.sh" stop-all
 
   dashboard-e2e:
     needs: changes
@@ -2200,8 +2263,12 @@ jobs:
     # doc's S6 spec (no existing job boots the dashboard; the legal/welcome
     # e2e jobs serve website/ on :8788 only).
     #
-    # TWO wrangler boots (the #1511/#2166 harness): website/ on :8788 (the
-    # auth origin the gate redirects to) + the dashboard bundle on :8790.
+    # TWO wrangler boots (the #1511/#2166 harness): website/ (the auth origin
+    # the gate redirects to) + the dashboard bundle (the app origin).
+    # #10283: neither is a shared port any more — `.github/scripts/preview-server.sh`
+    # allocates a per-run/per-job free port for each and records a per-job pid, so
+    # this job can neither take a peer's port nor kill a peer's server. Its
+    # suites read the ports from `DASHBOARD_AUTH_BASE` / `DASHBOARD_URL`.
     #
     # #3775: the job now BUILDS that bundle (step below). Before #3775 `dist/`
     # was tracked and CI had no build — the committed bundle was served and a
@@ -2210,6 +2277,11 @@ jobs:
     # better for this suite's purpose: the fixtures assert against the exact
     # bundle THIS revision produces, instead of whatever was last committed.
     timeout-minutes: 15
+    # #10283: preview state is PER-JOB and per-run — the helper's `dir` verb
+    # computes it from `$RUNNER_TEMP` (per-runner-agent even on a shared host),
+    # and its `alloc` verb hands each server a port it has just verified free.
+    # (Not a job-level `env:`: the `runner` context is unavailable there and
+    # actionlint reds it.)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -2270,32 +2342,42 @@ jobs:
           echo "::error::could not install wrangler ${WRANGLER_VERSION} after 3 attempts"
           exit 1
       - name: Start wrangler pages dev preview (website/ = auth origin, :8788)
+        id: auth
         run: |
           cd website
+          PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           for attempt in 1 2; do
             # No spec: this is the binary the install step verified (#8816).
-            wrangler pages dev . --port 8788 --ip 127.0.0.1 \
+            PREVIEW_PORT="$(bash "$PREVIEW" alloc --name auth --base 8788)" || exit 1
+            wrangler pages dev . --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
-              > /tmp/wrangler-auth.log 2>&1 &
-            echo $! > /tmp/wrangler-auth.pid
+              > "$PREVIEW_STATE/auth.log" 2>&1 &
+            # `|| true`: exit 4 means wrangler already died (see the marketing
+            # step). `ready` then reds, and the `tail -50 auth.log` below still
+            # shows wrangler's own stderr.
+            bash "$PREVIEW" record --name auth --pid $! || true
             for i in $(seq 1 240); do
-              if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
-                echo "wrangler (auth) ready after ${i}s (attempt ${attempt})"
+              if bash "$PREVIEW" ready --name auth; then
+                echo "preview (auth) ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
+                echo "port=${PREVIEW_PORT}" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               sleep 1
             done
             echo "attempt ${attempt} timed out — retrying"
-            kill $(cat /tmp/wrangler-auth.pid) 2>/dev/null || true
-            pkill -f 'wrangler.*8788' 2>/dev/null || true
+            bash "$PREVIEW" stop --name auth
             sleep 3
           done
-          echo "::error::wrangler (auth) dev server failed to start"
-          tail -50 /tmp/wrangler-auth.log || true
+          echo "::error::the website (auth) preview failed to start"
+          tail -50 "${PREVIEW_STATE}/auth.log" || true
           exit 1
       - name: Start wrangler pages dev preview (dashboard dist = app origin, :8790)
+        id: app
         run: |
           cd website/apps/dashboard
+          PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           for attempt in 1 2; do
             # #3501/#4054: `--d1 SESSIONS` is load-bearing. The dashboard's
             # session gate is `/api/session`, which resolves the HttpOnly
@@ -2304,24 +2386,28 @@ jobs:
             # unreachable") instead of 200, so the suite's seeded-session
             # fixtures can never render the shell. The harness seeds the row it
             # reads (tests/e2e/test_session_login_flow.py).
-            wrangler pages dev dist --port 8790 --ip 127.0.0.1 \
+            PREVIEW_PORT="$(bash "$PREVIEW" alloc --name app --base 8790)" || exit 1
+            wrangler pages dev dist --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 --d1 SESSIONS \
-              > /tmp/wrangler-dash.log 2>&1 &
-            echo $! > /tmp/wrangler-dash.pid
+              > "$PREVIEW_STATE/app.log" 2>&1 &
+            # `|| true`: exit 4 means wrangler already died (see the marketing
+            # step). `ready` then reds, and the `tail -50 app.log` below still
+            # shows wrangler's own stderr.
+            bash "$PREVIEW" record --name app --pid $! || true
             for i in $(seq 1 240); do
-              if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
-                echo "wrangler (dashboard) ready after ${i}s (attempt ${attempt})"
+              if bash "$PREVIEW" ready --name app; then
+                echo "preview (dashboard) ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
+                echo "port=${PREVIEW_PORT}" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               sleep 1
             done
             echo "attempt ${attempt} timed out — retrying"
-            kill $(cat /tmp/wrangler-dash.pid) 2>/dev/null || true
-            pkill -f 'wrangler.*8790' 2>/dev/null || true
+            bash "$PREVIEW" stop --name app
             sleep 3
           done
-          echo "::error::wrangler (dashboard) dev server failed to start"
-          tail -50 /tmp/wrangler-dash.log || true
+          echo "::error::the dashboard preview failed to start"
+          tail -50 "${PREVIEW_STATE}/app.log" || true
           exit 1
       # #4221: this step used to run three of the seven `RUN_DASHBOARD_E2E`
       # specs, so the onboarding spec's 36 cases (plus 48 more across the three
@@ -2351,25 +2437,26 @@ jobs:
           tests/e2e/test_dashboard_identity.py
           -q -rs -p no:cacheprovider
         env:
+          # #10283: the suite harnesses default to the retired shared literals;
+          # these point them at the ports this run actually allocated.
+          DASHBOARD_AUTH_BASE: http://127.0.0.1:${{ steps.auth.outputs.port }}
+          DASHBOARD_URL: http://127.0.0.1:${{ steps.app.outputs.port }}/
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
           # enforcement opt-in (this suite needs no FalkorDB server).
           TORTOISE_TEST_CARVE_OUT: "1"
-      - name: Stop wrangler dev servers
+      - name: Stop wrangler dev servers (scoped to this job's pids)
         if: always()
-        # kill npx + its wrangler/workerd children (each job gets its own
-        # runner VM, so pkill can't touch other jobs)
-        run: |
-          kill $(cat /tmp/wrangler-auth.pid) 2>/dev/null || true
-          kill $(cat /tmp/wrangler-dash.pid) 2>/dev/null || true
-          pkill -f 'wrangler.*8788' 2>/dev/null || true
-          pkill -f 'wrangler.*8790' 2>/dev/null || true
-          # #2809: the identity spec spawns its OWN preview on a runtime-picked
-          # port, so the port patterns above cannot match it — kill by the
-          # command shape it uses. This is the hard-kill/timeout backstop; the
-          # spec's own `finally` covers the normal path.
-          pkill -f 'wrangler pages dev' 2>/dev/null || true
-          pkill workerd 2>/dev/null || true
-          true
+        # #10283: `stop-all` signals the pids THIS job recorded (and their
+        # descendants) and nothing else. The old body `kill $(cat
+        # /tmp/wrangler-*.pid)` + `pkill -f 'wrangler.*PORT'` + `pkill workerd`
+        # was machine-global on a host shared by several runner agents, so this
+        # job's teardown red a CONCURRENT PR's preview job.
+        #
+        # #2809: the identity spec spawns its OWN preview on a runtime-picked
+        # port and kills it in its own `finally`; a hard timeout can leave it
+        # behind, and that residue is now the runner reset's business rather
+        # than a machine-global kill's — leaving a stray beats killing a peer.
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/preview-server.sh" stop-all
 
   hosted-e2e:
     needs: changes
@@ -2452,6 +2539,20 @@ jobs:
     # `bash .github/scripts/verify-cutover --live` with prod creds right
     # before dispatching the flip (sequence in supabase-deploy.yml).
     runs-on: ubuntu-latest
+    # OUTER CAP (#10327 review, ISSUE 1): this job OWNS an embedded redislite
+    # server — `verify-cutover` runs ten pytest files on FalkorDBLite from
+    # inside a shell script (the URI-less opt-in below) — and it shares its
+    # host with `python-ci.yml`'s legs, whose setup runs
+    # `.github/scripts/reap-redislite-orphans.py --apply`. Uncapped it inherits
+    # GitHub's 360-minute default, and the reaper's proof ("older than the
+    # widest job `timeout-minutes`") can never cover a job permitted to live
+    # 360 minutes: a server this job still owns would look orphaned.
+    # Measured 2 m on 2026-10-30 and 3 m 07 s in the 2026-09-02 ci audit
+    # (`pip install -e '.[test]'` + the gate); 30 m is the runner-stall
+    # allowance, not the work — the same reasoning as `test-isolation`'s 15 m.
+    # ⛔ Keep it UNDER `DEFAULT_MAX_AGE_MINUTES` (95): the pin at
+    # `tests/test_reap_redislite_orphans.py` reds otherwise.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

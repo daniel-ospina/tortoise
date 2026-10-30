@@ -13,7 +13,17 @@
 > ```bash
 > uv run python tools/link_agent_infra_scripts.py           # create/repair scripts/ -> $AGENT_INFRA_PATH/scripts
 > uv run python tools/link_agent_infra_scripts.py --check   # assert it (exit 0 = resolves, 1 = missing/dangling/wrong target, 2 = no agent-infra checkout)
+> uv run python tools/link_agent_infra_scripts.py --pin-check  # assert the CHECKOUT is the pinned tree (exit 0 = at/carries the pin or no pin recorded, 1 = drift, 2 = cannot verify)
 > ```
+>
+> `--check` answers "does the pointer resolve"; `--pin-check` answers "is the tree behind it the
+> one this box is pinned to" (`$HARNESS_PIN` / `${CELL_HOME:-$HOME}/.pi/agent/state/HARNESS-PIN`, the
+> same `${CELL_HOME:-$HOME}` base `harness-up` resolves). The second
+> question is the one #10114 cost 18–25 PRs across three outages to learn to ask: a correct link
+> into a checkout older than the pin read as a healthy setup. `--check` now prints that drift as a
+> `!` note (its exit code is unchanged — the link IS correct), and `--pin-check` makes it a verdict.
+> They are separate invocations on purpose and are REFUSED together (`--check --pin-check` exits 2)
+> rather than silently answering only the cheaper question — run each on its own line.
 
 ---
 
@@ -406,8 +416,9 @@ not let the model's probability *be* the verdict: the threshold band, the cache 
 failure paths belong to the caller, and they must be **measured and pinned, not assumed**.
 
 - **In-repo use:** ✅ **one, internal and OFF by default** — `tortoise/s2_decision_seam.py` (`#5087`)
-  is the S2.2/S2.3 seam: `vet-v1` (`noul` + `score` per candidate) and `classify-v1` (a `choice`
-  over the kinds the kNN offered), armed only by `TORTOISE_S2_DECISION_SEAM`, consumed through
+  is the S2.2/S2.3 seam: `vet-v2` (`noul` + `score` per candidate) and `classify-v2` (a `choice`
+  over the kinds the kNN offered), every question carrying the untrusted-data framing
+  (`#10077`/`#10117`), armed only by `TORTOISE_S2_DECISION_SEAM`, consumed through
   `vet_gate.vet_candidates(arbiter=…)` and `KindClassifier(tail_decider=…)`. That flag arms S2.2
   unconditionally (it overrides an explicit `TORTOISE_VET=0`, because the seam *is* the arbiter) and
   arms S2.3 only where a `KindClassifier` is built (`TORTOISE_CLASSIFY_LATER=1`). What it does, what
@@ -503,7 +514,7 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 | `tortoise/` | Python SDK, EP engine, MCP server, connectors |
 | `tests/` | Test suite (pytest) |
 | `graph-scripts/` | Historical graph operations (pricing decisions, migrations, audit) |
-| `scripts/` → `$AGENT_INFRA_PATH/scripts` | Agent-infra shared scripts — **machine-local symlink, gitignored, not tracked** (#9475). Materialise it with `uv run python tools/link_agent_infra_scripts.py`; assert it with `--check`. A fresh clone has no `scripts/` until that runs (or `agent-infra init`/`update` does), because a git symlink blob cannot hold `$AGENT_INFRA_PATH` |
+| `scripts/` → `$AGENT_INFRA_PATH/scripts` | Agent-infra shared scripts — **machine-local symlink, gitignored, not tracked** (#9475). Materialise it with `uv run python tools/link_agent_infra_scripts.py`; assert it with `--check`; assert the checkout itself is the pinned tree with `--pin-check` (#10114). A fresh clone has no `scripts/` until that runs (or `agent-infra init`/`update` does), because a git symlink blob cannot hold `$AGENT_INFRA_PATH` |
 | `tools/` | In-repo tooling — e.g. `collision_preflight.py` (pre-dispatch in-flight-work check, #3061) and `who_is_on.py` / `who-is-on.sh` (the "who is on #N?" verb + stranded-work inventory, #4256) |
 | `config/` | YAML configs (routing, pipelines) |
 | `docs/` | Architecture, ontology, legal, strategy docs |

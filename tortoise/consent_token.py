@@ -28,7 +28,15 @@ against the spec rather than against its own prose):
 Why the binding is load-bearing and the TTL is not a substitute — §2.4, verbatim: *"Single-use +
 short TTL bounds replay, not fixation. An attacker's own live link still fixes the victim. Only the
 binding addresses that."* So the bind comparison is the security-critical half of this module, and
-the `jti` register is what stops one consent yielding N codes.
+the `jti` register is what stops ONE TOKEN from yielding N codes.
+
+⚠️ That is a narrower bound than "one consent yields one code", and the difference is deliberate: the
+BFF mint does not consume its attempt, so a page that mints again after a spent/refused redemption (§2.3's
+re-mint recovery, `hosted_api.py`) gets a fresh `jti` and hence a second code for the SAME approval. `jti`
+bounds the token; nothing in steps 1+3 bounds the approval. Closing that needs a single-use mark on the
+BFF's `consent_attempts` row — a step-2/step-3 contract change — and the re-mint is pinned by
+`tests/test_oauth_consent_bff_routes.py::test_the_attempt_can_be_MINTED_AGAIN_for_step_4s_recovery`, so it
+cannot be narrowed silently either.
 
 WHAT THIS MODULE DELIBERATELY DOES NOT DO
 -----------------------------------------
@@ -36,15 +44,23 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO
   session origin (§2.3). The function here is the reference INVERSE of the verifier — it exists so
   the AS has a checkable counterpart to the contract and so tests can mint exactly what §2.1
   specifies. Shipping it as a route would put identity assertion on the wrong origin.
-* **No shared `jti` store.** §2.3's mechanism choice (the D1 `consent_tickets` table, redeemed
-  through the session origin, or a control-plane row) is §9 **step 1** — infrastructure, outside
-  this diff. `ProcessLocalJtiStore` is the default so the property is enforced and testable today;
-  it is PROCESS-LOCAL, so single-use holds per instance. `configure_consent_jti_store()` is the
-  seam step 1 replaces it through, and `consume` is `async` because that replacement is a network
-  call. **Until step 1 lands, the token arm is not fit for a multi-instance AS** — stated here
-  because a reader who finds only the code would reasonably assume otherwise.
 * **No page change.** Reading a token on the page is §9 step 4; a page that half-reads a token and
   half-reads the old cookie is the "strictly worse than not starting" state §9 records for #3559.
+
+The `jti` register IS shared (§2.3, DELIVERED)
+---------------------------------------------
+* `ControlPlaneJtiStore` redeems the nonce against the control plane the AS already holds at the
+  call site, and `hosted_api._lifespan` installs it at startup, so single-use holds across Fly
+  machines rather than per process. The row store is `oauth_consent_tickets`
+  (`supabase/migrations/20261030000001_oauth_consent_tickets.sql`); the RPC decides the winner
+  with one `INSERT … ON CONFLICT DO NOTHING RETURNING`, because a read-then-write is a TOCTOU two
+  machines can both win.
+* `ProcessLocalJtiStore` is therefore the seam's default only when nothing is installed (tests, a
+  bare embed). It is NOT the deployed posture: reading it as the production guarantee understates
+  replay safety and invites a duplicate re-implementation of the shared store.
+* The store stamps `exp + CONSENT_TOKEN_LEEWAY_S`, not `exp`: the verifier accepts until the
+  leeway runs out, so the prune must not forget the nonce while its token still verifies —
+  otherwise the replay deletes its own fence and then re-inserts, for the whole window.
 
 REFUSALS (all typed, all fail-closed)
 -------------------------------------
@@ -65,13 +81,16 @@ OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on
     bearer path is unaffected.
   * ``CONSENT_TOKEN_ISSUER`` — optional, defaults to ``https://app.premiselabs.co`` (the session
     origin). A token whose `iss` differs is refused, so this must match the minting origin.
-  * the shared `jti` store from §9 step 1 — without it, single-use is per-process (above).
-  * ``config/required-bindings.yml`` must declare `CONSENT_TOKEN_SECRET` so the deploy preflight
-    fails closed; that declaration is part of step 1, not of this module.
+  * the shared `jti` store — installed from `hosted_api._lifespan` (above). If nothing is
+    installed the seam falls back to `ProcessLocalJtiStore`, i.e. single-use PER PROCESS.
+  * ``config/required-bindings.yml`` declares `CONSENT_TOKEN_SECRET` (and, as `recommended`,
+    ``CONSENT_AS_ORIGIN`` / ``CONSENT_TOKEN_ISSUER``, since both have correct defaults) so the
+    deploy preflight fails closed instead of shipping an unprovisioned mint.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -85,6 +104,8 @@ import re
 import secrets as _secrets
 import threading
 import time
+from datetime import UTC, datetime
+from typing import Protocol, runtime_checkable
 
 from tortoise.oauth import OAuthError, _redirect_uri_matches
 
@@ -475,17 +496,38 @@ class JtiStoreUnavailable(RuntimeError):
     """The register cannot answer, so single-use cannot be guaranteed — refuse (§2.3)."""
 
 
+@runtime_checkable
+class ConsentJtiStore(Protocol):
+    """The seam `configure_consent_jti_store` installs (§2.3) — the contract, as a TYPE.
+
+    Two implementations satisfy it: `ProcessLocalJtiStore` (the per-process fallback) and
+    `ControlPlaneJtiStore` (the SHARED one the deployed AS installs at startup). Annotating the
+    module global against this protocol rather than against the fallback is what keeps the
+    declared type honest on the only path that matters — a caller that type-checked against the
+    fallback would reach for `_seen`/`_max_entries`, which the deployed store does not have.
+
+    `consume` MUST be genuinely `async` (its redemption is a network call) and MUST raise
+    `JtiStoreUnavailable` when it cannot answer, rather than degrading to a permissive answer:
+    a register that cannot answer cannot guarantee single-use, so the caller refuses.
+    """
+
+    async def consume(self, jti: str, expires_at: float) -> bool:
+        """``True`` on FIRST use; ``False`` on replay; raises when it cannot answer."""
+        ...
+
+
 class ProcessLocalJtiStore:
-    """A process-local single-use register — the DEFAULT until §2.3's shared store lands.
+    """A process-local single-use register — the seam's fallback, NOT the deployed posture.
 
     §2.3 requires shared state because the AS is multi-instance: this store enforces single-use
-    **per process**, which is exactly the guarantee one instance needs and not the one a fleet
-    needs. It is the default rather than a placeholder because the alternative — no register until
-    step 1 — would ship a verifier whose `jti` field does nothing, i.e. the "specified, not
-    implemented" state #3524 was reopened for. `configure_consent_jti_store()` replaces it.
+    **per process**, which is the guarantee one instance needs and not the one a fleet needs. In
+    the deployed API it is superseded by `ControlPlaneJtiStore` (installed at startup from
+    `hosted_api._lifespan`); it remains here for a bare embed and for tests that want the property
+    without a database. It is kept rather than deleted because the alternative — no register until
+    the shared one — would ship a verifier whose `jti` field does nothing, i.e. the "specified,
+    not implemented" state #3524 was reopened for.
 
-    `consume` is `async` so that replacement is a drop-in: §2.3's preferred mechanism redeems the
-    nonce through the session origin, which is a network call.
+    `consume` is `async` so the shared store is a drop-in: its redemption is a network call.
     """
 
     def __init__(self, *, max_entries: int = _MAX_STORE_ENTRIES,
@@ -518,12 +560,121 @@ class ProcessLocalJtiStore:
             return True
 
 
+#: The ONE description a shared register may publish to the 503 body.
+#:
+#: ⛔ THIS IS A CONTRACT, NOT A STYLE CHOICE. `consume_consent_jti` passes a
+#: `JtiStoreUnavailable`'s message into the `error_description` of an UNAUTHENTICATED
+#: response, and PR #10096's P2-1 deliberately kept that passthrough because the message is
+#: the operator's remedy channel ("the register is full"). The condition that makes the
+#: passthrough safe is that the message carries NO driver internals — no DSN, URL, query
+#: string, request id, or schema detail. The control plane's errors can carry all of those,
+#: so the DETAIL IS LOGGED and this literal is what is raised. `main` rejected the variant
+#: that silenced the channel entirely (commit `d57b5d64e8`, kept as
+#: `archive/consent-token-round2-strict-p2-1-not-adopted`); silencing it is NOT the fix and
+#: would reverse a recorded decision — honouring the contract from the store side is.
+_SHARED_STORE_UNAVAILABLE = "the shared consent-ticket register could not answer"
+
+
+class ControlPlaneJtiStore:
+    """The shared single-use register — §2.3 option (b), on the seam the AS already holds.
+
+    WHY THIS CLASS EXISTS (§2.2/§2.3, §9 step 1)
+    `ProcessLocalJtiStore` enforces single-use PER PROCESS, and the hosted API runs several
+    Fly machines, so a token replayed against a different machine yields a second
+    authorization code — the replay `jti` exists to bound, un-bounded in production. A
+    register only bounds replay if every machine consults the SAME row store.
+
+    WHY THE CONTROL PLANE AND NOT A THIRD MECHANISM
+    §2.3 compares (a) a D1 table on the session origin redeemed over a server-to-server call
+    against (b) "a row in the control plane consumed by the AS directly", and records (b) as
+    the DECIDED mechanism — this class is why it is no longer "the one open mechanism choice"
+    it read as while the choice was open. (b) was taken for one reason: the AS **already holds this seam at the exact call
+    site** (`hosted_api.py` passes its `cp` into `issue_auth_code`, and the whole
+    `oauth_clients`/`oauth_codes`/`oauth_*_tokens` family lives there). (a) would add a new
+    route on the session origin, a new server-to-server authentication for it, and a new
+    failure domain on the consent path — strictly more new boundary for the same guarantee.
+
+    CONSEQUENCE OF (b) THAT IS WORTH STATING: only the AS writes. The minter records
+    nothing, because single-use is bounded at REDEMPTION — which is where a replay
+    arrives. So the minting side needs no service-role credential, no new secret, and no
+    write access (§2.3's "no new secret is needed for the redemption leg").
+
+    ATOMICITY. `consume` is ONE `rpc_value` call to `consume_oauth_consent_ticket`, whose
+    body is a single `INSERT … ON CONFLICT DO NOTHING RETURNING` (migration
+    `20261030000001_oauth_consent_tickets.sql`). A read-then-write would be a TOCTOU that
+    two machines can both win; with the constraint deciding, exactly one caller gets `true`.
+    """
+
+    def __init__(self, control_plane=None) -> None:
+        # Injected for tests; `None` resolves `get_control_plane()` per call, so a store
+        # constructed before the control plane is configured is not silently dead forever.
+        #
+        # NO clock parameter, deliberately: the prune happens in POSTGRES (`now()`), so an
+        # injected clock here could not influence it — offering one would let a test pin a
+        # boundary the code does not actually use, which is the false-confidence seam the
+        # injected clocks elsewhere in this module exist to prevent.
+        self._cp = control_plane
+
+    def _client(self):
+        if self._cp is not None:
+            return self._cp
+        from tortoise.supabase_control import get_control_plane
+
+        return get_control_plane()
+
+    async def consume(self, jti: str, expires_at: float) -> bool:
+        """``True`` on FIRST use; ``False`` on replay; raises when it cannot answer.
+
+        The blocking PostgREST client is run in a worker thread rather than called inline:
+        `consume` is awaited from an async request handler, and a synchronous HTTP call here
+        would block the event loop for every other request on the worker.
+        """
+        try:
+            answer = await asyncio.to_thread(self._consume_blocking, jti, expires_at)
+        except JtiStoreUnavailable:
+            raise
+        except Exception as exc:
+            # ⛔ NO `str(exc)` IN THE RAISED MESSAGE — see `_SHARED_STORE_UNAVAILABLE`.
+            # A control-plane error can carry the upstream URL, a query string or a schema
+            # detail, and this message reaches an unauthenticated 503 body.
+            logger.warning(
+                "the shared consent-ticket register could not answer (%s): %s",
+                type(exc).__name__, exc, exc_info=True)
+            raise JtiStoreUnavailable(_SHARED_STORE_UNAVAILABLE) from exc
+        # ⛔ A NON-BOOLEAN ANSWER IS "CANNOT ANSWER", never a replay and never a pass.
+        # PostgREST returns the function's scalar; a missing row, an RPC that does not
+        # exist, or a `null` are all indistinguishable from `false` once coerced, and
+        # coercing `None` to `False` would answer every FIRST redemption with "already
+        # redeemed" — a fail-closed that reads as a replay and blames the user's token.
+        if not isinstance(answer, bool):
+            logger.warning("the consent-ticket register answered %r, not a boolean", answer)
+            raise JtiStoreUnavailable(_SHARED_STORE_UNAVAILABLE)
+        return answer
+
+    def _consume_blocking(self, jti: str, expires_at: float) -> object:
+        # ⛔ STAMP THE LAST VALID INSTANT, NOT THE RAW `exp`. The verifier refuses only when
+        # `exp + LEEWAY < now`, so a token stays redemable until `exp + LEEWAY`; the RPC prunes
+        # `expires_at < now()` BEFORE it inserts. Stamping the raw `exp` therefore lets a replay
+        # inside the leeway window DELETE the row that fences its own nonce and then insert it
+        # again — a repeatable replay for 30 s, i.e. one consent yielding N codes (measured;
+        # `ProcessLocalJtiStore` adds the leeway for the same reason).
+        stamp = datetime.fromtimestamp(
+            expires_at + CONSENT_TOKEN_LEEWAY_S, tz=UTC).isoformat()
+        return self._client().rpc_value(
+            "consume_oauth_consent_ticket", {"p_jti": jti, "p_expires_at": stamp})
+
+
 _jti_store_lock = threading.Lock()
-_jti_store: ProcessLocalJtiStore | None = None
+_jti_store: ConsentJtiStore | None = None
 
 
-def consent_jti_store() -> ProcessLocalJtiStore:
-    """The active register (§2.3). Lazily built so importing this module has no side effect."""
+def consent_jti_store() -> ConsentJtiStore:
+    """The active register (§2.3). Lazily built so importing this module has no side effect.
+
+    Returns the seam's type, not the fallback's: on the deployed AS this is a
+    `ControlPlaneJtiStore` (installed from `hosted_api._lifespan`), so annotating the fallback
+    here would be false on the only path that runs in production.
+    """
     global _jti_store
     with _jti_store_lock:
         if _jti_store is None:
@@ -531,12 +682,12 @@ def consent_jti_store() -> ProcessLocalJtiStore:
         return _jti_store
 
 
-def configure_consent_jti_store(store) -> None:
+def configure_consent_jti_store(store: ConsentJtiStore | None) -> None:
     """Install the register §9 step 1 provides (or ``None`` to rebuild the default).
 
     The seam exists so step 1 can land WITHOUT touching the endpoint or this verifier: whatever
-    object is installed must expose ``async consume(jti, expires_at) -> bool`` and raise
-    ``JtiStoreUnavailable`` when it cannot answer.
+    object is installed must satisfy `ConsentJtiStore` — ``async consume(jti, expires_at) -> bool``
+    — and raise ``JtiStoreUnavailable`` when it cannot answer.
     """
     global _jti_store
     if store is not None:
@@ -554,6 +705,21 @@ def configure_consent_jti_store(store) -> None:
 def reset_consent_jti_store() -> None:
     """Drop the register (tests, and a deliberate re-provision)."""
     configure_consent_jti_store(None)
+
+
+def install_shared_consent_jti_store(control_plane=None) -> None:
+    """Install the SHARED register — §2.3 cross-machine single-use (§9 step 1).
+
+    Called once from the hosted app's startup (`hosted_api._lifespan`) rather than at import:
+    the module's own contract is that importing it has no side effect, and a store resolved at
+    import time would capture whatever control plane existed then.
+
+    Installed UNCONDITIONALLY, including on a deployment with no control plane: the failure
+    then surfaces as a typed `503 temporarily_unavailable` on the consent-token arm (§2.3's
+    fail-closed posture) instead of silently degrading to a PER-PROCESS register — which is
+    the one state this class exists to leave behind. The bearer path is untouched either way.
+    """
+    configure_consent_jti_store(ControlPlaneJtiStore(control_plane))
 
 
 async def consume_consent_jti(jti: str, expires_at: float) -> None:

@@ -59,7 +59,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK, _entity_name_id
+from tortoise.sdk import TortoiseSDK
 
 
 @pytest.mark.xfail(
@@ -80,7 +80,11 @@ def test_derived_id_reference_does_not_mint_a_second_carrier(tmp_path):
                       event_log_path=str(events / "events.jsonl"))
     try:
         proj = sdk._get_proj()
-        derived = _entity_name_id("Object", "SHARED")
+        # The RETIRED derivation's value for `Object:"SHARED"`, frozen as a
+        # literal (#3590 item 6 removed the minter; a test must not recompute a
+        # derivation the product no longer has). The point of this pin is that a
+        # derived-LOOKING id proves nothing about identity (#3389).
+        derived = "obj-2c8f61dbe32e30a50debc0b61b"
         assert derived.startswith("obj-"), derived
 
         # 1) a journaled live carrier of SHARED under an ARBITRARY id
