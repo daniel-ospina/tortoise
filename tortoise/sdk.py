@@ -18150,13 +18150,18 @@ class TortoiseSDK:
 
         ⚠️ A self-support target list that ALSO carries another target —
         ``create_operator(op, a, [a, b])`` — writes THREE slots over TWO
-        distinct endpoints, and no same-set request can express that arity.
-        ``ingest``'s dedup key is a SET on both sides, so a request for the
-        same endpoint set (``{"from": a, "to": [b]}``) EXACT-matches this
-        operator and is reused **unchanged**: the narrower factor is neither
-        written nor reported (§3.2 key 13's adoption caveat, and #10320 for the
-        missing diagnostic). Supersede and re-create if you need the narrower
-        arity.
+        distinct endpoints. `ingest`'s dedup key requires the request's ARITY
+        to match that slot count (#10305), so a request for the same endpoint
+        set with FEWER slots (``{"from": a, "to": [b]}``, 2 slots) does NOT
+        adopt this operator: it misses and mints its own 2-slot operator, which
+        is what the caller asserted. A request that DOES spell three slots for
+        the same endpoint set (a target resolving onto the source, plus another
+        target) exact-matches it and is reused unchanged. ⛔ The arity leg is
+        why a request is no longer answered by a **self-support-widened**
+        factor; the one remaining width tolerance is the pre-#9750
+        duplicate-TARGET shape (``idx`` 1 and 2 over one id), whose extra slots
+        no request can spell, so it is adopted at any request width (see
+        ``_find_operator``'s arity block).
 
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism). ⛔ ``MITIGATES`` is
@@ -22783,12 +22788,22 @@ class TortoiseSDK:
                     # is false on the direct route, which writes no `idx` at all
                     # — and a warning that contradicts itself is worse than no
                     # warning.
+                    # (#10305, text P2) …and the edge-count promise must not
+                    # READ as one-edge-per-target when the collapsed target IS
+                    # the source: `{from: q1, to: ["q2", "q2"]}` where `q2`
+                    # folds onto `q1` writes TWO typed + TWO INPUT edges over
+                    # ONE id (`idx` 0 and 1 — the deliberate self-support slot,
+                    # §5.5), so the sentence names that slot instead of leaving
+                    # a reader to infer a count the graph does not hold.
                     _effect = (
                         "one connection writes ONE typed edge and ONE INPUT "
                         "edge per DISTINCT target (the operator's input set "
                         "is a set, #9750); the repeated spelling was collapsed "
                         "with the order preserved, so the positional idx is "
-                        "unchanged"
+                        "unchanged. One exception: a target that resolves onto "
+                        "the SOURCE keeps its OWN slot, so that self-support "
+                        "shape writes two typed and two INPUT edges over that "
+                        "one id (idx 0 and 1)"
                         if _route != "direct" else
                         "a direct edge takes ONE target, so the repeated "
                         "spelling was ignored and the write is identical to "
@@ -23608,7 +23623,14 @@ class TortoiseSDK:
         """§5.5 OPERATOR-DEDUP (A3): richer return — exact-hit | partial-absorb
         | miss.
 
-        Exact-hit: an operator with the SAME (op_type, input set) — returns
+        Exact-hit: an operator with the SAME (op_type, input set) AND the same
+        input ARITY — the operator's typed-edge count must equal the length of
+        the raw ``inputs`` list it was handed (a repeated SOURCE slot is a real
+        slot, and ``ep.py`` reads arity from the edge list, #10305), with one
+        documented carve-out: a pre-#9750 operator that carries excess slots
+        which are a duplicate of a TARGET (never of its own source slot) is
+        matched on the endpoint set alone, at ANY request width — no request can
+        spell that shape, so its endpoint set is all it can answer for. Returns
         {"id", "status", "kind": "exact"}. Condition builders apply the
         CYCLE-25 per-op_type absent↔default canonicalization (IMPL
         direction-absent → stored "bidirectional"; NAND direction-absent →
@@ -23640,6 +23662,8 @@ class TortoiseSDK:
         edge_rel = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         canonical_dir = self._canonical_direction(op_type, direction)
         # ── #9750: BOTH SIDES OF THE KEY ARE SETS ──────────────────────────
+        # (#10305: …and the request's ARITY is the third leg of the key — see
+        # the arity block below. Sets alone were not enough.)
         # The graph side collects `DISTINCT t.id` below, so `$inputs` is
         # normalized to the same DISTINCT set HERE — once, for EVERY caller, so
         # no caller can make the key unsatisfiable by handing it a SLOT list
@@ -23650,10 +23674,78 @@ class TortoiseSDK:
         # its slots (the self-support operator is written with `idx` 0 and 1 over
         # one id) — the KEY is a lookup, not the edge shape.
         _inputs_distinct = _distinct_preserving_order(inputs)
-        params: dict = {"op": op_type, "inputs": _inputs_distinct}
+        # ── #10305: the REQUEST's own slot MULTIPLICITY is part of the key ──
+        # A set key alone made multiplicity free, and multiplicity IS the EP
+        # factor arity: `ep.py` builds the factor from the operator's EDGE
+        # list, so `create_operator("IMPL", a, [a, b])` is a THREE-input
+        # factor (slots `[(0,a),(1,a),(2,b)]` — the self-support shape, where
+        # `idx` 0 and 1 land on one id) while a request that asserts TWO
+        # inputs resolves to the same distinct endpoint set `{a, b}`. Under the
+        # set-only key that request EXACT-hit the 3-slot operator and was
+        # answered `deduped` — the caller asserted a 2-input `IMPL` and
+        # silently got a 3-input factor, so EP propagated a different model
+        # than the one written (measured twice by review at 8ac927908; on
+        # pre-#9750 `7ff42c0d5` the same sequence minted the 2-slot operator).
+        #
+        # So the exact arm ALSO requires the operator's slot count to equal the
+        # RAW request arity (`inputs` BEFORE the DISTINCT normalization above —
+        # a repeat of the SOURCE slot is a real slot, so it counts). What
+        # #9750 was actually about is untouched: a request whose slots are a
+        # REPEAT of one endpoint set still carries the same arity as the
+        # operator the collapse wrote (`to: [b, b]` → 2 slots, operator → 2
+        # slots; a target that folds onto the source → `[a, a]` → 2 slots,
+        # self-support operator → 2 slots), so it still exact-dedups.
+        #
+        # ⛔ The legacy carve-out is NOT slack, it is the reason this is an OR —
+        # and it is bounded to an operator that ACTUALLY CARRIES an excess slot
+        # (`n_edges > size(targets)`). Without that bound the disjunct below is
+        # true for every CLEAN operator and forgives the mismatch in the
+        # WIDENING direction too (measured by review: a 3-slot request
+        # `[q1, q1, q3]` adopted a clean 2-slot operator over `{q1, q3}` and
+        # kept the 2-slot factor the caller never asserted — the same silent
+        # wrong-width defect, mirrored).
+        #
+        # A pre-#9750 operator carries duplicate TARGET slots (`idx` 1 and 2
+        # over one id, vs `create_operator`'s `idx` 0 and 1 over one id): 3
+        # edges, 2 distinct endpoints — the SAME counts as a self-support
+        # extra-target operator, so `n_edges = arity` alone cannot tell them
+        # apart, and applying it to both re-opens #9750 on every legacy graph
+        # (the retry misses, and the miss MINTS the duplicate operator the
+        # issue is about — pinned by `test_legacy_duplicate_graph_still_dedups`
+        # and `test_reingest_repeated_ref_is_an_exact_dedup`). The two shapes
+        # differ in ONE thing: WHICH slot is the duplicate. A legacy duplicate
+        # repeats a TARGET (`from_slots` — the `idx` 0 slot — occurs exactly
+        # once), a self-support duplicate repeats the SOURCE (it occurs twice).
+        # A legacy shape is also UNSPELLABLE as a request (the writer collapses
+        # repeated targets, so no request can ask for 3 slots over 2 endpoints
+        # that way) while the self-support shape IS spellable — a target
+        # resolving onto the source plus another target. So: an operator that
+        # carries excess slots which are NOT a duplicate of its own source slot
+        # → the excess is a pre-fix artifact. ⚠️ That carve-out is
+        # WIDTH-UNBOUNDED ON PURPOSE: a pre-#9750 operator with SEVERAL excess
+        # duplicate-target slots (`to: [b, b, b]` leaves `idx` 1, 2 and 3 over
+        # one id) is adopted by any same-set request of ANY width, because no
+        # request can spell its widths and tightening that would re-mint the
+        # duplicate operator #9750 is about. An arity mismatch WITHOUT such an
+        # excess (a clean operator, or one whose duplicate is the source) →
+        # arity is a real difference and the request falls through to the
+        # partial arm (a MISS for equal-size sets, i.e. the caller gets the
+        # operator width it asked for).
+        # ⚠️ Residual, deliberate and disclosed rather than papered over: a
+        # pre-#9750 operator whose duplicated target IS its own source (3 slots
+        # all on one id, written by `to: [a, a]` before this fix) is
+        # shape-identical to the self-support case, so it is NOT forgiven — it
+        # misses and the retry mints its own arity. Bounded to that pre-fix
+        # shape, and the retry THEN exact-matches the clean operator it minted.
+        _slots = list(inputs)
+        params: dict = {"op": op_type, "inputs": _inputs_distinct,
+                        "slots": _slots}
         conds = [
             "size(targets) = size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
+            "(n_edges = size($slots) OR (n_edges > size(targets) AND "
+            "size(from_slots) > 0 AND "
+            "size([x IN slot_ids WHERE x IN from_slots]) <= 1))",
         ]
         if label is not None:
             conds.append("o.label = $label")
@@ -23696,11 +23788,18 @@ class TortoiseSDK:
         # #7822 row-order-dependence class). Ordering by edge count ASC prefers
         # the operator whose edges EQUAL its distinct endpoints (the clean one)
         # and is deterministic on the tie.
+        # `slot_ids` (NOT DISTINCT — one entry per typed edge) and
+        # `from_slots` (the `idx` 0 target, i.e. the operator's SOURCE slot)
+        # exist for the #10305 arity condition above; both are counted from the
+        # same rows as `n_edges`, so no extra pattern multiplies them.
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
             f"WHERE {epistemic_disjunction('t')} "
-            f"WITH o, collect(DISTINCT t.id) AS targets, count(r) AS n_edges "
+            f"WITH o, collect(DISTINCT t.id) AS targets, "
+            f"collect(t.id) AS slot_ids, count(r) AS n_edges, "
+            f"collect(CASE WHEN r.idx = 0 THEN t.id ELSE null END) "
+            f"AS from_slots "
             f"WHERE {' AND '.join(conds)} "
             f"RETURN o.id, o.status ORDER BY n_edges ASC, o.id LIMIT 1",
             params=params,

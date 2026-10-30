@@ -27,6 +27,11 @@ The fix is at the seam that OWNS endpoint identity, never in Cypher and never in
 * ``ingest`` collapses the RESOLVED ``dsts`` before ``_find_operator``, because
   that query's dedup key is ``size(targets) = size($inputs)``; feeding it the
   caller's multiplicity computes the key over a list the graph no longer holds.
+* ``_find_operator`` keys on the endpoint SET **plus the request's ARITY**
+  (#10305): the exact arm requires the operator's typed-slot count to equal the
+  RAW request arity, because multiplicity IS the EP factor arity — a 2-slot
+  request must not be answered by a 3-slot factor. The one carve-out is the
+  pre-#9750 duplicate-TARGET operator, which no request can spell.
 * ``_find_operator`` collects ``DISTINCT t.id``, so a graph written BEFORE this
   fix (already carrying duplicate edges) still exact-matches instead of minting a
   duplicate operator.
@@ -152,11 +157,13 @@ def test_ingest_dedups_repeated_ref(make_sdk):
 def test_reingest_repeated_ref_is_an_exact_dedup(make_sdk):
     """The instance the ingest-side dedupe exists for: the second submission
     of the SAME repeated spelling must EXACT-hit the operator run 1 wrote.
-    ``_find_operator``'s key is ``size(targets) = size($inputs)``, so a request
-    still carrying the caller's multiplicity (``[src, p2, p2]``) misses the
-    2-target operator it just wrote, falls into the PARTIAL-ABSORB arm and
+    ``_find_operator``'s set key is ``size(targets) = size($inputs)``, so a
+    request still carrying the caller's multiplicity (``[src, p2, p2]``) misses
+    the 2-target operator it just wrote, falls into the PARTIAL-ABSORB arm and
     reports a ``operator_absorb_completed`` for an operator that was already
-    complete."""
+    complete. (#10305 added the ARITY leg to that key — the collapsed request's
+    slot count still equals the operator's, which is why this case keeps
+    deduping.)"""
     sdk = make_sdk("reingest")
     bundle = _bundle(["p2", "p2"])
 
@@ -296,25 +303,33 @@ def test_find_operator_key_is_a_set_for_the_repeated_source_slot(make_sdk):
     assert [i for i, _ in slots] == [0, 1], slots
 
 
-def test_self_support_operator_with_extra_target_adopts_same_set_request(make_sdk):
-    """Review round 5, P3 — the trade §3.2 key 13 now RECORDS, pinned so it
-    cannot be changed silently in either direction.
+def test_self_support_operator_with_extra_target_mints_its_own_arity(make_sdk):
+    """#10305 (red-first: this test previously asserted the SILENCE) — a
+    same-SET request of a DIFFERENT ARITY must NOT adopt the wider operator.
 
     ``create_operator("IMPL", a, [a, b])`` keeps the self-support slot AND the
-    other target — 3 slots over 2 distinct endpoints, an arity no same-set
-    request can spell. The exact arm's key is a SET, so ``to: [b]`` (2 slots)
-    EXACT-matches it and is reused **unchanged**: no edge is written, no warning
-    is emitted, and ``ep.py`` reads the 3-slot factor.
+    other target — 3 slots over 2 distinct endpoints. ``ep.py`` builds the
+    factor from the EDGE list, so that operator IS a 3-input factor. A request
+    asserting 2 inputs (``{"from": a, "to": [b]}``) resolves to the SAME
+    distinct endpoint set, and a set-only dedup key therefore EXACT-matched it:
+    the caller asserted a 2-input ``IMPL`` and was handed a 3-input factor,
+    with no edge written and no warning (measured at 8ac927908; on pre-#9750
+    ``7ff42c0d5`` the same sequence minted the 2-slot operator).
 
-    ⛔ Considered and rejected: adding ``n_edges = size($slots)`` to the EXACT
-    arm. It would red ``test_legacy_duplicate_graph_still_dedups`` and re-open
-    the duplicate-operator defect #9750 closes, so the mismatch is DISCLOSED
-    (docs/INGEST_CONTRACT.md §3.2 key 13 + ``create_operator``'s docstring) and
-    the missing diagnostic is #10320 — not silently invented here.
+    The exact arm now also requires the operator's slot count to equal the RAW
+    request arity (#10305), so this request MISSES (the sets are equal in size,
+    so the partial arm cannot take it either) and mints its OWN 2-slot operator:
+    the graph ends with two operators over one endpoint set, which is the
+    honest outcome — one factor per asserted arity.
 
-    FAILS on the pre-fix writer: without ``collect(DISTINCT t.id)`` the 3-slot
-    operator's ``collect(t.id)`` is ``[a, a, b]`` (size 3) against a size-2
-    request, so BOTH arms miss and this ``to: [b]`` mints a SECOND operator.
+    ⛔ The arity leg does NOT disturb what #9750 fixed: a request whose slots
+    repeat ONE endpoint set still carries the stored arity (`to: [b, b]` → 2,
+    a target folding onto the source → `[a, a]` → 2 against the 2-slot
+    self-support operator, both still exact-dedups — see
+    ``test_reingest_repeated_ref_is_an_exact_dedup`` and
+    ``test_find_operator_key_is_a_set_for_the_repeated_source_slot``), and a
+    pre-#9750 duplicate-TARGET operator is still adopted
+    (``test_legacy_duplicate_graph_still_dedups``).
     """
     sdk = make_sdk("self_support_extra_target")
     a = sdk.create_point(kind="statement", content="one")["id"]
@@ -325,23 +340,26 @@ def test_self_support_operator_with_extra_target_adopts_same_set_request(make_sd
     assert [(i, t) for i, t in slots] == [(0, a), (1, a), (2, b)], slots
     assert _edge_counts(sdk) == (3, 3), _edge_counts(sdk)
 
-    assert sdk._find_operator("IMPL", [a, b])["kind"] == "exact"
+    # the 3-slot operator is not what a 2-slot request asked for
+    assert sdk._find_operator("IMPL", [a, b]) is None, (
+        "a 2-slot request must not exact-hit the 3-slot operator")
+    # …but the 3-slot request that CAN be spelled still finds it
+    assert sdk._find_operator("IMPL", [a, a, b])["kind"] == "exact"
 
     res = sdk.ingest({"connections": [
         {"from": a, "to": [b], "operator": "IMPL"}]})
 
-    assert res["deduped"]["connections"] == 1, res
-    assert res["created"]["connections"] == 0, res["created"]
-    assert res["ids"]["connections"] == [op["id"]], res["ids"]
-    assert _count(sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 1
-    # the adopted arity is NOT repaired and NOT reported — the recorded trade
-    assert _edge_counts(sdk) == (3, 3), _edge_counts(sdk)
+    assert res["created"]["connections"] == 1, res
+    assert res["deduped"]["connections"] == 0, res
+    assert res["ids"]["connections"] != [op["id"]], res["ids"]
+    assert _count(sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 2
+    # the new operator is the arity the caller ASSERTED
+    new_op = res["ids"]["connections"][0]
+    assert [(i, t) for i, t in _operator_input_slots(sdk, new_op)] == \
+        [(0, a), (1, b)], _operator_input_slots(sdk, new_op)
+    # the wider operator is untouched — not repaired, not superseded
     assert [(i, t) for i, t in _operator_input_slots(sdk, op["id"])] == \
         [(0, a), (1, a), (2, b)]
-    assert "duplicate_target_deduped" not in \
-        [w.split(":", 1)[0] for w in res["warnings"]], res["warnings"]
-    assert res["warnings"] == [] or all(
-        "arity" not in w for w in res["warnings"]), res["warnings"]
 
 
 def test_absorb_never_completes_an_inexpressible_request(make_sdk):
@@ -388,6 +406,76 @@ def test_absorb_never_completes_an_inexpressible_request(make_sdk):
     for node_id, idxs in idx_by_op.items():
         assert idxs == list(range(len(idxs))), \
             (node_id, idxs, "idx GAP in the factor's positional input list")
+
+
+def test_clean_operator_is_not_adopted_by_a_wider_request(make_sdk):
+    """#10305, the WIDENING direction — found by review, and the reason the
+    legacy carve-out is bounded by ``n_edges > size(targets)``.
+
+    Without that bound the carve-out ("this operator carries no duplicate of its
+    own source slot") is true for every CLEAN operator, so an arity mismatch was
+    forgiven in this direction and the defect reappeared mirrored: a bundle that
+    asserts THREE inputs — ``{from: q1, to: [q2, q3]}`` where ``q2`` folds onto
+    ``q1``, i.e. the spellable self-support shape ``[q1, q1, q3]`` — resolved to
+    the endpoint set ``{q1, q3}`` and was answered ``deduped: true`` by an
+    existing 2-slot operator, so the caller asserted a 3-input ``IMPL`` and got
+    a 2-input factor. It must mint its own 3-slot operator instead.
+    """
+    sdk = make_sdk("wider_request")
+    q1 = sdk.create_point(kind="statement", content="same")["id"]
+    q3 = sdk.create_point(kind="statement", content="other")["id"]
+    narrow = sdk.create_operator("IMPL", q1, [q3])
+    assert [(i, t) for i, t in _operator_input_slots(sdk, narrow["id"])] == \
+        [(0, q1), (1, q3)]
+
+    assert sdk._find_operator("IMPL", [q1, q1, q3]) is None, (
+        "a 3-slot request must not exact-hit a 2-slot operator")
+
+    # the ingest spelling: two same-content refs fold onto ONE node, so the
+    # request's real slot list is `[q1, q1, q3]` — 3 slots the graph can hold
+    bundle = {"points": [{"ref": "r1", "kind": "statement", "content": "same"},
+                         {"ref": "r2", "kind": "statement", "content": "same"},
+                         {"ref": "r3", "kind": "statement", "content": "other"}],
+              "connections": [{"from": "r1", "to": ["r2", "r3"],
+                               "operator": "IMPL"}]}
+    res = sdk.ingest(bundle)
+
+    assert res["ids"]["refs"]["r1"] == res["ids"]["refs"]["r2"], res["ids"]
+    assert res["created"]["connections"] == 1, res
+    assert res["deduped"]["connections"] == 0, res
+    assert res["ids"]["connections"] != [narrow["id"]], res["ids"]
+    wide = res["ids"]["connections"][0]
+    assert [(i, t) for i, t in _operator_input_slots(sdk, wide)] == \
+        [(0, q1), (1, q1), (2, q3)], _operator_input_slots(sdk, wide)
+
+
+def test_crash_partial_still_absorbs_a_repeated_target(make_sdk):
+    """#10305 — the arity leg must NOT disturb the crash-partial absorb, which is
+    the one place the ingest-side ``dsts = _distinct_dsts`` collapse is
+    load-bearing (the previous reviewer measured it).
+
+    A crash after the source slot only leaves a one-slot operator; the retry
+    spells the SAME target twice. The request is collapsed to 2 slots, the
+    exact arm misses (1 distinct endpoint vs 2), the partial arm takes it, and
+    the completion writes ONE edge: 1 operator, 2 typed + 2 `INPUT` edges, and
+    an ``operator_absorb_completed`` payload of ``:1``.
+    """
+    sdk = make_sdk("crash_partial_repeated")
+    a = sdk.create_point(kind="statement", content="one")["id"]
+    b = sdk.create_point(kind="statement", content="two")["id"]
+    op = sdk.create_operator("IMPL", a, [])  # the crash remnant: source slot only
+    assert _operator_input_slots(sdk, op["id"]) == [(0, a)]
+
+    res = sdk.ingest({"connections": [
+        {"from": a, "to": [b, b], "operator": "IMPL"}]})
+
+    assert res["deduped"]["connections"] == 1, res
+    assert res["created"]["connections"] == 0, res["created"]
+    done = [w for w in res["warnings"] if w.startswith("operator_absorb_completed")]
+    assert len(done) == 1 and done[0].endswith(":1"), res["warnings"]
+    assert _count(sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 1
+    assert _edge_counts(sdk) == (2, 2), _edge_counts(sdk)
+    assert _operator_input_slots(sdk, op["id"]) == [(0, a), (1, b)]
 
 
 def test_absorb_reports_the_writes_it_makes(make_sdk):
@@ -483,7 +571,15 @@ def test_legacy_duplicate_graph_still_dedups(make_sdk):
     """A graph written BEFORE this fix carries duplicate edges (``idx`` 1 and 2
     over one id). ``_find_operator`` reads ``DISTINCT t.id``, so that operator
     still EXACT-matches its own input set — re-ingest dedups instead of minting
-    a SECOND operator (which is the duplicate this whole issue is about)."""
+    a SECOND operator (which is the duplicate this whole issue is about).
+
+    #10305 — this is WHY the exact arm's arity leg is an OR: this operator has 3
+    typed slots against a 2-slot request, so arity alone would refuse it. The
+    carve-out is shape-keyed: its excess slot repeats a **TARGET**, a shape no
+    request can spell (the writer collapses repeated targets), so it is adopted;
+    an excess slot that repeats the **SOURCE** is spellable and is not (see
+    ``test_self_support_operator_with_extra_target_mints_its_own_arity``).
+    """
     sdk = make_sdk("legacy")
     a = sdk.create_point(kind="statement", content="one")
     b = sdk.create_point(kind="statement", content="two")
