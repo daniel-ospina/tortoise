@@ -25,7 +25,7 @@ from tests._tmpdir_hygiene import scan_root
 pytest.importorskip("redislite")
 
 
-# #10313: every writer below computes an EMBEDDING per write (a truthy
+# #10333: every writer below computes an EMBEDDING per write (a truthy
 # ``content`` takes the dense-retrieval leg through
 # ``compute_embedding``), so each of these tests runs N processes doing
 # bge-small forward passes at once. Left at torch's default, EACH writer
@@ -67,7 +67,7 @@ def _writer_env():
     ``test_every_writer_subprocess_runs_with_a_single_intra_op_thread`` proves the
     env BOUNDS torch, and ``test_every_writer_spawner_passes_the_bounded_env``
     proves each spawner actually HANDS it to its child — a reader that only
-    exercises this helper cannot see a spawner that drops ``env=`` (#10313
+    exercises this helper cannot see a spawner that drops ``env=`` (#10333
     review, P3: the earlier docstring claimed the pin covered both).
     """
     return {**os.environ, **_WRITER_THREAD_ENV}
@@ -107,7 +107,7 @@ finally:
     return subprocess.Popen(
         [sys.executable, "-c", code],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        # #10313: one intra-op thread per writer — five concurrent writers at
+        # #10333: one intra-op thread per writer — five concurrent writers at
         # torch's default reddened a required check on thread thrash, not on a
         # lost write. See _WRITER_THREAD_ENV for the measurement.
         env=_writer_env(),
@@ -162,7 +162,7 @@ def _spawn_live_writer(writer_id, writes=10):
     (test_live_mw_tortoise) via FalkorProjection.from_uri (#942).
 
     Inherits the parent env (TORTOISE_DB_URI must pass through) with each
-    writer's intra-op pool bounded to one thread (`_writer_env`, #10313) —
+    writer's intra-op pool bounded to one thread (`_writer_env`, #10333) —
     deliberately NOT the embedded _spawn_writer helper, which pops
     TORTOISE_DB_URI and forces TORTOISE_DB_PATH (embedded by design)."""
     code = f"""
@@ -185,7 +185,7 @@ finally:
     return subprocess.Popen(
         [sys.executable, "-c", code],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        env=_writer_env())  # #10313 — see _WRITER_THREAD_ENV
+        env=_writer_env())  # #10333 — see _WRITER_THREAD_ENV
 
 
 def test_concurrent_writers_live_falkor_no_lost_writes():
@@ -209,9 +209,9 @@ def test_concurrent_writers_live_falkor_no_lost_writes():
     procs = [_spawn_live_writer(i, writes=10) for i in range(5)]
     for p_ in procs:
         # 90 s is a HANG bound, not the expected cost: with each writer's
-        # intra-op pool bounded (`_WRITER_THREAD_ENV`, #10313) the measured
+        # intra-op pool bounded (`_WRITER_THREAD_ENV`, #10333) the measured
         # wall is ~26 s on a 4-core host with co-tenant load, so this keeps
-        # ~3.5x headroom. It sat BELOW the unbounded cost (109 s) until #10313,
+        # ~3.5x headroom. It sat BELOW the unbounded cost (109 s) until #10333,
         # which is what reddened the required test-concurrency-falkor check.
         p_.wait(timeout=90)
         assert p_.returncode == 0, p_.stderr.read()
@@ -236,11 +236,11 @@ def _canonical_path():
 
 
 def test_every_writer_subprocess_runs_with_a_single_intra_op_thread():
-    """#10313: a writer's env must bound torch's intra-op pool to one thread.
+    """#10333: a writer's env must bound torch's intra-op pool to one thread.
 
     Non-vacuous by EXECUTION, not by reading the helper: the child actually
     imports torch with exactly the env the spawners hand their writers and
-    reports the pool it built. Pre-#10313 this reds twice over (no
+    reports the pool it built. Pre-#10333 this reds twice over (no
     ``_writer_env``, and torch defaults to ``os.cpu_count()`` threads), and it
     stays red if the env var is dropped, misspelled, or stops bounding torch.
 
@@ -259,11 +259,11 @@ def test_every_writer_subprocess_runs_with_a_single_intra_op_thread():
     assert child.returncode == 0, child.stderr
     assert child.stdout.strip() == "1", (
         f"a writer subprocess built a {child.stdout.strip()}-thread intra-op "
-        "pool; five of those oversubscribe the runner (#10313)")
+        "pool; five of those oversubscribe the runner (#10333)")
 
 
 def test_every_writer_spawner_passes_the_bounded_env():
-    """#10313 review, P3: the SPAWNERS, not just the helper.
+    """#10333: the SPAWNERS, not just the helper.
 
     ``test_every_writer_subprocess_runs_with_a_single_intra_op_thread`` above
     proves that ``_writer_env()`` bounds torch — but it builds that env itself,
@@ -299,11 +299,11 @@ def test_every_writer_spawner_passes_the_bounded_env():
         env = kwargs.get("env")
         assert env is not None, (
             "a writer spawner passed NO env= — the child then inherits torch's "
-            "default intra-op pool, which is the #10313 oversubscription")
+            "default intra-op pool, which is the #10333 oversubscription")
         for var in _WRITER_THREAD_ENV:
             assert env.get(var) == "1", (
                 f"a writer spawner handed its child {var}={env.get(var)!r}; "
-                "every writer must be bounded to one intra-op thread (#10313)")
+                "every writer must be bounded to one intra-op thread (#10333)")
 
 
 def _pid_alive(pid: int) -> bool:
