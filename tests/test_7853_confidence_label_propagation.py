@@ -1013,21 +1013,30 @@ _BOUNDARY_MATRIX = [
     # the P2-2 shape: the write PRECEDES its own materialization.
     ("belief-forward-references-its-materialization",
      [_m_belief(), _m_object()], False),
-    # #7936 round-5 P1: the graph MERGEs Object/Subject by NAME, so a second
-    # registration of ONE name under a FRESH id RE-IDS the single node and the
-    # earlier id stops existing with NO journaled delete. The boundary must
-    # model that collapse (the disposition `journal_object_surviving_keys`
-    # already takes for supersedes) or it answers EXISTS for the collapsed
-    # id and exempts a belief `rebuild_all` refuses — the fail-open class.
+    # #7936 round-5 P1: on the NAME-keyed graph a second registration of ONE
+    # name under a FRESH id RE-ID'd the single node, so the earlier id stopped
+    # existing with NO journaled delete, and the boundary had to model that
+    # collapse or answer EXISTS for a collapsed id.
+    # ⛔ #3590 RETIRED THE COLLAPSE ITSELF: the fold MERGEs on `id` now, so the
+    # second registration opens a SECOND carrier and the earlier id SURVIVES
+    # (`name-reuse-buries-the-earlier-id`'s own comment below already says the
+    # node table leaves duplicated nodes as SEPARATE records). The belief
+    # therefore folds on every surface, and the row is ACCEPTED — the same flip
+    # `rename-collision-buries-every-dup-named-id` took. The collapse model is
+    # still exercised where it can still occur: replay of a journal line whose
+    # merge key IS the id, pinned by `rename-into-a-reused-name-…` below (which
+    # flips for the same reason: a rename now MOVES the id-keyed node's name
+    # without re-id-ing it).
     ("name-reuse-buries-the-earlier-id",
-     [_m_object(), _m_object("n-7936-matrix-2"), _m_belief()], True),
+     [_m_object(), _m_object("n-7936-matrix-2"), _m_belief()], False),
     # CONTROL: the same collapse AFTER the write — at the write the earlier id
     # is still the carrier, so the belief folds and every engine accepts.
     ("name-reuse-after-the-write-is-accepted",
      [_m_object(), _m_belief(), _m_object("n-7936-matrix-2")], False),
-    # the :Subject twin of the same collapse (`_upsert_subject` MERGEs by name).
+    # the :Subject twin, flipped for the same reason (`_upsert_subject` keys on
+    # `id` at this head, so the second registration is a second carrier).
     ("subject-name-reuse-buries-the-earlier-id",
-     [_m_subject(), _m_subject("n-7936-matrix-2"), _m_belief()], True),
+     [_m_subject(), _m_subject("n-7936-matrix-2"), _m_belief()], False),
     # an UNWRITABLE merge key materializes no node, so the record must not open
     # an incarnation the graph fold never created.
     ("unwritable-name-materializes-nothing",
@@ -1039,12 +1048,15 @@ _BOUNDARY_MATRIX = [
     ("rename-away-then-reuse-old-name-is-accepted",
      [_m_object(), _m_rename(), _m_object("n-7936-matrix-2"), _m_belief()],
      False),
-    # The mirror: a registration of the RENAMED-TO name re-ids the node, so the
-    # original id stops existing and the belief refuses — same collapse, reached
-    # through the rename rather than a second registration of the original name.
+    # The mirror: on the name-keyed graph a registration of the RENAMED-TO name
+    # RE-ID'd the node, so the original id stopped existing and the belief
+    # refused. ⛔ #3590 retires that too: a rename MOVES the id-keyed node's
+    # `name` without touching the id, and the later registration is a SECOND
+    # carrier, so `_MATRIX_ID` survives and the belief folds (same flip as the
+    # two rows above).
     ("rename-into-a-reused-name-buries-the-earlier-id",
      [_m_object(), _m_rename(new_name="matrix-renamed"),
-      _m_object("n-7936-matrix-2", "matrix-renamed"), _m_belief()], True),
+      _m_object("n-7936-matrix-2", "matrix-renamed"), _m_belief()], False),
     # #7936 round-5 P1 → FLIPPED by #8864. When MORE THAN ONE node already
     # carries the name-MERGE key, `_upsert_object` USED to match EVERY one of
     # them and `ON MATCH SET o.id=$id` re-id'd them ALL, so a 1:1
