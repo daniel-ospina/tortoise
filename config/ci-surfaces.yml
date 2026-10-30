@@ -3954,6 +3954,21 @@ surfaces:
   # *docs-only* diff, where NO surface is selected at all (#9089 review).
   - test_7949_capstone_measure.py
   - test_7949_capstone_verdict_check.py
+  # #9889: the three ADDITIVE probes that make the capstone's E1/E2 rows
+  # PRODUCIBLE instead of refused — `e1_paired_arm.py` (the OFF arm E1's bar is
+  # written over; `capstone_measure.py` forces the measured arm ON, so its
+  # before arm can never exist), `e1_gate_drops.py` (E1's mechanism, measured
+  # deterministically) and `e2a_value_units.py` (the frozen 14-unit
+  # denominator). The pins are each probe's FALSIFIER, not its happy path: a
+  # probe that reports a number and cannot show its counter moving is the
+  # refused-measurement failure this epic exists to close, one layer down.
+  # Stdlib + two pure shipped instruments (`value_gate.mechanical_verdict`,
+  # `grading.strict_survival_counts`); no DB, network or model. `core` is its
+  # home for the same reason as the two rows above — a probe-only diff reaches
+  # it through the BROAD `docs/evidence/7949-capstone/` bundle prefix (#9076),
+  # and `tools/ci_selection.py --integrity` reds an unclassified test file, so
+  # this row is required for manifest INTEGRITY as well as selection.
+  - test_9889_capstone_probes.py
   # #7949 E5: the WRITE-BACK half of E5's criterion — a fresh run of the registered
   # raw-vs-narrative scorer over the committed arm receipts, compared cell by cell
   # against the table §10 publishes. The run half was pinned
