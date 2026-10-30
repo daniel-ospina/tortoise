@@ -318,7 +318,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     // succeeded" is not "there is an object to read". Each arm posts the raw TEXT, because
     // `JSON.stringify` would turn a request for the text `null` into a present-or-absent body.
     // A throw is RECORDED rather than allowed to escape: on the pre-fix route the `null` arm threw
-    // a TypeError out of `onRequestPost`, and an escaping throw would kill the harness process (an
+    // a TypeError out of the mint handler, and an escaping throw would kill the harness process (an
     // exit-code failure) instead of asserting the status and body a caller actually receives.
     out.cases = [];
     for (const [label, text] of Object.entries(opts.bodies || {})) {
@@ -663,8 +663,10 @@ def test_the_CORS_preflight_is_the_one_that_makes_the_credentialed_mint_reachabl
 
     The consent page mints from the AS origin with `credentials: "include"`. That call only happens
     if THIS route answers the preflight with the exact AS origin (never `*`), credentials allowed, and
-    `POST` in the method list — so deleting or narrowing `onRequestOptions` makes the mint
-    unreachable from the page while every other test in this file stays green. The two suffix
+    `POST` in the method list — so deleting or narrowing `preflight` makes the mint
+    unreachable from the page while every other test in this file stays green. The arm drives the
+    route's one exported handler (`onRequest`), which is what Pages invokes for an OPTIONS request.
+    The two suffix
     look-alikes are pinned in the same arm because the refusal must carry NO
     `Access-Control-Allow-Origin`: a 403 with the header set still completes the browser call.
     """
@@ -1531,7 +1533,7 @@ def test_a_json_body_that_is_not_an_object_is_a_typed_400_not_an_untyped_500() -
     itself. The body is read BEFORE the session cookie, so this arm is reachable with no credential
     at all: `Origin` (an ordinary request header) plus `Content-Type: application/json` and the
     four bytes `null`. Pre-fix that last shape threw `TypeError: Cannot read properties of null`
-    out of `onRequestPost`, which Pages answers as an untyped 500.
+    out of the mint handler, which Pages answers as an untyped 500.
 
     The message is pinned, not just the status: the simpler-looking fix
     `((await request.json()) ?? {}) as Record<string, unknown>` also stops the throw, but it reports
