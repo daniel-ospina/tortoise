@@ -225,6 +225,19 @@ jobs:
     # PyPI marks the whole matrix `skipped` for up to the 360-minute default.
     # Mirrors manifest-integrity's bound for the same reason.
     timeout-minutes: 5
+    # ⛔ #6897: this job carries NO `env:` of its own — the runner-split opt-in
+    # is attached to the TWO matrix EMITTER steps instead (`push-matrix` and
+    # `split` below). Job scope would reach every emitter by construction, and
+    # an earlier cut of #10186 did exactly that, but this job also owns the
+    # capstone pre-registration gate step: any `env:` key at job scope sits
+    # ABOVE that gate and can hook its interpreter or shell, so
+    # `tests/test_capstone_preregistration_9075.py::_SAFE_JOB_ENV` is empty for
+    # every job and a job-scope lever reds a required fast shard (measured: 44
+    # reds in that pin at head `3eaf43fda`). Step scope on BOTH emitters is the
+    # shape that keeps the gate clean AND the lever live;
+    # `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`
+    # discovers the emitters from their `run:` commands, so a third one added
+    # later cannot silently miss it.
     outputs:
       python: ${{ steps.select.outputs.python }}
       full: ${{ steps.select.outputs.full }}
@@ -360,6 +373,16 @@ jobs:
         # event (the test job needs the matrix even on tier-2 PRs, where the
         # split step below overrides it).
         #
+        # #6897: the OPT-IN for the pool split arrives as the
+        # `CI_SHARD_ROUTING` repo variable — passed to the selector HERE, at
+        # STEP scope, and again on the tier-2 `split` step below (both
+        # emitters carry the lever; job scope is barred because it sits above
+        # the capstone gate step — see the note on this job). Resolved inside
+        # the selector (`resolve_shard_routing`) rather than in an expression,
+        # so the mode has exactly one implementation and
+        # `tests/test_ci_selection.py` can pin it. Unset/any other value =
+        # hosted-only.
+        #
         # #6135: the emitted `fast_matrix` is the COMPLETE GHA matrix object
         # (`{include: [...]}`) — one entry per shard, each carrying its own
         # `files` (space-joined), `watchdog_minutes`, `watchdog_headroom` (the
@@ -368,7 +391,11 @@ jobs:
         # shard COUNT is `config/ci-surfaces.yml::fast_shards`, and the count
         # of include rows is whatever the selector emits — nothing here counts
         # shards.
+        # #6897: emitter #1 of 2 — the other is `split` below, and BOTH must
+        # carry the mode or a tier-2 PR silently resolves to hosted-only.
         id: push-matrix
+        env:
+          CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
         run: |
           MATRIX=$(python3 tools/ci_selection.py --emit-push-matrix)
           # #1472 regression fix: SPACE-JOINED strings inside the matrix (the
@@ -417,8 +444,14 @@ jobs:
         # NOTE: reads steps.select.outputs.test_files — the split runs INSIDE
         # the changes job, so `needs.changes` (the job's own output) is
         # ALWAYS empty and would crash --split with empty stdin (#1492).
+        # #6897: emitter #2 of 2. This output OVERRIDES the push matrix on
+        # tier-2 PRs (`outputs.fast_matrix`), so without the mode here the
+        # opt-in is dead on exactly the event type every PR uses — measured on
+        # head `3db8f7d78`, which carried it on the push step alone.
         id: split
         if: github.event_name == 'pull_request' && steps.select.outputs.full == 'false'
+        env:
+          CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
         run: |
           SPLIT=$(echo '${{ steps.select.outputs.test_files }}' | python3 tools/ci_selection.py --split)
           echo "fast_matrix=$(echo "$SPLIT" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["fast_matrix"]))')" >> "$GITHUB_OUTPUT"
@@ -631,7 +664,56 @@ jobs:
     # under test-slow's 60m outer cap.
     needs: changes
     if: needs.changes.outputs.python == 'true'
-    runs-on: ubuntu-latest
+    # ── #6897: the fast matrix CAN split across both runner classes ──────────
+    # ⛔ OFF BY DEFAULT. The pool is **fallback-only** by recorded decision
+    # (`docs/ops/ci-runner-x64.md` -> "Contradiction test",
+    # `scripts/ci_runner_gate.sh:1-30`): jobs landing on local hardware compete
+    # with the agent fleet and the Tortoise graph. An earlier cut of this change
+    # made the pool a PRIMARY class for 4 of 9 gated shards by default, which is
+    # an adoption over that decision — so the split is now an explicit opt-in
+    # and the default is main's behaviour, verbatim.
+    #
+    # WHY THE DEFAULT STAYS OFF, measured (PR #10186 review, 2026-10-30):
+    # run 40981781885 on MAIN (plain `ubuntu-latest`) saw the pool win 5 of 9
+    # legs by the fallback race and **5 of 5 die at their watchdog**, while 4 of
+    # 4 hosted legs passed in 10-12 m of a 20 m budget; the x64 cells measured
+    # ~2.7x hosted at job level, not the 1.16x an older run suggested. On head
+    # 5a2ae6aa1 (run 40986603502) 3 of 4 pool legs failed — and two of those
+    # were not budget kills but `redis.exceptions.ConnectionError: Error 111 ...
+    # localhost:6379`, i.e. the pool host not serving the FalkorDB every
+    # docker-lane shard needs. A class that cannot complete the work is not
+    # capacity. Changing that default is #6897's decision to reopen, not this
+    # diff's to take.
+    #
+    # THE LEVER: `CI_SHARD_ROUTING` (Settings -> Variables) is read by the
+    # `changes` job and resolved in `tools/ci_selection.py` (ONE place, so it is
+    # unit-tested rather than living in a shell expression).
+    # `CI_SHARD_ROUTING=pool-split` opts IN: odd shards -> `[self-hosted,
+    # self-hosted-x64]` (x64 ONLY — 4.46x hosted on the ARM64 VMs vs far less on
+    # the x64 cells, 654 common testcases, run 40238275534 vs 40249711042), even
+    # shards + the LAST one stay on `ubuntu-latest`. Unset, empty, `hosted-only`,
+    # or anything unrecognised -> EVERY row is `ubuntu-latest`, which is exactly
+    # what main does. That is deliberate: a typo or an unavailable `vars` must
+    # fail SAFE, never onto the contended class.
+    #
+    # The last shard is the `canary_producer` the streak compares across runs, so
+    # it keeps the label it has always used in either mode.
+    #
+    # ⛔ NAMED RESIDUAL (opt-in mode only, and not fixed here): the split's
+    # non-pool rows are `ubuntu-latest`, which on this repo is NOT hosted-only —
+    # `scripts/ci_runner_gate.sh` attaches it to the self-hosted pool as a
+    # FALLBACK, and #6897 measured it attached while GitHub-hosted was healthy.
+    # That fired for real on head 5a2ae6aa1: `test (i)` — the CANARY — was taken
+    # by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s. `ubuntu-24.04` is the
+    # hosted-only label that would close it, and moving the hosted half to it is
+    # a separate decision (it also drops the outage fallback and breaks
+    # comparability with the canary streak's history) — filed on #6897, not
+    # taken here. In the DEFAULT mode this residual is main's own, unchanged.
+    #
+    # `runs-on` has no logic of its own: it parses the per-row `runner` the
+    # selector emitted, so the mode cannot drift between the two — there is no
+    # second place to edit.
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       # #6135: the WHOLE matrix is the selector's output — the shard count
@@ -643,6 +725,11 @@ jobs:
       # feed the canary streak). The labels MUST stay a, b, c, … — the merge
       # rail's lane-parity is a name subtraction, so an S-adding diff has to be
       # a SUPERSET of main's `test (a)`, `test (b)`.
+      # #6897: rows also carry `runner` — the `runs-on` label array as a JSON
+      # string, consumed ONLY by this job's `runs-on` above. Under the default
+      # (`hosted-only`) every row carries `["ubuntu-latest"]`, so this job is
+      # main's, row for row; the split appears only when an operator opts in
+      # with `CI_SHARD_ROUTING=pool-split`.
       matrix: ${{ fromJSON(needs.changes.outputs.fast_matrix) }}
     name: test (${{ matrix.half }})
     # Outer cap: setup (checkout+install+cache) + manifest collect-only
@@ -1762,14 +1849,30 @@ jobs:
     # yet") instead of being killed into a false red on the class that cannot finish
     # them, while the fast matrix keeps using the pool.
     #
-    # ⚠️ NAMED RESIDUAL (not fixed here): the fast matrix (`test (a)`…`test (i)`) is
-    # still `ubuntu-latest`, so the pool can still take it. Its per-shard margin is
-    # thinner than this leg's, not safer: a 9.72m committed estimate against a 20m
-    # budget, and the pool consumed 17.3m and 19.9m of JOB wall on shards (c) and (e)
-    # in the two other main runs measured that evening (39327442614, 39304878787) —
-    # ~78% and ~91% of the 20m pytest budget after ~1.7m of setup. Pinning the whole matrix would remove the fallback the gate exists for,
-    # which is a capacity decision, not a CI-hygiene one; the measurement is filed on
-    # #6897 instead.
+    # ✅ EXPLICIT WHEN OPTED IN (#6897, the change this paragraph belongs to —
+    # it is not yet on main): under the default (`hosted-only`) `test` behaves
+    # EXACTLY as this header describes — every leg is `ubuntu-latest`, and the
+    # pool can take it through the fallback race, which is main's exposure
+    # carried over unchanged and worth nothing new. The split only appears when
+    # an operator sets `CI_SHARD_ROUTING=pool-split`, and then `test`'s
+    # `runs-on` reads the selector's per-row `runner`: odd shards name
+    # `[self-hosted, self-hosted-x64]` EXPLICITLY (they cannot be resolved by the
+    # ARM64 class the `ubuntu-latest` fallback attaches, which is the class the
+    # margin below was measured on) while even shards keep `ubuntu-latest` — the
+    # SAME label, and the same residual ambiguity, that this header describes.
+    # Do not read "explicit" as "the fast matrix is now class-safe": even in
+    # opt-in mode the non-pool rows are not, and they include shards (c) and (e)
+    # — the two measured below at ~78%/~91% of the 20m budget on the ARM64 VMs.
+    # It fired for real on head 5a2ae6aa1: `test (i)`, the CANARY, was taken by
+    # `pi-runner-vm-5` (ARM64) and killed at 32m12s of a 30m budget. Closing THAT
+    # needs `ubuntu-24.04` on those rows, which also drops the outage fallback
+    # this gate exists for: a capacity decision, not a CI-hygiene one, filed on
+    # #6897. Kept here as the record of why THIS job is version-pinned: a 9.72m
+    # committed estimate against a 20m budget, and the pool consumed 17.3m and
+    # 19.9m of JOB wall on shards (c) and (e) in the two other main runs measured
+    # that evening (39327442614, 39304878787) — ~78% and ~91% of the 20m pytest
+    # budget after ~1.7m of setup, on the ARM64 VMs. Pinning THIS leg would remove
+    # the fallback the gate exists for. The measurement is filed on #6897.
     # Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`.
     runs-on: ubuntu-24.04
     # #1471: parallel duration-balanced legs (matrix), mirroring the `test`
@@ -1876,7 +1979,8 @@ jobs:
     # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
     # (legacy), read by tests/_live_utils.py.
     steps:
-      # ⛔ FIRST STEP ON PURPOSE — same contract as the fast job's (#10028).
+      # ⛔ FIRST STEP ON PURPOSE — same contract as the fast job's (#10028)
+      # and as `test-concurrency-falkor`'s (#10280).
       # This job was the UN-MIGRATED half: `pytest-rc`, `pytest-files` and the
       # redislite/tempdir hygiene reports had already moved to `${RUNNER_TEMP}`,
       # but the three artifacts the VERDICT and the guards are read from were
@@ -1885,10 +1989,9 @@ jobs:
       # named that exact residue in its own "NAMED RESIDUAL" header, whose STATUS
       # paragraph records THIS job as migrated (2026-10-29). The header's residual
       # paragraph names the legs that still write the host-global literals —
-      # `test-concurrency-falkor`, `test-track-b`, `test-carve-out` and
-      # `test-d14-hosted-api` here, plus the warn-only `validate` job in
-      # `post-merge-validation.yml` — the deliberate residual carried by #10280. That
-      # list is DERIVED and pinned by
+      # `test-track-b`, `test-carve-out` and `test-d14-hosted-api` here, plus the
+      # warn-only `validate` job in `post-merge-validation.yml` — the deliberate
+      # residual carried by #10280. That list is DERIVED and pinned by
       # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
       # so read it there rather than trusting this comment's copy of it.
       #
@@ -1900,6 +2003,7 @@ jobs:
       # truncated the file between this leg's `tail` and its attribution read.
       # `pytest-attribution.sh` therefore printed `STALE session summary (NOT
       # this leg's verdict)` / `INCOMPLETE` under that exit code.
+      #
       # The same sharing made legs (b) and (e) print FAILED nodeids for
       # `tests/test_epic903_fixtures.py`, `tests/test_epic903_scheduler.py` and
       # `tests/test_graph_diagnostics.py` — files whose only progress line in
@@ -1908,6 +2012,25 @@ jobs:
       # (444 passed -> 353 passed). The six nodeids genuinely belong to legs (c)
       # and (d), which do run those files; neither of those legs' own sets is
       # recoverable from the tail.
+      #
+      # ⛔ THE VERDICT ITSELF IS THE ARTIFACT THAT CAN BE ANOTHER LEG'S, and it
+      # needs no kill to go wrong. MEASURED on THIS PR (run 40921262252,
+      # `test-slow (a)`, job 123636659746, head 80c15dfe9): pytest exited **0**
+      # with `814 passed, 3 skipped`, and the leg still redded in the
+      # `Skip-fail guard` step — `850 expected nodeid(s) absent from the
+      # junitxml testcases` — because `/tmp/expected-nodeids.txt` held a
+      # CO-TENANT's manifest (its `… and 800 more` list is
+      # `tests/test_capture_session.py` and
+      # `tests/test_3311_multilabel_status_vocab.py`, files this leg never ran)
+      # while `/tmp/junit.xml` held this leg's. The log this run uploaded proves
+      # the sharing independently: its FIRST 5 KB carry a FOREIGN session header
+      # (`…-- /opt/gh-runner-x64/…`) while this job's own env says
+      # `pythonLocation: /opt/gh-runner-x64-2/…`, and a 62 KB NUL HOLE
+      # (offsets 5304..67993) sits where this leg's progress lines used to be.
+      # Both are registrations on ONE host (`gh api …/actions/runners` lists
+      # `self-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04` for each — which is
+      # also why this job's `runs-on: ubuntu-24.04` did not keep it off the pool;
+      # that routing drift is #10289, not this change).
       #
       # `runner.temp` is `<runner_install>/_work/_temp`, and a runner executes one
       # job at a time, so this is per-JOB unique even when several runner installs
@@ -2433,52 +2556,34 @@ jobs:
     # The image pin, the `--requirepass falkordb --save ''` REDIS_ARGS pair and
     # the health gate moved with it. The probe family is unchanged; the port is
     # now $TORTOISE_TEST_DOCKER_PORT, read by tests/_live_utils.py.
+    #
+    # ⛔ PER-JOB PYTEST ARTIFACTS (first step, #10280). This leg was one of the
+    # six #10280 names as still writing host-global `/tmp` artifacts, and it bit
+    # on THIS job (run 40884374618, job 123539933295): the live-concurrency step
+    # wrote `/tmp/pytest.log`, a co-tenant job on the same self-hosted host
+    # truncated it mid-run, and this leg's own `tail` and `pytest-attribution.sh`
+    # then read `tests/test_backfill_sources.py` / `tests/test_billing.py` —
+    # files it never runs — so it reported "test leg INCOMPLETE — no pytest
+    # summary; failure set unobservable" and the rail could attribute nothing.
+    # The inverse direction is worse and equally reachable: the skip-fail guard
+    # below greps this file for its three nodeids, so a peer's log makes a leg
+    # that ran NOTHING look certified. `$GITHUB_ENV` only reaches SUBSEQUENT
+    # steps, hence first, and it FAILS CLOSED on a missing `RUNNER_TEMP` — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
     steps:
-      # ⛔ FIRST STEP ON PURPOSE, and the reason is a MEASURED false red (#10280).
-      # `RUNNER_TEMP` is `<runner_install>/_work/_temp`, and a runner executes ONE
-      # job at a time — so it is per-JOB unique even though several runner installs
-      # on this host share one `/tmp`. That is exactly the property this leg lacked.
-      #
-      # Measured — run 40985248910 (PR #10214), **ATTEMPT 3**, this job on runner
-      # `cmux`. The attempt number is load-bearing: that run has four, attempt 1 was a
-      # hosted run that passed, and attempt 4 was CANCELLED with zero steps and no job
-      # log at all (400/404 on `jobs/<id>/logs`), so citing the run alone sends the
-      # next lane to a log that cannot show this.
-      #
-      # In attempt 3 a CO-TENANT leg was writing the SAME host-global `/tmp/pytest.log`
-      # for 19 minutes, so this leg's `tail`, its attribution read and its
-      # `grep '^(FAILED|ERROR) '` all described the OTHER leg's session (288 passed /
-      # `test_smoke_embedded` / `test_eval_ingest_retry`, none of them this job's
-      # tests). The reporter said so out loud — `test leg INCOMPLETE — no pytest
-      # summary; failure set unobservable` — and `ci-introduced-failure` then blocked
-      # this PR on three nodeids THIS leg had not run. A leg whose verdict is another
-      # leg's is not a red or a green: it is nothing.
-      #
-      # ⛔ WHICH leg wrote it is an INFERENCE, not a measurement, and the co-tenant's
-      # own runner is not observable at all: a truncated log cannot name its other
-      # writer. `test-carve-out` is named because this file's own inventory makes it
-      # the only other leg still on the literal AND a matrix whose shards run
-      # concurrently — not because the log names it. What IS measured: this leg's
-      # runner, the window, and the content of the log it read.
-      #
-      # The same migration #10028 applied to `test` and to `test-slow`; `test-carve-out`
-      # is migrated in this change too, so no matrix job in this workflow writes a
-      # host-global pytest artifact any more. The rest of #10280's scope
-      # (`test-track-b`, `test-d14-hosted-api`, `validate`) is unchanged by this step.
-      #
-      # ⛔ NOT a job-level `env:` block: `runner` is not an allowed context at
-      # `jobs.<job_id>.env`, and `${{ runner.temp }}` there makes actionlint reject the
-      # WHOLE file (#6253: zero jobs, zero check-runs, and the required
-      # `python-ci-gate` ABSENT rather than red). The upload below uses
-      # `${{ runner.temp }}` directly because `steps.<id>.with` DOES allow the context.
-      - name: Resolve per-job pytest artifact paths (#10028)
+      # #10280: this leg's log is PER-JOB. `/tmp` is ONE namespace across every
+      # runner install on a shared self-hosted host, so a `/tmp/pytest.log`
+      # literal is truncated and interleaved by whatever else the pool is running;
+      # the counts, the tail and the reporter's ownership proof then describe a
+      # co-tenant's session. `RUNNER_TEMP` is per-runner, and a runner runs one job
+      # at a time, so it is per-job. Same resolver shape as the `test` job's
+      # (#10028); it fails closed rather than falling back to the host `/tmp`.
+      - name: Resolve per-job pytest artifact paths (#10280)
         run: |
           set -euo pipefail
           base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
-          {
-            echo "PYTEST_LOG=$base/pytest.log"
-          } >> "$GITHUB_ENV"
-          echo "pytest artifact for this leg is under $base (per-job, not the host /tmp)"
+          echo "PYTEST_LOG=$base/pytest.log" >> "$GITHUB_ENV"
+          echo "pytest artifacts for this job are under $base (per-job, not the host /tmp)"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -2598,6 +2703,8 @@ jobs:
           # Skip-fail guard: live tests must RUN here, never skip (vacuity).
           # Matches BOTH pytest output formats (-v progress: "nodeid SKIPPED";
           # -rs summary: "SKIPPED [N] tests/file.py:line").
+          # This grep is WHY the log must be this job's OWN (#10280): a peer's
+          # log would certify a leg that ran nothing.
           if grep -E '(test_seq_is_monotonic_under_concurrency_live_falkor|test_next_seq_ceiling_is_atomic_across_workers_live_falkor|test_concurrent_writers_live_falkor_no_lost_writes) SKIPPED|SKIPPED \[[0-9]+\] tests/(test_event_store|test_embedded_concurrency)\.py' "$PYTEST_LOG"; then
             echo "❌ live tests SKIPPED — the job would be green while testing nothing"
             rc=1
@@ -2635,6 +2742,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}
+          # #10280: `runner.temp` (not /tmp) — the runner context IS allowed in
+          # `steps.<id>.with`, which is why the upload reads the path here rather
+          # than from a job-level `env:` block (see the #6253 note on test-slow).
           path: ${{ runner.temp }}/pytest.log
           if-no-files-found: ignore
       - name: Validate docker-compose.yml (ports + header edits)
@@ -2745,6 +2855,26 @@ jobs:
     # the health gate moved with it. The probe family is unchanged; the port is
     # now $TORTOISE_TEST_DOCKER_PORT, read by tests/_live_utils.py.
     steps:
+      # #10280: this leg's three pytest artifacts are PER-JOB. `/tmp` is ONE
+      # namespace across every runner install on a shared self-hosted host, so a
+      # `/tmp/expected-nodeids.txt` written by a concurrent leg IS this job's
+      # manifest — which is how this required check reds with no test failing:
+      # run 40990582554 wrote `4 expected nodeids -> /tmp/expected-nodeids.txt`
+      # and then reconciled its 4 testcases against a `test-carve-out` leg's
+      # register `616 expected nodeid(s) absent` (the leg's 616-nodeid emit landed
+      # on the same host 11s earlier). `RUNNER_TEMP` is per-runner, and a runner
+      # runs one job at a time, so it is per-job. Same resolver shape as the
+      # `test` job's (#10028); it fails closed rather than falling back to `/tmp`.
+      - name: Resolve per-job pytest artifact paths (#10280)
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
+          {
+            echo "PYTEST_LOG=$base/pytest.log"
+            echo "PYTEST_JUNIT=$base/junit.xml"
+            echo "PYTEST_MANIFEST=$base/expected-nodeids.txt"
+          } >> "$GITHUB_ENV"
+          echo "pytest artifacts for this job are under $base (per-job, not the host /tmp)"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -2771,7 +2901,7 @@ jobs:
         run: |
           FILES="tests/test_ingest_safety.py"
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "track_b" --output "$PYTEST_MANIFEST"
       - name: Run Track B tests (explicit marker)
         # §7: non-blocking UNTIL the sentinels flip, then MUST-PASS — both
         # Track B sentinels (_TRACK_B_FULL, SENTINEL_A9) have shipped, so
@@ -2783,8 +2913,8 @@ jobs:
           # in-step kill must stay BELOW the job's 10m outer cap (#798).
           timeout -s INT -k 10 5m stdbuf -oL python -m pytest \
             tests/test_ingest_safety.py -m track_b -v --timeout=300 \
-            -p no:cacheprovider --maxfail=20 -r fEs --junitxml=/tmp/junit.xml \
-            -o junit_family=xunit1 > /tmp/trackb.log 2>&1
+            -p no:cacheprovider --maxfail=20 -r fEs --junitxml="$PYTEST_JUNIT" \
+            -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           # #3470: a BLIND `tail -25` is a LINE-COUNT window, not a result —
@@ -2795,8 +2925,8 @@ jobs:
           # FAILED/ERROR nodeid grep, so the tail was its ONLY attribution
           # channel. Read the summary from the FULL log instead, and name the
           # INCOMPLETE case out loud. One definition: pytest-attribution.sh.
-          tail -25 /tmp/trackb.log
-          bash .github/scripts/pytest-attribution.sh --log /tmp/trackb.log --rc "$rc"
+          tail -25 "$PYTEST_LOG"
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
           echo "track-b rc=$rc (must-pass — gate member)"
           exit $rc
       - name: Skip-fail guard (track-b, epic #1647 Task 9)
@@ -2808,7 +2938,7 @@ jobs:
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
-            python3 tools/skip-guard.py /tmp/trackb.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+            python3 tools/skip-guard.py "$PYTEST_LOG" --junitxml="$PYTEST_JUNIT" --manifest "$PYTEST_MANIFEST"
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
@@ -2834,17 +2964,20 @@ jobs:
             echo "no tolerated tempdir-cleanup leak recorded at $LOG"
           fi
       - name: Upload track-b log (measurement artifact, #1477)
-        # #1477: non-gating upload — track-b writes /tmp/trackb.log (no
+        # #1477: non-gating upload — track-b writes $PYTEST_LOG (no
         # --durations, but the PASSED/FAILED lines feed the flake signal).
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}
+          # #10280: `runner.temp`, not the host `/tmp` — the second half of the
+          # same migration (the paths above are per-job; naming the old literals
+          # here would upload whatever a co-tenant left behind).
           path: |
-            /tmp/trackb.log
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
+            ${{ runner.temp }}/pytest.log
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
           if-no-files-found: ignore
 
       - name: Stop FalkorDB services (#6673)
@@ -2925,30 +3058,16 @@ jobs:
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
-      # ⛔ FIRST STEP ON PURPOSE — the migration #10028 gave `test` and `test-slow`,
-      # and the last leg of #10280's MATRIX half. `RUNNER_TEMP` is
-      # `<runner_install>/_work/_temp`, and a runner executes ONE job at a time, so
-      # it is per-JOB unique even though several runner installs on this host share
-      # one `/tmp`. That matters HERE more than anywhere else: this job is a MATRIX
-      # (#6263) whose shards run CONCURRENTLY, so a `/tmp/pytest.log` literal means
-      # two shards truncate each other's log mid-run — and every reader of that path
-      # (the `tail`, `pytest-attribution.sh`'s session-ownership check, and the
-      # `grep '^(FAILED|ERROR) '` the admin rail derives a failure SET from) then
-      # describes a SIBLING shard's session. That is the failure measured on this
-      # branch: run 40985248910 attempt 3, where `test-concurrency-falkor`'s log on
-      # runner `cmux` was a 19-minute carve-out session (`288 passed`,
-      # `test_smoke_embedded`, `test_eval_ingest_retry`) and the reporter correctly
-      # concluded `INCOMPLETE`. The three artifacts move together — a per-shard log
-      # beside a shared `junit.xml` would leave the skip-guard reading a sibling's
-      # collected set.
-      #
-      # ⛔ NOT a job-level `env:` block: `runner` is not an allowed context at
-      # `jobs.<job_id>.env`, and `${{ runner.temp }}` there makes actionlint reject
-      # the WHOLE file (#6253: zero jobs, zero check-runs, and the required
-      # `python-ci-gate` ABSENT rather than red). The upload below uses
-      # `${{ runner.temp }}` directly because `steps.<id>.with` DOES allow the
-      # context.
-      - name: Resolve per-job pytest artifact paths (#10028)
+      # #10280: this shard's three pytest artifacts are PER-JOB. The legs of this
+      # matrix run CONCURRENTLY, and on a shared self-hosted host `/tmp` is ONE
+      # namespace across every runner install — so the literals here let a sibling
+      # SHARD of this very job truncate this shard's log and overwrite its
+      # manifest/junit (`test-slow`'s measured false reds, #10028; `test-track-b`'s
+      # false red was this job's own manifest being read, run 40990582554).
+      # `RUNNER_TEMP` is per-runner, and a runner runs one job at a time, so it is
+      # per-job. Same resolver shape as the `test` job's (#10028); it fails closed
+      # rather than falling back to the host `/tmp`.
+      - name: Resolve per-job pytest artifact paths (#10280)
         run: |
           set -euo pipefail
           base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
@@ -3352,6 +3471,8 @@ jobs:
           # step is continue-on-error, so the logs disappear silently).
           # NOT `matrix.suffix` — it carries a leading space and parentheses.
           name: pytest-log-${{ github.job }}-${{ matrix.label }}
+          # #10280: `runner.temp`, not the host `/tmp` — naming the literals here
+          # would upload whatever a co-tenant shard left behind.
           path: |
             ${{ runner.temp }}/pytest.log
             ${{ runner.temp }}/junit.xml

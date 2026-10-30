@@ -59,7 +59,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
 ``result["vet"]`` at ``:8975-8979``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:13651``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14295``), which copies each
 stage's own counts onto ``stats["step_witness"]`` — so this module READS that seam
 (:func:`_witness_block`) instead of citing the gap. A run measured at a stamp
 BEFORE the seam still reports S2.2/S2.3 unobserved, and that is the run's own
@@ -151,7 +151,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13932`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:14576`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -166,7 +166,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13932 "
+    "the capture path at tortoise/sdk.py:14576 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
