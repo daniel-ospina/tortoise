@@ -26,27 +26,26 @@ pytest.importorskip("redislite")
 
 
 # #10333: every writer below computes an EMBEDDING per write (a truthy
-# ``content`` takes the dense-retrieval leg through
-# ``compute_embedding``), so each of these tests runs N processes doing
-# bge-small forward passes at once. Left at torch's default, EACH writer
-# spawns its own intra-op pool sized to the host's core count, so five
-# writers on a 4-core host oversubscribe it ~5x and the forward pass
-# degrades ~4x.
+# ``content`` takes the dense-retrieval leg through ``compute_embedding``), so
+# each of these tests runs N processes doing bge-small forward passes at once.
+# Left at torch's default, EACH writer spawns its own intra-op pool sized to the
+# host's core count, so five writers on a 4-core host oversubscribe it ~5x and
+# the forward pass degrades ~4x.
 #
-# MEASURED on a 4-core host with co-tenant lanes, 5 writers x 10 writes on the
-# live FalkorDB sidecar (the exact shape of
-# ``test_concurrent_writers_live_falkor_no_lost_writes``):
+# MEASURED, the exact shape of
+# ``test_concurrent_writers_live_falkor_no_lost_writes`` (5 writers x 10 writes
+# on a live FalkorDB sidecar), two independent boxes:
 #
-#   * torch default (ncpu threads each) ......... 109.2 s per writer
-#   * OMP/MKL/OPENBLAS_NUM_THREADS=1 per writer ... 26.0 s per writer
+#   4-core host with co-tenant lanes ... torch default 109.2 s / bounded 26.0 s
+#   8-core host with co-tenant lanes ... torch default 186.7 s / bounded 16.7 s
 #
-# The 109 s exceeded the test's own 90 s liveness bound and reddened the
-# REQUIRED ``test-concurrency-falkor`` check (run 40884374618, job
-# 123539933295: ``subprocess.TimeoutExpired ... timed out after 90 seconds``)
-# on a head that changed nothing in the write path — the bound was measuring
-# thread thrash, not a lost write or a hang. Bounding the pool keeps the bound
-# honest: it is a HANG detector again, with ~3.5x headroom over the measured
-# cost instead of sitting below it.
+# Both defaults sat ABOVE the test's own 90 s liveness bound, which reddened the
+# REQUIRED ``test-concurrency-falkor`` check (run 40884374618, job 123539933295;
+# and again on the #10241 lane at head fcf88d429, job 123936413843) on a head
+# that changed nothing in the write path — the bound was measuring thread
+# thrash, not a lost write or a hang. Bounding the pool keeps the bound honest:
+# it is a HANG detector again, with ~5x headroom over the measured cost instead
+# of sitting below it.
 #
 # Env, not ``torch.set_num_threads``: the child imports torch lazily (inside
 # ``compute_embedding``), so the process env is the one lever that is certain
@@ -64,8 +63,8 @@ def _writer_env():
     EVERY writer spawner in this module must use it — see
     ``_WRITER_THREAD_ENV`` for the measurement that makes it load-bearing.
     Pinned twice, at the two different claims:
-    ``test_every_writer_subprocess_runs_with_a_single_intra_op_thread`` proves the
-    env BOUNDS torch, and ``test_every_writer_spawner_passes_the_bounded_env``
+    ``test_every_writer_subprocess_runs_with_a_single_intra_op_thread`` proves
+    the env BOUNDS torch, and ``test_every_writer_spawner_passes_the_bounded_env``
     proves each spawner actually HANDS it to its child — a reader that only
     exercises this helper cannot see a spawner that drops ``env=`` (#10333
     review, P3: the earlier docstring claimed the pin covered both).
@@ -210,9 +209,10 @@ def test_concurrent_writers_live_falkor_no_lost_writes():
     for p_ in procs:
         # 90 s is a HANG bound, not the expected cost: with each writer's
         # intra-op pool bounded (`_WRITER_THREAD_ENV`, #10333) the measured
-        # wall is ~26 s on a 4-core host with co-tenant load, so this keeps
-        # ~3.5x headroom. It sat BELOW the unbounded cost (109 s) until #10333,
-        # which is what reddened the required test-concurrency-falkor check.
+        # wall is 16.7-26.0 s with co-tenant load, so this keeps ~3.5x
+        # headroom. It sat BELOW the unbounded cost (109.2-186.7 s) until
+        # #10333, which is what reddened the required test-concurrency-falkor
+        # check.
         p_.wait(timeout=90)
         assert p_.returncode == 0, p_.stderr.read()
 
@@ -245,10 +245,10 @@ def test_every_writer_subprocess_runs_with_a_single_intra_op_thread():
     stays red if the env var is dropped, misspelled, or stops bounding torch.
 
     The bound matters because each writer computes one EMBEDDING per write: at
-    torch's default, five writers on a 4-core host oversubscribe it ~5x and the
-    measured 5x10 write loop went 26.0 s -> 109.2 s, past the test's own 90 s
-    hang bound — a required-check red caused by thread thrash. See
-    ``_WRITER_THREAD_ENV``.
+    torch's default, five writers with co-tenant load oversubscribed the host
+    and the measured 5x10 write loop went 16.7-26.0 s -> 109.2-186.7 s, past the
+    test's own 90 s hang bound — a required-check red caused by thread thrash.
+    See ``_WRITER_THREAD_ENV``.
     """
     env = _writer_env()
     for var in _WRITER_THREAD_ENV:
@@ -263,7 +263,7 @@ def test_every_writer_subprocess_runs_with_a_single_intra_op_thread():
 
 
 def test_every_writer_spawner_passes_the_bounded_env():
-    """#10333 review, P3: the SPAWNERS, not just the helper.
+    """#10333: the SPAWNERS, not just the helper.
 
     ``test_every_writer_subprocess_runs_with_a_single_intra_op_thread`` above
     proves that ``_writer_env()`` bounds torch — but it builds that env itself,
