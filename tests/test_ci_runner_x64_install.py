@@ -76,7 +76,7 @@ WHAT IS BEING PINNED
      drop** — #6897's `OVERRIDES:` marker records the revert as `CI_RUNNER_OS_LABEL=off` PLUS
      `--repair-labels`, so a repair that dropped the pin whatever the flag said performed that revert
      with no switch involved. `on|auto` KEEPS the pin (and prints `version-pinned, kept=[…]`),
-     `off`/unset drops it, an unrecognised value is read as `off`. The keep-half is also ARCH-AWARE:
+     `off`/unset drops it, an unrecognised value is REFUSED (exit 1, before any mode runs). The keep-half is also ARCH-AWARE:
      a runner whose read-only host label says `ARM64`/`ARM` is refused, because keeping
      `ubuntu-latest` there is the measured #6897 false red rather than a queue delay.
   10c. **A label set is PARSED literally, and `relabelled` is a claim about the server.** An unquoted
@@ -1376,7 +1376,7 @@ def test_label_coverage_never_widens_a_class_numerator_to_foreign_arch_carriers(
         tmp_path / "gh-foreign",
         "\n".join(
             [
-                "a%d\tonline\tself-hosted,Linux,ARM64,self-hosted-arm64,ubuntu-24.04" % i
+                f"a{i}\tonline\tself-hosted,Linux,ARM64,self-hosted-arm64,ubuntu-24.04"
                 for i in range(1, 6)
             ]
             + ["x1\toffline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04"]
@@ -1412,7 +1412,7 @@ def test_label_coverage_never_widens_a_class_numerator_to_foreign_arch_carriers(
     wrong_arch = _stub_gh(
         tmp_path / "gh-wrong-arch",
         "\n".join(
-            "x%d\tonline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04-arm" % i
+            f"x{i}\tonline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04-arm"
             for i in range(1, 3)
         ),
     )

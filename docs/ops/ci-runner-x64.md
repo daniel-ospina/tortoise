@@ -749,7 +749,7 @@ and `systemctl show -p Environment runner-autoscale.service` is what says which 
 | `off`, or unset | no — the pre-departure invariant | DROPS it, prints `version-pinned, not kept=[…]` |
 | `on` | yes | KEEPS it — and ONLY it (`ubuntu-24.04-arm` etc. stay dropped) — prints `version-pinned, kept=[…]` |
 | `auto` | yes, derived from `/etc/os-release` | KEEPS it and only it (the box may claim one) |
-| anything else | treated as `off` | DROPS it, and says the value was not understood |
+| anything else | REFUSED before any mode runs (exit 1) | — nothing is read, and nothing is PUT |
 
 - **Why the repair has to read it.** #6897's `OVERRIDES:` marker suspends the version-pin invariant
   and records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. The repair honours
