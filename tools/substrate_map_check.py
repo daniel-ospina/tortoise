@@ -239,6 +239,34 @@ def _family_paths(text: str) -> set[str]:
     return paths
 
 
+#: A markdown table's separator row (`|---|`, alignment colons allowed).
+_TABLE_SEPARATOR = re.compile(r"^\|[\s:|-]+\|$")
+
+
+def _lane_table_body_rows(lanes: str) -> list[str] | None:
+    """The body rows of §3's LANE table — the first table in the section.
+
+    The population is the TABLE, not a row SHAPE. Enumerating rows by a
+    `| **L` prefix skipped every row written any other way (an unbolded
+    `| L9 …`, a table that stopped bolding its ids), so a lane row whose family
+    is prose could sit inside §3 while the guard reported CLEAN over it — the
+    same "narrower population read as a pass" class as the family regex, one door
+    along (#5086 review P3, cycle 9). A table whose header/separator cannot be
+    found returns `None`, so the caller REPORTS the unenumerable population
+    instead of reading it as emptiness.
+    """
+    rows: list[str] = []
+    for line in lanes.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            rows.append(stripped)
+        elif rows:
+            break
+    if len(rows) < 2 or not _TABLE_SEPARATOR.match(rows[1].replace(" ", "")):
+        return None
+    return rows[2:]
+
+
 def _lane_rows_without_a_family(lanes: str) -> list[str]:
     """Per §3 LANE row: it must name an adjudicable path, or say it is prose.
 
@@ -248,11 +276,22 @@ def _lane_rows_without_a_family(lanes: str) -> list[str]:
     prefixes (#5086 review P3, cycle 8). The exemption is explicit and in the
     document, so the skip is declared where it happens instead of being
     invisible.
+
+    The row population is §3's lane TABLE (`_lane_table_body_rows`), never a
+    prefix of the row text: a checker that only recognises `| **L` rows is a
+    shape allowlist, and a row that stops matching the shape escapes measurement
+    silently (#5086 review P3, cycle 9).
     """
+    body = _lane_table_body_rows(lanes)
+    if body is None:
+        return [
+            "§3's lane table (header + `|---|` separator) not found — the lane "
+            "population cannot be enumerated, so not one lane row is measured"
+        ]
+    if not body:
+        return ["§3's lane table has no rows — the lane population is empty"]
     problems: list[str] = []
-    for line in lanes.splitlines():
-        if not line.startswith("| **L"):
-            continue
+    for line in body:
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) < 4:
             problems.append(f"lane row is not a 5-cell table row: {line[:60]}")

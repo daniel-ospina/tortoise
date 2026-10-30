@@ -294,6 +294,54 @@ def test_a_lane_row_with_a_prose_only_family_is_reported() -> None:
     ), registry_only
 
 
+def test_a_lane_row_that_stops_looking_like_a_LANE_row_is_still_measured() -> None:
+    """Fails if the §3 row population is a ROW-SHAPE allowlist (`| **L`).
+
+    Reachable: the checker used to enumerate rows by a `| **L` text prefix, so
+    the SAME prose-family row it was added to catch went unseen the moment its
+    id was written unbolded (`| L4 retrieval-traversal |`) — `check_lane_families`
+    returned `[]` while the family was measured by nothing. Measured at the
+    pre-fix head: the first arm below returns `[]`, i.e. CLEAN over an
+    unmeasured lane. A lane table is a table; the population is its body rows,
+    not the ones whose first cell happens to start with a bold `L`
+    (#5086 review P3, cycle 9).
+
+    The two-state control keeps it discriminating: dropping the bold from the id
+    ALONE must stay clean, so the arm proves the row is still PARSED (rather than
+    reported for its own sake).
+    """
+    doc = _doc()
+    anchor = "| **L4** retrieval-traversal |"
+    family = (
+        "`tortoise/assembly.py` · `tortoise/subgraph.py` · "
+        "`tortoise/fanout.py` · `tortoise/search_engine.py`"
+    )
+    assert anchor in smc._section(doc, "## 3."), (
+        "the L4 row is gone — this control substitutes nothing the row checker reads"
+    )
+    assert family in smc._section(doc, "## 3."), (
+        "the L4 family cell is gone — the prose arm below would prove nothing"
+    )
+
+    unbolded = doc.replace(anchor, "| L4 retrieval-traversal |", 1)
+    problems = smc.check_lane_families(unbolded.replace(family, "the retrieval seams", 1))
+    assert any("declares no checkable file family" in p for p in problems), (
+        f"an unbolded lane row with a prose family is a CLEAN over nothing: {problems}"
+    )
+
+    assert smc.check_lane_families(unbolded) == [], (
+        "the unbolded row must still be MEASURED — its family still resolves, so "
+        "dropping the bold alone is not drift"
+    )
+
+    #: A table whose header/separator cannot be found cannot be enumerated at
+    #: all; that must be REPORTED, never read as an empty population.
+    broken = doc.replace("|---|---|---|---|---|", "| not a separator |", 1)
+    assert any("cannot be enumerated" in p for p in smc.check_lane_families(broken)), (
+        "an unenumerable lane table must be a stated problem, not silence"
+    )
+
+
 def test_the_lane_table_is_actually_enumerated() -> None:
     """Fails if §3's families stop being parsed, leaving only §4's checked.
 
