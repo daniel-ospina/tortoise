@@ -511,28 +511,102 @@ class TestProjectionFold:
         finally:
             sdk.close()
 
-    def test_fold_id_miss_does_not_fall_back_to_name(self):
-        """#3590: an id that matches NO Object is a MISS — it is never
-        re-resolved by the name the record also carries.
+    def test_a_main_era_synthesized_id_supersede_still_replays(
+            self, tmp_path):
+        """#3590 D2-(i), the REGRESSION: a journal `main` wrote must keep
+        rebuilding.
 
-        ⛔ This test's predecessor (`test_fold_id_miss_falls_back_to_name`)
-        pinned the #2164 ISSUE B fallback: id-miss + name-present must fold the
-        node found BY NAME. That fallback is RETIRED (#3590): under same-name
-        coexistence a name-keyed fold supersedes a DIFFERENT incarnation —
-        #3573's burial class, and the reason `_update_entity` had to withhold
-        rename records. `_fold_object_superseded` now issues
-        ``MATCH (o:Object {id:$id})`` and nothing else, so the honest pin is the
-        inverse: `(0, 0)` with the node left `live`, on both `cas` modes.
+        `apply_supersessions` on `main` targeted an id-less Object by
+        SYNTHESIZING the canonical ``obj-<sha26(name)>`` id (``ids.entity_name_id``)
+        and journaling ``ObjectSuperseded`` with BOTH that id and the name. On a
+        graph whose registration wrote a DIFFERENT id (a pre-canonical
+        ``github-issue-…`` one — the class #3389/#3589 record as live) the id
+        binds 0 rows, so an id-only fold folds nothing and `rebuild_all`'s sweep
+        classifies ``object-superseded-miss`` — the NAME is established — and
+        raises. That journal is already on disk; it cannot be un-written.
 
-        RED-capability: re-growing a name branch (or any "id missed, try the
-        name" fallback) returns `(1, 1)` and reds this."""
+        The owner ruled the shape (2026-10-26, the D2 comment that names the
+        no-id fold calls): *"a journal that replays on `main` must keep
+        replaying and the record must keep landing — that is a regression to
+        repair. I am not asking about it."* So an id-miss re-resolves the
+        record's NAME through the name→ID index — ONE carrier or nothing.
+
+        NON-VACUITY: this is RED at the pre-fix head with
+        ``NonFoldedEventsError`` on this exact journal, and green on
+        ``origin/main`` (which folded it by name).
+        """
+        from tortoise.legacy_ids import _derived_legacy_handle  # main's spell
+        from tortoise.projection import FalkorProjection
+
+        name, successor = "legacy-R", "successor-S"
+        # `main`'s `ids.entity_name_id("Object", name)` — the exact spelling, via
+        # the one function that still emits it (`label[:3]-<sha256[:26]>`).
+        synthesized = _derived_legacy_handle("Object", name)
+        assert synthesized.startswith("obj-"), synthesized
+        events = tmp_path / "events"
+        events.mkdir()
+        # The main-era journal, VERBATIM: a pre-canonical registration id, then
+        # the supersede `main` synthesized, whose id the graph never carries.
+        with open(events / "events.jsonl", "w", encoding="utf-8") as fh:
+            for rec in (
+                {"type": "ObjectRegistered",
+                 "id": f"github-issue-{name}-7", "name": name,
+                 "objectKind": "core:strategy", "status": "live"},
+                {"type": "ObjectSuperseded", "id": synthesized,
+                 "name": name, "supersedes_by": successor,
+                 "ts": "2026-01-01T00:00:00Z"},
+            ):
+                fh.write(json.dumps(rec) + "\n")
+        proj = FalkorProjection(path=str(tmp_path / "tmain-era.db"),
+                                skip_health_check=True)
+        try:
+            proj.rebuild_all(str(events), confirm_destructive=True)  # no raise
+            rows = proj.g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+                params={"n": name}).result_set
+        finally:
+            proj.close()
+        assert rows and rows[0][0] == "superseded", (
+            "a main-era journal's supersede reverted to live on rebuild — the "
+            f"id-miss no longer re-resolves the name→ID index: {rows!r}")
+        assert rows[0][1] == successor, rows
+
+    def test_fold_id_miss_resolves_the_name_index_and_never_a_name_merge(self):
+        """#3590: an id that matches NO Object is re-resolved by the name the
+        record carries — through the name→ID INDEX, which answers ONE id or
+        nothing. It is never a name-keyed MERGE.
+
+        The distinction is the whole finding: `main`'s #2164 ISSUE B fallback
+        was ``MATCH (o:Object {name:$name})`` + blind SET, which folded EVERY
+        carrier of the name and could re-claim a DIFFERENT incarnation
+        (#3573's burial class). Retiring it outright made a main-era journal
+        un-rebuildable (D2-(i): a journal that replays on `main` must keep
+        replaying), so the reach is restored at the one strength that is still
+        a fact — a name with exactly ONE carrier denotes that carrier, and 2+
+        carriers denote nothing.
+
+        Three arms, because any two of them alone can pass for the wrong
+        reason:
+
+        * **id-less carrier** — the only holder carries no ``id``, so there is
+          nothing to fold on: ``(0, 0)``, node untouched. (This is the arm the
+          previous pin generalised from; it proves the index is not a MERGE, so
+          fixing one instance of the class did not leave the class behind.)
+        * **ONE id-carrying carrier** — RESOLVES, ``(1, 1)``. RED-capability:
+          deleting the index re-resolution (returning ``(0, 0)`` for any
+          id-miss) reds this arm, which is exactly the regression a
+          main-era journal hits.
+        * **TWO id-carrying carriers** — refuses to pick: ``(0, 0)``, both
+          nodes left ``live``. RED-capability: a name-keyed MERGE returns
+          ``(1, 1)``/``(2, 2)`` and reds this.
+        """
         sdk = _fresh_sdk()
         try:
             proj = sdk._get_proj()
             fold = proj._fold_object_superseded
-            # #2242: a FRESH legacy node per cas mode — the cas=False pass
-            # folds (blind) and would leave the cas=True pass a terminal
-            # re-fold (0,1); each arm must assert a first-fold fallback.
+            # #2242: a FRESH legacy node per arm — the cas=False pass folds
+            # (blind) and would leave the cas=True pass a terminal re-fold
+            # (0,1); each arm must assert a first-fold outcome.
             for cas in (False, True):
                 name = f"legacy-F-{int(cas)}"
                 # raw legacy Object — NO id property at all
@@ -542,15 +616,37 @@ class TestProjectionFold:
                                 "name": name,
                                 "supersedes_by": "successor-F"}, cas=cas)
                 assert matched == (0, 0), (
-                    "an id-miss was re-resolved by the record's NAME — the "
-                    "name branch is back, and it supersedes a different "
-                    f"incarnation under coexistence (cas={cas}): {matched}")
+                    "an id-miss folded a carrier that carries NO id — there "
+                    "is no address to write, so the fold must not touch it "
+                    f"(cas={cas}): {matched}")
                 rows = proj.g.query(
                     "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
                     params={"n": name}).result_set
                 assert rows and rows[0][0] == "live", (
-                    f"a name-keyed fold MOVED the node's state (cas={cas}): "
-                    f"{rows}")
+                    f"an id-less carrier's state was MOVED (cas={cas}): {rows}")
+            # ── ONE id-carrying carrier: the index RESOLVES ───────────────
+            sdk.create_entity("object", "index-single", objectKind="core:strategy")
+            assert fold({"id": "synthesized-obj-<sha26(index-single)>",
+                         "name": "index-single",
+                         "supersedes_by": "index-succ"}) == (1, 1)
+            rows = proj.g.query(
+                "MATCH (o:Object {name:'index-single'}) "
+                "RETURN o.status, o.supersededBy").result_set
+            assert rows == [["superseded", "index-succ"]], rows
+            # ── TWO id-carrying carriers: refuses to pick one ────────────
+            proj.g.query("CREATE (o:Object {name:'index-dup', id:'dup-a', "
+                         "status:'live'})")
+            proj.g.query("CREATE (o:Object {name:'index-dup', id:'dup-b', "
+                         "status:'live'})")
+            assert fold({"id": "synthesized-obj-<sha26(index-dup)>",
+                         "name": "index-dup",
+                         "supersedes_by": "dup-succ"}) == (0, 0), (
+                "a 2-carrier name resolved to ONE of them — that is the "
+                "#3573 burial class the index exists to refuse")
+            rows = proj.g.query(
+                "MATCH (o:Object {name:'index-dup'}) RETURN o.status"
+            ).result_set
+            assert rows == [["live"], ["live"]], rows
             # id-miss + NO name stays a (0,0) no-op (id-only/§6b legacy shapes)
             assert fold({"id": "no-such-id", "name": "",
                          "supersedes_by": "x"}, cas=False) == (0, 0)
@@ -615,15 +711,16 @@ class TestProjectionFold:
             #     terminal target; stored values unchanged
             assert fold({"id": oid, "name": "strategy-A",
                           "supersedes_by": "strategy-B"}, cas=True) == (0, 1)
-            # (3b) #3590 RETIRED the name branch: an id-less record is
-            #      UNADDRESSABLE whatever name it carries, so it folds nothing
-            #      even when a live carrier holds that name (the name-keyed
-            #      fold could supersede a DIFFERENT incarnation under
-            #      same-name coexistence — #3573's burial class). Its miss is
-            #      classified one level up (rebuild_all's sweep / the
-            #      reference fold's classifier), not here.
+            # (3b) #3590: an id-less record is addressed by the NAME it carries
+            #      — through the name→ID INDEX (the ONE carrier, or nothing),
+            #      never by a name-keyed MERGE. `strategy-A` has ONE carrier, so
+            #      this record RESOLVES: (0, 1) — the target is already terminal
+            #      from (3) and the CAS keeps its first-fold stamps. That is the
+            #      D2-(i) shape `main` folded by name, which is why this pin is
+            #      no longer (0, 0).
             assert fold({"id": "", "name": "strategy-A",
-                          "supersedes_by": "strategy-B"}, cas=True) == (0, 0)
+                          "supersedes_by": "strategy-B"}, cas=True) == (0, 1)
+            # ... and a name with NO carrier resolves to nothing at all.
             assert fold({"id": "", "name": "no-such-object",
                           "supersedes_by": "strategy-B"}, cas=True) == (0, 0)
             rows = sdk._get_proj().g.query(
@@ -724,13 +821,16 @@ class TestProjectionFold:
             sdk.create_entity("object", "bl-B", objectKind="core:strategy")
             sdk.create_entity("object", "bl-C", objectKind="core:strategy")
             fold = proj._fold_object_superseded
-            bl_a = _oid(sdk, "bl-A")
             ts1 = "2026-09-07T00:00:00Z"
-            # default cas=False (no cas= arg) — blind, pre-CAS parity
-            assert fold({"id": bl_a, "name": "bl-A", "supersedes_by": "bl-B",
+            # default cas=False (no cas= arg) — blind, pre-CAS parity.
+            # ⛔ NO ID, deliberately: this is the D2-(i) shape (`main` folded a
+            # name-only record by name), and the name→ID index has to reach the
+            # ONE carrier for the blind last-wins contract to be exercised at
+            # all.
+            assert fold({"name": "bl-A", "supersedes_by": "bl-B",
                          "ts": ts1}) == (1, 1)
             ts2 = "2026-09-07T01:00:00Z"
-            assert fold({"id": bl_a, "name": "bl-A", "supersedes_by": "bl-C",
+            assert fold({"name": "bl-A", "supersedes_by": "bl-C",
                          "ts": ts2}) == (1, 1)
             rows = proj.g.query(
                 "MATCH (o:Object {name:$n}) "

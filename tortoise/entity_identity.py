@@ -582,6 +582,43 @@ def all_name_holder_ids(g, label: str, name: str, *,
                             name_props=name_props)
 
 
+def unique_name_holder_id(g, label: str, name: str) -> str | None:
+    """The ONE id-carrying holder of ``name`` (**any** status) — else ``None``.
+
+    The FOLD-SIDE address resolution: it answers "which id does this name
+    denote", never "which node should I write". It resolves only when there is
+    exactly ONE carrier, which is what makes it safe where a name-keyed
+    ``MERGE`` was not — a name with 2+ carriers has no single answer, so the
+    caller folds NOTHING and lets its own classifier decide (fail-closed, and
+    no bailment of a carrier the caller never chose — #3573's burial class).
+
+    **ANY status, deliberately.** ``main``'s ``MATCH (o:Object {name:$name})``
+    fallback in ``_fold_object_superseded`` carried no status predicate, so an
+    already-terminal target re-folded blind (``cas=False`` replay is last-wins).
+    A live-only index would refuse those journals instead — one journal, two
+    verdicts, across the release boundary.
+
+    ⛔ It RECORDS NOTHING. A miss here is classified ONE level up, by the same
+    predicate the sweep and ``check_consistency`` use
+    (``classify_terminalizer_miss`` + ``supersede_object_address``), because a
+    fold-site ``unregistered-reference`` would refuse a journal the recorded
+    D2 exemption covers (``object-superseded-unregistered``: the journal
+    established NEITHER address the record carries, so live and replay agree by
+    construction). This is the quiet half of :func:`resolve_fold_name`, which
+    is the same resolution for the folds that own their own miss.
+
+    An id-less carrier is NOT addressable (:func:`_require_unique_id`'s
+    precondition is an id to fold on), so a name whose only holder carries no
+    id answers ``None`` — the same shape ``apply_supersessions`` refuses on the
+    write side (``unaddressable-name``).
+    """
+    holders = all_name_holder_ids(g, label, name)
+    ids = [str(h) for h in holders if h]
+    if len(holders) == 1 and ids:
+        return ids[0]
+    return None
+
+
 def _endpoint_idents(g, value: str, *, include_url: bool) -> set:
     """The distinct endpoint idents ``create_edge`` would resolve for ``value``.
 

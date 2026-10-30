@@ -12201,27 +12201,49 @@ class FalkorProjection(
             # right predicate: `rebuild_all` does fold it, so refusing here
             # would be a false refusal.
             #
-            # ⛔ #3590: `_survives` reads the ID limb ONLY. Both surviving
-            # halves used to suppress the refusal, which was correct while the
-            # fold had a name branch (`MATCH (o:Object {name:$name})`) — a
-            # surviving NAME then really was a target `rebuild_all` would fold.
-            # That branch is RETIRED: `_fold_object_superseded` now issues
-            # `MATCH (o:Object {id:$id})` and nothing else, so a name-only
-            # record misses on EVERY engine, including `rebuild_all`'s sweep.
-            # Counting the name as "the sweep will fold it" made the three
-            # engines disagree on ONE journal — measured on
-            # `[ObjectRegistered(obj-5285-a, TERM), ObjectSuperseded(name=TERM)
-            # ×2]`: `rebuild_all` raised `NonFoldedEventsError`
-            # (`object-superseded-miss`, the name WAS established) while
-            # `rebuild(log)` and `recover_from_log` finished GREEN with the
-            # Object still `live`. R8 requires one journal → one disposition.
-            # A surviving name is no longer evidence of anything: the record
-            # carries no address the fold can use.
+            # ⛔ #3590: `_survives` reads BOTH limbs, and the ID limb is no
+            # longer the whole story — that is the point of the name→ID index.
+            # It used to be id-only because the fold had no name path at all,
+            # so a surviving name was evidence of nothing; now a name with ONE
+            # carrier IS a target the sweep folds, and a name-only record whose
+            # target a LATER record materializes folds there too. Suppressing
+            # the refusal for it is required in the direction this guard must
+            # never fail in — a false refusal blocks recovering a sound journal.
+            # The 2+ carrier over-accept is named in-line below.
+            #
+            # Measured before the index (`[ObjectRegistered(obj-5285-a, TERM),
+            # ObjectSuperseded(name=TERM) ×2]`): `rebuild_all` raised
+            # `NonFoldedEventsError` (`object-superseded-miss`, the name WAS
+            # established) while `rebuild(log)` and `recover_from_log` finished
+            # GREEN with the Object still `live`. R8 requires one journal → one
+            # disposition; with both halves resolving the same name the index,
+            # both fold the single carrier and the three engines agree.
             folded, _ = self._fold_object_superseded(ev)
             if folded == 0 and journal_object_surviving is not None:
-                _cids, _ = journal_object_surviving
+                _cids, _cnames = journal_object_surviving
                 _oid, _oname = ev.get("id"), ev.get("name")
-                _survives = isinstance(_oid, str) and _oid in _cids
+                # ⛔ BOTH limbs suppress the refusal — main's predicate, and the
+                # reason it is back is the doctrine stated on
+                # `journal_object_surviving_keys`: a FALSE REFUSAL (refusing a
+                # journal `rebuild_all` folds, which blocks the recovery of a
+                # sound journal) is "the one error this guard must never make".
+                # The FORWARD-REFERENCE shapes are exactly where a
+                # chronological pass cannot know the answer yet: the target is
+                # materialized by a LATER creation or rename, so this pass
+                # folds nothing while the trailing sweep folds the carrier.
+                # The name limb is what keeps those accepted.
+                #
+                # ⚠️ The price, stated rather than hidden: a name whose journal
+                # end-state has 2+ carriers is accepted here (no refusal, target
+                # left `live`) while `rebuild_all`'s sweep REFUSES it
+                # (`object-superseded-miss`, the name IS established). That is
+                # the SAME class as the id limb's long-documented FIX-4 gap
+                # (`[Sup(id=x), Reg(x,XOBJ)]`: accepted here, folded there, graph
+                # differs — "the ACCEPT verdict is shared, the graph is not"),
+                # not a new one: this gate decides ACCEPT/REFUSE, and for the
+                # 2+ carrier shape only the sweep holds the carrier count.
+                _survives = ((isinstance(_oid, str) and _oid in _cids)
+                             or (isinstance(_oname, str) and _oname in _cnames))
                 _deleted = (isinstance(_oid, str)
                             and journal_object_deleted is not None
                             and _oid in journal_object_deleted)

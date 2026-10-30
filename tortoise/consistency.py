@@ -1809,40 +1809,54 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         or every LATER zero-carrier supersede of a once-ambiguous name is
         silently exempted — passing a journal `rebuild_all` refuses.
 
-        ⛔ #3590: this resolves by ID ONLY, mirroring the query the graph fold
-        actually issues — ``MATCH (o:Object {id:$id})`` and nothing else. The
-        name branch of ``_fold_object_superseded`` is RETIRED, so a name-keyed
-        resolution here *invented* a target no engine folds and the two halves
-        of one classification disagreed on the same journal. Measured on
-        ``[ObjectRegistered(obj-5285-a, TERM), ObjectSuperseded(name=TERM)]``:
-        the graph engines refuse (``object-superseded-miss``) while this fold
-        resolved the name, wrote ``status='superseded'`` into the ENTITY model,
-        and reported a bogus ``content`` divergence against the correct graph.
-        R8's contract is one journal -> one disposition on every surface.
+        ⛔ #3590: the fold addresses an ID and never a ``MERGE`` key of a name,
+        and this resolves the SAME way so the two halves of one classification
+        cannot disagree on one journal — R8's contract is one journal -> one
+        disposition on every surface. The graph fold's rule
+        (``_fold_object_superseded``) is: the explicit ``id`` while it binds a
+        row; otherwise the name→ID INDEX — the ONE id-carrying carrier of the
+        name, or nothing. So this mirrors it in the same order:
+
+        * id present and SURVIVING -> that key (the ``surviving_ids`` limb
+          below);
+        * id present but NOT surviving -> fall through to the name arm, exactly
+          as the fold re-resolves it (a record whose id the graph does not
+          carry: ``main``'s synthesized ``obj-<sha26(name)>`` for an id-less
+          target);
+        * no id -> the name arm.
+
+        ⛔ A name-keyed resolution that picked among 2+ carriers is what
+        #3590 forbids (``main``'s ``MATCH (o:Object {name:$name})`` folded
+        EVERY carrier — #3573's burial class). One carrier is not a pick: it
+        cannot be a DIFFERENT incarnation, so resolving it is the same answer
+        the graph fold reaches. Measured before this mirror existed:
+        ``[ObjectRegistered(obj-5285-a, TERM), ObjectSuperseded(name=TERM)]``
+        refused on the graph but wrote ``status='superseded'`` here — a bogus
+        ``content`` divergence against the correct graph.
 
         #5285 cycle-4 (FIX 2) still applies to the ID limb: two ids sharing a
         name collapse into ONE node carrying the LAST id, so
-        ``MATCH (o:Object {id:$oid})`` folds 0 rows for the collapsed-away id
-        and every replay engine REFUSES. A bare ``entities`` membership test
-        recorded NO miss (the collapsed-away id is still in the reference
-        index), so ``check_consistency`` passed a journal the graph refuses —
-        the fail-open this lane exists to remove. An id is a live carrier only
+        ``MATCH (o:Object {id:$oid})`` folds 0 rows for the collapsed-away id.
+        A bare ``entities`` membership test recorded NO miss (the
+        collapsed-away id is still in the reference index), so
+        ``check_consistency`` passed a journal the graph refused — the
+        fail-open this lane exists to remove. An id is a live carrier only
         when it SURVIVES to the journal's end (the same key set the apply
         engines' refusal gate reads).
 
-        The name is read in the NO-ID arm ONLY to report the >1-carrier
-        ambiguity, never to resolve a target: an id-less record is
-        unaddressable on every engine (the D2 exemption or the
-        ``object-superseded-miss`` refusal, decided by
-        ``_supersede_name_unregistered``), so resolving it here would be the
-        same false fold in the other direction.
+        With that id limb exhausted, the name arm decides the disposition too:
+        the collapse above now resolves to its surviving carrier (one key),
+        while a name the journal established with NO surviving carrier stays a
+        miss and 2+ carriers stay the reported ambiguity.
         """
-        if isinstance(oid, str) and oid:
-            if ("Object", oid) in entities and oid in surviving_ids:
-                return ("Object", oid), False
-            # A stale / absent / collapsed-away id is a MISS, never a name
-            # re-resolution: the graph fold does not consult the name either.
-            return None, False
+        if (isinstance(oid, str) and oid
+                and ("Object", oid) in entities and oid in surviving_ids):
+            return ("Object", oid), False
+        # A stale / absent / collapsed-away id: the graph fold re-resolves the
+        # record's NAME through the index and folds THAT id, so resolving here
+        # keeps the two halves in step. The synthesized-id shape (`main`'s
+        # `obj-<sha26(name)>`) is the reachable one.
+
         # #5285 (DEFECT 2): read the ONCE-built `name -> [keys]` index instead
         # of rescanning ALL of `entities` on EVERY call. The scan was
         # O(len(entities)) PER SUPERSEDE, so a journal of N name-only supersedes
@@ -1853,6 +1867,8 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         # underneath it.
         carriers = (object_keys_by_name.get(oname, [])
                     if isinstance(oname, str) and oname else [])
+        if len(carriers) == 1:
+            return carriers[0], False
         if len(carriers) > 1:
             # #5285 cycle-3: `status != "superseded"` gates the >1-carrier
             # AMBIGUITY decision only (exactly one still-live carrier is the

@@ -1105,41 +1105,39 @@ class TestReReviewRoundThree:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestCycleThreeFinalStateResolution:
-    def test_second_name_only_supersede_of_an_established_name_refuses(
+    def test_second_name_only_supersede_of_an_established_name_folds(
             self, env, tmp_path):
-        """#3590 — an ID-LESS supersede is unaddressable, and here the name
-        IS established, so it is the NON-exempt refusal on EVERY engine.
+        """#3590 D2-(i) — a name-only supersede of an ESTABLISHED name LANDS,
+        on EVERY engine.
 
-        ⛔ This pin previously asserted the pre-#3590 NAME-KEYED fold: the
-        graph matched a name-only supersede on NAME and re-folded
-        unconditionally, so this journal folded to `superseded`. That fold is
-        RETIRED (#3590): a name is not an identity, and under same-name
-        coexistence a name-keyed supersede can bury a DIFFERENT incarnation
-        (#3573's class). The record carries no `id`, so nothing is addressable
-        by the id-keyed fold.
+        ⛔ This pin has been inverted twice and the history is the point, so
+        both directions are named here. Pre-#3590 it asserted the name-keyed
+        fold. This branch then asserted the opposite (a blanket
+        ``object-superseded-miss`` refusal), on the premise that an id-less
+        record is UNADDRESSABLE — which made a journal ``main`` folds
+        UN-REBUILDABLE, i.e. the durable copy of the data could no longer be
+        recovered from its own journal. The owner excluded exactly this shape
+        (#3590 D2, 2026-10-26): *"a journal that replays on `main` must keep
+        replaying and the record must keep landing — that is a regression to
+        repair. I am not asking about it."*
 
-        The verdict is the recorded D2 bound (`object-superseded-unregistered`,
-        adopted on #3590), not a blanket refusal: the exemption needs BOTH
-        limbs unestablished, and here the name `TERM` IS established by the
-        journal's own `ObjectRegistered` — a supersede that COULD have landed,
-        so it must refuse as `object-superseded-miss`.
+        What replaced the refusal is the name→ID INDEX
+        (``entity_identity.unique_name_holder_id``): the record resolves to the
+        ONE carrier of ``TERM``, so both supersedes fold (blind, last-wins —
+        ``supersededBy='s2'``). 2+ carriers would resolve to nothing; that
+        shape is pinned by
+        ``test_ambiguous_status_does_not_hide_a_presence_burial`` and by
+        ``test_fold_id_miss_resolves_the_name_index_and_never_a_name_merge``.
 
         R8 requires ONE journal → ONE disposition, so all three replay engines
-        are pinned, each in its own refusal shape: `rebuild_all` and
-        `rebuild(log)` raise :class:`NonFoldedEventsError`; `recover_from_log`
-        REPORTS the refusal (`recovered: False` + the additive `reason` clause)
-        because its documented contract catches and reports rather than raising.
-        Measured before this pin: `rebuild_all` refused while `rebuild(log)`
-        and `recover_from_log` finished GREEN with the Object still `live` —
-        the `apply()` gate's `_survives` predicate still counted a surviving
-        NAME as "the deferred sweep will fold it", which was true only while
-        the fold had a name branch.
+        are pinned: ``rebuild_all``, ``rebuild(log)`` and ``recover_from_log``
+        must all accept it and agree on the graph.
 
-        FAILS IF: the fold re-grows a name-keyed path (the journal would fold),
-        if the refusal becomes exempt (the journal would pass while nothing was
-        superseded), or if any engine accepts a journal the others refuse.
-        REACHABLE: an append/merge that carries two supersedes of one name, or
-        any legacy journal whose writer omitted the id."""
+        FAILS IF: an id-less supersede of a single-carrier name stops folding
+        (the D2-(i) regression), the fold re-grows a name-keyed MERGE that
+        folds several carriers, or any engine refuses a journal the others
+        accept.
+        """
         _sdk, events = env
         _raw(events, type="ObjectRegistered", id="obj-5285-a", name="TERM",
              status="live", event_id="e-a0")
@@ -1147,56 +1145,59 @@ class TestCycleThreeFinalStateResolution:
              supersedes_by="s1", event_id="e-a1")
         _raw(events, type="ObjectSuperseded", name="TERM",
              supersedes_by="s2", event_id="e-a2")
-        for engine in ("rebuild_all", "rebuild"):
-            proj = _fresh(tmp_path, engine)
+        for engine in ("rebuild_all", "rebuild", "recover_from_log"):
+            proj = _fresh(tmp_path, f"c3-{engine}")
             try:
-                with pytest.raises(NonFoldedEventsError) as ei:
-                    _drive(engine, tmp_path, events, proj)
-                assert "object-superseded-miss" in str(ei.value), str(ei.value)
-                assert "object-superseded-unregistered" not in str(ei.value), \
-                    str(ei.value)
+                _drive(engine, tmp_path, events, proj)
+                rows = proj.g.query(
+                    "MATCH (o:Object {id:'obj-5285-a'}) "
+                    "RETURN o.status, o.supersededBy").result_set
             finally:
                 proj.close()
-        # `recover_from_log` REPORTS rather than raises (its contract), so its
-        # refusal shape is `recovered: False` plus the reason clause.
-        proj = _fresh(tmp_path, "recover_from_log")
-        try:
-            res = recover_from_log(str(events), proj)
-            assert res["recovered"] is False, res
-            assert "object-superseded-miss" in str(res.get("reason")), res
-        finally:
-            proj.close()
-        # Nothing was superseded anywhere: the Object is still `live`, and the
-        # reference fold agrees with the graph fold that refused.
+            assert rows == [["superseded", "s2"]], (
+                f"{engine} did not fold both name-only supersedes onto the ONE "
+                f"carrier of TERM (blind replay is last-wins): {rows}")
+        # The reference fold must read the same disposition against the graph
+        # the journal's own fold produced (R8: one journal, one disposition).
         proj = _fresh(tmp_path, "c3a")
         try:
-            with pytest.raises(NonFoldedEventsError):
-                proj.rebuild_all(str(events), confirm_destructive=True)
-            assert _objects(proj) == [("obj-5285-a", "TERM", "live")], \
+            proj.rebuild_all(str(events), confirm_destructive=True)
+            assert _objects(proj) == [("obj-5285-a", "TERM", "superseded")], \
                 _objects(proj)
             r = check_consistency(str(events / "events.jsonl"), proj)
         finally:
             proj.close()
-        assert r["ok"] is False, r["divergence"]
-        assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+        assert r["ok"] is True, (r["divergence"], r["non_folded_events"])
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
 
-    def test_rename_materialized_forward_reference_refuses_on_every_engine(
+    def test_rename_materialized_forward_reference_folds_on_every_engine(
             self, env, tmp_path):
-        """#3590 — a name-only supersede whose target NAME is materialized by an
-        `op=rename` is still UNADDRESSABLE: the id-keyed fold never resolves by
-        name (`_fold_object_superseded`'s name branch is retired, and the
-        reference fold mirrors it), so the record is the NON-exempt
-        `object-superseded-miss` on every engine.
+        """#3590 D2-(i) — a name-only supersede whose target NAME is materialized
+        by a later `op=rename` LANDS in `rebuild_all`: the deferred sweep
+        resolves against the journal's END graph, where that name has ONE
+        carrier.
 
-        ⛔ This pin previously asserted the PRE-#3590 name-keyed resolution (the
-        held supersede stayed `pending` until the rename supplied the name, then
-        folded). That fold is retired: a name is not an identity and a
-        name-keyed resolution could bury a DIFFERENT incarnation (#3573).
+        ⛔ This pin was inverted on the premise that the id-keyed fold can never
+        resolve a name, so the record had to refuse. That premise made a journal
+        `main` folds un-rebuildable, and the owner excluded exactly this shape
+        (#3590 D2: a journal that replays on `main` must keep replaying and the
+        record must keep landing). The name→ID index keeps the reach at the one
+        strength that is a fact — ONE carrier, or nothing.
 
-        FAILS IF: a name-keyed resolution re-grows and the run stops refusing,
-        or the two halves of one disposition disagree (R8).
+        ⚠️ The APPLY engines are not asserted to reproduce the fold: they run
+        chronologically, so at `e-c1` the name `NEWNAME` is not on the graph yet
+        and they accept the record WITHOUT folding it (status stays `live`).
+        That is the pre-existing, stated FIX-4 gap (`the ACCEPT verdict is
+        shared, the graph is not`), and the ACCEPT/REFUSE half is what this
+        file owns — so the assertion here is that no engine REFUSES a journal
+        `rebuild_all` folds (a false refusal blocks recovering a sound journal)
+        and that the reference fold agrees with the graph that IS produced.
+
+        FAILS IF: the name-index resolution stops reaching a name a LATER record
+        supplies (the forward-reference case this test exists for).
         REACHABLE: a merged/partial journal where a supersede by the NEW name
-        precedes the Object whose rename supplies that name."""
+        precedes the Object whose rename supplies that name.
+        """
         _sdk, events = env
         _raw(events, type="ObjectRegistered", id="obj-5285-w", name="WITNESS",
              status="live", event_id="e-c0")
@@ -1206,26 +1207,22 @@ class TestCycleThreeFinalStateResolution:
              status="live", event_id="e-c2")
         _raw(events, type="EntityMutated", label="Object", id="obj-5285-x",
              op="rename", state={"name": "NEWNAME"}, event_id="e-c3")
-        for engine in ("rebuild_all", "rebuild"):
-            proj = _fresh(tmp_path, f"c3c-{engine}")
-            try:
-                with pytest.raises(NonFoldedEventsError) as ei:
-                    _drive(engine, tmp_path, events, proj)
-                assert "object-superseded-miss" in str(ei.value), str(ei.value)
-                assert "object-superseded-unregistered" not in str(ei.value), (
-                    "the name the rename wrote IS established, so the record is "
-                    f"a miss, not the exemption: {ei.value}")
-            finally:
-                proj.close()
-        proj = _fresh(tmp_path, "c3c-check")
+        proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "c3c"))
         try:
+            assert ("obj-5285-x", "NEWNAME", "superseded") in _objects(proj), \
+                _objects(proj)
             r = check_consistency(str(events / "events.jsonl"), proj)
         finally:
             proj.close()
-        assert r["ok"] is False, r["divergence"]
-        assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
-        assert any("object-superseded-miss" in e
-                   for e in r["non_folded_events"]), r["non_folded_events"]
+        assert r["ok"] is True, (r["divergence"], r["non_folded_events"])
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+        assert r["divergent_entity_count"] == 0, r["divergent_entities"]
+        # ACCEPT parity: no apply engine may REFUSE a journal `rebuild_all`
+        # folds (false refusals block recovering a sound journal). The graph
+        # they produce is the stated FIX-4 gap, deliberately not asserted.
+        for engine in ("rebuild", "recover_from_log"):
+            proj = _drive(engine, tmp_path, events, _fresh(tmp_path, f"c3c-{engine}"))
+            proj.close()
 
     def test_plain_forward_referenced_supersede_by_id_is_not_refused(
             self, env, tmp_path):
@@ -3414,54 +3411,52 @@ def test_label_less_rename_does_not_move_the_surviving_name():
         f"is now a blanket ignore: {names}")
 
 
-def test_nested_supersede_of_an_established_name_refuses_on_both_halves(
+def test_nested_supersede_of_an_established_name_folds_on_both_halves(
         env, tmp_path):
-    """#10107 review P2, restated for #3590.
+    """#10107 review P2, restated for #3590: the NESTED envelope resolves as
+    the FLAT one does, on both halves.
 
-    ⛔ The record is a NESTED envelope (`point={'name': …}`) carrying a NAME and
-    no id. #3590 retires every name-keyed resolution (`_fold_object_superseded`'
-    name branch and `_object_target`'s name arm alike), so the record cannot be
-    resolved on EITHER half — and because the registration above DOES establish
-    that name, it is the non-exempt `object-superseded-miss`, never the D2
-    exemption. The pin this file has always owned holds unchanged: the two
-    halves of ONE disposition must not disagree.
+    The record is a NESTED envelope (`point={'name': …}`) carrying a NAME and
+    no id — the spelling a legacy/raw producer adds. `_norm` splices the nested
+    payload, so the fold sees the name it would see flat; #3590 then resolves
+    it through the name→ID index (ONE carrier — here the registration above),
+    and the record LANDS. ⛔ The branch earlier asserted the opposite (a
+    non-exempt `object-superseded-miss`), on the premise that no fold resolves
+    a name — which refused a journal `main` folds, the D2-(i) regression the
+    owner excluded.
 
-    FAILS IF: the graph engines fold (or exempt) the record while
-    `check_consistency` reports it as folded, or the reference fold drops to the
-    `object-superseded-unregistered` exemption the established name forbids.
-    REACHABLE: a legacy/raw producer that writes the name INSIDE the payload
-    envelope — the spelling a nested `point` envelope adds.
+    What this file has always owned is unchanged and is what is pinned here:
+    the two halves of ONE disposition must not disagree — the graph engines
+    fold it and `check_consistency` must report it folded, not a divergence.
+
+    FAILS IF: the reference fold stops splicing the nested envelope (the graph
+    folds, the reference half does not → one journal, two dispositions), or
+    the graph fold stops resolving the name.
     """
     _sdk, events = env
     _raw(events, type="ObjectRegistered", id="obj-nest-1", name="NEST-OK",
          status="live", event_id="e-nest-reg")
     _raw(events, type="ObjectSuperseded", point={"name": "NEST-OK"},
          supersedes_by="y", event_id="e-nest-sup")
-    for engine in ("rebuild_all", "rebuild"):
+    for engine in ("rebuild_all", "rebuild", "recover_from_log"):
         proj = _fresh(tmp_path, f"nest-{engine}")
         try:
-            with pytest.raises(NonFoldedEventsError) as ei:
-                _drive(engine, tmp_path, events, proj)
-            assert "object-superseded-miss" in str(ei.value), str(ei.value)
-            assert "object-superseded-unregistered" not in str(ei.value), (
-                "the name the registration established was treated as "
-                f"unestablished: {ei.value}")
+            _drive(engine, tmp_path, events, proj)
+            rows = proj.g.query(
+                "MATCH (o:Object {id:'obj-nest-1'}) "
+                "RETURN o.status, o.supersededBy").result_set
         finally:
             proj.close()
+        assert rows == [["superseded", "y"]], (engine, rows)
     # The REFERENCE fold must read the same disposition — against the graph the
     # journal's own fold produced, so presence cannot supply the verdict.
     proj = _fresh(tmp_path, "nest-check")
     try:
-        with pytest.raises(NonFoldedEventsError):
-            _drive("rebuild_all", tmp_path, events, proj)
+        proj.rebuild_all(str(events), confirm_destructive=True)
         r = check_consistency(str(events / "events.jsonl"), proj)
     finally:
         proj.close()
-    assert r["ok"] is False, r
-    assert r["divergence"] == "non-folded", (
-        r["divergence"], r["divergent_entities"])
-    assert any("object-superseded-miss" in e
-               for e in r["non_folded_events"]), r["non_folded_events"]
+    assert r["ok"] is True, (r["divergence"], r["non_folded_events"])
 
 
 # ═══════════════════════════════════════════════════════════════════════

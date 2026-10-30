@@ -4144,12 +4144,15 @@ class _EntityHandlers:
         concurrent commit folded it between this record's gate probe and the
         fold); direct fold callers can also produce it as an idempotent
         re-fold. folded > 0 = claimed. First-fold stamps are kept on a
-        terminal re-fold (never re-SET). ⛔ #3590 RETIRED the id→name fallback
-        (#2164 ISSUE B legacy) that this paragraph used to describe as firing
-        "ONLY on matched == 0": there is no such fallback left to fire, because
-        under same-name coexistence a name-keyed re-resolution supersedes a
-        DIFFERENT incarnation (#3573's burial class). What replaced it is the
-        unified miss classifier described at the end of this docstring.
+        terminal re-fold (never re-SET). ⛔ #3590 RETIRED the name-keyed
+        FALLBACK (#2164 ISSUE B legacy) — the ``MATCH (o:Object {name:$name})``
+        re-resolution that folded EVERY carrier of a name — because under
+        same-name coexistence it supersedes a DIFFERENT incarnation (#3573's
+        burial class). What occupies that slot is a name→ID INDEX
+        (``entity_identity.unique_name_holder_id``): the same D2-(i) reach
+        (a record the graph can address must keep landing), one answer instead
+        of a row-order pick, and ``None`` for 2+ carriers so the miss is
+        classified rather than guessed.
 
         ``cas=False`` (the DEFAULT — replay/rebuild surfaces: the pass-1b
         sweep, the apply dispatch, backup restore, consistency, migrate,
@@ -4170,18 +4173,38 @@ class _EntityHandlers:
         supplied), distinct from a successful fold without a separate
         existence pre-query.
 
-        #3590 RETIRED the id→name fallback: the fold addresses the target's ID
-        only. A legacy/stale id that matches nothing is NOT re-resolved by name
-        (under same-name coexistence a name-keyed fold supersedes a DIFFERENT
-        incarnation — #3573's burial class), and an id-less record is
-        unaddressable. Neither arm fabricates an address here: the miss is
-        recorded by ONE shared classifier — ``classify_terminalizer_miss``
-        driven by ``_supersede_name_unregistered`` — which exempts the bounded
-        ``object-superseded-unregistered`` case (D2, adopted on #3590: the
-        journal established NEITHER limb, so live and replay agree by
-        construction) and refuses ``object-superseded-miss`` whenever the name
-        WAS established (a reachable target was genuinely missed).
+        #3590 keeps the id AS THE ADDRESS: an explicit ``id`` is folded and
+        nothing else is consulted while it binds a row. What the change removes
+        is the name-keyed FALLBACK — ``MATCH (o:Object {name:$name})`` folding
+        every carrier — not the ability to reach a target by the name a record
+        carries. Two arms use the name→ID index
+        (``entity_identity.unique_name_holder_id``), and only when there is
+        exactly ONE carrier to name:
+
+        * an id-less record (D2-(i), owner-ruled: a journal that replays on
+          ``main`` must keep replaying and the record must keep landing) —
+          ``main`` fell back to the name here, and every id-less supersede its
+          ``apply_supersessions`` wrote is on disk in a main-era journal;
+        * an id that binds NO row (``(0, 0)``) — the record's id is one the
+          graph does not carry, e.g. the ``obj-<sha26(name)>`` id ``main``
+          SYNTHESIZED for an id-less target, which differs from the id the
+          registration actually wrote. A present-but-TERMINAL id (``(0, 1)``)
+          never falls back: that is the anti-burial guard, and it predates this
+          change.
+
+        A name with 2+ carriers answers ``None`` on both arms — the refusal of
+        #3573's burial class, which ``main``'s name fallback performed silently
+        (``SET … RETURN o.id LIMIT 1`` caps the RETURN, not the SET). Neither
+        arm records anything: the miss is recorded by ONE shared classifier —
+        ``classify_terminalizer_miss`` driven by ``supersede_object_address`` —
+        which exempts the bounded ``object-superseded-unregistered`` case (D2 as
+        amended on #10204: the journal established NEITHER address, so live and
+        replay agree by construction) and refuses ``object-superseded-miss``
+        whenever an address the record carries WAS established (a reachable
+        target was genuinely missed).
         """
+        from tortoise.entity_identity import unique_name_holder_id
+
         oid = ev.get("id")
         name = ev.get("name")
         if not oid and not name:
@@ -4242,30 +4265,67 @@ class _EntityHandlers:
         if cas:
             common_params["excluded"] = excluded
         if not oid:
-            # #3590: ID-KEYED ONLY. The name-keyed fallback (#2164 ISSUE B) is
-            # RETIRED: it is the one remaining fold that reached a node by NAME,
-            # and under same-name coexistence a name-keyed fold can supersede a
-            # DIFFERENT incarnation (#3573's burial class). It also forced
-            # `_update_entity` to WITHHOLD rename records (#3377/#4769): a
-            # journaled rename moves the name before this fold's deferred sweep
-            # runs, so the fallback stopped matching.
-            # ⛔ Fold NOTHING here and record NOTHING here: the miss is
-            # classified ONE level up, by the same predicate the sweep and
-            # `check_consistency` use (`classify_terminalizer_miss` +
+            # #3590: an id is never DERIVED from a name (R1/R2), so an id-less
+            # record has no id to fold on — but it is not UNADDRESSABLE: the
+            # name it carries resolves through the name→ID index
+            # (`entity_identity.unique_name_holder_id`), which answers an id or
+            # nothing. That is the recorded D2-(i) ruling (owner, 2026-10-26):
+            # *"a journal that replays on `main` must keep replaying and the
+            # record must keep landing"* — `main`'s fold fell back to
+            # `MATCH (o:Object {name:$name})` here, and every id-less record
+            # `apply_supersessions` used to journal is on disk in a main-era
+            # journal.
+            #
+            # ⛔ What the INDEX buys over that fallback is the #3573 burial
+            # class: `main`'s name branch folded EVERY carrier of the name
+            # (`SET … RETURN o.id LIMIT 1` caps the RETURN, not the SET), so a
+            # two-carrier graph lost an incarnation per supersede, by row
+            # order. The index resolves only a UNIQUE carrier; 2+ answers
+            # `None` and the miss is classified one level up.
+            #
+            # ⛔ Fold NOTHING and record NOTHING when it answers `None`: the
+            # miss is classified ONE level up, by the same predicate the sweep
+            # and `check_consistency` use (`classify_terminalizer_miss` +
             # `_supersede_name_unregistered`). Recording a non-exempt
             # `unregistered-reference` at this site — an earlier draft of this
             # branch did — refuses a journal the recorded D2 exemption covers
             # (`object-superseded-unregistered`: the journal established
-            # NEITHER limb, so live and replay agree by construction) and that
-            # `rebuild()` folds, i.e. one journal, two engines, opposite
+            # NEITHER address, so live and replay agree by construction) and
+            # that `rebuild()` folds, i.e. one journal, two engines, opposite
             # verdicts. The classifier keeps the refusal where it belongs: a
             # name the journal DID establish still records the non-exempt
             # `object-superseded-miss`.
-            return (0, 0)
+            target = (unique_name_holder_id(self.g, "Object", name)
+                      if isinstance(name, str) and name else None)
+            if not target:
+                return (0, 0)
+            result = self.g.query(
+                "MATCH (o:Object {id:$id}) " + live,
+                params={"id": target, **common_params})
+            return _classify(result)
         result = self.g.query(
             "MATCH (o:Object {id:$id}) " + live,
             params={"id": oid, **common_params})
-        return _classify(result)
+        folded, matched = _classify(result)
+        if folded == 0 and matched == 0 and isinstance(name, str) and name:
+            # The id bound NO row: a legacy/foreign record whose id the graph
+            # does not carry — `apply_supersessions` on `main` SYNTHESIZED
+            # `obj-<sha26(name)>` for an id-less target, and that synthesized id
+            # matches nothing the registration actually wrote (it wrote the
+            # node's own id). Re-resolve the carried NAME through the index.
+            #
+            # ⚠️ The guard is `folded == 0 AND matched == 0`, exactly `main`'s
+            # (#2164 ISSUE B): a present-but-TERMINAL id (0, 1) must NEVER fall
+            # back, or a re-fold whose name resolves to a DIFFERENT live carrier
+            # folds that carrier — `test_fold_cas_terminal_id_no_name_fallback_
+            # to_other_live_node` is the pin, and it predates this change.
+            target = unique_name_holder_id(self.g, "Object", name)
+            if target:
+                result = self.g.query(
+                    "MATCH (o:Object {id:$id}) " + live,
+                    params={"id": target, **common_params})
+                return _classify(result)
+        return (folded, matched)
 
     def _upsert_document(self, ev: dict) -> None:
         """MERGE the document node as a ``:Source`` (D10, ONTOLOGY §4.4).
