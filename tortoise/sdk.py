@@ -16629,7 +16629,6 @@ class TortoiseSDK:
         # matched NOTHING, so the MERGE was a constrained no-op and the
         # delete-leg below removed the ORIGINAL edge — the transfer silently
         # DESTROYED the edge live, and the replay (which received the same
-        # DESTROYED the edge live, and the replay (which received the same
         # endpoint contract) dropped it too. ``labels(t)`` rides the same
         # traversal, so no extra round trip is spent resolving the far node.
         # #10139: ONE vocabulary for the carried attributes — the two 2a-DIRECT
@@ -16963,9 +16962,10 @@ class TortoiseSDK:
                 # restated claim about the same subject is bound to the same
                 # Subject by `bind_point_subjects` and both edges exist. In a chain
                 # (X→Y→Z) each transfer would re-stamp the newest successor with the
-                # oldest ancestor's value, and the descriptor below carries no
-                # `attrs`, so the overwritten value is journaled NOWHERE and cannot
-                # be rebuilt.
+                # oldest ancestor's value, and since `#10139` the repoint descriptor
+                # journals only the RETIRED edge's attributes — never the value its
+                # own carry destroyed — so the overwritten value is journaled
+                # NOWHERE and cannot be rebuilt.
                 # ⛔ PRECEDENCE, stated: the successor's own live value WINS. That is
                 # what the pre-#9417 code did (a bare MERGE left a pre-existing edge
                 # untouched), so this preserves it while still refusing to leave a

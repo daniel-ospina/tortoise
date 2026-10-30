@@ -2311,9 +2311,15 @@ def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
     # NO SELF-EDGE (E2E-11.6): a chain that collapses the endpoints onto one node
     # must not mint `(X)-[:aboutPoint]->(X)`.
     assert "dest.node_key <> tgt.node_key" in insert, insert
-    # A bare MERGE is what the fold's transfer is: no attribute SET, so an
-    # existing successor row keeps its own value (#9417) — `DO UPDATE` would
-    # overwrite it with the descriptor's absent attributes.
+    # `DO NOTHING`, so an existing successor row keeps its own value (#9417).
+    # NOT `DO UPDATE`: since `#10139` the graph's own transfer carries the
+    # descriptor's attributes (`MERGE … ON CREATE SET nr += $attrs`, i.e. it
+    # populates only an edge it CREATED), so a `DO UPDATE` here would overwrite
+    # the successor's own row with the retired point's carried value — the same
+    # 0.91 → 0.42 clobber measured LIVE. The moved row is still `{}` for a
+    # DIFFERENT reason: the INSERT hard-codes a literal empty props map and this
+    # function reads only coordinates from the record (residual (a) in
+    # `_structural_repoint_statements`).
     assert insert.rstrip().endswith("DO NOTHING"), insert
 
 

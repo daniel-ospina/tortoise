@@ -2526,23 +2526,30 @@ def _structural_repoint_statements(
     2. `INSERT` the same row at `_final(src)`, the TERMINAL endpoint of the
        `superseded_by` chain (a recursive CTE, so a 3-link chain resolves to the
        last link and to nothing in between). `ON CONFLICT … DO NOTHING`, not
-       `DO UPDATE`: the graph's transfer is a BARE `MERGE (s)-[:<rel>]->(t)` with
-       no attribute `SET` (`projection/__init__.py`, the pass-2b structural
-       replay leg), and #9417's rule is that a successor's OWN live value wins
-       — a `DO UPDATE` would overwrite it with the descriptor's absent
-       attributes. `<rel>` is the INTERPOLATED `etype`, not a parameter: Cypher
-       refuses a parameter as a relationship type (`-[:$param]->` is invalid —
-       Neo4j Cypher Manual, Syntax → Parameters), which is why the writer
-       f-string-formats the type into the pattern. The no-self-edge predicate
-       (`destination != resolved target`) mirrors the fold's `E2E-11.6` guard:
-       a chain that collapses the endpoints onto one node must not mint
-       `(X)-[:aboutPoint]->(X)`.
+       `DO UPDATE`: the successor's OWN row is authoritative, and an existing row
+       IS the successor's own. The two carriers agree on that — since `#10139`
+       the graph's transfer applies the descriptor's attributes with `MERGE …
+       ON CREATE SET nr += $attrs` (`projection/__init__.py`, the pass-2b
+       structural replay leg), i.e. it populates only an edge it CREATED, and
+       #9417's rule is the same rule on the live side. A `DO UPDATE` would
+       overwrite a live successor row with the retired point's carried value —
+       exactly the 0.91 → 0.42 clobber #9417 measured LIVE. `<rel>` is the
+       INTERPOLATED `etype`, not a parameter: Cypher refuses a parameter as a
+       relationship type (`-[:$param]->` is invalid — Neo4j Cypher Manual,
+       Syntax → Parameters), which is why the writer f-string-formats the type
+       into the pattern. The no-self-edge predicate (`destination != resolved
+       target`) mirrors the fold's `E2E-11.6` guard: a chain that collapses the
+       endpoints onto one node must not mint `(X)-[:aboutPoint]->(X)`.
 
-    ⚠️ NAMED RESIDUALS, not fixed here: (a) the descriptor carries no edge
-    `attrs` (`#10139`), so a moved row lands with `props = '{}'` while the LIVE
-    graph carries the old edge's `confidence` (#9417's `ON CREATE SET`) — the
-    row exists at the right node and its attributes are absent, which is
-    #10139's own contract, not a second silent loss; (b) `#2488`'s
+    ⚠️ NAMED RESIDUALS, not fixed here: (a) the moved row lands with
+    `props = '{}'` while the LIVE graph carries the old edge's `confidence`
+    (#9417's `ON CREATE SET`) — because the INSERT below hard-codes a LITERAL
+    empty map (`json.dumps({})`) and this function reads only the row's
+    COORDINATES out of the record (`_relation_coordinates`); the descriptor DOES
+    carry the retired edge's attributes since `#10139`, so this is a
+    record-carrier gap in its own right, not the `#10139` contract. The row
+    exists at the right node and its attributes are absent, which is a second
+    silent loss (#9836's family) still open; (b) `#2488`'s
     survivor-filtered `succ` map has no record-side expression, so an id-reuse
     journal (a point re-created live under a used id) is resolved here as
     `point.status` says at the moment the record runs — which is the LIVE order,

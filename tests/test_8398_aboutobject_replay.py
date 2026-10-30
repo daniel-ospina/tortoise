@@ -1628,3 +1628,70 @@ def test_a_successors_OWN_confidence_wins_ACROSS_a_rebuild(wired) -> None:
         "keeps the successor's own value authoritative on both paths")
     assert _counts(proj)["aboutSubject"] == 1, (
         "the rebuild left two aboutSubject edges where live has one")
+
+
+def test_a_chained_supersede_diverges_LATEST_live_against_EARLIEST_replay(
+        wired) -> None:
+    """#10139's OPEN residual, MEASURED: a CHAIN is where `live == rebuild` fails.
+
+    This is not the two-node case above and it is not the same rule. Both
+    descriptors of a chain X→Y→Z resolve onto the SAME `(final, subject)` edge
+    (`_final(src)` at replay; `supersede_point`'s transfer at live), and
+    `ON CREATE` fires only on the statement that CREATES the relationship, so
+    the two halves pick OPPOSITE payloads:
+
+    * replay — descriptor 1 (X's, `0.42`) CREATES the edge at Z; descriptor 2
+      (Y's, `0.91`) MATCHES it and its `ON CREATE SET` does not fire → **0.42**.
+    * live — `supersede(X→Y)` leaves Y's own `0.91` (the `#9417` rule), then
+      `supersede(Y→Z)` reads `properties(r)` off the edge Y holds at that
+      moment and carries `0.91` → **0.91**.
+
+    So the chain is an OPEN divergence, and the whole point of pinning the two
+    numbers here is that the record said the opposite ("the later one wins …
+    live's chain is consistent with that"). A test that asserted equality would
+    be the same false claim in executable form. ⚠️ When the residual is CLOSED
+    (the recipe: mark each key this pass CREATED — `ON CREATE` for a key that
+    already existed, a plain `SET` for one an earlier descriptor of this pass
+    made), THIS test must be flipped to the equality the other two assert, not
+    deleted — the divergence going away is not the same event as it being
+    forgotten.
+    """
+    sdk, proj, events, journal = wired
+    x = _nid(sdk.create_point("statement", "X: earliest claim"))
+    y = _nid(sdk.create_point("statement", "Y: restated, better bound"))
+    z = _nid(sdk.create_point("statement", "Z: restated again"))
+    subj = _nid(sdk.create_subject("TheChainedSubject"))
+    _bind(proj, sdk, x, subj, 0.42)
+    _bind(proj, sdk, y, subj, 0.91)
+
+    sdk.supersede_point(x, y)
+    assert _about_confidence(proj, y, subj) == pytest.approx(0.91), (
+        "the LIVE chain lost Y's own value on the first link")
+    sdk.supersede_point(y, z)
+
+    live = _about_confidence(proj, z, subj)
+    assert live == pytest.approx(0.91), (
+        f"live's chain must end at the LATEST carried value: {live}")
+
+    # The divergence is in the JOURNAL, not in an assumption: both descriptors
+    # carry a DIFFERENT payload onto the same final successor.
+    carried = [r.get("confidence") for r in _records(journal)
+               if r.get("type") == "DirectEdgeRepoint"
+               and r.get("edge_type") == "aboutSubject"]
+    assert carried == [pytest.approx(0.42), pytest.approx(0.91)], (
+        f"the chain must journal both links' payloads: {carried}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    replay = _about_confidence(proj, z, subj)
+    assert replay == pytest.approx(0.42), (
+        "the OPEN residual changed shape (#10139): the replay no longer keeps "
+        f"the FIRST descriptor's payload (live {live}, replay {replay}) — if "
+        "the chain was closed on purpose, flip this to the equality the "
+        "neighbouring tests assert")
+    assert live != replay, (
+        "the chain now agrees across live and rebuild — update the residual in "
+        "`projection/__init__.py` instead of leaving a divergence described "
+        "that no longer exists")
+    assert _counts(proj)["aboutSubject"] == 1, (
+        "the chain collapsed onto one successor edge, as live's transfers do")
