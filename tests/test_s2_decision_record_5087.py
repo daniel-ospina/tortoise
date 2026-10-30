@@ -1056,7 +1056,25 @@ _VENDOR_REMEDY = "be explicit in the criteria"
 #: substring missed the `being` form, which is verbatim the sentence review round 4 found
 #: still alive in `tests/`. A marker that cannot match the phrasing it exists to refuse is
 #: a guard whose green means nothing.
-_REMEDY_PARAPHRASE = re.compile(r"\bb(?:e|eing) explicit in the (?:`?trusted`?\s+)?fields")
+#:
+#: The EMPHASIS run is in the pattern for that same reason, one spelling further out (PR #10302
+#: review round 9, P2). Prose in these artifacts renders a word it wants read with emphasis —
+#: `*trusted*`, `**trusted**`, `_trusted_`, `***trusted***` — and the emphasis-free marker matched
+#: only the bare and backticked forms. The occurrence that round found live (`#10117`'s scoping
+#: comment) is written exactly that way — "the vendor's guidance is to be explicit in the *trusted*
+#: fields" — so a re-introduction in the ordinary emphasis spelling passed `_provenance_gaps` green
+#: on all four corpus members: round 4's failure reproduced one spelling over, in the file that
+#: exists because the sentence "survived one file over". The run is absorbed on BOTH sides of the
+#: word, so `*trusted*`, `**trusted**`, `_trusted_` and a mixed pair are all refused; the in-test
+#: non-vacuity loop below pins each spelling, so the widening cannot be quietly undone.
+_EMPHASIS_RUN = r"[*_`]{0,3}"
+_REMEDY_PARAPHRASE = re.compile(
+    r"\bb(?:e|eing) explicit in the (?:"
+    + _EMPHASIS_RUN
+    + r"trusted"
+    + _EMPHASIS_RUN
+    + r"\s+)?fields"
+)
 
 #: The vendor scopes its note to `jev-1.13` ("Applies to `jev-1.13`. Last reviewed
 #: 2026-10-02") and says the edges may be fixed in later versions, while this seam sends
@@ -1166,6 +1184,32 @@ def test_the_framing_cites_a_vendor_page_that_exists_and_quotes_it_verbatim():
     pre_fix_record_gaps = _provenance_gaps(pre_fix_record)
     assert ("remedy-put-in-the-vendors-mouth: 'trusted fields' is our wording, not theirs"
             in pre_fix_record_gaps), pre_fix_record_gaps
+
+    # …and EVERY spelling of it reds, the emphasized ones included (PR #10302 review round 9,
+    # P2). This is the non-vacuity half of the widened marker: a spelling the marker cannot see
+    # is the retracted attribution shipping GREEN on all four corpus members, and the occurrence
+    # live in the fleet today (`#10117`'s scoping comment) is the `*trusted*` form — the one the
+    # emphasis-free marker missed. Emphasis is not exotic in these artifacts; it is how they
+    # write a word they want read.
+    for spelling in (
+        "be explicit in the trusted fields",
+        "be explicit in the `trusted` fields",
+        "be explicit in the *trusted* fields",
+        "be explicit in the **trusted** fields",
+        "be explicit in the ***trusted*** fields",
+        "be explicit in the _trusted_ fields",
+        "be explicit in the *_`trusted`_* fields",
+        "be explicit in the **trusted fields**",
+        "the vendor's guidance is to be explicit in the *trusted* fields",
+        "the vendor prescribes being explicit in the **trusted** fields",
+    ):
+        assert (
+            "remedy-put-in-the-vendors-mouth: 'trusted fields' is our wording, not theirs"
+            in _provenance_gaps(spelling)
+        ), (
+            f"the paraphrase marker cannot see {spelling!r} — a re-introduction in this "
+            "spelling ships green, which is the failure the marker exists to refuse"
+        )
 
     # …and a correct provenance passes every checker, so the guard cannot be satisfied by
     # mangling the text in some other direction.
