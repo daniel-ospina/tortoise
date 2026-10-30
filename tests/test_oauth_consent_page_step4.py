@@ -594,8 +594,8 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   catch (e) { loadError = String(e); }
   await tick();
   const out = { loadError, afterLoad: snap(), afterClick: null,
-                afterDeny: null, afterPick: null, afterSecondClick: null,
-                fetchCalls, navs };
+                afterDeny: null, afterPick: null, afterRepick: null,
+                afterSecondClick: null, fetchCalls, navs };
   if (!loadError && opts.pick !== undefined && opts.pick !== null) {
     // The chooser's change handler, as the browser fires it on a user pick.
     els['org-select'].value = opts.pick;
@@ -604,10 +604,19 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   }
   if (!loadError && typeof els['btn-auth'].onclick === 'function' &&
       opts.click === true) {
-    els['btn-auth'].disabled = false;   // the click a mint-200 enables
+    // NOT force-enabled: the PAGE arms this button (one expression, from the
+    // token + the org), so a click here is the visitor clicking what is
+    // actually clickable.
     els['btn-auth'].onclick();
     await tick();
     out.afterClick = snap();
+  }
+  if (!loadError && opts.repick !== undefined && opts.repick !== null) {
+    // A SECOND pick, after the first click: the gesture that used to bypass the
+    // 401 branch's disable.
+    els['org-select'].value = opts.repick;
+    els['org-select'].onchange({ target: { value: opts.repick } });
+    out.afterRepick = snap();
   }
   if (!loadError && typeof els['btn-auth'].onclick === 'function' &&
       opts.clickTwice === true) {
@@ -1140,6 +1149,178 @@ def test_the_bearer_arm_of_the_preview_is_unchanged(api_client, session_user):
                params={"resource": params["resource"] or ""})
     assert r.status_code == 200, r.text
     assert r.json()["org_id"] == "team-free-001", r.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3c. #3443: the page navigates the SERVER-built target, never the raw string
+# ═══════════════════════════════════════════════════════════════════════════
+# The wholesale rewrite replaced the page that carried these assertions, so they
+# are rebuilt here — armed, not merely present. A page navigating `redirect_uri`
+# instead of `redirect_target` delivers the code to a URL the CLIENT asked for
+# rather than the one that was REGISTERED, which is the open-redirect class
+# #3443 exists to remove.
+
+_RAW_REDIRECT = "https://CLIENT.example/cb"
+_BUILT_TARGET = "https://client.example/cb"
+
+
+def _render_page(*, redirect_uri: str = _RAW_REDIRECT,
+                 redirect_target: str | None = _BUILT_TARGET) -> str:
+    """The page as a PURE function of `params`, so the two redirect values can be
+    made to DIFFER — passing one string in both places cannot distinguish "read
+    the server's target" from "read the request's value".
+
+    Only this test renders directly: every other page test goes through
+    `/oauth/authorize`, where the handler decides both values.
+    """
+    from tortoise.oauth import consent_page_html
+
+    params = {
+        "client_id": "c-3443", "redirect_uri": redirect_uri,
+        "response_type": "code", "code_challenge": "ch-3443",
+        "code_challenge_method": "S256", "state": "st-1", "scope": "mcp",
+        "resource": None, "client_name": "c-3443",
+    }
+    if redirect_target is not None:
+        params["redirect_target"] = redirect_target
+    html = consent_page_html(client_name="c-3443", params=params,
+                             raw_query="client_id=c-3443&attempt_key=ak-3443&state=st-1",
+                             app_origin=APP_ORIGIN)
+    return html[0] if isinstance(html, tuple) else html
+
+
+def test_3443_the_page_navigates_the_SERVER_built_target_not_the_raw_request(
+        api_client, tmp_path):
+    """#3443, all four arms plus the control that makes them discriminating.
+
+    (a) deny — no server round trip, so the page-scoped `redirect_target` is the
+        ONLY source; (b) a successful approval PREFERS the response's target
+        (which is made to differ, or the assertion could not tell); (c) version
+        skew — an API that omits the field falls back to the page-scoped target,
+        never to the raw string; (d) fail-closed — no target at all does NOT
+        navigate (an empty dest would resolve as a RELATIVE url and deliver the
+        code to this page's own origin).
+    """
+    page = _render_page()
+
+    # (a) deny
+    deny = _run_page(page, {"search": "?client_id=c-3443&attempt_key=ak-3443",
+                            "clickDeny": True,
+                            "responses": [{"status": 500, "body": {}}]}, tmp_path)
+    assert deny["navs"] == [_BUILT_TARGET + "?error=access_denied&state=st-1"], deny
+
+    # (b) the response's target WINS over the page-scoped one
+    minted_target = "https://client.example/cb-from-the-mint"
+    minted = _run_page(page, {
+        "search": "?client_id=c-3443&attempt_key=ak-3443",
+        "click": True,
+        "responses": [
+            {"status": 200, "body": {"token": "t"}},
+            _SOLE_ORG,
+            {"status": 200, "body": {"code": "code-1", "state": "st-1",
+                                     "redirect_target": minted_target}},
+        ]}, tmp_path)
+    assert minted["navs"] == [minted_target + "?code=code-1&state=st-1"], minted[
+        "navs"]
+
+    # (c) version skew: the field is absent from the response
+    skew = _run_page(page, {
+        "search": "?client_id=c-3443&attempt_key=ak-3443",
+        "click": True,
+        "responses": [
+            {"status": 200, "body": {"token": "t"}},
+            _SOLE_ORG,
+            {"status": 200, "body": {"code": "code-1", "state": "st-1"}},
+        ]}, tmp_path)
+    assert skew["navs"] == [_BUILT_TARGET + "?code=code-1&state=st-1"], skew["navs"]
+
+    for arm, out in (("deny", deny), ("mint", minted), ("skew", skew)):
+        assert all("CLIENT.example" not in n for n in out["navs"]), (
+            f"the {arm} arm navigated the RAW request string: {out['navs']}")
+
+    # (d) fail-closed: no server-built target, no navigation
+    blank = _run_page(_render_page(redirect_target=None), {
+        "search": "?client_id=c-3443&attempt_key=ak-3443", "clickDeny": True,
+        "responses": [{"status": 500, "body": {}}]}, tmp_path)
+    assert blank["navs"] == [], (
+        "navigated with no server-built target — an empty dest resolves as a "
+        "RELATIVE url and would hand the code to this page's own origin")
+    assert blank["afterDeny"]["errorVisible"] is True, blank["afterDeny"]
+    assert blank["afterDeny"]["error"].strip(), blank["afterDeny"]
+
+    # ── the control that makes the three assertions above discriminating ──
+    guard_off = page.replace("const dest = target || PARAMS.redirect_target;",
+                            "const dest = target || PARAMS.redirect_uri;")
+    assert guard_off != page, "the guard's source line moved — update this control"
+    ctl = _run_page(guard_off, {"search": "?client_id=c-3443&attempt_key=ak-3443",
+                                "clickDeny": True,
+                                "responses": [{"status": 500, "body": {}}]}, tmp_path)
+    assert any("CLIENT.example" in n for n in ctl["navs"]), (
+        "the guard-removed control did NOT navigate the raw string, so the "
+        f"assertions above are vacuous: {ctl['navs']}")
+
+
+def test_a_401_then_a_NEW_PICK_cannot_rearm_a_spent_token(api_client, tmp_path):
+    """The picker's onchange must not defeat the 401 branch.
+
+    A spent `jti` disables Authorize; the chooser is still on screen, so a new
+    pick runs `onchange` — which must NOT re-arm a button holding the redeemed
+    token. Authorize is armed from ONE expression (`consentToken && orgReady`),
+    and this is the gesture that used to bypass it.
+    """
+    html, raw = _page_html(api_client, attempt_key="k-401pick")
+    out = _run_page(html, {
+        "search": "?" + raw,
+        "pick": "https://api.premiselabs.co/mcp/org-1",
+        "click": True,
+        "repick": "https://api.premiselabs.co/mcp/org-2",
+        "responses": [
+            {"status": 200, "body": {"token": "ct1.spent.sig"}},
+            {"status": 200, "body": {
+                "org_id": None, "org_name": None,
+                "resource": "https://api.premiselabs.co/mcp",
+                "memberships": [
+                    {"org_id": "org-1", "org_name": "Acme Labs",
+                     "resource": "https://api.premiselabs.co/mcp/org-1"},
+                    {"org_id": "org-2", "org_name": "Beta Inc",
+                     "resource": "https://api.premiselabs.co/mcp/org-2"},
+                ]}},
+            {"status": 401, "body": {"error": "invalid_token",
+                                     "error_description": "already redeemed"}},
+        ],
+    }, tmp_path)
+    assert out["afterClick"]["authDisabled"] is True, (
+        "the spent token must leave the button disabled")
+    assert out["afterRepick"]["authDisabled"] is True, (
+        "picking another team re-armed a button whose token is already "
+        "redeemed — the click posts a spent jti and can only earn another 401")
+    assert out["navs"] == [], out["navs"]
+
+
+def test_a_mint_4xx_offers_no_retry_that_cannot_help(api_client, tmp_path):
+    """The mint's 4xx is the REQUEST's fault, and `state` is not validated at
+    authorize time — so the page can legitimately be reached without one, the
+    mint answers `400 invalid_request`, and a Retry would re-send the same body
+    forever. Only a 5xx or a transport failure is retryable."""
+    html, raw = _page_html(api_client, attempt_key="k-400")
+    out = _run_page(html, {"search": "?" + raw, "responses": [
+        {"status": 400, "body": {"error": "invalid_request",
+                                 "reason": "state is required"}},
+    ]}, tmp_path)
+    after = out["afterLoad"]
+    assert after["authDisabled"] is True, after
+    assert after["errorVisible"] is True, after
+    assert "state is required" in after["error"], after
+    assert after["retryOn"] is False, (
+        "a 400 from the mint cannot be fixed by retrying the same request")
+
+    # …while a 5xx still offers it: the failure above must not have removed the
+    # remedy for a transient one.
+    html5, raw5 = _page_html(api_client, attempt_key="k-500")
+    out5 = _run_page(html5, {"search": "?" + raw5, "responses": [
+        {"status": 503, "body": {"error": "temporarily_unavailable"}},
+    ]}, tmp_path)
+    assert out5["afterLoad"]["retryOn"] is True, out5["afterLoad"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

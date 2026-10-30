@@ -2265,6 +2265,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // #1701 R1: orgResource is set ONLY by the picker's change handler — an
   // untouched picker can never authorize (no silent wrong-org bind).
   let orgResource = null;
+  // The other half of "may this click approve": a team was RESOLVED for this
+  // assertion (sole-org auto-bind, or a pick on the chooser branch). Authorize is
+  // armed from exactly `consentToken && orgReady` — ONE expression, evaluated by
+  // ONE function — so no later handler can re-arm a button while either half is
+  // missing. (Found in review: the picker's onchange re-armed the button after a
+  // 401 had deliberately disabled it, because it only looked at the pick.)
+  let orgReady = false;
+  function refreshArm() {
+    authBtn().disabled = !(consentToken && orgReady);
+  }
 
   function showError(msg) {
     const el = byId("error");
@@ -2318,6 +2328,8 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     // it. This is the only place the selection is cleared — a failed approval
     // must keep the pick its retry will re-post (see the consent handler).
     orgResource = null;
+    orgReady = false;
+    refreshArm();
     orgLine.style.display = "";
     orgSelect.classList.remove("on");
     while (orgSelect.firstChild) orgSelect.removeChild(orgSelect.firstChild);
@@ -2378,7 +2390,8 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       byId("resource-line").textContent = PARAMS.resource || "default (sole org)";
       orgLine.textContent = (preview.org_name || preview.org_id) +
           " (" + preview.org_id + ")";
-      authBtn().disabled = false;
+      orgReady = true;          // sole active team — auto-bound, nothing to pick
+      refreshArm();
       return;
     }
     showError("No usable org for this account.");
@@ -2386,7 +2399,8 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
 
   byId("org-select").onchange = (ev) => {
     orgResource = ev.target.value;
-    authBtn().disabled = !orgResource;
+    orgReady = !!orgResource;
+    refreshArm();               // never more than the two halves allow
   };
 
   // ── step 1: ask the session origin for the bound assertion ────────────────
@@ -2439,7 +2453,13 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     }
     const why = (payload && (payload.reason || payload.error)) || ("HTTP " + res.status);
     showError("Could not confirm your session (" + why + ").");
-    offerRetry(true);
+    // ⛔ A 4xx that is not 401/403 is the REQUEST's fault, not a blip: the mint
+    // refuses a missing `state` with `400 invalid_request`, and `state` is not
+    // validated at authorize time, so this page can legitimately be reached
+    // without one. Offering "Try again" there would name a control that cannot
+    // ever help — the same dead end the render-time 503 exists to avoid. Only a
+    // 5xx or a transport failure is retryable.
+    offerRetry(res.status >= 500);
   }
 
   // ── step 2: hand the assertion to the AS, and go where IT says ────────────
@@ -2469,7 +2489,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       });
     } catch (e) {
       spinner(false);
-      authBtn().disabled = false;
+      refreshArm();             // the token and the pick both survive a transport blip
       showError("Could not reach Tortoise to approve — check your connection, then try again.");
       offerRetry(true);
       return;
@@ -2486,14 +2506,14 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       redirectBack(q, payload.redirect_target);
       return;
     }
-    authBtn().disabled = false;
     if (res.status === 401) {
       // The jti is spent before the code is inserted (a post-spend refusal costs
-      // a RE-MINT, not a re-login), so the remedy is a fresh assertion — and this
-      // button must NOT stay armed holding a spent token: `consentToken` is still
-      // the redeemed one, so a click here would re-post a jti the AS already
-      // recorded and earn another 401.
-      authBtn().disabled = true;
+      // a RE-MINT, not a re-login), so the remedy is a fresh assertion. The token
+      // is DROPPED — not merely the button disabled — because the chooser is still
+      // on screen and its onchange re-derives the button state: keeping the token
+      // would let one pick re-arm a button holding a jti the AS already recorded.
+      consentToken = null;
+      refreshArm();
       showError("Your approval expired before it was issued. Try again to re-confirm your session.");
       offerRetry(true);
       return;
@@ -2504,6 +2524,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     // refused by `_default_org` for a multi-team account, with a message that
     // blames the client. The pick is reset where it is genuinely rebuilt: in
     // `loadOrg()`, on the re-mint this handler offers.
+    refreshArm();
     const why = (payload && (payload.error_description || payload.error)) || ("HTTP " + res.status);
     showError("Approval failed (" + why + ").");
     if (res.status >= 500) offerRetry(true);
