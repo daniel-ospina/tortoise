@@ -51,7 +51,11 @@ fails on §5's `:8608`/`:8740` pair. All three are re-verified below by running 
 checkers over the pre-fix text, so a future edit that reintroduces any of them reddens here
 instead of merging green.
 
-Static: one file read. No network, no DB, no graph, no model.
+Static: file reads plus the §7 payload construction through a stub transport. No network,
+no DB, no graph, no model — and that is a claim the suite can hold this file to, which is
+why the §7 `tok` cells are a RECORDED proxy (`_S7_TOKEN_CELLS`) rather than a re-count
+(PR #10302 review round 6: `tiktoken` is a `dev`-group package and its BPE fetch leaves the
+box, invisible to the httpx-shaped hermetic guard — details on the constant).
 """
 
 from __future__ import annotations
@@ -505,6 +509,33 @@ _S7_NARRATIVE_WORDS = 500
 _S7_BYTES_CELL = re.compile(r"^\| `(?P<version>vet-v2|classify-v2)`.*?\| ([\d,]+) B \|",
                             re.MULTILINE)
 
+#: The §7 ``tok`` cells — a RECORDED `cl100k_base` proxy, deliberately NOT re-derived here.
+#: Both columns of the table, because §7 publishes the framed request and the clause-removed
+#: one it compares against.
+#:
+#: ⚠️ Why a constant rather than a measurement (PR #10302 review round 6, P1 + P2): the
+#: `tok` column needs `tiktoken`, which is declared ONLY in the `dev` dependency group — no CI
+#: leg installs it (`pyproject.toml`'s `test` extra is what `pip install -e '.[test]'` resolves,
+#: and the sharded job runs the ambient interpreter, not the `uv sync` venv), so a test that
+#: imports it reds the fast leg with `ModuleNotFoundError`. Worse, `tiktoken.get_encoding(
+#: "cl100k_base")` DOWNLOADS its ~1.1 MB BPE ranks from
+#: `https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken` at construction
+#: whenever `$TMPDIR/data-gym-cache` is cold — and every ephemeral runner's cache is cold. That
+#: fetch goes over `requests`/`urllib`, not `httpx`, so the hermetic egress guard in
+#: `tests/conftest.py` cannot see it: the call would be real egress from a file that declares
+#: itself deterministic, with no opt-in recording it. A deterministic test may do neither.
+#:
+#: The **`B` cells are still measured exactly** and are the tripwire: any payload change that
+#: moves these token counts moves those bytes first, and `test_section_7_cost_rows_…` reds on
+#: it. These two dicts then pin the PUBLISHED pairs — a `39,544 B ≈ 9,999 tok`-shaped edit in
+#: the artifacts is neither of them and reds `_unmarked_legacy_figures`.
+#:
+#: Re-measure on a dev box (`uv sync --group dev`, which does install `tiktoken`): build
+#: `_s7_requests(framed=…)` and run
+#: `len(tiktoken.get_encoding("cl100k_base").encode(json.dumps(payload)))` over each payload.
+_S7_TOKEN_CELLS = {"vet-v2": 11_223, "classify-v2": 7_674}
+_S7_TOKEN_CELLS_UNFRAMED = {"vet-v2": 9_103, "classify-v2": 6_594}
+
 
 def _s7_text(chars: int, seed: int = 1) -> str:
     words, i = [], seed
@@ -571,18 +602,6 @@ def _s7_payloads(*, framed: bool = True) -> dict[str, int]:
     import json
 
     return {version: len(json.dumps(payload).encode("utf-8"))
-            for version, payload in zip(("vet-v2", "classify-v2"),
-                                        _s7_requests(framed=framed), strict=True)}
-
-
-def _s7_payload_tokens(*, framed: bool = True) -> dict[str, int]:
-    """The same two requests, counted over `cl100k_base` — the proxy §7 records."""
-    import json
-
-    import tiktoken
-
-    enc = tiktoken.get_encoding("cl100k_base")
-    return {version: len(enc.encode(json.dumps(payload)))
             for version, payload in zip(("vet-v2", "classify-v2"),
                                         _s7_requests(framed=framed), strict=True)}
 
@@ -675,29 +694,42 @@ def test_the_pre_framing_baseline_is_a_measurement_and_a_superseded_row_is_marke
     was quoted against a cell no artifact had measured, and a reader re-deriving it got
     +21% / +26% instead.
 
-    So this test MEASURES the clause-removed construction (`_framed` replaced with the
-    bare question — the only splice of the clause, so this is the request the module built
-    before `#10117`) and requires: every ``<n> B ≈ <n> tok`` pair these artifacts publish
-    is either that measurement, or sits in a paragraph that says it is superseded. A
-    legacy row may be quoted — it may not be published as a second, comparable baseline.
+    So this test MEASURES the clause-removed construction's **bytes** (`_framed` replaced
+    with the bare question — the only splice of the clause, so this is the request the module
+    built before `#10117`) and takes its **token** cells from the recorded proxy, which no
+    deterministic test can re-derive (`_S7_TOKEN_CELLS_UNFRAMED`), and requires: every
+    ``<n> B ≈ <n> tok`` pair these artifacts publish is either that recorded pair, or sits in
+    a paragraph that says it is superseded. A legacy row may be quoted — it may not be
+    published as a second, comparable baseline.
 
     Non-vacuity is in the test, not in a checkout: the same predicate is applied to the
     PRE-FIX sentence, and it must flag it.
     """
     byte_cells = _s7_payloads(framed=False)
-    tok_cells = _s7_payload_tokens(framed=False)
+    # The `B` cells are MEASURED (exact and hermetic — see `_s7_payloads`): that equality is
+    # the tripwire a payload change hits. The `tok` cells are the RECORDED `cl100k_base`
+    # proxy (`_S7_TOKEN_CELLS_UNFRAMED`) — re-deriving them needs `tiktoken`, which no CI leg
+    # installs and which downloads its BPE ranks at construction, so it cannot run in a
+    # deterministic test (PR #10302 review round 6, P1 + P2: the reason is on the constant).
+    # Both cells are still GUARDED below: a published `B ≈ tok` pair that is neither the pair
+    # asserted here nor labelled superseded reds `_unmarked_legacy_figures`.
+    assert byte_cells == {"vet-v2": 39_544, "classify-v2": 23_332}, (
+        "the clause-removed construction no longer measures what the artifacts record as the "
+        f"pre-framing request (measured {byte_cells}) — a payload change: re-measure the `B` "
+        "cells, the `tok` proxy beside them in `_S7_TOKEN_CELLS_UNFRAMED` (recipe there), and "
+        "the percentage derived from them (one baseline, not two)")
     # The clause-removed request is the PRE-framing version, so it is published as `-v1`.
     as_v1 = {"vet-v2": "vet-v1", "classify-v2": "classify-v1"}
-    measured = {as_v1[version]: (byte_cells[version], tok_cells[version]) for version in byte_cells}
+    measured = {as_v1[version]: (byte_cells[version], _S7_TOKEN_CELLS_UNFRAMED[version])
+                for version in byte_cells}
     assert measured == {"vet-v1": (39_544, 9_103), "classify-v1": (23_332, 6_594)}, (
-        "the clause-removed construction no longer measures what the artifacts record as the "
-        "pre-framing request — a payload change or a `cl100k_base` re-count: re-measure and "
-        "update BOTH cells and the percentage derived from them (one baseline, not two)")
+        "the clause-removed baseline §7 publishes is not this head's pair — a payload change "
+        "or a re-counted `tok` cell: re-measure BOTH cells and the percentage derived from "
+        f"them (one baseline, not two): got {measured}")
     # The FRAMED cells are the sibling test's subject; named here so this guard is about the
     # baseline only, and does not re-judge a legitimately quoted framed figure.
-    framed_bytes = _s7_payloads()
-    framed_tok = _s7_payload_tokens()
-    framed = {version: (framed_bytes[version], framed_tok[version]) for version in framed_bytes}
+    framed = {version: (cell, _S7_TOKEN_CELLS[version])
+              for version, cell in _s7_payloads().items()}
     for artifact in (DOC, CHANGELOG):
         text = artifact.read_text(encoding="utf-8")
         unmarked = _unmarked_legacy_figures(text, measured, framed)
