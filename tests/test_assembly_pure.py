@@ -2471,7 +2471,7 @@ def test_resolver_docker_fts_survives_retracted_crowd(_docker_sdk):
     """
     proj = _docker_sdk._get_proj()
     qid = "q4061r2"
-    from tortoise.sdk import _entity_name_id
+    from _node_ids import node_id
 
     live_name = "widget variant zz"
     # Non-vacuity premise: the live Object must sort BEHIND the crowd. #10121's
@@ -2491,7 +2491,10 @@ def test_resolver_docker_fts_survives_retracted_crowd(_docker_sdk):
                      params={"n": name})
     # Assert the premise BEHAVIOURALLY — not by re-checking the filter that
     # built the fixture: the crowd must fill the resolver's own bound ahead of
-    # the live Object, so a post-truncation filter would drop it.
+    # the live Object, so a post-truncation filter would drop it. (#10121 on
+    # main replaced the same premise for the same reason; kept here with
+    # `node_id` because this branch retires `_entity_name_id` — the id is
+    # READ from the graph, not predicted from the name.)
     from tortoise.search_engine import run_fts_query
     # The probe query must TIE every candidate name ("widget variant" is in all
     # eleven), otherwise the lexical SCORE decides and the tie never engages —
@@ -2503,7 +2506,7 @@ def test_resolver_docker_fts_survives_retracted_crowd(_docker_sdk):
     crowd_ids = [oid for oid, _ in crowd]
     assert len(crowd_ids) == 8, (
         f"FIXTURE NOT REACHED: expected the bound to be filled, got {crowd}")
-    assert _entity_name_id("Object", live_name) not in [
+    assert node_id(proj, "Object", live_name) not in [
         str(oid) for oid in crowd_ids], (
         "the fixture's premise: the live Object must sort BEHIND the crowd "
         f"under the #10121 tie (recency-then-id DESC), or the crowd no longer "

@@ -59,7 +59,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
 ``result["vet"]`` at ``:8975-8979``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14295``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14329``), which copies each
 stage's own counts onto ``stats["step_witness"]`` — so this module READS that seam
 (:func:`_witness_block`) instead of citing the gap. A run measured at a stamp
 BEFORE the seam still reports S2.2/S2.3 unobserved, and that is the run's own
@@ -124,6 +124,37 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+def _sdk_line(code: str) -> int:
+    """The ONE line of ``tortoise/sdk.py`` carrying ``code`` — READ, never typed.
+
+    The meta fold moves on every merge that touches ``sdk.py`` above it (#9964
+    inserted 326 lines; main's own commits move it too), so a typed cite in a
+    cause this probe emits is stale the moment the branch is merged — and a stale
+    cite sends the #9116 fixer to the wrong line. The SYMBOL-quoting convention
+    documented at the top of this file is what this implements: the number is a
+    convenience, re-derived from the tree on each run.
+    """
+    hits = [n for n, line in enumerate(
+        (ROOT / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines(), 1)
+        if code in line]
+    if len(hits) != 1:  # pragma: no cover - a moved/ambiguous cite is a refusal
+        raise AssertionError(
+            f"`{code}` is on {len(hits)} lines of sdk.py {hits} — one expected")
+    return hits[0]
+
+
+#: The meta fold's cite, in the exact shape the causes below print it — derived
+#: from the tree at run time (see ``_sdk_line``), never typed.
+#:
+#: The typed string is the POST-#9116 fold (``"stats":
+#: _capture_stats_with_step_witness(out, len(extracted))``), because the merge
+#: that brought ``_sdk_line`` in also brought the seam this PR lands: the
+#: pre-seam ``"stats": out.get("stats")`` occurs on NO line of the merged tree,
+#: so a cite derived from it would raise at import. Deriving it means the number
+#: below stays right on every tree; typing the OLD code would have frozen the
+#: probe to a fold the branch deletes.
+META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line('"stats": _capture_stats_with_step_witness(')}"
+
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
@@ -149,9 +180,9 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/projection/edges.py:2467-2492``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:2573-2598``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:14576`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:14610`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -165,13 +196,13 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/projection/edges.py:2467-2492 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:14576 "
+    "tortoise/projection/edges.py:2573-2598 link_source_to_event, reached from "
+    "the capture path at tortoise/sdk.py:14610 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
-    "DERIVATION LINK (tortoise/projection/edges.py:537-545 "
+    "DERIVATION LINK (tortoise/projection/edges.py:614-622 "
     "_anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels "
-    "are _DERIVATION_REFERENCES_LABELS (edges.py:510: Event, Document). A "
+    "are _DERIVATION_REFERENCES_LABELS (edges.py:587: Event, Document). A "
     "Source->Object link is identity/mention and carries none BY DESIGN (owner "
     "option A, #5199; #9736)"
 )
@@ -194,7 +225,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2377`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2376`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -1101,7 +1132,7 @@ def point_composition_line(composition: dict | None) -> str:
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2377, t.is_episodic=true, wired only by CONTAINS), and "
+        f"tortoise/sdk.py:2376, t.is_episodic=true, wired only by CONTAINS), and "
         f"operator Points are written by create_operator (tortoise/sdk.py — the "
         f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
         f"(measured: {operators_anchored} of {operators} anchored). Whether an "
@@ -1179,7 +1210,7 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"classes cannot carry a derivation link AT ALL and are named "
         f"rather than folded into the figure: the turn rows carry none BY "
         f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2377, t.is_episodic=true, wired only by "
+        f"tortoise/sdk.py:2376, t.is_episodic=true, wired only by "
         f"CONTAINS), and the operator Points are written by "
         f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
         f"operator writer), which never writes extractedFrom. So "
@@ -1257,8 +1288,9 @@ def _seam_cause(runs: list[dict], stats_keys: list[str], stats_key_total: int,
         return (
             f"{measured}; no receipt carries stats[{STEP_WITNESS_KEY!r}], so the "
             f"#9116 seam that copies result[{key!r}] onto the receipt ("
-            f"`_capture_step_witness`, called at the meta fold in "
-            f"_extract_session_v2) did not reach this capture. This is an "
+            f"`_capture_step_witness`, called at the meta fold "
+            f"{META_FOLD_CITE} in _extract_session_v2) did not reach this "
+            f"capture. This is an "
             f"INSTRUMENT gap, NOT the pipeline skipping the step; reading a "
             f"wrapper instead is the instrumentation E4's row forbids")
     return (

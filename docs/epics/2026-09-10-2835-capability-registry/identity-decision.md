@@ -197,7 +197,58 @@ R8 above requires that a shape genuinely exempt from the fail-the-run assertion 
 
 **A `#10204` shape that is deliberately NOT in either table — `object-superseded-no-address`.** The `#10204` amendment also split one label, because it conflated two epistemically different records: a genuine divergence (the journal **did** establish the target and the fold missed it — repairable, and "reconcile the journal" is the right instruction) and a record carrying **no address at all** (no name, no id — nothing to reconcile). The second now reports `object-superseded-no-address`, which is **not** exempt and **never** will be: nothing in such a record is checkable, so "the journal never established it" is unfalsifiable. Its refusal carries a remedy the caller *can* perform — supply the target's name or id — which is what makes it allowed to refuse at all under `#10183`. This is the same defect shape the END-side ruling on `#9202` fixed (a stored-but-un-datable end read `known`), and the AX wording lives at the decision site in the code, per `#9202`'s third placement rule.
 
+**Post-Stage-0 addition — minted identity (`#3590`).** The D9 rule (*the projection never mints; the producer registers what it references*) retired the fold's name-keyed stub mint. That turned every unregistered reference in an EXISTING journal into a refused fold — including one class the journal cannot avoid, so it is exempted here rather than left to make the durable copy un-rebuildable:
+
+| Shape | Why it is exempt | Degraded guarantee (the bound) | Recorded decision it rests on |
+|---|---|---|---|
+| `unfolded-mention` | A **mention** — an `EventRecorded`'s `subject` / `object` / `uses[]`, an `about_entities` status-fold target, or an about-edge name — resolved to no single live holder (none, only terminal/id-less, or two or more), **in its ATTRIBUTION use**. A mention is loose **attribution**, not the folded record's identity: the fold drops ONE link and moves no entity's state, and the live pass and the replay pass run the same resolver, so both drop the SAME link. `EventAPI.add_event` — this repo's main journal writer — registers none of the names it writes into those fields, and pre-`#3590` journals relied on the retired fold mint; refusing would make `rebuild_all` raise on journals that replay on `main` (the `#3590` review P1: *the durable copy of the data can no longer be rebuilt from its journal*). | **Attribution only.** The identity shapes — `unregistered-reference`, `ambiguous-entity-name`, and the supersede/delete/state-op misses — stay NON-exempt, so a fold that must MOVE an entity's state can never take this exemption (pinned by `tests/test_3590_minted_identity_acceptance.py::test_an_unregistered_mention_is_exempt_but_an_identity_miss_is_not`). ⛔ **The classification is per USE, not per field**, and the two state-fold-adjacent uses are settled in opposite directions: an `about_entities` target of the status fold KEEPS this exemption (that list is loose — the fold's own contract says a non-match is not a violation — and a non-exempt record there made `rebuild_all` refuse journals that replay on `main`, one extracted event naming an unregistered subject being enough), while an `EventRecorded`'s **explicit** `object`, when a status fold declares it as the target, is re-resolved WITHOUT the exemption **when the name has NO carrier at all** and its miss then fails the run (pinned by `…::test_a_lifecycle_event_on_an_unresolvable_object_is_not_a_green_run` — the exemption left a lifecycle event that moved nothing behind a green run). **A target whose every carrier is TERMINAL is the one sub-case that keeps the exemption** (#3590 round-5 review F2): the entity IS registered and the incarnation it names is merely buried, so the fold may not resurrect it (R5) — a deliberate no-op, recorded with `cause=no-live-holder`, not a missing creation event. It must not be fatal because the door cannot make it resolvable without minting a ghost out of a mention (the same review finding), so a non-exempt class there made every journal carrying a post-supersede lifecycle event one `rebuild_all` refuses (measured). Pinned by `…::test_a_lifecycle_event_on_a_terminal_only_object_is_a_recorded_no_op`. What a legacy journal loses is the stub nodes the retired fold minted, which no replay can recreate. Every occurrence is still recorded and named by the run boundary's report. The remedy for NEW journals is **not** a producer registration: **D1 is RULED (owner, 2026-10-26) — a bare mention does not create an entity**, so a name written inside a statement is a mention and never a creation, and "an unresolvable mention drops its link, records the miss, and mints nothing". The entity set therefore grows only from an explicit registration (`create_entity` / `ObjectRegistered` / `SubjectAdded`) that mints the id; no door registers `about*`, `subject`, `object` or `uses[]` on a mention's behalf, and a caller that wants the attribution edge registers the target explicitly. `D9`'s remaining half is the fold-side stub (`_mint_subject_stub`, filed as `#8914`), which this exemption still tolerates for the records already written. ⛔ **That stub is a BOUNDED EXCEPTION to D1/R1, recorded here because this row is D1's home (#3590 review, finding 4).** `edges._mint_subject_stub` mints `MERGE (s:Subject {name:$name}) ON CREATE SET s.id=$name` — name-DETERMINISTIC, so live and replay produce the byte-identical node (FalkorDB MERGE binds an existing pattern and fires `ON CREATE` only when it creates; primary source: `docs.falkordb.com/cypher/merge.html`). Two consequences are therefore bounded, not denied: **(a)** the fold still CREATES one entity shape out of a bare about-name (a `:Subject` whose id IS its name), which is the shape D1 says is never a creation; and **(b)** a later `create_entity("subject", <that name>)` resolves to that single live holder and ADOPTS it, so for that path the entity's id IS its name. Acceptance item 1 ("no id is derived from a name") therefore holds for the `create_entity` DOOR, and the acceptance pin exercises exactly that create-first path — it is not a universal claim, and a lane that reads it as one will "fix" this mint out of the replay contract and make every `how:"name"` record already in a journal un-replayable. Both consequences end together when `#8914` moves the mint on the live and replay passes at once; until then they are the recorded cost of keeping pre-change journals rebuildable, and they must not be widened. | `#3590` D9 (the projection is not the minter) + D1 (a mention is not a creation) + the issue's acceptance item 2 (`rebuild == live`); the exemption narrows R8 for attribution only, so the identity refusal stays fail-closed. |
+
 **Everything else fails the run.** A shape not listed in this table (or in `EXEMPT_SHAPES` in `tortoise/projection/nonfolded.py`) is fail-closed by default: a new fold-miss site that forgets to classify itself still fails, and the two classifiers — the graph replay engines and `check_consistency`'s reference fold — must yield the **same** disposition for the same journal, or `check_consistency` passes a journal `rebuild_all` refuses (the asymmetry #3585's re-review closed).
+
+### A retirement that is NOT an exemption — the `#2164 ISSUE B` id→name fold fallback (`#3590`)
+
+`#3590` made the fold **id-keyed only**: `_fold_object_superseded` issues
+`MATCH (o:Object {id:$id})` and nothing else, so the **`#2164 ISSUE B` id→name
+fallback is RETIRED** (`tortoise/projection/entities.py`,
+`tortoise/commit_ops.py:1284-1293`). ⛔ It is retiring, **not** exempting: a
+record whose carried address the journal DID establish now **ABORTS the rebuild**
+and the live write **refuses** — it is not added to the table above.
+
+The class that moves, stated concretely because it is the one a previous release
+actually WROTE and pinned (the retired
+`tests/test_status_projection.py::test_rebuild_all_legacy_idless_object_fold_survives`
+built it): an `ObjectSuperseded` carrying the **synthesised** `obj-<sha26(name)>`
+id **and** a `name` that an earlier `ObjectRegistered` established. `main` folded
+it by name; at this release it classifies as `SHAPE_OBJECT_SUPERSEDED_MISS` — the
+**name limb** of `journal_object_established` answers `OBJECT_ADDRESS_ESTABLISHED`,
+fail-closed — so `rebuild_all` raises `NonFoldedEventsError`. That is deliberate:
+under same-name coexistence a name-keyed fold can supersede a **different
+incarnation** (`#3573`'s burial class), which is why the fallback also forced
+`_update_entity` to **withhold** rename records (`#3377`/`#4769`).
+
+**OVERRIDES:** the log-and-continue replay default (skip an un-replayable legacy
+record and continue, as Kafka Streams' `LogAndContinueExceptionHandler` does) — for
+this class the replay **aborts**, because a supersede is a state change on an
+entity and a skipped one is silent burial, not a dropped attribution link.
+
+**The ruling this rests on, and the one it does NOT discharge.** It rests on D2
+**as amended** (`#3590` comment `6453059051`), whose bound reads *"… or carries an
+address the journal DID establish → `object-superseded-miss` (still refuses)"* — the
+name is such an address. It does **not** discharge D2 case **(i)** (`#3590` comment
+`6425220686`), which ruled the opposite way for the same records — *"a journal that
+replays on `main` must keep replaying and the record must keep landing — that is a
+regression to repair"* — and sequenced that repair (restore the fallback **with**
+`#4769`'s ordering fix, or resolve the name through the R2 name→id index). Those two
+owner rulings were never reconciled; the code follows the **later** one (the
+amendment). ⛔ The unreconciled obligation is **open and tracked on `#10345`**, not
+settled by this note — `#4769` was consolidated into `#5048` and both are CLOSED, so
+this pointer is the obligation's only live home. A lane that reads this row as the
+final word on case (i) will foreclose an owner ruling.
+
+Pinned by `tests/test_3590_minted_identity_acceptance.py::
+test_a_legacy_journal_with_a_synthesized_id_aborts_the_rebuild` (the abort, at the
+current head) and `tests/test_status_projection.py::
+test_fold_id_miss_does_not_fall_back_to_name` (the fold itself, both `cas` modes).
 
 ---
 

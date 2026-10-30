@@ -1482,6 +1482,27 @@ def test_the_docker_lane_seam_forces_the_full_matrix():
     assert result["test_files"] == "ALL", result
 
 
+def test_the_minted_identity_id_helper_forces_the_full_matrix():
+    """#3590 round-5 review F4: `tests/_node_ids.py` is a CROSS-SURFACE helper.
+
+    It replaced the retired `entity_name_id` derivation in every test that needs
+    "the id of this name", and it is imported from modules registered on several
+    surfaces — `test_sdk_group3.py` (sdk), `test_capture_session.py` /
+    `test_ingest_event_endpoint.py` / `test_event_provenance.py` /
+    `test_status_folds_2729.py` (core), `test_7936_stable_stub_ids.py`
+    (core + sdk) and others. It is NOT a `test_*.py` file, so the manifest never
+    classifies it: without its `SHARED_MODULES` entry a helper-only change
+    selected `core` only and a break it induced in a sdk/api test never ran on
+    the PR that made it (the #1349/#3332/#3910 under-selection class). Same
+    reason — and same shape — as the `_live_utils.py` pin above; the generic
+    `test_every_shared_module_entry_selects_the_full_matrix` cannot catch the
+    entry going MISSING, which is the failure this names.
+    """
+    result = _sel(["tests/_node_ids.py"])
+    assert result["full"] is True, result
+    assert result["test_files"] == "ALL", result
+
+
 def test_every_shared_module_entry_selects_the_full_matrix():
     """#4097: `SHARED_MODULES` is a hand-maintained list, so derive its invariant here.
 
