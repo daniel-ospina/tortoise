@@ -500,8 +500,8 @@ shape: everything agrees live↔rebuild except the residuals below.
 - **journal route, `wasDerivedFrom`/`aboutAction`** — MOVED live by 2b but not derivable, so 2b journals no
   repoint: live has the edge at the successor, the journal rebuild has it nowhere.
 - **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191**:
-  the record applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the terminal of the
-  `superseded_by` chain, `ON CONFLICT … DO NOTHING`), so `relation` follows the edge to the successor too. What
+  the record applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the
+  hop `superseded_by` names — one hop per descriptor, so a chain reaches the terminal row as each hop runs — `ON CONFLICT … DO NOTHING`), so `relation` follows the edge to the successor too. What
   remains open in **#9836** is the *non-derivable* family (`wasDerivedFrom`/`aboutAction`): 2b journals no
   descriptor for them at all, so nothing moves the row and the record keeps the row at the pre-supersede point
   (live moved it to the successor). A shape the producer DECLINES at the mint (`_record_addressable`) holds
