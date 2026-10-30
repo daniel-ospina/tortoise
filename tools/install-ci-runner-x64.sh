@@ -406,12 +406,12 @@ is_foreign_arch_label() {
   return 1
 }
 # Is $1 a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …)? Same class/shape as
-# `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two writers. The pool
-# claims `ubuntu-latest` and NEVER an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:87-88`) — that is
-# the label a leg pins to escape this pool; `ubuntu-2204-tools` is NOT in the class (boundary test in
-# `tests/test_runner_autoscale.py`), hence both ends anchored. ⛔ A HERE-STRING, never a builtin
-# writer piped into a quiet grep (#841): under `pipefail` the quiet grep's early exit leaves the
-# writer with SIGPIPE and the PIPELINE non-zero over text that DID match — a false negative here would drop this carve-out and put a version pin back on the pool. `repo-harnesses` enforces the shape.
+# `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two writers. The pool's
+# DEFAULT is `ubuntu-latest`, never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:87-88`: the
+# `CI_RUNNER_OS_LABEL=on|auto` suspension) — the pin a leg names to escape this pool, and
+# `ubuntu-2204-tools` is NOT in the class (boundary test in `tests/test_runner_autoscale.py`). ⛔ A
+# HERE-STRING, never a builtin writer piped into a quiet grep (#841): under `pipefail` the quiet
+# grep's early exit leaves the writer with SIGPIPE and the PIPELINE non-zero over text that DID match — a false negative here would drop this carve-out and put a version pin back on the pool. `repo-harnesses` enforces the shape.
 is_version_pinned_hosted_label() {
   grep -qiE '^ubuntu-[0-9]+(\.[0-9]+)*(-arm)?$' <<<"$1"
 }
