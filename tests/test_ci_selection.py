@@ -206,12 +206,15 @@ def test_docs_scanning_gates_stay_in_tier1():
     assert "test_substrate_map.py" in tier1, (
         "#5086 review (P1-2): the substrate map's drift guard must be in tier1 — "
         "the map IS a document (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`), "
-        "the doc it must stay registered in is another (`docs/00_index.md`), and "
-        "BOTH are under NON_PYTHON_PREFIXES — so the docs-only edit that let the "
-        "map go stale three times selects no surface and runs tier1 ONLY. "
-        "Registered in `core` alone it ran on `tortoise/` diffs, i.e. on the one "
-        "half of the map that is not the artifact that went stale (#4309 class, "
-        "same dual registration as the sibling doc guards above)"
+        "and `docs/` is in NON_PYTHON_PREFIXES and the map matches no "
+        "SOURCE_PATTERNS entry, so the docs-only edit that let the map go stale "
+        "three times selects no surface and runs tier1 ONLY. Registered in "
+        "`core` alone it ran on `tortoise/` diffs, i.e. on the one half of the "
+        "map that is not the artifact that went stale (#4309 class, same dual "
+        "registration as the sibling doc guards above). ⚠️ This row is the MAP's "
+        "arm only: `docs/00_index.md`, the other file the guard reads, is in "
+        "`CORE_ALSO`, so an index-only edit measures `surfaces=['core']` and "
+        "needs no tier1 row (#5086 review P3, cycle 6)"
     )
 
 
@@ -270,27 +273,33 @@ def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
 
 
 def test_substrate_map_guard_runs_on_the_diffs_it_guards():
-    """#5086 review (P1-2): pin the SELECTION on all three arms, not the string.
+    """#5086 review (P1-2): pin the SELECTION on all four arms, not the string.
 
     `tests/test_substrate_map.py` re-measures
-    `docs/architecture/SUBSTRATE-REBUILD-MAP.md` against the tree. Three distinct
+    `docs/architecture/SUBSTRATE-REBUILD-MAP.md` against the tree. Four distinct
     diffs can break it, and before this fix NONE of them selected it — the row had
     been appended to the `ep:` list rather than `core:`, and neither `core` nor
     the early return reaches the file anyway:
 
-    - a **docs-only** edit of the map (or of the `docs/00_index.md` row it must
-      stay registered in) → measured `surfaces=[]`, tier-1 set WITHOUT the pin;
-      `tier1` is the only surface that runs, so the row above is the whole fix.
+    - a **docs-only** edit of the map → measured `surfaces=[]`, tier-1 set WITHOUT
+      the pin; `tier1` is the only surface that runs, so the row above is the
+      whole fix. (This is the arm that went stale three times, and the ONLY one
+      that needs `tier1`.)
     - a **tool-only** edit of `tools/substrate_map_check.py` → measured
       `surfaces=[]` (a flat `NON_PYTHON_PREFIXES` entry, no `SOURCE_PATTERNS`
       match), so the tool's own test never ran on the PR editing the tool. Closed
       by `CORE_ALSO` in `tools/ci_selection.py` (#1349/#3332/#3616 class).
+    - a **`docs/00_index.md`** edit — the OTHER file the guard reads for the
+      registration claim — is `CORE_ALSO` too, so it measures
+      `surfaces=['core']` and reaches the pin through the `core` row. Pinned here
+      because the fix-pass notes and the `tier1` comment both claimed this arm was
+      a docs-only early return; it is not (#5086 review P3, cycle 6).
     - a **`tortoise/`** symbol move (what the interface map places) → `core`,
       through the `tortoise/` prefix fallback.
 
     Measured after the fix: docs `surfaces=[]` + pin present, tool
-    `surfaces=['core']` + pin present, `tortoise/projection/edges.py`
-    `surfaces=['core', ...]` + pin present.
+    `surfaces=['core']` + pin present, index `surfaces=['core']` + pin present,
+    `tortoise/projection/edges.py` `surfaces=['core', ...]` + pin present.
     """
     docs = _sel(["docs/architecture/SUBSTRATE-REBUILD-MAP.md"])
     assert docs["full"] is False
@@ -306,6 +315,15 @@ def test_substrate_map_guard_runs_on_the_diffs_it_guards():
         "a tool-only edit must run the tool's own negative controls — `tools/` "
         "is swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing "
         "that keeps this out of the docs-only early return"
+    )
+
+    index = _sel(["docs/00_index.md"])
+    assert index["surfaces"] == ["core"], index["surfaces"]
+    assert "test_substrate_map.py" in index["test_files"], (
+        "the registration claim reads `docs/00_index.md`, and that path is in "
+        "CORE_ALSO — so an index-only edit is `core`, NOT the docs-only early "
+        "return the `tier1` comment used to describe it (#5086 review P3, "
+        "cycle 6: measured, not reasoned)"
     )
 
     symbol_move = _sel(["tortoise/projection/edges.py"])

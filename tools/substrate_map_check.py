@@ -21,7 +21,11 @@ tree disagree:
   4. the document is registered in `docs/00_index.md`;
   5. every §5 row whose `depends on` cell says `*leaf*` really imports nothing under
      `tortoise/` at MODULE level (a lazy in-function import does not count: it is
-     how `source_identity` and `quota` deliberately break their cycles);
+     how `source_identity` and `quota` deliberately break their cycles). A
+     **module-scope** `try:` / `if:` / `with:` body counts as module level — it
+     still executes at import time, so a `try: from . import x` creates exactly
+     the cycle the cell denies; only `if TYPE_CHECKING:` (which does not run) and
+     in-function imports are exempt;
   6. the document's `measured_at_commit` is an ancestor of `HEAD` — the map names
      the tree it was cut from (`tools/finding_provenance.py`'s rule, applied to a
      doc rather than to a finding). ⚠️ **(6) is the one claim that needs history.**
@@ -217,19 +221,69 @@ def check_interface_symbols(doc: str) -> list[str]:
 #: §5's `depends on` cell for a module that imports nothing under `tortoise/`.
 _LEAF_CELL = "*leaf*"
 
+#: Module-scope statements whose BODIES still execute at import time. An import
+#: wrapped in one of these is module level for the `*leaf*` claim: `try: from
+#: .security import redact_error / except ImportError: ...` is neither lazily
+#: deferred nor cycle-free, so reading only `tree.body`'s direct children let the
+#: exact construct below (`quota.py`'s in-function `try`) pass at module scope
+#: (#5086 review P3, cycle 6). `ast.TryStar` (`except*`) executes identically.
+_IMPORT_TIME_BLOCKS: tuple[type, ...] = (ast.Try, ast.TryStar, ast.With)
+
+
+def _is_type_checking_guard(test: ast.expr) -> bool:
+    """`if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` — the one exempt block.
+
+    Its body does NOT run at import time, so it creates no runtime cycle — which
+    is the property the `*leaf*` cell is about.
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return False
+
+
+def _walk_module_scope(body: list[ast.stmt]) -> list[ast.stmt]:
+    """Every statement that RUNS at import time, descending into block bodies.
+
+    Descends into `try`/`with` (always) and `if` (unless the test is the
+    `TYPE_CHECKING` guard). Functions and classes are NOT descended into: their
+    bodies are the lazy-import case the `*leaf*` claim explicitly allows.
+    """
+    found: list[ast.stmt] = []
+    for node in body:
+        if isinstance(node, _IMPORT_TIME_BLOCKS):
+            found += _walk_module_scope(node.body)
+            for handler in getattr(node, "handlers", ()):
+                found += _walk_module_scope(handler.body)
+            found += _walk_module_scope(getattr(node, "orelse", []))
+            found += _walk_module_scope(getattr(node, "finalbody", []))
+        elif isinstance(node, ast.If):
+            if _is_type_checking_guard(node.test):
+                continue
+            found += _walk_module_scope(node.body)
+            found += _walk_module_scope(node.orelse)
+        else:
+            found.append(node)
+    return found
+
 
 def _module_level_internal_imports(path: Path) -> list[str]:
-    """Internal imports at MODULE level in `path` — not inside a function.
+    """Internal imports that EXECUTE at module level in `path`.
 
     Module level is the level the `*leaf*` claim is about: a module-level cycle is
     what serializes two lanes, while a lazy in-function import (`source_identity.py`'s
     one, `quota.py`'s eleven) breaks the cycle deliberately and does not. A
-    `TYPE_CHECKING`-guarded import is nested inside an `if`, so it is not module
-    level either — and creates no runtime cycle, which is the property at stake.
+    `TYPE_CHECKING`-guarded import does not run, so it creates no runtime cycle
+    either — the property at stake.
+
+    "Module level" therefore means "executes at import time", not "is a direct
+    child of the module body": a module-scope `try:`/`if:`/`with:` body runs too,
+    so a wrapped internal import is reported (#5086 review P3, cycle 6).
     """
     tree = ast.parse(_read(path))
     found: list[str] = []
-    for node in tree.body:
+    for node in _walk_module_scope(tree.body):
         if isinstance(node, ast.ImportFrom):
             if node.level:
                 base = "." * node.level + (node.module or "")
@@ -368,12 +422,19 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     except subprocess.TimeoutExpired:
         # Not drift: the claim was never adjudicated. Same cause as the status-128
         # arm below, arriving slowly — see this function's docstring.
+        #
+        # ⛔ ONE reporting shape across both unverified arms: the token
+        # "cannot be verified here" is what a caller (and the CLI's stdout) is
+        # told to look for, so the timeout arm prefixes it too rather than
+        # leaving two wordings for one verdict — the integration tests asserted
+        # only the 128 wording and therefore FAILED (not skipped) the moment the
+        # bound tripped (#5086 review P2, cycle 6).
         return (
             [],
             [
-                f"measured_at_commit {sha} could not be verified within "
-                f"{ANCESTRY_TIMEOUT_S}s (git is trying to fetch an object it does "
-                "not have, so this checkout cannot answer the claim)"
+                f"measured_at_commit {sha} cannot be verified here: could not be "
+                f"verified within {ANCESTRY_TIMEOUT_S}s (git is trying to fetch an "
+                "object it does not have, so this checkout cannot answer the claim)"
             ],
         )
     except OSError as exc:  # pragma: no cover - git absent is a state error

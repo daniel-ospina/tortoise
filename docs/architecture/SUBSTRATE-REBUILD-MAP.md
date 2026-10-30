@@ -215,10 +215,14 @@ The leaves created by the merged lanes are still leaves. **The contention
 remains entirely in the pre-existing aggregators.**
 
 What a *leaf* cell means in that table, stated because it is narrower than
-"dependency-free": **no module-level import of anything under `tortoise/`** —
-the property the contention argument rests on, since a module-level cycle is what
-serializes two lanes. `fanout`, `source_identity` and `quota` hold on that
-reading (verified at `4f68a2aa7`: none has a column-0 internal import). Two of
+"dependency-free": **no import of anything under `tortoise/` that EXECUTES at
+module level** — the property the contention argument rests on, since a
+module-level cycle is what serializes two lanes. "Module level" is read as
+"runs at import time", not "sits at column 0": a `try:`/`if:`/`with:` at
+module scope runs too, so an internal import wrapped in one counts, while an
+`if TYPE_CHECKING:` block (which does not run) does not. `fanout`,
+`source_identity` and `quota` hold on that reading (verified at `4f68a2aa7`: no
+internal import of theirs executes at module level). Two of
 them are **not** dependency-free in the wider sense, and the difference is
 deliberate rather than stale: `source_identity.py:271` and eleven sites in
 `quota.py` (`:78`, `:476`, `:518`, `:556`, `:604`, `:647`, `:724`, `:883`,
@@ -396,7 +400,10 @@ status arm rather than against it: a locally-present sha answers in 7 ms, an
 absent one costs ~24 s on a partial clone while git attempts a lazy fetch, so the
 bound exists to stop a CI gate hanging on a typo. A probe that hits it is
 therefore *"could not answer"* — the same absent-object condition as git's
-error status, arriving slowly — and is reported as `UNVERIFIED`, exit `2`. It is
+error status, arriving slowly — and is reported as `UNVERIFIED`, exit `2`. Both
+unverified arms carry the same report token (*"… cannot be verified here"*), so a
+caller reading the output or the tests reading `measure()` cannot mistake one arm
+for a different verdict. It is
 never `1`: `--is-ancestor` exits `0` (ancestor) / `1` (not an ancestor) / a
 non-zero status that is not `1` (error), and a timeout is not a git status at
 all, so scoring it as drift would hand an operator *"the document and the tree
@@ -418,7 +425,7 @@ What it checks, and deliberately does not:
 |---|---|
 | every **file family** a lane declares resolves on disk | whether a lane is *live* (that is the tracker's job — §1's command) |
 | every **symbol** the interface map places is still **declared** in the file it names (`STRUCTURAL_REL_LABELS`, `stub_key`, `_SOURCE_HANDLED`, `_DOC_RETIRED_KEYS`, `relabel_legacy_documents`, `build_master_list`, `compile_vocab`, `compile_value_brief`) — *declared*, not merely mentioned: a comment or a reader does not satisfy it — and that the document still *names* it | whether the symbol still *means* what the map says |
-| every §5 row whose `depends on` cell says `*leaf*` really imports nothing under `tortoise/` at **module level** (a lazy in-function import does not count — that is how `source_identity` and `quota` break their cycles) | whether a row's dependency list is *complete*: the non-leaf rows name the interfaces that matter to the contention argument, not every import |
+| every §5 row whose `depends on` cell says `*leaf*` really imports nothing under `tortoise/` that executes at **module level** — a module-scope `try:`/`if:`/`with:` body counts (it runs at import time), an `if TYPE_CHECKING:` block and a lazy in-function import do not (that is how `source_identity` and `quota` break their cycles) | whether a row's dependency list is *complete*: the non-leaf rows name the interfaces that matter to the contention argument, not every import |
 | | whether `:Document` is minted anywhere — **not regex-checkable**, and §5 records the measurement showing why |
 | | the tracker state of any issue — **the 76/33 split above is a point-in-time measurement, and it is dated in the frontmatter** |
 | this document is registered in `docs/00_index.md` | the correctness of the placement judgements |

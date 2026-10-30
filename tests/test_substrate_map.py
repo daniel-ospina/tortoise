@@ -142,14 +142,26 @@ def _ancestry_is_verifiable_here() -> bool:
     fetches one commit by default, so in the CI `test` job this is False and the
     ancestry claim is unprovable there; the REQUIRED `docs` job (fetch-depth 0)
     is where it is proved.
+
+    ⛔ **Bounded with the tool's own bound** (`smc.ANCESTRY_TIMEOUT_S`). Unbounded,
+    this oracle ran the exact probe the tool deliberately caps: on a partial clone
+    whose absent object costs ~24 s of lazy fetch it could finish and answer
+    "verifiable" AFTER the tool had already given up at 10 s, so the two
+    disagreed about which arm to expect and both integration tests failed in
+    both branches (#5086 review P2, cycle 6). A probe that cannot answer within
+    the tool's own bound is not verifiable HERE — the tool will say the same.
     """
     sha = smc._FRONTMATTER_SHA.search(_doc()).group(1)
-    probe = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        probe = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=smc.ANCESTRY_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return probe.returncode == 0
 
 
@@ -165,13 +177,19 @@ def test_the_shipped_map_is_clean() -> None:
     object, so the question is unanswerable THERE. The offline half is asserted
     FIRST — in a shallow clone a real drift still reds this — and only then is the
     ancestry half handed to the job that has the history.
+
+    The unverified arm accepts EITHER wording the tool uses for "this checkout
+    cannot answer": the absent-object status arm and the bounded-probe timeout
+    arm. Both are one verdict, so they carry one token — before that they did
+    not, and this test FAILED (rather than skipped) whenever the bound tripped
+    (#5086 review P2, cycle 6).
     """
     result = smc.measure()
     assert result["problems"] == [], result["problems"]
     if not _ancestry_is_verifiable_here():
         assert result["verdict"] == "UNVERIFIED", result
         assert len(result["unverified"]) == 1, result["unverified"]
-        assert "cannot be verified here" in result["unverified"][0]
+        assert "cannot be verified here" in result["unverified"][0], result["unverified"]
         pytest.skip(
             "shallow checkout: `measured_at_commit` is absent here, so the offline "
             "half is all this job proves; the ancestry claim is proved by the "
@@ -381,6 +399,50 @@ def test_an_unbounded_ancestry_probe_cannot_hang_the_gate(monkeypatch) -> None:
     )
     assert len(unverified) == 1, unverified
     assert "could not be verified within" in unverified[0], unverified
+
+
+def test_the_unverified_arm_carries_one_token_whichever_probe_produced_it(
+    monkeypatch, capsys
+) -> None:
+    """Fails if the timeout arm's report is worded differently from the status arm's.
+
+    Reachable on a PARTIAL clone: the 10 s bound trips (measured ~24 s of lazy
+    fetch on this box), so the timeout arm — not the status-128 arm — produces
+    the `UNVERIFIED` report. Both arms mean the same thing ("this checkout cannot
+    answer the claim"), and every caller keys on the token the 128 arm uses, so
+    the timeout arm must carry it too. Before the fix it said only "could not be
+    verified within", so `test_the_shipped_map_is_clean` and `test_cli_exit_codes`
+    FAILED — not skipped — in that state, and the CLI's stdout could not be
+    matched to the verdict it printed (#5086 review P2, cycle 6).
+    """
+    def _boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=smc.ANCESTRY_TIMEOUT_S)
+
+    monkeypatch.setattr(smc.subprocess, "run", _boom)
+    code = smc.main(["substrate_map_check.py", "--check"])
+    printed = capsys.readouterr().out
+    assert code == 2, printed
+    assert "UNVERIFIED" in printed, printed
+    assert "cannot be verified here" in printed, printed
+    assert "could not be verified within" in printed, printed
+    # The drift instruction must NOT be printed: nothing is wrong with the document.
+    assert "The document and the tree disagree" not in printed, printed
+
+
+def test_the_test_oracle_cannot_outlive_the_tools_own_bound(monkeypatch) -> None:
+    """Fails if the tests' own probe is unbounded, so it can out-vote the tool.
+
+    Reachable on a partial clone whose absent object costs ~24 s: unbounded, this
+    oracle finished and answered "verifiable" AFTER the bounded tool had given up
+    at 10 s — so the tests expected `CLEAN`/exit 0 from a run that correctly said
+    `UNVERIFIED`/exit 2 and failed in both branches. The oracle must give up where
+    the tool does (#5086 review P2, cycle 6).
+    """
+    def _boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=smc.ANCESTRY_TIMEOUT_S)
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert _ancestry_is_verifiable_here() is False
 
 
 def test_a_missing_measured_at_commit_is_drift() -> None:
@@ -613,6 +675,56 @@ def test_a_leaf_row_that_imports_internally_is_drift() -> None:
     )
 
 
+def test_a_module_scope_try_wrapped_internal_import_is_not_a_leaf(tmp_path: Path) -> None:
+    """Fails if "module level" means "a direct child of the module body".
+
+    Reachable: `try: from .security import redact_error / except ImportError: ...`
+    at module scope RUNS at import time and creates exactly the cycle the `*leaf*`
+    cell denies, but it is an `ast.Try` at `body`, so a walk over `tree.body`'s
+    direct `Import`/`ImportFrom` children never saw it and reported the module as
+    a leaf — a false CLEAN on the property the map calls load-bearing
+    ("emptiness is what a lane plans a rebase on"). The same holds for a
+    module-scope `if` that is not the `TYPE_CHECKING` guard, and for `with`.
+
+    The negative half is as load-bearing as the positive one: a
+    `TYPE_CHECKING` block and an in-function import must stay exempt, because
+    neither runs at import time — that is how `source_identity` and `quota`
+    deliberately break their cycles, and the shipped tree is CLEAN on that
+    reading (#5086 review P3, cycle 6).
+    """
+    module = tmp_path / "wrapped.py"
+    module.write_text(
+        "from __future__ import annotations\n"
+        "try:\n"
+        "    from . import security\n"
+        "except ImportError:\n"
+        "    security = None\n"
+        "if True:\n"
+        "    from . import value_gate\n"
+        "if TYPE_CHECKING:\n"
+        "    from . import entities\n"
+        "if typing.TYPE_CHECKING:\n"
+        "    from . import edges\n"
+        "def lazy():\n"
+        "    from . import redact\n",
+        encoding="utf-8",
+    )
+    imports = smc._module_level_internal_imports(module)
+    assert imports == [".security", ".value_gate"], imports
+
+    clean = tmp_path / "clean.py"
+    clean.write_text(
+        "from __future__ import annotations\n"
+        "import json\n"
+        "if TYPE_CHECKING:\n"
+        "    from . import entities\n"
+        "def lazy():\n"
+        "    from tortoise import projection\n",
+        encoding="utf-8",
+    )
+    assert smc._module_level_internal_imports(clean) == []
+
+
 def test_an_unreadable_tracked_file_is_a_state_error_not_a_narrower_count(
     monkeypatch,
 ) -> None:
@@ -778,9 +890,15 @@ def test_cli_exit_codes() -> None:
 
     Reachable: the clean arm on the shipped tree, the usage arm on an unknown
     flag, and (in a `fetch-depth: 1` checkout, which is what CI gives the `test`
-    job) the state arm with 2 in place of 0. Asserting `0` unconditionally here is
-    what redded this file in CI: the clone cannot answer the ancestry question.
-    The drift arm is covered by the negative controls above.
+    job, or on a partial clone whose probe trips the bound) the state arm with 2
+    in place of 0. Asserting `0` unconditionally here is what redded this file in
+    CI: the clone cannot answer the ancestry question. The drift arm is covered
+    by the negative controls above.
+
+    `_ancestry_is_verifiable_here()` is bounded with the tool's own bound, so the
+    expectation and the tool cannot disagree about which arm this is; the
+    unverified assertion accepts either unverified wording because both carry the
+    same token (#5086 review P2, cycle 6).
     """
     tool = REPO / "tools" / "substrate_map_check.py"
     clean = subprocess.run(
