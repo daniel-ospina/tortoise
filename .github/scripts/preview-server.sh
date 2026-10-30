@@ -42,15 +42,15 @@
 #   alloc --name N [--base PORT] [--span N]   pick a free port, record it, print it
 #   dir                                       print the per-job state directory
 #   record --name N --pid PID                 register the pid this job started
-#   ready --name N                            exit 0 iff OUR pid is alive AND the
-#                                             port answers — two INDEPENDENT facts.
-#                                             It does NOT prove the port's LISTENER
-#                                             is ours: that needs a socket→pid map
+#   ready --name N                            exit 0 iff OUR pid is alive, the port
+#                                             ANSWERS, and that listener answers HTTP.
+#                                             It does NOT prove the port's LISTENER is
+#                                             ours: that needs a socket→pid map
 #                                             (`ss`/`lsof`), which the runner image
-#                                             does not guarantee. So `alloc`'s
-#                                             pre-boot free-check and wrangler's
-#                                             exit on EADDRINUSE are what keep a
-#                                             peer's server from satisfying it.
+#                                             does not guarantee. So `alloc`'s pre-boot
+#                                             free-check and wrangler's exit on
+#                                             EADDRINUSE are what keep a peer's server
+#                                             from being graded.
 #   stop --name N                             signal the recorded tree only
 #   stop-all                                  stop every server this job recorded
 #
@@ -231,14 +231,24 @@ cmd_ready() {
   [[ -f "$dir/${name}.pid" && -f "$dir/${name}.port" ]] || return 1
   pid="$(cat "$dir/${name}.pid")"
   port="$(cat "$dir/${name}.port")"
-  # Two INDEPENDENT facts, never one: the pid we recorded is ALIVE, and
-  # something ANSWERS on the port. Nothing here relates the two — mapping the
-  # port's listener to a pid needs `ss`/`lsof`, which the runner image does not
-  # guarantee — so a live-but-unbound pid beside a PEER's listener still passes.
-  # What actually narrows that window is `alloc`'s pre-boot free-check and
-  # wrangler's own exit on EADDRINUSE, not this probe (#2757).
+  # (a) The pid we recorded must still be ALIVE. Three facts are checked here and
+  # NOTHING relates them to each other: (a) liveness, (b) something ANSWERS on the
+  # port, (c) that answer is an HTTP success. Mapping the port's listener to a pid
+  # needs `ss`/`lsof`, which the runner image does not guarantee, so a
+  # live-but-unbound pid beside a PEER's listener still passes. What narrows that
+  # window is `alloc`'s pre-boot free-check and wrangler's own exit on
+  # EADDRINUSE, not this probe (#2757).
   kill -0 "$pid" 2>/dev/null || return 1
+  # (b) …and something must be LISTENING there.
   port_free "$port" && return 1
+  # (c) …and it must be SERVING, not merely bound: a wrangler whose listener is up
+  # while its bundle/workerd is still starting answers a connect but never a 200,
+  # and the suites behind this gate require HTTP 200
+  # (`tests/e2e/test_session_login_flow.py` exits the run when it is not). `-f`
+  # fails on HTTP >= 400; `--max-time` keeps a listener that accepts but never
+  # replies from stalling the 240-iteration loop. This is the pre-fix `curl -fsS`
+  # requirement, kept beside the properties the #10283 fix added.
+  curl -fsS --max-time 2 "http://127.0.0.1:${port}/" >/dev/null 2>&1 || return 1
   return 0
 }
 

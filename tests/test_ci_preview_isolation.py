@@ -28,12 +28,14 @@ Two halves are pinned here, and they are DIFFERENT kinds of assertion:
 
 ⚠️ What `ready` does NOT prove: that the port's LISTENER belongs to our pid
 tree. Proving that needs a socket→pid mapping (`ss`/`lsof`) that the runner
-image does not guarantee, so `ready` asserts only (a) the pid we recorded is
-still alive and (b) the port answers — strictly more than the pre-fix bare
-`curl`, which related the two not at all. The remaining window needs our
-process to survive a failed BIND while a peer listens on the same port; the
-allocator's pre-boot free-check plus wrangler's exit on `EADDRINUSE` are what
-close it in practice.
+image does not guarantee, so `ready` asserts (a) the pid we recorded is still
+alive, (b) the port is bound, and (c) that listener answers HTTP successfully.
+(c) is the pre-fix `curl -fsS` requirement, kept: a bound listener is not a
+serving server, and the specs behind this gate require 200 —
+`test_ready_requires_the_preview_to_SERVE_not_just_bind` is the arm that pins it.
+The remaining window needs our process to survive a failed BIND while a peer
+listens on the same port; the allocator's pre-boot free-check plus wrangler's
+exit on `EADDRINUSE` are what close it in practice.
 
 Those four sentences are pinned below
 (`test_readiness_comments_do_not_claim_a_listener_pid_mapping`): the OVERCLAIM
@@ -47,6 +49,7 @@ import contextlib
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -479,6 +482,92 @@ def test_alloc_returns_a_port_that_is_actually_free(tmp_path: Path, state) -> No
     )
     assert probe.returncode != 0, f"alloc handed back a port that is already in use ({port})"
     assert (Path(state["PREVIEW_STATE"]) / "marketing.port").read_text().strip() == port
+
+
+def _spawn_http(port: int, status: int, cwd: Path) -> subprocess.Popen:
+    """A preview-shaped listener: binds, accepts, answers `status` on `/`."""
+    code = (
+        "import http.server, socketserver\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        f"        self.send_response({status})\n"
+        "        self.send_header('Content-Length', '0')\n"
+        "        self.end_headers()\n"
+        "    def log_message(self, *a):\n"
+        "        pass\n"
+        "socketserver.TCPServer.allow_reuse_address = True\n"
+        f"socketserver.TCPServer(('127.0.0.1', {port}), H).serve_forever()\n"
+    )
+    return _spawn([sys.executable, "-c", code], cwd)
+
+
+def _port_answers(port: int) -> bool:
+    """The PRE-fix readiness test: does a TCP connect to `port` succeed?"""
+    return subprocess.run(
+        ["bash", "-c", f'(exec 3<>"/dev/tcp/127.0.0.1/{port}") 2>/dev/null'],
+        capture_output=True,
+    ).returncode == 0
+
+
+def _wait_port(port: int, timeout: float = 15.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _port_answers(port):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_ready_requires_the_preview_to_SERVE_not_just_bind(tmp_path: Path, state) -> None:
+    """`ready` must not hand a bound-but-not-yet-serving listener to the specs.
+
+    The gate this replaces (`curl -fsS http://127.0.0.1:<port>/`) required an HTTP
+    success; "the port answers a connect" does not — and the consumers require
+    200: `tests/e2e/test_session_login_flow.py` exits the run on a non-200, which
+    reds a REQUIRED check. This is the `tcpSocket` vs `httpGet` distinction in
+    Kubernetes' own wording (`content/en/docs/concepts/workloads/pods/probes.md`):
+    a TCP probe is *"considered successful if the port is open"*, while an HTTP
+    probe requires a status in [200, 400).
+
+    Both listeners below are alive, bound and recorded; only the response STATUS
+    separates them, so the 500 arm is RED on a `ready` that stops at liveness +
+    a connect (its non-vacuity proof). The 200 arm is the positive control —
+    without it a `ready` that always returned 1 would satisfy the first arm.
+    """
+    result = _script("alloc", "--name", "app", "--base", "18788", env=state)
+    assert result.returncode == 0, result.stderr
+    port = int(result.stdout.strip())
+
+    broken = _spawn_http(port, 500, tmp_path)
+    healthy = None
+    try:
+        assert _wait_port(port), f"the decoy listener never bound :{port}"
+        assert _script(
+            "record", "--name", "app", "--pid", str(broken.pid), env=state
+        ).returncode == 0
+        assert _script("ready", "--name", "app", env=state).returncode == 1, (
+            f"a listener on :{port} that is bound, alive and answering 500 was reported "
+            "READY — the specs behind this gate require 200, so the boot step would "
+            "hand them a server they then declare unreachable (#10283's own class)"
+        )
+
+        _reap(broken.pid)
+        deadline = time.time() + 10
+        while time.time() < deadline and _port_answers(port):
+            time.sleep(0.05)
+
+        healthy = _spawn_http(port, 200, tmp_path)
+        assert _wait_port(port), f"the healthy listener never bound :{port}"
+        assert _script(
+            "record", "--name", "app", "--pid", str(healthy.pid), env=state
+        ).returncode == 0
+        result = _script("ready", "--name", "app", env=state)
+        assert result.returncode == 0, (
+            f"a serving 200 preview on :{port} was reported NOT ready — the boot loop "
+            f"would spin 240 s and red the job: {result.stderr}"
+        )
+    finally:
+        _reap(broken.pid, *([healthy.pid] if healthy is not None else []))
 
 
 def test_the_helper_carries_no_process_name_kill() -> None:
