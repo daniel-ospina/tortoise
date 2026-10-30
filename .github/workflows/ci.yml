@@ -794,11 +794,30 @@ jobs:
         # already has the package installed cannot exhibit the failure mode:
         # inject a line into a listed artifact -> exit 1 naming the file;
         # restore -> exit 0.
+        #
+        # #5086: the substrate-map drift guard
+        # (`tools/substrate_map_check.py`, pinning
+        # `docs/architecture/SUBSTRATE-REBUILD-MAP.md` against the tree) is the
+        # second such guard and joins this step for the SAME reason, plus one of
+        # its own. Same reason: a docs-only edit of the map selects NO surface, so
+        # the guard's own test (`tests/test_substrate_map.py`, `core` + `tier1`)
+        # reaches it only through the curated `tier1` list — and `docs` is the
+        # REQUIRED, path-filter-free context that cannot inherit that skip.
+        # Extra reason, and it is why it must be HERE rather than only in the
+        # matrix: one of the guard's five claims is that the map's
+        # `measured_at_commit` is an ancestor of HEAD, which needs HISTORY. The
+        # `test` job checks out at the default `fetch-depth: 1`, so the object is
+        # absent there and the tool reports that claim UNVERIFIED (exit 2) rather
+        # than blaming the document (#5086 review P1-1). This job checks out at
+        # `fetch-depth: 0` (see the checkout above), so this is where the ancestry
+        # claim is actually proved. `--check` is verify-only; stdlib only, so it
+        # needs nothing from the `pip install` above (kept for its siblings).
         run: |
           pip install -e . --quiet
           python3 tools/bridge_table.py --check
           python3 tools/mcp_rename_table.py --check
           python3 tools/sdk_surface.py --check
+          python3 tools/substrate_map_check.py --check
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

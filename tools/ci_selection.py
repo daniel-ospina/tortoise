@@ -2306,7 +2306,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # on the very change that can break them (#6138-review-P1 class).
              # Kept here so `_selection_relevant` claims it in `_keep_changed`
              # and the core fallback stays alive.
-             "integrations/cli-extraction/extract_turns.py")
+             "integrations/cli-extraction/extract_turns.py",
+             # #5086 review P1-2: the substrate map's drift guard
+             # (`tests/test_substrate_map.py`, registered `core` + `tier1`) has TWO
+             # arms a filter can swallow, and this entry closes the tool half.
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry and nothing in
+             # SOURCE_PATTERNS matches the tool, so a `tools/substrate_map_check.py`
+             # -only diff came back `changed == []`, took the docs-only early
+             # return and fell to tier-1 smoke — the tool's own test would not run
+             # on the PR editing the tool. MEASURED before this entry
+             # (`select()` in-process): `select(["tools/substrate_map_check.py"])`
+             # → surfaces=[], full=False, and the pin ABSENT from test_files.
+             # After: surfaces=['core'], pin present. The DOC half
+             # (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`) is deliberately NOT
+             # claimed here: a docs-only diff must stay on the tier-1 path, which is
+             # why the file is dual-registered there — see the `tier1` row's comment
+             # and config/ci-surfaces.yml's `core`-home row.
+             # Pinned by tests/test_ci_selection.py::
+             # test_substrate_map_guard_runs_on_the_diffs_it_guards.
+             "tools/substrate_map_check.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
