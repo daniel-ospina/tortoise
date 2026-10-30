@@ -1105,8 +1105,8 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 #: 2, inside the very function the next `/tmp` migrator reads. These two numbers are
 #: asserted against the workflows by `test_the_stated_inventory_matches_the_workflows`,
 #: so a further migration reds the guard instead of silently falsifying its map.
-_STATED_PER_RUNNER_PYTEST_LOG_SITES = 3
-_STATED_LITERAL_PYTEST_LOG_SITES = 2
+_STATED_PER_RUNNER_PYTEST_LOG_SITES = 6
+_STATED_LITERAL_PYTEST_LOG_SITES = 0
 
 #: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
 #: workflows, so match the SHAPE, not one spelling. Anchored (`^tail`), so a comment
@@ -1169,16 +1169,17 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log`-named tails in python-ci.yml (3 of them the per-runner
-    `"$PYTEST_LOG"`, not a `/tmp` literal — see the DERIVED split pinned by
-    `test_the_stated_inventory_matches_the_workflows`), 1 `trackb.log` (the must-pass
-    Track B member, whose log name does not contain "pytest" — it was the coverage
-    gap a first cut missed), 1 `pmv-pytest.log` in post-merge-validation.yml, and 1
-    `pytest-d14.log`, written through `| tee` rather than a tail (this file counts
-    both shapes; the `tee` site is the one a tail-only counter missed). The filter is
-    deliberately the LOG CAPTURE, not the file name: a leg's log name is not a
-    contract, and the rail's capture is `gh run view --log-failed` across every job,
-    so any of these legs can omit its own failure set.
+    #9300): 6 `pytest.log`-named tails in python-ci.yml — 6 of them the per-runner
+    `"$PYTEST_LOG"`, not a `/tmp` literal, see the DERIVED split pinned by
+    `test_the_stated_inventory_matches_the_workflows` — plus `pmv-pytest.log` in
+    post-merge-validation.yml, plus `pytest-d14.log`, written through `| tee` rather
+    than a tail (this file counts both shapes; the `tee` site is the one a tail-only
+    counter missed). `test-track-b`'s tail was the `trackb.log` site in an earlier
+    inventory; #10280 migrated that leg onto `"$PYTEST_LOG"`, so its log no longer
+    carries a distinct name and it is counted in the six. The filter is deliberately
+    the LOG CAPTURE, not the file name: a leg's log name is not a contract, and the
+    rail's capture is `gh run view --log-failed` across every job, so any of these legs
+    can omit its own failure set.
     """
     tails = 0
     for workflow in ATTRIBUTION_WORKFLOWS:
@@ -1193,12 +1194,13 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 f"{workflow.name}:{i + 1}: the `{target}` capture is not followed by the "
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
-    # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
-    # `test`'s last-failed pre-phase (200), `test` (300) and `test-slow` (300) through
-    # the per-runner `"$PYTEST_LOG"` (the fast job since #10028, `test-slow` since the
-    # #10028 residue that PR closed), then the TWO remaining `/tmp/pytest.log` literals
-    # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
-    # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
+    # The measured inventory is 8: six `pytest.log`-named tails in python-ci.yml, ALL
+    # through the per-runner `"$PYTEST_LOG"` — `test`'s last-failed pre-phase (200),
+    # `test` (300), `test-slow` (300) (the fast job since #10028, `test-slow` since the
+    # #10028 residue that PR closed), `test-concurrency-falkor` (120),
+    # `test-carve-out` (200) and `test-track-b` (25) (those three since #10280, which
+    # also renamed the leg's log from the host-global `/tmp/trackb.log`) — plus
+    # `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
     # under this check while it stayed green (it took two losses to red it). Counting
@@ -1251,10 +1253,10 @@ def test_the_stated_inventory_matches_the_workflows() -> None:
         f"legs, the workflows have {literal} — update BOTH the stated count and the "
         "comment block above the floor"
     )
-    # The five `pytest.log`-named tails the inventory enumerates. Asserting the total as
+    # The six `pytest.log`-named tails the inventory enumerates. Asserting the total as
     # well means a migration that changes BOTH sides cannot pass by swapping them.
-    assert per_runner + literal == 5, (
-        f"{per_runner + literal} `pytest.log`-named tails, the inventory enumerates 5"
+    assert per_runner + literal == 6, (
+        f"{per_runner + literal} `pytest.log`-named tails, the inventory enumerates 6"
     )
 
 
@@ -1340,10 +1342,7 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
     # The delivered state, not a bound: a further migration changes this set and must
     # update the header's scope in the same change (that is the point of the pin).
     assert residual == [
-        "test-carve-out",
-        "test-concurrency-falkor",
         "test-d14-hosted-api",
-        "test-track-b",
         "validate",
     ], (
         "the legs still writing a host-global /tmp/*.log changed — update the "
@@ -1410,7 +1409,7 @@ def test_the_docstrings_inventory_split_is_derived_not_restated() -> None:
     per_runner = [s for s in sites if s == _RUNNER_TEMP_LOG]
     literal = [s for s in sites if s == "/tmp/pytest.log"]
     # the total this sentence states, and the split it got wrong
-    assert len(per_runner) + len(literal) == 5, sites
+    assert len(per_runner) + len(literal) == 6, sites
     flat = " ".join(
         (test_every_pytest_log_tail_is_followed_by_the_reporter.__doc__ or "").split()
     )
