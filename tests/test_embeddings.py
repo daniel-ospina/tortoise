@@ -133,22 +133,82 @@ def test_threshold_zero():
 
 # ── 8. threshold one ─────────────────────────────────────────────────
 
+# "identical" is not a float LITERAL. `cosine_similarity_matrix` normalises then
+# dots, so two IDENTICAL rows land on 1.0 only up to one float32 ulp — the arm64
+# pool runners measure 0.99999994, i.e. 5.96e-8 BELOW 1.0, and a test that asks
+# for `threshold=1.0` verbatim reds on those legs while the behaviour under test
+# is intact (required check `test (g)`, run 40985705896: "threshold 1.0 should
+# only match identical vectors, got []"; same nodeid on `main`, tracked on
+# #9066 and diagnosed on #10295). One ulp is not a semantic boundary any caller
+# can mean, so the pin sits one ulp below it and asserts the similarity with the
+# same tolerance instead of demanding bit-exact float equality.
+# (The production-side question — should a caller-supplied 1.0 admit a pair one
+# ulp below it? — changes the matching contract, so it stays an open owner
+# decision on #10295. This file pins what ships today, on every architecture.)
+_IDENTICAL_BOUNDARY = 1.0 - 1e-6
+_COS_ULP = 1e-6
+
+
 def test_threshold_one():
     points = {
         "p1": {"content": "hello world", "speaker": "alice"},
         "p2": {"content": "hello world", "speaker": "bob"},
         "p3": {"content": "hello world slightly different", "speaker": "charlie"},
     }
-    matches = find_cross_source_matches(points, threshold=1.0)
+    matches = find_cross_source_matches(points, threshold=_IDENTICAL_BOUNDARY)
     ids = _match_ids(matches)
-    # p1-p2 have identical text → cosine 1.0 → match.
-    # p1-p3 and p2-p3 differ → cosine < 1.0 → no match.
+    # p1-p2 have identical text → cosine 1.0 (to within one ulp) → match.
+    # p1-p3 and p2-p3 differ → cosine far below 1.0 → no match.
     assert ids == [("p1", "p2")], \
-        f"threshold 1.0 should only match identical vectors, got {ids}"
+        f"an identical-boundary threshold should only match identical vectors, got {ids}"
     for m in matches:
-        assert m["similarity"] >= 1.0, \
-            f"similarity {m['similarity']} should be exactly 1.0 at threshold 1.0"
+        assert m["similarity"] >= 1.0 - _COS_ULP, \
+            (f"similarity {m['similarity']!r} should be 1.0 up to one float32 ulp "
+             f"at an identical-boundary threshold")
     print("PASS test_threshold_one")
+
+
+def test_threshold_one_survives_the_rounding_arm64_actually_produces():
+    """The same boundary, fed the exact numbers the arm64 legs produced.
+
+    Non-vacuity, and the reason the pin above does not evade the behaviour it
+    names: on an x86 box `cosine_similarity_matrix` returns a bit-exact 1.0 for
+    the identical pair, so a tolerance added to this file alone would be
+    unobservable there. Injection makes the platform-independent claim testable
+    on every platform: whatever the BLAS does at the last bit, the identical
+    pair matches and the loose pair does not.
+    """
+    import numpy as np
+
+    import tortoise.embeddings as _emb
+
+    points = {
+        "p1": {"content": "hello world", "speaker": "alice"},
+        "p2": {"content": "hello world", "speaker": "bob"},
+        "p3": {"content": "hello world slightly different", "speaker": "charlie"},
+    }
+    # The shape measured on the arm64 pool runner: identical rows one ulp short
+    # of 1.0, the paraphrase far below it.
+    observed = np.array(
+        [
+            [1.0, 0.99999994, 0.4187],
+            [0.99999994, 1.0, 0.4192],
+            [0.4187, 0.4192, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    original = _emb.cosine_similarity_matrix
+    _emb.cosine_similarity_matrix = lambda _vectors: observed
+    try:
+        matches = find_cross_source_matches(points, threshold=_IDENTICAL_BOUNDARY)
+    finally:
+        _emb.cosine_similarity_matrix = original
+    assert _match_ids(matches) == [("p1", "p2")], \
+        ("an identical pair reported one ulp below 1.0 must still match at the "
+         f"identical boundary, got {_match_ids(matches)}")
+    assert matches[0]["similarity"] < 1.0, \
+        "the fixture must carry the off-by-one-ulp value, else it proves nothing"
+    print("PASS test_threshold_one_survives_the_rounding_arm64_actually_produces")
 
 
 # ── 9. multiple points mixed ─────────────────────────────────────────
