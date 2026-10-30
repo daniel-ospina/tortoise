@@ -474,6 +474,20 @@ WHAT IS PINNED (one entry per test, in file order)
    pre-fix spellings on purpose), and the one pointer the third row leans on may
    carry no line number anywhere in the file.
 
+41. `test_the_rebuild_half_carries_what_the_live_half_carries` — `#10139`'s CODE
+   half, at the STATEMENT, replacing the residual `MAP_WRITERS` used to state in
+   prose: the census's whole-function union reaches that site through the
+   2a-DIRECT `SET r += $attrs` leg (the structural `SET` rides an interpolated
+   `_carry` fragment, gap 1 of the docstring's list). Pinned here: the descriptor
+   JOURNALS the payload from the ONE shared `DIRECT_EDGE_ATTR_KEYS` vocabulary,
+   the transfer statement INTERPOLATES the carry, and the carry is `ON CREATE` —
+   `#9417`'s precedence rule, since the `EntityLinked` trailing sweep has already
+   re-materialized the successor's own `confidence` when pass-2b runs, so a bare
+   `SET` clobbers it (measured live at 0.42 replacing 0.91; `_carry = " SET nr +=
+   $attrs"` now reds HERE, not only in the behaviour suites). The gated
+   `SET r += $attrs` folds are still gated per statement, and the vocabulary is a
+   CEILING inside `FALSE_POSITIVE_ATTR_VOCAB`.
+
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
 (that is a design question, recorded, not resolved here — what IS pinned is
@@ -1149,12 +1163,58 @@ def _nearest_map_assignment(
     return ast.get_source_segment(text, best.value) or ""
 
 
+#: Where a NAMED key vocabulary is defined, in resolution order: the module that
+#: imports it names it from this one (`projection/edges.py`, the single home the
+#: `DERIVABLE_STRUCTURAL_RELS`/`STRUCTURAL_REL_LABELS` constants share).
+_VOCABULARY_MODULES = ("tortoise/projection/edges.py",)
+
+
+def _named_vocabulary(name: str) -> list[str]:
+    """The literal string members a module-level NAME is bound to.
+
+    ⛔ A NAME, not only a literal tuple (`#10139`). The gated folds filter on
+    `DIRECT_EDGE_ATTR_KEYS` — ONE definition, imported by both halves of the
+    carry, renamed from the structural-only spelling precisely so the live
+    transfer and its replay cannot drift. A reader that understands only LITERAL
+    tuples returns `[]` for that fold, i.e. "no fixed vocabulary", which is a
+    measured absence about the very protection the per-statement leg asserts —
+    and the exemption machinery would report it as a dead premise rather than as
+    a reader that went blind.
+    """
+    for relative in _VOCABULARY_MODULES:
+        path = ROOT / relative
+        if not path.exists():  # pragma: no cover - the tree ships it
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if not any(isinstance(target, ast.Name) and target.id == name
+                       for target in targets):
+                continue
+            value = node.value
+            if isinstance(value, ast.Subscript):  # `tuple((...))` / annotated forms
+                value = value.slice
+            if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+                return [
+                    element.value
+                    for element in value.elts
+                    if isinstance(element, ast.Constant)
+                    and isinstance(element.value, str)
+                ]
+    return []
+
+
 def _fixed_key_vocabulary(source: str) -> list[str]:
-    """The literal key names a `{k: v for … if k in (…)}` map is built from.
+    """The key names a `{k: v for … if k in (…)}` map is built from.
 
     A fixed vocabulary is what makes the exemption hold where the predicate is
     INTERPOLATED: a descriptor carrying none of these keys yields an EMPTY map,
     and an empty map writes nothing on whatever `etype` resolves to.
+
+    A NAME is resolved through `_named_vocabulary` (`#10139`) — the same claim,
+    read through the constant the code now imports instead of a literal tuple
+    spelled at the write site.
     """
     tree = ast.parse(source)
     names: list[str] = []
@@ -1176,6 +1236,8 @@ def _fixed_key_vocabulary(source: str) -> list[str]:
                         if isinstance(element, ast.Constant)
                         and isinstance(element.value, str)
                     )
+                elif isinstance(candidate, ast.Name):
+                    names.extend(_named_vocabulary(candidate.id))
     return names
 
 
@@ -7671,3 +7733,122 @@ def test_no_bare_line_citation_survives_in_this_files_record():
         "row as stale. Name the symbol; the record may not carry the number at "
         "all"
     )
+
+
+def test_the_rebuild_half_carries_what_the_live_half_carries():
+    """`#10139`'s CODE half, asserted at the STATEMENT — the residual this file
+    used to state instead.
+
+    `MAP_WRITERS` records the replay row and names its residual in place: the
+    census's whole-function union reaches that site through the 2a-DIRECT
+    `SET r += $attrs` leg, because the structural transfer's own `SET` rides an
+    interpolated `_carry` fragment (module-docstring gap 1). A `shape` needle and
+    the two behavioural replay tests were what stood in for a statement-level
+    pin. This leg is that pin, and it is cheap because the premises are literals:
+
+      1. the descriptor JOURNALS the payload — `sdk.supersede_point` spreads
+         `edge_props`, and `edge_props` is filtered by the ONE shared tuple
+         (`DIRECT_EDGE_ATTR_KEYS`). A second hand-written key list here is the
+         drift class `#10139` is about.
+      2. the replay APPLIES it at the statement that re-creates the edge, so a
+         rename cannot silently move the property off the transfer.
+      3. the application is `ON CREATE`, not a bare `SET` — `#9417`'s precedence
+         rule and NOT a formatting preference: the `EntityLinked` trailing sweep
+         has already re-materialized the successor's OWN `confidence` by the time
+         pass-2b runs, so an unconditional `SET nr += $attrs` overwrites it with
+         the retired point's value (measured live at 0.42 replacing 0.91, and
+         reproduced on the replay side by mutation). `_carry = " SET nr +=
+         $attrs"` must red HERE, not only in the behaviour suites.
+
+    ⚠️ The vocabulary is also pinned as a CEILING inside
+    `FALSE_POSITIVE_ATTR_VOCAB`, the fixed set the neighbouring gated folds copy
+    through: a carry that grew a key outside it would put that key on an
+    interpolated `etype`, which is the `#9417` shape one constant away.
+    """
+    module = "tortoise/projection/__init__.py"
+    symbol = "_rebuild_all_replay"
+    body = _function_body(module, symbol)
+    # 2. the statement that re-creates the transferred edge is still there …
+    transfer = _query_call_containing(body, "MERGE (s)-[nr:{etype}]->(t)")
+    assert transfer, (
+        f"`{module}::{symbol}` no longer carries `MERGE (s)-[nr:{{etype}}]->(t)` "
+        "— the about/structural transfer moved or was renamed, so the payload the "
+        "descriptor journals lands nowhere (`#10139`)"
+    )
+    assert "{_carry}" in transfer, (
+        "the transfer statement in "
+        f"`{module}::{symbol}` does not interpolate the carry variable, so the "
+        "payload is computed and then never applied: "
+        + repr(transfer.strip()[:200])
+    )
+    # … 3. and the carry is the PRECEDENCE-PRESERVING form.
+    assert "ON CREATE SET nr += $attrs" in body, (
+        f"`{module}::{symbol}` no longer applies the descriptor's payload with "
+        "`ON CREATE SET nr += $attrs` — `live == rebuild` is false again for an "
+        "`about*` edge's `confidence` (`#10139`)"
+    )
+    assert '= " SET nr += $attrs"' not in body, (
+        f"`{module}::{symbol}` applies the payload with a BARE `SET`. That "
+        "clobbers the successor's OWN confidence, which the `EntityLinked` "
+        "trailing sweep has already re-materialized by the time pass-2b runs: "
+        "the live half's measured 0.91 -> 0.42 regression, on the replay side "
+        "(`#9417`, `#10139`)"
+    )
+    # The gated `SET r += $attrs` folds beside it are still gated PER STATEMENT —
+    # the protection that bounds what an INTERPOLATED `etype` can receive.
+    setter_needle = "SET r += $attrs"
+    setters = _query_calls_containing(body, setter_needle)
+    assert setters, (
+        f"`{module}::{symbol}` lost its `{setter_needle}` folds, so the census "
+        "row this file records no longer describes the code"
+    )
+    gates = _setter_gate_premises(
+        module,
+        (ROOT / module).read_text(encoding="utf-8"),
+        symbol,
+        setter_needle,
+    )
+    assert len(gates) == len(setters), (
+        f"`{module}::{symbol}` carries {len(setters)} `{setter_needle}` "
+        f"statement(s) but {len(gates)} gate premise(s) — the two readings of "
+        "the same function disagree, so this leg measures neither"
+    )
+    for _gate_test, vocabulary in gates:
+        stray = sorted(set(vocabulary) - FALSE_POSITIVE_ATTR_VOCAB)
+        assert not stray, (
+            f"a gated attribute fold in `{module}::{symbol}` copies {stray}, "
+            "which is outside the fixed vocabulary the interpolated `etype` is "
+            f"bounded by ({sorted(FALSE_POSITIVE_ATTR_VOCAB)})"
+        )
+    # 1. ONE vocabulary, imported by BOTH halves.
+    from tortoise.projection.edges import DIRECT_EDGE_ATTR_KEYS
+
+    stray_keys = sorted(set(DIRECT_EDGE_ATTR_KEYS) - FALSE_POSITIVE_ATTR_VOCAB)
+    assert not stray_keys, (
+        "`DIRECT_EDGE_ATTR_KEYS` carries keys outside the fixed vocabulary the "
+        f"neighbouring folds are bounded by: {stray_keys}"
+    )
+    emitter = (ROOT / "tortoise/sdk.py").read_text(encoding="utf-8")
+    assert "if k in DIRECT_EDGE_ATTR_KEYS" in emitter, (
+        "`sdk.supersede_point` builds its 2b payload from a key list of its own "
+        "again — the live half and the replay half then disagree about which "
+        "keys a supersede moves, which is what one shared constant prevents "
+        "(`#10139`)"
+    )
+    assert "**edge_props," in emitter, (
+        "the 2b `DirectEdgeRepoint` emission no longer journals `edge_props` — "
+        "the descriptor is topology-only again, so the replay re-creates a bare "
+        "edge and drops the property (`#10139`)"
+    )
+    # … and the two design documents that COUNT the row must say what it writes.
+    for label, start, end, which in CORRECTED_SECTIONS:
+        if label.endswith("§11.1"):
+            continue
+        section = _flat(
+            _section(_doc(STORAGE if which == "STORAGE" else EXTRACTOR), start, end)
+        )
+        assert "ON CREATE SET nr += $attrs" in section, (
+            f"{label} no longer states that the transfer carries the payload "
+            "under `ON CREATE` — the row is counted there as an `about*` writer, "
+            "so a reader cannot tell what it writes (`#10139`)"
+        )
