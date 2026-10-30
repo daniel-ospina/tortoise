@@ -168,6 +168,25 @@ class TestMembershipCRUD:
     def test_membership_get_returns_none_for_missing(self, sdk):
         assert sdk.membership_get("nonexistent") is None
 
+    def test_membership_create_rejects_at_max_users(self, sdk, team):
+        """#4282 deleted `org_update`, which only SET the cap here.
+
+        The gate under test is `membership_create`'s own `max_users` check, on
+        the SDK door — alive and otherwise covered only at the HTTP layer.
+
+        The cap is set to 2, NOT the free tier's default of 1: at 1 the write
+        would be redundant and the test would pass with the write broken (the
+        default gate alone raises). At 2 the first two members must be ADMITTED
+        and only the third refused, so a cap that never landed fails the test.
+        """
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_users = 2",
+            params={"id": team["id"]})
+        sdk.membership_create(team["id"], "user-1", "owner")
+        sdk.membership_create(team["id"], "user-2", "admin")
+        with pytest.raises(ControlPlaneError, match="max users"):
+            sdk.membership_create(team["id"], "user-3", "member")
+
 
 
 
@@ -327,3 +346,37 @@ class TestAPIKeyC1Tenancy:
         valid = sdk.apikey_verify(result["api_key"])
         assert valid is not None
         assert valid["org_id"] == team["id"]
+
+
+class TestInvitationRevoke:
+    """`invitation_revoke` survives — only its create door was deleted by #4282.
+
+    The subject here is the IDEMPOTENT branch (`already: True`) of a live public
+    method, plus the not-found refusal. Nothing else in the tree reaches either:
+    `tests/test_invites_http.py` exercises the FIRST revoke through the
+    endpoint, which 404s/409s before idempotency can show.
+    """
+
+    def _seed_invitation(self, sdk, team, inv_id: str = "inv-probe-1") -> str:
+        # `invitation_create` was deleted; the node shape it wrote is written
+        # directly, in the graph the surviving methods read (`_get_registry`).
+        sdk._get_registry().query(
+            "CREATE (i:Invitation {id:$id, org_id:$t, email:$e, role:$r, "
+            "status:'pending'})",
+            params={"id": inv_id, "t": team["id"],
+                    "e": "rev2@test.com", "r": "admin"})
+        return inv_id
+
+    def test_invitation_revoke_is_idempotent(self, sdk, team):
+        inv_id = self._seed_invitation(sdk, team)
+        first = sdk.invitation_revoke(inv_id)
+        assert first["revoked"] is True and "already" not in first, first
+        assert sdk.invitation_get_by_id(inv_id)["status"] == "revoked"
+
+        again = sdk.invitation_revoke(inv_id)
+        assert again.get("already") is True, again
+        assert again["invitation_id"] == inv_id
+
+    def test_invitation_revoke_missing_is_not_an_error(self, sdk, team):
+        out = sdk.invitation_revoke("inv-does-not-exist")
+        assert out == {"revoked": False, "reason": "not found"}, out

@@ -39,7 +39,7 @@ import pytest
 # no provider/network call.
 from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
-from tortoise.embeddings import EmbeddingModel
+from tortoise.embeddings import EmbeddingModel, compute_embedding
 from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import run_vector_query
 
@@ -391,3 +391,84 @@ def test_dense_leg_returns_the_captured_turn(sdk, embedder, monkeypatch):
     assert legs["hybrid"] is True, legs
     assert any(e["leg"] == "vector" and e["count"] >= 1
                for e in legs["legs"]), legs["legs"]
+
+
+def test_captured_turn_embedding_matches_the_query_encoder(sdk, embedder,
+                                                           monkeypatch):
+    """The stored turn vector is the SAME vector the query leg encodes.
+
+    Pins model + dimension + normalisation together: the write goes through
+    ``embeddings.encode_batch_for_store`` → ``compute_embeddings`` (the seam
+    ``create_point``'s ``compute_embedding`` delegates to, so turn and extracted
+    Points can never diverge) and is compared against the EXACT call the read
+    path makes (``EmbeddingModel.get().encode([q])[0]``). A dimension mutation
+    (wrong-length vector) fails the length assertion; a normalisation mutation
+    (a unit-norm rewrite on one side only) fails the value comparison.
+    """
+    _keyless(monkeypatch)
+    _write(sdk, "sess-4194", CONV)
+
+    rows = _turn_rows(sdk, "sess-4194")
+    assert [r[0] for r in rows] == [f"sess-4194_t{i}" for i in range(len(CONV))]
+
+    # The dimension the READ path's encoder produces — never a hardcoded 384,
+    # so the test tracks the embedder rather than a magic number.
+    query_dim = len(embedder.encode(["anything"])[0])
+    for tid, content, stored in rows:
+        assert stored is not None, (
+            f"{tid}: turn stored WITHOUT an embedding — the dense leg is inert")
+        assert len(stored) == query_dim, (
+            f"{tid}: stored dim {len(stored)} != query-encoder dim {query_dim}")
+        # Write-side: the seam ``create_point``'s ``compute_embedding``
+        # delegates to (single-vs-batched equality for the same text).
+        assert np.allclose(stored, compute_embedding(content), atol=1e-6), tid
+        # Query-side: the exact call the read path makes. (For content at or
+        # under the 512-word encode cap this is the same string the write
+        # encoded; a LONGER turn is word-truncated before write-encoding —
+        # covered by test_long_turn_and_coerced_content below.)
+        qvec = embedder.encode([content])[0]
+        assert np.allclose(stored, qvec, atol=1e-6), (tid, "stored != query")
+        # Normalisation equality: the stored vector is the encoder's raw,
+        # un-normalised output (a unit-norm rewrite on either side would make
+        # the vector above disagree, since these fake vectors are not unit).
+        assert np.isclose(np.linalg.norm(stored), np.linalg.norm(qvec),
+                          rtol=1e-5), tid
+        assert not np.isclose(np.linalg.norm(stored), 1.0, rtol=1e-3), (
+            f"{tid}: stored vector was L2-normalised — the query encoder does "
+            "not normalise, so the two spaces would disagree")
+
+
+def test_long_turn_and_coerced_content_still_store_the_encoded_text(
+        sdk, embedder, monkeypatch):
+    """The vector is computed over exactly the STORED text, at both edges.
+
+    Two shapes the #721 coercion / the 512-word cap exist for: a turn longer
+    than the encode cap (the write word-truncates via `_truncate_for_embedding`,
+    while the node stores the full capped text) and non-string role/content
+    (None -> "unknown"/"", truthy non-strings -> `str()`). Pinning both keeps a
+    future edit to `_capture_turn_texts` from silently breaking the
+    stored-text == encoded-text parity.
+    """
+    _keyless(monkeypatch)
+    long_turn = " ".join(f"w{i}" for i in range(1200))  # > 512 words
+    _write(sdk, "sess-4194-long",
+           [{"role": "user", "content": long_turn},
+            {"role": None, "content": 123}])
+    rows = {r[0]: (r[1], r[2]) for r in _turn_rows(sdk, "sess-4194-long")}
+
+    # The long turn: the vector is the encode of its 512-WORD truncation, not
+    # of the raw stored string. ⚠️ #4282 removed the 6,096-char capture clip
+    # (`_clip_capture_turn_content`) with the door, so the stored text is now
+    # the full turn and the two assertions that pinned that clip's marker are
+    # the only ones dropped — the parity this test is NAMED for still holds.
+    stored0, emb0 = rows["sess-4194-long_t0"]
+    assert emb0 is not None
+    truncated = " ".join(stored0.split()[:512])
+    assert np.allclose(emb0, embedder.encode([truncated])[0], atol=1e-6)
+
+    # Non-string role/content: coerced exactly as stored, and the SAME string
+    # was what the embedder encoded.
+    stored1, emb1 = rows["sess-4194-long_t1"]
+    assert stored1 == "[unknown] 123"
+    assert emb1 is not None
+    assert np.allclose(emb1, embedder.encode([stored1])[0], atol=1e-6)
