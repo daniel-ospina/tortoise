@@ -219,7 +219,24 @@ def test_direct_route_repeated_ref_not_multi_item(make_sdk):
 
     assert _edge_counts(repeated) == (1, 0), _edge_counts(repeated)
     assert _edge_counts(singular) == (1, 0), _edge_counts(singular)
-    assert rep["ids"]["connections"] == sing["ids"]["connections"]
+    # ⛔ NOT `rep["ids"]["connections"] == sing["ids"]["connections"]`: entity
+    # identity is an OPAQUE per-graph ULID minted once (#3590), so two isolated
+    # graphs never share an id and that equality could only ever pass by
+    # coincidence. "Writes exactly what the singular spelling writes" is a
+    # claim about SHAPE: each graph's ONE direct edge must join ITS OWN resolved
+    # o1 to ITS OWN resolved o2 — the convention the operator-route test above
+    # (`test_ingest_dedups_repeated_ref`) already follows.
+    assert len(rep["ids"]["connections"]) == 1, rep["ids"]["connections"]
+    assert len(sing["ids"]["connections"]) == 1, sing["ids"]["connections"]
+    rep_edge = rep["ids"]["connections"][0]
+    sing_edge = sing["ids"]["connections"][0]
+    assert sorted(rep_edge) == sorted(sing_edge), (rep_edge, sing_edge)
+    assert rep_edge == {"direct_edge": "IMPL",
+                        "from": rep["ids"]["refs"]["o1"],
+                        "to": rep["ids"]["refs"]["o2"]}, rep_edge
+    assert sing_edge == {"direct_edge": "IMPL",
+                         "from": sing["ids"]["refs"]["o1"],
+                         "to": sing["ids"]["refs"]["o2"]}, sing_edge
     assert "duplicate_target_deduped" in \
         [w.split(":", 1)[0] for w in rep["warnings"]], rep["warnings"]
     # …and the text names the route it ACTUALLY took (review round 1, P3): the
