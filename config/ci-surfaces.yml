@@ -4788,6 +4788,32 @@ surfaces:
   - test_record_backup.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
+  # #10132: the static import-closure derivation and its validation harness. `core`
+  # is what CLASSIFIES the file at all (`--integrity` rglobs `tests/**/test_*.py`
+  # with no wildcard, so an unregistered file reds the required
+  # `manifest-integrity` check) — the placement argument stops there, on purpose.
+  # It opens no store (static analysis: `ast` + junit XML), but it is NOT free of
+  # surface dependencies, and saying so would HIDE the follow-up this registration
+  # is meant to lead to: its only in-repo import at module scope is
+  # `tools.ci_import_closure`, and it exercises `tools.ci_selection` at RUNTIME —
+  # `test_the_bare_carve_out_artifact_label_matches_the_selector` reads the shard-0
+  # label off the selector's own `load_manifest`/`carve_shard_entries`/
+  # `carve_matrix_include`, and the always-on test asserts `cmd_validate`'s
+  # `(current - core) | always_on` arithmetic
+  # (`test_an_always_on_legs_failure_is_scored_not_absolved`). The tool does the
+  # same at `_selection_module()` (`from tools import ci_selection`).
+  # That dependency IS covered, and not by `core`: `tools/ci_selection.py` is a
+  # `TOOL_CARVEOUTS` row (the #2159 review's P2-3), so a selector-only diff lands
+  # in the unknown-path fail-closed branch and takes the FULL matrix; a
+  # `config/ci-surfaces.yml`-only diff selects `core` and runs this pin too.
+  # What is NOT covered is the instrument: `tools/` is a flat
+  # `NON_PYTHON_PREFIXES` entry matching no `SOURCE_PATTERNS` row, so a
+  # `tools/ci_import_closure.py`-only diff takes tier-1 smoke and this pin does not
+  # run — the blind spot the doc's Pins block names, whose fix is the separate,
+  # evidence-backed `CORE_ALSO`/`TOOL_CARVEOUTS` entry (#10132 edits no
+  # `surfaces`/`SOURCE_PATTERNS` membership). `core` is CLASSIFICATION only; the
+  # placement argument stops there, on purpose.
+  - test_ci_import_closure.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
   - test_suggest_entry_points.py
   - test_supabase_control.py
