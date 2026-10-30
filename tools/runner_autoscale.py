@@ -268,9 +268,11 @@ ARCH_LABEL = {
     "arm64": "self-hosted-arm64",
 }
 
-#: `ubuntu-24.04`-shaped labels — a VERSION-pinned GitHub-hosted label. The pool deliberately
-#: claims only `ubuntu-latest` and never one of these (`docs/ops/ci-runner-x64.md:25-26`), because
-#: a job that pins a version asks for the GitHub-hosted image specifically.
+#: `ubuntu-24.04`-shaped labels — a VERSION-pinned GitHub-hosted label. The pool claims only
+#: `ubuntu-latest` of its OWN accord and never one of these, because a job that pins a version asks
+#: for the GitHub-hosted image specifically; the one exception is the opt-in mitigation an operator
+#: sets (`CI_RUNNER_OS_LABEL=on|auto`, `docs/ops/ci-runner-x64.md:85-86`), and this class is still
+#: DROPPED on re-registration whatever that flag says (`docs/ops/ci-runner-x64.md:90-92`).
 #:
 #: The class is bounded by what GitHub's hosted images ANSWER TO, not by a spelling: the same label
 #: table publishes the arm64 variants `ubuntu-24.04-arm` / `ubuntu-22.04-arm` / `ubuntu-26.04-arm`
@@ -1520,7 +1522,10 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     ⛔ A VERSION-PINNED HOSTED LABEL (`ubuntu-24.04`-shaped, INCLUDING GitHub's arm64 spelling
     `ubuntu-24.04-arm` — see `VERSION_PINNED_HOSTED_LABEL`) is the ONE exception, and it is
     dropped rather than preserved. The recorded invariant is that the pool claims `ubuntu-latest`
-    and never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:25-26`), and that label is
+    and never an `ubuntu-<version>` of its own accord — the opt-in mitigation an operator sets
+    (`CI_RUNNER_OS_LABEL=on|auto`, `docs/ops/ci-runner-x64.md:85-86`) is the only exception, and
+    `_preserve_labels` DROPS the class on re-registration regardless of it
+    (`docs/ops/ci-runner-x64.md:90-92`) — and that label is
     precisely what a lane pins to ESCAPE this pool. Preserving it on re-registration is how a label
     attached once out of band — the 2026-10-24 drift that put `finding-provenance` on
     `pi-runner-vm-*` with `ubuntu-24.04` (`tests/test_runner_tool_contract.py:5-12`) — becomes

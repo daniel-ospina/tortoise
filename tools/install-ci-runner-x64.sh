@@ -407,7 +407,9 @@ is_foreign_arch_label() {
 }
 # Is $1 a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …)? Same class/shape as
 # `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two writers. The pool
-# claims `ubuntu-latest` and NEVER an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:85-86`) — that is
+# claims `ubuntu-latest`, and an `ubuntu-<version>` ONLY on the opt-in mitigation
+# (`CI_RUNNER_OS_LABEL=on|auto`, `docs/ops/ci-runner-x64.md:85-86`) which `_preserve_labels` then
+# drops again on re-registration (`docs/ops/ci-runner-x64.md:90-92`) — that version pin is
 # the label a leg pins to escape this pool; `ubuntu-2204-tools` is NOT in the class (boundary test in
 # `tests/test_runner_autoscale.py`), hence both ends anchored. ⛔ A HERE-STRING, never a builtin
 # writer piped into a quiet grep (#841): under `pipefail` the quiet grep's early exit leaves the
@@ -723,7 +725,13 @@ if [ "$MODE" = status ]; then
         sub(/[ \t]+#.*$/, "", line)   # a TRAILING comment must not contribute a second label
         line = trim(line)
         if (line == "") next
-        if (pend && ind <= pind) finish()
+        # ⛔ A SEQUENCE MEMBER MAY SIT AT THE INDENT OF ITS OWN KEY — the PyYAML default block
+        # spelling (a dash at the key indent, parsed as a one-element list), so the old
+        # `ind > pind` guard refused the most machine-generated form of the very shape this pass
+        # exists to read. A dash line at `ind == pind` is a member; any OTHER line at that indent
+        # opens the next key and closes the block. (No apostrophes in this comment: the awk
+        # program is a single-quoted bash string.)
+        if (pend && (ind < pind || (ind == pind && line !~ /^-[ \t]/))) finish()
         if (keylike(line)) keyseen++
         if (line ~ /^["\047]?runs-on["\047]?[ \t]*:/) {
           opened++
@@ -733,7 +741,7 @@ if [ "$MODE" = status ]; then
           if (rest != "") { value(rest); finish() }
           next
         }
-        if (pend && ind > pind) {
+        if (pend && (ind > pind || (ind == pind && line ~ /^-[ \t]/))) {
           if (line ~ /^-[ \t]/) {
             item = trim(substr(line, 2))
             if (keyis(item, "group")) pgroup = 1
