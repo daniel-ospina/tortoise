@@ -30,6 +30,7 @@ so a broken glob (or a moved directory) fails loudly instead of reporting clean.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1736,23 +1737,97 @@ CLAIM_CLOSED_SENTENCE = (
 #: the page. Each is `(substring, why it is false now)`. `git show <base>:<doc>` and
 #: `git show 245f42128^:docs/auth-architecture.md` are where these came from — do not
 #: paraphrase them into new arms; add the sentence you actually saw.
-_FORBIDDEN_VERBATIM: tuple[tuple[str, str], ...] = (
+#: The pre-step-4 claims, VERBATIM from the docs as they shipped before #3524 §9 step 4 deleted
+#: the page, each with the reason it is false now.
+#:
+#: ⛔ **A PARAPHRASE HERE IS A HOLE, SO THE LIST IS PINNED RATHER THAN REMEMBERED.** Round 8 of
+#: #10346's review found one entry that had been edited in passing (`… still re-reads it as its
+#: session`, with `own` dropped) while the real shipped sentence is `… still re-reads it as its
+#: OWN session` — so restoring the single most prominent pre-step-4 sentence, the headline of
+#: §2.1's "Legacy cohort" bullet, passed GREEN. `test_every_banned_claim_is_VERBATIM` now
+#: asserts each entry is a substring of `_PRE_STEP_4_QUOTES`, and that those quotes still match
+#: the docs at `_PRE_STEP_4_SHA` when git has it. Adding an arm means quoting what actually
+#: shipped, not what you remember shipping.
+_BANNED_CLAIMS: tuple[tuple[str, str], ...] = (
     (
-        "still accepted by the one page that issues it",
-        "the page that issued it was DELETED (#3524 §9 step 4) — nothing accepts the cookie",
+        "still being issued — and still accepted by the one page that issues it",
+        "the page that issued it was DELETED (#3524 §9 step 4) — nothing issues it now",
     ),
     (
         "no surface other than the consent page accepts it",
         "the consent page is no longer an accepting surface — that is the #3559 wording",
     ),
     (
-        "reads that cookie back as the session",
-        "the page reads no cookie and holds no session; a bound single-use token replaces it",
+        "The cookie is still ISSUED, and the consent page still re-reads it as its own session",
+        "the page re-reads nothing: it was deleted, and its replacement reads a token",
     ),
     (
-        "the consent page still re-reads it as its session",
-        "the page re-reads nothing — it was deleted, and its replacement reads a token",
+        "still issued AND still accepted by the page that issues it",
+        "nothing issues it and nothing accepts it — the writer was deleted",
     ),
+    (
+        "still accepted by the one page that issues it (the MCP consent page)",
+        "that page was deleted; it accepts nothing, because it no longer exists",
+    ),
+    (
+        "still **issued** — and still **read back as its own session**, so it still authenticates",
+        "the page holds no session: a bound single-use token replaces the cookie bearer",
+    ),
+    (
+        "reads this cookie back as the session",
+        "the page reads no cookie — its replacement presents a consent token",
+    ),
+    (
+        "reads the cookie back as the session",
+        "the same claim, spelled without `this` — the page exists no more",
+    ),
+    (
+        "the consent page itself still reads it as its credential",
+        "the page holds no credential of its own; that is the whole of step 4",
+    ),
+    (
+        "It is that surface's credential, not inert scaffolding",
+        "there is no such surface — the page was deleted, and this sentence asserts a live one",
+    ),
+)
+
+#: The pre-step-4 passages these claims are quoted FROM, verbatim, at `_PRE_STEP_4_SHA`. The pin's
+#: other half: a banned claim must appear here, and (when the commit is available) each quote must
+#: still appear in the doc at that sha — so neither the list nor this record can drift silently.
+_PRE_STEP_4_SHA = "54922a800"
+_PRE_STEP_4_QUOTES: dict[str, tuple[str, ...]] = {
+    "docs/auth-architecture.md": (
+        "**The removed design is still being issued — and still accepted by the one page that "
+        "issues it:**",
+        "so no surface other than the consent page accepts it",
+        "**The cookie is still ISSUED, and the consent page still re-reads it as its own session**",
+        "so `cookieStorage.getItem` reads this cookie back as the session",
+        "It is that surface's credential, not inert scaffolding.",
+        "the consent page itself still reads it as its credential",
+        "is still issued AND still accepted by the page that issues it",
+        "reads the cookie back as the session",
+    ),
+    "website/website_architecture.md": (
+        "still accepted by the one page that issues it (the MCP consent page)",
+        "still **issued** — and still **read back as its own session**, so it still authenticates",
+    ),
+}
+
+#: A pre-step-4 claim is a VIOLATION only where it is not marked as the record. Same polarity as
+#: the closure sentence: the docs must be able to say what the page USED to do (that record is the
+#: evidence for the decision), and must not say it is still true.
+#: ⛔ NOT a bare past tense (`was `) — round 3 of #10346's review measured that as an excuse for
+#: `The legacy cookie was never revoked, and the consent page still accepts it`. A DISPOSITION word
+#: only: the sentence has to say the thing is gone.
+#: ⛔ NO BARE `removed` / `deleted`. They are ATTRIBUTIVE as often as they are dispositions —
+#: the pre-step-4 headline itself is `**The removed design is still being issued — and still
+#: accepted by the one page that issues it:**`, so a bare `removed` excused the very sentence the
+#: denylist exists to catch (measured: GREEN). These forms name a DISPOSAL of the thing, which is
+#: what a record is; `the removed design` names it as an adjective.
+_HISTORY_MARKERS = (
+    "formerly", "previously", "no longer", "used to", "pre-step-4", "superseded",
+    "retired", "closed", "was deleted", "were deleted", "deleted in", "deleted by",
+    "was removed", "were removed", "removed in", "removed by",
 )
 
 #: The page's THREE names in this repo's own prose — `consent page` (the arch docs),
@@ -1840,22 +1915,24 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
     """Violations of the legacy cookie's CLOSURE claim in one doc's CURRENT region.
 
     Empty means: the region carries the owned closure sentence, and it does not restate a
-    pre-step-4 claim verbatim. Called from the docs gate above.
+    pre-step-4 claim verbatim outside a line that marks it as the record.
 
-    ⛔ Deliberately NOT an English grammar — see the block comment above for the measurement
-    that ended the regex (`11/17` correct closures refused, `11/18` live claims passed).
-    Fenced code is stripped, so a markdown SAMPLE is not a claim: the closure must be real
-    prose in the region, not an example block a reader skims past.
+    ⛔ Deliberately NOT an English grammar — see the block comment above for the measurement that
+    ended the regex (`11/17` correct closures refused, `11/18` live claims passed). The detector
+    here is LITERAL: a finite list of sentences that actually shipped, quoted from
+    `_PRE_STEP_4_SHA`. It cannot mis-fire on prose it was not written against, which is the whole
+    reason it replaced the regex.
     """
+    pairs = _current_lines(rel, text)
     scanned = _without_fences(
         # A BLOCKQUOTE MARKER IS NOT PART OF THE SENTENCE. `docs/auth-architecture.md` carries the
         # owned closure inside a `> …` callout, so its every line starts with `> ` — which, once
         # the lines are joined, would sit in the middle of the sentence the doc is saying.
-        "\n".join(re.sub(r"^\s*(?:>\s?)*", "", ln) for _, ln in _current_lines(rel, text))
+        "\n".join(re.sub(r"^\s*(?:>\s?)*", "", ln) for _, ln in pairs)
     )
-    # Whitespace-normalised, so the sentence a doc OWNS may be WRAPPED by markdown's own line
-    # breaks (`docs/auth-architecture.md` wraps it inside a blockquote). The normalisation is
-    # whitespace only — the words, the emphasis and the punctuation must still match exactly.
+    # Whitespace-normalised, so a sentence a doc OWNS may be WRAPPED by markdown's own line
+    # breaks. The normalisation is whitespace only — the words, the emphasis and the punctuation
+    # must still match exactly.
     scanned = " ".join(scanned.split())
 
     violations: list[str] = []
@@ -1871,13 +1948,25 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
             "did not mean to remove it, restore it."
         )
 
-    for phrase, why in _FORBIDDEN_VERBATIM:
-        if phrase.lower() in scanned.lower():
-            violations.append(
-                f"{rel} restates the PRE-STEP-4 claim verbatim: {phrase!r} — {why}. "
-                "#3524 §9 step 4 deleted that page; a reader acting on this line re-derives "
-                "a surface that no longer exists."
-            )
+    for item in _items(pairs):
+        item_text = re.sub(r"^\s*(?:>\s?)*", "", " ".join(ln for _, ln in item))
+        item_text = " ".join(item_text.split())
+        low = item_text.lower()
+        if any(mk in low for mk in _HISTORY_MARKERS):
+            # the line marks itself as the record of what the page used to do — keep it,
+            # it is the evidence the decision is argued from
+            continue
+        for phrase, why in _BANNED_CLAIMS:
+            if phrase.lower() in low:
+                violations.append(
+                    f"{rel} restates the PRE-STEP-4 claim verbatim: {phrase!r} — {why}. "
+                    "That sentence shipped before #3524 §9 step 4 deleted the page; a reader "
+                    "acting on it re-derives a surface that no longer exists. If this line is "
+                    "the RECORD of what the page used to do, mark it as such in the same bullet "
+                    "(formerly / previously / no longer / was deleted by / used to / "
+                    "pre-step-4) — that is how the closure record stays legible without reading "
+                    "as current."
+                )
 
     live = _page_live_acceptances(scanned)
     if live:
@@ -1930,16 +2019,51 @@ def test_the_closure_claim_is_OWNED_not_parsed():
     # (d) ⛔ EACH pre-step-4 sentence, verbatim, reds — and names its reason. These are the
     #     strings that shipped before step 4; a restore is the failure the gate has actually
     #     had to catch (rounds 4-6: "the exact reversion … shipped GREEN").
-    for phrase, why in _FORBIDDEN_VERBATIM:
+    for phrase, why in _BANNED_CLAIMS:
         assert _consent_page_acceptance_violations(rel, good + f"- {phrase}.\n"), (
             f"the pre-step-4 claim {phrase!r} passed the gate")
         assert why, f"{phrase!r} carries no reason — the message would explain nothing"
 
     # (e) ⛔ …and the SAME strings in a different case, because a restore pastes text and
     #     markdown emphasis often changes case in passing.
-    for phrase, _ in _FORBIDDEN_VERBATIM:
+    for phrase, _ in _BANNED_CLAIMS:
         assert _consent_page_acceptance_violations(rel, good + f"- {phrase.upper()}.\n"), (
             f"the pre-step-4 claim {phrase!r} passed when upper-cased")
+
+    # (e2) ⛔ …AND THE HISTORY ESCAPE MUST WORK, or the gate demands deletion of a TRUE record —
+    #      the false-positive direction that killed the regex it replaced (round 7 measured
+    #      `11/17` correct closures refused). The same sentence, marked as the record, passes
+    #      the DENYLIST. ⚠️ Scoped to the denylist on purpose: the live-claim predicate has no
+    #      excuse vocabulary by design, so quoting a PRESENT-TENSE claim — even under "formerly"
+    #      — still trips it, and that is the right answer for that half (a quoted present-tense
+    #      claim about a deleted page is still a claim a reader can act on).
+    for phrase, _ in _BANNED_CLAIMS:
+        for marked in (
+            f"- **Legacy cohort — DELETED by #3524 §9 step 4.** Previously: {phrase}.\n",
+            f"- The cookie is no longer anything: formerly {phrase}.\n",
+        ):
+            found = _consent_page_acceptance_violations(rel, good + marked)
+            assert not [v for v in found if "restates the PRE-STEP-4 claim" in v], (
+                f"the RECORD form of {phrase!r} was refused by the denylist: {marked!r}")
+
+    # …and the record AUTHORS ACTUALLY WRITE — past tense — passes both halves.
+    for record in (
+        "- **Legacy cohort — DELETED by #3524 §9 step 4.** The cookie is no longer accepted\n"
+        "  by that page, and its replacement reads a bound single-use token.\n",
+        "- The MCP consent page was deleted in #3524; formerly it read the legacy cookie back\n"
+        "  as its own session, and nothing does that now.\n",
+    ):
+        assert _consent_page_acceptance_violations(rel, good + record) == [], (
+            f"a CORRECT retirement record was refused: {record!r}")
+
+    # (e3) ⛔ …and a bare past tense is NOT a record — `was` is an auxiliary, not a disposition,
+    #      so this sentence must still red even though it contains "was". (Round 3 of this PR's
+    #      review measured exactly that excuse.)
+    was_excuse = good + (
+        "- The legacy cookie was never revoked, and " + _BANNED_CLAIMS[2][0] + ".\n"
+    )
+    assert _consent_page_acceptance_violations(rel, was_excuse), (
+        "a bare 'was' excused a pre-step-4 claim — the round-3 hole is back")
 
     # (f) ⛔ AND THE DIRECTION THAT ENDED THE REGEX: a doc that states the closure in its OWN
     #     words must pass. Round 7 measured the regex refusing these six — `never`,
@@ -2001,6 +2125,49 @@ def test_the_closure_claim_is_OWNED_not_parsed():
     ):
         assert _consent_page_acceptance_violations(rel, good + record + "\n") == [], (
             f"a CORRECT retirement record was refused: {record!r}")
+
+
+def test_every_banned_claim_is_VERBATIM_from_the_pre_step_4_docs():
+    """⛔ A PARAPHRASE IN THE DENYLIST IS A HOLE — this test exists because one was one.
+
+    Round 8 of #10346's review found `_BANNED_CLAIMS` holding `… still re-reads it as its
+    session`, with `own` dropped by an edit in passing. The sentence that actually shipped is
+    `… still re-reads it as its OWN session` — so restoring the most prominent pre-step-4
+    sentence (the headline of §2.1's "Legacy cohort" bullet) passed GREEN, which is precisely
+    the "the exact reversion shipped green" class the denylist replacement was justified by.
+
+    Two assertions, so neither half can drift:
+      1. every banned claim appears VERBATIM in `_PRE_STEP_4_QUOTES` (the stored record of what
+         shipped) — an edited arm is no longer a substring, and this reds;
+      2. every stored quote still appears in the doc at `_PRE_STEP_4_SHA` — a "record" that was
+         itself edited in passing cannot vouch for arm (1). Skipped only when the commit is not
+         in this clone's history (a shallow CI checkout), and it says so rather than passing
+         silently as if it had checked.
+    """
+    quotes = " ".join(" ".join(q.split()) for qs in _PRE_STEP_4_QUOTES.values() for q in qs)
+    for phrase, _ in _BANNED_CLAIMS:
+        assert phrase in quotes, (
+            f"{phrase!r} is a PARAPHRASE — it is not in `_PRE_STEP_4_QUOTES`, so it never "
+            "shipped verbatim and cannot be what a reversion restores. Quote the sentence you "
+            "actually saw, or drop the arm.")
+
+    for doc, stored in _PRE_STEP_4_QUOTES.items():
+        try:
+            shown = subprocess.run(
+                ["git", "show", f"{_PRE_STEP_4_SHA}:{doc}"],
+                cwd=REPO, capture_output=True, text=True, check=True,
+            ).stdout
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            pytest.skip(f"{_PRE_STEP_4_SHA} is not in this clone's history ({exc.__class__.__name__}) — "
+                        "the stored quotes could not be re-derived here")
+        flat = " ".join(re.sub(r"^\s*(?:>\s?)*", "", ln) for ln in shown.splitlines())
+        flat = " ".join(flat.split())
+        for quote in stored:
+            assert " ".join(quote.split()) in flat, (
+                f"{doc} at {_PRE_STEP_4_SHA} does not contain {quote!r} — the stored record has "
+                "drifted from the docs that shipped, so it can no longer vouch for the arms.")
+
+
 def test_auth_architecture_doc_keeps_the_rendered_welcome_case():
     """
     `/welcome` renders exactly ONE case, and the doc must keep saying so — inside its block.

@@ -1176,13 +1176,18 @@ def test_the_preview_accepts_the_bound_consent_token_in_a_HEADER(api_client):
 def test_a_preview_token_from_ANOTHER_flow_is_refused(api_client, field):
     """§2.2 at the preview: EVERY bind field is COMPARED, not merely present.
 
-    Parametrised one field at a time on purpose. A single "other flow" fixture
-    that differs in all four at once cannot attribute the 401 (`_bind_mismatch`
-    returns the FIRST mismatch), so dropping any one comparison from the preview's
-    `presented` dict would leave the suite green while the preview stopped
-    checking the CSRF nonce — the cross-flow read this route's docstring claims to
-    prevent. `/oauth/consent` carries the same parametrisation; this is its
-    preview-side twin.
+    Parametrised one field at a time on purpose: a single fixture that differs in all four
+    at once cannot ATTRIBUTE the 401, because `_bind_mismatch` reports only the first. One
+    mutated field per case is what makes `bind.<field>` a meaningful assertion, and it is
+    what proves each comparison runs.
+
+    ⛔ The mutation this catches is the COMPARISON being dropped or short-circuited, so a
+    WRONG presented value is accepted. It is NOT "deleting a key from `presented`": that
+    would make `_bind_mismatch` report the missing field and red the POSITIVE test
+    (`test_the_preview_accepts_the_bound_consent_token_in_a_HEADER`), which is a different
+    failure surfaced by a different test. Stated precisely, because an overstated claim of
+    discriminating power is the kind of sentence that survives review while being false
+    (round 8 of #10346's review measured the old wording).
     """
     from tortoise.oauth import CONSENT_TOKEN_HEADER
 
@@ -1409,14 +1414,20 @@ def test_a_401_then_a_NEW_PICK_cannot_rearm_a_spent_token(api_client, tmp_path):
 
 
 def test_a_mint_4xx_offers_no_retry_that_cannot_help(api_client, tmp_path):
-    """The mint's 4xx is the REQUEST's fault, and `state` is not validated at
-    authorize time — so the page can legitimately be reached without one, the
-    mint answers `400 invalid_request`, and a Retry would re-send the same body
-    forever. Only a 5xx or a transport failure is retryable."""
+    """The mint's 4xx is the REQUEST's fault, so a Retry would re-send the same body forever.
+
+    ⛔ NOT because a state-less render is reachable: `state` IS required at authorize
+    (`require_state=True` refuses an empty/missing one before the page renders), so this
+    branch is defence-in-depth for the 4xx the mint CAN answer — a refused `attempt_key`
+    (`403 no_authorize_attempt`) or a body it will not take (`400 invalid_request`). The
+    rewrite comment in `tortoise/oauth.py` says the same; keeping them in step matters,
+    because "stateless renders are supported" is how a future edit drops `require_state`.
+    The payload is the REAL shape: `token.ts` answers `{error, message}`.
+    """
     html, raw = _page_html(api_client, attempt_key="k-400")
     out = _run_page(html, {"search": "?" + raw, "responses": [
         {"status": 400, "body": {"error": "invalid_request",
-                                 "reason": "state is required"}},
+                                 "message": "state is required."}},
     ]}, tmp_path)
     after = out["afterLoad"]
     assert after["authDisabled"] is True, after

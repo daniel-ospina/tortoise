@@ -399,7 +399,17 @@ def test_key_identity_router_allows_only_the_session_key() -> None:
     contract with no current subject. It is kept (not deleted) because it is the
     ONLY thing that would bind a future copy's polarity, and because the
     detector's liveness is proved independently below. The behavioural
-    counterpart is tests/test_oauth_consent_page_step4.py."""
+    counterpart is tests/test_oauth_consent_page_step4.py.
+
+    ⛔ AND THE EMPTINESS IS AN ASSERTION. A `for` loop over an empty table reports a green
+    tick for a contract with no subject — "a guard that cannot fail is not a guard" (round 8
+    of #10346's review). Stated here, a future copy that is re-registered cannot satisfy this
+    test without also editing it, so the polarity it binds is a deliberate act."""
+    assert _ROUTER_CASES == [], (
+        f"{len(_ROUTER_CASES)} adapter copies are registered again "
+        f"({[p.name for p, _, _ in _ROUTER_CASES]}) — this test binds their polarity; if the "
+        "table is non-empty the loop below runs and this declaration is stale, so re-read it."
+    )
     for path, session_key, methods in _ROUTER_CASES:
         text = _read(path)
         for name, operator in methods.items():
