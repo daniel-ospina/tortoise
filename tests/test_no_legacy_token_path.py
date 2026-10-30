@@ -1733,10 +1733,6 @@ CLAIM_CLOSED_SENTENCE = (
     "**nothing on our side issues or accepts that legacy cookie any more**"
 )
 
-#: The pre-step-4 claims, VERBATIM, exactly as they shipped before #3524 §9 step 4 deleted
-#: the page. Each is `(substring, why it is false now)`. `git show <base>:<doc>` and
-#: `git show 245f42128^:docs/auth-architecture.md` are where these came from — do not
-#: paraphrase them into new arms; add the sentence you actually saw.
 #: The pre-step-4 claims, VERBATIM from the docs as they shipped before #3524 §9 step 4 deleted
 #: the page, each with the reason it is false now.
 #:
@@ -1744,51 +1740,89 @@ CLAIM_CLOSED_SENTENCE = (
 #: #10346's review found one entry that had been edited in passing (`… still re-reads it as its
 #: session`, with `own` dropped) while the real shipped sentence is `… still re-reads it as its
 #: OWN session` — so restoring the single most prominent pre-step-4 sentence, the headline of
-#: §2.1's "Legacy cohort" bullet, passed GREEN. `test_every_banned_claim_is_VERBATIM` now
-#: asserts each entry is a substring of `_PRE_STEP_4_QUOTES`, and that those quotes still match
-#: the docs at `_PRE_STEP_4_SHA` when git has it. Adding an arm means quoting what actually
-#: shipped, not what you remember shipping.
+#: §2.1's "Legacy cohort" bullet, passed GREEN. `test_every_banned_claim_is_VERBATIM` asserts
+#: each entry is a substring of `_PRE_STEP_4_QUOTES`, and that those quotes still match the docs
+#: at `_PRE_STEP_4_SHA` when git has it. Adding an arm means quoting what actually shipped, not
+#: what you remember shipping.
+#:
+#: ⛔ **AND A LIST OF TEN STRINGS CATCHES TEN STRINGS.** MEASURED: restore each stored
+#: pre-step-4 passage into its own doc, inside the CURRENT region, with the closure sentence KEPT
+#: (so only the negative half can catch it) — the ten arms above catch **12 of the 19**, and the
+#: seven that stay GREEN include `So the exposure this item names is **RESIDUAL, not closed**: …
+#: the consent page will still authenticate with it`, `The remaining work is to migrate that page
+#: off it`, `writes that legacy cookie with \`document.cookie\` … so it is still issuing today`,
+#: and `(A consent-page visitor's tokens are in the legacy cookie instead …)`. The extra arms
+#: below are the predecessor lane's, each quoted from the same sha; together they catch **19 of
+#: 19**. They are appended AFTER the first ten on purpose — `_BANNED_CLAIMS[2]` is referenced
+#: positionally by the discrimination test.
+#:
+#: Presentation is NOT part of a claim: `_normalise_markdown` strips markdown emphasis and
+#: collapses whitespace on BOTH sides, so a paste that re-wraps a line or bolds a word still
+#: matches, while every word, hyphen and punctuation mark must still be identical. Correct prose
+#: cannot trip an arm, because no arm is a grammatical pattern.
 _BANNED_CLAIMS: tuple[tuple[str, str], ...] = (
-    (
-        "still being issued — and still accepted by the one page that issues it",
-        "the page that issued it was DELETED (#3524 §9 step 4) — nothing issues it now",
-    ),
-    (
-        "no surface other than the consent page accepts it",
-        "the consent page is no longer an accepting surface — that is the #3559 wording",
-    ),
-    (
-        "The cookie is still ISSUED, and the consent page still re-reads it as its own session",
-        "the page re-reads nothing: it was deleted, and its replacement reads a token",
-    ),
-    (
-        "still issued AND still accepted by the page that issues it",
-        "nothing issues it and nothing accepts it — the writer was deleted",
-    ),
-    (
-        "still accepted by the one page that issues it (the MCP consent page)",
-        "that page was deleted; it accepts nothing, because it no longer exists",
-    ),
-    (
-        "still **issued** — and still **read back as its own session**, so it still authenticates",
-        "the page holds no session: a bound single-use token replaces the cookie bearer",
-    ),
-    (
-        "reads this cookie back as the session",
-        "the page reads no cookie — its replacement presents a consent token",
-    ),
-    (
-        "reads the cookie back as the session",
-        "the same claim, spelled without `this` — the page exists no more",
-    ),
-    (
-        "the consent page itself still reads it as its credential",
-        "the page holds no credential of its own; that is the whole of step 4",
-    ),
-    (
-        "It is that surface's credential, not inert scaffolding",
-        "there is no such surface — the page was deleted, and this sentence asserts a live one",
-    ),
+    ('still being issued — and still accepted by the one page that issues it',
+     'the page that issued it was DELETED (#3524 §9 step 4) — nothing issues it now'),
+    ('no surface other than the consent page accepts it',
+     'the consent page is no longer an accepting surface — that is the #3559 wording'),
+    ('The cookie is still ISSUED, and the consent page still re-reads it as its own session',
+     'the page re-reads nothing: it was deleted, and its replacement reads a token'),
+    ('still issued AND still accepted by the page that issues it',
+     'nothing issues it and nothing accepts it — the writer was deleted'),
+    ('still accepted by the one page that issues it (the MCP consent page)',
+     'that page was deleted; it accepts nothing, because it no longer exists'),
+    ('still **issued** — and still **read back as its own session**, so it still authenticates',
+     'the page holds no session: a bound single-use token replaces the cookie bearer'),
+    ('reads this cookie back as the session',
+     'the page reads no cookie — its replacement presents a consent token'),
+    ('reads the cookie back as the session',
+     'the same claim, spelled without `this` — the page exists no more'),
+    ('the consent page itself still reads it as its credential',
+     'the page holds no credential of its own; that is the whole of step 4'),
+    ("It is that surface's credential, not inert scaffolding",
+     'there is no such surface — the page was deleted, and this sentence asserts a live one'),
+    ('still accepted by the one page that issues it',
+     'the page that issued it was DELETED (#3524 §9 step 4) — nothing accepts the cookie'),
+    ('the removed design is still being issued',
+     'nothing issues it: its only writer was the deleted page'),
+    ('reads that cookie back as the session',
+     'the page reads no cookie and holds no session; a bound single-use token replaces it'),
+    ('no other tortoise surface accepts it',
+     'at this head NO surface accepts it, the consent page included'),
+    ('still re-reads it as its own session',
+     'the page re-reads nothing — it was deleted, and its replacement reads a token'),
+    ('is still issued and still accepted',
+     'nothing issues it and nothing accepts it since step 4 closed the last writer'),
+    ('accepted by that page itself',
+     'the page was DELETED; there is no page left to accept it'),
+    ('the legacy writer, and the unfixed exception to the ruling above',
+     'there is no unfixed exception — step 4 deleted the writer and the ruling holds'),
+    ('only the consent page that issues it',
+     'the page that issued it was deleted — this is the #3559 `Accepted by` wording'),
+    ('writes that legacy cookie with document.cookie',
+     'the page writes no cookie — it renders no sign-in client and stores nothing'),
+    ('so it is still issuing today',
+     'it stopped issuing when the page was deleted (#3524 §9 step 4)'),
+    ("consent-page visitor's tokens are in the legacy cookie",
+     'the page holds no tokens and no cookie — it redeems a bound single-use token'),
+    ("the consent page's cookie therefore still exists in a consent-page visitor's browser",
+     'a stale copy may survive as INERT residue; nothing issues it and nothing accepts it'),
+    ("the consent page's separate legacy-cookie acceptance",
+     'that acceptance was DELETED with the page — it is not kept as a §2.1 special case'),
+    ('still accepted as a credential is settled',
+     'it is settled the other way: nothing accepts the cookie as a credential'),
+    ('and the consent page will still authenticate with it',
+     'the page authenticates with a bound consent token, never the legacy cookie'),
+    ('read back as its own session, so it still authenticates',
+     'the page reads no cookie and holds no session; the PAST-tense history is fine'),
+    ('still issued to — and still authenticates — the consent page that writes it',
+     'nothing is issued to that page — it was DELETED by #3524 §9 step 4'),
+    ('no other surface accepts it:',
+     'at this head NO surface accepts it, the consent page included'),
+    ('surviving on the one surface not yet migrated',
+     'the migration is DONE (#3524 §9 step 4), not surviving on one surface'),
+    ('migrate that page off it',
+     'that page no longer exists — there is nothing left to migrate'),
 )
 
 #: The pre-step-4 passages these claims are quoted FROM, verbatim, at `_PRE_STEP_4_SHA`. The pin's
@@ -1797,21 +1831,52 @@ _BANNED_CLAIMS: tuple[tuple[str, str], ...] = (
 _PRE_STEP_4_SHA = "54922a800"
 _PRE_STEP_4_QUOTES: dict[str, tuple[str, ...]] = {
     "docs/auth-architecture.md": (
-        "**The removed design is still being issued — and still accepted by the one page that "
-        "issues it:**",
-        "so no surface other than the consent page accepts it",
-        "**The cookie is still ISSUED, and the consent page still re-reads it as its own session**",
-        "so `cookieStorage.getItem` reads this cookie back as the session",
+        '**The removed design is still being issued — and still accepted by the one page that issues it:** the MCP consent page writes a JS-readable parent-domain cookie, and its own inline supabase client (`storage: cookieStorage, storageKey: COOKIE_NAME`, `tortoise/oauth.py`) reads that cookie back as the session, presenting its access token to `/oauth/consent/preview` and `/oauth/consent` on `api.premiselabs.co` — a live credential there, not inert scaffolding.',
+        'The two OTHER surfaces that used to accept it — the blog-admin console (`/admin`, itself an app-origin BFF page) and the marketing-origin blog Functions — were migrated onto the BFF in **#4178** and the shared bridge was DELETED in **#3559**, so no surface other than the consent page accepts it (§2.1 "Legacy cohort": the `OVERRIDES` ruling is now violated on the consent page only; migrating that page is **#3524**).',
+        "**The cookie is still ISSUED, and the consent page still re-reads it as its own session**; no OTHER Tortoise surface accepts it any more: - **Issued by — the legacy writer, and the UNFIXED EXCEPTION to the ruling above** (tracked; the page both issues and accepts it): the MCP consent page in `tortoise/oauth.py`, served live at `/oauth/authorize` (`oauth_authorize` in `tortoise/hosted_api.py`) — that legacy cookie's production origin is `api.premiselabs.co`.",
+        '**Item 1 is RESIDUAL, not closed** — a second, JS-readable parent-domain session cookie (`sb-tortoise-auth-token`) is still issued AND still accepted by the page that issues it (the MCP consent page, §2.1); #4178 removed the console adapter and the blog-endpoint cookie fallback and #3559 deleted the bridge, so no OTHER surface accepts it.',
+        "- **Accepted by — only the consent page that issues it (both former consumers stopped in #4178).** The page's inline supabase client is configured with `storage: cookieStorage, storageKey: COOKIE_NAME, persistSession: true` (`tortoise/oauth.py`), so `cookieStorage.getItem` reads this cookie back as the session; `getSession()` then hands the page a real `access_token` that is the bearer for `GET /oauth/consent/preview` (`fetchPreview`, `tortoise/oauth.py:2256`) and `POST /oauth/consent` (`:2578`).",
+        'But a **second** JS-readable parent-domain session cookie (`sb-tortoise-auth-token`) is still **issued** — by the MCP consent page in `tortoise/oauth.py`, on `api.premiselabs.co`, with `Domain=.premiselabs.co` — and is still **accepted by that page itself**: its inline supabase client reads the cookie back as the session and uses the resulting access token as a bearer (§2.1); no OTHER Tortoise surface accepts it (#4178 removed the console adapter and the blog-endpoint cookie fallback, #3559 deleted the bridge).',
+        "The consent page's cookie therefore still exists in a consent-page visitor's browser, and the consent page itself still reads it as its credential (above).",
         "It is that surface's credential, not inert scaffolding.",
-        "the consent page itself still reads it as its credential",
-        "is still issued AND still accepted by the page that issues it",
-        "reads the cookie back as the session",
+        'Its inline client uses the same name — `COOKIE_NAME = "sb-tortoise-auth-token"` — and writes that **legacy** cookie with `document.cookie` plus a `Domain=.premiselabs.co` attribute, i.e.',
+        "Removing it is **#3524** (`SCOPE.md` §4 W3); `SCOPE.md` §7's ordering guard defers deleting this writer until #3524 ships (the `_CONSENT_HTML` template in `tortoise/oauth.py`) — so it is still issuing today.",
+        '(A consent-page visitor\'s tokens are in the legacy cookie instead — see the "Legacy cohort" bullet below.) - **Transport (current) — for the BFF session:** a server-side BFF on the app origin.',
+        "The consent page's separate legacy-COOKIE acceptance is §2.1.",
+        "Whether the cookie is still ACCEPTED as a credential is settled — by the consent page that issues it, and by no other surface: that page's inline supabase client reads it back as its session (§2.1; **#4178** removed the last two OTHER consumers).",
+        'So the exposure this item names is **RESIDUAL, not closed**: while a session holder has visited the consent page, XSS on ANY `premiselabs.co` subdomain can still READ a real Supabase session out of that cookie, and the consent page will still authenticate with it.',
+        "The remaining work is to migrate that page off it — **#3524** (`SCOPE.md` §4 W3), deferred by `SCOPE.md` §7's ordering guard.",
     ),
     "website/website_architecture.md": (
-        "still accepted by the one page that issues it (the MCP consent page)",
-        "still **issued** — and still **read back as its own session**, so it still authenticates",
+        'A **separate legacy** JS-readable parent-domain cookie is still issued — and is still accepted by the one page that issues it (the MCP consent page) — see the ruling bullet below.',
+        "The cookie is still **issued** — and still **read back as its own session**, so it still authenticates — by the MCP consent page in `tortoise/oauth.py` (`/oauth/authorize` on `api.premiselabs.co`, `Domain=.premiselabs.co`, JS-readable): the page's inline supabase client (`storage: cookieStorage, storageKey: COOKIE_NAME`) reads the cookie and uses the session's access token as the bearer for `/oauth/consent/preview` and `/oauth/consent`.",
+        'So a JS-readable parent-domain session is still issued to — and still authenticates — the consent page that writes it: exactly what this `OVERRIDES` ruling exists to prevent, surviving on the one surface not yet migrated.',
+        "No OTHER surface accepts it: the blog-admin console's supabase-js data layer now rides the same-origin `/api/sb/*` Token Handler (`website/apps/blog-admin/src/lib/backend.ts`, #4178 — the legacy `src/lib/supabase.ts` adapter is DELETED), and `website/functions/blog/_shared/admin-auth.ts`'s legacy COOKIE fallback is REMOVED (Bearer only).",
     ),
 }
+
+#: MARKDOWN PRESENTATION IS NOT PART OF A CLAIM. A restore is a PASTE: it arrives re-wrapped at
+#: the doc's own width, and emphasis often lands on a different word (`**issued**` in one
+#: revision, plain `issued` in the next). Both sides of every comparison go through this, so a
+#: needle and the sentence it is quoted from stay equal across that noise while every WORD,
+#: HYPHEN and PUNCTUATION mark must still match exactly.
+_EMPHASIS_RE = re.compile(r"[*`]")
+
+
+def _normalise_markdown(text: str) -> str:
+    """Case-folded, emphasis-free, whitespace-collapsed — the ONE comparison form."""
+    return " ".join(_EMPHASIS_RE.sub("", text).split()).lower()
+
+
+#: The closure sentence in comparison form, computed once so the two cannot drift.
+_CLAIM_CLOSED_NORMALISED = _normalise_markdown(CLAIM_CLOSED_SENTENCE)
+
+#: `_BANNED_CLAIMS` in comparison form, computed once from the verbatim list above. The THIRD
+#: field is the verbatim arm, so a violation quotes what a reader would restore rather than the
+#: lower-cased needle the comparison used.
+_BANNED_NEEDLES: tuple[tuple[str, str, str], ...] = tuple(
+    (_normalise_markdown(phrase), why, phrase) for phrase, why in _BANNED_CLAIMS
+)
 
 #: A pre-step-4 claim is a VIOLATION only where it is not marked as the record. Same polarity as
 #: the closure sentence: the docs must be able to say what the page USED to do (that record is the
@@ -1829,6 +1894,33 @@ _HISTORY_MARKERS = (
     "retired", "closed", "was deleted", "were deleted", "deleted in", "deleted by",
     "was removed", "were removed", "removed in", "removed by",
 )
+
+#: A NEGATED marker is the OPPOSITE of a disposition: `Item 1 is RESIDUAL, **not closed**`,
+#: `this is not retired`, `nothing was deleted`. Measured, round 9 of #10346's review: the §4
+#: exposure paragraph carries BOTH `not closed` and `#4178 removed … / #3559 deleted …`, so its
+#: own record vocabulary excused the live claim it was itself recording — the same class round 8
+#: closed one layer out ("the history escape excused the claim it was recording"). Only an
+#: AFFIRMED disposal counts.
+_NEGATED_BEFORE_MARKER = re.compile(
+    r"\b(?:not|never|isn'?t|wasn'?t|aren'?t|nothing)\s+$", re.IGNORECASE)
+
+
+def _marks_as_record(low: str) -> bool:
+    """True where the item presents its claim as the RECORD of a disposed thing.
+
+    `low` is already in `_normalise_markdown` form. Every occurrence of every marker is checked,
+    so one negated marker cannot hide an affirmed one elsewhere in the same item.
+    """
+    for marker in _HISTORY_MARKERS:
+        start = 0
+        while True:
+            at = low.find(marker, start)
+            if at == -1:
+                break
+            if not _NEGATED_BEFORE_MARKER.search(low[max(0, at - 24):at]):
+                return True
+            start = at + len(marker)
+    return False
 
 #: The page's THREE names in this repo's own prose — `consent page` (the arch docs),
 #: `consent screen` (`docs/oauth-mcp.md`) and `authorize page` (the #9664 evidence). One
@@ -1930,13 +2022,14 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
         # the lines are joined, would sit in the middle of the sentence the doc is saying.
         "\n".join(re.sub(r"^\s*(?:>\s?)*", "", ln) for _, ln in pairs)
     )
-    # Whitespace-normalised, so a sentence a doc OWNS may be WRAPPED by markdown's own line
-    # breaks. The normalisation is whitespace only — the words, the emphasis and the punctuation
-    # must still match exactly.
-    scanned = " ".join(scanned.split())
+    # Presentation-normalised (`_normalise_markdown`), so a sentence a doc OWNS may be WRAPPED by
+    # markdown's own line breaks AND an emphasis marker may sit on a different word: a restore is a
+    # paste, and neither wrapping nor `**` is part of the claim. Every WORD, hyphen and punctuation
+    # mark must still match exactly — this is still a substring search, not an English grammar.
+    scanned = _normalise_markdown(scanned)
 
     violations: list[str] = []
-    if CLAIM_CLOSED_SENTENCE not in scanned:
+    if _CLAIM_CLOSED_NORMALISED not in scanned:
         violations.append(
             f"{rel} no longer carries, in its CURRENT-architecture region, the closure "
             f"sentence this gate owns:\n\n    {CLAIM_CLOSED_SENTENCE}\n\n"
@@ -1950,14 +2043,13 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
 
     for item in _items(pairs):
         item_text = re.sub(r"^\s*(?:>\s?)*", "", " ".join(ln for _, ln in item))
-        item_text = " ".join(item_text.split())
-        low = item_text.lower()
-        if any(mk in low for mk in _HISTORY_MARKERS):
+        low = _normalise_markdown(item_text)
+        if _marks_as_record(low):
             # the line marks itself as the record of what the page used to do — keep it,
             # it is the evidence the decision is argued from
             continue
-        for phrase, why in _BANNED_CLAIMS:
-            if phrase.lower() in low:
+        for needle, why, phrase in _BANNED_NEEDLES:
+            if needle in low:
                 violations.append(
                     f"{rel} restates the PRE-STEP-4 claim verbatim: {phrase!r} — {why}. "
                     "That sentence shipped before #3524 §9 step 4 deleted the page; a reader "
@@ -1981,6 +2073,32 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
         )
 
     return violations
+
+
+def _insert_after_closure(doc_text: str, sentence: str) -> str:
+    """`doc_text` with `sentence` inserted as a bullet right after the closure sentence.
+
+    The insertion point is INSIDE the CURRENT-architecture region on purpose: the gate scans that
+    region, so appending to the end of a doc would prove nothing for `docs/auth-architecture.md`
+    (whose region is three declared ranges, not the file). The closure is WRAPPED by markdown and
+    sits in a `> …` callout, so its last line is found by accumulating de-quoted text rather than
+    by matching one line.
+    """
+    lines = doc_text.splitlines()
+    acc = ""
+    for i, ln in enumerate(lines):
+        plain = re.sub(r"^\s*(?:>\s?)*", "", ln)
+        acc = (acc + " " + " ".join(plain.split())).strip()
+        if _CLAIM_CLOSED_NORMALISED in _normalise_markdown(acc):
+            # The trailing blank line matters: `_items` makes a bullet plus its lazy
+            # continuation lines ONE claim unit, so without it the restored bullet would
+            # absorb the next paragraph's own record vocabulary (`superseded`, `deleted`)
+            # and excuse itself. A real restore replaces a bullet; it does not swallow
+            # its neighbour.
+            return "\n".join([*lines[:i + 1], "", "- " + sentence, "", *lines[i + 1:]])
+    raise AssertionError(
+        "the closure sentence could not be located, so the restore arm cannot say where the "
+        "CURRENT region is — fix this helper rather than deleting the arm")
 
 
 def test_the_closure_claim_is_OWNED_not_parsed():
@@ -2126,6 +2244,24 @@ def test_the_closure_claim_is_OWNED_not_parsed():
         assert _consent_page_acceptance_violations(rel, good + record + "\n") == [], (
             f"a CORRECT retirement record was refused: {record!r}")
 
+    # (j) ⛔ THE REAL REVERSION, ON THE REAL DOCS — and the reason this arm exists is a
+    #     MEASUREMENT, not a hypothesis. Restore each pre-step-4 passage into the doc it was cut
+    #     from, INSIDE that doc's CURRENT region, with the closure sentence KEPT (so the positive
+    #     half must pass and only the negative half can catch it). With the ten original arms,
+    #     **7 of these 19 restored passages stay GREEN**, including the exposure paragraph,
+    #     `migrate that page off it`, `so it is still issuing today` and the legacy-cookie-tokens
+    #     parenthetical. Each of those is a claim a reader can act on, and this gate exists because
+    #     a docs claim has no other test to fail.
+    for doc, stored in _PRE_STEP_4_QUOTES.items():
+        text = (REPO / doc).read_text()
+        for quote in stored:
+            restored = _insert_after_closure(text, quote)
+            assert _consent_page_acceptance_violations(doc, restored), (
+                f"{doc}: restoring the PRE-STEP-4 passage {quote[:90]!r}… passed the gate — "
+                "it is a live claim about the deleted page, and its wording is quoted verbatim "
+                f"from {_PRE_STEP_4_SHA}. Add the sentence to `_BANNED_CLAIMS` and to "
+                "`_PRE_STEP_4_QUOTES`.")
+
 
 def test_every_banned_claim_is_VERBATIM_from_the_pre_step_4_docs():
     """⛔ A PARAPHRASE IN THE DENYLIST IS A HOLE — this test exists because one was one.
@@ -2143,10 +2279,14 @@ def test_every_banned_claim_is_VERBATIM_from_the_pre_step_4_docs():
          itself edited in passing cannot vouch for arm (1). Skipped only when the commit is not
          in this clone's history (a shallow CI checkout), and it says so rather than passing
          silently as if it had checked.
+
+    Both comparisons use `_normalise_markdown`, the gate's own form: a stored quote is a PASTE
+    out of the doc, so a re-wrapped line or a moved `**` must not make it stop vouching.
     """
-    quotes = " ".join(" ".join(q.split()) for qs in _PRE_STEP_4_QUOTES.values() for q in qs)
+    quotes = _normalise_markdown(
+        " ".join(" ".join(q.split()) for qs in _PRE_STEP_4_QUOTES.values() for q in qs))
     for phrase, _ in _BANNED_CLAIMS:
-        assert phrase in quotes, (
+        assert _normalise_markdown(phrase) in quotes, (
             f"{phrase!r} is a PARAPHRASE — it is not in `_PRE_STEP_4_QUOTES`, so it never "
             "shipped verbatim and cannot be what a reversion restores. Quote the sentence you "
             "actually saw, or drop the arm.")
@@ -2161,9 +2301,9 @@ def test_every_banned_claim_is_VERBATIM_from_the_pre_step_4_docs():
             pytest.skip(f"{_PRE_STEP_4_SHA} is not in this clone's history ({exc.__class__.__name__}) — "
                         "the stored quotes could not be re-derived here")
         flat = " ".join(re.sub(r"^\s*(?:>\s?)*", "", ln) for ln in shown.splitlines())
-        flat = " ".join(flat.split())
+        flat = _normalise_markdown(flat)
         for quote in stored:
-            assert " ".join(quote.split()) in flat, (
+            assert _normalise_markdown(quote) in flat, (
                 f"{doc} at {_PRE_STEP_4_SHA} does not contain {quote!r} — the stored record has "
                 "drifted from the docs that shipped, so it can no longer vouch for the arms.")
 
