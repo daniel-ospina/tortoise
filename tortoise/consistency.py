@@ -1524,11 +1524,13 @@ def _fold_journal(events: list[dict]) -> dict:
 #     a presence comparison there would be a false positive by construction.
 #   * Only `status` is compared, not `name` — `#3574`'s ``name[:200]``
 #     truncation is a known journal/graph asymmetry.
-#   * Object/Subject PRESENCE is resolved by NAME as well as id, because the
-#     graph MERGEs those labels by name (`_upsert_object`/`_upsert_subject`):
-#     two journal registrations of one name under different ids are ONE node
-#     carrying the LAST id, and an id-only key would report the older one
-#     `absent-from-graph` on a correctly-replayed graph.
+#   * Object/Subject PRESENCE is compared by ID, and by id ONLY: since #3590
+#     `_upsert_object`/`_upsert_subject` MERGE on the record's own `id`, so two
+#     journal registrations of one name under different ids are TWO nodes and a
+#     journal id has exactly one carrier. The name fallback that used to sit
+#     here — justified by the `name`-keyed MERGE those writers no longer issue —
+#     is RETIRED; `_compare_entities` records the false-GREEN it produced, and
+#     an id absent from the graph is ABSENT, with no name standing in for it.
 #   * A name-only `ObjectSuperseded` (no id, >1 carrier) leaves the object's
 #     status AMBIGUOUS: the fold's own resolution is heuristic, so those
 #     objects' STATUS leg is excluded from the comparison — PRESENCE is still
@@ -1953,11 +1955,14 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             _merge_key = (_merge_key if _writable_id(_merge_key) else None)
             if label in _NAME_MERGE_LABELS:
                 if _merge_key is not None:
-                    # The graph MERGEs Object/Subject by name, so the LAST
-                    # registration of a merge key OWNS its node id — the MERGE
-                    # re-ids the existing node, REMOVING the earlier id. Update
-                    # the carriers AT THIS SEQ; a re-creation of the same id
-                    # under a new key drops the id from its OLD key's set first.
+                    # Since #3590 the graph MERGEs Object/Subject on the record's
+                    # own `id`, so a registration neither re-ids NOR evicts any
+                    # other carrier of the key — the LAST registration does not
+                    # own the node (see `_NAME_MERGE_LABELS`, and the
+                    # `_live.add` arm below). What this arm still tracks is
+                    # which key THIS id carries: a re-creation of the same id
+                    # under a new key drops the id from its OLD key's set first,
+                    # so the index never holds one id under two names.
                     _old = merge_key_by_id.pop((label, eid), None)
                     if _old is not None:
                         _prev = carriers_by_name.get((label, _old))

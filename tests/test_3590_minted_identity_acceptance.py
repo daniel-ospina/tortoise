@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -1811,3 +1813,70 @@ def test_the_fold_side_subject_stub_takes_the_create_lock(sdk, monkeypatch):
         f"lock — a concurrent create can mint beside it: {taken}")
     assert _name_ids(proj, "Subject", "Unregistered Mention") == [
         "Unregistered Mention"], "the stub mint did not happen — pin is vacuous"
+
+
+# ── the PROSE may not argue for the arm the code deleted ─────────────────
+_SRC = Path(__file__).resolve().parents[1] / "tortoise"
+
+#: The retired mechanism, stated as CURRENT fact. Every arm names the
+#: pre-#3590 world in which a name-keyed MERGE re-id'd the node it matched, so
+#: the LAST registration of one name owned the id and the earlier one stopped
+#: existing. `_upsert_object` / `_upsert_subject` now MERGE on the record's own
+#: `id`; nothing re-ids, nothing evicts.
+_RETIRED_IN_PROSE = re.compile(
+    r"graph MERGEs (?:Object/Subject|those labels) by name"
+    r"|MERGE\s+re-ids the existing node"
+    r"|LAST\s+registration of a merge key OWNS its node id")
+
+
+def _strip_py_comments(path: Path) -> str:
+    """`path` with every COMMENT token blanked, keeping code and layout.
+
+    A prose check and a code check need OPPOSITE views of the same file: the
+    retired write may be DISCUSSED in a comment (both modules do, correctly, in
+    the past tense), but only CODE can issue it. Blanking comments by token —
+    not by truncating at the first ``#`` — keeps a ``#`` inside a Cypher string
+    from swallowing the statement after it.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    with open(path, encoding="utf-8") as fh:
+        for tok in tokenize.generate_tokens(fh.readline):
+            if tok.type == tokenize.COMMENT:
+                row, col = tok.start
+                lines[row - 1] = lines[row - 1][:col]
+    return "\n".join(lines)
+
+
+def test_no_source_states_the_retired_name_keyed_merge_as_current_fact():
+    """A comment arguing for the arm its own code deleted is a live defect.
+
+    #9876 review (P3, round 15) found two of them in ``tortoise/consistency.py``
+    — inside the two functions that carry the longest evidence about the
+    carrier model: ``_fold_journal_entities``, where the eviction was retired
+    eight lines below the comment, and the entity-parity bounds list, whose
+    name fallback ``_compare_entities`` had already deleted while the bounds
+    bullet still justified it by "the graph MERGEs those labels by name". A
+    reader of ``carriers_by_name``, or of the bounds list, takes the prose as
+    the current rule and builds on it. That is the same defect class the review
+    fixed in ``journal_object_established``'s docstring (round 8) and in
+    ``_seed_objects`` (round 12).
+
+    The premise is asserted FIRST, so this cannot pass vacuously: if a writer
+    ever goes back to a name-keyed Object/Subject MERGE the prose would be
+    TRUE again, and the pin must be retired deliberately rather than the
+    comments restored into it.
+    """
+    entities = _strip_py_comments(_SRC / "projection/entities.py")
+    for label in ("Object", "Subject"):
+        keyed = f"MERGE ({label[0].lower()}:{label} {{name:"
+        assert keyed not in entities, (
+            f"the premise of this pin is the RETIRED name-keyed {label} MERGE, "
+            f"and `projection/entities.py` now writes `{keyed}…` — the prose "
+            "claims below are true again, so retire THIS pin deliberately "
+            "instead of deleting the comments it guards")
+
+    text = (_SRC / "consistency.py").read_text(encoding="utf-8")
+    hits = [m.group(0) for m in _RETIRED_IN_PROSE.finditer(text)]
+    assert not hits, (
+        "these comments state the mechanism #3590 removed as CURRENT fact, "
+        f"while `projection/entities.py` MERGEs on `id`: {hits}")
