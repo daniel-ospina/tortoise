@@ -18,8 +18,8 @@ the three sources those cites name (`sdk.py`, `projection/edges.py`,
 """
 from __future__ import annotations
 
-import importlib.util as _ilu
 import ast
+import importlib.util as _ilu
 import json
 import os
 import re
