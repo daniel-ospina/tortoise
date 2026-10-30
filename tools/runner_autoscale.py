@@ -291,7 +291,7 @@ class ProvisionerRefused(ActionFailed):
     `verdict=fill-refused-by-provisioner` and exits 5 instead of a green timer over a box that
     cannot grow — the false PASS that a "a refusal is an answer, exit 0" reading created.
     ⛔ TWO KINDS OF REFUSAL ARRIVE HERE, AND THEY ARE NOT THE SAME FACT: `die()` in
-    `tools/install-ci-runner-x64.sh:137` exits 2 for EVERY guard arm, so this is either the
+    `tools/install-ci-runner-x64.sh:182` exits 2 for EVERY guard arm, so this is either the
     sizing disagreement (`cpu headroom` / `memory headroom` — the tool computed a count the
     callee's `COUNT*2 + 2 <= ncpu` / `COUNT*2 + 4 <= MemAvailable` guard rejects, open at #9672)
     or one of the callee's other arms (architecture, forks, disk, an unreadable measurement, gate
@@ -625,7 +625,7 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
     the fallback is engaged right now.
 
     This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels`
-    (`tools/install-ci-runner-x64.sh:192`, in this tree since #9639) instead of inventing a
+    (`tools/install-ci-runner-x64.sh:237`, in this tree since #9639) instead of inventing a
     second rule, and it is `auto`: the gate's state is the source of truth, so a runner never
     acquires a permanent claim on the pool. The reader CAN open it, which is why this file
     re-derives NOTHING it cannot check: the arch marker is this box's own `uname -m`, and the
@@ -1265,7 +1265,7 @@ def converge(
         except ProvisionerRefused as exc:
             record["problem_kind"] = "refusal"
             # ⛔ THE INSTALLER'S `die` EXITS 2 FROM EVERY GUARD, NOT JUST THE SIZING ONE.
-            # `tools/install-ci-runner-x64.sh:137` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
+            # `tools/install-ci-runner-x64.sh:182` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
             # so the wrong arch, an unreadable fork cap, a FULL DISK, an unreadable core count and
             # an unreadable gate state all arrive here as rc=2 exactly like the cpu/memory arms do.
             # Only `cpu headroom` / `memory headroom` are the two-models disagreement (#9672), and
@@ -1425,13 +1425,27 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     ⛔ The arch marker is RE-DERIVED from this box, never preserved: a mis-registered runner can
     carry the OTHER arch's marker, and passing it straight back lets an x86 box register with
     `self-hosted-arm64` — a false PASS (an arm64 job built on x86), not a queue delay.
+    ⛔ AND THE MARKER TEST IS CASE-INSENSITIVE, DELIBERATELY — `x.lower()`, unlike the host-derived
+    compare below. The two classes are NOT the same: the host names are vendor-fixed spellings, but
+    `self-hosted-<arch>` is a CUSTOM label whose spelling is whatever created it, and docs.github.com
+    "apply labels" says "Labels are case-insensitive" — so `Self-Hosted-Arm64` IS the arm64 marker
+    and still answers a lower-case `runs-on:`. An exact-case test here lets a mixed-case stamp
+    survive re-registration while the docstring above promises it is re-derived.
+
+    ⛔ THE HOST-DERIVED MATCH IS EXACT-CASE, like the repair's `is_host_label`
+    (`tools/install-ci-runner-x64.sh`) — `ONE invariant, two writers` is only true if both compare
+    the same way. GitHub returns `Linux`/`X64`/`macOS`/`Windows`/`self-hosted`, so a LOWER-CASED
+    compare adds nothing to the class and silently drops an operator's own `linux` or `x64` label on
+    re-registration — while `--repair-labels` keeps it. Filtering a label out of this argv IS a
+    removal: a label one writer keeps and the other deletes is the divergence this function's
+    shared-constant comment forbids.
     """
-    host_derived = {"self-hosted", "linux", "macos", "windows", "x64", "arm64", "arm"}
+    host_derived = {"self-hosted", "Linux", "macOS", "Windows", "X64", "ARM64", "ARM"}
     arch = ARCH_LABEL.get(machine.lower())
     keep = [
         x
         for x in current
-        if x and x.lower() not in host_derived and not x.lower().startswith("self-hosted-")
+        if x and x not in host_derived and not x.lower().startswith("self-hosted-")
         and not VERSION_PINNED_HOSTED_LABEL.fullmatch(x)
     ]
     if not arch:

@@ -16,14 +16,14 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:12843``, called at ``:11880``) →
+   (``sdk.py:13323``, called at ``:12360``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
    ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
    ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
    ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
-   ``:8701``), ``search_graph`` (S3, ``:8717``), ``run_s4`` (the gap filler,
+   ``:8700``), ``search_graph`` (S3, ``:8717``), ``run_s4`` (the gap filler,
    ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``). The SYMBOL is
-   authoritative and the line is a convenience — the three FILE-NAMED cites
+   authoritative and the line is a convenience: the three FILE-NAMED cites
    above are resolved against the tree by the bundle's pin, and these eight
    bare step cites are re-read by that same pin file
    (`tests/test_7949_capstone_verdict_check.py`,
