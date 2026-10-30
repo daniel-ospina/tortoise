@@ -512,11 +512,16 @@ def _code_only(line: str) -> str:
 def _looks_poolable(value: str) -> bool:
     """One `runs-on` VALUE (inline scalar or one list item): poolable, or unresolved?
 
-    An EXPRESSION value is routed to `True` deliberately: a matrix/needs expression
-    is resolved per leg at run time, so the text cannot show the label to be
-    non-poolable. Admitting it to the scan costs nothing when the job is `gh`-free
-    and is the whole point when it is not — the alternative is the silent skip
-    described in `_poolable_label`.
+    An EXPRESSION value routes to `True` deliberately: a matrix/needs expression is
+    resolved per leg at run time, so the text cannot show the label to be
+    non-poolable. Admitting it is the whole point when the job uses `gh`; the cost of
+    admitting it otherwise is a FALSE POSITIVE, stated rather than waved away — an
+    expression whose every leg is non-poolable (`os: [ubuntu-latest, macos-latest]`,
+    the matrix GitHub's own example uses) is admitted too, and if that job also uses
+    `gh` the pin's message asks for a declaration rather than a silent skip. Cheap in
+    the right direction: a demanded `KNOWN_UNCOVERED` reason, never an invisible job —
+    and note the remedy that message names (`ensure gh`) is Linux-only, so on a macOS
+    leg the declaration is the correct answer rather than the install step.
     """
     if _EXPRESSION in value:
         return True
@@ -533,6 +538,13 @@ def _poolable_label(text: str) -> bool:
     takes — was invisible and could have joined the gap with the suite green (#9939
     review).
 
+    A COMMENT is not a value: `runs-on:  # see #6897` then `- ubuntu-latest` is the
+    block-list shape, and a comment line among the items or above them must not end
+    the list. Both of those read as "no poolable label" before this arm, which is the
+    same silent skip in a comment-dense workflow — latent rather than live here (every
+    `runs-on:` in the tree is inline today), and exactly the shape this repo's style
+    invites next.
+
     The expression arm exists for the same reason, one step further out: #10186
     turned `test`'s literal `ubuntu-latest` into `${{ fromJSON(matrix.runner) }}`,
     and a text reader that only matches `ubuntu-…` then answered "not poolable" for
@@ -542,10 +554,10 @@ def _poolable_label(text: str) -> bool:
     unresolvable value must be "assume it can reach the pool".
 
     This is the same rule the installer already applies from the other side:
-    `tools/install-ci-runner-x64.sh:380` skips `${{ … }}` "because a matrix expression
-    is not a label; it is resolved per job at run time" — but that reader resolves
-    labels against the ONLINE runner list instead. This scan has no such second
-    source, so it cannot skip: it must fail closed.
+    `tools/install-ci-runner-x64.sh:377-378` skips `${{ … }}` — its comment reads
+    "a matrix expression (`${{ … }}`) is not a label; it is resolved per job at run
+    time" — but that reader resolves labels against the ONLINE runner list instead.
+    This scan has no such second source, so it cannot skip: it must fail closed.
     """
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -553,10 +565,11 @@ def _poolable_label(text: str) -> bool:
         if not m:
             continue
         inline = m.group(1).strip()
-        if inline:
+        if inline and not inline.startswith("#"):
             return _looks_poolable(inline)
         for follow in lines[i + 1 :]:
-            if not follow.strip():
+            stripped = follow.strip()
+            if not stripped or stripped.startswith("#"):
                 continue
             item = re.match(r"^\s*-\s*(.+)$", follow)
             if not item:
@@ -681,7 +694,9 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
 
     The THIRD shape is an expression, and it is asserted here rather than left to the
     scan below so the reader's contract is complete in one place: a value the text
-    cannot resolve is treated as possibly-poolable, not as a non-match.
+    cannot resolve is treated as possibly-poolable, not as a non-match. The two
+    COMMENT-bearing shapes are asserted for the same reason — a comment is not a
+    value, and reading it as one ends the block list before the labels are reached.
     """
     inline = "    runs-on: ubuntu-latest\n    steps:\n"
     block = "    runs-on:\n      - self-hosted\n      - ubuntu-24.04\n    steps:\n"
@@ -690,6 +705,14 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     expression_in_list = (
         "    runs-on:\n      - self-hosted\n      - ${{ matrix.arch }}\n    steps:\n"
     )
+    block_after_inline_comment = (
+        "    runs-on:  # odd shards go to the pool\n      - self-hosted\n      - ubuntu-latest\n"
+        "    steps:\n"
+    )
+    block_after_item_comment = (
+        "    runs-on:\n      # see #6897 for the residual\n      - self-hosted\n"
+        "      - ubuntu-latest\n    steps:\n"
+    )
     assert _poolable_label(inline)
     assert _poolable_label(block)
     assert not _poolable_label(block_pool_free)
@@ -697,18 +720,28 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     # pre-fix reader both of these answered False (#10186 review).
     assert _poolable_label(expression)
     assert _poolable_label(expression_in_list)
+    # A comment-bearing key and a comment above the items answered False before the
+    # comment arm — the same silent skip, one shape further out.
+    assert _poolable_label(block_after_inline_comment)
+    assert _poolable_label(block_after_item_comment)
+    # …and a pool-free list stays pool-free whichever way the comments fall, so the
+    # arm cannot be satisfied by simply always answering True.
+    assert not _poolable_label(
+        "    runs-on:  # hosted class\n      - self-hosted\n      - linux\n    steps:\n"
+    )
 
 
 def test_an_expression_valued_runs_on_keeps_its_job_in_the_scan():
     """#10186 turned `test`'s `runs-on` into an expression; the scan must still see it.
 
-    Why this is the shape that matters: `test` is the job that routes its odd legs to
-    an explicit `["self-hosted", "self-hosted-x64"]` pin, i.e. the one job whose legs
-    can reach a minimal-`PATH` pool runner BY NAME — and it is the largest job in the
-    tree (25 steps). Dropping it out of this scan is silent: the scan can only red on
-    jobs it looks at, so a `gh`-using step added to `test` later would join the #9018
-    gap with the suite green. It is `gh`-free today, which is why nothing reds now and
-    why the arm has to be a pin instead of a fix to a live failure.
+    Why this is the shape that matters: under the `CI_SHARD_ROUTING=pool-split` opt-in
+    `test` routes its odd legs to an explicit `["self-hosted", "self-hosted-x64"]`
+    pin, i.e. the one job whose legs can reach a minimal-`PATH` pool runner BY NAME —
+    and it is the largest job in the tree (25 steps). Dropping it out of this scan is
+    silent: the scan can only red on jobs it looks at, so a `gh`-using step added to
+    `test` later would join the #9018 gap with the suite green. It is `gh`-free today,
+    which is why nothing reds now and why the arm has to be a pin instead of a fix to
+    a live failure.
     """
     seen = {
         (path.name, job)
