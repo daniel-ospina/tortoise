@@ -4242,7 +4242,7 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 # nine runners advertised `ubuntu-latest` and none advertised `ubuntu-24.04`
 # (with the fallback disengaged, none carries either). The installer emits it only under
 # `CI_RUNNER_OS_LABEL=on|auto` — the shipped default is `off`, which is what
-# `tests/test_ci_runner_x64_install.py:228` pins — and the re-registration path
+# `tests/test_ci_runner_x64_install.py:230` pins — and the re-registration path
 # strips it (`tools/runner_autoscale.py::_preserve_labels`, pinned by
 # `tests/test_runner_autoscale.py`), but NO test here reads the LIVE label set,
 # and the pool HAS served this very label: 2026-10-24's `finding-provenance`

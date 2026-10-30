@@ -75,8 +75,10 @@ WHAT IS BEING PINNED
   10b. **The version-pin carve-out is the `off` state of `CI_RUNNER_OS_LABEL`, not an unconditional
      drop** — #6897's `OVERRIDES:` marker records the revert as `CI_RUNNER_OS_LABEL=off` PLUS
      `--repair-labels`, so a repair that dropped the pin whatever the flag said performed that revert
-     with no switch involved. `on|auto` KEEPS the pin (and prints `version-pinned, kept=[…]`),
-     `off`/unset drops it, an unrecognised value is REFUSED (exit 1, before any mode runs). The keep-half is also ARCH-AWARE:
+     with no switch involved. The carve-out reads THIS RUN'S RESOLUTION, never the flag's spelling:
+     `on` keeps the pin (and prints `version-pinned, kept=[…]`), `auto` keeps it ONLY on a host whose
+     `/etc/os-release` reports 24.04, and `off`/unset **or a DECLINING `auto`** drops it; an
+     unrecognised value is REFUSED (exit 1, before any mode runs). The keep-half is also ARCH-AWARE:
      a runner whose read-only host label says `ARM64`/`ARM` is refused, because keeping
      `ubuntu-latest` there is the measured #6897 false red rather than a queue delay.
   10c. **A label set is PARSED literally, and `relabelled` is a claim about the server.** An unquoted
@@ -501,9 +503,11 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
     """⛔ THE UNION'S NAMED CARVE-OUT (a): `ubuntu-<version>` is DROPPED, not carried forward.
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
-    decision (not just a style choice): `docs/ops/ci-runner-x64.md:92-94` —
+    decision (not just a style choice): `docs/ops/ci-runner-x64.md:92-96` —
     "`_preserve_labels` DROPS the whole class on re-registration … so an attachment survives a
-    repair that re-applies it (`--repair-labels` keeps only the box's own label under `on|auto`) and does NOT
+    repair that re-applies it (`--repair-labels` keeps only the box's own label, and only where
+    **this run's resolution** claims it — `on`, or `auto` on a host whose `/etc/os-release` reports
+    24.04; a DECLINING `auto` drops it with the rest of the family) and does NOT
     survive a re-registration". `tools/runner_autoscale.py::_preserve_labels` already drops the
     family
     (`VERSION_PINNED_HOSTED_LABEL`), so a union that kept it would leave the two writers with
@@ -544,9 +548,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:586-588`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:589-591`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:742-743`). Keeping
+    (`docs/ops/ci-runner-x64.md:745-746`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -3390,11 +3394,11 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
         92: r"DROPS the whole class on re-registration",
-        586: r"A foreign arch marker",
-        742: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        589: r"A foreign arch marker",
+        745: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        862: r"test_the_changes_job_carries_no_job_scope_env",
+        865: r"test_the_changes_job_carries_no_job_scope_env",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -3442,7 +3446,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:862` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:865` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3855,7 +3859,7 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
     reds the last arm, which is the signal to delete the paragraph in the same change.
     """
     # Local import: a module-level one shifts this file's line numbers, and five other files cite
-    # `tests/test_ci_runner_x64_install.py:228` by number (pinned by
+    # `tests/test_ci_runner_x64_install.py:230` by number (pinned by
     # `test_the_label_assertion_other_files_cite_lands_on_it`).
     import yaml
 
@@ -4032,8 +4036,9 @@ def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path
 def test_the_os_label_flag_describes_its_writers_without_asserting_the_live_box():
     """⛔ A WRITER THAT DOES NOT EXIST WAS ASSERTED, AND SO WAS A BOX NO CHECKOUT CAN READ.
 
-    `CI_RUNNER_OS_LABEL` guards the version-pin carve-out: `on|auto` KEEPS `ubuntu-24.04`,
-    `off`/unset DROPS it. The flag arrived with the repair (its READER), and two mistakes were made
+    `CI_RUNNER_OS_LABEL` guards the version-pin carve-out: THIS RUN'S RESOLUTION keeps
+    `ubuntu-24.04` — `on`, or `auto` on a 24.04 host — and `off`/unset **or a declining `auto`**
+    drops it. The flag arrived with the repair (its READER), and two mistakes were made
     around it in opposite directions. First, three places asserted a WRITER that did not exist yet
     ("BOTH writers read it", "the live pool's own state", "cannot revert an APPLIED owner departure
     with no switch involved") — so an operator read a pin as protected that a plain
@@ -4384,7 +4389,7 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         ("tests/test_website_docs_consistency.py", 56):
             r"from tortoise\.commit_schema import Point, point_content_id",
         # the reference-surface relay that drifted: the runbook sentence naming the test
-        ("docs/ops/ci-runner-x64.md", 862): r"test_the_changes_job_carries_no_job_scope_env",
+        ("docs/ops/ci-runner-x64.md", 865): r"test_the_changes_job_carries_no_job_scope_env",
         # the capstone pin's re-cut history, which names it too
         ("tests/test_capstone_preregistration_9075.py", 1590):
             r"test_the_changes_job_carries_no_job_scope_env",

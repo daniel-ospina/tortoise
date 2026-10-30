@@ -37,7 +37,7 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   survive a
   re-registration. The invariant stays OBSERVED, not ASSERTED: `read_pool()` reads the live label
   set on every pass and `_preserve_labels` drops a pin from it, but no test and no gate compares
-  the live set to the invariant (`docs/ops/ci-runner-x64.md:92-94`), so re-measure it after any runner
+  the live set to the invariant (`docs/ops/ci-runner-x64.md:92-96`), so re-measure it after any runner
   is registered -- `tools/install-ci-runner-x64.sh --status`' `label-coverage` block prints `N of M`
   and exits 5 exactly when the pool is ASKED for the label and answers with none (#10275).
 

@@ -834,8 +834,9 @@ def test_repair_drops_the_version_pinned_class_and_keeps_every_custom_label(env)
     ⛔ THE RESIDUAL IS NAMED, NOT HIDDEN (agent-infra #10275). The installer can now attach
     `ubuntu-24.04` (`CI_RUNNER_OS_LABEL=on|auto`), so a runner re-registered by THIS path loses a pin
     it legitimately carried, and nothing here re-attaches it. A deliberate `--repair-labels` pass
-    does (with the flag `on|auto` it KEEPS `$OS_LABEL` and DROPS the rest of the family with a
-    `NOT KEPT:` line — the narrowing is in `tools/install-ci-runner-x64.sh`), a fresh install does,
+    does (with a resolution that CLAIMS it — `on`, or `auto` on a 24.04 host — it KEEPS `$OS_LABEL`
+    and DROPS the rest of the family with a `NOT KEPT:` line, while a declining `auto` or `off` drops
+    the whole class — the narrowing is in `tools/install-ci-runner-x64.sh`), a fresh install does,
     and `--status`' `label-coverage` exits
     5 when the pool is asked for the label and answers with none — so the loss is reported, not
     silent. Pinning the DROP here is what keeps that report the only way the label comes back.

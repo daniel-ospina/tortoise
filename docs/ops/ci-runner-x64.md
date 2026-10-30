@@ -90,8 +90,10 @@ on a 24.04 x86_64 host); the live pool is opted IN as the temporary mitigation d
 contract above. The arm64 spellings GitHub also publishes (`ubuntu-24.04-arm`,
 `ubuntu-22.04-arm`, `ubuntu-26.04-arm`) are never emitted. `tools/runner_autoscale.py::
 _preserve_labels` DROPS the whole class on re-registration — reading NO flag, the way it always
-has — so an attachment survives a repair that re-applies it (`--repair-labels` keeps only the box's own label under
-`on|auto`, see "TWO NAMED CARVE-OUTS" below) and does NOT survive a re-registration. That is NOT
+has — so an attachment survives a repair that re-applies it (`--repair-labels` keeps only the box's own
+label, and only where **this run's resolution** claims it — `on`, or `auto` on a host whose
+`/etc/os-release` reports 24.04; a DECLINING `auto` drops it with the rest of the family, see "TWO
+NAMED CARVE-OUTS" below) and does NOT survive a re-registration. That is NOT
 the same as "cannot become
 permanent": `scripts/ci_runner_gate.sh` treats any non-auto label as `extra` (`:224`) and re-emits
 it in its whole-set `PUT` body on every fallback transition (`:234`), and a runner nobody
@@ -102,8 +104,9 @@ DROPS it.** That is deliberate, not an oversight: it is the label a leg pins to 
 preserving it on re-registration is how an attachment out of band becomes permanent. ⛔ THE COST IS
 NAMED RATHER THAN HIDDEN: while the #6897 mitigation is engaged this pool legitimately carries it, so
 a runner the autoscaler RE-registers loses a pin it had, and nothing in `runner_autoscale.py`
-re-attaches it. `--repair-labels` does (it KEEPS `ubuntu-24.04` under `on|auto`, and drops the rest
-of the family), a fresh install does
+re-attaches it. `--repair-labels` does (it KEEPS `ubuntu-24.04` only where **this run's resolution**
+claims it — `on`, or `auto` on a 24.04 host — and drops the rest of the family, plus the whole class
+under `off`/unset or a DECLINING `auto`), a fresh install does
 (the installer's `resolve_labels` emits it), the ORPHANED derivation does (`_os_labels`, below), and
 `--status`' `label-coverage` exits **5** when the pool is ASKED for the label and answers with none —
 so the loss is REPORTED, not silent. Nothing ASSERTS the LIVE label set — `read_pool()` reads it on

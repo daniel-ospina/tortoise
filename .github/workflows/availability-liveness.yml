@@ -100,12 +100,14 @@ jobs:
     # runner") is FALSE. ⛔ WHAT DOES **NOT** HOLD IT: `_preserve_labels` still
     # DROPS a version pin on RE-registration and nothing in this tree
     # re-attaches it on that path, so a re-registered runner loses the label
-    # until someone runs `--repair-labels` (which KEEPS it while the flag is
-    # `on|auto`) or reinstalls. `--status`' `label-coverage` exit 5 is what makes
+    # until someone runs `--repair-labels` on a box whose OWN resolution
+    # claims it (`on`, or `auto` on a host whose `/etc/os-release` reports
+    # 24.04 — a DECLINING `auto` claims nothing and drops it with the rest of
+    # the family) or reinstalls. `--status`' `label-coverage` exit 5 is what makes
     # that visible; re-measure rather than trusting this text:
     # `gh api repos/<owner>/<repo>/actions/runners`. The installer never hands
     # `config.sh` a version pin with the flag off — pinned at
-    # `tests/test_ci_runner_x64_install.py:228`.
+    # `tests/test_ci_runner_x64_install.py:230`.
     # ⛔ THE COST, STATED: GitHub's label matching is cumulative and unscoped
     # (github/docs, "Using self-hosted runners in a workflow"), so while the
     # mitigation is engaged this observer is POOL-ELIGIBLE — and a guard whose
