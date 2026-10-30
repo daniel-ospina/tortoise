@@ -1421,6 +1421,15 @@ def assert_seam_target(harness: str,
         return (f"the capture extension {harness} loads cannot be resolved: "
                 f"{loaded} → {e.__class__.__name__}: {e}. Remove the symlink "
                 f"and re-run `tortoise install {harness}`.")
+    if not resolved.exists():
+        # A BROKEN symlink (`resolve()` is non-strict, so it gets here). The
+        # detector calls this `symlinked-artifact`, and "not a regular file"
+        # would hide the one fact the user needs: the load path is a dead link.
+        return (
+            f"the file {harness} LOADS is a broken symlink: {loaded} → "
+            f"{resolved}, which does not exist. Remove or re-point it, then "
+            f"re-run `tortoise install {harness}`."
+        )
     if not resolved.is_file():
         # A directory / FIFO / socket is not divisible into bytes, and READING
         # a FIFO would block — report it without hashing, exactly as
@@ -1437,9 +1446,31 @@ def assert_seam_target(harness: str,
         # tests, never this install's problem — the same posture
         # `detect_artifact_install` takes for an unmarkered shipped seam.
         return ""
+    if loaded_digest is None:
+        # Unreadable, and no digest was computed — so the byte verdict below
+        # would be a claim the code cannot support ("differs" from a hash that
+        # does not exist). This is the state `detect_artifact_install` reports
+        # as `not-readable`, and its remedy is the same one.
+        return (
+            f"the file {harness} LOADS is not readable: {loaded} → {resolved}. "
+            f"chmod it so the seam can load, then re-run "
+            f"`tortoise install {harness}`."
+        )
     if loaded_digest == shipped_digest:
         return ""
     via = "" if resolved == loaded else f" (which resolves to {resolved})"
+    if not hook_install._looks_like_our_script(resolved):
+        # Not ours at all: the installer REFUSES this exact state
+        # (`_foreign_install_refusal`), so "re-run the installer to replace it"
+        # would send the user into a dead end — and accuse them of editing a
+        # file they never wrote. Same sniff, same remedy as the detector's
+        # `foreign-artifact` (#4680: one ownership rule, not a second copy).
+        return (
+            f"the file {harness} LOADS is not a Tortoise seam: {loaded}{via}, "
+            f"sha256 {loaded_digest}, differs from the shipped {shipped}, "
+            f"sha256 {shipped_digest}. Move it aside, then re-run "
+            f"`tortoise install {harness}` to install ours."
+        )
     found = hook_install.read_hook_version(resolved)
     expected = hook_install.read_hook_version(shipped)
     if found is not None and expected is not None and found > expected:
@@ -1449,7 +1480,7 @@ def assert_seam_target(harness: str,
         # user it is capturing with older logic.
         return (
             f"the file {harness} LOADS is not the file this repo SHIPS: "
-            f"{loaded}{via}, sha256 {loaded_digest or 'unreadable'}, differs "
+            f"{loaded}{via}, sha256 {loaded_digest}, differs "
             f"from the shipped {shipped}, sha256 {shipped_digest} — the "
             f"installed seam is generation {found}, NEWER than this CLI's "
             f"{expected}, so it captures with newer logic and "
@@ -1457,7 +1488,7 @@ def assert_seam_target(harness: str,
         )
     return (
         f"the file {harness} LOADS is not the file this repo SHIPS: "
-        f"{loaded}{via}, sha256 {loaded_digest or 'unreadable'}, differs from "
+        f"{loaded}{via}, sha256 {loaded_digest}, differs from "
         f"the shipped {shipped}, sha256 {shipped_digest} — the installed "
         f"capture seam would run older or locally edited logic. Re-run "
         f"`tortoise install {harness}` to replace it."
@@ -1516,45 +1547,71 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     # symlink (the checkout it points at is untouched) or rename a real
     # directory to a dot-prefixed name the loader skips. Never a recursive
     # delete.
-    if legacy.is_symlink():
-        if dry_run:
-            actions.append(f"[dry-run] would unlink legacy extension {legacy}")
-        else:
-            legacy.unlink()
-            actions.append(f"disabled legacy capture extension: unlinked "
-                           f"{legacy} (symlink target untouched)")
-        changed = True
-    elif legacy.is_dir():
-        if legacy_disabled.exists() or legacy_disabled.is_symlink():
-            return InstallResult(harness, error=(
-                f"cannot disable the legacy extension {legacy}: "
-                f"{legacy_disabled} already exists. Move one of them aside and "
-                "re-run."))
-        if dry_run:
-            actions.append(f"[dry-run] would rename {legacy} → {legacy_disabled}")
-        else:
-            legacy.rename(legacy_disabled)
-            actions.append(f"disabled legacy capture extension: renamed {legacy} "
-                           f"→ {legacy_disabled} (files preserved)")
-        changed = True
-
-    if not _is_regular_unchanged(dst, payload):
-        if dst.exists() and dst.is_file() and not dst.is_symlink():
-            # A differing copy that passed the ownership guard is a stale or
-            # locally edited Tortoise extension — preserve it before the
-            # shipped bytes replace it (mirrors ``tortoise hooks upgrade``).
-            backup = _backup_path(dst)
+    #
+    # The whole mutation block is wrapped so a WRITE-TIME failure (ENOSPC,
+    # EROFS, EDQUOT, an immutable target) reports the actions that DID land
+    # (#10241 review): by the time the seam write can fail, this run may
+    # already have renamed the user's legacy extension aside and backed up
+    # their own seam, and Pi's capture behaviour has changed. Letting the
+    # OSError escape to `install_capture`'s catch-all would return a fresh
+    # result with `actions=()`, i.e. exactly the "told only FAILED while the
+    # machine was modified" report the caller now prints actions to prevent.
+    try:
+        if legacy.is_symlink():
             if dry_run:
-                actions.append(f"[dry-run] would back up {dst} → {backup}")
+                actions.append(
+                    f"[dry-run] would unlink legacy extension {legacy}")
             else:
-                _atomic_bytes(backup, dst.read_bytes(), 0o600)
-                actions.append(f"backed up {dst} → {backup}")
-        if dry_run:
-            actions.append(f"[dry-run] would install {dst}")
-        else:
-            _atomic_bytes(dst, payload, 0o644)
-            actions.append(f"installed {dst}")
-        changed = True
+                legacy.unlink()
+                actions.append(f"disabled legacy capture extension: unlinked "
+                               f"{legacy} (symlink target untouched)")
+            changed = True
+        elif legacy.is_dir():
+            if legacy_disabled.exists() or legacy_disabled.is_symlink():
+                return InstallResult(harness, changed=changed,
+                                     actions=tuple(actions), error=(
+                                         f"cannot disable the legacy extension "
+                                         f"{legacy}: {legacy_disabled} already "
+                                         "exists. Move one of them aside and "
+                                         "re-run."))
+            if dry_run:
+                actions.append(
+                    f"[dry-run] would rename {legacy} → {legacy_disabled}")
+            else:
+                legacy.rename(legacy_disabled)
+                actions.append(
+                    f"disabled legacy capture extension: renamed {legacy} "
+                    f"→ {legacy_disabled} (files preserved)")
+            changed = True
+
+        if not _is_regular_unchanged(dst, payload):
+            if dst.exists() and dst.is_file() and not dst.is_symlink():
+                # A differing copy that passed the ownership guard is a stale
+                # or locally edited Tortoise extension — preserve it before the
+                # shipped bytes replace it (mirrors ``tortoise hooks upgrade``).
+                backup = _backup_path(dst)
+                if dry_run:
+                    actions.append(f"[dry-run] would back up {dst} → {backup}")
+                else:
+                    _atomic_bytes(backup, dst.read_bytes(), 0o600)
+                    actions.append(f"backed up {dst} → {backup}")
+            if dry_run:
+                actions.append(f"[dry-run] would install {dst}")
+            else:
+                _atomic_bytes(dst, payload, 0o644)
+                actions.append(f"installed {dst}")
+            changed = True
+    except OSError as e:
+        return InstallResult(harness, changed=changed,
+                             actions=tuple(actions), error=(
+                                 f"install failed at "
+                                 f"{getattr(e, 'filename', None) or dst}: "
+                                 f"{e.__class__.__name__}: {e} — the capture "
+                                 f"seam is NOT fully installed, and the "
+                                 f"{len(actions)} action(s) above DID land. "
+                                 "Re-run once the cause is fixed; "
+                                 "`tortoise hooks status` reports what is on "
+                                 "disk."))
 
     # #10241: success is CLAIMED here, so it is VERIFIED here — the installer
     # re-reads the file Pi will load, resolved through any symlink, and refuses

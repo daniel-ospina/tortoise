@@ -447,7 +447,11 @@ the server's admission pool.
 
 These all stay on **#3515**, which this PR references (`Refs`, not `Closes`) for
 exactly this reason: they are the issue's own Indicators, and closing it while they
-are unbuilt would read as done.
+are unbuilt would read as done.  ⚠️ **#3515 has since been CLOSED** (2026-10-24, when
+#9788 landed), so this list is the historical ledger, not a live pointer — the
+current home of each remainder is named in its bullet where one exists.  **A
+remainder without a live home is not done; it is unowned**, and the startup bullet
+below is the one that matters here.
 
 - **Piece 7** — the server-side extraction claim + lease: the next task. Its test
   set is already named in the issue.
@@ -455,7 +459,11 @@ are unbuilt would read as done.
   reader) is not branch-aware. It is a **different invocation** (an explicit
   import), so it does not overwrite live turns; making it call the same contract is
   a follow-up.
-- **Startup resolution assert** on the user's machine — §7.
+- **Startup resolution assert** on the user's machine — §7. **Now held on
+  #10241**: its install-time half landed (`capture_install.assert_seam_target`), and
+  the startup half waits on the fail-loud-vs-warn decision §7/§9 record as the
+  owner's. Closing #10241 without it would re-orphan the criterion it was filed
+  for.
 - **Part (ii)'s falsifiers (a)/(b)/(c)** — §6.
 - **A monotone window across a `/compact`** — §4's recorded consequence. The
   deletion path is **narrowed, not closed**: the worker refuses a shrinking window

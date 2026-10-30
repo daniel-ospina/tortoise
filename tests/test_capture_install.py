@@ -1123,6 +1123,132 @@ def test_seam_target_assertion_names_the_resolved_target_of_a_symlink(home):
     assert str(shipped) in msg, msg
 
 
+def test_seam_target_assertion_read_side_default_does_not_fail_on_absence(home):
+    """#10241 review: the parameter's WHOLE point is the split — absence is the
+    installer's failure and the read-side caller's non-finding. The installer's
+    direction is pinned elsewhere; this pins the DEFAULT, which had no test, so
+    flipping it shipped green.
+
+    Mutation: make `require_present` default to `True` (a read-side caller — the
+    startup surface §7 leaves open — then hard-fails on "not installed")."""
+    # No seam at all in this home.
+    assert capture_install.assert_seam_target("pi", home=home) == ""
+    assert capture_install.assert_seam_target(
+        "pi", home=home, require_present=True) != ""
+
+
+def test_seam_target_assertion_calls_a_broken_symlink_broken(home):
+    """#10241 review: a DANGLING link is not "not a regular file" — it is a
+    broken pointer, which the detector reports as `symlinked-artifact` with
+    "remove or re-point it". Saying "not a regular file" hides the only fact
+    the user needs (the load path is a dead link).
+
+    Mutation: drop the `resolved.exists()` branch (the state falls through to
+    the non-regular-file sentence — RED)."""
+    real_home = home.resolve()
+    ext_dir = real_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    gone = real_home / "deleted-checkout" / capture_install.PI_EXTENSION_NAME
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(gone)  # target never created
+
+    msg = capture_install.assert_seam_target("pi", home=real_home)
+
+    assert msg, "a broken symlink at the loaded path passed"
+    assert "broken symlink" in msg, msg
+    assert str(dst) in msg, msg
+    assert str(gone) in msg, msg
+
+
+def test_seam_target_assertion_never_claims_a_verdict_it_cannot_hash(home):
+    """#10241 review: an UNREADABLE seam produced "sha256 unreadable, differs
+    from …" — a "differs" verdict from a digest that was never computed — and
+    the wrong remedy ("re-run install") where the detector says `not-readable`
+    / "chmod it". A claim the code cannot support is the exact class this PR
+    exists to remove.
+
+    Mutation: delete the `loaded_digest is None` branch (the sentence then
+    asserts "differs" and accuses the user of editing the file)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.write_bytes(_PI)
+    os.chmod(dst, 0o000)
+    try:
+        msg = capture_install.assert_seam_target("pi", home=home)
+    finally:
+        os.chmod(dst, 0o644)
+
+    assert msg, "an unreadable seam passed the assertion"
+    assert "not readable" in msg, msg
+    assert str(dst) in msg, msg
+    assert "differs from" not in msg, msg
+    assert "older or locally edited" not in msg, msg
+
+
+def test_seam_target_assertion_sends_a_foreign_file_to_move_aside(home):
+    """#10241 review: for a file that is NOT ours, "re-run `tortoise install pi`
+    to replace it" is a dead end — the installer REFUSES that state
+    (`_foreign_install_refusal`), and the user is told they edited a Tortoise
+    seam they never wrote. The detector's remedy (`move it aside, then re-run`)
+    is the one that works.
+
+    Mutation: drop the `_looks_like_our_script` gate (ours and foreign share the
+    "older or locally edited / re-run install" sentence)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.write_text("// someone else's extension\nexport default 1\n")
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    assert msg, "a foreign file at the loaded path passed the assertion"
+    assert "not a Tortoise seam" in msg, msg
+    assert "Move it aside" in msg, msg
+    # ...and the installer really does refuse it, so the two agree.
+    assert not install_capture("pi", home=home).ok
+
+
+def test_pi_install_write_failure_reports_the_actions_that_already_landed(home):
+    """#10241 review: the partial-write path — the one MOST likely to have
+    changed the machine — reported no actions at all, because the write-time
+    `OSError` escaped `_install_pi` into `install_capture`'s catch-all, which
+    returns a fresh result (`actions=()`). By then the legacy extension may be
+    renamed aside and the user's own seam backed up.
+
+    Mutation: remove the `try/except OSError` around the mutation block (the
+    actions vanish and this test reds)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / "tortoise-capture"
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// legacy producer\n")
+    stale = _PI + b"\n// locally edited - still ours (tortoise session)\n"
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.write_bytes(stale)
+
+    real_atomic = capture_install._atomic_bytes
+
+    def _fails_on_the_seam_write(target, data, mode):
+        if target.name == capture_install.PI_EXTENSION_NAME:
+            raise OSError(28, "No space left on device")
+        return real_atomic(target, data, mode)
+
+    capture_install._atomic_bytes = _fails_on_the_seam_write
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        capture_install._atomic_bytes = real_atomic
+
+    assert not res.ok, res.actions
+    assert any("disabled legacy capture extension" in a for a in res.actions), (
+        res.actions)
+    assert any("backed up" in a for a in res.actions), res.actions
+    assert "NOT fully installed" in res.error, res.error
+    # The state those actions describe really is on disk.
+    assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "index.ts").exists()
+    assert (ext_dir / (capture_install.PI_EXTENSION_NAME + ".bak")).exists()
+
+
 def test_pi_install_failure_still_reports_the_writes_that_landed(home, capsys):
     """#10241 review: a FAILED install may still have written state — the
     backup of the user's own seam, the legacy directory renamed aside. The CLI
