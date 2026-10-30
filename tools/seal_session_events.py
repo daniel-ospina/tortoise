@@ -150,7 +150,12 @@ def eligible(root: Path, *, keep_days: int, today: date,
     cutoff = today - timedelta(days=keep_days)
     clock = time.time() if now is None else now
     out = []
-    for path in sorted(root.glob("*.jsonl")):
+    # `Path.glob` swallows EVERY scandir OSError (pathlib's wildcard selector
+    # returns an empty iterator), so an unreadable substrate read as "nothing to
+    # do" — the same defect fixed one surface over in `_unreadable_archives`.
+    # `os.scandir` is explicit; `main` maps an OSError out of here to EXIT_ERROR.
+    for path in sorted(Path(entry.path) for entry in os.scandir(root)
+                       if entry.name.endswith(".jsonl")):
         day = _day_of(path)
         if day is None or day >= today or day >= cutoff:
             continue
@@ -217,12 +222,17 @@ def seal_one(root: Path, path: Path) -> Sealed:
     #    the only copy of the missing tail and report success (#6388 review
     #    cycle 3, P0).  Falls through to the publish path below.
     #  * anything else -> genuine disagreement. NEVER clobber; keep both.
-    if target.exists():
-        try:
-            prior = gzip.decompress(target.read_bytes())
-        except (OSError, EOFError, zlib.error) as e:
-            return Sealed(day, "conflict", len(plain), _size_or_zero(target),
-                          f"existing archive is unreadable: {e}")
+    # No `target.exists()` gate: it is a TOCTOU, and it is not total — EACCES
+    # propagates out of `seal_one` and aborts the whole `--apply` loop. Branch
+    # off the read instead (absence is a first-class case).
+    try:
+        prior: bytes | None = gzip.decompress(target.read_bytes())
+    except FileNotFoundError:
+        prior = None
+    except (OSError, EOFError, zlib.error) as e:
+        return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                      f"existing archive is unreadable: {e}")
+    if prior is not None:
         if _sha256(prior) == digest:
             if _changed_since(path, stat_before, len(plain)):
                 return Sealed(day, "conflict", len(plain), _size_or_zero(target),
@@ -233,7 +243,14 @@ def seal_one(root: Path, path: Path) -> Sealed:
                 return Sealed(day, "verify-failed", len(plain),
                               _size_or_zero(target),
                               f"archived but the source could not be removed: {e}")
-            _fsync_dir(root)
+            try:
+                _fsync_dir(root)
+            except OSError as e:
+                # The archive holds the full content; the removal may not be
+                # durable. Disclose it rather than escaping after the unlink.
+                return Sealed(day, "already-sealed", len(plain),
+                              _size_or_zero(target),
+                              f"sealed; a post-removal fsync failed: {e}")
             return Sealed(day, "already-sealed", len(plain), _size_or_zero(target))
         if not (plain.startswith(prior) and len(prior) < len(plain)):
             return Sealed(day, "conflict", len(plain), _size_or_zero(target),

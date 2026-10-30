@@ -458,6 +458,56 @@ def test_an_unreadable_archive_dir_is_not_ok(tmp_path, capsys):
     assert code == seal.EXIT_ERROR, code
 
 
+def test_an_unreadable_root_is_not_ok_and_not_silent(tmp_path, capsys):
+    """`Path.glob` swallows the scandir OSError, so an unreadable substrate read
+    as "nothing to do" — for BOTH modes.
+
+    Mutation: `eligible`'s `os.scandir` replaced by `root.glob("*.jsonl")` REDs
+    here (measured: --check exits 0 and --apply reports success over records it
+    never saw).
+    """
+    if os.geteuid() == 0:  # pragma: no cover - root ignores mode 000
+        pytest.skip("root ignores mode 000")
+    _write(tmp_path, TODAY - timedelta(days=30))
+    os.chmod(tmp_path, 0o100)  # searchable, not readable
+    try:
+        check = seal.main(["--root", str(tmp_path), "--today", TODAY.isoformat(),
+                           "--keep-days", "7", "--check"])
+        apply_code = seal.main(["--root", str(tmp_path), "--today", TODAY.isoformat(),
+                                "--keep-days", "7", "--apply"])
+    finally:
+        os.chmod(tmp_path, 0o755)
+    capsys.readouterr()
+
+    assert check == seal.EXIT_ERROR, check
+    assert apply_code == seal.EXIT_ERROR, apply_code
+
+
+def test_an_archive_that_cannot_be_read_does_not_abort_the_run(tmp_path, capsys):
+    """`exists()` is not total: EACCES on the archive must yield a verdict, not
+    a traceback that abandons every remaining day.
+
+    Mutation: restoring the `target.exists()` gate REDs here (measured:
+    PermissionError escapes into main's list comprehension).
+    """
+    if os.geteuid() == 0:  # pragma: no cover
+        pytest.skip("root ignores mode 000")
+    day = TODAY - timedelta(days=9)
+    path = _write(tmp_path, day, b'{"session_id": "p"}\n')
+    archive = tmp_path / seal.ARCHIVE_DIRNAME
+    archive.mkdir(parents=True, exist_ok=True)
+    seal.archive_path(tmp_path, day).write_bytes(gzip.compress(b"other\n", mtime=0))
+    os.chmod(archive, 0o000)
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        os.chmod(archive, 0o755)
+    capsys.readouterr()
+
+    assert result.status == "conflict", result
+    assert path.exists()
+
+
 def test_a_differing_archive_is_never_clobbered(tmp_path):
     """Two copies that disagree: NEITHER is discarded — a human decides.
 
