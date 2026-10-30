@@ -1704,6 +1704,26 @@ def test_architecture_docs_do_not_restate_the_rejected_parent_domain_session():
 #   2. NEGATIVE — the pre-step-4 phrasings as LITERAL substrings (`_FORBIDDEN_VERBATIM`).
 #      By construction these cannot mis-fire on correct prose, which is what five rounds of
 #      regex could not achieve.
+#
+# ⛔ …AND THE LITERAL LIST ALONE IS NOT A NEGATIVE HALF — measured, round 7 again. A denylist
+# of four strings catches four strings and nothing else, so the doc can keep the owned closure
+# sentence AND restore a live claim in ANY other wording. Executed against this file at
+# `edd54933b`: `- The consent page still accepts the legacy cookie.` → CLEAN, and both shapes
+# the round-7 review reproduced → CLEAN. The positive half cannot help: the closure IS present,
+# which is what "keep the closure, restore the claim" means. So the negative half is TWO
+# instruments, neither of which parses English:
+#
+#   (b) `_FORBIDDEN_VERBATIM` — the verbatim restores, low-cost and unfalsifiable by reword;
+#   (c) `_page_live_acceptances` — the ONE grammatical fact that makes a claim live, with NO
+#       excuse vocabulary: THE PAGE IS NAMED, and an acceptance verb is in the PRESENT tense
+#       (or `still <participle>`) beside it. Rounds 4-7's failures were the POSITIVE half's
+#       rewordings and the excuse machinery's laundering — not this predicate. The instrument
+#       that failed is gone; the fact that a named page cannot read a deleted cookie is not.
+#
+# RESIDUAL, stated so it is not mistaken for a proof: a claim whose subject is a bare pronoun
+# (`It still accepts the legacy cookie.`) names no page, so (c) does not fire on it. That is the
+# documented cost of not writing a parser; the four verbatim strings plus the named-page rule
+# cover every shape the review has actually reproduced.
 
 #: The closure sentence, verbatim, in each scanned doc's CURRENT region. It is the state
 #: that ships; a doc that stops carrying it is claiming something else, and this assertion
@@ -1734,6 +1754,86 @@ _FORBIDDEN_VERBATIM: tuple[tuple[str, str], ...] = (
         "the page re-reads nothing — it was deleted, and its replacement reads a token",
     ),
 )
+
+#: The page's THREE names in this repo's own prose — `consent page` (the arch docs),
+#: `consent screen` (`docs/oauth-mcp.md`) and `authorize page` (the #9664 evidence). One
+#: constant, so a rename in the prose is one edit here rather than a silent blind spot.
+_PAGE_SUBJECT = (
+    r"(?:mcp\s+)?(?:consent|authori[sz]e|authorization)[- ](?:page|screen)"
+)
+
+#: (c) THE NAMED-PAGE LIVE CLAIM — the one grammatical fact, with no excuse vocabulary.
+#:
+#: ARM 1, noun first: `the consent page … writes it`, `only the consent page that issues it`.
+#:   Present tense only. EVERY past-tense spelling belongs to the retirement record the
+#:   decision rests on — "its inline client READ the cookie back as its session", "the page
+#:   that USED TO read it" — so `read`/`accepted`/`kept` must not be in this alternation.
+#:   80 chars, which is enough for ` that writes it` and for `, was deleted, so nothing issues
+#:   it`; a full stop stops it, so a filename (`tortoise/oauth.py`) cannot be spanned.
+#: ARM 2, verb first: `so it still authenticates — by the MCP consent page`, and the passive
+#:   `The legacy cookie is STILL accepted by the consent page.` `still` is what makes the
+#:   passive LIVE rather than a record — `formerly accepted by the deleted consent page`
+#:   carries no `still`, so the record cannot be reddened by this arm.
+_PAGE_LIVE_NOUN_FIRST = re.compile(
+    r"(?P<page>" + _PAGE_SUBJECT + r")"
+    r"(?P<before>[^.\n]{0,80}?)"
+    # ⛔ NON-GREEDY, and that is load-bearing: greedy `before` ran past the FIRST verb to a
+    # LATER one and then read a negation belonging to THAT verb — `The consent page still
+    # accepts the legacy cookie, though it no longer writes it.` had its `accepts` swallowed
+    # and the `no longer` in front of `writes` excused the whole clause (executed).
+    # ⛔ THE `s` IS REQUIRED. `reads?` matched `read` — the PAST tense of the retirement
+    # record — so `the consent page that used to read it back as its session` reddened as a
+    # live claim the moment this arm was added (executed: `docs/auth-architecture.md`). Present
+    # tense is third-person singular here because the page is one page.
+    r"(?P<verb>(?:re-?)?reads|accepts|authenticates|issues|writes|mints"
+    r"|signs\s+(?:visitors?\s+)?in|logs\s+(?:visitors?\s+)?in)\b",
+    re.IGNORECASE,
+)
+_PAGE_LIVE_VERB_FIRST = re.compile(
+    r"\bstill\b[^.\n]{0,40}"
+    r"(?:(?:re-?)?read|accepted|issued|trusted|authenticated|reads?|accepts?|issues?"
+    r"|authenticates?)\b"
+    r"[^.\n]{0,24}\bby\s+(?:the\s+)?(?P<page>" + _PAGE_SUBJECT + r")",
+    re.IGNORECASE,
+)
+
+#: …and a NEGATED verb is a CLOSURE, not a claim. Deliberately NARROW — at most two words
+#: between the negation and the verb, and anchored so it must END at the verb. Rounds 4-6 died
+#: widening this into a sentence-wide excuse: `The consent page is not deprecated and still
+#: accepts the legacy cookie` read as a denial under a 40-char span, and a 40-CHARACTER one was
+#: what made a denial in a subordinate clause excuse a claim in the main one. This arm does not
+#: excuse anything — it only says which verb the doc actually negated.
+_NEGATED_BESIDE_VERB = re.compile(
+    r"\b(?:no longer|not|never|nothing|nobody|cannot)\b(?:\s+[\w-]+){0,2}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _page_live_acceptances(scanned: str) -> list[str]:
+    """Sentences that present the DELETED page as an accepting surface, in the present tense.
+
+    No disposition markers, no clause splitting, no pronoun resolution — see the block comment
+    above for why each of those was tried and removed. This asks one question: does a NAMED
+    page carry an un-negated acceptance verb beside it? A retirement record answers "no"
+    because it is written in the past tense (`formerly`, `used to`, `read`, `kept`), and every
+    past-tense spelling for the whole claim-set can be enumerated from `git show
+    origin/main:<doc>` — which is why the past tense is not an arm here.
+    """
+    found: list[str] = []
+    for pattern, negatable in (
+        (_PAGE_LIVE_NOUN_FIRST, True),
+        (_PAGE_LIVE_VERB_FIRST, False),
+    ):
+        for m in pattern.finditer(scanned):
+            if negatable and _NEGATED_BESIDE_VERB.search(m.group("before")):
+                continue
+            # `scanned` is whitespace-NORMALISED, so its offsets are not the doc's line
+            # numbers. Report the matched span instead: a line number that pointed at the
+            # wrong line would be worse than none.
+            lo = max(0, m.start() - 60)
+            hi = min(len(scanned), m.end() + 40)
+            found.append(f"  …{scanned[lo:hi].strip()}…")
+    return found
 
 
 def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
@@ -1778,6 +1878,18 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
                 "#3524 §9 step 4 deleted that page; a reader acting on this line re-derives "
                 "a surface that no longer exists."
             )
+
+    live = _page_live_acceptances(scanned)
+    if live:
+        violations.append(
+            f"{rel} presents, in its CURRENT-architecture region, the DELETED page as an "
+            "ACCEPTING surface in the present tense:\n" + "\n".join(live)
+            + "\n\n#3524 §9 step 4 deleted that page — it holds no session and reads no "
+            "cookie (`tortoise/oauth.py` has no `sb-tortoise`, no `document.cookie` and no "
+            "inline client), so a claim like this sends a reader to rebuild it. State the "
+            "closure in the past tense (`formerly`, `used to`, `read`, `kept`) if you are "
+            "recording what the page did."
+        )
 
     return violations
 
@@ -1851,6 +1963,44 @@ def test_the_closure_claim_is_OWNED_not_parsed():
         text = doc.read_text()
         found = _consent_page_acceptance_violations(doc.relative_to(REPO).as_posix(), text)
         assert not found, "\n\n".join(found)
+
+    # (h) ⛔ THE FOUR LITERAL STRINGS ARE NOT THE NEGATIVE HALF. "Keep the closure, restore the
+    #     claim" is the reversion this gate exists for, and the positive half CANNOT catch it
+    #     (the closure is present) — so a denylist alone passes every live claim in any other
+    #     wording. Executed against this file with the denylist as the whole negative half:
+    #     all three of the cases below were CLEAN. Each is a live claim that NAMES the page.
+    for live_claim in (
+        # the plainest possible claim — round-7's own control
+        "- The consent page still accepts the legacy cookie.",
+        # round-7 reproduction (b): a disposition about two OTHER consumers laundering it
+        "- **Accepted by — only the consent page that issues it (both former consumers "
+        "stopped in #4178).**",
+        # round-7 reproduction (a): the pre-step-4 affirmation, the page named on both sides
+        "- The cookie is still **issued** — and still **read back as its own session**, so it "
+        "still authenticates — by the MCP consent page in `tortoise/oauth.py`.",
+        # …and the page's OTHER two names, plus the fix's own vocabulary
+        "- The authorize page still accepts the legacy cookie.",
+        "- The consent screen still accepts the legacy cookie.",
+        "- The consent page signs visitors in with the legacy cookie.",
+        # a denial in a SUBORDINATE clause must not excuse a claim in the main one
+        "- The consent page still accepts the legacy cookie, though it no longer writes it.",
+    ):
+        assert _consent_page_acceptance_violations(rel, good + live_claim + "\n"), (
+            f"a LIVE acceptance claim passed the gate: {live_claim!r}")
+
+    # (i) ⛔ …and the new negative half must not red the retirement RECORD, which is the
+    #     evidence the decision rests on. Every shape here is past tense or explicitly negated.
+    for record in (
+        "- **Formerly accepted by — the deleted consent page.** Its inline client read the "
+        "legacy cookie back as its session until #3524 §9 step 4 REMOVED it.",
+        "- Its only writer, the MCP consent page, was deleted, so nothing issues it and "
+        "nothing accepts it.",
+        "- The consent page that used to read it back as its session holds no session at all.",
+        "- The consent page no longer accepts the legacy cookie.",
+        "- The consent page never accepts the legacy cookie.",
+    ):
+        assert _consent_page_acceptance_violations(rel, good + record + "\n") == [], (
+            f"a CORRECT retirement record was refused: {record!r}")
 def test_auth_architecture_doc_keeps_the_rendered_welcome_case():
     """
     `/welcome` renders exactly ONE case, and the doc must keep saying so — inside its block.
