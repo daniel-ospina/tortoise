@@ -812,9 +812,14 @@ S6  COMMIT
 
 #### ✅ Jev for classification is cheap — but ⚠️ `llm_tail` is not the seam
 
-> **STATUS (2026-10-26, `#5087`): the seam now EXISTS — internal, and OFF by default.**
-> `tortoise/s2_decision_seam.py` is the adapter + the two versioned prompts (`vet-v1`,
-> `classify-v1`) + the validating parser; it is consumed through the seams that already
+> **STATUS (2026-10-26, `#5087`; prompts `-v2` since `#10117`): the seam now EXISTS — internal, and OFF by default.**
+> `tortoise/s2_decision_seam.py` is the adapter + the two versioned prompts (`vet-v2`,
+> `classify-v2` — both carrying the untrusted-data framing on every question, so an
+> instruction embedded in session text has to run against an explicit trusted-side rule that it
+> is **data**, which **reduces but does not remove** the ability of embedded text to steer a
+> verdict: the vendor's own note says such content still "can move the answer", and §4 of
+> `docs/architecture/S2-DECISION-SEAM.md` records that the clause does **not** make injection
+> impossible) + the validating parser; it is consumed through the seams that already
 > existed (`vet_gate.vet_candidates(arbiter=…)`, `kind_classifier.KindClassifier(tail_decider=…)`)
 > and armed only by `TORTOISE_S2_DECISION_SEAM`. **What it does, what it deliberately does not
 > do, and its measured cost per call: `docs/architecture/S2-DECISION-SEAM.md`.** The paragraph
