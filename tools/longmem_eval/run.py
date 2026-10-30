@@ -739,9 +739,10 @@ def run_measured_evaluation(
     entry point may adopt by forgetting.
 
     Programmatic callers therefore keep calling ``run_evaluation`` directly
-    and keep D5 unchanged; entry points call this. Passing ``embedder_status``
-    a second time through ``**kwargs`` is Python's own TypeError (the keyword
-    is declared), so the gate argument cannot be shadowed.
+    and keep D5 unchanged; entry points call this. ``embedder_status`` is a
+    DECLARED keyword parameter HERE, so a caller that also forwards it inside
+    ``**kwargs`` raises Python's own ``TypeError`` (multiple values for keyword
+    argument) — the gate argument cannot be shadowed by a permissive default.
     """
     status = embedder_status
     if (not isinstance(status, dict) or "available" not in status
