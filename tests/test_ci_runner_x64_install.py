@@ -3997,6 +3997,59 @@ def test_memory_ci_runners_exit_contract_is_intent_gated():
     )
 
 
+def test_memory_facts_this_pr_does_not_measure_are_not_offset_shifted():
+    """⛔ MEMORY.md IS GRADED HERE TOO — AND A `git diff -U0` DELTA WAS APPLIED TO ITS PROSE.
+
+    A "re-derive every ref" pass over this PR applied one constant (`+55`, a line-offset delta)
+    to THREE numbers in `MEMORY.md` that this change never measured: `[docs]`'s worked example
+    moved one of its three spellings (`:39205` → `:39260`, the other two left), and
+    `[silent-loss]`'s measured box fact moved both loopback ports (`:6379`/`:16379` →
+    `:6434`/`:16434`). Neither line has anything to do with the CI-runner label contract, and
+    `MEMORY.md` is read by lanes that never diff it against `main` — so the drift is silent.
+
+    Both pins are INVARIANTS, not fresh magic numbers, so a legitimate future edit still passes:
+
+    * the `[docs]` spellings (`:<n>`, `L <n>`, `line <n>`) are one worked example of the SAME
+      anchor, so they must carry ONE number — a shift of any one of them reds the sentence;
+    * the `[silent-loss]` ports are a MEASURED box fact that `tortoise/event_store.py`
+      (`_store_identity`) names for the same two stores, so the two files must agree.
+
+    Mutation: restore either `+55` value (`:39260`, `:6434`/`:16434`) → RED. Measured: pre-fix the
+    three spellings report `('39260', '39205', '39205')` and neither shifted port appears in
+    `event_store.py`'s docstring.
+    """
+    text = (REPO_ROOT / "MEMORY.md").read_text()
+
+    docs_line = re.search(r"^\[docs\]:.*$", text, re.MULTILINE)
+    assert docs_line is not None, "MEMORY.md lost its `[docs]` line — re-anchor this pin"
+    example = re.search(r"plus `:(\d+)`/`L (\d+)`/`line (\d+)`", docs_line.group(0))
+    assert example is not None, (
+        "MEMORY.md's `[docs]` entry no longer carries its worked example of the three spellings "
+        "(`:N`, `L N`, `line N`) — re-anchor this pin rather than deleting it"
+    )
+    spellings = example.groups()
+    assert len(set(spellings)) == 1, (
+        "the `[docs]` entry's three spellings are one worked example of the SAME anchor, so they "
+        f"must carry one number — a line-offset pass moved one of them: {spellings!r}"
+    )
+
+    silent = re.search(r"^\[silent-loss\]:.*$", text, re.MULTILINE)
+    assert silent is not None, "MEMORY.md lost its `[silent-loss]` line — re-anchor this pin"
+    pair = re.search(r"two loopback servers `:(\d+)`/`:(\d+)`", silent.group(0))
+    assert pair is not None, (
+        "MEMORY.md's `[silent-loss]` entry no longer states the two-loopback-servers measurement "
+        "— re-anchor this pin rather than deleting it"
+    )
+    store_identity = (REPO_ROOT / "tortoise" / "event_store.py").read_text()
+    for port in pair.groups():
+        assert f"localhost:{port}" in store_identity, (
+            f"`[silent-loss]` cites loopback port :{port}, but `tortoise/event_store.py` "
+            "(`_store_identity`, the seam the sentence is about) names no such store — the entry's "
+            "measured pair must match the source it explains, and a constant shift breaks it "
+            "without touching a single word"
+        )
+
+
 # ── 8. a missing installer is a FAIL, not a silent skip ───────────────────────────────────────
 def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path):
     """Copied one directory down, the module's own `REPO_ROOT` has no installer → it must go RED.
