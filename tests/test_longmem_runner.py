@@ -5025,8 +5025,8 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     """#4821 (b)+(c): the ``--skip-preflight`` waiver still lets the sweep
     run (the documented debugging/offline escape hatch), but the receipt can
     never read as a measurement — each cell's ``vector_strategy`` /
-    ``embedding_coverage`` come from that cell's report methodology, and the
-    winner line never uses the SELECTED vocabulary.
+    ``embedding_coverage`` rolled up from that cell's per-question outcomes,
+    and the winner line never uses the SELECTED vocabulary.
 
     RED when the fix is deleted: pre-fix the cells carried no dense-leg
     fields at all and the winner was printed as ``SELECTED granularity``
@@ -5041,7 +5041,15 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     assert results
     # (c) the receipt cannot claim density it did not measure
     assert results[0]["vector_strategy"] == "unavailable"
-    assert results[0]["embedding_coverage"] in (None, 0.0)
+    # The coverage witness is DETERMINISTIC here, not a disjunction: the
+    # pinned no-embedder env writes every point without an embedding, so the
+    # cell's rolled-up write-time coverage is exactly 0.0. `in (None, 0.0)`
+    # was satisfied by a permanently-None field and could not fail (#4821
+    # review P1): `embedding_coverage` is a PER-QUESTION metric, so reading
+    # it off the aggregate `report["retrieval"]` always produced None.
+    assert results[0]["embedding_coverage"] == 0.0
+    assert results[0]["points_total"] > 0
+    assert results[0]["points_embedded"] == 0
     assert sg._dense_leg_verified(results) is False
     capsys.readouterr()
     # (b) ... and the artifact says so, in the operator's own vocabulary
@@ -5080,6 +5088,89 @@ def test_sweep_granularity_cli_waiver_is_the_only_way_through(
     assert payload["dense_leg"]["embedder"]["reason"] == "no_embedder"
     assert all(r["vector_strategy"] == "unavailable"
                for r in payload["results"])
+    # ... and the coverage witness in the WRITTEN receipt is a number, not a
+    # permanently-None field (#4821 review P1).
+    assert all(r["embedding_coverage"] == 0.0 for r in payload["results"])
+
+
+# ── #4821 review P1: the coverage witness must actually testify ───────────
+
+def _cell_report(*, points_total, points_embedded, per_q):
+    """A ``run_evaluation``-shaped report whose coverage lives WHERE R3 D3
+    puts it — per question, in ``report["outcomes"]`` — and NOT in the
+    ``retrieval`` aggregate (which is left empty here on purpose: reading a
+    nonexistent aggregate key is exactly the defect this pins)."""
+    outcomes = [{"question_id": f"q{i}",
+                 "points_total": points_total,
+                 "points_embedded": points_embedded,
+                 "embedding_coverage": per_q} for i in range(2)]
+    return outcomes, {"retrieval": {},
+                      "methodology": {"vector_strategy": "enabled"},
+                      "outcomes": outcomes}
+
+
+def test_sweep_granularity_rolls_up_per_question_embedding_coverage(monkeypatch):
+    """#4821 review P1: a MEASURED hybrid cell reports its REAL write-time
+    coverage. The sweep advertises two per-cell dense-leg witnesses; before
+    this fix ``embedding_coverage`` was read off ``report["retrieval"]``,
+    which never carries it, so it was ``None`` for every cell — a witness
+    that could not tell coverage ``1.0`` from ``0.0``.
+
+    RED on the pre-fix code: all four cases read ``None``, while three of
+    them must be a number. The embedder is not involved — the cell's report
+    is supplied, so this runs (and fails) in any environment."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    cases = [
+        # (points_total/q, points_embedded/q, per-q coverage, expected cell)
+        (10, 10, 1.0, 1.0),      # every point embedded
+        (10, 0, 0.0, 0.0),       # keyword-only — the #4718 failure mode
+        (10, 5, 0.5, 0.5),       # partial
+        (None, None, None, None),  # pre-R3 resume: unknown, never a fake 0
+    ]
+    for points_total, points_embedded, per_q, expected in cases:
+        outcomes, report = _cell_report(points_total=points_total,
+                                       points_embedded=points_embedded,
+                                       per_q=per_q)
+        monkeypatch.setattr(sg, "run_measured_evaluation",
+                            lambda *a, **k: (outcomes, report))
+        results, _winner = sg.run_sweep(
+            _mini(), chunk_turns_values=(1,), ingest_mode="v2",
+            reader=MockReader(), judge=MockJudge(), limit=1,
+            embedder_status={"available": True, "reason": None,
+                             "model": "pinned"})
+        assert results[0]["embedding_coverage"] == expected, (
+            f"total={points_total} embedded={points_embedded}: the cell's "
+            f"coverage witness did not testify")
+        # the census travels with the number so it stays auditable
+        expected_total = 20 if points_total is not None else None
+        assert results[0]["points_total"] == expected_total
+        assert results[0]["points_embedded"] == (
+            2 * points_embedded if points_embedded is not None else 0)
+        assert results[0]["vector_strategy"] == "enabled"
+
+
+def test_embedding_coverage_is_never_on_the_retrieval_aggregate(
+        tmp_path, monkeypatch):
+    """#4821 review P1 root cause, pinned against the REAL report: the sweep's
+    coverage witness lives per question (D3), and the aggregate
+    ``report["retrieval"]`` does not carry it — its dense-adjacent key is
+    ``evidence_coverage``, a different (M6/D6 ingest) metric. A future
+    reader of the aggregate is reading a key that does not exist."""
+    _pin_no_embedder(monkeypatch)
+    _outcomes, report = run_evaluation(
+        _mini()[:1], reader=MockReader(), judge=MockJudge(), ks=(5,),
+        top_k=5, split="s", work_dir=str(tmp_path),
+        ingest_mode="deterministic", chunk_turns=2)
+    assert "embedding_coverage" not in report["retrieval"]
+    assert "evidence_coverage" in report["retrieval"]  # the key that IS there
+    per_q = [o.get("embedding_coverage") for o in report["outcomes"]]
+    assert per_q and all(c is not None for c in per_q), per_q
+    # ... and the sweep's roll-up reads exactly that per-question list
+    from tools.longmem_eval.sweep_granularity import (
+        _aggregate_embedding_coverage,
+    )
+    assert _aggregate_embedding_coverage(report["outcomes"]) == 0.0
 
 
 def test_no_entry_point_bypasses_the_dense_leg_gate():

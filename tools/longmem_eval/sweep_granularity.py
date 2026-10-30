@@ -31,11 +31,12 @@ load, naming the reason and stating that no measurement was produced.
 ``--skip-preflight`` is the ONE explicit waiver (debugging / offline wiring)
 and must not be confused with ``--mock``: it lets the sweep CONTINUE when the
 embedder cannot load, and the outcome is then recorded rather than implied —
-every cell carries ``vector_strategy`` / ``embedding_coverage`` from its own
-report methodology (``unavailable`` when the leg could not load), the table
-prints ``NOT MEASURED``, and the winner line never says SELECTED. A waiver
-taken on a host where the embedder DOES load is a no-op on all of that: the
-cells record ``enabled``, because that is what ran.
+every cell carries ``vector_strategy`` from its own report methodology and
+``embedding_coverage`` rolled up from its own PER-QUESTION outcomes
+(``unavailable`` / ``0.0`` when the leg could not load), the table prints
+``NOT MEASURED``, and the winner line never says SELECTED. A waiver taken on
+a host where the embedder DOES load is a no-op on all of that: the cells
+record ``enabled``, because that is what ran.
 """
 from __future__ import annotations
 
@@ -71,6 +72,38 @@ DEFAULT_SWEEP_KS = (5, 10, 20)
 def _selection_metric_label(ingest_mode: str) -> str:
     return ("evidence_recall@10" if ingest_mode == "v2"
             else "turn_recall@10 (view-only)")
+
+
+def _aggregate_embedding_coverage(outcomes: list[dict]) -> float | None:
+    """Roll the PER-QUESTION write-time coverage up into ONE cell receipt.
+
+    #4821: ``embedding_coverage`` is a per-question metric (R3 #1542 D3 —
+    produced in ``retrieve.py``, projected per outcome in ``run.py``). The
+    report's AGGREGATE ``report["retrieval"]`` does not carry it (its
+    dense-adjacent key is ``evidence_coverage``, a different M6/D6 ingest
+    metric), so reading it from there returned ``None`` for EVERY sweep and
+    the field could never testify — ``None`` for coverage ``1.0`` and ``0.0``
+    alike.
+
+    Aggregating the per-question values is what an eval harness does with a
+    per-sample metric at the aggregate level (the aggregate is derived FROM
+    the per-item records, never carried separately). Point-weighted, so it is
+    the write-time coverage of the cell's points: ``1.0`` when every point was
+    embedded, ``0.0`` when none was. Questions that carry no coverage data
+    (a pre-R3 checkpoint resume) are excluded rather than counted as zero —
+    an unknown is not a miss. ``None`` when the cell knows about no points at
+    all, which is the honest shape for "not checked" (D5)."""
+    totals = [o.get("points_total") for o in outcomes]
+    embedded = [o.get("points_embedded") for o in outcomes]
+    known_total = sum(t for t in totals if isinstance(t, int))
+    known_embedded = sum(e for e in embedded if isinstance(e, int))
+    if known_total:
+        return round(known_embedded / known_total, 4)
+    per_q = [o.get("embedding_coverage") for o in outcomes
+             if o.get("embedding_coverage") is not None]
+    if per_q:
+        return round(sum(per_q) / len(per_q), 4)
+    return None
 
 
 def _dense_leg_verified(results: list[dict]) -> bool:
@@ -129,9 +162,12 @@ def run_sweep(
     Returns ``(results, winner)`` where each result records the per-config
     aggregates (evidence/chunk-evidence/session/turn recall@10,
     context_tokens_mean, context_point_count_mean) **plus the dense-leg
-    receipt fields** ``vector_strategy`` and ``embedding_coverage`` copied
-    from that cell's report, and the winner is the D2 selection (None in
-    deterministic mode or when no config is eligible).
+    receipt fields** — ``vector_strategy`` from that cell's report
+    methodology, and ``embedding_coverage`` (with its ``points_total`` /
+    ``points_embedded`` census) rolled up from that cell's PER-QUESTION
+    outcomes, which is the only place D3 records it (see
+    :func:`_aggregate_embedding_coverage`) — and the winner is the D2
+    selection (None in deterministic mode or when no config is eligible).
 
     #4821 — the dense-leg gate. This function used to call ``run_evaluation``
     directly, so it never ran the pre-flight that ``run.py``'s ``run_main``
@@ -178,8 +214,26 @@ def run_sweep(
             # #4821: the dense-leg receipt rides the per-cell row. An entry
             # point that scores a keyword-only run as if it were hybrid has
             # to lie in these two fields, not merely forget a flag.
+            #
+            # ``vector_strategy`` comes from the methodology (where D5 puts
+            # it). ``embedding_coverage`` is PER QUESTION (D3) — the
+            # aggregate ``report["retrieval"]`` does not carry it, so it is
+            # rolled up from this cell's own outcomes. Reading it off the
+            # aggregate returned ``None`` for every cell, a witness that
+            # could never testify.
             "vector_strategy": methodology.get("vector_strategy"),
-            "embedding_coverage": ret.get("embedding_coverage"),
+            "embedding_coverage": _aggregate_embedding_coverage(
+                report.get("outcomes") or []),
+            # The raw census, so the rolled-up number stays auditable back to
+            # the points it was computed over (None on a pre-R3 resume).
+            "points_total": sum(
+                t for t in (o.get("points_total")
+                            for o in (report.get("outcomes") or []))
+                if isinstance(t, int)) or None,
+            "points_embedded": sum(
+                e for e in (o.get("points_embedded")
+                            for o in (report.get("outcomes") or []))
+                if isinstance(e, int)),
         })
     return results, _select_winner(results, ingest_mode=ingest_mode,
                                    context_cap=context_cap)
