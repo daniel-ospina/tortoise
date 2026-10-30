@@ -1442,6 +1442,39 @@ def test_the_bearer_arm_of_the_preview_is_unchanged(api_client, session_user):
     assert r.json()["org_id"] == "team-free-001", r.text
 
 
+def test_BOTH_arms_of_the_preview_ship_Cache_Control_no_store(api_client, session_user):
+    """An identity-bearing GET must not be storable by a SHARED cache.
+
+    ⛔ The carrier change removed a FREE protection. The old page authenticated with
+    `Authorization: Bearer …`, and RFC 9111 §3.5 forbids a shared cache from reusing the response
+    to a request carrying that header. §9 step 4 moved the page to `X-Consent-Token` in a HEADER
+    — right for logs and `Referer` — but no cache rule covers a custom header, this 200 is
+    heuristically cacheable, and the cache key is the URL, which does not contain the token. So
+    an intermediary could replay one visitor's team list to another.
+
+    Pinned on BOTH arms: the token arm is the one the carrier change created, and the bearer arm
+    is pinned so the guarantee stops depending on a cache honouring a rule about a header the page
+    no longer sends.
+    """
+    from tortoise.oauth import CONSENT_TOKEN_HEADER
+
+    tc, _cp = api_client
+    params = _authorize_params(tc)
+
+    token_arm = tc.get("/oauth/consent/preview", params=_preview_bind(params),
+                       headers={CONSENT_TOKEN_HEADER: _consent_token_for(params)})
+    assert token_arm.status_code == 200, token_arm.text
+    assert token_arm.headers.get("cache-control") == "no-store", (
+        f"the token arm is cacheable: {dict(token_arm.headers)!r}")
+
+    session_user()
+    bearer_arm = tc.get("/oauth/consent/preview",
+                        params={"resource": params["resource"] or ""})
+    assert bearer_arm.status_code == 200, bearer_arm.text
+    assert bearer_arm.headers.get("cache-control") == "no-store", (
+        f"the bearer arm is cacheable: {dict(bearer_arm.headers)!r}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 3c. #3443: the page navigates the SERVER-built target, never the raw string
 # ═══════════════════════════════════════════════════════════════════════════

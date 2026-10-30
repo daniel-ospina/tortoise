@@ -41831,6 +41831,29 @@ async def oauth_authorize(request: Request):
                     headers={"Content-Security-Policy": csp})
 
 
+def _preview_response(payload: dict) -> JSONResponse:
+    """A consent-preview body with `Cache-Control: no-store`.
+
+    ⛔ THE CARRIER CHANGED, AND IT TOOK A FREE PROTECTION WITH IT. This route used to
+    authenticate with `Authorization: Bearer …`, and RFC 9111 §3.5 forbids a SHARED cache from
+    storing or reusing the response to a request carrying that header. #3524 §9 step 4 moved the
+    page's identity to `X-Consent-Token` — right for access logs and `Referer` — but no cache rule
+    covers a custom header, this response is a heuristically cacheable 200 (RFC 9111 §4.2.2), no
+    validator or `Vary` is sent, and the cache key is the URL, which does NOT contain the token
+    (that is the point of a header). An intermediary in front of `api.premiselabs.co` could then
+    replay one visitor's team list to another.
+
+    The BEARER arm gets the same header: one story for the route, and it stops depending on a
+    cache honouring a rule about a header the page no longer sends. This mirrors
+    `api_key_create`/`api_key_rotate`/`tenant_register` (`no-store, no-cache, must-revalidate`)
+    and the mint's own `Cache-Control: NO_STORE` on the app side — the AS half was the only leg
+    missing it.
+    """
+    response = JSONResponse(content=payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/oauth/consent/preview")
 async def oauth_consent_preview(request: Request):
     """Consent-page org preview (D4): which org a grant would bind, given the
@@ -41885,16 +41908,18 @@ async def oauth_consent_preview(request: Request):
         except Exception as exc:        # last-resort: never a bare 500 detail (#3026)
             return _oauth_unconverted_failure(exc, where="oauth/consent/preview token")
         try:
-            return consent_preview(cp, assertion["sub"], _oauth_base(request),
-                                   request.query_params.get("resource") or None)
+            return _preview_response(consent_preview(
+                cp, assertion["sub"], _oauth_base(request),
+                request.query_params.get("resource") or None))
         except OAuthError as exc:
             return _oauth_error_response(exc)
         except Exception as exc:        # last-resort: never a bare 500 detail (#3026)
             return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
     user = await verify_session_jwt(request)
     try:
-        return consent_preview(cp, user["user_id"], _oauth_base(request),
-                               request.query_params.get("resource") or None)
+        return _preview_response(consent_preview(
+            cp, user["user_id"], _oauth_base(request),
+            request.query_params.get("resource") or None))
     except OAuthError as exc:
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
