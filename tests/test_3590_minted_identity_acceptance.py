@@ -1683,7 +1683,11 @@ def test_the_node_id_helper_counts_holders_not_truthy_ids(sdk):
         [held, None], key=str), "fixture did not build the mixed holder shape"
     with pytest.raises(AssertionError) as mixed:
         node_id(proj, "Object", "Held")
-    assert "2 live holder(s)" in str(mixed.value), str(mixed.value)
+    # The count is of HOLDERS over an ANY-status query, so the message does not
+    # say "live" (#9876 review round 14, cosmetic): a live + a superseded twin
+    # used to report "2 live holders", which misdescribed the shape an operator
+    # is being asked to diagnose. The assertion still pins the COUNT.
+    assert "2 holder(s)" in str(mixed.value), str(mixed.value)
 
     # 2. a LONE id-less holder: one holder, but nothing addressable to return.
     proj.g.query("CREATE (o:Object {name:$n})", params={"n": "Bare"})

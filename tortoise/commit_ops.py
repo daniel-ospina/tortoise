@@ -1281,8 +1281,14 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # and it does not exist any more. Synthesizing one now would fold
             # onto nothing live and, worse, mint a phantom identity in the
             # journal. An id-less target is unaddressable: record it and skip.
-            record_non_folded("Object", ref, [],
-                              shape="unregistered-reference")
+            # ⛔ The candidates must name what the refusal COUNTED (#9876 review
+            # round 14, minor): this branch is reached with exactly one holder —
+            # the id-less one — and `[]` said the refusal had none. `shape` is
+            # the module's own spelling for it (`entity_identity._refuse`'s
+            # `unaddressable-name`): the target IS registered, it just carries
+            # no id, so `unregistered-reference` described the wrong thing.
+            record_non_folded("Object", ref, display_holder_ids([obj_id]),
+                              shape="unaddressable-name")
             warn(f"supersession ref {ref!r} resolves to an id-less Object "
                  f"(no id to address or journal) — skipped (#3590)")
             continue

@@ -2177,6 +2177,52 @@ def test_an_unreferenced_ambiguous_item_is_refused_too(sdk):
                        "RETURN count(n)") == 0
 
 
+def test_a_kind_routed_item_probes_the_label_the_write_lands_on(sdk):
+    """#9876 review (round 14, P1): the ambiguity loop probed the DECLARED label.
+
+    `create_object(objectKind='core:organization')` writes a **`:Subject`** — the
+    entity door re-labels the write by the KIND it names (#9964), and step 3
+    already probes that landing label through `_existing_entity_ids`. The
+    bundle-wide ambiguity loop added by #3590 did not: it read
+    `_ENTITY_ITEM_LABELS[declared type]`, so for a routed item it asked a
+    question about a node set the write never touches.
+
+    MEASURED on the pre-fix head: with two live `:Subject` carriers of `Acme`,
+    `_validate_bundle` returned `[]` while step 3's
+    `entity_identity.resolve_or_mint("Subject", name)` raised
+    `AmbiguousEntityName` — **after** the point items had already committed. That
+    is exactly the #2422/#7925 partial-mutation class this loop exists to close,
+    re-opened one label over.
+
+    FAILS IF: Phase 1 probes `_ENTITY_ITEM_LABELS` again instead of the door's
+    own authority (`_door_relayed_props` → `_kind_layer_note`), i.e. this bundle
+    is reported CLEAN and the mutation lands before the raise.
+    """
+    # The label `core:organization` routes to — asserted, not assumed: if the
+    # routing table ever stopped sending that kind to `Subject` this pin would
+    # be testing the un-routed shape it was written to distinguish itself from.
+    from tortoise.kind_layers import entity_route
+    assert entity_route("core:organization") == "subject"
+    sdk._get_proj().g.query(
+        "CREATE (:Subject {id:'subj-a', name:'Acme', status:'live'})")
+    sdk._get_proj().g.query(
+        "CREATE (:Subject {id:'subj-b', name:'Acme', status:'live'})")
+    bundle = {
+        "points": [{"kind": "statement", "content": "must-not-commit"}],
+        "entities": [{"type": "object", "name": "Acme",
+                      "objectKind": "core:organization"}],
+    }
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("2 LIVE entities" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError, match="LIVE entities"):
+        sdk.ingest(bundle)
+    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+                       "RETURN count(n)") == 0, (
+        "the point committed before step 3 raised AmbiguousEntityName")
+    assert _count(sdk, "MATCH (s:Subject {name:'Acme'}) RETURN count(s)") == 2, (
+        "the refused bundle minted a third carrier of the ambiguous name")
+
+
 def test_a_single_live_operator_shaped_holder_is_refused(sdk):
     """The operator axis is read from the LANDING node, not from any carrier.
 

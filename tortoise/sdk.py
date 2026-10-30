@@ -3854,6 +3854,37 @@ def _door_relayed_props(etype: str, item: dict) -> dict:
     return relayed
 
 
+def _landing_entity_label(etype: str, props: dict) -> str | None:
+    """The label an ENTITY item's write actually LANDS on — ``"Subject"``/
+    ``"Object"`` (``None`` for anything that is neither).
+
+    ``etype`` is what the item DECLARED; the entity door re-labels the write by
+    the KIND it names (#9964: ``create_object(objectKind='core:team')`` writes a
+    ``:Subject``), and identity is label-scoped (``ids.py``:
+    ``sha256(f"{label}:{name}")``) — so anything predicting the node the write
+    touches must ask the DOOR's own authority (``_door_relayed_props`` →
+    ``_kind_layer_note``) rather than the type→label map.
+
+    ⛔ ONE helper, because a guard and the writer it predicts must never probe
+    different labels (#9876 review round 14). Step 3 already routed through
+    ``_existing_entity_ids``; the bundle-wide ambiguity loop added by #3590 read
+    ``_ENTITY_ITEM_LABELS`` directly, so for a kind-routed item Phase 1 asked
+    about a node set the write never touches: with two live ``:Subject``
+    carriers of ``Acme``, ``_validate_bundle`` returned ``[]`` and step 3's
+    ``resolve_or_mint("Subject", …)`` raised ``AmbiguousEntityName`` with the
+    earlier POINTS already committed — the #2422/#7925 partial-mutation class
+    the loop exists to close, re-opened one label over.
+
+    Fails open to the DECLARED label (#1934: a probe must never refuse a
+    write).
+    """
+    try:
+        probe = _kind_layer_note(etype, _door_relayed_props(etype, props))[0]
+    except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
+        probe = etype
+    return _ENTITY_LAYER_LABEL.get(probe) or _ENTITY_LAYER_LABEL.get(etype)
+
+
 def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     """The ids of the entity nodes this write will actually MERGE onto.
 
@@ -3895,12 +3926,7 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     """
     if not isinstance(name, str) or not name:
         return []
-    try:
-        probe_props = _door_relayed_props(etype, props)
-        probe = _kind_layer_note(etype, probe_props)[0]
-    except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
-        probe = etype
-    label = _ENTITY_LAYER_LABEL.get(probe) or _ENTITY_LAYER_LABEL.get(etype)
+    label = _landing_entity_label(etype, props)
     return all_name_holder_ids(g, label, name) if label else []
 
 
@@ -21070,14 +21096,22 @@ class TortoiseSDK:
         # "object", "name": "Acme"}]}` with two live `Acme` carriers, and
         # `ingest` raised `AmbiguousEntityName` with **Point 1 already committed**
         # — the #2422/#7925 partial-mutation class exactly.
+        # ⛔ The probe label is the label the WRITE lands on, not the one the
+        # item declared (#9876 review round 14): a `*Kind` re-labels the write
+        # (#9964), so `_ENTITY_ITEM_LABELS` alone let a kind-routed item past
+        # Phase 1 and the refusal then landed in step 3 with the points already
+        # committed. `_landing_entity_label` is the SAME authority step 3's
+        # `_existing_entity_ids` uses, so the two cannot disagree.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            _elabel = _ENTITY_ITEM_LABELS.get(
-                str(item.get("type") or "").strip().lower())
+            _etype = str(item.get("type") or "").strip().lower()
             _name = item.get("name")
-            if _elabel not in ("Subject", "Object") \
+            if _etype not in _ENTITY_LAYER_LABEL \
                     or not isinstance(_name, str) or not _name:
+                continue
+            _elabel = _landing_entity_label(_etype, dict(item))
+            if _elabel not in ("Subject", "Object"):
                 continue
             _live_n = _name_holders(_elabel, _name)[4]
             if _live_n > 1:

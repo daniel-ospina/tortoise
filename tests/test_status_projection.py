@@ -438,7 +438,11 @@ class TestProjectionFold:
         to pin the REFUSAL — which was previously pinned NOWHERE:
 
           * `apply_supersessions` records the non-fold reason
-            (`shape="unregistered-reference"`) and warns,
+            (`shape="unaddressable-name"` — #9876 review round 14: the target
+            IS registered, it just carries no id, and `entity_identity`'s own
+            record vocabulary owns that spelling; `unregistered-reference`
+            belongs to the FOLD's shapes, for a target nothing registered) and
+            warns,
           * `applied == 0` — the id-less node is NOT silently "superseded"
             while the journal holds nothing that would replay it, and
           * the rebuild leaves it `live` (no phantom identity in the log).
@@ -484,7 +488,7 @@ class TestProjectionFold:
                        for w in warns), (
                 f"the refusal was silent — no operator-visible reason: {warns}")
             from tortoise.entity_identity import non_folded_entries
-            assert any(e.shape == "unregistered-reference"
+            assert any(e.shape == "unaddressable-name"
                        and e.name == name for e in non_folded_entries()), (
                 "the refused coordinate was not recorded as a non-folded "
                 f"entry: {non_folded_entries()}")

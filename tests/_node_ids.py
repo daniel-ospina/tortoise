@@ -45,7 +45,7 @@ def node_id(source, label: str, name: str, *, prop: str = "name") -> str:
     holder_ids = [r[0] for r in rows]
     assert len(holder_ids) == 1, (
         f"expected exactly one {label} carrying {prop}={name!r}, found "
-        f"{len(holder_ids)} live holder(s) {holder_ids}")
+        f"{len(holder_ids)} holder(s) {holder_ids}")
     assert holder_ids[0], (
         f"the single {label} carrying {prop}={name!r} has no id — an id-less "
         f"legacy/hosted stub holder is not addressable, so there is no id to "
