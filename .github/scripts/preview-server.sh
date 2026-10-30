@@ -96,6 +96,40 @@ proc_starttime() {
   awk '{print $20}' <<<"$rest"
 }
 
+# ── the same two questions on a host WITHOUT /proc ───────────────────────────
+# Linux exposes /proc; macOS does not, and the arm that proves this helper's
+# stop is pid-scoped runs on a developer's machine as well as in CI. A host
+# capability gap must degrade the READ, never produce a wrong VERDICT (#5049):
+# without this, `record` refused every pid and `stop` could not tell "already
+# exited" from "cannot look", so the isolation arms RED on a Mac while the same
+# logic is correct on the Linux legs. `ps` answers both questions portably —
+# `state=` gives the state letter (a zombie answers kill(0) forever and is dead
+# for our purposes) and `lstart=` is a start instant that changes exactly when
+# the pid is reused, which is all the identity witness has to be.
+have_proc() { [[ -r "/proc/$$/stat" ]]; }
+
+pid_state() {
+  if have_proc; then
+    proc_rest_fields "$1" 2>/dev/null | awk '{print $1}'
+  else
+    ps -o state= -p "$1" 2>/dev/null | tr -d ' ' | cut -c1
+  fi
+}
+
+# Running = signalable AND not a zombie.
+pid_running() {
+  kill -0 "$1" 2>/dev/null || return 1
+  [[ "$(pid_state "$1")" != "Z" ]]
+}
+
+pid_starttime() {
+  if have_proc; then
+    proc_starttime "$1"
+  else
+    ps -o lstart= -p "$1" 2>/dev/null
+  fi
+}
+
 # Every descendant pid of $1, from one `ps` snapshot (children first is not
 # guaranteed; a signal is order-insensitive for TERM/KILL purposes).
 descendants_of() {
@@ -159,12 +193,12 @@ cmd_record() {
   done
   [[ -n "$name" ]] || die "record: --name is required"
   [[ "$pid" =~ ^[0-9]+$ ]] || die "record: --pid must be numeric"
-  [[ -d "/proc/$pid" ]] || { printf '%s: pid %s is not running — nothing recorded\n' "$PROG" "$pid" >&2; return 4; }
+  pid_running "$pid" || { printf '%s: pid %s is not running — nothing recorded\n' "$PROG" "$pid" >&2; return 4; }
 
   local dir start
   dir="$(state_dir)"
   mkdir -p "$dir"
-  start="$(proc_starttime "$pid")" || { printf '%s: cannot read /proc/%s/stat\n' "$PROG" "$pid" >&2; return 4; }
+  start="$(pid_starttime "$pid")" || { printf '%s: cannot read the start time of pid %s\n' "$PROG" "$pid" >&2; return 4; }
   printf '%s\n' "$start" > "$dir/${name}.start"
   printf '%s\n' "$pid" > "$dir/${name}.pid"
 }
@@ -211,7 +245,7 @@ cmd_stop() {
   pid="$(cat "$pfile")"
   recorded="$(cat "$dir/${name}.start" 2>/dev/null || true)"
 
-  if [[ ! -d "/proc/$pid" ]]; then
+  if ! pid_running "$pid"; then
     printf '%s: %s (pid %s) already exited\n' "$PROG" "$name" "$pid"
     rm -f "$pfile" "$dir/${name}.start" "$dir/${name}.port"
     return 0
@@ -221,7 +255,7 @@ cmd_stop() {
   # leaving a stray preview alive costs a runner reset; signalling a stranger is
   # the class of bug this file exists to remove.
   if [[ -n "$recorded" ]]; then
-    now="$(proc_starttime "$pid" || true)"
+    now="$(pid_starttime "$pid" || true)"
     if [[ -n "$now" && "$now" != "$recorded" ]]; then
       printf '%s: pid %s was recycled (start %s != %s) — not signalling it\n' \
         "$PROG" "$pid" "$now" "$recorded"
@@ -230,21 +264,34 @@ cmd_stop() {
     fi
   fi
 
-  local victims=() p i
-  mapfile -t victims < <(descendants_of "$pid"; printf '%s\n' "$pid")
-  for p in "${victims[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
+  local victims=() p i count
+  # A read loop, not `mapfile`: bash 3.2 (macOS `/bin/bash`) has no `mapfile`,
+  # and this helper's isolation arms run on a developer's machine as well as in
+  # CI (#5049: a host gap must not become a verdict — the failure it caused was
+  # the arm erroring out on a host that cannot even parse the script).
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && victims+=("$p")
+  done < <(descendants_of "$pid"; printf '%s\n' "$pid")
+  count=${#victims[@]}
+  # `${arr[@]+…}` keeps this valid on bash 3.2 under `set -u` when the array is
+  # empty (a bare "${arr[@]}" is an unbound-variable ERROR there, not zero words).
+  for p in "${victims[@]+"${victims[@]}"}"; do kill -TERM "$p" 2>/dev/null || true; done
   for (( i = 0; i < 100; i++ )); do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
   done
-  if kill -0 "$pid" 2>/dev/null; then
+  if pid_running "$pid"; then
     # Re-walk: a supervisor may have spawned replacements while we waited.
-    mapfile -t victims < <(descendants_of "$pid"; printf '%s\n' "$pid")
-    for p in "${victims[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
+    local retry=()
+    while IFS= read -r p; do
+      [[ -n "$p" ]] && retry+=("$p")
+    done < <(descendants_of "$pid"; printf '%s\n' "$pid")
+    count=$(( count + ${#retry[@]} ))
+    for p in "${retry[@]+"${retry[@]}"}"; do kill -KILL "$p" 2>/dev/null || true; done
   fi
   rm -f "$pfile" "$dir/${name}.start" "$dir/${name}.port"
   printf '%s: stopped %s (pid %s and %s descendant(s))\n' \
-    "$PROG" "$name" "$pid" "$(( ${#victims[@]} - 1 ))"
+    "$PROG" "$name" "$pid" "$(( count - 1 ))"
 }
 
 cmd_stop_all() {

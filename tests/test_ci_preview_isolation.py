@@ -86,11 +86,21 @@ def _script(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess:
 
 
 def _pid_alive(pid: int) -> bool:
-    """RUNNING — not merely present. A zombie is a reaped-to-be child, i.e. dead."""
+    """RUNNING — not merely present. A zombie is a reaped-to-be child, i.e. dead.
+
+    `/proc` first (Linux, every CI leg); `ps` when the host has no `/proc` (a
+    developer's macOS run). The verdict is the same question either way, and a
+    host that cannot answer it must not be reported as "the process is gone".
+    """
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except (FileNotFoundError, ProcessLookupError):
-        return False
+    except FileNotFoundError:
+        state = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        # "" = no such pid; "Z"/"Z+" = a zombie.
+        return bool(state) and not state.startswith("Z")
     except OSError:  # pragma: no cover — /proc unreadable, not ours
         return True
     # state is field 3, right after the `(comm)` field, which may contain spaces.
