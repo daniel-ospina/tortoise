@@ -42,9 +42,15 @@
 #   alloc --name N [--base PORT] [--span N]   pick a free port, record it, print it
 #   dir                                       print the per-job state directory
 #   record --name N --pid PID                 register the pid this job started
-#   ready --name N                            exit 0 iff OUR pid is alive and its
-#                                             port answers (a peer's server on the
-#                                             same port must never satisfy this)
+#   ready --name N                            exit 0 iff OUR pid is alive AND the
+#                                             port answers — two INDEPENDENT facts.
+#                                             It does NOT prove the port's LISTENER
+#                                             is ours: that needs a socket→pid map
+#                                             (`ss`/`lsof`), which the runner image
+#                                             does not guarantee. So `alloc`'s
+#                                             pre-boot free-check and wrangler's
+#                                             exit on EADDRINUSE are what keep a
+#                                             peer's server from satisfying it.
 #   stop --name N                             signal the recorded tree only
 #   stop-all                                  stop every server this job recorded
 #
@@ -225,8 +231,12 @@ cmd_ready() {
   [[ -f "$dir/${name}.pid" && -f "$dir/${name}.port" ]] || return 1
   pid="$(cat "$dir/${name}.pid")"
   port="$(cat "$dir/${name}.port")"
-  # OUR process must still be the one holding the port: without this the
-  # readiness probe would accept a PEER's server that took the same port (#2757).
+  # Two INDEPENDENT facts, never one: the pid we recorded is ALIVE, and
+  # something ANSWERS on the port. Nothing here relates the two — mapping the
+  # port's listener to a pid needs `ss`/`lsof`, which the runner image does not
+  # guarantee — so a live-but-unbound pid beside a PEER's listener still passes.
+  # What actually narrows that window is `alloc`'s pre-boot free-check and
+  # wrangler's own exit on EADDRINUSE, not this probe (#2757).
   kill -0 "$pid" 2>/dev/null || return 1
   port_free "$port" && return 1
   return 0

@@ -34,6 +34,12 @@ still alive and (b) the port answers — strictly more than the pre-fix bare
 process to survive a failed BIND while a peer listens on the same port; the
 allocator's pre-boot free-check plus wrangler's exit on `EADDRINUSE` are what
 close it in practice.
+
+Those four sentences are pinned below
+(`test_readiness_comments_do_not_claim_a_listener_pid_mapping`): the OVERCLAIM
+lived in the helper's contract block and its `cmd_ready`, and in the two `ci.yml`
+boot steps — the two files a CI author actually opens — while the paragraph above
+was the only place that said it correctly.
 """
 from __future__ import annotations
 
@@ -200,6 +206,91 @@ def test_no_workflow_shares_a_fixed_preview_port_or_tmp_path() -> None:
         "a workflow pins a preview to the shared loopback port / shared /tmp path; "
         "these are per-run+job values from `.github/scripts/preview-server.sh` (#10283):\n"
         + "\n".join(offenders)
+    )
+
+
+# A readiness comment that claims the probe maps the port's LISTENER to our pid.
+# `ready` cannot: it asserts that our pid is ALIVE and that the port ANSWERS, two
+# INDEPENDENT facts, and nothing in it relates them (a socket→pid map needs
+# `ss`/`lsof`, which the runner image does not guarantee). Both spellings this
+# branch has shipped are listed so the arm catches the claim, not one wording.
+_READY_OVERCLAIM = re.compile(
+    r"hold(?:s|ing)?\s+(?:that|the)\s+port"
+    r"|(?:must\s+never|cannot|can\s+never|never)\s+satisfy",
+    re.IGNORECASE,
+)
+# The disclaimer, in the form `cmd_ready` and this file's docstring already use.
+_READY_RESIDUAL = re.compile(
+    r"does\s+not\s+prove\s+the\s+(?:port'?s\s+)?listener", re.IGNORECASE
+)
+_READY_SUBJECT = re.compile(r"\bready\b|\breadiness\b", re.IGNORECASE)
+
+
+def _comment_blocks(path: Path) -> list[tuple[int, str]]:
+    """Consecutive `#` lines joined — a claim that WRAPS must be read as one claim.
+
+    Line-scoped matching is what let the overclaim survive: `a peer's server on
+    the same port must never satisfy this` puts the subject on the first line and
+    the false verb on the second, so no single line carried the defect.
+    """
+    blocks: list[tuple[int, str]] = []
+    start = 0
+    acc: list[str] = []
+    for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            if not acc:
+                start = lineno
+            acc.append(stripped.lstrip("#").strip())
+            continue
+        if acc:
+            blocks.append((start, " ".join(acc)))
+            acc = []
+    if acc:
+        blocks.append((start, " ".join(acc)))
+    return blocks
+
+
+def test_readiness_comments_do_not_claim_a_listener_pid_mapping() -> None:
+    """`ready` relates our pid's liveness to the port not at all — don't say it does.
+
+    `cmd_ready` asserts (a) the pid we recorded is still alive and (b) the port
+    answers. A bare `connect()` cannot name the pid behind a listener, so the two
+    facts can be satisfied by a live-but-unbound pid beside a PEER's server —
+    exactly the #2757 shape this helper exists to narrow. The window is closed by
+    `alloc`'s pre-boot free-check and by wrangler's own exit on `EADDRINUSE`.
+
+    The claim was still in four places at `5c8d598a3` — the helper's contract
+    block (`preview-server.sh:45-47`), its `cmd_ready` (`:226-228`), and both
+    `ci.yml` boot steps (`:1931`, `:2133`) — while this file's docstring (above)
+    was the only place that stated the limitation. That direction is the defect:
+    a lane reads `ci.yml`, believes readiness closes the collision window, and
+    drops or widens the free-check on stated grounds. So the arm is RED on the
+    pre-fix text at all four sites (non-vacuity proof) and the disclaimer has to
+    survive in the helper a later edit would otherwise erode.
+    """
+    offenders: list[str] = []
+    examined = 0
+    for path in (SCRIPT, *_workflow_paths()):
+        for start, block in _comment_blocks(path):
+            if not _READY_SUBJECT.search(block):
+                continue
+            examined += 1
+            if _READY_OVERCLAIM.search(block):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{start}: {block}")
+    assert not offenders, (
+        "a readiness comment claims `ready` proves the port's LISTENER is ours. It "
+        "does not: it asserts our pid is alive and the port answers, and relates "
+        "them not at all (a socket→pid map needs `ss`/`lsof`, which the runner "
+        "image does not guarantee). State the residual instead — `alloc`'s "
+        "pre-boot free-check and wrangler's exit on EADDRINUSE are what narrow it "
+        "(#10283/#2757):\n" + "\n".join(offenders)
+    )
+    assert examined, "no readiness comment found in the helper or any workflow — vacuous arm"
+    assert _READY_RESIDUAL.search(SCRIPT.read_text()), (
+        "`.github/scripts/preview-server.sh` no longer states what `ready` does NOT "
+        "prove. The limitation has to live where the mechanism lives — dropping it "
+        "sent four other comments back to the false stronger claim (#10283)."
     )
 
 

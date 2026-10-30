@@ -1928,8 +1928,11 @@ jobs:
             # log dump + retry reachable under the runner's `bash -e`.
             bash "$PREVIEW" record --name marketing --pid $! || true
             for i in $(seq 1 240); do
-              # `ready` (not a bare curl) also proves our recorded pid is the
-              # process holding that port, so a peer cannot satisfy it.
+              # `ready` (not a bare curl) also requires our recorded pid to be
+              # ALIVE, not just the port to answer. It does NOT prove the
+              # LISTENER is ours (mapping the port to a pid needs `ss`/`lsof`,
+              # which the runner image does not guarantee), so `alloc`'s pre-boot
+              # free-check is what keeps a peer's server from being graded.
               if bash "$PREVIEW" ready --name marketing; then
                 echo "preview ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
                 echo "port=${PREVIEW_PORT}" >> "$GITHUB_OUTPUT"
@@ -2130,8 +2133,10 @@ jobs:
             bash "$PREVIEW" record --name marketing --pid $! || true
             # Wait for the dev server to accept connections (first start also
             # downloads workerd + bundles website/functions/_middleware.ts).
-            # `ready` also proves OUR recorded pid holds the port, so a peer's
-            # server on the same port can never satisfy this loop (#2757).
+            # `ready` also requires OUR recorded pid to be ALIVE, not just the
+            # port to answer — it does NOT prove the listener is ours (same
+            # `ss`/`lsof` caveat), so the per-job `alloc` free-check is what keeps
+            # a peer's server on the same port from satisfying this loop (#2757).
             for i in $(seq 1 240); do
               if bash "$PREVIEW" ready --name marketing; then
                 echo "preview ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
