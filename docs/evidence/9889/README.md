@@ -1,3 +1,14 @@
+---
+title: "#9889 — the capstone's three E1/E2 probes, and what they measured"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-10-30
+subjects.team: epistemic-team
+aboutSubjects: Tortoise extractor v4, E1 (volume), E2 (correctness)
+aboutObjects: "#9889, #7949, #9080, #9116, EXTRACTOR-V4-ARCHITECTURE.md §S2.2, docs/evidence/7949-capstone"
+---
+
 # `#9889` — the capstone's three E1/E2 probes, and what they measured
 
 `#7949`'s capstone can only score E1 and E2 by parsing **one fixed artifact**
