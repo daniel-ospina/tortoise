@@ -362,6 +362,74 @@ def test_self_support_operator_with_extra_target_mints_its_own_arity(make_sdk):
         [(0, a), (1, a), (2, b)]
 
 
+def test_exact_arm_prefers_the_SHAPE_the_request_spelled(make_sdk):
+    """#10305 (round 6, red-first) — the arity leg cannot tell two SAME-ARITY
+    shapes apart, so the OLDER operator won on `o.id`.
+
+    Two operators over ONE endpoint set ``{q1, q3}``, each with THREE typed
+    slots:
+
+    * a pre-#9750 duplicate-TARGET operator — ``[q1, q3, q3]`` (``idx`` 1 and 2
+      over one id), the corrupt shape the exact arm's carve-out deliberately
+      still adopts; created FIRST, so it holds the lower id;
+    * the self-support shape ``[q1, q1, q3]`` — the shape a caller SPELLS (two
+      same-content items fold, so ``to: ["q2", "q3"]`` resolves onto the
+      source) and ``create_operator`` writes deliberately.
+
+    ``n_edges = size($slots)`` is satisfied by BOTH (3 = 3), so the arity leg
+    separates neither, and ``ORDER BY n_edges ASC, o.id`` bound the request to
+    the LEGACY operator (measured at `86c4c6558` before the tie-break): the
+    caller asserted the self-support slot and was handed a duplicate-target
+    factor — the same "EP propagated a model the caller never asserted" class
+    this PR exists to close, one shape over.
+
+    The tie-break now prefers the operator whose SOURCE-slot multiplicity (how
+    many ``idx`` slots carry the ``idx`` 0 endpoint) equals the request's, with
+    ``o.id`` still breaking a remaining tie. It is an ORDER preference, never a
+    condition: nothing that matches today stops matching, so it cannot re-mint
+    a duplicate operator (#9750's hazard).
+    """
+    sdk = make_sdk("shape_tiebreak")
+    bundle = {"points": [{"ref": "q1", "kind": "statement", "content": "same"},
+                          {"ref": "q2", "kind": "statement", "content": "same"},
+                          {"ref": "q3", "kind": "statement", "content": "other"}],
+               "connections": [{"from": "q1", "to": ["q3"],
+                                "operator": "IMPL"}]}
+    first = sdk.ingest(bundle)
+    q1 = first["ids"]["refs"]["q1"]
+    q3 = first["ids"]["refs"]["q3"]
+    legacy = first["ids"]["connections"][0]
+    assert _operator_input_slots(sdk, legacy) == [(0, q1), (1, q3)]
+    # the pre-#9750 writer's second typed + INPUT edge over the same target
+    sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$o}), (t:Point {id:$t}) "
+        "CREATE (o)-[:IMPL {idx:2}]->(t) CREATE (t)-[:INPUT {idx:2}]->(o)",
+        params={"o": legacy, "t": q3})
+    assert _operator_input_slots(sdk, legacy) == [(0, q1), (1, q3), (2, q3)]
+
+    # the shape the request can spell, minted AFTER the legacy one
+    self_support = sdk.create_operator("IMPL", q1, [q1, q3])["id"]
+    assert _operator_input_slots(sdk, self_support) == \
+        [(0, q1), (1, q1), (2, q3)]
+    assert legacy != self_support
+
+    hit = sdk._find_operator("IMPL", [q1, q1, q3])
+    assert hit is not None and hit["kind"] == "exact", hit
+    assert hit["id"] == self_support, (
+        "the exact arm must answer with the SHAPE the request spelled "
+        f"(self-support {self_support}), not the older legacy duplicate-target "
+        f"operator {legacy}")
+
+    # …and the user-visible path: the resubmission dedups onto that operator,
+    # writing nothing at all.
+    res = sdk.ingest(bundle)
+    assert res["deduped"]["connections"] == 1, res
+    assert res["created"]["connections"] == 0, res["created"]
+    assert res["ids"]["connections"] == [self_support], res["ids"]
+    assert _edge_counts(sdk) == (6, 6), _edge_counts(sdk)
+    assert _count(sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 2
+
+
 def test_absorb_never_completes_an_inexpressible_request(make_sdk):
     """Review round 2, P3 — the crash window the `n_edges = size(targets)` guard
     does NOT cover, and the `completed` count that over-reported it.
@@ -482,9 +550,18 @@ def test_absorb_reports_the_writes_it_makes(make_sdk):
     """Review round 2, P3 — `operator_absorb_completed` must count EDGES WRITTEN.
 
     It used to be derived as ``len([src] + dsts) - len(written)``: a SLOT count
-    minus an id SET, which over-reports by one for every repeated id. Here the
-    request is duplicate-free and exactly one input is missing, so the payload
-    must say ``:1``."""
+    minus an id SET. Here the request is duplicate-free and exactly one input is
+    missing, so the payload must say ``:1``.
+
+    ⛔ This is a PIN on the ordinary path, NOT a discriminating test, and the
+    docstring says so on purpose (#10305 round 6): once `_find_operator`
+    declines a request whose own slot list repeats an id, no request can reach
+    the completion loop with a repeated id, so the old derivation and the new
+    count are provably equal on every reachable path — this test passes on the
+    pre-fix source too. The change is structural (count what the loop wrote,
+    rather than subtract an id set from a slot count), which is the property
+    the §3.2 key-8 payload needs; it is not a behaviour change anyone can
+    observe, and it should not be cited as one."""
     sdk = make_sdk("absorb_count")
     a = sdk.create_point(kind="statement", content="one")["id"]
     b = sdk.create_point(kind="statement", content="two")["id"]
