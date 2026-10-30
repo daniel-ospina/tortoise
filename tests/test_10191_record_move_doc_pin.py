@@ -15,8 +15,9 @@ row in ``config/ci-surfaces.yml`` records the same split for the same reason.
 entry, which is why that half fired while this one did not.
 
 WHAT THIS PINS. ``#10191`` landed the record-side half of a supersede's
-structural repoint (a ``DELETE`` at the superseded point + an ``INSERT`` at the
-terminal endpoint of the ``superseded_by`` chain) and left both artifacts
+structural repoint (a ``DELETE`` at the superseded point + an ``INSERT`` at
+the hop the ``superseded_by`` chain names, one hop per descriptor, so the chain's
+TERMINAL row is where the row ends up once every hop has run) and left both artifacts
 describing pass-2b only, so a lane had to read
 ``record_projection._structural_repoint_statements`` to learn what the record
 actually does with a 2b ``DirectEdgeRepoint`` — and ``#10244`` was spent
@@ -38,7 +39,7 @@ have shipped the ``INSERT``-without-``DELETE`` fix the same file forbids.
 Class-B test doctrine:
   (1) *What value makes this test fail?*  Deleting or rewording any clause below
       from §3.1 / the supersede row; a plan that stops emitting the two halves,
-      the chain CTE, the terminal landing, or ``DO NOTHING``; or a doc that goes
+      the chain CTE, the one-hop landing, or ``DO NOTHING``; or a doc that goes
       back to claiming the record upserts in place, or that an unmoved
       non-derivable rel sits at *neither* endpoint.
   (2) *Does the test reach it?*  Yes — the docs are read from the tree and the
@@ -161,9 +162,17 @@ def test_the_documented_record_side_move_is_the_move_the_record_emits():
         assert "superseded_by" in delete and "WITH RECURSIVE succ" in delete, delete
         assert "no successor field" in line, (path, line)
         assert "new_id" not in delete + insert, (delete, insert)
-        # ... and it lands at the chain's TERMINAL row, not at `src`.
+        # ... and it lands at the successor `superseded_by` NAMES, one hop per
+        # descriptor (`#10139` review round 4) — which is what makes a chain
+        # reach its TERMINAL row only as each hop's descriptor runs, and is the
+        # same hop the graph's replay takes (`succ[src]`, not `_final(src)`).
+        # Resolving straight to the terminal row collapses a chain's
+        # descriptors onto one destination, where `DO NOTHING` then keeps the
+        # FIRST — right for two independent retired points, wrong for a chain.
+        assert "one hop per descriptor" in line.lower() or "one hop" in line, (path, line)
         assert "terminal" in line, (path, line)
-        assert "succ WHERE next_id IS NULL" in insert, insert
+        assert "succ WHERE depth = 2" in insert, insert
+        assert "next_id IS NULL" not in insert, insert
         # The successor's own live value wins (#9417) — never `DO UPDATE`.
         # CITED WITH ITS DOCUMENT **and its section derived from the rule**: the
         # bare `§11.1` resolved to INGEST's own "11.1 Derived liveness", and to
@@ -203,11 +212,22 @@ def test_the_documented_record_side_move_is_the_move_the_record_emits():
         assert "(SELECT terminal FROM succ WHERE depth = 1)" in sql, sql
     # The linear-vs-cyclic qualifier must NAME its residual where that residual
     # lives. The bare "residual (b) above" had no referent in ONTOLOGY at all, and
-    # at its likely intended home (04-projection) (b) is the CLOSED item while the
-    # cyclic divergence is the CODE's residual (c) — a dangling pointer that sent a
-    # reader to a closed residual (#10244 review P2).
+    # at its likely intended home (04-projection) (b) is the CLOSED item — a
+    # dangling pointer that sent a reader to a closed residual (#10244 review P2).
     assert "residual (b)" not in ontology, ontology
-    assert "cyclic" in ontology and "residual (c)" in ontology, ontology
+    # ... and the cycle claim is now SCOPED to the shape BOTH routes handle
+    # (#10139 review round 5). "Both walks are path-guarded, so both stop at the
+    # same hop" was FALSE for a cycle carrying a descriptor per hop: pass-2b's
+    # `_final` returns the first REPEATED node, so `_final(src) == src` SKIPS the
+    # create after that descriptor's delete-leg already removed the previous
+    # hop's edge — measured, the rebuilt graph keeps NO edge, while the record's
+    # path-guarded walk ends at the LAST hop's successor. The over-claim is
+    # pinned ABSENT and the scoped statement pinned PRESENT, so a doc that goes
+    # back to calling cycles non-divergent reds here.
+    assert "cyclic" in ontology.lower(), ontology
+    assert "no longer a divergence" not in ontology, ontology
+    assert "descriptor per hop" in ontology, ontology
+    assert "residual (c)" not in ontology, ontology
 
 
 def test_the_epic_artifacts_no_longer_assert_the_retired_upsert_premise():
