@@ -9390,7 +9390,6 @@ durations:
   test_mcp_wrap_envelope_error_8482.py: 2.7
   test_oauth_clients_count_2853.py: 0.2
   test_oauth_consent_bridge.py: 1.7
-  test_oauth_consent_page_step4.py: 12.0  # #3524 §9 step 4 (also registered on `api`, where its long comment lives). Node-spawning: three cases run the page's inline script / signup.html's allowlist under node.
   test_oauth_session_flow_properties.py: 3.2
   test_onboarding_selfhost_w12.py: 6.3
   test_operator_label_vocabulary.py: 0.6
