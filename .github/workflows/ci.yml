@@ -1834,14 +1834,11 @@ jobs:
     # (empty HEAD side); #1181's monitor move had dropped per-PR coverage of
     # the mocked welcome flows (the python matrix excludes tests/e2e/).
     timeout-minutes: 15
-    # #10283: preview STATE is per-JOB — `runner.temp` is a per-runner-agent
-    # directory even when several agents share one host (`pi-runner-cmux-x64-5/6/7/8`
-    # all report `Machine name: 'cmux'`), so this job can never read another
-    # job's pid file. The PORTS are allocated per run+job by
-    # `.github/scripts/preview-server.sh` — never a shared literal — and the
-    # teardown signals only the pid this job recorded.
-    env:
-      PREVIEW_STATE: ${{ runner.temp }}/preview
+    # #10283: preview state is PER-JOB and per-run — the helper's `dir` verb
+    # computes it from `$RUNNER_TEMP` (per-runner-agent even on a shared host),
+    # and its `alloc` verb hands each server a port it has just verified free.
+    # (Not a job-level `env:`: the `runner` context is unavailable there and
+    # actionlint reds it.)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -1914,6 +1911,7 @@ jobs:
         run: |
           cd website
           PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           for attempt in 1 2; do
             # #10283: a per-run/per-job port, verified FREE before it is handed
             # back — on a shared host a fixed literal let a peer job take the
@@ -2032,16 +2030,11 @@ jobs:
     # p50 1.79m, p95 8.91m, max 9.25m (n=26) — 20m clears the measured max by
     # >2× and stays above the runner-stall floor. See docs/ops/ci-wall-clock.md.
     timeout-minutes: 20
-    # #10283: per-JOB preview state. `runner.temp` is a per-runner-agent
-    # directory even when several agents share one host, and the ports are
-    # allocated per run+job by `.github/scripts/preview-server.sh`. This job's
-    # own failing run is the evidence for both: job 123953321176 on
-    # `pi-runner-cmux-x64-8` was serving its previews at 08:12:03Z and lost them
-    # at 08:12:29Z (`ERR_CONNECTION_REFUSED` on :8790) — 3.2 s after a PEER
-    # `legal-e2e` (job 123951276145, `pi-runner-cmux-x64-7`, same
-    # `Machine name: 'cmux'`) logged its teardown `pkill workerd`.
-    env:
-      PREVIEW_STATE: ${{ runner.temp }}/preview
+    # #10283: preview state is PER-JOB and per-run — the helper's `dir` verb
+    # computes it from `$RUNNER_TEMP` (per-runner-agent even on a shared host),
+    # and its `alloc` verb hands each server a port it has just verified free.
+    # (Not a job-level `env:`: the `runner` context is unavailable there and
+    # actionlint reds it.)
     # Full legal-page suite (#657) — ~1000 assertions across 10 plan checks
     # (privacy/tos/license/dpa content, consent + pricing content, mocked
     # signup/signin flows, mobile render, full link crawl). The suite is
@@ -2111,6 +2104,7 @@ jobs:
         run: |
           cd website
           PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           # The binary is the one the install step above verified against
           # config/wrangler-version (#8816) — no spec here, so nothing can drift.
           # 2026-09-04 ~04:00Z a runner-fleet cold-npx stall broke this boot on
@@ -2166,6 +2160,7 @@ jobs:
         run: |
           cd website/apps/dashboard
           PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           # `--d1 SESSIONS`: the auth pages' session probe is `/api/session`,
           # which resolves the HttpOnly `__Host-session` cookie against the D1
           # `sessions` table. Without the binding a request carrying a cookie
@@ -2249,11 +2244,11 @@ jobs:
     # better for this suite's purpose: the fixtures assert against the exact
     # bundle THIS revision produces, instead of whatever was last committed.
     timeout-minutes: 15
-    # #10283: per-JOB preview state — `runner.temp` is per-runner-agent even
-    # when several agents share one host, and both ports are allocated per
-    # run+job (see the boot steps below).
-    env:
-      PREVIEW_STATE: ${{ runner.temp }}/preview
+    # #10283: preview state is PER-JOB and per-run — the helper's `dir` verb
+    # computes it from `$RUNNER_TEMP` (per-runner-agent even on a shared host),
+    # and its `alloc` verb hands each server a port it has just verified free.
+    # (Not a job-level `env:`: the `runner` context is unavailable there and
+    # actionlint reds it.)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -2318,6 +2313,7 @@ jobs:
         run: |
           cd website
           PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           for attempt in 1 2; do
             # No spec: this is the binary the install step verified (#8816).
             PREVIEW_PORT="$(bash "$PREVIEW" alloc --name auth --base 8788)" || exit 1
@@ -2345,6 +2341,7 @@ jobs:
         run: |
           cd website/apps/dashboard
           PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
           for attempt in 1 2; do
             # #3501/#4054: `--d1 SESSIONS` is load-bearing. The dashboard's
             # session gate is `/api/session`, which resolves the HttpOnly

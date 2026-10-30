@@ -206,8 +206,11 @@ def test_every_preview_job_boots_and_aborts_through_the_scoped_helper() -> None:
             problems.append(f"{job_name}: job is gone (rename it here too)")
             continue
         env = job.get("env") or {}
-        if "PREVIEW_STATE" not in env:
-            problems.append(f"{job_name}: no job-level PREVIEW_STATE (shared state dir)")
+        if "PREVIEW_STATE" in env:
+            # actionlint reds a `runner.` context here (it is unavailable at
+            # job-level `env:`), and a job-level state dir is the shared-literal
+            # shape this issue is about anyway.
+            problems.append(f"{job_name}: job-level PREVIEW_STATE (shared state dir / invalid context)")
         boots = [
             step for step in (job.get("steps") or [])
             if (step.get("name") or "").startswith(BOOT_STEP_PREFIX)
@@ -219,6 +222,8 @@ def test_every_preview_job_boots_and_aborts_through_the_scoped_helper() -> None:
             name = step.get("name")
             for needle, why in (
                 ("preview-server.sh", "does not invoke the scoped helper at all"),
+                ('PREVIEW_STATE="$(bash "$PREVIEW" dir)"',
+                 "does not resolve its per-job state directory from the helper"),
                 (" alloc", "does not allocate its port"),
                 (" record", "does not record the pid it started"),
                 (" ready", "readiness does not verify its own pid"),

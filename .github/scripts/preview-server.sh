@@ -29,9 +29,10 @@
 # ------------
 #   * PORTS are per-run/per-job (a seeded scan over a range, verified FREE before
 #     use), never a shared literal.
-#   * STATE lives under `$PREVIEW_STATE`, which the workflow sets to
-#     `${{ runner.temp }}/preview` — `runner.temp` is a per-JOB directory even
-#     when the host is shared.
+#   * STATE lives under the directory `dir` prints — `$RUNNER_TEMP`, which is a
+#     per-JOB directory even when several runner agents share one host. It is
+#     computed by THIS script and nowhere else, so the boot step's log path and
+#     the teardown's pid file can never disagree.
 #   * TEARDOWN signals exactly the recorded pid and its DESCENDANTS. No `pkill`,
 #     no pattern match, no process name. A pid whose `/proc` start time no longer
 #     matches the one recorded at boot is treated as RECYCLED and is not
@@ -39,6 +40,7 @@
 #
 # Subcommands
 #   alloc --name N [--base PORT] [--span N]   pick a free port, record it, print it
+#   dir                                       print the per-job state directory
 #   record --name N --pid PID                 register the pid this job started
 #   ready --name N                            exit 0 iff OUR pid is alive and its
 #                                             port answers (a peer's server on the
@@ -262,11 +264,12 @@ main() {
   shift || true
   case "$cmd" in
     alloc) cmd_alloc "$@" ;;
+    dir) state_dir ;;
     record) cmd_record "$@" ;;
     ready) cmd_ready "$@" ;;
     stop) cmd_stop "$@" ;;
     stop-all) cmd_stop_all ;;
-    *) die "usage: $PROG {alloc|record|ready|stop|stop-all} ..." ;;
+    *) die "usage: $PROG {alloc|dir|record|ready|stop|stop-all} ..." ;;
   esac
 }
 
