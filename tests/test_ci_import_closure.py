@@ -2480,7 +2480,17 @@ def test_the_truth_cache_shape_is_pinned_to_its_version(monkeypatch, tmp_path):
     from tools import ci_import_closure as module
 
     shape_by_version = {
+        # v4: the per-run leg scoping + the `executed`/zero-testcase gate.
         4: frozenset({
+            "failed_files", "failed_tests", "jobs",
+            "job_failed_without_test_failure", "artifacts",
+            "runs_seen", "test_legs_seen", "artifact_errors",
+        }),
+        # v5: the zero-testcase gate moved from PER RUN to PER ARTIFACT. The key
+        # set is deliberately IDENTICAL — that is the whole reason this pin could
+        # not see the change, and why the RULES are pinned separately by
+        # `test_a_new_artifact_errors_producer_forces_a_ground_truth_version_bump`.
+        5: frozenset({
             "failed_files", "failed_tests", "jobs",
             "job_failed_without_test_failure", "artifacts",
             "runs_seen", "test_legs_seen", "artifact_errors",
@@ -2502,6 +2512,63 @@ def test_the_truth_cache_shape_is_pinned_to_its_version(monkeypatch, tmp_path):
     assert set(written) == shape_by_version[module.GROUND_TRUTH_VERSION], (
         "the ground truth's SHAPE changed — bump GROUND_TRUTH_VERSION and record "
         "the new key set, or every warm cache answers with the old rules forever")
+
+
+def test_a_new_artifact_errors_producer_forces_a_ground_truth_version_bump():
+    """P2: the truth's SHAPE was pinned; its RULES were not.
+
+    `96a1cd871` changed what `pr_ground_truth` RECORDS — the zero-testcase gate
+    moved from one entry per RUN to one per ARTIFACT — and added no truth key, so
+    `test_the_truth_cache_shape_is_pinned_to_its_version` stayed green while a
+    warm `truth-v4-*.json` written by the pre-fix reader kept being served as the
+    answer. The extraction's whole contract is *which states produce an
+    `artifact_errors` entry*, because that field alone makes the window PARTIAL
+    and blocks the cache (`if not artifact_errors and check_runs and
+    test_legs_seen: cached.write_text(...)`).
+
+    So the PRODUCERS are pinned per version, not the key set: adding a state that
+    can now be recorded unread, or removing one, fails here until the version
+    moves AND the count is re-recorded. This is the `v1 → v2 → v3 → v4` history
+    made mechanical — each of those bumps existed because a producer changed
+    while the constant did not.
+
+    Counted with `ast`, not a text search: `artifact_errors` appears ~30 times in
+    this module as prose and as a read-only key, and a substring count would pin
+    the comments. A refactor that moves an append into a helper should re-record
+    the count deliberately (that is the point) rather than delete the pin.
+    """
+    import ast
+
+    from tools import ci_import_closure as module
+
+    producers_by_version = {
+        # v5: the per-artifact zero-testcase entry is the ninth producer (the
+        # per-run entry it sits beside is kept, deliberately not deduped).
+        5: 9,
+    }
+
+    tree = ast.parse(Path(module.__file__).read_text())
+    producers = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "append"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "artifact_errors"
+    ]
+    assert module.GROUND_TRUTH_VERSION in producers_by_version, (
+        "the version moved without recording how many states it can record as "
+        "unread — record the producer count for "
+        f"v{module.GROUND_TRUTH_VERSION} here")
+    assert len(producers) == producers_by_version[module.GROUND_TRUTH_VERSION], (
+        f"pr_ground_truth now has {len(producers)} `artifact_errors` producers, "
+        "but this version was recorded with "
+        f"{producers_by_version[module.GROUND_TRUTH_VERSION]}: a WARM CACHE "
+        "written by the previous reader reports `artifact_errors: []` for a "
+        "state that is now unread, and `pr_ground_truth` short-circuits on "
+        "`cached.exists()`, so a fixed extractor would keep answering the old "
+        "question forever. Bump GROUND_TRUTH_VERSION and record the new count "
+        "(bumping is what re-names every cache file and invalidates them at once)")
 
 
 # ---------------------------------------------------------------------------

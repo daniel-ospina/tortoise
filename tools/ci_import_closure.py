@@ -143,10 +143,26 @@ CACHE_DIR = REPO / ".ci-selection" / "closure-cache"
 # workflow legs' own artifacts as absent and could not open `junit-d14.xml` at
 # all, so a warm v3 cache re-answers the OLD question forever — which is exactly
 # why the re-derivation of §3 must not be allowed to short-circuit on one.
+# #10143 review P2 (v4 → v5): the EXTRACTION changed again, one granularity down,
+# and the KEY SET did not — which is why the shape pin above could not see it.
+# The zero-testcase gate became PER ARTIFACT (a leg whose junit described 0
+# testcases now writes its own `artifact_errors` entry; before, a sibling leg in
+# the same RUN with 500 testcases masked it entirely), so a v4 file written by the
+# pre-fix reader reports `artifact_errors: []`/`[]` for a state that is now
+# unread, and `pr_ground_truth` short-circuits on `cached.exists()`. A warm v4
+# cache therefore re-answers the OLD question forever — including on this lane's
+# own machine, where every earlier round wrote one, `.ci-selection/` being
+# gitignored at `.gitignore:69`. Nothing reads a v4 file now.
+#
 # `test_the_truth_cache_shape_is_pinned_to_its_version` pins the coupling: the
 # shape the truth writes is recorded per version, so a shape change without a
 # bump fails, and a bump without a recorded shape fails too.
-GROUND_TRUTH_VERSION = 4
+# `test_a_new_artifact_errors_producer_forces_a_ground_truth_version_bump` pins
+# the other half — the RULES. A shape key set cannot see this class at all (v4 →
+# v5 added no key), so the number of `artifact_errors` producers is recorded per
+# version too: adding one without a bump fails, and bumping without re-recording
+# fails.
+GROUND_TRUTH_VERSION = 5
 
 # The package whose modules a closure REPORTS. Other in-repo roots (`tests/`,
 # `battery/`, `tools/`) are indexed and TRAVERSED — a test that imports
