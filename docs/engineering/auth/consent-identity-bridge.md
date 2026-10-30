@@ -418,9 +418,21 @@ attempted as one blind pass:
 | 4. The page rewrite (delete §7's rows, keep the org picker + the #5734 refusal copy, add the mint call and the terminal-loop guard) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
 | 5. `SCOPE.md` §9 class 4(i) — attested client identity | a product decision (which clients are attested, and what an unattested one may claim), filed separately |
 
-Steps 2→4 must land together or not at all: a page that half-reads a token and half-reads the old cookie is
-the "strictly worse than not starting" state #3559 recorded for `main.jsx`. Step 2 alone is safe (additive,
-bearer path untouched); step 4 is where the flow changes.
+**What the "together" rule binds, and what it does not.** Steps 2→4 were scoped to land together because
+a page that half-reads a token and half-reads the old cookie is the "strictly worse than not starting"
+state #3559 recorded for `main.jsx`. That hazard lives in the PAGE — nothing else in the sequence can
+half-read anything — so the rule binds **step 4**, which lands last and never in halves. Steps 2 and 3 are
+ADDITIVE and INERT on their own: step 2 is the token arm of `/oauth/consent` (bearer path untouched), and
+step 3 is `/api/consent/start` + `/api/consent/token` + `_shared/auth/consent-bridge.ts`, which the consent
+page (`tortoise/oauth.py::_CONSENT_HTML`) does not reference and cannot reach. With step 4 unbuilt no
+visitor's browser calls either route, so a deployment carrying step 3 without step 4 is a **no-op surface**,
+not a half-migrated flow — and the routes' own evidence (`tests/test_oauth_consent_bff_routes.py`) runs the
+shipped TS, not a page.
+
+**OVERRIDES:** the earlier "Steps 2→4 must land together **or not at all**" read as an operative ordering
+rule — because its recorded reason (#3559) is scoped to the page's half-read, and step 3 adds no caller to
+the page; relayed to [issue #3524 (decision comment)](https://github.com/daniel-ospina/tortoise/issues/3524#issuecomment-6516505856)
+and qualified here, where the rule is read. Nothing reverses the decision that step 4 lands last.
 
 **Step 2 is DELIVERED** by #3524 (`tortoise/consent_token.py` + the token arm of the
 `/oauth/consent` handler), and its guarantees are EXECUTED — not merely anchored — by
