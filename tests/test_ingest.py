@@ -1029,6 +1029,20 @@ def test_capture_metadata_creates_document_no_points():
             "RETURN count(o)"
         ).result_set
         assert uses[0][0] >= 1, uses
+        # #3590 (D1): that edge exists because the PRODUCER registered the
+        # skill explicitly (`api.add_object(...)` -> ObjectRegistered) before
+        # emitting the event. The fold no longer MERGEs a stub for a mention,
+        # so without the registration this edge is dropped and the assertion
+        # above is red (CI run 40917794096, job 123637953240). Pin the
+        # registration itself too, not only the edge: exactly ONE live carrier,
+        # the real kind, and no `_stub` marker (the retired fold wrote a
+        # name-derived stub — the identity model #3590 removes).
+        skill = proj.g.query(
+            "MATCH (o:Object {name:'tortoise-capture'}) "
+            "RETURN o.id, o.objectKind, o._stub").result_set
+        assert len(skill) == 1, f"expected one registered skill carrier: {skill}"
+        assert skill[0][1] == "skill", skill[0]
+        assert not skill[0][2], skill[0]
         # ZERO Points extracted
         pts = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set
         assert pts[0][0] == 0, f"Points extracted during capture: {pts[0][0]}"

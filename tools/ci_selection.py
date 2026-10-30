@@ -313,6 +313,19 @@ SHARED_MODULES = (
     # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`)
     # cannot see it and this registration has to be made by hand.
     "tests/_change_feed_isolation.py",
+    # #3590 round-5 review F4: the minted-identity id RESOLVER
+    # (`tests/_node_ids.py`) replaced the retired `entity_name_id` derivation in
+    # the tests that need "the id of this name", and it is imported ACROSS
+    # surfaces — `test_sdk_group3.py` (sdk), `test_capture_session.py` /
+    # `test_ingest_event_endpoint.py` / `test_event_provenance.py` /
+    # `test_status_folds_2729.py` (core), `test_7936_stable_stub_ids.py`
+    # (core + sdk), and roughly a dozen more. Same class as `_live_utils.py`
+    # above: it is NOT a `test_*.py` file, so the manifest never classifies it —
+    # without this entry a helper-only change selected `core` only, and a break
+    # it induced in a sdk/api test would never run on the PR that made it (the
+    # #1349/#3332/#3910 under-selection class). Note `--integrity` cannot see
+    # this gap: it rglobs `test_*.py` only.
+    "tests/_node_ids.py",
     # this PR (#1436 / #5084 remainder): the in-process live-skip gate
     # (`tests/_live_gate.py`) is imported at conftest MODULE level and is applied
     # from `pytest_runtest_setup` — i.e. it runs before EVERY test on EVERY
