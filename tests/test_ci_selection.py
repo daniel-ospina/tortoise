@@ -12391,7 +12391,9 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     # a tool-only diff took the docs-only early return and selected NO surface —
     # the guard never ran on the file it guards.
     #
-    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    # Mutation check: removing the CORE_ALSO entry empties `r["surfaces"]`, so
+    # assert 1 (below) is the row that reds first — measured: surfaces=[] and
+    # the test file is unlisted, same as the pre-entry state.
     r = _sel(["tools/seal_session_events.py"])
     assert "core" in r["surfaces"], r
     assert "test_session_events_seal.py" in r["test_files"], r
