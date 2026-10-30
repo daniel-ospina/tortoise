@@ -2763,8 +2763,8 @@ def _write_capture_turns(
         # see `record_projection.TURNS_RECORD_TYPE`). A pre-change turn's `PointAdded`
         # keeps a creation in the feed with no matching retraction — the asymmetry
         # accepted here rather than repaired by re-announcing turns; the JSONL half
-        # below still removes the record ROW, so a shorter re-capture is durable. Pinned by
-        # `tests/test_10017_turn_carrier_replay.py`.
+        # below still removes the record ROW, so a shorter re-capture is durable. Decided on #10325,
+        # pinned by `tests/test_10017_turn_carrier_replay.py`.
         if not _record_holds_turns:
             sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
         sdk._journal_entity_mutation("Point", tid, "delete")
