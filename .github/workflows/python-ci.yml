@@ -938,7 +938,9 @@ jobs:
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
         # socket dir is gone, or it is older than the widest job `timeout-minutes`
-        # among the jobs that run it) and KEEPS every case it cannot measure.
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2073,7 +2075,9 @@ jobs:
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
         # socket dir is gone, or it is older than the widest job `timeout-minutes`
-        # among the jobs that run it) and KEEPS every case it cannot measure.
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2586,7 +2590,9 @@ jobs:
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
         # socket dir is gone, or it is older than the widest job `timeout-minutes`
-        # among the jobs that run it) and KEEPS every case it cannot measure.
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -3071,7 +3077,9 @@ jobs:
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
         # socket dir is gone, or it is older than the widest job `timeout-minutes`
-        # among the jobs that run it) and KEEPS every case it cannot measure.
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |

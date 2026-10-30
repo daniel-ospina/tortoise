@@ -539,6 +539,85 @@ def test_every_cleaning_job_invokes_the_scoped_reaper():
         )
 
 
+#: The population the age proof quantifies over, in the two halves the shipped
+#: diff states it in: the WIDE set ("jobs that can OWN one") and the part of it a
+#: call site cannot see (every job that opts into the URI-less embedded lane).
+#: Read off `reap-redislite-orphans.py:104-112`.
+_POPULATION_PROSE = ("can OWN one", "URI-less embedded lane")
+
+#: The narrowed reading the call-site comments carried before this pin existed —
+#: "the jobs that run it", i.e. the five callers, which round 2 of #10327's own
+#: review rejected: this tool enumerates the HOST's process table, so it can meet
+#: a server belonging to a job that never installs it.
+_NARROW_POPULATION_PROSE = "jobs that run it"
+
+
+def _reaper_call_site_comments() -> list[tuple[str, str]]:
+    """`(where, comment block)` for every step that actually RUNS the reaper.
+
+    The block is the contiguous comment run immediately above the step's `run:`
+    key (one non-comment line back, because `run: |` sits between them). It is
+    anchored on the INVOCATION, not on a step name or a heading: a heading scan
+    goes vacuous the moment the heading is reworded — the very failure this pin
+    exists to catch one line over.
+    """
+    sites: list[tuple[str, str]] = []
+    for path in _workflow_files():
+        lines = path.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if "reap-redislite-orphans.py --apply" not in line:
+                continue
+            if line.lstrip().startswith("#"):  # prose ABOUT the call, not the call
+                continue
+            block: list[str] = []
+            j = i - 1
+            if j >= 0 and not lines[j].lstrip().startswith("#"):
+                j -= 1  # step over the `run:` key
+            while j >= 0 and lines[j].lstrip().startswith("#"):
+                block.append(lines[j])
+                j -= 1
+            sites.append((f"{path.name}:{i + 1}", "\n".join(reversed(block))))
+    return sites
+
+
+def test_every_reaper_call_site_states_the_real_population():
+    """NON-VACUOUS: this reds on all five comments the pre-fix diff shipped.
+
+    The module says the opposite of "the jobs that run it" in two places
+    (`reap-redislite-orphans.py:44-45`, `:104-105`), and `ci.yml`'s `flip-gate`
+    comment gets it right — so a tree that says both ships two contradictory
+    statements of one fact, and the prose ones sit on the DISPROVED side. It is
+    not cosmetic: a maintainer recomputing the arm from the shipped comment
+    derives it over the five callers, which happens to yield the same 90 today
+    only because `python-ci.yml::test` is in both sets — while omitting
+    `evals-on-demand.yml::evals` (90) and `ci.yml::flip-gate` (30), the jobs this
+    PR's widening exists for. The next job to move would then derive a false arm
+    from a green tree (#10327 review, ISSUE 1 — raised at `32b56f99e` and again
+    at `0bc5529c3`, and dropped by a fixer lane that read the head as clean).
+    """
+    sites = _reaper_call_site_comments()
+    assert len(sites) >= 5, (
+        "the call-site scan found fewer steps than the five that run the reaper "
+        f"({[where for where, _ in sites]}) — a scan that reads nothing would "
+        "pass over the comments it exists to check, so fail instead"
+    )
+    narrow = [where for where, block in sites if _NARROW_POPULATION_PROSE in block]
+    thin = [
+        where for where, block in sites if not all(marker in block for marker in _POPULATION_PROSE)
+    ]
+    assert narrow == [], (
+        'a call-site comment still names "the jobs that run it", the population '
+        "round 2 of #10327's review rejected (the reaper reads the HOST's process "
+        "table, so a job that never installs it can own a server):\n  " + "\n  ".join(narrow)
+    )
+    assert thin == [], (
+        "a call-site comment does not state the population the age proof quantifies "
+        'over — every one must name a job that "can OWN one" and the URI-less '
+        "embedded opt-in that widens it past the call sites "
+        "(`reap-redislite-orphans.py:104-112`):\n  " + "\n  ".join(thin)
+    )
+
+
 #: the three logical lines of the tempdir cleanup that follows the scoped reaper
 _CLEANUP_MARKERS = ("gettempdir())", "-mmin +30", 'echo "tempdir cleaned"')
 
