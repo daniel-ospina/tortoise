@@ -2338,7 +2338,7 @@ try {
   // the fold's own `absent` verdict), the supersede patch, then the descriptor.
   const supersedeRecords = (oldId, newId, targetKey,
                             { preamble = [], link, edgeType = 'aboutObject',
-                              targetLabel = 'Object' } = {}) => [
+                              targetLabel = 'Object', descriptorAttrs = {} } = {}) => [
     ...preamble,
     { type: 'PointAdded', ts: '2026-10-25T00:00:01Z', id: oldId,
       point: { id: oldId, content: 'the claim', status: 'live' } },
@@ -2352,7 +2352,7 @@ try {
     { type: 'DirectEdgeRepoint', ts: '2026-10-25T00:00:04Z',
       id: `${oldId}->${newId}:${edgeType}:${targetKey}`,
       src: oldId, tgt: targetKey, target_label: targetLabel,
-      edge_type: edgeType },
+      edge_type: edgeType, ...descriptorAttrs },
   ];
   const acme = {
     type: 'ObjectRegistered', ts: '2026-10-25T00:00:00Z', id: 'obj-9972-acme',
@@ -2628,11 +2628,99 @@ try {
       + 'variant is the record holding an identity the fold does not');
   }
 
+  // (10) #10303 (#10139, review P1) — the descriptor CARRIES the retired edge's
+  //      attributes (`sdk.supersede_point` emits them FLAT) and the record must
+  //      re-apply them, or ONE journal rebuilds into two different stores: the
+  //      graph's pass-2b replay restores `confidence` (`ON CREATE SET nr +=
+  //      $attrs`) and the record dropped it. ⚠️ The five names are COLUMNS of
+  //      `public.relation`, so this asserts the COLUMNS — not the `props` tail,
+  //      where a reader would otherwise look for the carry and find `{}`.
+  const carried = await run('10139-carry',
+    supersedeRecords('p1', 'p2', 'Acme Corp', {
+      preamble: [acme],
+      link: { ...linked, confidence: 0.83, batch_id: 'b-10139' },
+      descriptorAttrs: { confidence: 0.83, batch_id: 'b-10139' },
+    }));
+  const carriedRow = (await db.query(
+    `SELECT src_key, confidence, batch_id, props::text AS props
+       FROM public.relation
+      WHERE org_id = '10139-carry-org' AND graph_id = '10139-carry-graph'
+        AND rel_type = 'aboutObject'`)).rows;
+  if (carried.length !== 1 || carriedRow.length !== 1
+      || carriedRow[0].src_key !== 'p2') {
+    throw new Error('#10303: the carried move must land exactly ONE row at the '
+      + `successor; rows = ${JSON.stringify(carried)} / `
+      + JSON.stringify(carriedRow));
+  }
+  if (Number(carriedRow[0].confidence) !== 0.83
+      || carriedRow[0].batch_id !== 'b-10139') {
+    throw new Error('#10303: the moved row dropped the descriptor\'s attributes '
+      + `(${JSON.stringify(carriedRow[0])}) — the graph restores them from the `
+      + 'same descriptor, so this row is where the two rebuild routes diverge');
+  }
+  if (carriedRow[0].props !== '{}') {
+    throw new Error('#10303: the carried names have COLUMNS, so the props tail '
+      + `must stay empty; props = ${carriedRow[0].props}`);
+  }
+
+  // (11) #10303 PRECEDENCE — the successor already holds its OWN row on the same
+  //      target with its own `confidence` (the COMMON restatement case: the same
+  //      subject bound by both points). `ON CONFLICT … DO NOTHING` is the
+  //      record's `ON CREATE SET`: the existing row is left BYTE-IDENTICAL, so
+  //      0.91 survives the retired point's 0.42. An unconditional update here is
+  //      the measured 0.91 -> 0.42 destruction the live leg's review P1 fixed.
+  const precAcme = {
+    type: 'ObjectRegistered', ts: '2026-10-25T00:09:00Z',
+    id: 'obj-10303-prec', name: 'Precedence Corp', objectKind: 'org',
+  };
+  const precedence = await run('10139-precedence', [
+    precAcme,
+    { type: 'PointAdded', ts: '2026-10-25T00:09:01Z', id: 'prec-old',
+      point: { id: 'prec-old', content: 'the claim', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:09:02Z', id: 'prec-new',
+      point: { id: 'prec-new', content: 'the restatement', status: 'live' } },
+    { type: 'EntityLinked', ts: '2026-10-25T00:09:03Z', id: 'prec-old',
+      source_label: 'Point', source_id: 'prec-old', target_label: 'Object',
+      target_id: 'obj-10303-prec', edge_type: 'aboutObject',
+      confidence: 0.42 },
+    // The successor's OWN binding — its value is the authoritative one.
+    { type: 'EntityLinked', ts: '2026-10-25T00:09:04Z', id: 'prec-new',
+      source_label: 'Point', source_id: 'prec-new', target_label: 'Object',
+      target_id: 'obj-10303-prec', edge_type: 'aboutObject',
+      confidence: 0.91 },
+    { type: 'PointSuperseded', ts: '2026-10-25T00:09:05Z', id: 'prec-old',
+      new_id: 'prec-new', valid_from: '2026-10-25T00:09:05Z',
+      valid_to: '2026-10-25T00:09:06Z', expired_at: '2026-10-25T00:09:06Z' },
+    { type: 'DirectEdgeRepoint', ts: '2026-10-25T00:09:06Z',
+      id: 'prec-old->prec-new:aboutObject:Precedence Corp',
+      src: 'prec-old', tgt: 'Precedence Corp', target_label: 'Object',
+      edge_type: 'aboutObject', confidence: 0.42 },
+  ]);
+  const precRow = (await db.query(
+    `SELECT src_key, confidence FROM public.relation
+      WHERE org_id = '10139-precedence-org'
+        AND graph_id = '10139-precedence-graph'
+        AND rel_type = 'aboutObject'`)).rows;
+  if (precedence.length !== 1 || precRow.length !== 1
+      || precRow[0].src_key !== 'prec-new') {
+    throw new Error('#10303 precedence: the row must end up ONCE, at the '
+      + `successor; rows = ${JSON.stringify(precedence)} / `
+      + JSON.stringify(precRow));
+  }
+  if (Number(precRow[0].confidence) !== 0.91) {
+    throw new Error('#10303 precedence: the successor\'s own `confidence` was '
+      + `overwritten (${JSON.stringify(precRow[0])}) — DO NOTHING must leave an `
+      + 'existing row untouched, as the graph\'s ON CREATE SET does');
+  }
+
   console.log('✓ #9972: the FOUR resolution arms resolve — Object and Subject by '
     + '`name`, Point by `props->>\'name\'`, Source+extractedFrom by the '
     + 'canonical triple — and a name held by 2+ carriers lands nothing (#5509)');
   console.log('✓ #9973: a supersede TRANSFERS the edge — the row leaves the '
     + 'superseded point, lands on the final successor, and re-replays idempotently');
+  console.log('✓ #10303: the RECORD route carries the descriptor\'s attributes to '
+    + 'the moved row\'s columns, and `DO NOTHING` keeps a successor\'s own value '
+    + '(0.91 over the retired 0.42) exactly as the graph\'s `ON CREATE SET` does');
 } catch (e) {
   console.error(`✗ #9972/#9973 STRUCTURAL REPOINT FAILED:\n  ${e.message.split('\n').slice(0, 30).join('\n  ')}`);
   process.exit(1);

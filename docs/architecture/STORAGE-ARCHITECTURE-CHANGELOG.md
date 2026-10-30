@@ -1738,3 +1738,22 @@ ONE place (`projection/edges.py::DIRECT_EDGE_ATTR_KEYS`) instead of a literal tu
 and replay site — the drift this row was one change away from, since the live and rebuilt halves each
 had their own copy. Pinned by `tests/test_8398_aboutobject_replay.py` (the replay, behaviourally) and
 `tests/test_9397_about_edge_properties.py` (the census).
+
+**2026-10-30 — `#10139` / `#10303` review P1 — the RECORD route carries them too.** The pass-2b
+fold above was only ONE of the two rebuild routes, and the other one
+(`record_projection._structural_repoint_statements`, the 2b MOVE's insert leg) still wrote the moved
+`relation` row with an EMPTY attribute set — so the descriptor carried the retired edge's
+`confidence` and the journal-rebuild restored it while the record rebuild dropped it. That is the
+`#9553` divergence class created by THIS change rather than existing before it: until `#10139` both
+routes dropped the value, so they agreed. The move now reads the descriptor through the SAME
+vocabulary the fold replays (`DIRECT_EDGE_ATTR_KEYS`, restated in `record_projection` for the
+STANDALONE reason its other constants are and pinned to the fold's own tuple), and routes each name
+through `_split_properties`: `direction`/`confidence`/`weight`/`label`/`batch_id` are COLUMNS of
+`public.relation`, so they land there and the row's `props` tail stays `{}` — the tail is not where
+this carry is observable. `ON CONFLICT … DO NOTHING` is kept, and it IS the fold's precedence rather
+than an approximation of it: a row the successor does not have is inserted carrying the values, a row
+it already has is left byte-identical, exactly as `ON CREATE SET` leaves it (`DO UPDATE` would
+reproduce the measured 0.91 → 0.42 destruction). `sourceVersion` stays uncarried on BOTH sides — the
+fold drops it too — so the two routes agree by both losing that anchor rather than the record keeping
+an attribute the graph does not have. Pinned by
+`tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.

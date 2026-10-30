@@ -4681,7 +4681,8 @@ _COUNT_NUMBER_TOKEN = re.compile(
     # (*"no corrected passage states how many declared false positives there
     # are"*) names a passage that plainly does state it (`#10200` review, cycle 7,
     # executed: `seven` … `twelve` all returned `[]`). Today `len(
-    # NOT_AN_ABOUT_WRITER) == 1`, so this is a LATENT fail-open — and the width
+    # NOT_AN_ABOUT_WRITER) == 0` — EMPTY since `#10139` retired its last row —
+    # so this is a LATENT fail-open, not a live one, and the width
     # guard one leg up says "the tables already cover it" at 7–12, which is what
     # made the gap invisible instead of loud. Building the alternation from
     # `NUMBER_WORDS` makes the reader unable to be narrower than the table.
