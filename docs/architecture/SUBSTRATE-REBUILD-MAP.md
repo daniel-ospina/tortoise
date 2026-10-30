@@ -205,10 +205,14 @@ Taken from the import graph, not from prose.
 
 **The "clean LEAF" claim, re-measured** (files under `tortoise/` importing
 each module, at `4f68a2aa7`): `fanout` **2** · `source_identity` **4** ·
-`embeddings` **14** · `vet_gate` **0** (no module imports it — its consumers are
-entered through `vet_gate.vet_candidates`, so this is a fact about the import
-graph and not about reachability). The leaves created by the merged lanes are
-still leaves. **The contention remains entirely in the pre-existing aggregators.**
+`embeddings` **14** · `vet_gate` **1** — its one importer is
+`extractor_v2.py:157` (`from . import vet_gate as _vet_gate`, a module-level
+import beside `value_gate`), which is what reaches
+`vet_gate.vet_candidates` at `extractor_v2.py:8464`. That importer is L3's
+declared family (§3), so the single inbound edge is inside one lane rather than
+across the dependency graph: a `vet_gate` interface change is L3's business.
+The leaves created by the merged lanes are still leaves. **The contention
+remains entirely in the pre-existing aggregators.**
 
 ### The one interface that must not be broken
 
@@ -229,8 +233,11 @@ symbol pair this guard does check: the writers' retired-key allowlist
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
 and the reason is measured: `:Document` occurs on **55** lines across **17**
 files under `tortoise/` at `4f68a2aa7` (`git grep -n ':Document'` → 55 lines,
-`git grep -l ':Document'` → 17 files — the file count is not the line count), and
-every one of those lines is prose that *names the retired label* —
+`git grep -l ':Document'` → 17 files — the file count is not the line count).
+`tests/test_substrate_map.py` re-derives both numbers over the **same**
+population this sentence is stated in — every *tracked* file under `tortoise/`,
+any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
+of those lines is prose that *names the retired label* —
 a docstring, a comment, a printed message, or an RST literal in
 `migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
@@ -359,6 +366,17 @@ the tree disagree:
 or could not *answer* one of the claims — the case that matters here is the
 ancestry claim in a shallow clone, which is reported as `UNVERIFIED` with the
 cause named, never as drift (the document is not wrong; the clone is shallow).
+
+The ancestry probe is **bounded at 10 s**, and the bound is classified with the
+status arm rather than against it: a locally-present sha answers in 7 ms, an
+absent one costs ~24 s on a partial clone while git attempts a lazy fetch, so the
+bound exists to stop a CI gate hanging on a typo. A probe that hits it is
+therefore *"could not answer"* — the same absent-object condition as git's
+error status, arriving slowly — and is reported as `UNVERIFIED`, exit `2`. It is
+never `1`: `--is-ancestor` exits `0` (ancestor) / `1` (not an ancestor) / a
+non-zero status that is not `1` (error), and a timeout is not a git status at
+all, so scoring it as drift would hand an operator *"the document and the tree
+disagree"* about a correct document.
 
 ### Where the guard runs, and which half runs where
 

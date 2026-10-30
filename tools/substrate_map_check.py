@@ -62,11 +62,21 @@ Pinned by `tests/test_substrate_map.py`.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/substrate_map_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/substrate_map_check.py`"
+    )
+
 import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -232,8 +242,18 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     not: on this box's partial clone an unknown sha took **24 s** and a network
     round trip to the promisor remote (measured, `GIT_NO_LAZY_FETCH=1` does not
     avoid it — the cost is CPU in ref enumeration, not the socket). An unbounded
-    ancestry probe inside a CI gate is a hang waiting for a typo, so a timeout is
-    a PROBLEM (the map names a tree nobody can verify), never a pass.
+    ancestry probe inside a CI gate is a hang waiting for a typo, so it is
+    **bounded** — and the bound is classified with the status arm, not against
+    it: a timeout is the 128 condition arriving slowly (the same absent object,
+    the same lazy fetch), so it is UNVERIFIED, exit 2, never a pass and never
+    drift (#5086 review P2, cycle 4).
+
+    The split keys on git's own STATUS, which is what the platform guarantees:
+    `--is-ancestor` *"exit[s] with status 0 if true, or with status 1 if not.
+    Errors are signaled by a non-zero status that is not 1."* A timeout is not a
+    git status at all, so it cannot be put in the status-1 (drift) channel — an
+    operator told "the document and the tree disagree" on a slow clone is handed
+    a wrong instruction about a correct document.
     """
     match = _FRONTMATTER_SHA.search(doc)
     if not match:
@@ -249,12 +269,15 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"},
         )
     except subprocess.TimeoutExpired:
+        # Not drift: the claim was never adjudicated. Same cause as the status-128
+        # arm below, arriving slowly — see this function's docstring.
         return (
+            [],
             [
                 f"measured_at_commit {sha} could not be verified within "
-                f"{ANCESTRY_TIMEOUT_S}s (git is trying to fetch an object it does not have)"
+                f"{ANCESTRY_TIMEOUT_S}s (git is trying to fetch an object it does "
+                "not have, so this checkout cannot answer the claim)"
             ],
-            [],
         )
     except OSError as exc:  # pragma: no cover - git absent is a state error
         raise _state_error(f"git unavailable ({exc})") from exc

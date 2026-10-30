@@ -49,22 +49,66 @@ _LABEL_CLAIM = re.compile(
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
+#: The population §5's claim is stated in: every **tracked** file under
+#: `tortoise/`, any suffix. Derived from the index rather than from an extension
+#: filter so the check measures the same set the sentence's `git grep` does —
+#: `rglob("*.py")` omitted the 28 tracked non-`.py` files under `tortoise/`
+#: (`SKILL.md`, `config/*.json|*.yaml`, `pi-hooks/*.ts`, …), so a `:Document`
+#: added to one of them raised the true figure while the check still saw 55 and
+#: passed: a latent false CLEAN on the number the no-regex-check decision rests
+#: on (#5086 review P3, cycle 4).
+_TRACKED_DIR = "tortoise"
+
+#: Bound on the index read. `git ls-files` is local (it reads the index, it never
+#: fetches), so anything slower means the checkout is broken — a state error.
+_INDEX_TIMEOUT_S = 60
+
+
+def _tracked_files_under(rel: str) -> list[Path]:
+    """Every tracked path under `rel`, in index order.
+
+    Not a failure-tolerant read: if git cannot answer, that is a STATE ERROR
+    (exit 2), never a quietly narrower population — the exact way a guard and
+    the claim it checks end up agreeing because both looked at less.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z", "--", rel],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=_INDEX_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise smc._state_error(f"cannot enumerate tracked files under {rel}/ ({exc})") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        why = detail[0] if detail else "git gave no detail"
+        raise smc._state_error(f"cannot enumerate tracked files under {rel}/: {why}")
+    return [REPO / p for p in proc.stdout.split("\0") if p]
+
 
 def _label_hits() -> tuple[int, int, int]:
     """`(lines, files, narrow)` for `:Document` under `tortoise/`.
 
-    Measured directly rather than through `subprocess`, so a broken `git` cannot
-    make the claim and its check agree by both failing: `git grep -n` prints one
-    line per MATCHING LINE, `git grep -l` one per FILE — the exact distinction
-    §5's figure got wrong.
+    Over EVERY tracked file, any suffix — the population §5's sentence is stated
+    in (`git grep` over `tortoise/`), not the `.py`-only subset the first cut
+    walked. Counting is still done directly rather than through `git grep`, so a
+    broken `grep` cannot make the claim and its check agree by both failing;
+    the *file list* comes from the index, and a git that cannot supply it is a
+    state error rather than an empty population.
     """
     lines = files = narrow = 0
-    for path in sorted((REPO / "tortoise").rglob("*.py")):
-        hits = [
-            line
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if ":Document" in line
-        ]
+    for path in _tracked_files_under(_TRACKED_DIR):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # A tracked path that is unreadable or not text cannot carry prose
+            # about a node label; it also cannot be silently *counted* as zero
+            # matches in a way that shifts the figure, so it is simply not part
+            # of a prose population.
+            continue
+        hits = [line for line in text.splitlines() if ":Document" in line]
         if not hits:
             continue
         files += 1
@@ -297,19 +341,29 @@ def test_a_sha_that_is_not_an_ancestor_is_drift(monkeypatch) -> None:
 
 
 def test_an_unbounded_ancestry_probe_cannot_hang_the_gate(monkeypatch) -> None:
-    """Fails if a slow/hanging git probe is allowed to read as clean.
+    """Fails if a slow/hanging git probe is allowed to read as clean — or as drift.
 
     Reachable: measured on this box's partial clone, an absent sha makes
     `git merge-base --is-ancestor` spend ~24 s attempting a lazy fetch. Without
     the bound the gate blocks; with the bound as a PASS it would silently certify
-    a tree nobody verified — so the timeout must surface as a problem.
+    a tree nobody verified — so the timeout must not be clean. It must not be
+    DRIFT either: the claim was never adjudicated, and "the document and the tree
+    disagree" is a false instruction about a correct document on a slow clone.
+    The split keys on git's own status (`--is-ancestor` errors with "a non-zero
+    status that is not 1"), so the timeout joins the status-128 arm below:
+    unverified, exactly one entry, exit 2 (#5086 review P2, cycle 4).
     """
     def _boom(*a, **k):
         raise subprocess.TimeoutExpired(cmd="git", timeout=smc.ANCESTRY_TIMEOUT_S)
 
     monkeypatch.setattr(smc.subprocess, "run", _boom)
-    problems, _unverified = smc.check_measured_at_commit(_doc())
-    assert any("could not be verified within" in p for p in problems), problems
+    problems, unverified = smc.check_measured_at_commit(_doc())
+    assert problems == [], (
+        f"a timeout is not drift — the document is not wrong, the clone cannot "
+        f"answer; got problems={problems}"
+    )
+    assert len(unverified) == 1, unverified
+    assert "could not be verified within" in unverified[0], unverified
 
 
 def test_a_missing_measured_at_commit_is_drift() -> None:
@@ -429,6 +483,60 @@ def test_the_json_manifest_names_what_it_does_not_check() -> None:
     # The unverified channel is part of the manifest: a caller must be able to see
     # WHICH claim a state error stopped, instead of inferring it from the exit code.
     assert "unverified" in result, result
+
+
+def test_the_label_population_is_every_tracked_file_not_just_py() -> None:
+    """Fails if the `:Document` count is measured over a NARROWER set than §5 claims.
+
+    Reachable — and it WAS the shipped state: `_label_hits()` walked
+    `(REPO / "tortoise").rglob("*.py")` while §5's sentence states its figure in
+    `git grep`'s population (all tracked files under `tortoise/`). The two sets
+    differ by **28** tracked non-`.py` files (`tortoise/onboarding/SKILL.md`,
+    `tortoise/config/*.json|*.yaml`, `tortoise/pi-hooks/*.ts`, …), so a
+    `:Document` occurrence added to one of them raises the true figure while a
+    `.py`-only walk still returns 55 — the assertion then compares 55 against a
+    document that says 55 and PASSES, leaving the stale number in place. That is
+    the false-CLEAN class this file exists to close.
+
+    The control asserts on the POPULATION (which files were read), not on the
+    count, so it stays reachable at any re-cut: whatever the numbers are, the set
+    must contain a non-`.py` tracked file.
+    """
+    scanned = _tracked_files_under(_TRACKED_DIR)
+    assert scanned, "the tracked-file population collapsed to nothing"
+    non_py = [p for p in scanned if p.suffix != ".py"]
+    assert non_py, (
+        "the `:Document` population is `.py`-only again, so a label minted in a "
+        "tracked SKILL.md / config *.yaml / *.ts raises the true figure while this "
+        "check keeps reporting the old number"
+    )
+    assert all(p.is_file() for p in scanned), (
+        "a tracked path under tortoise/ is not a file here — the index and the "
+        "working tree disagree"
+    )
+
+
+def test_an_index_git_that_cannot_answer_is_a_state_error_not_an_empty_population(
+    monkeypatch,
+) -> None:
+    """Fails if a broken git silently narrows the population to nothing.
+
+    Reachable: exit 128 (outside a work tree, a corrupt index, a permissions
+    fault). An empty population would make every `:Document` figure compare 0
+    against 0 and report CLEAN, which is the fail-open this whole module is
+    written against — so the read must raise the state error (exit 2) instead.
+    """
+    monkeypatch.setattr(
+        smc.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 128, "", "fatal: not a git repository"),
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        _tracked_files_under(_TRACKED_DIR)
+    assert excinfo.value.code == 2, (
+        f"a git that cannot enumerate the population is a state error (2); got "
+        f"{excinfo.value.code!r}"
+    )
 
 
 def test_the_document_label_prose_count_is_the_LINE_count() -> None:
