@@ -125,18 +125,18 @@ if str(ROOT) not in sys.path:
 def _sdk_line_naming(code: str) -> int:
     """The ONE line of ``tortoise/sdk.py`` that carries ``code`` — read from the tree.
 
-    The causes below are EMITTED, so no human re-derives their number between runs:
-    a typed cite here re-stales silently on the next branch that inserts a line
-    above the fold — this bundle has already been sent to ``:12196``, ``:12738``
-    and ``:13473`` by three such merges, and #9750 (a 40-line helper inserted near
-    the top of ``sdk.py``, above every cite in this bundle) would have made that
-    four. The CITE CONVENTION above calls
-    the number a convenience and the SYMBOL authoritative; reading it here is what
-    makes that true for the text this probe prints, while the PROSE cites stay
-    typed and self-detecting (`_bundle_sweep` in the test bundle resolves them
-    against the tree). Anchors are whole lines of code, never a line number, and a
-    second match REFUSES: an ambiguous anchor would emit a plausible number for
-    the wrong line, which is the failure this replaces.
+    The causes below are EMITTED, so no human re-derives their number between
+    runs: a typed cite here re-stales silently on the next branch that inserts a
+    line above the fold — this bundle has already been sent to ``:12196``,
+    ``:12738`` and ``:13473`` by three such merges, and #9750 (a 40-line helper
+    inserted near the top of ``sdk.py``, above every cite in this bundle) would
+    have made that four. The CITE CONVENTION above calls the number a convenience
+    and the SYMBOL authoritative; reading it here is what makes that true for the
+    text this probe prints, while the PROSE cites stay typed and self-detecting
+    (`_bundle_sweep` in the test bundle resolves them against the tree). Anchors
+    are whole lines of code, never a line number, and a second match REFUSES: an
+    ambiguous anchor would emit a plausible number for the wrong line, which is
+    the failure this replaces.
     """
     lines = (ROOT / "tortoise" / "sdk.py").read_text().splitlines()
     hits = [n for n, line in enumerate(lines, 1) if code in line]
