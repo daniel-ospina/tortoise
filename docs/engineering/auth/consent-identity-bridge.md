@@ -279,7 +279,7 @@ the split is:
 | Mitigation | What it stops |
 |---|---|
 | **(ii) the binding above** | the attacker cannot *reuse* an assertion across flows: an assertion minted in flow X is inert in flow Y, so a stolen or replayed token cannot be steered into the attacker's `code_challenge`/`state`. This is the only half that bounds replay **and** cross-flow substitution. |
-| **(i) attested client identity — OPEN** | the remaining half: the *human* decision. Fixation survives (ii) whenever the victim is induced to visit the attacker's authorize URL *fresh*, so the victim must be able to tell **who** they are approving. Today the page renders `client_name` **from the client's own metadata document**: DCR lets an attacker register `client_name: "Claude"` (`register_client`, `oauth.py:1014`) and the page prints it verbatim (`oauth.py:2608-2609`) — *"Claude wants to access your Tortoise MCP surface."* That is the phishing surface. Requires an allowlist/attestation of client identity before the page asserts any name. **Filed as [#8218](https://github.com/daniel-ospina/tortoise/issues/8218)** — `SCOPE.md` §9 class 4(i) is explicitly assigned to #3524 but is absent from the issue body, so a separate ticket is what keeps it tracked. |
+| **(i) attested client identity — OPEN** | the remaining half: the *human* decision. Fixation survives (ii) whenever the victim is induced to visit the attacker's authorize URL *fresh*, so the victim must be able to tell **who** they are approving. Today the page renders `client_name` **from the client's own metadata document**: DCR lets an attacker register `client_name: "Claude"` (`register_client`, `oauth.py:1014`) and the page prints it verbatim (`consent_page_html`'s `#client-line` render, `oauth.py:2558-2560` at this head — a LINE anchor that drifts; the stable identifier is the `#client-line` assignment) — *"Claude wants to access your Tortoise MCP surface."* That is the phishing surface. Requires an allowlist/attestation of client identity before the page asserts any name. **Filed as [#8218](https://github.com/daniel-ospina/tortoise/issues/8218)** — `SCOPE.md` §9 class 4(i) is explicitly assigned to #3524 but is absent from the issue body, so a separate ticket is what keeps it tracked. |
 
 **Not mitigated by design, recorded plainly:** an attacker who can run script on the AS origin can drive the
 mint route. That is not new authority — that origin already serves the page that approves consents — but the
@@ -325,7 +325,7 @@ The mint requires the browser to reach the session origin even though the consen
 
 ## 5. Task 2 — RFC 8414 `authorization_endpoint` stability: VERIFIED
 
-`authorization_server_metadata(base)` (`oauth.py:2124-2143`) emits `"authorization_endpoint": base +
+`authorization_server_metadata(base)` (in `tortoise/oauth.py`) emits `"authorization_endpoint": base +
 "/oauth/authorize"`, where `base = _oauth_base(request) = str(request.base_url).rstrip("/")`
 (`_oauth_base`, a function in `hosted_api.py`), served at both
 `@app.get("/.well-known/oauth-authorization-server")` and its `/mcp` twin (both in `hosted_api.py`).
@@ -485,9 +485,9 @@ state #3559 recorded for `main.jsx`. That hazard lives in the PAGE — nothing e
 half-read anything — so the rule binds **step 4**, which lands last and never in halves. Steps 2 and 3 are
 ADDITIVE and INERT on their own: step 2 is the token arm of `/oauth/consent` (bearer path untouched), and
 step 3 is `/api/consent/start` + `/api/consent/token` + `_shared/auth/consent-bridge.ts`, which the consent
-page (`tortoise/oauth.py::_CONSENT_HTML`) does not reference and cannot reach. With step 4 unbuilt no
-visitor's browser calls either route, so a deployment carrying step 3 without step 4 is a **no-op surface**,
-not a half-migrated flow — and the routes' own evidence (`tests/test_oauth_consent_bff_routes.py`) runs the
+page (`tortoise/oauth.py::_CONSENT_HTML`) did not reference and could not reach **before step 4 landed**
+(it is the mint's only caller now, by design). With step 4 unbuilt no visitor's browser called either route,
+so a deployment carrying step 3 without step 4 was a **no-op surface**, not a half-migrated flow — and the routes' own evidence (`tests/test_oauth_consent_bff_routes.py`) runs the
 shipped TS, not a page.
 
 **OVERRIDES:** the earlier "Steps 2→4 must land together **or not at all**" read as an operative ordering
@@ -546,7 +546,7 @@ no cookie and no client.
 | **TTL / replay** | `exp = iat + 120 s` (leeway ≤30 s) **and** a single-use `jti`; neither substitutes for the `bind` set. |
 | **The page (§9 step 4)** | `GET /oauth/authorize` renders `tortoise/oauth.py::_CONSENT_HTML` **only when the request carries `attempt_key`**; otherwise it is a `302` to `{app}/auth?next=/api/consent/start?{raw query}` (`consent_bounce_url`), and the sign-in page's own session probe forwards a signed-in visitor straight through. The page then POSTs `{state, attempt_key}` to `{app}/api/consent/token` (`credentials: include`) and, on a `200 {token, exp}`, asks `GET /oauth/consent/preview` which team the grant binds (the token in `X-Consent-Token`, the four bind fields in the query) and renders the org line — or the #1701 R1 chooser — from that ANSWER, then POSTs `consent_token` + the raw authorize params to `/oauth/consent`, navigating the response's `redirect_target` with `code` + the response's `state`. **It holds no credential, writes no cookie, and signs nobody in** — the AS's only render-time evidence is the attempt key the app wrote onto the URL. |
 | **Redemption** | `POST /oauth/consent` (`@app.post("/oauth/consent")` in `hosted_api.py`) — TWO identity sources as of §9 step 2: the bearer (`verify_session_jwt`, `session_auth.py:588`) or a `consent_token` in the body verified by `tortoise/consent_token.verify_consent_token`. |
-| **Endpoint stability** | `authorization_server_metadata` (`oauth.py:2124`); `_oauth_base(request)` (a function in `hosted_api.py`). Guarded. |
+| **Endpoint stability** | `authorization_server_metadata` (in `tortoise/oauth.py`); `_oauth_base(request)` (a function in `hosted_api.py`). Guarded. |
 | **CORS** | new, exact-origin to the AS origin, on the mint route only. The BFF carries none today; `/oauth/token` must never become reachable through it (`SCOPE.md` §9 class 3). |
 | **Bindings to declare** | `CONSENT_TOKEN_SECRET` (`config/required-bindings.yml`, `tortoise-dashboard`), checked pre-deploy by `tools/check_pages_bindings.py` (the #3616 gate). |
 | **Verified by execution** | `tests/test_oauth_consent_bridge.py` (RFC 8414 stability + the allowlist record). |
