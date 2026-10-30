@@ -1726,13 +1726,21 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
                 actions.append(f"installed {dst}")
             changed = True
     except OSError as e:
+        # A write-time failure on a VIRGIN home lands NOTHING — the seam
+        # write is the first mutation such a run attempts — so the count
+        # clause is emitted only when it is true. "…is NOT fully installed,
+        # and the 0 action(s) above DID land" is a sentence about nothing, in
+        # the one message whose whole job is to never claim more than it can
+        # support (#10241 review).
+        state = (f"the capture seam is NOT fully installed, and the "
+                 f"{len(actions)} action(s) above DID land."
+                 if actions else
+                 "the capture seam is NOT installed — nothing was written.")
         return InstallResult(harness, changed=changed,
                              actions=tuple(actions), error=(
                                  f"install failed at "
                                  f"{getattr(e, 'filename', None) or dst}: "
-                                 f"{e.__class__.__name__}: {e} — the capture "
-                                 f"seam is NOT fully installed, and the "
-                                 f"{len(actions)} action(s) above DID land. "
+                                 f"{e.__class__.__name__}: {e} — {state} "
                                  "Re-run once the cause is fixed; "
                                  "`tortoise hooks status` reports what is on "
                                  "disk."))

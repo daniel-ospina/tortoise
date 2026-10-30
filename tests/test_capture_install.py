@@ -1542,6 +1542,44 @@ def test_pi_install_write_failure_reports_the_actions_that_already_landed(home):
     assert (ext_dir / (capture_install.PI_EXTENSION_NAME + ".bak")).exists()
 
 
+def test_pi_install_write_failure_that_landed_nothing_says_so(home, monkeypatch):
+    """#10241 review: the ZERO-action write failure is the COMMON shape, not an
+    edge — a virgin home (no legacy ``tortoise-capture/``, no ``dst``) whose
+    target is full or immutable reaches the seam write as this run's FIRST
+    mutation, so ``actions == ()``. The message nevertheless read "… is NOT
+    fully installed, and the 0 action(s) above DID land": a sentence about
+    nothing, in the one report whose whole job is never to claim more than it
+    can support. It must say plainly that nothing was written.
+
+    Mutation: interpolate ``len(actions)`` unconditionally again (the
+    "nothing was written" arm disappears, so both prose assertions red)."""
+    # A VIRGIN home: nothing to back up and no legacy extension to disable, so
+    # the seam write is this install's first — and failing — mutation.
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    assert not ext_dir.exists(), "the fixture must start virgin"
+
+    real_atomic = capture_install._atomic_bytes
+
+    def _fails_on_the_seam_write(target, data, mode):
+        if target.name == capture_install.PI_EXTENSION_NAME:
+            raise OSError(28, "No space left on device")
+        return real_atomic(target, data, mode)
+
+    monkeypatch.setattr(capture_install, "_atomic_bytes",
+                        _fails_on_the_seam_write)
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert res.actions == (), res.actions
+    assert "No space left on device" in res.error, res.error
+    assert "nothing was written" in res.error, res.error
+    assert "0 action(s)" not in res.error, res.error
+    assert "NOT fully installed" not in res.error, res.error
+    # ...and it really is virgin: the failure landed no state at all.
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists()
+    assert not list(ext_dir.glob("*.tortoise-tmp"))
+
+
 def test_pi_install_failure_still_reports_the_writes_that_landed(home, capsys):
     """#10241 review: a FAILED install may still have written state — the
     backup of the user's own seam, the legacy directory renamed aside. The CLI
