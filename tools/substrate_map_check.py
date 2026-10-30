@@ -193,8 +193,10 @@ def check_lane_families(doc: str) -> list[str]:
     declares its family only in prose (`L6`'s *"the provenance read paths"*) is
     invisible to the path match, and the document-wide `seen` floor below cannot
     tell that row apart from one that was checked. Such a row must therefore
-    either name a backticked path or carry `PROSE_FAMILY_MARKER`; a row that does
-    neither is reported as measuring nothing (#5086 review P3, cycle 8).
+    either name an ADJUDICABLE path — one `_family_paths` would actually measure,
+    not a `.md`/`.yml` registry or a glob — or carry `PROSE_FAMILY_MARKER`; a row
+    that does neither is reported as measuring nothing (#5086 review P3, cycle
+    8).
     """
     problems: list[str] = []
     lanes = _section(doc, "## 3.")
@@ -202,25 +204,8 @@ def check_lane_families(doc: str) -> list[str]:
     if not section:
         return ["§3/§4 (lane + hotspot tables) not found in the document"]
 
-    seen: set[str] = set()
-    for raw in _BACKTICK_PATH.findall(section):
-        path = raw.split(":")[0].rstrip("/")
-        if (
-            not path
-            or path in seen
-            or path.endswith((".md", ".yml"))
-            or "*" in path
-        ):
-            # `.md`/`.yml` are cited as documents/registries, not as code
-            # families; a GLOB (`tests/*.py`) is a rule about a directory, not a
-            # family path. `docs/00_index.md`'s REGISTRATION is checked by (4)
-            # instead — and nothing here checks that a cited `.yml` exists at all,
-            # because the document cites it as a registry it DESCRIBES. (An
-            # earlier version of this comment claimed `config/ci-surfaces.yml` was
-            # "checked by (4) instead"; (4) is the index registration, so the
-            # comment taught a check that does not exist — #5086 review P3.)
-            continue
-        seen.add(path)
+    seen = _family_paths(section)
+    for path in sorted(seen):
         if not (ROOT / path).exists():
             problems.append(f"lane/hotspot family does not resolve: {path}")
     if not seen:
@@ -229,8 +214,33 @@ def check_lane_families(doc: str) -> list[str]:
     return problems
 
 
+def _family_paths(text: str) -> set[str]:
+    """The backticked paths in *text* that this guard can actually adjudicate.
+
+    One definition, used by both the section-wide population and the per-row
+    floor, so the two cannot disagree about what "a family" is — a row is
+    measured when it names a path the existence loop would test.
+
+    `.md`/`.yml` are cited as documents/registries, not as code families; a GLOB
+    (`tests/*.py`) is a rule about a directory, not a family path.
+    `docs/00_index.md`'s REGISTRATION is checked by (4) instead — and nothing here
+    checks that a cited `.yml` exists at all, because the document cites it as a
+    registry it DESCRIBES. (An earlier version of this comment claimed
+    `config/ci-surfaces.yml` was "checked by (4) instead"; (4) is the index
+    registration, so the comment taught a check that does not exist — #5086
+    review P3.)
+    """
+    paths: set[str] = set()
+    for raw in _BACKTICK_PATH.findall(text):
+        path = raw.split(":")[0].rstrip("/")
+        if not path or path.endswith((".md", ".yml")) or "*" in path:
+            continue
+        paths.add(path)
+    return paths
+
+
 def _lane_rows_without_a_family(lanes: str) -> list[str]:
-    """Per §3 LANE row: it must name a backticked path, or say it is prose.
+    """Per §3 LANE row: it must name an adjudicable path, or say it is prose.
 
     The document-wide floor above is satisfied by ANY row, so one row written in
     prose was silently unmeasured while the guard reported CLEAN — the same
@@ -248,10 +258,10 @@ def _lane_rows_without_a_family(lanes: str) -> list[str]:
             problems.append(f"lane row is not a 5-cell table row: {line[:60]}")
             continue
         lane, family = cells[0], cells[3]
-        if _BACKTICK_PATH.search(family) or PROSE_FAMILY_MARKER in family:
+        if _family_paths(family) or PROSE_FAMILY_MARKER in family:
             continue
         problems.append(
-            f"{lane} declares no backticked file family — this row is measuring "
+            f"{lane} declares no checkable file family — this row is measuring "
             f"nothing; name the paths, or write `{PROSE_FAMILY_MARKER}` in the cell"
         )
     return problems

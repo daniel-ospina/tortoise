@@ -265,7 +265,7 @@ def test_a_lane_row_with_a_prose_only_family_is_reported() -> None:
     )
 
     problems = smc.check_lane_families(doc.replace(anchor, "the retrieval seams", 1))
-    assert any("declares no backticked file family" in p for p in problems), problems
+    assert any("declares no checkable file family" in p for p in problems), problems
 
     declared = smc.check_lane_families(
         doc.replace(anchor, f"the retrieval seams {smc.PROSE_FAMILY_MARKER}", 1)
@@ -277,6 +277,21 @@ def test_a_lane_row_with_a_prose_only_family_is_reported() -> None:
 
     named = smc.check_lane_families(doc.replace(anchor, "`tortoise/api.py`", 1))
     assert named == [], named
+
+    #: A backticked token the existence loop SKIPS is not a measured family: a
+    #: glob is a rule about a directory and a `.md`/`.yml` is a registry citation,
+    #: so a row whose cell holds only those is still measuring nothing. Without
+    #: this arm the per-row floor would be satisfied by a token that never enters
+    #: the population — the same gap one door along.
+    glob_only = smc.check_lane_families(doc.replace(anchor, "`tests/*.py`", 1))
+    assert any("declares no checkable file family" in p for p in glob_only), glob_only
+
+    registry_only = smc.check_lane_families(
+        doc.replace(anchor, "`config/ci-surfaces.yml`", 1)
+    )
+    assert any(
+        "declares no checkable file family" in p for p in registry_only
+    ), registry_only
 
 
 def test_the_lane_table_is_actually_enumerated() -> None:
