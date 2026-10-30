@@ -37,6 +37,7 @@ close it in practice.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
@@ -135,10 +136,10 @@ def _wait_alive(pid: int, timeout: float = 5.0) -> None:
 
 def _reap(*pids: int) -> None:
     for pid in pids:
-        try:
+        # Already-exited decoys are the normal case here: the point is that the
+        # helper killed them, not that we did. SIM105's `suppress` is the idiom.
+        with contextlib.suppress(ProcessLookupError):
             os.kill(pid, 9)
-        except ProcessLookupError:
-            pass
 
 
 @pytest.fixture()
@@ -248,6 +249,57 @@ def test_every_preview_job_boots_and_aborts_through_the_scoped_helper() -> None:
         if not stops:
             problems.append(f"{job_name}: no scoped teardown (`stop-all`) step")
     assert not problems, "preview jobs are not wired to the scoped helper:\n" + "\n".join(problems)
+
+
+# The only accepted guard spelling on a `record` line: a NON-aborting `||`
+# handler. `|| exit 1` / `|| return 4` do not count — they keep the black box.
+_RECORD_TOLERATED = re.compile(r"\|\|\s*(?:true|:)\s*$")
+
+
+def test_every_preview_boot_tolerates_a_dead_pid_from_record() -> None:
+    """`record` is not infallible, and a bare call turns a retry into a black box.
+
+    `preview-server.sh record` exits **4** when the pid handed to it is already
+    gone (`.github/scripts/preview-server.sh::cmd_record`:
+    `pid_running "$pid" || { …; return 4; }`). A `run:` step's shell is
+    `bash -e {0}`, so a bare `record` line aborts the whole STEP on exactly the
+    failure the boot step's own comment names: a `wrangler` that exits within
+    milliseconds because the bundled workerd lags the default compatibility
+    date (also `EADDRINUSE`, also a missing binary). The abort drops three
+    things the pre-fix step always did — attempt 2, the `::error::` annotation,
+    and the `cat`/`tail` of wrangler's own log — and the job then reports only
+    `Process completed with exit code 4`, with no wrangler stderr anywhere.
+
+    Tolerating the exit keeps the readiness probe as the thing that reds (it
+    fails on its own when the pid file was never written), so the loop still
+    retries and still dumps the log. This arm is RED on the pre-fix workflow at
+    all five boot sites, which is its non-vacuity proof.
+    """
+    ci = _load_workflow("ci.yml")
+    jobs = ci.get("jobs") or {}
+    problems: list[str] = []
+    seen = 0
+    for job_name in PREVIEW_JOBS:
+        job = jobs.get(job_name) or {}
+        for step in job.get("steps") or []:
+            if not (step.get("name") or "").startswith(BOOT_STEP_PREFIX):
+                continue
+            for line in (step.get("run") or "").splitlines():
+                code = _cut_comment(line).strip()
+                if " record " not in f" {code} ":
+                    continue
+                seen += 1
+                if not _RECORD_TOLERATED.search(code):
+                    problems.append(
+                        f"{job_name}/{step.get('name')!r}: `{code}` — a dead pid "
+                        "exits 4 and `bash -e` aborts the step before the retry "
+                        "and the log dump run"
+                    )
+    assert seen, "no `record` invocation found in any preview boot step — vacuous arm"
+    assert not problems, (
+        "a preview boot step aborts opaquely when `record` cannot record pid $!:\n"
+        + "\n".join(problems)
+    )
 
 
 # ── 2. the mechanism: stop() is pid-scoped, and it refuses a recycled pid ───

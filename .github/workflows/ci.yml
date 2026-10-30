@@ -1923,7 +1923,10 @@ jobs:
               > "$PREVIEW_STATE/marketing.log" 2>&1 &
             # The pid THIS job started, recorded with its /proc start time —
             # the only handle any teardown is allowed to signal.
-            bash "$PREVIEW" record --name marketing --pid $!
+            # `|| true`: `record` exits 4 when the pid is already gone (the
+            # fast-exit wrangler named above). Tolerating it is what keeps the
+            # log dump + retry reachable under the runner's `bash -e`.
+            bash "$PREVIEW" record --name marketing --pid $! || true
             for i in $(seq 1 240); do
               # `ready` (not a bare curl) also proves our recorded pid is the
               # process holding that port, so a peer cannot satisfy it.
@@ -2124,7 +2127,7 @@ jobs:
             wrangler pages dev . --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
               > "$PREVIEW_STATE/marketing.log" 2>&1 &
-            bash "$PREVIEW" record --name marketing --pid $!
+            bash "$PREVIEW" record --name marketing --pid $! || true
             # Wait for the dev server to accept connections (first start also
             # downloads workerd + bundles website/functions/_middleware.ts).
             # `ready` also proves OUR recorded pid holds the port, so a peer's
@@ -2170,7 +2173,11 @@ jobs:
             wrangler pages dev dist --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 --d1 SESSIONS \
               > "$PREVIEW_STATE/app.log" 2>&1 &
-            bash "$PREVIEW" record --name app --pid $!
+            # `|| true`: exit 4 means wrangler already died, so there is
+            # nothing to record. `ready` then reds on its own — the loop still
+            # retries and still dumps `app.log`, instead of `bash -e` aborting
+            # the step with only `exit code 4` and no diagnostics.
+            bash "$PREVIEW" record --name app --pid $! || true
             for i in $(seq 1 240); do
               if bash "$PREVIEW" ready --name app; then
                 echo "preview (app) ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
@@ -2320,7 +2327,10 @@ jobs:
             wrangler pages dev . --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
               > "$PREVIEW_STATE/auth.log" 2>&1 &
-            bash "$PREVIEW" record --name auth --pid $!
+            # `|| true`: exit 4 means wrangler already died (see the marketing
+            # step). `ready` then reds, and the `tail -50 auth.log` below still
+            # shows wrangler's own stderr.
+            bash "$PREVIEW" record --name auth --pid $! || true
             for i in $(seq 1 240); do
               if bash "$PREVIEW" ready --name auth; then
                 echo "preview (auth) ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
@@ -2354,7 +2364,10 @@ jobs:
             wrangler pages dev dist --port "$PREVIEW_PORT" --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 --d1 SESSIONS \
               > "$PREVIEW_STATE/app.log" 2>&1 &
-            bash "$PREVIEW" record --name app --pid $!
+            # `|| true`: exit 4 means wrangler already died (see the marketing
+            # step). `ready` then reds, and the `tail -50 app.log` below still
+            # shows wrangler's own stderr.
+            bash "$PREVIEW" record --name app --pid $! || true
             for i in $(seq 1 240); do
               if bash "$PREVIEW" ready --name app; then
                 echo "preview (dashboard) ready after ${i}s (attempt ${attempt}) on :${PREVIEW_PORT}"
