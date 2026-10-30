@@ -1487,6 +1487,44 @@ def test_pi_install_failure_still_reports_the_writes_that_landed(home, capsys):
     assert "Capture install FAILED for pi" in captured.err, captured.err
 
 
+def test_hooks_upgrade_failure_still_reports_the_writes_that_landed(home, capsys,
+                                                                   monkeypatch):
+    """`InstallResult` states ONE contract for BOTH CLI renderers (#10241): a
+    FAILED repair may already have written state (a `.bak` of the user's own
+    seam, a legacy extension renamed aside), so its actions are printed beside
+    the failure. Only the `tortoise install` half was pinned, so a future edit
+    could drop the `hooks upgrade` half and ship green — which is the very
+    class this rule exists to close (two renderers shipped the same defect).
+
+    Mutation: delete the `for action in result.actions` loop above
+    `if not result.ok` in `__main__._upgrade_artifact_seam` (only the error
+    line prints, so `"backed up" in captured.out` reds)."""
+    from types import SimpleNamespace
+
+    from tortoise import __main__ as cli
+    from tortoise import capture_install as ci
+    from tortoise.capture_install import InstallResult
+
+    def _stub(*_args, **_kwargs):
+        return InstallResult(
+            "pi", changed=True,
+            actions=("backed up /x/tortoise-capture.ts → /x/tortoise-capture.ts.bak",),
+            error="the file pi LOADS is not the file this repo SHIPS: …")
+
+    # `_upgrade_artifact_seam` imports the installer INSIDE the call, so patching
+    # the module attribute is what the call site resolves — no CLI fixture needed.
+    monkeypatch.setattr(ci, "install_capture", _stub)
+    rc = cli._upgrade_artifact_seam(
+        SimpleNamespace(harness="pi", dry_run=False), home, home)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "backed up" in captured.out, captured.out
+    assert "not the file this repo SHIPS" in captured.err, captured.err
+    # The success sentence must not appear on the failure path.
+    assert "upgraded." not in captured.out, captured.out
+
+
 # ── codex: the artifact + the $CODEX_HOME registration (#3818) ──────────
 
 
