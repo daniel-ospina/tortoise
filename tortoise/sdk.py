@@ -18488,8 +18488,14 @@ class TortoiseSDK:
         # the EP source and the CREATE gives replay parity with
         # `projection/edges.py::_create_edges`), so the dedup has to happen in
         # the input list — which is what makes the PRIMITIVE incapable of
-        # double-writing, and therefore fixes every door at once (ingest,
-        # `decide`, extraction, MCP, direct API) rather than the ingest spelling.
+        # double-writing, so every door that goes THROUGH it is fixed at once
+        # (ingest, `decide`/`decide_wiring`, extraction's write pass, MCP
+        # `tortoise_create_operator`, the direct SDK call) rather than only the
+        # ingest spelling. ⛔ NOT every door in the codebase: `EventAPI.add_operator`
+        # (`tortoise/api.py`) hands its `inputs` list to the fold
+        # (`projection/edges.py::_create_edges`), which MERGEs one edge per list
+        # POSITION — the same defect, on a door this writer cannot reach (#10306).
+        # Do not read this collapse as covering it.
         # `OperatorAdded` below carries this same list, so a rebuild reproduces
         # the deduped graph (replay parity, not a live-only repair).
         target_ids = _distinct_preserving_order(target_ids)
@@ -22713,24 +22719,15 @@ class TortoiseSDK:
                 # `to` shape is a stable contract field; de-duplicating there
                 # would change a documented shape, which this issue is not.
                 _distinct_dsts = _distinct_preserving_order(dsts)
-                if len(_distinct_dsts) != len(dsts):
-                    # Warn-not-block (#1934's ruling, this issue's §3.2 key 13):
-                    # the caller asked for N list entries and the graph holds one
-                    # edge per DISTINCT target, so name what collapsed rather
-                    # than silently answering a different question.
-                    _collapsed = [
-                        str(d) for d in _distinct_dsts if dsts.count(d) > 1]
-                    self._append_warning(
-                        "duplicate_target_deduped:"
-                        + ",".join(_collapsed)
-                        + f":{conn['operator']} — the connection's 'to' list "
-                        f"named the same target more than once; one connection "
-                        f"writes ONE typed edge and ONE INPUT edge per "
-                        f"DISTINCT target (the operator's input set is a set, "
-                        f"#9750). The repeated spelling was collapsed (order "
-                        f"preserved, so the positional idx is unchanged)."
-                    )
-                    dsts = _distinct_dsts
+                # (#9750 review round 1, P2) THE WARNING IS EMITTED AFTER THE
+                # ROUTE IS KNOWN, further down: on the operator-less DIRECT
+                # route nothing is "collapsed" into a per-target edge (that
+                # writer reads `dsts[0]` and writes ONE direct edge, no operator
+                # and no `INPUT` mirror), so the operator wording would describe
+                # a graph that route never produces.
+                _collapsed = [
+                    str(d) for d in _distinct_dsts if dsts.count(d) > 1]
+                dsts = _distinct_dsts
                 op_type = conn["operator"]
                 label = conn.get("label")
                 direction = conn.get("direction")
@@ -22763,6 +22760,30 @@ class TortoiseSDK:
                 _request_route = self._connection_route(conn)
                 _route = (_eff if _eff is not None
                           else self._effective_route(conn, [src, *dsts]))
+                if _collapsed:
+                    # Warn-not-block (#1934's ruling, this issue's §3.2 key 13):
+                    # the caller asked for N list entries and the write produces
+                    # one edge per DISTINCT target, so name what collapsed
+                    # rather than silently answering a different question — and
+                    # describe the graph THIS route actually writes (the direct
+                    # route takes one target and has no operator and no INPUT
+                    # mirror, so the operator sentence would be false there).
+                    _effect = (
+                        "one connection writes ONE typed edge and ONE INPUT "
+                        "edge per DISTINCT target (the operator's input set "
+                        "is a set, #9750)"
+                        if _route != "direct" else
+                        "a direct edge takes ONE target, so the repeated "
+                        "spelling was ignored (#9750)"
+                    )
+                    self._append_warning(
+                        "duplicate_target_deduped:"
+                        + ",".join(_collapsed)
+                        + f":{op_type} — the connection's 'to' list named the "
+                        f"same target more than once; {_effect}. The repeated "
+                        f"spelling was collapsed (order preserved, so the "
+                        f"positional idx is unchanged)."
+                    )
                 if _request_route == "direct" and _route == "operator":
                     self._append_warning(
                         f"point_mediated_route:{src}->{dsts[0]}:{op_type} — a "
@@ -22811,8 +22832,20 @@ class TortoiseSDK:
                                         "result": conn_result,
                                         "deduped": bool(conn_result.get("deduped"))})
                     continue
-                existing = self._find_operator(op_type, [src] + dsts,  # noqa: RUF005
-                                               label=label, direction=direction)
+                # (#9750 review round 1, P2) The KEY is the DISTINCT input list,
+                # including the SOURCE slot. `_find_operator` compares
+                # `size(DISTINCT targets) = size($inputs)` (set semantics on both
+                # sides), so handing it the slot list (`[src, *dsts]`, which
+                # carries the source twice when a target resolves onto the
+                # source's own node) made the key unsatisfiable for that shape:
+                # the retry fell into PARTIAL-ABSORB, wrote zero edges and
+                # reported `operator_absorb_completed` for an operator that was
+                # already complete. The EDGE SHAPE is untouched —
+                # `create_operator` writes its own `inputs`, which keep the
+                # deliberate self-support slot.
+                existing = self._find_operator(
+                    op_type, _distinct_preserving_order([src, *dsts]),
+                    label=label, direction=direction)
                 if existing is not None and existing.get("kind") == "exact":
                     oid = existing["id"]
                     # k=N boundary (cycle-15): re-apply promotion when the
@@ -23582,7 +23615,18 @@ class TortoiseSDK:
         proj = self._get_proj()
         edge_rel = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         canonical_dir = self._canonical_direction(op_type, direction)
-        params: dict = {"op": op_type, "inputs": list(inputs)}
+        # ── #9750: BOTH SIDES OF THE KEY ARE SETS ──────────────────────────
+        # The graph side collects `DISTINCT t.id` below, so `$inputs` is
+        # normalized the same way HERE (once, for every caller) — otherwise a
+        # caller handing the SLOT list (`[src, src]`, which a target that
+        # resolves onto the source's own node legitimately produces) makes the
+        # key unsatisfiable `size(1) = size(2)`, and the resubmission falls into
+        # the PARTIAL-ABSORB arm and reports a completion that never happened.
+        # Sets on both sides is what "the same input set" means; the WRITE keeps
+        # its slots (the self-support operator is written with `idx` 0 and 1 over
+        # one id) — the KEY is a lookup, not the edge shape.
+        params: dict = {"op": op_type,
+                        "inputs": _distinct_preserving_order(inputs)}
         conds = [
             "size(targets) = size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
@@ -23607,22 +23651,32 @@ class TortoiseSDK:
             params["directions"] = sorted(direction_spellings(canonical_dir))
         # ── #9750: DISTINCT, because the KEY is a set ─────────────────────
         # `targets` is the LEFT side of `size(targets) = size($inputs)`, and
-        # `$inputs` is now de-duplicated by the caller (both ingest's resolved
-        # `dsts` and `create_operator`'s own target list). A graph written
-        # BEFORE #9750 can still carry the duplicate edges the old writer
-        # produced (`idx` 1 and 2 over one id), whose `collect(t.id)` yields
-        # the same id twice — reading that as TWO targets made the exact-hit
-        # miss on a request that IS the operator's input set, and the retry
-        # MINTED A SECOND OPERATOR: the very duplicate this issue is about,
-        # on every legacy graph. Counting DISTINCT endpoints makes the key
-        # compare SETS on both sides, which is what "same input set" means.
+        # `$inputs` is de-duplicated BY THE CALLER (ingest passes
+        # `_distinct_preserving_order([src, *dsts])`), so both sides count the
+        # same thing: DISTINCT endpoints. A graph written BEFORE #9750 can
+        # still carry the duplicate edges the old writer produced (`idx` 1 and
+        # 2 over one id), whose `collect(t.id)` yields the same id twice —
+        # reading that as TWO targets made the exact-hit miss on a request that
+        # IS the operator's input set, and the retry MINTED A SECOND OPERATOR:
+        # the very duplicate this issue is about, on every legacy graph.
+        #
+        # ⛔ `count(r) AS n_edges` is not decoration — it is the TIE-BREAK, and
+        # the reason is the population DISTINCT widens. On a legacy graph the
+        # old key separated a duplicate-edge operator from its clean twin by
+        # EDGE COUNT (`size(targets)` 3 vs 2); under DISTINCT both satisfy the
+        # set key, and the query's `LIMIT 1` with no ordering would then bind
+        # the resubmission to whichever row came back first — making
+        # `ids["connections"]` unstable across runs for the same bundle (the
+        # #7822 row-order-dependence class). Ordering by edge count ASC prefers
+        # the operator whose edges EQUAL its distinct endpoints (the clean one)
+        # and is deterministic on the tie.
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
             f"WHERE {epistemic_disjunction('t')} "
-            f"WITH o, collect(DISTINCT t.id) AS targets, collect(r) AS _ "
+            f"WITH o, collect(DISTINCT t.id) AS targets, count(r) AS n_edges "
             f"WHERE {' AND '.join(conds)} "
-            f"RETURN o.id, o.status LIMIT 1",
+            f"RETURN o.id, o.status ORDER BY n_edges ASC, o.id LIMIT 1",
             params=params,
         ).result_set
         if rows:
@@ -23653,6 +23707,28 @@ class TortoiseSDK:
             "size(targets) < size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
             "size(targets) > 0",
+            # ── #9750 (review round 1, P2): NO SLOT-CARRYING OPERATOR IS EVER
+            # "COMPLETED" BY POSITION. `create_operator` deliberately lets a
+            # target repeat the SOURCE (the self-support shape, `idx` 0 and 1
+            # over one id), so an operator can hold FEWER distinct endpoints
+            # than edges. The completion below writes each missing input at ITS
+            # REQUEST POSITION (`idx: _i`), which for such an operator collides
+            # with a slot that already exists — measured: a `composedOf`
+            # self-support operator plus `to: [p2]` left TWO typed edges at
+            # `idx 1`, and `ep.py` reads the factor positionally, so the
+            # operator became malformed and then permanently adopted by a
+            # resubmission. Requiring the edge count to EQUAL the distinct count
+            # excludes every slot-carrying operator from this arm (it is not
+            # partial — it is complete in a shape this arm cannot express), so
+            # the worst case becomes a MISS (a new operator for a genuinely
+            # different input set) instead of a corrupted factor.
+            # ⛔ Referenced through the WITH alias (`n_edges`), never as a bare
+            # `count(r)` in the WHERE: an aggregate written there makes FalkorDB
+            # fail the whole query with `_AR_EXP_UpdateEntityIdx: Unable to
+            # locate a value with alias r` on the EMBEDDED and the SERVER build
+            # alike (measured), i.e. the absorb arm would raise instead of
+            # matching.
+            "n_edges = size(targets)",
             _current_status_clause("o.status"),
         ]
         if label is not None:
@@ -23665,9 +23741,9 @@ class TortoiseSDK:
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
             f"WHERE {epistemic_disjunction('t')} "
-            f"WITH o, collect(DISTINCT t.id) AS targets "
+            f"WITH o, collect(DISTINCT t.id) AS targets, count(r) AS n_edges "
             f"WHERE {' AND '.join(pcond)} "
-            f"RETURN o.id, o.status, targets",
+            f"RETURN o.id, o.status, targets ORDER BY n_edges ASC, o.id",
             params=params,
         ).result_set
         if len(prows) == 1:

@@ -215,6 +215,78 @@ def test_direct_route_repeated_ref_not_multi_item(make_sdk):
     assert rep["ids"]["connections"] == sing["ids"]["connections"]
     assert "duplicate_target_deduped" in \
         [w.split(":", 1)[0] for w in rep["warnings"]], rep["warnings"]
+    # …and the text names the route it ACTUALLY took (review round 1, P3): the
+    # direct writer reads `dsts[0]` and writes no operator and no `INPUT` edge,
+    # so the operator wording would describe a graph this route never produces.
+    _dup = next(w for w in rep["warnings"]
+                if w.startswith("duplicate_target_deduped"))
+    assert "takes ONE target" in _dup, _dup
+    assert "INPUT" not in _dup, _dup
+
+
+def test_self_support_operator_is_never_completed_by_position(make_sdk):
+    """Review round 1, P2 — the shape the dedupe must NOT collapse, and the
+    partial-absorb arm must not "complete".
+
+    ``create_operator`` deliberately keeps a target that repeats the SOURCE
+    (``idx`` 0 and 1 over one id), so an operator can hold FEWER distinct
+    endpoints than edges. The completion loop writes each missing input at ITS
+    REQUEST POSITION, so "completing" such an operator collides with a slot that
+    already exists: measured before this arm required ``n_edges = size(targets)``
+    — a ``composedOf`` self-support operator plus ``to: [p2]`` left TWO typed
+    edges at ``idx 1``, and ``ep.py`` reads the factor positionally, so the
+    operator became malformed and was then permanently adopted by a
+    resubmission."""
+    sdk = make_sdk("self_support_absorb")
+    p1 = sdk.create_point(kind="statement", content="one")["id"]
+    p2 = sdk.create_point(kind="statement", content="two")["id"]
+    op = sdk.create_operator("composedOf", p1, [p1])
+
+    sdk.ingest({"connections": [
+        {"from": p1, "to": [p2], "operator": "composedOf"}]})
+
+    slots = _operator_input_slots(sdk, op["id"], op_type="hasPart")
+    assert [i for i, _ in slots] == [0, 1], slots
+    assert {t for _, t in slots} == {p1}, slots
+
+
+def test_find_operator_key_is_a_set_for_the_repeated_source_slot(make_sdk):
+    """Review round 1, P2 — the READ side must agree with the WRITE side.
+
+    A target can resolve onto the SOURCE's own node (two same-content items
+    fold; Phase 1's self-edge arm compares REFS, not resolved ids), so the
+    requested input list legitimately carries the source twice. Counting
+    ``DISTINCT`` endpoints on the graph side while handing the query the SLOT
+    list made the key unsatisfiable for that shape: the resubmission fell into
+    PARTIAL-ABSORB, wrote no edge, and reported ``operator_absorb_completed``
+    (a §3.2 key-8 payload asserting a completion that never happened) — the
+    same mis-report ``test_reingest_repeated_ref_is_an_exact_dedup`` prevents
+    for the duplicate-target case."""
+    sdk = make_sdk("repeated_source_slot")
+    a = sdk.create_point(kind="statement", content="one")["id"]
+    b = sdk.create_point(kind="statement", content="two")["id"]
+    sdk.create_operator("IMPL", a, [a])  # the self-support shape
+
+    assert sdk._find_operator("IMPL", [a, a])["kind"] == "exact", (
+        "the dedup KEY must be the DISTINCT input list — a slot list makes the "
+        "key unsatisfiable for every self-support operator")
+    assert (sdk._find_operator("IMPL", [a, b]) or {}).get("kind") != "exact"
+
+    # the ingest spelling of the same shape: `to` folds onto `from`'s node
+    bundle = {"points": [{"ref": "q1", "kind": "statement", "content": "same"},
+                         {"ref": "q2", "kind": "statement", "content": "same"}],
+              "connections": [{"from": "q1", "to": ["q2"], "operator": "IMPL"}]}
+    first = sdk.ingest(bundle)
+    oid = first["ids"]["connections"][0]
+    second = sdk.ingest(bundle)
+
+    assert second["deduped"]["connections"] == 1, second
+    assert second["created"]["connections"] == 0, second["created"]
+    assert second["ids"]["connections"] == [oid], second["ids"]
+    assert "operator_absorb_completed" not in \
+        [w.split(":", 1)[0] for w in second["warnings"]], second["warnings"]
+    slots = _operator_input_slots(sdk, oid)
+    assert [i for i, _ in slots] == [0, 1], slots
 
 
 # ═══════════════════════════════════════════════════════════════════════
