@@ -18828,9 +18828,10 @@ def _record_unavailable() -> HTTPException:
     served in its place.
 
     On an armed **journaling** deployment the turns are RECORD rows (the
-    turn records of #10000/#10011 — ONE `TurnsRecorded` carrier per capture
-    since #10067) and the graph keeps only the Session's counters — so when the
-    record read FAILS, the fail-soft fallback
+    turn-record carrier's ``public.point`` rows — ``TurnsRecorded``, #10017;
+    before that change, the per-turn `PointAdded` records of #10000/#10011) and
+    the graph keeps only the
+    Session's counters — so when the record read FAILS, the fail-soft fallback
     below answers zero turn nodes, which is byte-identical to a session that has
     no turns. Serving that as ``200 {"turn_points": []}`` is the shape #8447
     forbids — a refusal rendered as a legitimate empty answer, with the only
@@ -18849,19 +18850,6 @@ def _record_unavailable() -> HTTPException:
     at the bottom of the read measures the fallback against the Session's own
     ``turn_count``, and on that config the graph holds all of them, so a
     complete copy is still served 200.
-
-    ⛔ THE DIVERGENCE HAS TWO TRIGGERS, not one, and the SECOND is #10067's
-    (#10067 review P2). The first is armed-but-NOT-journaling, above. The second
-    is **armed + journaling + NO NAMABLE TENANT** — a multi-tenant process with
-    no request scope and no declared single-tenant pair (`record_tenant()` →
-    `None`): the writer correctly keeps the turns in the GRAPH (`no_tenant`,
-    #9188 F4, so the record takes nothing), while this read still asks the record
-    and serves `turn_points: []` for a session whose graph holds every turn —
-    the fix turning a LOST transcript into an INVISIBLE one. Naming it here is
-    the point: the shared predicate is #10021's ("the store is decided by what
-    the write did"), and a reader who does not see the tenant trigger re-derives
-    the gap later. The observable is `get_session_detail` / `list_sessions` on
-    that shape.
 
     The arm that fails soft to the graph KEEPS failing soft, and #1591 is not
     repealed: a graph copy that is COMPLETE against the Session's own
@@ -19101,7 +19089,8 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # #10000: WHICH STORE holds the turns is the same CAPABILITY question the
     # capture writer asks (`_record_tenant_for_read`, the ONE resolution). With
     # the record holding them,
-    # the graph has no turn nodes and this read must come from the record;
+    # the turn-record carrier's `public.point` rows (#10017) — and no
+    # turn NODE, so this read must come from the record;
     # otherwise it reads the graph exactly as before, which is what keeps both
     # the pre-arming deployment AND the refused-write lane byte-identical.
     #

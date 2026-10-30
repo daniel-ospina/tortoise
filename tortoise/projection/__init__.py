@@ -7525,16 +7525,20 @@ _NO_PROJECTION_FOLD = frozenset({
     # it here is what keeps a replay of a journal holding one from reaching the
     # `else` arm: that arm calls `record_non_folded`, which fails a whole
     # `rebuild`/`recover_from_log` run — so the carrier would make a lost graph
-    # unrecoverable, not merely noisy. ⚠️ Its torn tail is NOT tolerated (see
-    # `log.TORN_TAIL_HARMLESS_EVENT_TYPES`): the turns ARE the transcript, so a
-    # dropped one loses a capture's turn set, unlike the narrative's summary.
+    # unrecoverable, not merely noisy. ⚠️ Its torn tail IS tolerated — see
+    # `log.TORN_TAIL_HARMLESS_EVENT_TYPES`, where the two measurements are
+    # recorded. In short: `_emit_event` returns on an append failure BEFORE the
+    # record write, so a torn carrier line means that capture's turn rows
+    # reached NEITHER store, and the carrier is ADDITIVE (it can never revive a
+    # removal). ⛔ Do NOT "restore" a refusal here: refusing the tail turns one
+    # lost capture into `recover_from_log` returning `recovered=False, nodes=0`
+    # for the WHOLE journal.
     # ⚠️ The measured consequence, so nobody reads this entry as "replayed
     # elsewhere": with a carrier present a replay completes and reports success
     # having folded NO turn state — which is the ruling (the record is the home),
-    # not a gap. ✅ The PRODUCER is live since #10067: `sdk._write_capture_turns`
-    # journals ONE of these per capture on the record-only lane, so a journal
-    # really can hold one and the `else` arm above is reachable from production
-    # traffic (it was not before step 7).
+    # not a gap. `sdk._write_capture_turns` has been the PRODUCER since #10017's
+    # step 7 (on the record-armed lane alone), so journals in the field can
+    # already hold one — this entry is not a placeholder for future work.
     "TurnsRecorded",
 })
 
@@ -7808,6 +7812,11 @@ _ENTITY_MUTATION_PENDING_OPS: frozenset[str] = frozenset(
 #: place, which an unguarded provenance merge would re-open.
 _ENTITY_MUTATION_RESERVED_KEYS: frozenset[str] = frozenset({
     "type", "id", "op", "label", "state", "name",
+    # #10017 R1: the removal's TIER declaration. Reserved for the same reason
+    # `state` is — a `provenance` bag is merged BESIDE the record and must not
+    # be able to rewrite a field the caller passed explicitly, and a rewritten
+    # tier changes the fold's meaning (demote vs hard delete).
+    "cache_tier",
     "point", "payload", "event_id", "ts", "initiated_by",
     "projection_version", "recorded_ts",
 })

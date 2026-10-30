@@ -38,24 +38,6 @@ from tortoise.record_projection import TENANT_GUC_SQL, TENANT_SCOPE_SQL
 from tortoise.record_writer import RecordWrite, RecordWriteOutcome
 
 
-def arm_record(monkeypatch, *, org: str = "org-10000",
-               graph: str = "graph-10000") -> None:
-    """Arm the record the way a real single-tenant deployment does.
-
-    THREE facts, not one (#10067): the DSN, the declaration that this process
-    serves one graph, and that graph's id pair. `TORTOISE_RECORD_DSN` alone is
-    NOT the capability — `write_live_record` refuses an armed write it cannot
-    attribute (`no_tenant`, #9188 F4) — so a test that set the DSN alone was
-    asserting a path on which the turn reached NEITHER store.
-    """
-    from tortoise import record_writer
-
-    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-    monkeypatch.setenv(record_writer.RECORD_SINGLE_TENANT_ENV, "1")
-    monkeypatch.setenv(record_writer.RECORD_ORG_ENV, org)
-    monkeypatch.setenv(record_writer.RECORD_GRAPH_ENV, graph)
-
-
 @pytest.fixture()
 def sdk(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", str(tmp_path))
@@ -63,9 +45,11 @@ def sdk(tmp_path, monkeypatch):
     from tortoise.sdk import TortoiseSDK
 
     # The record can only hold the turns when a JOURNAL is configured too: the
-    # per-turn `PointAdded` records are what reach Postgres, and they are gated on
-    # the event log (`sdk._get_event_log()`). Both halves of the capability test
-    # are therefore supplied here.
+    # turn RECORDS are what reach Postgres, and they are gated on the event log
+    # (`sdk._get_event_log()`). Since #10017's step 7 the armed lane journals ONE
+    # `TurnsRecorded` carrier holding those snapshots rather than one `PointAdded`
+    # per turn; the store they reach is the same one either way. Both halves of
+    # the capability test are therefore supplied here.
     return TortoiseSDK(db_path=str(tmp_path / "cap.db"),
                        event_log_path=str(tmp_path / "events.jsonl"))
 
@@ -92,21 +76,23 @@ def _capture(sdk, sid: str, turns: list[dict], **kw):
 class _RecordSeam:
     """A stand-in for `record_writer.write_live_record` that KEEPS the records.
 
-    ``outcome`` is what the seam reports for each write — a `RecordWrite` (the
+    ``outcome`` is what the seam reports for the write — a `RecordWrite` (the
     record took it) or ``None`` (it refused). Keeping the records is what makes
     "the turns reached the record" an assertable fact rather than an absence.
 
-    ⛔ ONE OUTCOME PER WRITE, AND THAT IS NOW ONE PER CAPTURE (#10067). The
-    writer used to emit one `PointAdded` per turn and read back one outcome per
-    turn, so a per-turn list of outcomes could model a split store inside ONE
-    capture. The carrier rides ONE record for the whole capture and the writer
-    takes ONE outcome for it (`sdk._write_capture_turns`: "N turns ride ONE
-    record, so `turn_id` has no write of its own to report") — so a per-turn list
-    here would model a shape no capture can produce, and a fixture that can only
-    fail by inventing one pins nothing. The split store is still reachable (a
-    later capture whose carrier is refused puts ITS turns in the graph), and
-    `test_a_partially_refused_capture_is_served_from_both_stores` builds it that
-    way.
+    ⛔ THE WRITER HAS ONE SHAPE PER CAPTURE NOW (#10017 step 7), AND A SEAM THAT
+    READ ONLY THE OLD ONE REDDENED SEVEN LEGS OF THIS FILE. On the record-held
+    lane `_write_capture_turns` journals ONE `TurnsRecorded` carrier holding
+    every turn's snapshot instead of one `PointAdded` per turn; on the graph lane
+    it is still one `PointAdded` per turn. So anything this seam hands back is
+    read through `snapshots()`, which speaks BOTH shapes.
+
+    ⛔ AND THEREFORE NO LIST OF PER-TURN OUTCOMES. One carrier is one record
+    write, so its outcome is EVERY turn's outcome: the writer puts all of a
+    capture's turns in the graph or none of them. A per-turn outcome list would
+    describe a state the writer cannot reach any more — the one leg that used it
+    (`test_a_partially_refused_capture_is_served_from_both_stores`) now
+    CONSTRUCTS its split store and says so (#10017 review).
     """
 
     def __init__(self, outcome):
@@ -117,27 +103,18 @@ class _RecordSeam:
         self.records.append(record)
         return self.outcome
 
-    def turn_snapshots(self) -> list[dict]:
-        """Every turn SNAPSHOT the capture handed the record, in either shape.
-
-        Both are real: `PointAdded` carries one snapshot under `point` (the
-        JOURNAL record where the GRAPH holds the turn), and `TurnsRecorded`
-        (#10067) carries the whole capture's snapshots under `turns` (the record
-        WRITE on the record-only lane, which is what this seam stands in for). A
-        helper that knew only one shape read the carrier as "the capture handed
-        the record nothing" — the vacuity this class exists to prevent.
-        """
-        snapshots: list[dict] = []
+    def snapshots(self) -> list[dict]:
+        """Every turn snapshot the capture handed the record, in EITHER shape."""
+        out: list[dict] = []
         for record in self.records:
-            if record.get("type") == rp.TURNS_RECORD_TYPE:
-                snapshots.extend(record.get("turns") or [])
-            elif record.get("type") == "PointAdded" and isinstance(
-                    record.get("point"), dict):
-                snapshots.append(record["point"])
-        return snapshots
+            if record.get("type") == "PointAdded":
+                out.append(record["point"])
+            elif record.get("type") == "TurnsRecorded":
+                out.extend(record.get("turns") or ())
+        return out
 
     def point_contents(self) -> list[str]:
-        return [snap["content"] for snap in self.turn_snapshots()]
+        return [snapshot["content"] for snapshot in self.snapshots()]
 
 
 _APPLIED = RecordWrite(outcome=RecordWriteOutcome.APPLIED, events=1,
@@ -187,9 +164,9 @@ def test_armed_record_receives_every_turn(sdk, monkeypatch):
 def test_armed_record_writes_no_turn_nodes_but_keeps_the_session(sdk, monkeypatch):
     """Record armed -> the graph holds the Session only.
 
-    The transcript lives in the record (the `TurnsRecorded` carrier, #10067,
-    which projects the turn rows at `cache_tier = 'record_only'`), so the thing
-    that must be true of the GRAPH is the absence of turn nodes — and the
+    The transcript lives in the record (the `TurnsRecorded` carrier, or a
+    per-turn `PointAdded` before #10017's step 7), so the
+    thing that must be true of the GRAPH is the absence of turn nodes — and the
     Session's counters must still be written, or the quota/metering reads that
     depend on `turn_count`/`capture_redactions` would silently see nothing.
     """
@@ -527,7 +504,7 @@ def test_a_recapture_without_an_embedder_journals_the_preserved_vector(
     _bind_tenant(sdk)
     _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
              turn_embs=[None])
-    snapshot = seam.turn_snapshots()
+    snapshot = seam.snapshots()
     assert snapshot and snapshot[0]["embedding"] == [0.1, 0.2, 0.3], (
         "a re-capture with no embedder cleared the stored vector instead of "
         "preserving it (#5004)")
@@ -552,7 +529,7 @@ def test_a_changed_turn_with_no_embedder_clears_the_vector(sdk, monkeypatch):
     _bind_tenant(sdk)
     _capture(sdk, "kept", [{"role": "user", "content": "DIFFERENT text"}],
              turn_embs=[None])
-    snapshot = seam.turn_snapshots()
+    snapshot = seam.snapshots()
     assert snapshot and snapshot[0]["embedding"] is None, (
         "a re-capture whose text changed kept a vector for the old text")
     assert snapshot[0].get("embedding_preserved") is None
@@ -609,56 +586,64 @@ def test_a_partially_refused_capture_is_served_from_both_stores(
         sdk, monkeypatch):
     """⛔ P0: ONE session, two outcomes — the served transcript is BOTH turns.
 
-    The read's store decision used to be per SESSION: `session_turns` answered as
-    soon as ANY row existed, so the record's landed prefix was served ALONE and
-    the turns the fallback had just rescued were reachable from neither door.
+    The read's store decision is per SESSION and the writer's is per CAPTURE, and
+    the two can still disagree: `session_turns` answered as soon as ANY row
+    existed, so the record's landed prefix was served ALONE and a turn the
+    fallback had rescued was reachable from neither door.
 
-    ⛔ THE SPLIT IS BUILT THE WAY #10067 MAKES IT REACHABLE. The writer's store
-    decision is one outcome per CARRIER, i.e. per capture (`_carrier_outcome =
-    _sink[0]`), so two turns of ONE capture cannot land one-each any more. What is
-    still reachable, and is the state this leg exists for, is a capture whose
-    carrier LANDED followed by one whose carrier was REFUSED (the record went
-    away mid-session): the record holds the first capture's turns, the fallback
-    put the next capture's turn in the graph, and NEITHER store has the whole
-    transcript. Same session, same two-store read, no per-turn fiction.
-
-    The record's answer for this state is produced by `turn_read` itself (pinned
-    above), so this leg drives the DOOR: the SDK detail read must serve the union.
+    ⛔ THE SPLIT STORE IS **CONSTRUCTED** HERE, NOT CAPTURED (#10017 review). It
+    used to be produced by a seam refusing every SECOND per-turn write. Since
+    step 7 the armed lane journals ONE `TurnsRecorded` carrier, so one capture is
+    one record write and the writer's decision is per capture — it rescues all of
+    this capture's turns to the graph or none of them. A split store is therefore
+    unreachable from the writer, and pretending otherwise is how this leg kept
+    passing for the wrong reason. What is still reachable, and still matters, is
+    the READ door: a record that answers PARTIAL (its own landed prefix) beside a
+    graph that holds the remainder must serve the UNION. So the graph half is
+    produced by the writer's REAL rescue path and the record-held half is the
+    hand-built `TurnAnswer` below — which is what the door is handed either way.
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-    seam = _RecordSeam(_APPLIED)
+    # A refused carrier: `_write_capture_turns` then writes BOTH turns to the
+    # graph through the production fallback, which is the graph half's real
+    # producer.
+    seam = _RecordSeam(None)
     monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
     _bind_tenant(sdk)
     proj = sdk._get_proj()
     _capture(sdk, "split", [{"role": "user", "content": "a"},
                             {"role": "assistant", "content": "b"}])
-    # The record refuses the NEXT capture wholesale: its turn is the one the
-    # fallback rescues, and it is now the graph's alone.
-    seam.outcome = None
-    _capture(sdk, "split", [{"role": "user", "content": "c"}],
-             turn_offset=2, session_existed=True)
-    assert sdk_mod._capture_turn_ids(proj, "split") == ["split_t2"], (
-        "the fixture did not produce a split store: only the REFUSED capture's "
-        "turn belongs in the graph")
+    assert sorted(sdk_mod._capture_turn_ids(proj, "split")) == [
+        "split_t0", "split_t1"], (
+        "the fixture's refused carrier did not rescue BOTH turns to the graph "
+        "— the split store below would then be constructed on a capture that "
+        "stored nothing")
+    # …and turn 0 is removed from the graph to stand for the half the RECORD
+    # took. This is the one manufacturing step, and it is the state itself.
+    proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {id:$tid}) "
+        "DETACH DELETE t",
+        params={"sid": "split", "tid": "split_t0"})
+    assert sdk_mod._capture_turn_ids(proj, "split") == ["split_t1"], (
+        "the constructed split store is not the state this leg pins: the graph "
+        "must hold ONLY the turn the record did not take")
 
     landed_only = record_read.TurnAnswer(
         answered=False,
         turns=(record_read.Turn(turn_id="split_t0", index=0,
-                                content="[user] a", speaker="user"),
-               record_read.Turn(turn_id="split_t1", index=1,
-                                content="[assistant] b", speaker="assistant")),
+                                 content="[user] a", speaker="user"),),
         turn_count=2,
-        reason="the record states 2 turn(s) and holds them, while the session's "
-               "window reaches past them — a partial transcript")
+        reason="the record states 2 turn(s) but holds only 1 — a partial "
+               "transcript")
     # The door's private signature carries the tail witness; this leg pins the
     # UNION, so the stand-in accepts it and ignores it.
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
                         lambda self, sid, **kw: (landed_only, False))
     detail = sdk.get_session("split") or {}
     assert [t["id"] for t in detail.get("turn_points", [])] == [
-        "split_t0", "split_t1", "split_t2"], (
+        "split_t0", "split_t1"], (
         "the split transcript was served from ONE store: the record's landed "
-        "turns and the graph's rescued turn must all be readable")
+        "turn and the graph's rescued turn must both be readable")
 
 
 def test_a_recapture_journals_the_records_created_at_and_status(
@@ -683,9 +668,7 @@ def test_a_recapture_journals_the_records_created_at_and_status(
     _bind_tenant(sdk)
     _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
              turn_embs=[[0.1, 0.2, 0.3]])
-    snapshots = seam.turn_snapshots()
-    assert snapshots, "the capture handed the record no turn snapshot at all"
-    snapshot = snapshots[0]
+    snapshot = seam.snapshots()[0]
     assert snapshot["createdAt"] == "2026-01-01T00:00:00+00:00", (
         "a re-capture re-stamped the record's created_at")
     assert snapshot["status"] == "established", (
@@ -708,9 +691,7 @@ def test_an_unreadable_prior_row_omits_the_field_rather_than_restamping(
     _bind_tenant(sdk)
     _capture(sdk, "unknown", [{"role": "user", "content": "hi"}],
              turn_embs=[[0.1, 0.2, 0.3]])
-    snapshots = seam.turn_snapshots()
-    assert snapshots, "the capture handed the record no turn snapshot at all"
-    snapshot = snapshots[0]
+    snapshot = seam.snapshots()[0]
     assert not (set(snapshot) & rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS), (
         "a capture that could not read the prior row asserted its own "
         "created_at/status over the record's")
@@ -820,9 +801,7 @@ def test_a_recapture_on_a_graph_that_lost_its_session_journals_the_records_value
     # this session, the record still holds its turn.
     _capture(sdk, "reborn", [{"role": "user", "content": "same text"}],
              turn_embs=[[0.1, 0.2, 0.3]], session_existed=False)
-    snapshots = seam.turn_snapshots()
-    assert snapshots, "the capture handed the record no turn snapshot at all"
-    snapshot = snapshots[0]
+    snapshot = seam.snapshots()[0]
     assert snapshot["createdAt"] == "2026-01-01T00:00:00+00:00", (
         "the re-capture re-stamped the record's created_at because the GRAPH no "
         "longer had the session — the record is the store of record (§2.0)")
@@ -2185,24 +2164,21 @@ class _RecordingSeam:
                            statements=2, first_seq=1, last_seq=1)
 
     def point_contents(self) -> list[str]:
-        """Every turn TEXT the capture handed the record, in either shape.
+        """The turn text the capture handed the record, in EITHER carrier shape.
 
-        Both are real: `PointAdded` carries one snapshot under `point` and is the
-        record's carrier where the GRAPH holds the turn; `TurnsRecorded` (#10067)
-        carries the whole capture's snapshots under `turns` and is its carrier on
-        the record-only lane. A helper that knew only one shape would read the
-        other as "the capture handed the record nothing" — the vacuity this class
-        exists to prevent.
+        #10017 step 7 moved the record-armed lane from one `PointAdded` per turn
+        to ONE `TurnsRecorded` carrier holding them (`turns`), so a seam that
+        only read `point` would report "no turn reached the record" on the very
+        lane this file is about — and the non-vacuity assertion below would then
+        fail for a capture that stored the transcript correctly.
         """
-        contents: list[str] = []
+        out: list[str] = []
         for record in self.records:
-            if record.get("type") == "PointAdded" and isinstance(
-                    record.get("point"), dict):
-                contents.append(record["point"]["content"])
+            if record.get("type") == "PointAdded":
+                out.append(record["point"]["content"])
             elif record.get("type") == "TurnsRecorded":
-                contents.extend(snap["content"]
-                                for snap in record.get("turns") or [])
-        return contents
+                out.extend(turn["content"] for turn in record.get("turns") or ())
+        return out
 
 
 def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
@@ -2247,7 +2223,7 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
     Without the binding this leg would be the untenanted case and would assert
     the transcript in neither store — the P0 #10021 removes.
     """
-    arm_record(monkeypatch)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
     seam = _RecordingSeam()
     monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
     _bind_tenant(sdk)
@@ -2376,7 +2352,10 @@ def test_a_SCRATCH_log_is_not_a_journal_so_the_turns_stay_in_the_graph(
     """
     from tortoise.log import EventLog
 
-    arm_record(monkeypatch)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-10000")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "graph-10000")
     seam = _RecordingSeam()
     monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
     # The SDK builds a durable `EventLog` for a configured path; a scratch buffer
@@ -2404,6 +2383,8 @@ def test_a_SCRATCH_log_is_not_a_journal_so_the_turns_stay_in_the_graph(
     assert seam.point_contents() == ["[user] a", "[assistant] b"], (
         "the fallback must journal the NODE-CREATING record, because the graph "
         "is the store that holds these turns")
+
+
 def test_a_record_with_no_account_is_not_narrated_as_a_divergence(
         sdk, monkeypatch, caplog):
     """⛔ P2 (#10021 review): the migrate-phase state must not fill the

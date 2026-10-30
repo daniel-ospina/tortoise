@@ -328,6 +328,8 @@ The general rule:
 > **⇒ The rebuild path is REPLAY, never re-extraction.** The only thing that makes the derived tables regenerable is that the journal **stores the resulting rows**. A journal entry saying *"a point was created"* with just an id regenerates nothing.
 >
 > **And the payoff is identity, not just recoverability:** replay reproduces the graph **exactly**, so a v3 rebuild can be **diffed against** a v2 graph. A recompute-everything rebuild would silently produce a *different* graph each time — no stable baseline, and no reproducible audit.
+>
+> ⚠️ **"Exactly" is bounded by a declared exception: the journal may carry entries whose replay materialises NO graph node.** Two do, and both are §9.1 placements rather than omissions — `SessionNarrated` (the narrative, #9555) and `TurnsRecorded` (a capture's turn set while the record holds the turns, #10017 R2). Both are declared in `projection._NO_PROJECTION_FOLD`, so the exception is a *decision the dispatcher states*, never a silent skip; and both still carry their text into the record, so a rebuild loses nothing that a read can see. ⛔ The exception does not extend to REMOVALS: a `EntityMutated` op=delete that a replayed journal drops is a resurrection, not an exception (#3316), which is why `tortoise/log.py`'s torn-tail tolerance is an allow-list of additive types.
 
 **✅ The schema test this gives you, for any type or field:**
 > **If the journal does not carry it, it is not derived — it is PRIMARY, and belongs in a truth-layer table.**
@@ -522,9 +524,30 @@ The S1 narrative (the connected prose form of a captured session) is stored as *
 
 **A turn row DECLARES that it is not for the graph.** `public.point.cache_tier` (`'graph'` by default, `'record_only'` for §9.1's **raw-turn** tier — the narrative tier has its OWN table, `public.session_narrative`, and no tier column, so the two tiers are not both `public.point` rows) is how a row states it is not graph state, and `tortoise/cache_projection.py::read_record_view` skips every `record_only` point **and any edge incident to one**. The tier is a COLUMN, so it cannot be set through an event payload (it is stripped before the insert); a writer states it as its own statement. Migration `supabase/migrations/20261029000001_record_point_cache_tier.sql`, PR `#10070`.
 
-**The carrier states its turn rows itself.** On the lane where the record holds the turns, `_write_capture_turns` journals ONE `TurnsRecorded` carrier per capture instead of one `PointAdded` per turn, and that carrier WRITES the turn rows itself — `record_projection._turns_statements`, one `public.point` row per snapshot at `cache_tier = 'record_only'`, with the tier taken from the record TYPE's declaration rather than from a payload (`_RECORD_ONLY_KEYS` strips a payload `cache_tier` before the insert, so a payload path could only ever land the DEFAULT `'graph'`). The carrier's GRAPH fold is nothing (`projection._NO_PROJECTION_FOLD`), so a `rebuild()` replay cannot re-create turns the running graph deliberately does not hold — a replay that did would undo `#10017`'s purge within a day, the RESURRECTION class (`tortoise/log.py`, `#3316`). Pinned on the producer itself (`tests/test_10017_record_carrier.py` §7): a record-armed capture journals one carrier and no per-turn `PointAdded`, its plan writes both turn rows at `record_only`, and `recover_from_log` over that journal materialises the `:Session` and **no** turn node.
+**Where that placement is now EXECUTABLE** (it was prose until #10000/#10017/#10076, which is step 7):
 
-**Three consequences, each deliberate.** (a) The `:GraphEvent` stream is a THIRD store and is unchanged: the capture still emits a payload-only `PointAdded` per turn, which reaches the event store and journals nothing, so `poll_events` keeps every row it had. (b) The capture's stale-turn sweep therefore keeps its matching payload-only `PointRetracted` **subscriber row** — a consumer that learned a turn exists must learn it was swept, or the feed carries a one-sided lifecycle — while the JSONL record for that removal is the `EntityMutated` op=delete, whose fold is the hard delete of the ROW. The `PointRetracted` call journals nothing (payload only), so there is no double-delete: one removal, one record, one subscriber row (`#3300`). (c) The tenant is the third conjunct of the capability, resolved by the seam's own precedence — **carried > scope > env pair**, `record_writer.record_tenant_effective` — so the hosted REST lane's by-value carrier counts: an armed record that cannot NAME a tenant (`no_tenant`, `#9188` F4) takes nothing, so the graph write runs and the journal records the node-creating shape. ⚠️ **Two residuals, named.** (i) A record write refused AFTER the decision (unreachable, breaker open) leaves the carrier in the journal and no row until a replay heals it: the store is decided by what the write DID, which `#10021` owns, and the read side asks the DSN alone (so `armed + journaling + no namable tenant` serves `turn_points: []` over a graph that holds the turns). (ii) A TORN carrier tail is REFUSED rather than tolerated (`log.py`), and that classification is worth re-deciding against the WRITE ORDER — the record write follows the journal append, so a torn carrier line loses the capture's turns on both stores while refusing the whole journal; `#10017` carries that re-decision.
+- **The write.** The capture writer stores turns in the graph **only** when the record cannot hold
+  them (no journal, or no `TORTOISE_RECORD_DSN`) — the capability decides, never a policy flag
+  (#10000, `sdk._write_capture_turns`).
+- **The journal.** On the record-held lane a capture's turns are journalled as ONE `TurnsRecorded`
+  carrier (`turns: [<the writer's per-turn snapshots, verbatim>]`) instead of one `PointAdded` per
+  turn, and its replay materialises **no node** (`_NO_PROJECTION_FOLD`) (#10017 R2) — a `PointAdded`
+  there re-created the turn nodes on every rebuild, i.e. a rebuild that *undid* this placement
+  (#10067).
+- **The row.** The carrier's turns are written as `public.point` rows by the projection's own
+  carrier-keyed statement (`record_projection._turn_row_statements`), each stating
+  `cache_tier = 'record_only'` in that statement. Doing it in the PROJECTION rather than at the
+  writer is what keeps `record == replay(journal)`: a live write and a record rebuilt from the same
+  journal run the same statement. The tier is **in the data**, not in a reader's predicate, so
+  `read_record_view` skips those rows and `rebuild_from_record` cannot node-ify them either —
+  otherwise the two rebuild routes produce two different graphs.
+- **The removal.** Deleting a legacy turn from the graph is journalled
+  (`EntityMutated` op=delete, `cache_tier: 'record_only'`), and its record effect is a **tier demote, not
+  a row delete** — the transcript stays (#10017 R1).
+- **The change feed.** The carrier is deliberately NOT in `sdk._GRAPH_EVENT_TYPES`, so an armed
+  capture's turns leave `poll_events` — a `:GraphEvent` for a turn the writer deliberately skipped
+  would advertise an entity that does not exist in the graph (recorded in `docs/event-catalog.md` and
+  pinned by `tests/test_10017_turn_carrier_replay.py`, #10017 step 7).
 
 ### 9.2 A GitHub PR is an **`Object` + an `Event` + a `Source`** — never a `Source`-per-event (D2, decided)
 

@@ -56,10 +56,13 @@ claim nothing supports. They are still UNWITNESSABLE through
 ``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
-``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold,
-``"stats": out.get("stats") or {}`` inside ``_extract_session_v2`` — the sibling
-key is never copied — whose LINE this probe reads out of the tree rather than
-typing it (``META_FOLD_CITE``, see ``_sdk_line``). That is #9116, cited
+``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold in
+``tortoise/sdk.py`` — the line carrying ``"stats": out.get("stats") or {}``
+inside ``_extract_session_v2``, whose sibling key is never copied. That cite is
+NOT typed in this file: it is resolved from the tree at import as
+``META_FOLD_CITE`` (and a cite that will not resolve to exactly one line makes
+the probe REFUSE), because it is the one number no reader can keep true by hand
+and a stale one sends #9116's fixer to the wrong line. That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
 forbids.
@@ -74,16 +77,6 @@ and the composition line carry, so one cannot be dropped or silently re-worded;
 the number's RESOLUTION is checked against the tree at the moment it is
 re-derived (``grep -n`` at the stamped head), which is the only check that can be
 made without pinning a line that ``main`` is free to move.
-
-📌 THE ``sdk.py`` NUMBERS THE CAUSES PRINT ARE DERIVED, NOT TYPED. A number in a
-markdown row is re-derived by a lane (and the sweep reds until it is), but a
-number inside an f-string that the pin CHECKS AGAINST ITS OWN DERIVED EXPECTATION
-is a second source of truth: the pin moves with the tree and the cause does not,
-so the next insertion above the symbol reds a test whose order of events says
-the pass was fine (that is exactly what #10199's head did — ``+20`` lines above
-the fold). ``META_FOLD_CITE`` / ``REFERENCES_EDGE_CITE`` / ``TURN_WRITE_CITE``
-are therefore READ from ``tortoise/sdk.py`` at import (``_sdk_line``), the way
-the pin derives its own expected value.
 
 ⛔ WHERE THE LOG GOES. NOT over ``capstone.log``. That file is the shipped REFUSAL
 record, its add-commit predates the pre-registration, and
@@ -132,44 +125,6 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-
-def _sdk_line(code: str) -> int:
-    """The ONE line of ``tortoise/sdk.py`` that carries ``code`` — READ from the tree.
-
-    See the CITE CONVENTION above: the SYMBOL is authoritative and the number is
-    a convenience, so a number this probe PRINTS is read at the moment it is
-    printed instead of being typed into the source. Sphinx reaches the same
-    conclusion from the other side — ``sphinx.ext.linkcode`` resolves a
-    source link from the object's ``module``/``fullname`` (``_DOMAIN_KEYS =
-    {'py': ['module', 'fullname']}``) at build time, and its Python domain has no
-    "line N of file X" role at all, because a stored line number cannot survive
-    an edit above it.
-
-    A code string that is not on exactly ONE line is refused rather than guessed:
-    the callers below name a single known line, and a second hit means the anchor
-    moved, not that either line will do.
-    """
-    hits = [n for n, line in enumerate(
-        (ROOT / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines(), 1)
-        if code in line]
-    if len(hits) != 1:
-        raise SystemExit(
-            f"`{code}` is on {len(hits)} line(s) of tortoise/sdk.py {hits} — this "
-            f"probe names ONE line; re-anchor the constant, do not pick one")
-    return hits[0]
-
-
-#: The meta fold ``_extract_session_v2`` drops S2.2/S2.3 at, in the exact shape
-#: the causes below print it.
-META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line('\"stats\": out.get(\"stats\")')}"
-
-#: The capture path's call that writes the references edge.
-REFERENCES_EDGE_CITE = (
-    f"tortoise/sdk.py:{_sdk_line('proj.link_source_to_event(source_key, event_id)')}")
-
-#: The turn-row writer the E3 denominator excludes by construction.
-TURN_WRITE_CITE = f"tortoise/sdk.py:{_sdk_line('_TURN_WRITE_CYPHER = (')}"
-
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
@@ -177,6 +132,46 @@ E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
 CORPUS_DIR = "tests/eval/write_path"
+
+#: The meta fold's cite, in the exact shape the causes below print it, READ out of
+#: `sdk.py` on every run instead of typed.
+#:
+#: A line cite is the one number in this bundle no reader can keep true by hand:
+#: any commit that inserts a line above the fold moves it, and this branch alone
+#: has now moved it twice (its own docstring insert in `sdk.py`, and `main`'s
+#: `#9964`). Typed here, the CAUSE re-stales SILENTLY — the shipped cause named
+#: `:13593` for a fold that had moved to `:13611`, and the only thing that caught
+#: it was `tests/test_7949_capstone_measure.py`, which derives the line in the
+#: PIN and compares. Deriving it here too means the cause a reader (and #9116's
+#: fixer) actually reads cannot re-stale on a merge that touched nothing this
+#: bundle owns. The symbol is authoritative and the line is a convenience (the
+#: bundle's own cite convention), so deriving it is the same answer Sphinx gives
+#: (`py:obj` resolves to a symbol, not a line).
+#:
+#: ⛔ It REFUSES rather than printing a claim nothing supports: a cite that cannot
+#: be resolved to exactly ONE line is not a number this run may print (the `arm:`
+#: read-back rule, applied to a cite).
+META_FOLD_CODE = '"stats": out.get("stats")'
+
+
+def _meta_fold_cite() -> str:
+    """`tortoise/sdk.py:<n>` for the line carrying `META_FOLD_CODE` — read, not typed."""
+    source = ROOT / "tortoise/sdk.py"
+    if not source.exists():
+        raise RuntimeError(
+            f"cannot resolve the meta fold's cite: {source} is not in this checkout, "
+            "and a cause that names no real line is worse than no cite (#9116)")
+    hits = [n for n, line in enumerate(
+        source.read_text().splitlines(), 1) if META_FOLD_CODE in line]
+    if len(hits) != 1:
+        raise RuntimeError(
+            f"the meta fold's cite is ambiguous: {META_FOLD_CODE!r} is on {len(hits)} "
+            f"lines of sdk.py {hits} — the cause names ONE line, so this run refuses "
+            f"rather than pick (#9116)")
+    return f"tortoise/sdk.py:{hits[0]}"
+
+
+META_FOLD_CITE = _meta_fold_cite()
 
 SCHEMA = "capstone-verdict-v1"
 BEGIN = "=== CAPSTONE-VERDICT-BEGIN ==="
@@ -197,10 +192,9 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2573-2598``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``proj.link_source_to_event(source_key, event_id)`` in
-#: ``_extract_session_v2`` — ``(Source)-[:references]->(sessionCaptured Event)``,
-#: cited as ``REFERENCES_EDGE_CITE`` (derived from the tree, never typed). The
-#: anchor is on the same link, but the DERIVED node is its TARGET.
+#: path at ``tortoise/sdk.py:14658`` (``proj.link_source_to_event(source_key,
+#: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
+#: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
 ANCHOR_IN = ("references",)
 
@@ -213,12 +207,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2573-2598 link_source_to_event, reached from "
-    # ⛔ NOT a typed number: `E3_RULE` is PRINTED (`add(f"e3 rule: {E3_RULE}")`,
-    # `"rule": E3_RULE` in the scored log), so a hand-kept line here re-stales
-    # on the next insert above the symbol and the scored row names a line no
-    # reader can resolve — the exact defect this PR set out to end (#10199
-    # review P1: the merge restored `main`'s 14432 into this string).
-    f"the capture path at {REFERENCES_EDGE_CITE} "
+    "the capture path at tortoise/sdk.py:14658 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:614-622 "
@@ -836,9 +825,10 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596 and "
-        ":8616), and each VET pass is gated on the LIST — `if vet_enabled and "
-        "embed_list:` (:8684), `if vet_enabled and complete_list:` (:8806) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596, the "
+        "flag; :8600, the early return; :8616, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:8684), "
+        "`if vet_enabled and complete_list:` (:8806) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
         "returns {} on its fail-open path, :8478-8481)."
@@ -1139,7 +1129,7 @@ def point_composition_line(composition: dict | None) -> str:
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"{TURN_WRITE_CITE}, t.is_episodic=true, wired only by CONTAINS), and "
+        f"tortoise/sdk.py:2399, t.is_episodic=true, wired only by CONTAINS), and "
         f"operator Points are written by create_operator (tortoise/sdk.py — the "
         f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
         f"(measured: {operators_anchored} of {operators} anchored). Whether an "
@@ -1217,7 +1207,7 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"classes cannot carry a derivation link AT ALL and are named "
         f"rather than folded into the figure: the turn rows carry none BY "
         f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"{TURN_WRITE_CITE}, t.is_episodic=true, wired only by "
+        f"tortoise/sdk.py:2399, t.is_episodic=true, wired only by "
         f"CONTAINS), and the operator Points are written by "
         f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
         f"operator writer), which never writes extractedFrom. So "
