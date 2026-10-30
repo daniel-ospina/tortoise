@@ -5,10 +5,15 @@ used to drive each committed session through the REAL write path
 (store-file render → ``session_import`` parser round-trip →
 ``sdk.capture_session`` on a hermetic graph → dream EP pass), grade the
 written graph and publish a receipt.  #4282 deleted ``capture_session`` from
-the SDK surface, and no surviving SDK entry point reaches an in-memory
-conversation capture (``index_sessions`` / ``reconcile_sessions`` index
-session *files*; the hosted ``POST /v1/sessions`` door is a server route,
-not an SDK method).  ``run_benchmark`` and the ``run`` CLI sub-command were
+the SDK surface. No surviving PUBLIC SDK entry point reaches an in-memory
+conversation capture (``index_sessions`` / ``reconcile_sessions`` index session
+*files*; the hosted ``POST /v1/sessions`` door is a server route, not an SDK
+method, and its async ``_capture_session_impl`` is the only door that survives
+whole). ⚠️ The PRIVATE ``_extract_session_v2`` *does* capture in-process — measured,
+four probes, in `tests/test_graph_census_7949.py`'s header — but it mints no
+``:Session`` and writes no ``(Source)-[:references]->(Event)`` link, so a fixture
+driving it reads 0 points through ``snapshot_session``; closing that gap means
+re-implementing the deleted door's ordering contract inside a fixture.  ``run_benchmark`` and the ``run`` CLI sub-command were
 therefore removed with it, and so was every probe that drove them
 (``test_write_path_benchmark.py`` — including the #4860 rotating-key
 failover guard — and the ``run``-gate tests in

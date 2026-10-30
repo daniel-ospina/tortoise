@@ -538,8 +538,10 @@ suppresses operator promotion exactly as a draft Point does.
 
 > **(#2788)** The names this lane historically carried — `name`, `eventStatus`,
 > `createdAt` — are props, not projection state, and none of the three is read
-> back as Event state. `name` has one reader (`sdk.backfill_about_entities`
-> matches an Event against a Point's content); `eventStatus` is an **ingest**
+> back as Event state. ⚠️ `name` has **no reader left**: its only reader was
+> `sdk.backfill_about_entities` (it matched an Event against a Point's content), one of the 26
+> dead public SDK methods deleted by `#4282` (2026-10-27, owner ruling) — so nothing in the
+> served package performs that match any more. `eventStatus` is an **ingest**
 > marker (`scheduled` → `completed`) written by the session/meeting indexers,
 > deliberately outside the consistency gate's `status` comparison (which is
 > Object/Subject-only), and the typed commit path cannot set it at all

@@ -1,16 +1,34 @@
 """#8444 census, for `#7949` E1 and E3 — non-vacuous, fail-closed, report-only.
 
-`#7949` E1 ("the `^the <X>` share of `:Object`s") and E3 ("every derived node
-carries its version anchor — `:Object`/`:Event` included") had no home in a
-run's own artifact: `METRIC_VALUES` has no object-composition member,
-`provenance_accuracy` is a Point-level PRESENCE test that never reads
-`sourceVersion`, and `snapshot_session` reads `:Point` only. `#8444` asked for
-a report-only census in the runner; these tests pin it.
+⚠️ **THIS FILE LOST 15 OF ITS 19 TESTS (#4282, 2026-10-27), and the loss is MEASURED,
+not assumed.** Every one of them ran the census over a real capture, and the fixture
+entered through `TortoiseSDK.capture_session` — one of the 26 dead public SDK methods
+the owner authorised deleting. The rule this PR applies to such a file is
+*"fixture-only with no surviving SDK entry point → excise the fixture"*, and the last
+clause is the one worth checking, so it was checked. Four probes, each against the
+lane's FalkorDB, replaying the deleted door's surviving primitives in the documented
+order:
 
-Every test names the mutation that makes it FAIL, and the ones that matter run
-the census over a REAL capture (the offline extractor lane) rather than a
-fixture, because the point is that the numbers come off the graph the write
-path actually wrote.
+1. `_extract_session_v2` alone writes the payload — a Point, an Object, an
+   `aboutObject` edge and an `extractedFrom` edge — but mints no `:Session` and
+   stamps no `eventId`: `snapshot_session` returns 0 points, the census 0 objects;
+2. adding `_write_session_and_turns` lands the `:Session` node and the turn rows, and
+   still 0 points;
+3. adding the deterministic `sessionCaptured` Event and
+   `_materialize_session_source` lands both nodes, and still 0 points;
+4. adding `_stamp_capture_provenance` (returns `True`; the Point then carries
+   `eventId`) STILL reads 0 points, because the census's session scope walks
+   `(src:Source {sessionId})-[:references]->(e:Event …)` and that link's source key
+   was derived by the deleted method (`_index_resolve_corpus_root`, itself orphaned
+   now).
+
+Reconstructing the rest means re-implementing the door's ORDERING contract — the
+#8501 "materialize the Source BEFORE extraction" rule among it — inside a test
+fixture, i.e. testing the fixture's imitation of a path nothing else exercises. That
+is the instrument-false-negative class this PR deletes, so the tests stay out and the
+loss is recorded with its boundary instead of asserted: the only door that survives
+whole is the hosted async `_capture_session_impl` (a `SessionRequest` + org + capture
+slot + request state), and rebuilding this fixture on it is filed as its own work.
 """
 from __future__ import annotations
 

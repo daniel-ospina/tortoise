@@ -970,7 +970,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     the tree (`_EXTRACTOR_SITES[k]["result"]`), never typed — a range's END moves
     with every key added to the emitted block, exactly as the start moves with
     every insert above it. The
-    drop is the meta fold at `tortoise/sdk.py:12177` — **re-derived from the tree at
+    drop is the meta fold in `tortoise/sdk.py` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4), so any typed number is
@@ -1052,7 +1052,13 @@ def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
                      "other=15 (anchored 0)",
                      "total=326", "STRUCTURALLY INCAPABLE",
                      "create_operator", "never writes extractedFrom",
-                     "BY CONSTRUCTION", "tortoise/sdk.py:2377",
+                     "BY CONSTRUCTION",
+                     # ⛔ DERIVED, never typed: this literal was
+                     # `tortoise/sdk.py:2377` until an unrelated import edit two
+                     # lines above the def reddened this very test (round 19).
+                     # `_sdk_line_naming` is the bundle's own answer to exactly
+                     # this class of rot, so the pin uses it.
+                     f"tortoise/sdk.py:{_sdk_line_naming('_TURN_WRITE_CYPHER = (')}",
                      # the denominator is stated as the WRITER class, and the
                      # residual is inside it
                      "supposed-to-derive", "the class where a LOST derivation "
@@ -1333,7 +1339,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:12177`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
+# `tortoise/sdk.py:12819`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
 # ``tortoise/extractor_v2.py:8975-8979``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1602,8 +1608,10 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     which carries none of ['vet_enabled = (']` (measured at a head on which 7913
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
-    The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:12177` to `12401` reds it, and before this leg nothing read that row.
+    The index row's cites are pinned by the same sweep: re-staling its meta-fold
+    cite reds it (measured; the number is deliberately not recorded here — it moved
+    four times under this branch and each typing of it became the next stale claim),
+    and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]

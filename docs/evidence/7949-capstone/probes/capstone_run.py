@@ -16,7 +16,7 @@ the corrected reading:
 1. **A single entry point DOES exist.**
    The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
-   the SDK's capture door → ``sdk._extract_session_v2`` (``sdk.py:11993``) →
+   the SDK's capture door → ``sdk._extract_session_v2`` (``sdk.py:11991``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
    ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
    ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
@@ -162,8 +162,8 @@ HEAD_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 WITNESS_KEYS = ("stats", "story_arc", "embed_list", "vet",
                 "classify_later", "search", "payload")
 
-#: The subset of ``WITNESS_KEYS`` that ``TortoiseSDK.capture_session``'s receipt
-#: does NOT carry (#9116). ``stats`` is the receipt's only pipeline surface, so
+#: The subset of ``WITNESS_KEYS`` that the receipt of ``TortoiseSDK.capture_session``
+#: (deleted by #4282 — G4 refuses by name when it is absent) did NOT carry (#9116). ``stats`` is the receipt's only pipeline surface, so
 #: every step whose witness lives in here is unobservable through this entry
 #: point — the run refuses at G5 and says so, attributed to the instrument.
 WITNESS_KEYS_OFF_RECEIPT = ("story_arc", "embed_list", "vet",
@@ -905,6 +905,17 @@ def main(argv: list[str] | None = None) -> int:
 
     sdk = TortoiseSDK()
     session_id = f"capstone_{uuid.uuid4().hex[:12]}"
+    # #4282 deleted the entry point. The `except Exception` below would already
+    # turn the `AttributeError` into a refusal, but it would report "the entry
+    # point raised" — which reads as a bug in the pass rather than as the
+    # authorised deletion it is. Name it.
+    if not hasattr(sdk, "capture_session"):
+        return refuse("#4282 deleted TortoiseSDK.capture_session — the entry point "
+                      "G4 drives does not exist, so no pass can be observed; the "
+                      "surviving in-process door is the private "
+                      "sdk._extract_session_v2, which the hosted handler still "
+                      "reaches",
+                      prereg_ok=True, code=4, corpus=corpus)
     try:
         captured = sdk.capture_session(turns, session_id=session_id)
         # The receipt IS the only surface. ``capture_session`` never returns an

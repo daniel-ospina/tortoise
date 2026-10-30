@@ -173,9 +173,9 @@ sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`)
 `tools/*.py` cite and the bare `:N` continuation below are invisible to it — stated
 here so "swept" is never read into a number nothing re-checks.
 
-The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
+The only entry point the capstone may drive was `TortoiseSDK.capture_session` — deleted by `#4282`, so the probes now REFUSE by name rather than measuring a different door. What follows was written against it. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:12821` is the fold (`"stats": out.get("stats") or {}`) — while the
+`tortoise/sdk.py:12819` is the fold (`"stats": out.get("stats") or {}`) — while the
 extractor builds `result["classify_later"]` (`tortoise/extractor_v2.py:8965`) and
 `result["vet"]` (`:8975`) on a surface the receipt never carries. `#9116` is open and
 still true at this head.

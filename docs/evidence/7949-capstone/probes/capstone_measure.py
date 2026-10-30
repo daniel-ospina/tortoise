@@ -2,7 +2,17 @@
 """The extractor-v4 capstone MEASUREMENT run (#9080 / epic #7949).
 
 ``capstone_run.py`` (same directory) is the instrument that ships with PR #9089. It
-drives ``TortoiseSDK.capture_session`` — the real entry point — and then reads four
+drove ``TortoiseSDK.capture_session`` — the real entry point — and then read four
+
+⚠️ **It now REFUSES (#4282, 2026-10-27):** `capture_session` was one of the 26 dead
+public SDK methods the owner authorised deleting, so the run this file performs has
+no entry point to perform it through. It refuses BY NAME at start-up rather than
+raising `AttributeError` mid-corpus, because a crashed tool and a recorded refusal
+are different claims: the scores below stand as the last MEASURED reading at
+`e0fc940b5`, not as a reproducible one. The surviving in-process door is the private
+`sdk._extract_session_v2(conversation, session_id, now)`, which the hosted
+`POST /v1/sessions` handler still drives — re-registering a measurement against THAT
+door is a new instrument, not a re-run of this one.
 step witnesses off the RECEIPT that the receipt does not carry (#9116), so it
 refuses at G5 for every input and its table is five ``BLOCKED`` rows with
 ``numerator=None`` (#9737: *"a COMPLETED run still yields 0/5 BLOCKED"*). It
@@ -20,7 +30,9 @@ working, and its refusal table stays the artifact that pins the refusal contract
     ``corpus.fixtures_hash``). A different revision is REFUSED, never scored — the
     record's own ``interface_note`` says so.
   * **THE RUN** is one pass over the seven pre-registered sessions on a FRESH
-    disposable graph: ``capture_session(turns, session_id=<sid>)`` per session.
+    disposable graph: ``capture_session(turns, session_id=<sid>)`` per session —
+    the call this probe could make until #4282 deleted the method (see the header:
+    the probe now refuses instead of raising).
   * **THE OBSERVATION** reads each of the eight steps off the object that actually
     carries it — ``stats`` for six of them, the live graph for the commit, and an
     explicit UNOBSERVED-with-cause for the two the receipt has no key for. The
@@ -57,7 +69,7 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
 ``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold,
-``tortoise/sdk.py:12821`` (``"stats": out.get("stats") or {}`` inside
+``tortoise/sdk.py:12819`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
@@ -148,7 +160,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2467-2492``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13102`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13100`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -163,7 +175,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2467-2492 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13102 "
+    "the capture path at tortoise/sdk.py:13100 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:537-545 "
@@ -191,7 +203,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2377`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2375`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -724,6 +736,21 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
     from tortoise.sdk import TortoiseSDK
 
     sdk = TortoiseSDK(graph_name=graph)
+    # ⛔ #4282 deleted the public entry point this probe drives. Check BEFORE the
+    # loop: the old code raised `AttributeError` on the first session, after
+    # printing "running N sessions through capture_session ...", so a dead
+    # instrument read as a started run. A named refusal is the honest verdict.
+    if not hasattr(sdk, "capture_session"):
+        raise SystemExit(
+            "capstone-measure: REFUSED — #4282 deleted "
+            "`TortoiseSDK.capture_session`, the entry point this probe drives. No "
+            "pass can be run, so no row may be re-measured: the scores in the "
+            "bundle stand as the last reading measured at `e0fc940b5`, not as a "
+            "reproducible result. The surviving in-process door is the private "
+            "`sdk._extract_session_v2(conversation, session_id, now)`, which the "
+            "hosted POST /v1/sessions handler still reaches — a measurement "
+            "against THAT door needs its own instrument and its own "
+            "pre-registration.")
     results = []
     for sid in sessions:
         fixture = load_fixture(sid)
@@ -1084,7 +1111,7 @@ def point_composition_line(composition: dict | None) -> str:
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2377, t.is_episodic=true, wired only by CONTAINS), and "
+        f"tortoise/sdk.py:2375, t.is_episodic=true, wired only by CONTAINS), and "
         f"operator Points are written by create_operator (tortoise/sdk.py — the "
         f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
         f"(measured: {operators_anchored} of {operators} anchored). Whether an "
@@ -1162,7 +1189,7 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"classes cannot carry a derivation link AT ALL and are named "
         f"rather than folded into the figure: the turn rows carry none BY "
         f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2377, t.is_episodic=true, wired only by "
+        f"tortoise/sdk.py:2375, t.is_episodic=true, wired only by "
         f"CONTAINS), and the operator Points are written by "
         f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
         f"operator writer), which never writes extractedFrom. So "
@@ -1293,14 +1320,14 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8975-8979. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:12821 (\"stats\": out.get(\"stats\") "
+            f"the meta fold tortoise/sdk.py:12819 (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:12821 is the line its fix "
+            f"#9116 is the seam, and tortoise/sdk.py:12819 is the line its fix "
             f"must target; reading a wrapper instead is the instrumentation "
             f"E4's row forbids")
 
@@ -1328,12 +1355,12 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8965-8971. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:12821 "
+            f"is DROPPED at the same meta fold, tortoise/sdk.py:12819 "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:12821 is the line its fix must target")
+            f"tortoise/sdk.py:12819 is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "
@@ -1945,7 +1972,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"capstone-measure: G1 corpus {corpus_sha} MATCHES the frozen pin")
     print(f"capstone-measure: graph {graph} (fresh, disposable)")
     print(f"capstone-measure: running {len(sessions)} sessions through "
-          "capture_session ...", flush=True)
+          "capture_session (deleted by #4282 — see run_corpus's refusal) ...",
+          flush=True)
 
     # The measured arm is FORCED here and read back — a printed arm that the
     # shell did not actually hold measures the OFF population under an ON label

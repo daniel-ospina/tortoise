@@ -177,7 +177,7 @@ is **per-surface**, not uniform (#3615):
   are the Claude Code `session-end.sh` hook (plus `tortoise session drain`,
   which its `SessionStart` counterpart runs in the background), `tortoise
   session capture` / `tortoise sessions import`, and the SDK's client
-  transmission (`TortoiseSDK.commit_session` → `POST /v1/sessions/commit`).
+  transmission (`POST /v1/sessions/commit`, the hosted route — the SDK's `TortoiseSDK.commit_session` wrapper that used to call it was deleted by `#4282`).
 - **The hosted MCP tool `tortoise_session_capture` is not gated by this
   variable** — it executes on the server, which cannot read the client host's
   `TORTOISE_CAPTURE`. It carries the server-side recording policy
