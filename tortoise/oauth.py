@@ -2630,11 +2630,27 @@ def consent_app_origin() -> str | None:
     separates "this deployment cannot mint" (a typed 503 the caller can report)
     from a redirect to an unparseable string, which reaches the browser as a
     navigation error with nothing naming the binding.
+
+    ⛔ THE PARSE IS TOTAL — it is a `try`, not a bare `urlsplit`. `urlsplit` does
+    not merely produce a useless result for every bad binding: it RAISES
+    ``ValueError`` for a bracketed netloc that is not terminated
+    (``https://[``, ``http://[::1``), so a one-character operator typo would
+    escape this function as a ``ValueError`` out of ``GET /oauth/authorize`` and
+    be answered by the app-level handler as a bare 500 — the exact #3026 class
+    the endpoint's own ``except Exception`` net exists to close, one line above
+    this call. Both TS halves of the same knob are already total:
+    `token.ts::originVerdict` and `start.ts::parseAsOrigin` parse inside a
+    ``try``/``catch`` and answer a typed ``503``. This is the third half, and the
+    fallback is the same ``None`` → typed 503 the documented branch already owns,
+    so an unparseable binding and an unusable one are ONE outcome.
     """
     from urllib.parse import urlsplit
 
     from tortoise.consent_token import consent_token_issuer
-    parts = urlsplit(consent_token_issuer())
+    try:
+        parts = urlsplit(consent_token_issuer())
+    except ValueError:      # unterminated '[' netloc — unparseable, not a crash
+        return None
     if parts.scheme in ("http", "https") and parts.netloc:
         return f"{parts.scheme}://{parts.netloc}"
     return None

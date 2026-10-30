@@ -1087,7 +1087,9 @@ def test_the_page_is_not_RENDERED_when_the_AS_cannot_verify_what_it_mints(
     signs with its copy) and every redemption answers `401 invalid_token`, so the
     rendered page would offer an Authorize that can never succeed and a Retry that
     cannot help. The AS already refuses an unusable `CONSENT_TOKEN_ISSUER`/origin
-    this way; the key gets the same treatment, at RENDER.
+    this way (`test_an_UNPARSEABLE_session_origin_is_a_typed_503_not_a_crash`, which
+    executes that claim instead of asserting it); the key gets the same treatment,
+    at RENDER.
     """
     tc, _ = api_client
     params = _authorize_params(tc, attempt_key="ak-1")
@@ -1103,6 +1105,69 @@ def test_the_page_is_not_RENDERED_when_the_AS_cannot_verify_what_it_mints(
     assert bounced.status_code == 302, bounced.text
     assert bounced.headers["location"].startswith(APP_ORIGIN + "/auth?next="), (
         bounced.headers["location"])
+
+
+@pytest.mark.parametrize("issuer", [
+    # (1) absolute-but-not-a-serviceable-origin — the DOCUMENTED `None` branch.
+    "app.premiselabs.co",
+    "ftp://x.y",
+    # (2) THE CRASH ARM: `urlsplit` RAISES `ValueError` on a bracketed netloc that is
+    # not terminated, so these never reach the `scheme`/`netloc` test at all.
+    "https://[",
+    "http://[::1",
+])
+def test_an_UNPARSEABLE_session_origin_is_a_typed_503_not_a_crash(
+        api_client, monkeypatch, issuer):
+    """`consent_app_origin()` is the ONLY reader of the binding, and it must be TOTAL.
+
+    ⛔ `urlsplit` does not merely return a useless object for every bad binding: it
+    RAISES for an unterminated `[` netloc. Before the fix that escaped
+    `GET /oauth/authorize` as a `ValueError` and was answered by the app-level
+    handler — the bare 500 `{"detail": …}` this endpoint's own `except Exception`
+    net three lines above exists to prevent (#3026) — instead of the typed 503 the
+    function's docstring promises and the handler implements for `None`.
+
+    Both TS halves of the same knob (`token.ts::originVerdict`,
+    `start.ts::parseAsOrigin`) already parse inside a `try`; this pins the third.
+    Nothing here is reachable from REQUEST input — the binding is operator config —
+    which is why it is one assertion per shape rather than a fuzz arm.
+    """
+    tc, _ = api_client
+    params = _authorize_params(tc, attempt_key="ak-1")
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", issuer)
+    r = tc.get("/oauth/authorize", params=params, follow_redirects=False)
+    assert r.status_code == 503, (
+        f"{issuer!r} must be the SAME typed refusal as any other unusable binding, "
+        f"got {r.status_code}: {r.text}")
+    body = r.json()
+    assert body["error"] == "temporarily_unavailable", body
+    assert "session origin is misconfigured" in body["error_description"], body
+    # …and it is not a 302 either: a bounce to an unparseable origin is the other
+    # wrong answer this branch exists to refuse.
+    assert "location" not in {k.lower() for k in r.headers}, dict(r.headers)
+
+
+@pytest.mark.parametrize("issuer, expected_origin", [
+    ("https://app.premiselabs.co", APP_ORIGIN),          # the plain binding
+    ("https://app.premiselabs.co/consent", APP_ORIGIN),  # a path is stripped
+    ("http://localhost:3000/deep/path", "http://localhost:3000"),  # local preview
+    ("https://[::1]:8443", "https://[::1]:8443"),   # a WELL-FORMED bracketed netloc
+])
+def test_a_SERVICEABLE_session_origin_is_returned_as_a_bare_origin(
+        api_client, monkeypatch, issuer, expected_origin):
+    """The other direction, so the `try` above cannot swallow a GOOD binding.
+
+    A parametrised refusal test that never asserts an acceptance can be satisfied
+    by a function that always returns `None` — and then every real deployment is a
+    503. This pins the value the total parse still has to produce.
+    """
+    tc, _ = api_client
+    params = _authorize_params(tc, attempt_key="ak-1")
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", issuer)
+    r = tc.get("/oauth/authorize", params=params, follow_redirects=False)
+    assert r.status_code == 200, r.text
+    assert f'"{expected_origin}/api/consent/token"' in r.text, (
+        "the page's mint URL must be the ORIGIN, with no path from the binding")
 
 
 def test_the_deny_path_returns_an_error_to_the_SERVER_built_target(api_client, tmp_path):
