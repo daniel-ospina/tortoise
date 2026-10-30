@@ -1838,13 +1838,26 @@ jobs:
     # `WATCHDOG_CEILING_MIN` (55m) and past this job's own 60m outer cap — and a
     # budget built for the slowest class would also let a genuinely hung HOSTED leg
     # hold the REQUIRED aggregate red for 55m, the regression #6135/#6145 exists to
-    # prevent. This leg cannot be carried by the pool inside the policy, so it must
-    # not be schedulable onto it.
+    # prevent. This leg cannot be carried by the pool inside the policy, so this
+    # pin is written to keep it off the pool — though, as the next paragraph
+    # records, the pin alone no longer achieves that while the mitigation is on.
     #
-    # `ubuntu-24.04` is claimed by NO self-hosted runner (the pool carries
-    # `self-hosted,Linux,ARM64,self-hosted-arm64` plus, only while the fallback is
-    # attached, `ubuntu-latest`) — the same pin, and the same reasoning, as
-    # `workflow-lint` (#7867) and finding-provenance.
+    # `ubuntu-24.04` is HOSTED-ONLY for THIS job by choice — NOT because the pool
+    # cannot answer it. Since the 2026-10-29 mitigation (#6897 suspended;
+    # docs/ops/ci-runner-x64.md, "the label contract") the installer CAN emit
+    # `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`
+    # (tools/install-ci-runner-x64.sh), so the premise this comment used to end
+    # on, "`ubuntu-24.04` is claimed by no self-hosted runner", is
+    # FALSE. Re-measure it rather than trusting this text:
+    # `gh api repos/<owner>/<repo>/actions/runners`.
+    # ⛔ THE COST, STATED: label matching is cumulative and unscoped (github/docs,
+    # "Using self-hosted runners in a workflow"), so while the mitigation is
+    # engaged this leg IS pool-eligible — and on the pool it is not merely slower,
+    # it is KILLED: 5.49x on the same 365 nodeids (1352.5 s vs 246.5 s), and
+    # `test-slow (e)` killed at 2402 s with 375 of 850 done (#6897,
+    # 2026-10-29T04:49:36Z). That is an accepted cost of the temporary mitigation,
+    # recorded in the runbook; the fix is a budget matching the class or a move,
+    # not this label.
     # Cost when GitHub-hosted is healthy: none — the pool only wins these jobs while
     # the fallback label is attached. During a real GitHub-hosted outage these two
     # legs WAIT for a hosted runner (the aggregate stays pending — "not answered
@@ -4067,7 +4080,23 @@ jobs:
     # routing is ambiguous, not fixed" — so `ubuntu-latest` does NOT mean
     # "GitHub-hosted with its own egress IP". That premise is load-bearing here:
     # this leg pulls its actionlint image with a single literal reference.
-    # `ubuntu-24.04` is claimed by no self-hosted runner.
+    #
+    # `ubuntu-24.04` is HOSTED-ONLY for THIS job by choice, but NOT — any more —
+    # because the pool cannot answer it. Since the 2026-10-29 mitigation (#6897
+    # suspended; docs/ops/ci-runner-x64.md, "the label contract") the installer
+    # CAN emit `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`
+    # (tools/install-ci-runner-x64.sh), so the premise this comment used to end
+    # on — "`ubuntu-24.04` is claimed by no self-hosted runner" — is FALSE.
+    # Re-measure it rather than trusting this text:
+    # `gh api repos/<owner>/<repo>/actions/runners`.
+    # ⛔ THE COST, STATED: GitHub's label matching is cumulative and unscoped
+    # (github/docs, "Using self-hosted runners in a workflow"), so while the
+    # mitigation is engaged this leg is POOL-ELIGIBLE and its single literal
+    # `rhysd/actionlint` pull spends the fleet's shared anonymous Docker Hub
+    # quota — a rate-limit red on healthy code. That is an accepted cost of the
+    # temporary mitigation, recorded in the runbook; if the mitigation becomes
+    # permanent the fix is a `runs-on` only GitHub-hosted can answer, not this
+    # label.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -4084,11 +4113,18 @@ jobs:
             exit 1
           fi
           # #7867: deliberately NOT routed through the GHCR/mirror resolver.
-          # This leg is pinned to a HOSTED label (`runs-on: ubuntu-24.04`, see
-          # the job header), so it has its own egress IP and never shares the
-          # fleet's anonymous Docker Hub quota — there is nothing to fall back
-          # FROM. Keeping the pin literal and unquoted in the `docker run` line
-          # is also structural: tests/test_ci_selection.py reads it from there.
+          # The reference stays a single literal (and unquoted) in the `docker
+          # run` line for a structural reason: tests/test_ci_selection.py reads
+          # it from there.
+          # ⛔ The egress argument this comment used to make — "pinned to a HOSTED
+          # label, so it has its own egress IP and never shares the fleet's
+          # anonymous Docker Hub quota" — is NO LONGER a guarantee. The pool can
+          # answer `ubuntu-24.04` while the mitigation is engaged (see the job
+          # header), so this pull CAN spend the quota the pin used to protect.
+          # That is an accepted cost of the temporary mitigation, recorded in the
+          # runbook; a resolver on this fleet would not restore the guarantee,
+          # because it is the same fleet. If the mitigation becomes permanent the
+          # fix is a `runs-on` only GitHub-hosted answers, not this label.
           docker run --rm -v "$PWD:/repo" -w /repo \
             rhysd/actionlint:1.7.12 \
             -shellcheck= "${files[@]}"
