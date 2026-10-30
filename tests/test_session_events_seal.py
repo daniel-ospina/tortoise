@@ -570,7 +570,12 @@ def test_an_archive_that_cannot_be_read_does_not_abort_the_run(tmp_path, capsys)
     path = _write(tmp_path, day, b'{"session_id": "p"}\n')
     archive = tmp_path / seal.ARCHIVE_DIRNAME
     archive.mkdir(parents=True, exist_ok=True)
-    seal.archive_path(tmp_path, day).write_bytes(gzip.compress(b"other\n", mtime=0))
+    # IDENTICAL content, so a READABLE archive takes the `already-sealed` arm and
+    # unlinks the source: `conflict` then becomes reachable ONLY when the read is
+    # actually denied. With differing content this row passed whether the mode
+    # took effect or not (#6388 review cycle 5).
+    seal.archive_path(tmp_path, day).write_bytes(
+        gzip.compress(path.read_bytes(), mtime=0))
     os.chmod(archive, 0o000)
     try:
         result = seal.seal_one(tmp_path, path)
@@ -579,7 +584,34 @@ def test_an_archive_that_cannot_be_read_does_not_abort_the_run(tmp_path, capsys)
     capsys.readouterr()
 
     assert result.status == "conflict", result
-    assert path.exists()
+    assert "unreadable" in result.detail, result.detail
+    assert path.exists(), "a denied read must never cost the source"
+
+
+def test_a_failed_post_removal_fsync_still_reports_the_truth(tmp_path, monkeypatch):
+    """The `already-sealed` arm's post-unlink fsync used to escape AFTER the
+    source was deleted, aborting the rest of `--apply` with no verdict.
+
+    Mutation: that `except OSError` wrap removed REDs here (measured by the
+    cycle-5 reviewer: the verdict body was never executed by any row).
+    """
+    day = TODAY - timedelta(days=9)
+    body = b'{"session_id": "y"}\n'
+    path = _write(tmp_path, day, body)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(body, mtime=0))
+
+    def boom(_path):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(seal, "_fsync_dir", boom)
+    result = seal.seal_one(tmp_path, path)
+
+    assert result.status == "already-sealed", result
+    assert result.ok
+    assert not path.exists()
+    assert "fsync" in result.detail, result.detail
 
 
 def test_a_differing_archive_is_never_clobbered(tmp_path):

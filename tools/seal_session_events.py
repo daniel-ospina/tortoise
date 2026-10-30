@@ -547,8 +547,15 @@ def main(argv: list[str] | None = None) -> int:
     rows = [seal_one(root, path) for path in pending]
     _report(rows, stream=sys.stdout)
     if not rows:
-        print(f"nothing to seal — no plain day file older than "
-              f"{args.keep_days} days under {root}")
+        # Do not assert "no old day file exists" when `eligible` skipped entries
+        # it could not stat: that sentence would be false over a candidate still
+        # sitting on disk (#6388 review cycle 5).
+        if unreadable:
+            print(f"nothing sealable — but {len(unreadable)} day file(s) could "
+                  f"not be stat'd (run --check)", file=sys.stderr)
+        else:
+            print(f"nothing to seal — no plain day file older than "
+                  f"{args.keep_days} days under {root}")
     bad = [r for r in rows if not r.ok]
     if bad:
         print(f"{len(bad)} day file(s) could NOT be sealed; their plain copies "
