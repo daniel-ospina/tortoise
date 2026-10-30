@@ -383,6 +383,12 @@ def session_turns(conn: Any, *, org_id: str, graph_id: str,
         kind=TurnAnswer.NO_ACCOUNT)
 
 
+# How many gap indices a shortfall message NAMES (#10021 review P2). The
+# diagnosis is the arithmetic below; this bound is only how much text it prints,
+# and it is why the gap walk can stop early.
+_SHORTFALL_GAPS_NAMED = 5
+
+
 def _shortfall(turns: Sequence[Turn], turn_count: int | None,
                turn_max_index: int | None = None) -> str | None:
     """WHY these rows are not the session's whole transcript — or ``None``.
@@ -427,9 +433,43 @@ def _shortfall(turns: Sequence[Turn], turn_count: int | None,
     held = {turn.index for turn in turns}
     if not held:
         return None
-    missing = [i for i in range(max(held) + 1) if i not in held]
-    if missing:
-        shown = ", ".join(str(i) for i in missing[:5])
+    # ⛔ THE GAP CHECK IS ARITHMETIC, NOT A WALK OF THE ID SPACE (#10021 review
+    # P2 — CWE-407 *Inefficient Algorithmic Complexity*, Scope: Availability).
+    # This arm used to be `[i for i in range(max(held) + 1) if i not in held]`
+    # and then use at most five of the result: a per-read cost of O(max index)
+    # whose bound is a STORED integer, not the request's own size, on every
+    # turn read and on BOTH serving doors (`GET /v1/sessions/{id}` and
+    # `TortoiseSDK.get_session_detail`). `max(held)` comes from the stored key
+    # (`_turn_index` accepts any suffix `int()` can parse), `_turns` selects the
+    # whole row set with no LIMIT, and the write end never validates the id
+    # space — a legacy/copied row (`tools/backfill_graph_turns.py` carries
+    # `<session>_t<index>` ids into the record verbatim) at index 10**9 cost
+    # ≈16 minutes and ≈40 GB inside one request, materialised and then thrown
+    # away.
+    #
+    # All three facts the arm wants are still decidable, in O(len(turns)):
+    # `missing_count` (the subtraction) says WHETHER there is a gap, and the
+    # gaps themselves are found by walking the rows `_turns` has already SORTED
+    # — never by iterating the id space. The walk stops at
+    # `_SHORTFALL_GAPS_NAMED` appends, so it allocates a constant either way.
+    # ⛔ Do NOT substitute a cap (`if span > 10**6: report a gap`): that swaps
+    # one invented bound for another and misreports a legitimately long
+    # session. The arithmetic needs no threshold at all.
+    span = max(held) + 1                 # the index space 0 .. max(held)
+    missing_count = span - len(held)     # whether there is a gap, no scan
+    if missing_count:
+        gaps: list[int] = []
+        expected = 0
+        for index in sorted(held):
+            while expected < index and len(gaps) < _SHORTFALL_GAPS_NAMED:
+                gaps.append(expected)
+                expected += 1
+            if len(gaps) >= _SHORTFALL_GAPS_NAMED:
+                break
+            expected = index + 1
+        shown = ", ".join(str(i) for i in gaps)
+        if missing_count > len(gaps):
+            shown += f" (+{missing_count - len(gaps)} more)"
         return (f"the record holds {len(turns)} turn(s) but not the whole run "
                 f"(no turn row for index {shown}) — a partial transcript")
     if turn_max_index is not None and max(held) < turn_max_index:

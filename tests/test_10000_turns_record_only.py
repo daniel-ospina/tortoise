@@ -1161,6 +1161,95 @@ def test_a_short_record_answer_is_not_an_answer():
         "a complete row set was refused")
 
 
+def test_a_gap_is_found_without_walking_the_turn_id_space(monkeypatch):
+    """⛔ #10021 review P2 (availability): the gap check is O(rows), not O(index).
+
+    `_shortfall`'s interior-gap arm used to be
+    `[i for i in range(max(held) + 1) if i not in held]` and then use at most
+    five of the result — a per-read cost of O(`max(index)`), where the index is a
+    STORED integer the write end never validates (`_turn_index` accepts any
+    suffix `int()` can parse, and `_turns` selects the row set with no LIMIT).
+    One row at index 10**9 therefore cost ≈16 minutes and ≈40 GB inside a single
+    `GET /v1/sessions/{id}`, on both serving doors, and then threw the result
+    away. CWE-407, Scope: Availability.
+
+    Two assertions, because either alone is escapable: (1) MECHANISM — a
+    `range()` longer than `10**6` is refused by the guard below, so a fix that
+    merely caps the span still fails here (the cap is the thing the review
+    forbids: it misreports a legitimately long session); (2) COST — the read's
+    CPU time stays flat as the index grows, which no invented threshold
+    satisfies.
+
+    Non-vacuity / mutation: restore
+    `[i for i in range(max(held) + 1) if i not in held]` and this leg REDs — the
+    guarded `range` sees a 100 000 000-long range and raises before a byte is
+    allocated (`RangeWalked`). Against a `range`-free but still linear rewrite
+    (`for i in range(...)` replaced by a `while` over the same space) the CPU
+    assertion reds instead: the pre-fix cost measured on the exact expression at
+    `max(index)=10**6` is 0.06–1.0 s of CPU, versus microseconds here.
+    """
+    import builtins
+    import time
+
+    real_range = builtins.range
+    walked: list[int] = []
+
+    class RangeWalked(AssertionError):
+        pass
+
+    def guarded_range(*args):
+        span = real_range(*args)
+        if len(span) > 10 ** 6:
+            walked.append(len(span))
+            raise RangeWalked(
+                f"the turn read asked for a {len(span)}-entry range — the gap "
+                "check is walking the id space, not the rows")
+        return span
+
+    monkeypatch.setattr(builtins, "range", guarded_range)
+
+    sparse = _RlsConn(narrative=[(None, None, 0, 2)],
+                      turn_rows=[_turn_row(0, "[user] a"),
+                                 _turn_row(99_999_999, "[assistant] b")])
+    started = time.process_time()
+    answer = record_read.session_turns(sparse, org_id="org-1", graph_id="g-1",
+                                       session_id="sess")
+    cpu = time.process_time() - started
+
+    assert not walked, (
+        f"the read materialised `range` objects of length(s) {walked} — a stored "
+        "turn index bounds the read's cost")
+    assert not answer.answered, (
+        "a record holding _t0 and _t99999999 with no rows between them answered "
+        "COMPLETE — the huge index hid the missing run")
+    assert "no turn row for index 1, 2, 3, 4, 5" in answer.reason, answer.reason
+    assert "(+99999993 more)" in answer.reason, (
+        "the message must state the gap COUNT arithmetically instead of "
+        f"materialising the gaps: {answer.reason!r}")
+    assert cpu < 2.0, (
+        f"the turn read spent {cpu:.2f}s of CPU — the cost must not grow with "
+        "the largest stored turn index")
+
+    # The gap VALUES are still exact, on a shape a positional shortcut gets
+    # wrong: `[0, 1, 3, 4]` misses index 2 only, while `held[k] != k` reports 2
+    # AND 3 (it confuses "shifted" with "missing").
+    shifted = tuple(
+        record_read.Turn(turn_id=f"sess_t{i}", index=i, content="[user] x",
+                         speaker="user")
+        for i in (0, 1, 3, 4))
+    reason = record_read._shortfall(shifted, None)
+    assert reason is not None and "no turn row for index 2)" in reason, (
+        f"a single interior hole must be named exactly once: {reason!r}")
+
+    # And a complete dense run is still COMPLETE (no new refusal).
+    dense = tuple(
+        record_read.Turn(turn_id=f"sess_t{i}", index=i, content="[user] x",
+                         speaker="user")
+        for i in range(50))
+    assert record_read._shortfall(dense, 50) is None, (
+        "a complete dense transcript was reported as a shortfall")
+
+
 def test_the_served_count_refuses_a_shortfall_and_serves_an_append():
     """⛔ #10021 review P2: the rule's DIRECTION, stated at the rule itself.
 
