@@ -18,8 +18,11 @@ without touching GitHub. Four things these tests exist to keep true:
      keeps removing, and here it would hide the silence the tool exists to hear.
   5. **The alarm follows the REPORTED verdict, not "did the governor act".** A
      flood that still stands after a successful governor run is a real state and
-     exits 1; and a queue where PR CI is not running but no offender can be
-     blamed is `PR-STARVED`, never `OK`.
+     exits 1; and a queue where PR CI is not running and a queued PR run has
+     waited past the age floor is `PR-STARVED` — never `OK` — when the dominance
+     clause declines. A trim-safe offender may well be PRESENT there (below the
+     dominance floor, or dominated by PR work), so "no offender can be blamed" is
+     NOT what decides it: the declining CLAUSE is.
 """
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import ci_queue_health as Q
+from tools import ci_check_repair as R
 
 NOW = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
 
@@ -409,9 +413,12 @@ def test_the_starvation_seam_is_the_two_measured_verdicts_only():
 
     FLOOD and PR-STARVED both witness a queued PR run past the age floor with
     nothing executing; they differ only in whether THIS READING reaches the
-    governor — FLOOD's offender is trim-safe and IS trimmed, while a PR-STARVED
-    reading is declined ABOVE the governor and trims nothing. The OFFENDER is not
-    the seam in either direction: a FLOOD can carry no trim-safe offender at all,
+    governor's block — FLOOD's always does, and it trims only when its leader is
+    trim-safe (a FLOOD led by an untrimmable workflow reaches the block and trims
+    NOTHING), while a PR-STARVED reading is declined ABOVE the governor and reaches
+    it not at all. So neither the offender's existence nor action availability is
+    the seam. The OFFENDER is not the seam in either direction: a FLOOD can carry
+    no trim-safe offender at all,
     and a PR-STARVED reading can have one present (below the dominance floor, or
     dominated by PR work) — which is why "no offender to blame" is NOT what bounds
     it. Both are derived in `test_the_seam_is_whether_the_reading_reaches_the_governor`.
@@ -429,6 +436,95 @@ def test_the_starvation_seam_is_the_two_measured_verdicts_only():
         oldest_pr_queued_age_seconds=None,
     )
     assert unknown.starves_pr is False
+
+
+#: Statements of the FLOOD/PR-STARVED seam that this PR RETIRES, as the sentences
+#: that were actually written (flattened before matching). An absence assertion is
+#: the only guard that can reach a `#:` comment, where an attribute pin cannot; each
+#: entry is a CLAIM rather than a wording, so reflowing one is free and restoring the
+#: claim is not.
+_RETIRED_SEAM_CLAIMS = (
+    "action is available",
+    "something to trim",
+    "offender to trim",
+    "blamed is `pr-starved`",
+)
+
+
+def _flat_prose(text: str) -> str:
+    """Whitespace-insensitive form, so an honest reflow is not a red."""
+    return " ".join(text.split()).lower()
+
+
+def _starving_verdicts_comment() -> str:
+    """The `#:` block immediately above `STARVING_VERDICTS` — a comment, not an attr.
+
+    Sliced out of the file the module was loaded from, so the surface this guard
+    reads is the surface a reader reads: a transcribed copy of the comment would be
+    a second statement of the claim, i.e. the drift it exists to catch.
+    """
+    lines = Path(Q.__file__).read_text(encoding="utf-8").splitlines()
+    decl = next(i for i, line in enumerate(lines) if line.startswith("STARVING_VERDICTS = "))
+    start = decl
+    while start and lines[start - 1].startswith("#:"):
+        start -= 1
+    return "\n".join(lines[start:decl])
+
+
+#: EVERY surface that states the seam, with the claim it owes. Enumerated rather than
+#: sampled: a guard that certifies five surfaces while a sixth still teaches the
+#: retired model reads as "the seam is stated correctly everywhere", and the surface
+#: it misses is exactly the one the next guard or consumer keys on.
+_SEAM_PROSE_SURFACES = (
+    ("tools/ci_queue_health.py module docstring", "reaches the governor",
+     lambda: Q.__doc__ or ""),
+    ("tools/ci_queue_health.py STARVING_VERDICTS comment", "reaches the governor",
+     _starving_verdicts_comment),
+    ("QueueHealth.starves_pr docstring", "reaches the governor",
+     lambda: Q.QueueHealth.starves_pr.__doc__ or ""),
+    ("tools/ci_check_repair.classify docstring", "reaches the governor",
+     lambda: R.classify.__doc__ or ""),
+    ("this module's docstring (item 5)", "dominance clause declines",
+     lambda: __doc__ or ""),
+)
+
+
+def test_every_surface_that_states_the_seam_states_governor_reach_not_availability():
+    """PR #10264 review P3: the seam's correction landed where the diff was editing.
+
+    The PR retired "the trim scope is the bound" and, with it, the causal model that
+    FLOOD and PR-STARVED *"differ only in whether an action is available"* — on the
+    surfaces it happened to touch. Five others kept stating it, in files this PR
+    modifies, including the `starves_pr` docstring that DEFINES the seam and the
+    `tests` module docstring that states what the suite exists to keep true. Prose is
+    the one surface no runtime assertion covers, so the corrected claim and the
+    retired one are both pinned here, and the discriminator the prose names is
+    derived from `classify` below rather than trusted.
+    """
+    for name, claim, read in _SEAM_PROSE_SURFACES:
+        flat = _flat_prose(read())
+        assert claim in flat, f"{name} no longer states the seam: expected {claim!r}"
+        for retired in _RETIRED_SEAM_CLAIMS:
+            assert retired not in flat, f"{name} still states the retired claim {retired!r}"
+
+    # The discriminator the prose now names, DERIVED: a FLOOD's reading evaluates the
+    # governor's block and trims when the leader is trim-safe ...
+    trims = classify(flood_queued(12) + starving_pr_runs(1))
+    assert trims.verdict == Q.FLOOD
+    assert trims.trimmable
+    # ... a FLOOD whose leader sits outside TRIM_SAFE reaches the SAME block and trims
+    # NOTHING, which is why "an action is available" cannot be the seam ...
+    no_action = classify(flood_queued(12, name="publish-selfhost", event="push")
+                         + starving_pr_runs(1))
+    assert no_action.verdict == Q.FLOOD
+    assert no_action.trimmable == ()
+    # ... and a PR-STARVED reading with a trim-safe offender PRESENT also trims
+    # nothing, because it returns ABOVE the block. So two readings that both trim
+    # nothing carry OPPOSITE verdicts: reach separates them, the action does not.
+    starved = classify(flood_queued(5, start=1005) + starving_pr_runs(6, age_seconds=9000))
+    assert starved.verdict == Q.PR_STARVED
+    assert starved.trimmable == ()
+    assert "trim-safe offender present: True" in " ".join(starved.reasons)
 
 
 def test_governor_never_trims_the_workflow_dispatch_recovery_run():

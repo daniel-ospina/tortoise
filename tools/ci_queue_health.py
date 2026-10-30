@@ -90,8 +90,13 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               is not a measured starvation, and inferring STARVED from it would be
               the same inference this state exists to refuse. `FLOOD` and
               `PR-STARVED` ARE measured starvation — the same "PR CI is not running"
-              reality, differing only in whether an action is available — so both
-              reach the per-PR report (#9118 review, the late-stage blind spot).
+              reality — and the one thing they do NOT share is whether the reading
+              reaches the governor's block: FLOOD's always does, and it trims only
+              when the leader is trim-safe (a FLOOD led by an untrimmable workflow
+              reaches the block and trims NOTHING), while PR-STARVED's returns ABOVE
+              it. So the seam is this reading's REACH, not action availability:
+              either way both reach the per-PR report (#9118 review, the late-stage
+              blind spot).
 
 The truncation note, MEASURED rather than assumed (it is what makes
 PR-UNWITNESSED necessary):
@@ -296,12 +301,14 @@ DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0
 
 #: The verdicts that name a MEASURED PR starvation: PR work has a queued run that
 #: has waited past the age floor and nothing of it is executing. They differ only
-#: in whether an action is available (FLOOD's offender is trim-safe and IS trimmed;
-#: PR-STARVED's reading reaches no trim — a trim-safe offender MAY still be present,
-#: merely below the dominance floor or dominated by PR work — so "no offender to
-#: blame" is NOT what bounds it), which is NOT a difference in what the per-PR
-#: report is looking at, so both — and only these two — are threaded into
-#: `ci_check_repair`. A verdict that is NOT in this set (OK, UNKNOWN,
+#: in whether THIS READING reaches the governor's block — FLOOD's always does, and
+#: it trims only when its leader is trim-safe (a FLOOD led by an untrimmable
+#: workflow reaches the block and trims NOTHING); PR-STARVED's returns ABOVE the
+#: block, though a trim-safe offender MAY still be present there, merely below the
+#: dominance floor or dominated by PR work. So "no offender to blame" is NOT what
+#: bounds it, and neither is action availability — the clause order is — which is
+#: NOT a difference in what the per-PR report is looking at, so both — and only
+#: these two — are threaded into `ci_check_repair`. A verdict that is NOT in this set (OK, UNKNOWN,
 #: PR-UNWITNESSED) must never produce a per-PR STARVED claim: each of those leaves
 #: starvation unmeasured or disproved.
 STARVING_VERDICTS = frozenset({FLOOD, PR_STARVED})
@@ -476,7 +483,10 @@ class QueueHealth:
         The single seam `tools/ci_check_repair.py` keys its per-PR STARVED state on,
         so the two instruments cannot disagree about whether PR CI is running: both
         verdicts witness a queued PR run past the age floor with nothing executing.
-        They differ only in whether the governor has something to trim, which is not
+        They differ only in whether THIS READING reaches the governor's block —
+        FLOOD's always does, and it trims only when its leader is trim-safe (a FLOOD
+        led by an untrimmable workflow reaches it and trims NOTHING); PR-STARVED's
+        returns ABOVE it — which is a difference in what the reading can DO, not in
         what the per-PR report is asking. Everything else (OK, UNKNOWN,
         PR-UNWITNESSED) leaves starvation unmeasured or disproved and is False.
 
