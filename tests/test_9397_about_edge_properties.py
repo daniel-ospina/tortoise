@@ -108,45 +108,45 @@ counted MAP-form writer now rather than an exemption.
 ⚠️ Every clause in that paragraph is about `supersede_point`. Earlier revisions
 of this file ran the two functions together in ONE sentence — *"… is NOT: Its
 `SET r += $attrs` is on the 2a-DIRECT leg … so since #9417 this writer DOES
-write `confidence` on an about edge and is no longer an exemption here"* — so
-the nearest antecedent carried the supersede mechanism onto
-`projection._rebuild_all_replay`, though none of it is that function's. That is
-the "sentence that says the opposite of the table beside it" defect this census
-exists to close, in the file that closes it. The replay's row is the declared
-FALSE POSITIVE in `NOT_AN_ABOUT_WRITER`, for the reason its own block below
-states.
-The REBUILD half is still bare — traced as #10139. `_rebuild_all_replay`
-carries TWO `SET r += $attrs` statements, and neither is protected the same way:
-the `DirectEdgeCreated` fold has TWO producers since `#9553` — `create_direct_edge`,
-whose `op_type` allowlist is `{IMPL, NAND}` so its descriptor can never name an
-`about*` edge, and `_record_structural_edge` (reached by the edge MINTS —
-`create_edge`, `create_about_edge` and the three typed wrappers), which DOES
-journal an `aboutSubject`/`aboutObject`/… predicate but emits no attribute from
-the map's vocabulary at all. Both halves are load-bearing and both are pinned
-(`test_every_direct_edge_created_producer_is_safe_for_an_about_edge`), because
-the mechanism that actually protects this statement is the FIXED key vocabulary:
-no `DirectEdgeCreated` in this package can reach an `about*` edge carrying one of
-those keys. The structural-`DirectEdgeRepoint` fold's
-`etype` IS allowlisted and can be `aboutObject`, so there too what carries that
-statement is the map being built from a fixed attribute vocabulary — structural
-repoint descriptors carry none of those keys, the map is empty, and nothing is
-written.
-Its about/structural transfer is a separate BARE `MERGE` whose own comment says
-so (*"Structural 2b transfers are bare: NO attr SET"*). (`create_about_edge`
-DOES journal a bare `DirectEdgeCreated` since `#9553` — attribute-free, which is
-what this leg pins — so it is a producer here, not an absence.) That function
-therefore carries NO property on an about edge; the census's whole-function
-variable union cannot tell which edge the `SET` lands on, so its row is a
-declared FALSE POSITIVE in `NOT_AN_ABOUT_WRITER` rather than a counted
-re-materialization — the false-POSITIVE version of this file's own defect.
-`supersede_point` was the second such row and left it in `#9417`.
+write `confidence` on an about edge"* — so the nearest antecedent carried the
+supersede mechanism onto `projection._rebuild_all_replay`, though none of it is
+that function's. That is the "sentence that says the opposite of the table
+beside it" defect this census exists to close, in the file that closes it. (The
+verbatim paragraph the hand fix deleted is kept as a probe in
+`test_no_corrected_passage_denies_a_verdict_the_census_counts`, so the retraction
+is still pinned; it is NOT quoted here, because this docstring is itself scanned
+by that leg and a quotation of the defect is indistinguishable from the defect.)
+The replay's row is a COUNTED MAP-form writer since `#10139` — see the block
+below.
+**The REBUILD half carries the payload too since `#10139`, so that row's
+EXEMPT-class vocabulary is no longer the documents' claim.** `_rebuild_all_replay`'s structural-`DirectEdgeRepoint`
+fold validates its `etype` (`validate_rel_type`, whose allowlist contains every
+`about*` predicate), `supersede_point` journals those descriptors over
+`SUPERSEDE_STRUCTURAL_RELS`, and since `#10139` the descriptor CARRIES the
+whitelisted attribute payload — so the fold applies it to the rebuilt `about*`
+edge with `ON CREATE SET nr += $attrs`, by design, exactly as the live transfer
+does. The fold's OTHER `SET r += $attrs` (the `DirectEdgeCreated` family) is the
+one whose protection is the FIXED key vocabulary: the fold has TWO producers
+since `#9553` — `create_direct_edge`, whose `op_type` allowlist is
+`{IMPL, NAND}` so its descriptor can never name an `about*` edge, and
+`_record_structural_edge` (reached by the edge MINTS — `create_edge`,
+`create_about_edge` and the three typed wrappers), which DOES journal an
+`aboutSubject`/`aboutObject`/… predicate but emits no attribute from the map's
+vocabulary at all. Both halves are load-bearing and both are pinned
+(`test_every_direct_edge_created_producer_is_safe_for_an_about_edge`) — but the
+structural half is now a WRITER, so what this file measures there is its
+`EXPECTED_NAMES` set, not an exemption. (`create_about_edge` DOES journal a bare
+`DirectEdgeCreated` since `#9553` — attribute-free, which is what that leg pins
+— so it is a producer here, not an absence.)
 
 ⚠️ An EXEMPTION is a fail-open cell unless something compares against it, which
-is why this row is NOT exempt from the name-set comparison: it declares
-`EXPECTED_NAMES` like a recorded writer, and its premise (BARE about transfer,
-`SET` on the `IMPL|NAND` rows) is asserted against the STATEMENT it names — not
-against a function-wide text union, which is the very blindness the row exists
-to explain.
+is why the exemption TABLE survives with zero rows: its legs
+(`test_the_declared_false_positive_premises_hold_at_the_statement`, the
+exemption-name comparison, the vanished-row leg) are the machinery that reds the
+moment a future row is exempted without a statement-level premise. Every row
+that has ever been in it — `supersede_point` (`#9417`) and
+`_rebuild_all_replay` (`#10139`) — became a counted writer when the fix landed,
+and both kept their `EXPECTED_NAMES` entry so the name set stays measured.
 
 ROOT CAUSE OF THE FALSE CLAIM — the method, not the measurement
 ---------------------------------------------------------------
@@ -705,8 +705,21 @@ MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
     #: #9417: the structural transfer now CARRIES the old edge's properties
     #: (`SET nr += $attrs`, whitelisted to the RelationUpsert vocabulary), so an
     #: `about*` edge keeps the binder's `confidence`. It was a declared false
-    #: positive until this landed. REBUILD is still bare — traced as #10139.
+    #: positive until this landed.
     ("tortoise/sdk.py", "supersede_point"): (
+        "SET nr += $attrs",
+    ),
+    #: #10139: the REBUILD half. The structural `DirectEdgeRepoint` descriptor
+    #: journals the attribute payload and pass-2b applies it with the SAME
+    #: `ON CREATE SET nr += $attrs` the live transfer uses. It was the declared
+    #: false positive until this landed — the row that proved a whole-function
+    #: variable union cannot tell which edge a `SET` lands on, and that a
+    #: FIXED-vocabulary gate is not a proof of absence once a descriptor can
+    #: populate the map.
+    (
+        "tortoise/projection/__init__.py", "_rebuild_all_replay",
+    ): (
+        "SET r += $attrs",
         "SET nr += $attrs",
     ),
     ("tortoise/cache_projection.py", "relation_statement"): (
@@ -724,32 +737,29 @@ MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
 #: false-POSITIVE version of this PR's own defect (an instrument that cannot
 #: tell which edge the `SET` lands on).
 NOT_AN_ABOUT_WRITER: dict[tuple[str, str], str] = {
-    ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
-        "it carries TWO `SET r += $attrs` statements, and the exemption depends "
-        "on each separately: the `DirectEdgeCreated` fold — which has TWO "
-        "producers since #9553, `create_direct_edge` (its `op_type` allowlist "
-        "is {IMPL, NAND}, so it can never name an `about*` edge) and "
-        "`sdk._record_structural_edge` (the recorder the edge mints reach; it "
-        "CAN journal an `about*` predicate and emits NO attribute from the "
-        "map's vocabulary); and "
-        "the structural-`DirectEdgeRepoint` fold, whose interpolated `etype` "
-        "IS allowlisted and CAN be `aboutObject`, so it is the `attrs` gate "
-        "that carries it — structural repoint descriptors carry none of "
-        "{direction, confidence, weight, label, batch_id}, the map is empty, "
-        "and nothing is written. The about*/structural transfer is a separate "
-        "BARE `MERGE (s)-[:{etype}]->(t)` (the code says so in place: "
-        "'Structural 2b transfers are bare: NO attr SET'), and "
-        "`create_about_edge` reaches the `DirectEdgeCreated` fold through "
-        "`_record_structural_edges` (#9553) — so this writer's edge DOES arrive "
-        "at the fold, and what keeps a property off it is the descriptor's "
-        "EMPTY attribute map (no `direction`/`confidence`/`weight`/`label`/ "
-        "`batch_id`), NOT a restriction on the relation. ⛔ The pre-`#9553` "
-        "half of this sentence (a mint that 'journals no `DirectEdgeCreated` at "
-        "all') was TRUE once and stayed here after `#9553` made it false, while "
-        "the documents this guard governs were corrected around it — a record "
-        "is worth nothing if it states the opposite mechanism to the code. This "
-        "writer carries NO property on an about edge"
-    ),
+    #: ⛔ EMPTY since `#10139`, on purpose — the TABLE stays.
+    #:
+    #: Both rows this table has ever held became COUNTED writers when their fix
+    #: landed, and each left for the same reason: the exemption said "this
+    #: function's interpolated `etype` cannot carry a vocabulary key", and the
+    #: fix that makes `live == rebuild` true is precisely a descriptor that DOES
+    #: populate that map.
+    #:
+    #:   * `sdk.supersede_point` — left in `#9417` (the live carry);
+    #:   * `projection._rebuild_all_replay` — left in `#10139` (the replay carry:
+    #:     the structural `DirectEdgeRepoint` descriptor now journals the
+    #:     whitelisted payload and pass-2b applies it with
+    #:     `ON CREATE SET nr += $attrs`).
+    #:
+    #: The rows are in `MAP_WRITERS` and keep their `EXPECTED_NAMES` entries, so
+    #: a SECOND property name at either site still reds the name comparison.
+    #:
+    #: ⚠️ The machinery below is NOT stale and is NOT to be deleted: every leg
+    #: that reads this table is a fail-closed guard for the NEXT exemption — a
+    #: premise asserted at the STATEMENT (not at a function-wide text union), a
+    #: name set compared like a counted writer's, and a vanished-row check. An
+    #: empty table satisfies them by construction; deleting the legs would make
+    #: the next exemption unmeasured, which is the class this file exists for.
 }
 
 #: For each declared false positive: the STATEMENT the census attributes the
@@ -759,19 +769,28 @@ NOT_AN_ABOUT_WRITER: dict[tuple[str, str], str] = {
 #: membership test would be satisfied while a `SET` sat on the about transfer,
 #: which is exactly the false negative these rows must not hide.
 FALSE_POSITIVE_STATEMENTS: dict[tuple[str, str], tuple[str, str]] = {
-    ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
-        "SET r += $attrs",
-        "MERGE (s)-[:{etype}]->(t)",
-    ),
+    #: ⛔ EMPTY since `#10139` — see `NOT_AN_ABOUT_WRITER`. A row here pins, per
+    #: STATEMENT, the property write the census attributes to a function AND the
+    #: bare about transfer it does not. Both former rows now write the payload
+    #: on an about edge by design, so neither is a false positive any more, and
+    #: `test_the_declared_false_positive_premises_hold_at_the_statement` (which
+    #: loops this table, plus its own synthetic probes) is the guard the next
+    #: exemption must satisfy.
 }
 
-#: The FIXED attribute vocabulary the false positives' `SET r += $attrs` is
-#: built from (`{k: … for k in (…)}` / `… if k in (…)}`). This is the mechanism
-#: that carries the exemption where the predicate is INTERPOLATED: a structural
-#: descriptor carries none of these keys, so the map is empty and nothing lands
-#: on whatever `etype` resolves to. Pinned as a CEILING — a statement copying a
-#: key from outside it would put that key on an interpolated edge, which is the
-#: `#9417` shape this exemption is one change away from.
+#: The FIXED attribute vocabulary a `SET r += $attrs` statement's map may be
+#: built from (`{k: … for k in (…)}` / `… if k in (…)}`) where the predicate is
+#: INTERPOLATED — the shape that makes the write's TARGET unreadable statically.
+#: Two live uses since `#10139` emptied the exemption table:
+#:
+#:   * the `DirectEdgeCreated` fold's ceiling — a statement copying a key from
+#:     outside it would put that key on an interpolated edge, which is what
+#:     `DIRECT_EDGE_CREATED_ATTR_GUARDS` has to prove its producers cannot reach;
+#:   * ⚠️ **NOT a licence for the structural transfer.** `#10139` deliberately
+#:     carries FEWER keys (`projection/edges.py::STRUCTURAL_TRANSFER_ATTRS`,
+#:     which drops `source_version`), and that narrower set is the one the live
+#:     transfer and the replay both import. Membership here is a CEILING, never
+#:     a target list.
 FALSE_POSITIVE_ATTR_VOCAB: frozenset[str] = frozenset(
     {"direction", "confidence", "weight", "label", "batch_id", "source_version"}
 )
@@ -874,11 +893,12 @@ EXPECTED_NAMES: dict[tuple[str, str], frozenset[str]] = {
         frozenset({SECOND_PROPERTY, MAP_FORM})
     ),
     ("tortoise/hosted_backup.py", "restore_graph"): frozenset({MAP_FORM}),
-    #: The declared FALSE POSITIVES are compared like any other row. Both are in
-    #: the census (with `MAP_FORM`, from an `IMPL|NAND`-scoped
-    #: `SET r += $attrs`), and an exemption with no expected set is exactly where
-    #: a new property would slip past `unexpected` — the comparison is keyed on
-    #: `EXPECTED_NAMES`, so the rows have to be HERE to stay measured.
+    #: The counts are DERIVED from the tables in
+    #: `test_the_document_population_counts_match_the_census`. Since `#10139`
+    #: `_rebuild_all_replay` is a counted MAP writer (its structural repoint fold
+    #: applies the descriptor's payload), so no row here is an exemption — but
+    #: the row is kept measured, because a name-set comparison is the only thing
+    #: that would red on a SECOND property name at that site.
     ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
         frozenset({MAP_FORM})
     ),
@@ -2539,9 +2559,15 @@ def test_the_document_population_counts_match_the_census():
             f"§11.1 still calls that writer the '{wrong}' NAMED-form writer while "
             f"RECORDED_WRITERS={named} makes it the {ordinals[named]}"
         )
+    # ⛔ DERIVED, and 0 is a real value: `NUMBER_WORDS` starts at 1, so a zero
+    # count is written as the NUMERAL in the documents and read the same way
+    # (`test_the_population_numerals_are_derived_from_the_census_tables` reads it
+    # with `_COUNT_NUMBER_TOKEN`, which accepts `0`). Typing "zero" instead would
+    # put a count in the docs that no table can produce.
     _fp = len(NOT_AN_ABOUT_WRITER)
     _fp_noun = "positive" if _fp == 1 else "positives"
-    assert f"{words[_fp]} declared false {_fp_noun}" in storage, (
+    _fp_token = str(_fp) if _fp == 0 else words[_fp]
+    assert f"{_fp_token} declared false {_fp_noun}" in storage, (
         "§13's declared-false-positive count no longer matches `NOT_AN_ABOUT_WRITER` "
         f"({len(NOT_AN_ABOUT_WRITER)})"
     )
@@ -2550,11 +2576,12 @@ def test_the_document_population_counts_match_the_census():
     ), (
         f"§11.1 no longer states that {originating} writers ORIGINATE the property"
     )
-    assert len(NOT_AN_ABOUT_WRITER) == 1, (
-        "the exemption table changed size; §13's '6, not 7' arithmetic and the "
-        "declared-false-positive prose were written for ONE exemption — "
-        "`supersede_point` stopped being one when #9417 made it carry the edge's "
-        "properties, so it moved into MAP_WRITERS"
+    assert len(NOT_AN_ABOUT_WRITER) == 0, (
+        "the exemption table is non-empty again; every row that has ever been in "
+        "it became a COUNTED writer when its fix landed (`supersede_point` in "
+        "`#9417`, `_rebuild_all_replay` in `#10139`), and the documents state "
+        "that composition. A new exemption needs its own STATEMENT premise in "
+        "`FALSE_POSITIVE_STATEMENTS` and the documents' count re-derived with it"
     )
 
 
@@ -2597,23 +2624,33 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
         "RE-MATERIALIZING; the causal split is 2 + 4 (the #9417 supersede "
         "transfer is a fourth re-materializer)"
     )
-    assert _flat("2 originating + 4 re-materializing") in _flat(
-        _doc(STORAGE_CHANGELOG)
-    ), (
+    # ⛔ DERIVED from the tables, not typed (`#10139`). The literal was 2 + 4
+    # while `MAP_WRITERS` held three rows; the moment `#10139` made
+    # `_rebuild_all_replay` a counted MAP writer the ledger's current entry had to
+    # state 2 + 5, and a typed literal would have kept asserting the old
+    # composition against a table that no longer produced it — this file's own
+    # defect class, in the leg that pins the composition.
+    _originating = 2  # the two NAMED writers that write the property FIRST
+    _rematerializing = len(RECORDED_WRITERS) + len(MAP_WRITERS) - _originating
+    assert _flat(
+        f"{_originating} originating + {_rematerializing} re-materializing"
+    ) in _flat(_doc(STORAGE_CHANGELOG)), (
         "STORAGE-ARCHITECTURE-CHANGELOG.md no longer states the corrected "
-        "causal composition (2 originating + 4 re-materializing) — the ledger "
-        "is where the count's current form is recorded, so a ledger still "
-        "carrying only the wrong composition is the history a reader mistakes "
-        "for the claim"
+        f"causal composition ({_originating} originating + "
+        f"{_rematerializing} re-materializing, derived from the tables) — the "
+        "ledger is where the count's current form is recorded, so a ledger "
+        "still carrying only the wrong composition is the history a reader "
+        "mistakes for the claim"
     )
     # The correct split must be STATED, not merely absent: an absence-only pin
     # is satisfied by deleting the classification altogether.
     assert (
-        _flat("2 ORIGINATING") in section_13
-        and _flat("4 RE-MATERIALIZING") in section_13
+        _flat(f"{_originating} ORIGINATING") in section_13
+        and _flat(f"{_rematerializing} RE-MATERIALIZING") in section_13
     ), (
-        "§13 no longer states the causal split (2 originating + 4 "
-        "re-materializing) — the measured population's composition is a claim, "
+        f"§13 no longer states the causal split ({_originating} originating + "
+        f"{_rematerializing} re-materializing, derived from the tables) — the "
+        "measured population's composition is a claim, "
         "and deleting it leaves the number a reader cannot check"
     )
     # And the write-FORM split is the axis the census actually reads, so it must
@@ -2708,9 +2745,9 @@ def test_the_named_and_map_form_writer_populations_are_disjoint():
     )
     assert len(MAP_WRITERS) >= 2, (
         "the map-form population shrank below the two shipped sites the "
-        "documents now record (6 writers the census sees: 3 named-form + 3 "
-        "map-form, i.e. 2 originating + 4 re-materializing; one further "
-        "census hit is a declared false positive) — if a writer was "
+        "documents now record (7 writers the census sees: 3 named-form + 4 "
+        "map-form, i.e. 2 originating + 5 re-materializing; no census hit is a "
+        "declared false positive any more) — if a writer was "
         "genuinely removed, re-derive the documents' count with it"
     )
     #: A site cannot be both a real writer and a declared false positive.
@@ -4240,11 +4277,13 @@ DENIAL_MARKERS: tuple[str, ...] = (
 #: GREEN, i.e. the frame was dead on arrival against its own probe.
 #: ⚠️ STATED LIMIT: the TRANSFER-bare frame reads the VERB forms only (`transfers`
 #: / `transferred`). The NOUN form (*"the transfer is still bare"*) is deliberately
-#: NOT read: the REBUILD note `#10139` requires — *"the REBUILD half of the
-#: supersede transfer is still bare"* — is TRUE prose about a counted writer, so a
-#: noun-matching pattern reds a sentence the documents are required to carry, and
-#: the only way an editor could clear it is to delete that note. A verb-form rule
-#: costs one paraphrase and does not touch the record.
+#: NOT read: while `#10139` was open the documents were REQUIRED to carry the
+#: open-defect note *"the REBUILD half of the supersede transfer is still bare"*,
+#: so a noun-matching pattern reded prose the record had to hold and the only way
+#: an editor could clear it was to delete that note. `#10139` has since landed and
+#: that note is gone, so the control below is now a sentence the record DOES
+#: carry — but the limit stays stated rather than silently widened: a noun-form
+#: denial is still not read, and the frame's own `must_not_see` pins that.
 #:
 #: ⛔ EVERY ENTRY DECLARES ITS OWN PROBE PAIR — `(pattern, must_see, must_not_see)`.
 #: A frame that cannot see the denial it was written for is the same DEAD
@@ -4259,7 +4298,14 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
     (
         re.compile(r"\btransfer(?:s|red)\b[^.;,]{0,40}?\bbare\b"),
         ("transfers the about edge bare", "it transfers it bare"),
-        "The REBUILD half of the supersede transfer is still bare (`#10139`)",
+        # The control is a sentence the RECORD actually carries (`#10139`), and
+        # it is the shape that made this frame necessary in the first place: a
+        # NOUN form of the same subject. `#10139` landed the rebuild carry, so
+        # the old control (the open-defect note *"the REBUILD half … is still
+        # bare"*) is no longer tree prose — a `must_not_see` nothing but this
+        # file has ever written would pin a sentence, not the record.
+        "its structural transfer binds `nr` and carries the OLD edge's "
+        "properties (`ON CREATE SET nr += $attrs`)",
     ),
     # ── the BASE / INFINITIVE spelling of a denial verb ────────────────────────
     (
@@ -4624,11 +4670,13 @@ _COUNT_NUMBER_TOKEN = re.compile(
     # WORDS above six was silently unread — and the failure message for it
     # (*"no corrected passage states how many declared false positives there
     # are"*) names a passage that plainly does state it (`#10200` review, cycle 7,
-    # executed: `seven` … `twelve` all returned `[]`). Today `len(
-    # NOT_AN_ABOUT_WRITER) == 1`, so this is a LATENT fail-open — and the width
+    # executed: `seven` … `twelve` all returned `[]`). At the time the count was
+    # 1, so this is a LATENT fail-open — and the width
     # guard one leg up says "the tables already cover it" at 7–12, which is what
     # made the gap invisible instead of loud. Building the alternation from
-    # `NUMBER_WORDS` makes the reader unable to be narrower than the table.
+    # `NUMBER_WORDS` makes the reader unable to be narrower than the table. ⚠️ The
+    # count is `0` since `#10139` and is written as the NUMERAL, which the digit
+    # arm of this token already reads.
     + "|".join(NUMBER_WORDS[index] for index in sorted(NUMBER_WORDS))
     + r"|both|\d{1,2})\b",
     re.I,
@@ -4679,18 +4727,64 @@ _COUNT_WORD_VALUES: dict[str, int] = {"both": 2}
 #: than derived, it outlived the 5 -> 6 move by a whole review cycle ("A sixth
 #: site is in the code today" while the census saw six, so the site outside it
 #: was the seventh) and every other leg stayed green.
+#: ⛔ `A|An`, not `A` (`#10139`). English requires the `n` before a vowel-initial
+#: ordinal, and `eighth`/`eleventh` are exactly that — so a document saying the
+#: grammatical *"An eighth site is in the code today"* was UNREADABLE by this
+#: instrument, i.e. a correct sentence and the silence it reports would have been
+#: the same reading. Measured when the population grew 6 -> 7 and the site
+#: outside the walk became the eighth.
 _INVISIBLE_SITE_ORDINAL = re.compile(
-    r"\bA (second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh"
-    r"|twelfth) site is in the code today\b"
+    r"\b(?:A|An) (second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth"
+    r"|eleventh|twelfth) site is in the code today\b"
 )
 
 
-def _census_classes() -> tuple[tuple[str, dict[tuple[str, str], object]], ...]:
-    """The three tables, each with the class name its verdict vocabulary keys on."""
+#: The site the contradiction PROBES run against, and the reason they need one
+#: (`#10139`). `NOT_AN_ABOUT_WRITER` is EMPTY now — every row it ever held became
+#: a counted writer when its fix landed — so a probe whose sentence names a real
+#: exempt row would measure NOTHING, while a probe that kept naming the retired
+#: row would be read through that row's NEW class and red as a false positive.
+#: The probes therefore run `probe=True`, where this site holds the EXEMPT role
+#: and is REMOVED from `MAP_WRITERS` (one site, one role — the same disjointness
+#: `test_the_named_and_map_form_writer_populations_are_disjoint` enforces on the
+#: real tables). The site is the row `#10139` retired, so the probes keep testing
+#: the sentence shapes the documents actually carried.
+_PROBE_EXEMPT_KEY: tuple[str, str] = (
+    "tortoise/projection/__init__.py", "_rebuild_all_replay",
+)
+
+
+def _census_classes(
+    *, probe: bool = False,
+) -> tuple[tuple[str, dict[tuple[str, str], object]], ...]:
+    """The three tables, each with the class name its verdict vocabulary keys on.
+
+    *probe* swaps the EXEMPT table for `_PROBE_EXEMPT_KEY` — see its declaration
+    for why the real one is empty and why a probe may not use it. ⛔ The default is
+    the REAL tables: a document scan that forgot the flag would otherwise measure
+    a synthetic population and report it as the documents' own.
+    """
+    if not probe:
+        return (
+            ("MAP", MAP_WRITERS),
+            ("NAMED", RECORDED_WRITERS),
+            ("EXEMPT", NOT_AN_ABOUT_WRITER),
+        )
     return (
-        ("MAP", MAP_WRITERS),
+        (
+            "MAP",
+            {k: v for k, v in MAP_WRITERS.items() if k != _PROBE_EXEMPT_KEY},
+        ),
         ("NAMED", RECORDED_WRITERS),
-        ("EXEMPT", NOT_AN_ABOUT_WRITER),
+        (
+            "EXEMPT",
+            {
+                _PROBE_EXEMPT_KEY: (
+                    "the row that WAS the census's exemption until `#10139`; "
+                    "probes only"
+                )
+            },
+        ),
     )
 
 
@@ -4982,7 +5076,9 @@ def _marker_itself_negated(low: str, match) -> bool:
     )
 
 
-def _unstated_verdicts(sections: list[tuple[str, str]]) -> list[str]:
+def _unstated_verdicts(
+    sections: list[tuple[str, str]], *, probe: bool = False,
+) -> list[str]:
     """Writers a passage names without ever stating which class they are in.
 
     Split out of the leg so the anti-vacuity probes below run the SAME rule: a
@@ -4992,7 +5088,7 @@ def _unstated_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     stated: set[str] = set()
     for _label, text in sections:
         for sentence in _claim_sentences(text):
-            for role, table in _census_classes():
+            for role, table in _census_classes(probe=probe):
                 for _module, symbol in table:
                     if symbol in sentence and _stated_markers(
                         sentence, CLASS_VERDICT_MARKERS[role]
@@ -5000,13 +5096,15 @@ def _unstated_verdicts(sections: list[tuple[str, str]]) -> list[str]:
                         stated.add(symbol)
     return [
         f"{role} `{symbol}`"
-        for role, table in _census_classes()
+        for role, table in _census_classes(probe=probe)
         for _module, symbol in table
         if symbol not in stated
     ]
 
 
-def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
+def _denied_verdicts(
+    sections: list[tuple[str, str]], *, probe: bool = False,
+) -> list[str]:
     """Sentences that contradict the table their named writer lives in.
 
     Three directions, because the defect has been measured in all three: a
@@ -5079,7 +5177,7 @@ def _denied_verdicts(sections: list[tuple[str, str]]) -> list[str]:
     for label, text in sections:
         for sentence in _claim_sentences(text):
             low = sentence.lower()
-            for role, table in _census_classes():
+            for role, table in _census_classes(probe=probe):
                 for _module, symbol in table:
                     if symbol not in sentence:
                         continue
@@ -5161,10 +5259,19 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     reds here instead of quietly pinning nothing.
     """
     sections = _census_sections()
-    for role, table in _census_classes():
+    # ⛔ The vacuity guard runs on the PROBE tables, not the real ones: the real
+    # EXEMPT table is EMPTY since `#10139` (every row it held became a counted
+    # writer), so guarding on it would either red on a declared state or — if
+    # skipped — let this leg pass vacuously. The rule is exercised either way,
+    # because every probe below runs against `probe=True`, where each role has a
+    # member. The empty real table is itself pinned: the documents must state the
+    # zero count (`test_the_document_population_counts_match_the_census`) and a
+    # row added back without a statement premise reds
+    # `FALSE_POSITIVE_STATEMENTS`' set equality.
+    for role, table in _census_classes(probe=True):
         assert table, (
-            f"the {role} table is EMPTY — this leg would pass vacuously, and a "
-            "population of zero is a measured absence, not a green"
+            f"the PROBE {role} table is EMPTY — this leg would pass vacuously, "
+            "and a population of zero is a measured absence, not a green"
         )
     # Probe 1: a sentence that NAMES the site and says nothing about its class
     # must be a violation …
@@ -5358,7 +5465,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     )
     assert any(
         "_rebuild_all_replay" in item
-        for item in _denied_verdicts(list(exemption))
+        for item in _denied_verdicts(list(exemption), probe=True)
     ), (
         "the rule cannot see an exemption described as counted, so the "
         "contradiction is pinned in one direction only"
@@ -5382,7 +5489,10 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         ),
     )
     assert all(
-        any("_rebuild_all_replay" in item for item in _denied_verdicts([sentence]))
+        any(
+            "_rebuild_all_replay" in item
+            for item in _denied_verdicts([sentence], probe=True)
+        )
         for sentence in exemption_in_a_clause
     ), (
         "an unrelated negator cancels the exemption-is-counted denial, so the "
@@ -5541,7 +5651,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     )
     assert any(
         "_rebuild_all_replay" in item
-        for item in _denied_verdicts(list(exemption_as_map))
+        for item in _denied_verdicts(list(exemption_as_map), probe=True)
     ), (
         "an exemption said to write the attribute set by property MAP is not "
         "seen, so the contradiction is caught only when the sentence uses the "
@@ -5559,7 +5669,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     )
     assert not any(
         "_rebuild_all_replay" in item
-        for item in _denied_verdicts(list(exemption_true))
+        for item in _denied_verdicts(list(exemption_true), probe=True)
     ), (
         "the leg reds a TRUE statement of the exemption, so an editor clearing "
         "it would have to delete the record of why the row is exempt"
@@ -5644,7 +5754,10 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         ("probe", "`projection._rebuild_all_replay` is no longer exempt."),
     )
     assert all(
-        any("_rebuild_all_replay" in item for item in _denied_verdicts([sentence]))
+        any(
+            "_rebuild_all_replay" in item
+            for item in _denied_verdicts([sentence], probe=True)
+        )
         for sentence in post_exemption
     ), (
         "the exemption may be called counted by moving the negation after the "
@@ -6001,7 +6114,8 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
                     "`projection._rebuild_all_replay` counts as a writer of the "
                     "attribute set.",
                 )
-            ]
+            ],
+            probe=True,
         )
     ), (
         "the VERB form of 'called counted' is not seen for the exemption row, so "
@@ -6190,7 +6304,8 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         sentence
         for sentence in population_spelled_out
         if not any(
-            "_rebuild_all_replay" in item for item in _denied_verdicts([sentence])
+            "_rebuild_all_replay" in item
+            for item in _denied_verdicts([sentence], probe=True)
         )
     ]
     assert not missed_population, (
@@ -6212,7 +6327,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     population_reds = [
         offender
         for sentence in population_true_prose
-        for offender in _denied_verdicts([sentence])
+        for offender in _denied_verdicts([sentence], probe=True)
     ]
     assert not population_reds, (
         "the population frame reds TRUE prose — the documents' own pronominal "
@@ -6263,7 +6378,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     object_negated_reds = [
         offender
         for sentence in object_negated_true_prose
-        for offender in _denied_verdicts([sentence])
+        for offender in _denied_verdicts([sentence], probe=True)
     ]
     assert not object_negated_reds, (
         "an OBJECT negation (`re-materializes nothing`, `writes no property`) is "
@@ -6471,9 +6586,19 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "write `confidence` on an about edge and is no longer an exemption "
         "here."
     )
+    # ⛔ `probe=True`: the paragraph's offence is that it asserts the site WRITES
+    # the property while the row it named was an EXEMPTION — the state the
+    # documents were in at `2355c2e7f`. Since `#10139` the site is a counted MAP
+    # writer, so under the REAL tables the same paragraph is no longer a
+    # contradiction (writing the property is its verdict now). Running the probe
+    # against the exemption row is what keeps the retracted SINCE-DELETED text
+    # pinned to the claim it actually made, instead of decaying into a sentence
+    # that is only wrong by history.
     assert any(
         "_rebuild_all_replay" in item
-        for item in _denied_verdicts([("module docstring", pre_hand_fix)])
+        for item in _denied_verdicts(
+            [("module docstring", pre_hand_fix)], probe=True
+        )
     ), (
         "the docstring half cannot see the paragraph `904c13141` deleted — the "
         "sentence that carried `supersede_point`'s mechanism onto "
@@ -6620,7 +6745,11 @@ def test_the_population_numerals_are_derived_from_the_census_tables():
     exemptions = len(NOT_AN_ABOUT_WRITER)
     population = len(RECORDED_WRITERS) + len(MAP_WRITERS)
     invisible = population + 1
-    if invisible not in ORDINAL_WORDS or exemptions not in NUMBER_WORDS:
+    # ⛔ `0` is a legal population since `#10139` (no declared false positives)
+    # and `NUMBER_WORDS` starts at 1 — the documents write that count as the
+    # numeral `0`, which is the spelling `_COUNT_NUMBER_TOKEN` reads.
+    if invisible not in ORDINAL_WORDS or (
+            exemptions != 0 and exemptions not in NUMBER_WORDS):
         pytest.fail(
             f"the population is {population} with {exemptions} declared false "
             "positive(s), and this leg's word tables stop at "
@@ -6901,6 +7030,25 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "documents until someone writes it; the documents write `both exemptions` "
         "and `merely exempting` instead, neither of which is a denial"
     ),
+    "writes no property": (
+        "the EXEMPT class's verdict, and an open defect reference until "
+        "`#10139`: the rebuild replay was exempted on *\"this writer carries no "
+        "property on an about edge\"*, and `#10139` made the row a counted MAP "
+        "writer, so neither document states it any more. It stays in "
+        "`CLASS_VERDICT_MARKERS['EXEMPT']` because it is still the spelling a "
+        "future exemption row would have to use — declared absent, not deleted"
+    ),
+    "carries no property": (
+        "the article-less form of the same EXEMPT verdict, absent for the same "
+        "reason since `#10139` (it is still live in `DENIAL_MARKERS`, where it "
+        "is the denial a counted about-edge writer must never be described by)"
+    ),
+    "until #9417": (
+        "a HISTORY marker whose sentence the record no longer carries: the "
+        "`#9417` correction states its history with `before #9417` and "
+        "`pre-#9417`. Declared absent by design rather than dropped, because a "
+        "history marker is part of the denial ESCAPE the legs read"
+    ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"
@@ -6985,8 +7133,9 @@ def test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce():
         )
     # … and EVERY `DENIAL_PATTERNS` entry must SEE the denial it was written for,
     # or it is the same DEAD instrument as a hyphenated literal — plus one
-    # sentence it must NOT read, because the REBUILD note (`#10139`) is TRUE prose
-    # that a counted writer's sentence may legitimately carry.
+    # sentence it must NOT read — a NOUN form of the same subject, which is the
+    # paraphrase class no verb-form frame can reach, and which the record itself
+    # carries (so the control is tree prose, not a string only this file writes).
     # ⛔ THE TABLE CARRIES ITS OWN PROBES, so a NEW frame cannot ship unmeasured:
     # each entry declares the denials it MUST see, and the TRUE prose it must stay
     # out of. Every `must_see` below is a sentence measured GREEN at `a03951455b`
