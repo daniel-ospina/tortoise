@@ -16629,8 +16629,16 @@ class TortoiseSDK:
         # matched NOTHING, so the MERGE was a constrained no-op and the
         # delete-leg below removed the ORIGINAL edge — the transfer silently
         # DESTROYED the edge live, and the replay (which received the same
+        # DESTROYED the edge live, and the replay (which received the same
         # endpoint contract) dropped it too. ``labels(t)`` rides the same
         # traversal, so no extra round trip is spent resolving the far node.
+        # #10139: ONE vocabulary for the carried attributes — the two 2a-DIRECT
+        # legs below, the 2b emission further down and the pass-2b replay that
+        # re-applies them all read `DIRECT_EDGE_ATTR_KEYS` (`projection/edges.py`).
+        # Spelling the same five keys out at each site is the drift that left the
+        # REBUILD half bare while the live half carried the value.
+        from .projection.edges import DIRECT_EDGE_ATTR_KEYS
+
         def _epistemic_label(node_id: str) -> str | None:
             """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
             for _label in EPISTEMIC_LABELS:
@@ -16696,8 +16704,7 @@ class TortoiseSDK:
                     transferred += 1
                     continue
                 _attrs = {k: v for k, v in rdict.items()
-                          if k in ("direction", "confidence", "weight",
-                                   "label", "batch_id")}
+                          if k in DIRECT_EDGE_ATTR_KEYS}
                 # EMIT-BEFORE-TRANSFER: the REPOINT descriptor (plan §4.4 —
                 # A10's pass-2b repoint apply consumes it post-rebuild).
                 # Flat descriptor shape (REVIEW-FIX P2: match
@@ -16742,8 +16749,7 @@ class TortoiseSDK:
                               f"MERGE (t)-[nr:{rtype}]->(new)")
                     proj.g.query(mq, params={"new_id": new_id, "tid": tid})
                     _keep = {k: v for k, v in rdict.items()
-                             if k in ("direction", "confidence", "weight",
-                                      "label", "batch_id")}
+                             if k in DIRECT_EDGE_ATTR_KEYS}
                     if direction == "out":
                         _a_label, _b_label = new_label, tid_label
                     else:
@@ -16792,7 +16798,6 @@ class TortoiseSDK:
         from .projection.edges import (
             DERIVABLE_STRUCTURAL_RELS,
             STRUCTURAL_REL_LABELS,
-            STRUCTURAL_TRANSFER_ATTRS,
             stub_key,
         )
         structural_rels = SUPERSEDE_STRUCTURAL_RELS
@@ -16864,14 +16869,14 @@ class TortoiseSDK:
                 # STILL dropped on transfer — a separate, pre-existing loss this
                 # vocabulary does not own. Stated here rather than letting the
                 # word "never" above imply otherwise.
-                # ⛔ ONE vocabulary, imported: `STRUCTURAL_TRANSFER_ATTRS`
+                # ⛔ ONE vocabulary, imported: `DIRECT_EDGE_ATTR_KEYS`
                 # (`projection/edges.py`) is the SAME tuple the pass-2b replay
                 # branch reads a descriptor's payload through (#10139), so the
                 # live carry and the rebuilt carry cannot disagree about which
                 # keys a supersede moves.
                 edge_props = {
                     k: v for k, v in (row[4] or {}).items()
-                    if k in STRUCTURAL_TRANSFER_ATTRS
+                    if k in DIRECT_EDGE_ATTR_KEYS
                 }
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the

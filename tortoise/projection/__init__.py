@@ -16572,8 +16572,8 @@ class FalkorProjection(
 
             from .edges import (
                 DERIVABLE_STRUCTURAL_RELS,
+                DIRECT_EDGE_ATTR_KEYS,
                 STRUCTURAL_REL_LABELS,
-                STRUCTURAL_TRANSFER_ATTRS,
                 resolve_structural_target,
             )
 
@@ -16752,9 +16752,8 @@ class FalkorProjection(
                         replayed_at_terminal.add((src, etype, tid_rows[0][0]))
                 # Last-writer-wins attr SET — the final attrs post-rebuild
                 # (REVIEW-FIX P1 cycle-26 on the emission site).
-                attrs = {k: ev[k] for k in
-                         ("direction", "confidence", "weight", "label",
-                          "batch_id") if k in ev}
+                attrs = {k: ev[k] for k in DIRECT_EDGE_ATTR_KEYS
+                         if k in ev}
                 if attrs:
                     self.g.query(
                         f"MATCH (a:{labels[src]} {{id:$a}})-[r:{etype}]->"
@@ -17082,7 +17081,7 @@ class FalkorProjection(
                         # the case live created too.
                         #
                         # ⚠️ The payload is read through the SAME vocabulary the
-                        # emitter whitelisted with (`STRUCTURAL_TRANSFER_ATTRS`,
+                        # emitter whitelisted with (`DIRECT_EDGE_ATTR_KEYS`,
                         # `edges.py`) — never `properties(r)` raw, and never a
                         # second copy of the tuple.
                         # ⚠️ RESIDUAL, named: two descriptors that resolve to the
@@ -17095,7 +17094,7 @@ class FalkorProjection(
                         _carry = ""
                         _params = {"sid": src_f, "tid": resolved["internal"]}
                         _transfer_attrs = {
-                            k: ev[k] for k in STRUCTURAL_TRANSFER_ATTRS
+                            k: ev[k] for k in DIRECT_EDGE_ATTR_KEYS
                             if k in ev
                         }
                         if _transfer_attrs:
@@ -17158,9 +17157,8 @@ class FalkorProjection(
                         f"MERGE (a)-[:{etype}]->(b)",
                         params={"a": src_f, "b": tgt_f},
                     )
-                    attrs = {k: ev[k] for k in
-                             ("direction", "confidence", "weight",
-                              "label", "batch_id") if k in ev}
+                    attrs = {k: ev[k] for k in DIRECT_EDGE_ATTR_KEYS
+                             if k in ev}
                     if attrs:
                         self.g.query(
                             f"MATCH (a:{epi_labels[src_f]} {{id:$a}})-[r:{etype}]->"

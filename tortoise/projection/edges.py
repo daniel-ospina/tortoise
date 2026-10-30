@@ -49,15 +49,26 @@ DERIVABLE_STRUCTURAL_RELS = frozenset({
     'aboutDocument', 'extractedFrom',
 })
 
-#: The per-edge attributes a supersede's structural (2b) transfer CARRIES, and
-#: therefore the set its ``DirectEdgeRepoint`` descriptor must journal (#10139).
+#: The per-edge attributes a supersede TRANSFER carries — one definition, read
+#: by every writer and replay leg that moves an edge, so they cannot drift.
 #:
-#: ONE definition, imported by BOTH halves so they cannot drift: the live
-#: transfer in ``sdk.supersede_point`` (which whitelists what it copies onto the
-#: successor edge) and the pass-2b replay branch in ``projection/__init__.py``
-#: (which re-applies the journaled payload). Two copies of this tuple is the
-#: defect class the surrounding constants exist to remove — the same reason
-#: ``DERIVABLE_STRUCTURAL_RELS``/``STRUCTURAL_REL_LABELS`` live here.
+#: The consumers, all reading THIS tuple (#10139 named the structural half;
+#: before it the same five keys were also spelled out as literal tuples at each
+#: emission and replay site, which is the drift class this constant removes):
+#:
+#:   * ``sdk.supersede_point`` 2a-DIRECT descriptor emission (live read-back);
+#:   * ``sdk.supersede_point`` 2a-DIRECT live carry (``_keep``);
+#:   * ``sdk.supersede_point`` structural 2b descriptor emission;
+#:   * ``projection._rebuild_all_replay`` — the 2a-DIRECT fold and the structural
+#:     (pass-2b ``DirectEdgeRepoint``) fold, i.e. the ONE place the values are
+#:     re-applied post-rebuild.
+#:
+#: A whitelist spelled separately on each side is how a carried value becomes a
+#: dropped one: the structural replay re-created the edge BARE while the live
+#: transfer carried `confidence` (#10139), and nothing in the code said the two
+#: lists were meant to be the same list. Named `DIRECT_EDGE_ATTR_KEYS` rather
+#: than `STRUCTURAL_…` because the 2a-DIRECT legs carry it too — the tuple is
+#: the graph's edge-attribute vocabulary, not a structural-only one.
 #:
 #: ⛔ ``source_version`` is deliberately NOT a member, on either side. It is the
 #: RECORD column name (``RelationUpsert.attrs``), while the graph writes this
@@ -69,7 +80,7 @@ DERIVABLE_STRUCTURAL_RELS = frozenset({
 #: ``sourceVersion`` anchor is dropped by a supersede transfer AND by its
 #: replay. That is a separate, pre-existing loss; this vocabulary does not own
 #: it and must not appear to.
-STRUCTURAL_TRANSFER_ATTRS: tuple[str, ...] = (
+DIRECT_EDGE_ATTR_KEYS: tuple[str, ...] = (
     'direction', 'confidence', 'weight', 'label', 'batch_id',
 )
 
