@@ -159,9 +159,10 @@ _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 #: anyone can hold it)". BOTH halves are checked here: `SUPABASE_ANON_KEY` is in this process's
 #: environment, so a collision is observable — an earlier version of this tuple claimed otherwise
 #: and would have left the
-#: WORSE half unguarded (that key is public by construction: everyone who opens `/oauth/authorize`
-#: receives it). §8's human checklist still carries the cross-deployment case, where the Pages
-#: project's env differs from the API's.
+#: WORSE half unguarded (that key is public by construction — it ships to every browser that
+#: loads the app, independently of whether any one page embeds it; #3524 §9 step 4 deleted the
+#: page that used to, which never made it secret). §8's human checklist still carries the
+#: cross-deployment case, where the Pages project's env differs from the API's.
 _REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_ANON_KEY")
 
 #: The shortest secret this arm will use. A FLOOR, not an entropy measurement: it catches the
