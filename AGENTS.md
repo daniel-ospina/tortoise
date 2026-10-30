@@ -416,8 +416,9 @@ not let the model's probability *be* the verdict: the threshold band, the cache 
 failure paths belong to the caller, and they must be **measured and pinned, not assumed**.
 
 - **In-repo use:** ✅ **one, internal and OFF by default** — `tortoise/s2_decision_seam.py` (`#5087`)
-  is the S2.2/S2.3 seam: `vet-v1` (`noul` + `score` per candidate) and `classify-v1` (a `choice`
-  over the kinds the kNN offered), armed only by `TORTOISE_S2_DECISION_SEAM`, consumed through
+  is the S2.2/S2.3 seam: `vet-v2` (`noul` + `score` per candidate) and `classify-v2` (a `choice`
+  over the kinds the kNN offered), every question carrying the untrusted-data framing
+  (`#10077`/`#10117`), armed only by `TORTOISE_S2_DECISION_SEAM`, consumed through
   `vet_gate.vet_candidates(arbiter=…)` and `KindClassifier(tail_decider=…)`. That flag arms S2.2
   unconditionally (it overrides an explicit `TORTOISE_VET=0`, because the seam *is* the arbiter) and
   arms S2.3 only where a `KindClassifier` is built (`TORTOISE_CLASSIFY_LATER=1`). What it does, what
