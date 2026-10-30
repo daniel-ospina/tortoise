@@ -115,9 +115,11 @@ def _aggregate_embedding_coverage(outcomes: list[dict]) -> float | None:
 def _points_census(outcomes: list[dict]) -> dict:
     """The raw point census behind a cell's rolled-up coverage.
 
-    Derived as ONE pair, never two independent sums (#4821 review P2). The
-    sum of ``points_embedded`` is ``0`` whenever the cell's outcomes carry no
-    census at all — so pairing it with ``points_total: None`` published
+    Derived as ONE pair, never two independent sums (#4821 review P2): only an
+    outcome that knows BOTH halves contributes, so a cell whose records mix
+    known and unknown censuses cannot publish a coverage assembled from two
+    different populations. The sum of ``points_embedded`` is ``0`` whenever
+    the cell's outcomes carry no census at all — so pairing it with ``points_total: None`` published
     ``{points_total: None, points_embedded: 0}``, where a consumer summing
     ``points_embedded`` across cells reads "0 embedded" for a population it
     does not know. That is indistinguishable from "N points, none embedded",
@@ -133,10 +135,15 @@ def _points_census(outcomes: list[dict]) -> dict:
     reach the context cap nor produce evidence recall, so it is never a
     winner — but it means "unknown" in this pair covers two states, and the
     coverage arm treats both as un-refuted rather than inventing a zero."""
-    totals = [o.get("points_total") for o in outcomes]
-    embedded = [o.get("points_embedded") for o in outcomes]
-    known_total = sum(t for t in totals if isinstance(t, int))
-    known_embedded = sum(e for e in embedded if isinstance(e, int))
+    # ONE pair per outcome: an outcome that knows its total but not how many
+    # of its points were embedded is excluded from BOTH halves, never counted
+    # on one side only — that is what "one pair, never two independent sums"
+    # buys, and it is why this sums a filtered list instead of summing two
+    # independently filtered lists.
+    pairs = [(o.get("points_total"), o.get("points_embedded")) for o in outcomes]
+    known = [(t, e) for t, e in pairs if isinstance(t, int) and isinstance(e, int)]
+    known_total = sum(t for t, _ in known)
+    known_embedded = sum(e for _, e in known)
     if not known_total:
         return {"points_total": None, "points_embedded": None}
     return {"points_total": known_total, "points_embedded": known_embedded}
@@ -443,8 +450,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="temp dir for per-question graphs")
     args = p.parse_args(argv)
 
-    # --mock implies deterministic ingest when the mode is unset (fully
-    # offline; real v2 sweeps need --extractor-model/keys).
+    # --mock implies deterministic ingest when the mode is unset (a mock run
+    # needs no provider keys; real v2 sweeps need --extractor-model/keys). It
+    # does NOT waive the dense-leg gate (#4718) — --skip-preflight does (#4821).
     ingest_mode = args.ingest_mode or ("deterministic" if args.mock else "v2")
     if args.mock and ingest_mode == "v2":
         raise SystemExit("--mock implies deterministic ingest; pass "

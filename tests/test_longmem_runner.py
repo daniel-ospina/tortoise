@@ -5201,10 +5201,18 @@ def test_sweep_granularity_cli_waiver_is_the_only_way_through(
 def _option_help_block(help_text, flag):
     """The de-wrapped help text of ONE argparse option (its continuation
     lines are indented past the option column, so the block ends at the next
-    line that starts a new option)."""
+    line that starts a new option).
+
+    Width-agnostic: on a narrow terminal argparse prints the option alone on
+    its line and starts the help on the next one, so the option line is
+    matched after ``rstrip()`` rather than requiring a trailing space — a
+    required space made this return ```` at ``COLUMNS=30`` and red the test
+    with a misleading "re-anchor this test" message (#10348 review P2)."""
     lines = help_text.splitlines()
     start = next((i for i, ln in enumerate(lines)
-                  if ln.startswith("  " + flag + " ")), None)
+                  if ln.startswith("  " + flag)
+                  and ln[len("  " + flag):len("  " + flag) + 1] in ("", " ")),
+                 None)
     if start is None:
         return ""
     block = [lines[start]]
@@ -5215,18 +5223,23 @@ def _option_help_block(help_text, flag):
     return " ".join(" ".join(block).split())
 
 
-def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys):
+def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys,
+                                                                  monkeypatch):
     """#4821 (`--mock` contract): since the sweep gates the dense leg BEFORE the
     dataset load, `--mock` is no longer an offline-only run — a mock sweep on a
     host with no loadable embedder refuses unless `--skip-preflight` is passed.
     Both the module docstring and `--mock`'s `--help` said "a mock run must be
     fully offline" and named no waiver, which is the contract this PR makes
     false; `--help` is the surface an operator consults first, and the module
-    docstring is where this PR moved the sweep's contract.
+    docstring is where this PR moved the sweep's contract. The **inline
+    comment** beside the ingest default carried the same claim and is scanned
+    too — a docs-only pin left it standing.
 
-    Non-vacuity: on the pre-fix strings ("must be fully offline", no waiver
-    sentence) every assertion below reds — the docstring paragraph and the
-    `--mock` help both still carry the claim. `--skip-preflight` is asserted
+    Non-vacuity: on the pre-fix strings (the phrase in the docstring, in
+    `--help`, or anywhere in the module source, and no waiver sentence) every
+    assertion below reds — the docstring paragraph, the `--mock` help block,
+    and the module source each still carry the claim. `--skip-preflight` is
+    asserted
     inside the `--mock` block, not merely anywhere in `--help`, where its own
     option would satisfy it for free."""
     import tools.longmem_eval.sweep_granularity as sg
@@ -5240,7 +5253,25 @@ def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys):
     assert "does **NOT** waive the dense-leg gate" in mock_para, (
         "the docstring never says the mock run does not waive the gate")
 
+    # The false claim ALSO lived in `main()` as an inline comment beside the
+    # ingest default — a surface neither the docstring nor `--help` can see, so
+    # the head commit's docs-only pin would have left it standing (#10348
+    # review P2). Scan this module's own source so all three surfaces are
+    # covered and the comment cannot drift back. Keep this module free of the
+    # pre-fix phrase "fully offline"; quote it nowhere but in a negation you
+    # deliberately rewrite.
+    source = Path(sg.__file__).read_text(encoding="utf-8")
+    assert "fully offline" not in source, (
+        "an inline comment/docstring still promises a fully-offline mock run, "
+        "which the dense-leg gate makes false")
+
     with pytest.raises(SystemExit) as ei:
+        # argparse wraps to the AMBIENT terminal width and, below ~20 columns,
+        # breaks words mid-token (`--ingest-`/`mode`), so no substring
+        # assertion can survive an arbitrary COLUMNS. Pin it: the help TEXT is
+        # what this test judges, not the terminal it was rendered on
+        # (#10348 review P2 — the pin red was width-dependent).
+        monkeypatch.setenv("COLUMNS", "200")
         sg.main(["--help"])
     assert ei.value.code == 0
     help_text = capsys.readouterr().out
