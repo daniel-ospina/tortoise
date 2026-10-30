@@ -368,9 +368,17 @@ naming **both** paths (plus the resolved target whenever resolving changes the
 path — a symlink, or a symlinked ancestor such as macOS `/tmp`) and **both**
 digests. The generation marker is read only to say which WAY the bytes differ, so
 an install from a newer CLI is not accused of running older logic and told to
-downgrade. It never raises and never blocks: a non-regular artifact (a FIFO, which
-`open` would block on) and an unsearchable path each get a sentence, matching
-`detect_artifact_install`'s report-without-reading posture. What is still open is
+downgrade.  It never raises and never blocks: a non-regular artifact (a FIFO,
+which `open` would block on) gets a sentence rather than a read — the same
+report-without-reading posture `detect_artifact_install` takes — and an
+unsearchable path or a symlink loop gets a sentence too.  Presence and following
+are errno-discriminating stats, because the detector's own probe does not survive
+those two states: on an UNSEARCHABLE install directory it propagates
+`PermissionError` on Python 3.12 and (worse) folds `EACCES` into "absent" and
+reports a false `missing-artifact` on 3.14 — both inside this repo's
+`requires-python = ">=3.12"` — and for a symlink LOOP it reports
+`symlinked-artifact` / "is a broken symlink", naming a target that exists.  That is
+**#10317** (filed, not widened into this PR).  What is still open is
 only the STARTUP surface — reporting the same divergence at session start rather
 than at the next `tortoise install pi` — which keeps the fail-loud-vs-warn decision
 above; it stays on **#10241**, not on a closed issue.

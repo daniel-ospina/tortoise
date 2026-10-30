@@ -1143,8 +1143,9 @@ def test_seam_target_assertion_calls_a_broken_symlink_broken(home):
     "remove or re-point it". Saying "not a regular file" hides the only fact
     the user needs (the load path is a dead link).
 
-    Mutation: drop the `resolved.exists()` branch (the state falls through to
-    the non-regular-file sentence — RED)."""
+    Mutation: drop the `except FileNotFoundError` arm around the follow-stat (the
+    state then falls through to the generic "cannot be resolved" sentence, so
+    nothing names the dead link — RED)."""
     real_home = home.resolve()
     ext_dir = real_home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
@@ -1169,6 +1170,8 @@ def test_seam_target_assertion_never_claims_a_verdict_it_cannot_hash(home):
 
     Mutation: delete the `loaded_digest is None` branch (the sentence then
     asserts "differs" and accuses the user of editing the file)."""
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
     ext_dir = home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
     dst = ext_dir / capture_install.PI_EXTENSION_NAME
@@ -1184,6 +1187,60 @@ def test_seam_target_assertion_never_claims_a_verdict_it_cannot_hash(home):
     assert str(dst) in msg, msg
     assert "differs from" not in msg, msg
     assert "older or locally edited" not in msg, msg
+
+
+def test_seam_target_assertion_reports_an_unsearchable_install_dir(home):
+    """#10241 review: `exists()`/`is_symlink()` SWALLOW EACCES into `False`, so a
+    mode-000 install directory made the assert answer `""` (clean) — and, under
+    the installer's `require_present=True`, claim "the copy did not land" over a
+    copy that landed. Presence and following are errno-discriminating stats now.
+
+    Mutation: make the `except OSError` handler answer `""` instead of a
+    sentence (an unloadable seam then reads as CLEAN, and `require_present=True`
+    claims the copy did not land) — the pathlib probe this replaced raised
+    EACCES on 3.12 but SWALLOWS it on 3.14, which is why the branch is now an
+    explicit errno stat rather than a `try` around pathlib."""
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores directory permissions, so nothing is blocked")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / capture_install.PI_EXTENSION_NAME).write_bytes(_PI)
+    os.chmod(ext_dir, 0o000)
+    try:
+        msg = capture_install.assert_seam_target("pi", home=home)
+        msg_required = capture_install.assert_seam_target(
+            "pi", home=home, require_present=True)
+    finally:
+        os.chmod(ext_dir, 0o755)
+
+    assert msg, "an unsearchable install dir was reported clean"
+    assert "cannot be inspected" in msg, msg
+    assert str(ext_dir / capture_install.PI_EXTENSION_NAME) in msg, msg
+    # ...and it must NOT claim the write did not land: it landed.
+    assert msg_required, msg_required
+    assert "was not written" not in msg_required, msg_required
+
+
+def test_seam_target_assertion_calls_a_symlink_loop_a_loop(home):
+    """#10241 review: `Path.resolve()` is non-strict and realpath BREAKS a cycle
+    rather than raising, so a loop fell into the broken-symlink branch and the
+    message named a path that exists ("→ …/tortoise-capture.ts, which does not
+    exist" for a self-loop). A cycle is its own state (`ELOOP`).
+
+    Mutation: drop the `errno.ELOOP` arm (the loop then falls to the generic
+    "cannot be resolved" sentence, so nothing names the cycle — `assert "symlink
+    LOOP" in msg` fails)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(dst)  # a self-loop
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    assert msg, "a symlink loop at the loaded path passed"
+    assert "symlink LOOP" in msg, msg
+    assert "broken symlink" not in msg, msg
+    assert str(dst) in msg, msg
 
 
 def test_seam_target_assertion_sends_a_foreign_file_to_move_aside(home):

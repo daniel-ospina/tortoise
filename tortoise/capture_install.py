@@ -175,6 +175,7 @@ print "installed" for a state the repair path will not touch.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import math
@@ -496,6 +497,19 @@ class InstallResult:
     fail loudly (non-zero exit, message on stderr).  ``changed`` False with no
     ``error`` means re-running was a clean no-op — the state on disk is already
     the installed state.
+
+    ``actions`` MAY be non-empty WHEN ``error`` IS SET (#10241).  They name the
+    writes that LANDED before the failure — a ``.bak`` holding the user's own
+    seam, a legacy extension renamed to ``.tortoise-capture.disabled/`` — and
+    the caller MUST print them beside the failure, not instead of it: a user
+    told only ``FAILED`` cannot find the backup, and one of those writes has
+    already changed what the harness loads.  Never return a fresh result to
+    hide them, and never describe a result with actions as "nothing happened".
+
+    This is a CONTRACT, not a convenience: two CLI renderers shipped the same
+    defect by short-circuiting on ``not result.ok`` before printing the actions
+    (``tortoise install`` and ``hooks upgrade``), so a future consumer of these
+    results is expected to render them rather than re-derive the rule.
     """
 
     harness: str
@@ -1374,7 +1388,11 @@ def assert_seam_target(harness: str,
 
     Never raises and never blocks: an unsearchable path, a symlink loop and a
     non-regular file (FIFO/socket/directory) each get a sentence instead of a
-    traceback or a hang.
+    traceback or a hang.  Presence is decided by an errno-discriminating stat
+    and following by a SECOND one, because pathlib folds ``EACCES`` into
+    ``False`` (differently per Python version) and ``resolve()`` breaks a
+    symlink cycle instead of raising — either swallow reports an unloadable
+    seam as clean.
 
     KNOWN LIMITATION, the same one ``hook_install.detect_artifact_install``
     records: this grades the contract's ONE artifact.  Pi also loads a legacy
@@ -1396,10 +1414,20 @@ def assert_seam_target(harness: str,
     if root is None:  # pragma: no cover - registry membership is checked above
         return ""
     loaded = root / contract.install_name
+    # Presence is decided by an errno-DISCRIMINATING stat, never by pathlib's
+    # `exists()`/`is_symlink()`: `exists()` SWALLOWS EACCES into `False` (and
+    # what `is_symlink()` does with it CHANGED between Python versions), so
+    # neither can be trusted to tell "absent" from "unreadable" — and
+    # "unreadable" read as "absent" is clean on the read side and a false "the
+    # copy did not land" under `require_present=True`.
     try:
-        present = loaded.is_symlink() or loaded.exists()
+        os.lstat(loaded)
+        present = True
+    except FileNotFoundError:
+        present = False
     except OSError as e:
-        # A non-searchable parent: the harness cannot load this path at all.
+        # EACCES/EPERM on an ancestor, ENOTDIR, ENAMETOOLONG: the harness
+        # cannot load this path at all.  "Absent" would be a false claim.
         return (f"the capture extension {harness} loads cannot be inspected: "
                 f"{loaded} → {e.__class__.__name__}: {e}. Fix the directory "
                 f"permissions, then re-run `tortoise install {harness}`.")
@@ -1413,23 +1441,31 @@ def assert_seam_target(harness: str,
                 f"`tortoise install {harness}`."
             )
         return ""  # absent, not divergent: `missing-artifact` owns that
+    # FOLLOWING the entry is its own stat, and it is the one that distinguishes
+    # the two states `resolve()` cannot: a symlink CYCLE (ELOOP) and a BROKEN
+    # link (ENOENT after a successful lstat).  `Path.resolve()` is non-strict
+    # and realpath breaks a cycle rather than raising, so without this stat a
+    # loop was reported as "a broken symlink" naming a path that DOES exist.
     try:
+        os.stat(loaded)
+    except FileNotFoundError:
         resolved = loaded.resolve()
-    except (OSError, RuntimeError) as e:
-        # A symlink LOOP (or an unsearchable component): the harness cannot
-        # load this path at all, and no digest can describe it.
-        return (f"the capture extension {harness} loads cannot be resolved: "
-                f"{loaded} → {e.__class__.__name__}: {e}. Remove the symlink "
-                f"and re-run `tortoise install {harness}`.")
-    if not resolved.exists():
-        # A BROKEN symlink (`resolve()` is non-strict, so it gets here). The
-        # detector calls this `symlinked-artifact`, and "not a regular file"
-        # would hide the one fact the user needs: the load path is a dead link.
         return (
             f"the file {harness} LOADS is a broken symlink: {loaded} → "
             f"{resolved}, which does not exist. Remove or re-point it, then "
             f"re-run `tortoise install {harness}`."
         )
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return (
+                f"the file {harness} LOADS is a symlink LOOP: {loaded} cannot "
+                f"be followed to a real file, so nothing can load. Remove the "
+                f"loop, then re-run `tortoise install {harness}`."
+            )
+        return (f"the capture extension {harness} loads cannot be resolved: "
+                f"{loaded} → {e.__class__.__name__}: {e}. Fix the path, then "
+                f"re-run `tortoise install {harness}`.")
+    resolved = loaded.resolve()
     if not resolved.is_file():
         # A directory / FIFO / socket is not divisible into bytes, and READING
         # a FIFO would block — report it without hashing, exactly as
