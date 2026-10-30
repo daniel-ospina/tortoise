@@ -57,7 +57,7 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
 ``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold,
-``tortoise/sdk.py:13473`` (``"stats": out.get("stats") or {}`` inside
+``tortoise/sdk.py:13513`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
@@ -121,6 +121,38 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+def _sdk_line_naming(code: str) -> int:
+    """The ONE line of ``tortoise/sdk.py`` that carries ``code`` — read from the tree.
+
+    The causes below are EMITTED, so no human re-derives their number between runs:
+    a typed cite here re-stales silently on the next branch that inserts a line
+    above the fold — this bundle has already been sent to ``:12196``, ``:12738``
+    and ``:13473`` by three such merges, and #9750 (a 40-line helper inserted near
+    the top of ``sdk.py``, above every cite in this bundle) would have made that
+    four. The CITE CONVENTION above calls
+    the number a convenience and the SYMBOL authoritative; reading it here is what
+    makes that true for the text this probe prints, while the PROSE cites stay
+    typed and self-detecting (`_bundle_sweep` in the test bundle resolves them
+    against the tree). Anchors are whole lines of code, never a line number, and a
+    second match REFUSES: an ambiguous anchor would emit a plausible number for
+    the wrong line, which is the failure this replaces.
+    """
+    lines = (ROOT / "tortoise" / "sdk.py").read_text().splitlines()
+    hits = [n for n, line in enumerate(lines, 1) if code in line]
+    if len(hits) != 1:
+        raise SystemExit(
+            f"capstone_measure: `{code}` is on {len(hits)} line(s) of "
+            f"tortoise/sdk.py {hits} — the cite must name exactly one, so "
+            "re-derive the anchor before this probe reports anything")
+    return hits[0]
+
+
+#: The meta fold (``"stats": out.get("stats") or {}`` inside
+#: ``_extract_session_v2``) that DROPS ``vet``/``classify_later`` — the line
+#: #9116's fix must target.
+_META_FOLD_LINE = _sdk_line_naming('"stats": out.get("stats")')
+
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
@@ -148,7 +180,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13754`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13794`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -163,7 +195,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13754 "
+    "the capture path at tortoise/sdk.py:13794 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
@@ -1293,15 +1325,17 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8975-8979. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:13473 (\"stats\": out.get(\"stats\") "
+            f"the meta fold tortoise/sdk.py:{_META_FOLD_LINE} "
+            f"(\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:13473 is the line its fix "
-            f"must target; reading a wrapper instead is the instrumentation "
+            f"#9116 is the seam, and tortoise/sdk.py:{_META_FOLD_LINE} is the "
+            f"line its fix must target; reading a wrapper instead is the "
+            f"instrumentation "
             f"E4's row forbids")
 
     classify_block, classify_where, classify_refusal = _witness_block(
@@ -1328,12 +1362,12 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8965-8971. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:13473 "
+            f"is DROPPED at the same meta fold, tortoise/sdk.py:{_META_FOLD_LINE} "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:13473 is the line its fix must target")
+            f"tortoise/sdk.py:{_META_FOLD_LINE} is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "

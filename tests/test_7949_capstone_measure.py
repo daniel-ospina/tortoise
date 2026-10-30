@@ -856,10 +856,11 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8975-8979) and `result["classify_later"]` (:8965-8971). The
-    drop is the meta fold at `tortoise/sdk.py:13473` — **re-derived from the tree at
+    drop is the meta fold at `tortoise/sdk.py:13513` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
-    insert above it too; #9202's own branch moved it by 4), so any typed number is
+    insert above it too; #9202's own branch moved it by 4; #9750's 40-line helper at
+    `sdk.py:5168` moved it by 40), so any typed number is
     stale on the next merge and a merge that "takes the newer side" silently
     restores it. `_META_FOLD_CITE` therefore READS the line out of `sdk.py` on
     every run (`_sdk_line_naming`) instead of typing it — the cause must still name
@@ -886,6 +887,24 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
+    # EVERY sdk.py line the cause NAMES must carry the fold's code — checked
+    # against the tree, independently of how the probe arrived at the number.
+    # This is the assertion the three earlier rounds lacked: comparing the cause
+    # to `_META_FOLD_CITE` alone passes whenever BOTH sides are typed the same
+    # way, so a probe that TYPES the number reds only on the next branch that
+    # inserts a line above the fold (#9964's 326, #9202's 4, and this branch's
+    # own 40-line helper at `sdk.py:5168` — each one moved the fold, and each
+    # one needed a hand re-derivation). Resolving the emitted cite against the
+    # tree cannot be satisfied by agreement; it needs the code to BE there.
+    sdk_lines = (_REPO / "tortoise/sdk.py").read_text().splitlines()
+    cited_fold_lines = {int(n) for n in re.findall(
+        r"tortoise/sdk\.py:(\d+)", cause)}
+    assert cited_fold_lines, cause
+    for cited_line in sorted(cited_fold_lines):
+        assert '"stats": out.get("stats")' in sdk_lines[cited_line - 1], (
+            f"the cause names sdk.py:{cited_line}, which reads "
+            f"{sdk_lines[cited_line - 1].strip()!r} — not the fold's code"
+        )
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -1219,7 +1238,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13473`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
+# `tortoise/sdk.py:13513`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
 # ``tortoise/extractor_v2.py:8975-8979``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1489,7 +1508,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:13473` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:13513` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
