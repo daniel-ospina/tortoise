@@ -61,7 +61,7 @@ def _sdk_line_naming(code: str) -> int:
 
 
 #: The meta fold's cite, in the exact shape the probe's causes print it.
-_META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line_naming('\"stats\": out.get(\"stats\")')}"
+_META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line_naming('"stats": out.get("stats")')}"
 
 
 def _load():
@@ -921,6 +921,71 @@ def test_the_probes_printed_sdk_cites_are_derived_from_the_tree_not_typed():
     assert measure.META_FOLD_CITE == _META_FOLD_CITE, (
         "the probe and this pin derive the meta fold from different code strings: "
         f"{measure.META_FOLD_CITE} vs {_META_FOLD_CITE}")
+
+
+#: The cites `_IDLE_CITES` PRINTS for each surface: ``(printed, line, code)``.
+#: The numbers are the tree's — a typed number is a second source of truth that
+#: has to be re-derived on every edit above it, which is the rot `#10243`
+#: (+88 lines) and `#10072` (a further +4) each produced.
+_IDLE_CITE_ANCHORS = {
+    "vet": (
+        ("tortoise/extractor_v2.py:8596", 8596, "vet_enabled = ("),
+        (":8616", 8616, '"vet": {"enabled": vet_enabled'),
+        (":8684", 8684, "if vet_enabled and embed_list:"),
+        (":8806", 8806, "if vet_enabled and complete_list:"),
+        (":8478-8481", 8478, "except Exception as e:"),
+        (":8478-8481", 8481, '"(fail-open)"], {}'),
+    ),
+    "classify_later": (
+        (":8565", 8565, "classify_later = kind_classifier is not None"),
+        (":8590", 8590, "classify_later = False"),
+        (":8612", 8612, '"classify_later": {"enabled": classify_later'),
+        (":8696", 8696, "if classify_later and embed_list:"),
+        (":8821", 8821, "if classify_later and complete_list:"),
+        (":8712", 8712, "except Exception as e:"),
+        (":8842", 8842, "except Exception as e:"),
+    ),
+}
+
+
+def test_the_probes_printed_extractor_cites_resolve_to_the_code_they_name():
+    """The numbers `_IDLE_CITES` PRINTS are the TREE's, not a remembered head.
+
+    `main` moved `tortoise/extractor_v2.py` twice under #10199 — `#10243` by +88
+    and the `#10072` merge by a further +4 inside `extract_session_v2`'s body —
+    and both times the numbers a reader was handed landed on a docstring, a
+    comment or a blank line. Nothing caught it, because every leg that reads
+    these cites reads BOTH sides out of the same source: `_IDLE_CITES` prints a
+    number and the pin below it asserts that number's own string, so the pair
+    move together and neither ever consults the tree (the false-PASS shape of the
+    D3 cite).
+
+    This leg consults the tree: each cited number must carry the code the
+    sentence names, AND the cause must print that cite. So an insert above any of
+    these symbols reds HERE, at the moment it lands, instead of shipping a reader
+    to unrelated code — and the second half stops the pin being satisfied by a
+    cause that prints nothing.
+
+    Non-vacuity (measured pre-fix): at `ed8269786` every one of these cites was
+    stale by the `#10243` shift, e.g. `:8600` read
+    `"" \u2192 date-blind: undated S1 prompts \u2026` and `:8616` read `""`, so each
+    anchor below would have missed its line.
+    """
+    src = (_REPO / "tortoise/extractor_v2.py").read_text(
+        encoding="utf-8").splitlines()
+    for key, anchors in _IDLE_CITE_ANCHORS.items():
+        cause = measure._IDLE_CITES[key]
+        for cite, line_no, code in anchors:
+            assert code in src[line_no - 1], (
+                f"extractor_v2.py:{line_no} does not carry {code!r} — it reads "
+                f"{src[line_no - 1].strip()!r}; re-derive the cite and this pin")
+            assert cite in cause, (
+                f"the {key!r} cause no longer prints {cite}, so a reader is sent "
+                f"to a line this pin does not check: {cause[:160]}")
+    # The two `if items:` cites are the pair a shift slips past most easily: the
+    # anchors above only say "some `if items:` is there", so pin them EXACTLY.
+    assert src[8699 - 1].strip() == "if items:", src[8699 - 1]
+    assert src[8831 - 1].strip() == "if items:", src[8831 - 1]
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
