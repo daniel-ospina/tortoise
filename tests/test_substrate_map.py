@@ -120,7 +120,6 @@ def test_the_shipped_map_is_clean() -> None:
     assert result["verdict"] == "CLEAN", result["problems"]
 
 
-
 def test_a_lane_family_that_does_not_resolve_is_drift() -> None:
     """Fails if a §3/§4 path is not checked for existence.
 
