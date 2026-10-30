@@ -248,11 +248,18 @@ class TestGuardAcceptsCleanLog:
             # invocations and the pin compared the SLOW leg's command line —
             # exactly the same wrong-job shape it was written to catch (measured
             # on the required `test-slow (d)` check: `assert 2 == 1` over the
-            # fast run at :1358 and the slow run at :2177). The fast gating run's
+            # sharded fast gating run and the slow leg). The fast gating run's
             # own discriminator is the xdist expansion
             # (`-n "$XDIST_WORKERS" --dist loadscope`); the slow leg runs
             # single-process (`-p no:cacheprovider`, no `-n`), so this keeps the
             # selection at exactly one.
+            #
+            # ⛔ Both legs are named by their DISCRIMINATORS, never by a line
+            # number: this note used to cite the slow run's offset, the workflow
+            # grew, and the cite silently sent a reader to a comment line about a
+            # committed weight (#10244 review note). The two predicates below are
+            # what locate each leg, so a reader re-locates it the same way this
+            # test does — with nothing re-typed to drift.
             and '-n "$XDIST_WORKERS"' in l
         ]
         # A retarget here is INVISIBLE without these floors: every pytest
