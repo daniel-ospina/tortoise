@@ -6763,11 +6763,15 @@ _HOST_GLOBAL_PYTEST_ARTIFACTS = (
 def test_every_pytest_capture_leg_resolves_its_artifacts_per_job():
     """#10280: every migrated leg resolves its artifacts under `$RUNNER_TEMP`.
 
-    Non-vacuous on the pre-fix workflow: `test-track-b`, `test-carve-out` and
-    `test-concurrency-falkor` each wrote at least three of the literals above
-    from an executable `run:` line, and none of the three had a resolver step,
-    so this test fails on the pre-fix tree three times over. Restoring any one
-    literal (or the `/tmp` upload `path:`) reds it again.
+    Non-vacuous on the pre-fix workflow, by the reason that actually holds per leg:
+    NONE of the three newly-migrated legs (`test-track-b`, `test-carve-out`,
+    `test-concurrency-falkor`) had a resolver step — so assertion (1) fails on all
+    three — and EACH named at least one of the literals above from an executable
+    `run:` line — so assertion (2) fails on all three too. Both halves are what this
+    test rests on; how MANY distinct literals a leg had is not (the pre-fix counts
+    were 3, 3 and 1 respectively, and a count is the kind of restated measurement
+    that goes stale in the commit which changes the code). Restoring any one literal
+    (or the `/tmp` upload `path:`) reds it again.
     """
     wf = _load_python_ci()
     for job_id in _PER_JOB_ARTIFACT_JOBS:
