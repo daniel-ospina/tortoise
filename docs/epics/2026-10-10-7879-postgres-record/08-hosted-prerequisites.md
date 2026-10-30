@@ -499,15 +499,19 @@ shape: everything agrees live↔rebuild except the residuals below.
 
 - **journal route, `wasDerivedFrom`/`aboutAction`** — MOVED live by 2b but not derivable, so 2b journals no
   repoint: live has the edge at the successor, the journal rebuild has it nowhere.
-- **record route, EVERY moved structural rel** — a 2b repoint descriptor carries `src=old_id` and the record's
-  `DirectEdgeRepoint` is a plain upsert (`record_projection.py`), so `relation` keeps the row at the PRE-supersede
-  point and never writes the successor: a record-sourced rebuild attaches those edges to the terminal point. ⚠️
-  This pre-dates #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried — for those
-  the row was already at the old point; what this producer changed is that the remaining structural rels now have
-  a row there too (previously they had none).
+- **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191**:
+  the record applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the terminal of the
+  `superseded_by` chain, `ON CONFLICT … DO NOTHING`), so `relation` follows the edge to the successor too. What
+  remains open in **#9836** is the *non-derivable* family (`wasDerivedFrom`/`aboutAction`): 2b journals no
+  descriptor for them at all, so nothing moves the row and the record keeps the row at the pre-supersede point
+  (live moved it to the successor). A shape the producer DECLINES at the mint (`_record_addressable`) holds
+  nothing at all, and the `:Source`-targeted shape is one of those rather than the only one: the same gate also
+  declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`).
+  ⚠️ The retired claim here read *the record's `DirectEdgeRepoint` is a plain upsert* — true before #10191, and
+  it pre-dated #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried.
 
-Closing both needs the supersede move journaled for non-derivable rels AND the record taught to model a move
-(delete-old + write-successor): **#9836**, whose scope covers all eight moved rels.
+Closing what remains needs the supersede move journaled for non-derivable rels AND the record taught to model a
+move for them too (delete-old + write-successor): **#9836**, whose scope covers all eight moved rels.
 
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item

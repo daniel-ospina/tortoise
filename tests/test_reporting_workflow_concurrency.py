@@ -4241,7 +4241,7 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 # itself out of the pin. As measured 2026-10-27 with the fallback engaged, all
 # nine runners advertised `ubuntu-latest` and none advertised `ubuntu-24.04`
 # (with the fallback disengaged, none carries either). The installer cannot emit
-# it (`tests/test_ci_runner_x64_install.py:127`) and the re-registration path
+# it (`tests/test_ci_runner_x64_install.py:181`) and the re-registration path
 # strips it (`tools/runner_autoscale.py::_preserve_labels`, pinned by
 # `tests/test_runner_autoscale.py`), but NO test here reads the LIVE label set,
 # and the pool HAS served this very label: 2026-10-24's `finding-provenance`

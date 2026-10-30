@@ -62,10 +62,12 @@ The arbiter seam is the point (§4.2)
 A **decision-only** model structurally enforces the vocabulary: a ``Choice``
 over supplied options cannot return an out-of-vocabulary answer, whereas an
 extraction LLM emitting kinds/verdicts inline can only be *hoped* to comply.
-``arbiter=None`` ⇒ the step performs only its mechanical Level-2 checks and
-returns all-``KEEP``. **No production caller injects an arbiter yet** (it is an
-injected seam), so with the flag on and no arbiter the step decides nothing —
-that is the current, honest state.
+``arbiter=None`` ⇒ no model decides; the mechanical Level-2 checks still run,
+including the flag-gated ``#4899`` identifier-only ``DISCARD`` — not all-KEEP. No caller injects an arbiter *directly* — the seam is
+injected — but ``extractor_v2._s2_seam_arbiter`` now supplies
+``s2_decision_seam.vet_arbiter()`` whenever ``TORTOISE_S2_DECISION_SEAM`` is
+armed (`#5087`), so an arbiter-only gate DOES decide then. ``TORTOISE_VET``
+alone supplies no arbiter and still decides nothing.
 
 Vocabulary (owner ruling **O4**, `EXTRACTOR-V4-ARCHITECTURE.md` §16.3 / §16.4)
 -----------------------------------------------------------------------------
@@ -73,7 +75,12 @@ Vocabulary (owner ruling **O4**, `EXTRACTOR-V4-ARCHITECTURE.md` §16.3 / §16.4)
 - ``NOOP`` — a decision was made and it changes nothing (distinct from ``KEEP``
   only in *who* decided; both leave the item in place, so ``apply_vet`` treats
   them identically — a consumer that needs to tell them apart must read the
-  recorded outcome, not the list).
+  recorded outcome, not the list). **Precedence, because "changes nothing" is
+  load-bearing rather than decorative:** a ``NOOP`` never overrides a standing
+  ``DISCARD``, while ``KEEP``/``DISCARD``/``MERGE`` do. The seam emits ``NOOP``
+  for its uncertain and fused bands, so without that rule an armed seam would
+  silently keep what a mechanical ``#4899`` predicate dropped and erase the rule
+  id that explains it (:func:`vet_candidates` enforces it).
 - ``DISCARD`` — do not ship; the candidate is removed and its counterfactual
   recorded.
 - ``MERGE`` — fold into another candidate.
@@ -106,7 +113,11 @@ is inert on every arbiter-less run.
 Failure policy (§4.2): FAIL-OPEN
 --------------------------------
 A wrong keep is noise; a wrong drop is memory loss. Unknown ⇒ ``KEEP``. An
-arbiter that raises ⇒ all ``KEEP`` + a warning. ``DISCARD`` has exactly **two**
+arbiter that raises ⇒ **no verdict is applied** + a warning: every decision the
+gate had ALREADY taken stands, including the ``#4899`` mechanical ``DISCARD``
+(nothing here is an all-KEEP path — see the ``vet_candidates`` docstring, whose
+"every candidate KEEP" wording was false and is corrected there for the same
+reason it was corrected in the module prose). ``DISCARD`` has exactly **two**
 paths: an explicit arbiter verdict, or the ``#4899`` mechanical predicate when
 its flag is on — and every one records its ``rule_id`` and its counterfactual.
 The public functions are **total** on a malformed
@@ -431,14 +442,31 @@ def vet_candidates(embed_list: object, *,
     Returns::
 
         {"decisions": {item_id: {"section", "index", "text", "outcome",
-                                 "rule_id", "reason", "counterfactual"}},
+                                 "rule_id", "reason", "counterfactual",
+                                 "agreed_by"}},
          "batch": {...},            # check_batch() + any arbiter batch verdict
          "stats": {...},            # counts, for the session roll-up
          "warnings": [...]}
 
-    **Fail-open everywhere.** ``arbiter=None`` ⇒ every candidate ``KEEP``.
-    An arbiter that raises ⇒ every candidate ``KEEP`` + a warning. A candidate
-    the arbiter did not mention ⇒ ``KEEP``.
+    ``stats`` may carry a ``seam`` key: an arbiter that reports its own record
+    (spend, model, prompt version, bands — #5087's typed-decision seam) has it
+    folded in here, additively and under that one key, so the counters above stay
+    this gate's own. An arbiter that reports nothing simply has no such key — the
+    gate's FAIL-OPEN path must not require one.
+
+    **Fail-open everywhere.** ``arbiter=None`` ⇒ no model decides: every
+    candidate the mechanical pass did not discard is ``KEEP``, and with
+    ``TORTOISE_VALUE_GATE`` on that pass can still ``DISCARD`` an identifier-only
+    candidate (the Level-2 predicate runs BEFORE the arbiter and does not require
+    one) — so "no arbiter" is not "all candidates kept".
+    An arbiter that raises ⇒ **no verdict is applied** + a warning: everything
+    the gate had ALREADY decided stands, so the mechanical ``#4899`` ``DISCARD``
+    is not reverted, and the warning says so rather than claiming "all kept"
+    (this docstring and that warning both said "every candidate KEEP" until
+    #10072's review measured the composition: the surviving DISCARD is the
+    fail-closed direction this gate exists for, and a record that said otherwise
+    was a false claim about it). A candidate the arbiter did not mention ⇒
+    ``KEEP``.
     """
     warnings: list[str] = []
     candidates: list[dict] = []
@@ -457,12 +485,14 @@ def vet_candidates(embed_list: object, *,
 
     batch = check_batch(embed_list, narrative)
     arbiter_batch: dict = {}
+    seam_stats: dict = {}
 
     # #4899 — the mechanical Level-2 predicate: identifier-only DISCARD.
     #
-    # It runs BEFORE the arbiter, deliberately: the arbiter is an *injected*
-    # seam no production caller supplies yet, so an arbiter-only gate decides
-    # nothing today. Mechanical-first also makes the composition honest — the
+    # It runs BEFORE the arbiter, deliberately: with ``TORTOISE_VET`` alone no
+    # arbiter is supplied (``extractor_v2._s2_seam_arbiter`` supplies one only
+    # when ``TORTOISE_S2_DECISION_SEAM`` is armed, #5087), so an arbiter-only
+    # gate decides nothing. Mechanical-first also makes the composition honest — the
     # predicate is *necessary, not sufficient*, and an explicit arbiter verdict
     # still overrides it below (``decisions[iid].update(...)``).
     #
@@ -489,18 +519,67 @@ def vet_candidates(embed_list: object, *,
 
     if arbiter is not None and candidates:
         try:
-            verdicts, arbiter_batch = _parse_verdicts(
-                arbiter(candidates, str(narrative or "")))
+            payload = arbiter(candidates, str(narrative or ""))
+            verdicts, arbiter_batch = _parse_verdicts(payload)
+            if isinstance(payload, Mapping):
+                seam_record = payload.get("seam")
+                if isinstance(seam_record, Mapping) and seam_record:
+                    seam_stats = dict(seam_record)
         except Exception as e:
-            # capture. Fail-open: every candidate keeps, and the failure is
-            # recorded rather than swallowed.
+            # capture. Fail-open: NO verdict is applied, and the failure is
+            # recorded rather than swallowed. `verdicts = {}` leaves every
+            # decision the gate already took in place — including a mechanical
+            # `#4899` DISCARD — so the warning must name what SURVIVED, not
+            # claim a keep that did not happen (#10072 review).
             verdicts, arbiter_batch = {}, {}
+            survived = sum(
+                1 for d in decisions.values() if d["outcome"] == DISCARD)
             warnings.append(
-                f"vet arbiter failed ({type(e).__name__}: {e}) — all "
-                f"{len(candidates)} candidate(s) kept (fail-open)")
+                f"vet arbiter failed ({type(e).__name__}: {e}) — no verdict "
+                f"applied (fail-open); the gate's own decisions stand "
+                f"({survived} DISCARD of {len(candidates)} candidate(s))")
         for iid, verdict in verdicts.items():
-            if iid in decisions:
-                decisions[iid].update(verdict)
+            if iid not in decisions:
+                continue
+            # ⛔ ``NOOP`` IS DEFINED AS "IT CHANGES NOTHING" — see the module
+            # vocabulary above — so it must never FLIP an outcome, and in
+            # particular must never rescind a mechanical ``#4899`` DISCARD.
+            # Applying it unconditionally did exactly that: an armed seam's
+            # uncertain/fused band emits ``NOOP``, which turned
+            # ``DISCARD/value.identifier_only.hash`` into ``NOOP/seam.arbiter``
+            # — the item surviving and the predicate's rule id erased. That is
+            # the SAME harm the degraded path is guarded against (no usable
+            # answer must not protect what a working predicate dropped); an
+            # "outage" is not the only way to emit no opinion (#10072 review).
+            # ``KEEP``/``DISCARD``/``MERGE`` still override — those are
+            # decisions, and overriding the heuristic is the seam's job.
+            incoming = str(verdict.get("outcome") or "").upper()
+            standing = str(decisions[iid].get("outcome") or "").upper()
+            if incoming == NOOP and standing == DISCARD:
+                continue
+            # ``RULE_FAIL_OPEN`` is the ABSENCE of a decision (the gate's default
+            # row), not a standing one — so agreement applies only against a
+            # decision some rule actually made. Scoping this to ``incoming ==
+            # standing`` alone recorded a REAL ``KEEP`` verdict as
+            # ``rule_id: vet.fail_open / reason: "no verdict"`` (the default row
+            # it happened to match), so the artifact claimed no verdict was given
+            # when one was and "why was this kept?" became unanswerable per item.
+            # Verified: KEEP at noul 0.93 must keep ``seam.arbiter`` and its band
+            # reason, and only a genuine AGREEMENT over a real decision takes the
+            # branch below (#10072 review).
+            standing_rule = str(decisions[iid].get("rule_id") or "")
+            if incoming == standing and standing_rule != RULE_FAIL_OPEN:
+                # AGREEMENT, not a new decision. Replacing ``rule_id`` here made
+                # the decision record contradict the mechanical census on the
+                # SAME drop (record: ``DISCARD/seam.arbiter``; census:
+                # ``by_rule {value.identifier_only.hash: 1}, overridden: 0``) —
+                # so "which rule dropped this?" got two answers. The predicate's
+                # rule id is the evidence for why it went; the seam's agreement
+                # is recorded beside it, additively.
+                decisions[iid]["agreed_by"] = str(
+                    verdict.get("rule_id") or RULE_ARBITER)
+                continue
+            decisions[iid].update(verdict)
 
     if arbiter_batch:
         outcome = str(arbiter_batch.get("outcome") or "").strip().upper()
@@ -547,6 +626,11 @@ def vet_candidates(embed_list: object, *,
             },
         },
     }
+    if seam_stats:
+        # #5087: the arbiter's own record (spend, model, prompt version, bands,
+        # per-question refusals) — present only when the arbiter reports one, so
+        # an arbiter-less run is byte-identical to before.
+        stats["seam"] = seam_stats
     return {"decisions": decisions, "batch": batch, "stats": stats,
             "warnings": warnings}
 
