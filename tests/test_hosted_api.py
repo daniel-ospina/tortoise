@@ -4401,8 +4401,9 @@ class TestSessionDetail:
         EMPTY (refuse) and the graph copy is COMPLETE (serve). This one is the
         third, and its shape is still reachable at this head by a route that is
         NOT the sweep's gate (that gate is gone: `_write_capture_turns` now
-        bounds the sweep by the MAX of both stores — `_record_turn_high_water`
-        beside the graph's `turn_max_index` — and issues the graph
+        takes the sweep's ids from BOTH stores — `_record_turn_residue`
+        (the record's own rows) beside `prior_graph_turns` (the graph's own
+        `CONTAINS`-wired turn ids) — and issues the graph
         `DETACH DELETE` under a bare `if stale:`). The route is the WRITE ORDER:
         `_write_session_and_turns` MERGEs the `:Session` (its `turn_count`
         included) BEFORE it calls `_write_capture_turns`, so any failure in the

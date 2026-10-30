@@ -2540,8 +2540,9 @@ def _record_prior_vectors(sdk, session_id: str,
                 conn.close()
 
 
-def _record_turn_high_water(sdk, session_id: str) -> int | None:
-    """The highest turn index the RECORD holds — the #1920 sweep's OTHER bound.
+def _record_turn_residue(sdk, session_id: str,
+                         first_live: int) -> list[str] | None:
+    """The RECORD's turn ids at or above ``first_live`` — the #1920 sweep's ids.
 
     ⛔ A FACT ABOUT THE GRAPH IS NOT A LICENCE ABOUT THE RECORD (#10021 review
     P2), and the sweep was the second place that rule was not yet applied. Its
@@ -2559,13 +2560,25 @@ def _record_turn_high_water(sdk, session_id: str) -> int | None:
     turn count in the way #3086 measures (that pin is about per-turn work and
     on-loop GRAPH work; this is one fixed record read).
 
-    ``None`` — not ``-1`` — when the record cannot be asked: the caller folds it
-    to the graph's bound, and a failed read must never be read as "the record
-    holds nothing", which would sweep nothing at all. Same tenant resolution and
-    same failure posture as ``_record_prior_vectors``: a tenant this capture
-    cannot resolve is a tenant this may not read from.
+    ⛔ IT NAMES THE ROWS, IT DOES NOT RETURN THE HIGHEST NUMBER (#10021 review
+    P2, CWE-407 / CWE-770). This returned ``turn_high_water``'s single integer,
+    and the caller built the sweep's id list from it with a ``range()`` — an
+    allocation whose size is a STORED integer nothing validates (a legacy or
+    copied row at index ``10**9`` meant ~10⁹ id strings, ~2 × 10⁹ journal
+    appends and a 10⁹-element ``IN $ids``). :func:`record_read.turn_keys_at_or_above`
+    visits the same rows and hands back the ones that exist, so the sweep's cost
+    is O(rows held) whatever the stored index says — enumeration, never a cap
+    (the ruling ``record_read._shortfall`` records for the READ side, applied to
+    the second consumer of the same datum).
+
+    ``None`` — not ``[]`` — when the record cannot be asked: ``[]`` is the clean
+    answer "the record holds no turn at or above this floor", while ``None``
+    means this capture could not look, and the caller reports the un-nameable id
+    space instead of inventing one. Same tenant resolution and same failure
+    posture as ``_record_prior_vectors``: a tenant this capture cannot resolve is
+    a tenant this may not read from.
     """
-    from tortoise.record_read import turn_high_water
+    from tortoise.record_read import turn_keys_at_or_above
     from tortoise.record_serve import open_record
     from tortoise.record_writer import record_tenant
 
@@ -2576,14 +2589,18 @@ def _record_turn_high_water(sdk, session_id: str) -> int | None:
     conn = None
     try:
         conn = open_record()
-        return turn_high_water(conn, org_id=org_id, graph_id=graph_id,
-                               session_id=session_id)
+        keys = turn_keys_at_or_above(
+            conn, org_id=org_id, graph_id=graph_id, session_id=session_id,
+            first_index=first_live)
+        return list(keys)
     except Exception:  # noqa: BLE001, RUF100
         _logger.warning(
-            "could not read the record's turn high-water mark for session %s — "
-            "a shorter re-capture sweeps only the graph's range, so record "
-            "turn rows above the session's live id space may survive as "
-            "residue (#1920/#10021)", session_id, exc_info=True)
+            "could not read the record's turn rows at or above index %d for "
+            "session %s — a shorter re-capture sweeps only the ids the graph "
+            "can name, so record turn rows above the session's live id space "
+            "may survive as residue (#1920/#10021); the next capture asks the "
+            "record again, and that read does not inherit this one's failure",
+            first_live, session_id, exc_info=True)
         return None
     finally:
         if conn is not None:
@@ -2771,14 +2788,17 @@ def _write_capture_turns(
     a hard ``DETACH DELETE``, journaled as an ``EntityMutated`` op=delete
     (the ``delete_point`` record) so a rebuild cannot resurrect the orphan.
 
-    The sweep's BOUND is the union of every place residue can be named:
-    ``prior_turn_max_index`` (the graph mark, read before the MERGE lowers it),
-    ``_record_turn_high_water`` whenever a tenant resolves and the record can
-    carry the delete records — INDEPENDENT of whether this capture can WRITE
-    the record, because a reader must not inherit the write breaker (#10021
-    review P1) — and ``prior_graph_turns``
-    — the graph's own ``CONTAINS``-wired turn ids, which is the only one of the
-    three a ``SET`` cannot destroy (#10021 review P2).
+    The sweep's CANDIDATES are the ids the two stores can NAME, never a range
+    built from a stored index (#10021 review P2):
+    ``_record_turn_residue`` (the record's own rows at or above this window's end
+    — read whenever a tenant resolves and the record can carry the delete
+    records, INDEPENDENT of whether this capture can WRITE the record, because a
+    reader must not inherit the write breaker — #10021 review P1) and
+    ``prior_graph_turns`` (the graph's ``CONTAINS``-wired turn ids, the one
+    witness a ``SET`` cannot destroy — #10021 review P2). ``prior_turn_max_index``
+    is still read by the caller and still arrives; it is a COMPARISON here (does
+    the stored id space reach past this window at all), never the size of an
+    allocation.
 
     ``session_existed`` is the caller's own pre-MERGE probe of the graph
     ``:Session``. ⛔ IT NO LONGER GATES THE SWEEP OR THE PRIOR-ROW READ (#10021
@@ -2786,8 +2806,8 @@ def _write_capture_turns(
     is not evidence about the record (§2.0 — the graph is the cache, and §9.1's
     D7 is measured with it destroyed). It is still forwarded by
     ``_write_session_and_turns``, which uses it for the graph mark read and for
-    its own replay/retry gate; the record half now takes its own bound from the
-    record (`_record_turn_high_water`). It DEFAULTS TO TRUE — the conservative
+    its own replay/retry gate; the record half now takes its own candidates from
+    the record (`_record_turn_residue`). It DEFAULTS TO TRUE — the conservative
     direction: a caller that omits it prunes, so forgetting the parameter cannot
     silently reinstate #1920.
 
@@ -3016,24 +3036,23 @@ def _write_capture_turns(
     # the node gone the record kept `_t0.._t3` while `turn_count` became 1, and
     # the read side served four turns as COMPLETE.
     _first_live = turn_offset + len(turn_rows)
-    _stale_bound = prior_turn_max_index
-    # ⛔ THE RECORD'S BOUND IS A READ, AND A READER MUST NOT INHERIT THE WRITE
+    # ⛔ THE RECORD'S RESIDUE IS A READ, AND A READER MUST NOT INHERIT THE WRITE
     # BREAKER (#10021 review P1). This asked `_record_first` — the WRITE door's
-    # predicate, breaker included — so the one datum that names the RECORD's
-    # residue (`_record_turn_high_water`) was read only when THIS capture could
-    # WRITE to the record, which is the conflation the whole change exists to
-    # remove. The reachable failure: a record connect fails once, the breaker
-    # stays open for `LIVE_WRITE_BREAKER_SECONDS` (60 s, a fixed cooldown, not a
-    # probe) — so the record may be healthy again — and a SHORTER re-capture
-    # inside that window swept nothing, because neither store could name the
-    # surplus: the record was never asked, `prior_turn_max_index` was already
-    # lowered by this capture's own MERGE, and `prior_graph_turns` is empty by
-    # construction for a record-holding session (its turns are not graph nodes).
-    # The record then kept `_t0.._t3` while the session declared one turn, and
-    # from that moment BOTH serving doors refuse it (`record_read._shortfall`'s
-    # residue arm -> `served_turn_count` -> `RecordUnavailable` / HTTP 503) until
-    # a later record-first capture of that same session — which, for a session
-    # captured once, may never come. The write path reports success throughout.
+    # predicate, breaker included — so the one read that names the RECORD's
+    # residue (`_record_turn_residue`) ran only when THIS capture could WRITE to
+    # the record, which is the conflation the whole change exists to remove. The
+    # reachable failure: a record connect fails once, the breaker stays open for
+    # `LIVE_WRITE_BREAKER_SECONDS` (60 s, a fixed cooldown, not a probe) — so the
+    # record may be healthy again — and a SHORTER re-capture inside that window
+    # swept nothing, because neither store could name the surplus: the record was
+    # never asked, `prior_turn_max_index` was already lowered by this capture's
+    # own MERGE, and `prior_graph_turns` is empty by construction for a
+    # record-holding session (its turns are not graph nodes). The record then
+    # kept `_t0.._t3` while the session declared one turn, and from that moment
+    # BOTH serving doors refuse it (`record_read._shortfall`'s residue arm ->
+    # `served_turn_count` -> `RecordUnavailable` / HTTP 503) until a later
+    # record-first capture of that same session — which, for a session captured
+    # once, may never come. The write path reports success throughout.
     #
     # So the gate is the SAME one declaration asked the way the two READ doors
     # ask it (`sdk._record_turn_answer`, `hosted_api._record_tenant_for_read`):
@@ -3054,58 +3073,92 @@ def _write_capture_turns(
         durable=_journal_configured and getattr(_log, "durable", True),
         tenant=getattr(sdk, "_record_tenant", None),
         consult_breaker=False)
+    # ⛔ THE SWEEP NAMES THE IDS THE STORES HOLD; IT NEVER BUILDS THEM FROM A
+    # STORED BOUND (#10021 review P2 — CWE-407 Scope: Availability + CWE-770
+    # allocation without a limit). The candidates used to be
+    # `[_capture_turn_id(session, i) for i in range(_first_live, _stale_bound+1)]`,
+    # with `_stale_bound` the MAX of two stored integers — the graph mark
+    # (`s.turn_max_index`) and the record's highest index — neither validated at
+    # write time (`_turn_index` accepts any suffix `int()` can parse,
+    # `tools/backfill_graph_turns.py` copies ids in verbatim). One row at index
+    # 10**9 therefore made a CAPTURE allocate ~10⁹ id strings, journal ~2 × 10⁹
+    # records and issue a 10⁹-element `IN $ids` — while reporting success. Both
+    # stores can name their own rows, and the surplus is by definition the rows
+    # at/above `_first_live`, so the enumeration below is exact AND O(rows):
+    #   * the record half is `_record_turn_residue` (O(rows), see there);
+    #   * the graph half is `prior_graph_turns`, already collected in the same
+    #     statement as the mark.
+    # No threshold is introduced: a cap would swap one invented bound for another
+    # and misreport a legitimately long session — the ruling `record_read.
+    # _shortfall` records for the READ side, applied to this, the second consumer
+    # of the same datum. The MARK is still read by the caller and still arrives
+    # as `prior_turn_max_index`; it is a COMPARISON here (does the id space reach
+    # past this window at all), never an allocation.
+    _record_residue: list[str] | None = None
     if _record_readable:
-        _record_bound = _record_turn_high_water(sdk, session_id)
-        if _record_bound is not None and _record_bound > _stale_bound:
-            _stale_bound = _record_bound
-    stale: list[str] = []
-    if _stale_bound >= _first_live:
-        stale = [_capture_turn_id(session_id, _i)
-                 for _i in range(_first_live, _stale_bound + 1)]
-    # ⛔ THE STATEMENT-PROOF BOUND (#10021 review P2). The arithmetic above is
-    # bounded by `s.turn_max_index`, and the MERGE this capture already ran
-    # LOWERS that mark to its own window's end — so on the lanes where
-    # `_record_first` is False the mark is the sweep's ONLY witness, and one
-    # tolerated failure (a prior read that raised, or a sweep statement that
-    # failed after the MERGE had lowered the mark) left ids NOBODY would name
-    # again: every later capture read the lowered mark, the arithmetic found
-    # nothing, and the surplus turn nodes stayed `CONTAINS`-wired forever, with
-    # the read side then publishing a body that contradicts itself (#8447).
-    # Main's monotone-up mark bounded that exposure to one cycle; the live mark
-    # (decision (c), `sdk.py:3431`) is right and stays — so the bound has to
-    # come from something the statement cannot overwrite. `CONTAINS`-wired turn
-    # nodes ARE that thing (`_capture_turn_ids` is the same witness
-    # `record_read.turn_high_water` keeps for the record), read by the caller in
-    # the SAME statement that reads the mark, so the re-capture path pays no
-    # extra round-trip. Every id at or beyond this window's end is residue
-    # whatever the mark says, in both directions: a mark lowered by a previous
-    # shrink, a mark read that failed, and a mark that never existed. An id whose
-    # index cannot be PARSED is not swept — "never delete where we cannot place
-    # it", the direction `tests/test_write_session_and_turns_3551.py` pins.
+        _record_residue = _record_turn_residue(sdk, session_id, _first_live)
+    # ⛔ THE STATEMENT-PROOF WITNESS (#10021 review P2). The id space is bounded
+    # by `s.turn_max_index`, and the MERGE this capture already ran LOWERS that
+    # mark to its own window's end — so on the lanes where `_record_first` is
+    # False the mark WAS the sweep's only witness, and one tolerated failure (a
+    # prior read that raised, or a sweep statement that failed after the MERGE
+    # had lowered the mark) left ids NOBODY would name again: every later capture
+    # read the lowered mark, found nothing beyond the window, and the surplus
+    # turn nodes stayed `CONTAINS`-wired forever, with the read side then
+    # publishing a body that contradicts itself (#8447). Main's monotone-up mark
+    # bounded that exposure to one cycle; the live mark (decision (c),
+    # `sdk.py:3431`) is right and stays — so the ids have to come from something
+    # the statement cannot overwrite. `CONTAINS`-wired turn nodes ARE that thing
+    # (`_capture_turn_ids` is the same witness `record_read.turn_high_water`
+    # keeps for the record), read by the caller in the SAME statement that reads
+    # the mark, so the re-capture path pays no extra round-trip. Every id at or
+    # beyond this window's end is residue whatever the mark says, in both
+    # directions: a mark lowered by a previous shrink, a mark read that failed,
+    # and a mark that never existed. An id whose index cannot be PARSED is not
+    # swept — "never delete where we cannot place it", the direction
+    # `tests/test_write_session_and_turns_3551.py` pins.
     _graph_residue = [tid for (tid, _index) in (prior_graph_turns or [])
                       if _index is not None and _index >= _first_live]
-    if _graph_residue:
-        stale = sorted(set(stale) | set(_graph_residue))
-        # The RECORD half of the removal is the `PointRetracted` +
-        # `EntityMutated` pair emitted below (its fold is a hard delete), and it
-        # is emitted whatever store holds the turns. The GRAPH half runs when the
-        # graph holds the surplus — which is (a) whenever this capture wrote
-        # there, and (b) whenever a PREVIOUS capture did, i.e. any session
-        # captured before the record was armed. A no-op `DETACH DELETE` on ids
-        # the graph does not carry costs one statement; leaving residue instead
-        # is #1920 itself, and it is reachable from the armed path precisely
-        # because arming is new (the record-capability gate used to be asked
-        # with this process's journal, and that left every pre-arming surplus
-        # turn served forever).
-        if stale:
-            sdk._graph_write_with_retry(
-                lambda: proj.g.query(
-                    "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                    "WHERE t.id IN $ids DETACH DELETE t",
-                    params={"sid": session_id, "ids": stale},
-                ),
-                what="capture stale-turn sweep",
-            )
+    # ⛔ THE TWO HALVES ARE THE UNION OF NAMED ROWS, AND NEITHER IS DERIVED FROM
+    # AN INTEGER (#10021 review P2). The old `_stale_bound` was the MAX of the two
+    # stored indexes and the candidate list was built from it with a `range()`;
+    # both stores can name their own rows, so the list is their union and the
+    # sweep's size is the residue's size, whatever index a stored row carries.
+    stale: list[str] = sorted({*(_record_residue or ()), *_graph_residue})
+    if (_record_residue is None and _record_readable
+            and prior_turn_max_index >= _first_live):
+        # The id space reaches past this window and the record could not be asked
+        # which of its rows are up there. Sweeping the range the mark names is the
+        # allocation this fix removes, so the honest move is to say so: the
+        # graph's own ids are swept below, and the record's rows are named by the
+        # NEXT capture — its read is a reader-flavoured one, so it does not
+        # inherit this failure's breaker state, and its `_first_live` floor is
+        # the same or lower.
+        _logger.warning(
+            "the record could not be asked for session %s's turn rows at or "
+            "above index %d while the session's stored id space reaches %d — "
+            "sweeping only the ids the graph names; a later capture names the "
+            "rest (#1920/#10021 review P2)",
+            session_id, _first_live, prior_turn_max_index)
+    # The RECORD half of the removal is the `PointRetracted` +
+    # `EntityMutated` pair emitted below (its fold is a hard delete), and it is
+    # emitted whatever store holds the turns. The GRAPH half runs when the
+    # graph holds the surplus — which is (a) whenever this capture wrote there,
+    # and (b) whenever a PREVIOUS capture did, i.e. any session captured before
+    # the record was armed. A no-op `DETACH DELETE` on ids the graph does not
+    # carry costs one statement; leaving residue instead is #1920 itself, and it
+    # is reachable from the armed path precisely because arming is new (the
+    # record-capability gate used to be asked with this process's journal, and
+    # that left every pre-arming surplus turn served forever).
+    if stale:
+        sdk._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.id IN $ids DETACH DELETE t",
+                params={"sid": session_id, "ids": stale},
+            ),
+            what="capture stale-turn sweep",
+        )
 
     # #3947: journal the turn writes so a rebuild can recreate them.
     # `contains_session` rides the EVENT ENVELOPE, not the point payload —

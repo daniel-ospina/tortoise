@@ -89,6 +89,7 @@ __all__ = [
     "source_narrative",
     "source_session",
     "turn_high_water",
+    "turn_keys_at_or_above",
     "turn_payloads",
     "turn_prior_vectors",
 ]
@@ -779,6 +780,96 @@ def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
     return out
 
 
+def _session_turn_rows(conn: Any, *, org_id: str, graph_id: str,
+                       session_id: str) -> list[tuple[int, str]]:
+    """``[(index, node_key)]`` for every turn row the RECORD holds — O(rows).
+
+    THE ONE declaration of "which turn rows does this session have", shared by
+    its two consumers: :func:`turn_high_water` keeps the maximum index, and
+    :func:`turn_keys_at_or_above` keeps the KEYS from a floor up. Both used to be
+    derived from an id-space walk built out of a stored bound; see
+    :func:`turn_keys_at_or_above` for why the ROWS are the only thing either may
+    be built from (#10021 review P2, CWE-407 / CWE-770: an allocation sized by a
+    stored integer).
+
+    SCOPED: an unscoped read here sees NOTHING under the production role, so
+    install the tenant scope first — the same rule every other read in this
+    module states.
+
+    Ordered by the id's own index, in PYTHON: only a key-per-row scan can order
+    ``_t9`` before ``_t10`` (a lexical ``max(node_key)`` cannot). A key whose
+    suffix cannot be PARSED is skipped, not swept and not ordered — the regex
+    above already refuses every key without a digit run, and ``int()`` can still
+    refuse a run past CPython's conversion limit; ``_turn_index`` states that
+    trap.
+    """
+    from tortoise.record_projection import scope_connection
+
+    if not session_id:
+        raise RecordReadError("a record turn read needs a session id")
+    scope_connection(conn, org_id)
+    cursor = _cursor(conn)
+    # The same sargable range + anchored regex `_turns` uses, projected down to
+    # the KEY: the index lives in the id.
+    cursor.execute(
+        f"SELECT node_key FROM public.{POINT_TABLE} "
+        f"WHERE org_id = %s AND graph_id = %s AND is_episodic IS TRUE "
+        f"AND node_key >= %s AND node_key < %s AND node_key ~ %s",
+        (org_id, graph_id, session_id + "_t", session_id + "_u",
+         _turn_pattern(session_id)),
+    )
+    out: list[tuple[int, str]] = []
+    for row in _rows(cursor):
+        key = row[0] if row else None
+        if not isinstance(key, str):
+            continue
+        try:
+            index = _turn_index(key, session_id)
+        except RecordReadError:
+            # The regex above already refused every key without a parseable
+            # index, so this is unreachable from a real row set; skip rather
+            # than abort a read bound on one damaged key.
+            continue
+        out.append((index, key))
+    out.sort(key=lambda pair: pair[0])
+    return out
+
+
+def turn_keys_at_or_above(conn: Any, *, org_id: str, graph_id: str,
+                          session_id: str,
+                          first_index: int) -> tuple[str, ...]:
+    """The turn KEYS the RECORD holds at or above ``first_index`` — the residue.
+
+    The record's own answer to "which ids must the #1920 surplus sweep remove",
+    asked instead of the question it used to ask (#10021 review P2).
+    :func:`turn_high_water` answers the same fact as ONE NUMBER, and the sweep
+    turned that number into an id LIST —
+    ``[_capture_turn_id(session, i) for i in range(_first_live, bound + 1)]``.
+    The bound is a STORED integer the write end never validates
+    (``_turn_index`` accepts any suffix ``int()`` can parse, ``_turns`` selects
+    with no LIMIT, and ``tools/backfill_graph_turns.py`` copies turn ids in
+    verbatim), so one row at index ``10**9`` cost the capture a ~10⁹-element id
+    list, ~2 × 10⁹ journal appends and a 10⁹-element ``IN $ids`` parameter —
+    CWE-407 (Scope: Availability) plus CWE-770 (allocation without a limit),
+    inside a write the caller sees SUCCEED.
+
+    ⛔ ENUMERATION, NOT A CAP. The surplus is by definition the rows at/above the
+    floor, and this read already visits every one of them, so naming them costs
+    O(rows) and needs no threshold at all. A cap (``if span > 10**6: report``)
+    would swap one invented bound for another and misreport a legitimately long
+    session — the same ruling ``_shortfall``'s interior-gap arm records for the
+    READ side, applied to the second consumer of the same datum.
+
+    ``()`` means "the record holds no turn row at or above the floor" — a clean
+    answer. A FAILED read raises, so the caller can tell an empty answer from
+    one it never got: a read this process could not make must never be read as
+    "the record holds nothing", which would sweep nothing at all.
+    """
+    return tuple(key for (index, key) in _session_turn_rows(
+        conn, org_id=org_id, graph_id=graph_id, session_id=session_id)
+        if index >= first_index)
+
+
 def turn_high_water(conn: Any, *, org_id: str, graph_id: str,
                     session_id: str) -> int | None:
     """The HIGHEST turn index the RECORD holds for this session — or ``None``.
@@ -806,38 +897,18 @@ def turn_high_water(conn: Any, *, org_id: str, graph_id: str,
     caller's ``except`` can tell the two apart and decline to sweep rather than
     sweep an invented range. Scoped like :func:`_turns`: an unscoped read here
     would report "no rows" for every session under the production role.
-    """
-    from tortoise.record_projection import scope_connection
 
-    if not session_id:
-        raise RecordReadError("turn_high_water needs a session id")
-    scope_connection(conn, org_id)
-    cursor = _cursor(conn)
-    # The same sargable range + anchored regex `_turns` uses, projected down to
-    # the KEY: the index lives in the id, and only a key-per-row scan can order
-    # `_t9` before `_t10` (a lexical `max(node_key)` cannot).
-    cursor.execute(
-        f"SELECT node_key FROM public.{POINT_TABLE} "
-        f"WHERE org_id = %s AND graph_id = %s AND is_episodic IS TRUE "
-        f"AND node_key >= %s AND node_key < %s AND node_key ~ %s",
-        (org_id, graph_id, session_id + "_t", session_id + "_u",
-         _turn_pattern(session_id)),
-    )
-    highest: int | None = None
-    for row in _rows(cursor):
-        key = row[0] if row else None
-        if not isinstance(key, str):
-            continue
-        try:
-            index = _turn_index(key, session_id)
-        except RecordReadError:
-            # The regex above already refused every key without a parseable
-            # index, so this is unreachable from a real row set; skip rather
-            # than abort a sweep bound on one damaged key.
-            continue
-        if highest is None or index > highest:
-            highest = index
-    return highest
+    ⚠️ THE SWEEP NO LONGER ALLOCATES FROM THIS NUMBER (#10021 review P2). It is
+    still the honest answer to "how far does the record's id space reach", and
+    :func:`turn_keys_at_or_above` — which reads the SAME row set — is what the
+    sweep now names its ids from, because a number that sizes a list is a
+    stored-integer allocation (see that function). Both derive from
+    :func:`_session_turn_rows`, so the two cannot disagree about which rows
+    exist.
+    """
+    rows = _session_turn_rows(conn, org_id=org_id, graph_id=graph_id,
+                             session_id=session_id)
+    return rows[-1][0] if rows else None
 
 
 def _cursor(conn: Any):

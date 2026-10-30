@@ -280,8 +280,8 @@ def test_graph_residue_beyond_a_lowered_mark_is_still_swept(sdk, monkeypatch):
     side. The bound that survives the statement is the graph's own turn ids: no
     `SET` can un-`CONTAINS` them.
 
-    Mutation: drop `prior_graph_turns` from `_stale_bound` — nothing is swept and
-    all four ids remain.
+    Mutation: drop `prior_graph_turns` from the sweep's candidate union — nothing
+    is swept and all four ids remain.
     """
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
     proj = sdk._get_proj()
@@ -314,8 +314,8 @@ def test_a_failed_prior_read_costs_one_cycle_not_the_residue(
     halves: the fault cycle sweeps nothing (the conservative posture is intact)
     AND the next cycle cleans up.
 
-    Mutation: drop `prior_graph_turns` from the bound — the second capture sweeps
-    nothing and `_t1.._t3` stay attached to a one-turn session.
+    Mutation: drop `prior_graph_turns` from the candidate union — the second
+    capture sweeps nothing and `_t1.._t3` stay attached to a one-turn session.
     """
     from tortoise.projection import _GuardedGraph
 
@@ -385,9 +385,11 @@ def test_the_prior_mark_read_converts_the_index_and_the_count_separately(
 
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
     proj = sdk._get_proj()
-    # The pre-#10000 shape, ASSERTED: a Session with a COUNT and no id-space mark,
-    # whose turn nodes the graph no longer holds (so the sweep's only bound IS
-    # the count arm).
+    # (a) The pre-#10000 shape ASSERTED, with no rows behind it: a Session
+    # carrying a COUNT and no id-space mark. Nothing exists at `_t1`, so the
+    # honest surplus is EMPTY — and the count is not INFERRED into an id space:
+    # the old sweep read `turn_count=2` as a max index and journaled a delete for
+    # the id one past a two-turn session's end.
     proj.g.query(
         "MERGE (s:Session {id:'legacy-mark'}) "
         "SET s.created_at='2026-01-01T00:00:00+00:00', s.is_episodic=true, "
@@ -403,10 +405,28 @@ def test_the_prior_mark_read_converts_the_index_and_the_count_separately(
         str(ev.get("id")) for ev in sdk._get_event_log().read_all()
         if ev.get("type") == "EntityMutated" and ev.get("op") == "delete"
         and str(ev.get("id", "")).startswith("legacy-mark_t"))
-    assert deleted == ["legacy-mark_t1"], (
-        "the sweep named the wrong surplus for a legacy session "
-        f"(deleted={deleted!r}) — `_t2` does not exist, so the bound came from "
-        "a COUNT read as an INDEX")
+    assert deleted == [], (
+        "the sweep named a surplus for a legacy session that holds no turn row "
+        f"at all (deleted={deleted!r}) — an id space was DERIVED from a stored "
+        "count instead of named from the rows (#10021 review P2)")
+    assert sdk_mod._capture_turn_ids(proj, "legacy-mark") == [
+        "legacy-mark_t0"], "the legacy-mark capture did not run"
+
+    # (b) The SAME legacy shape with rows behind it, and the mark REMOVED: two
+    # turn nodes the session still CONTAINS. No count and no mark can name these
+    # — the ids come from the nodes, which is what the sweep reads now, so the
+    # surplus is still swept and the conversion above cannot name one past the
+    # end.
+    _capture(sdk, "legacy-rows", [{"role": "user", "content": "t0"},
+                                  {"role": "user", "content": "t1"}])
+    proj.g.query("MATCH (s:Session {id:'legacy-rows'}) REMOVE s.turn_max_index")
+    assert len(sdk_mod._capture_turn_ids(proj, "legacy-rows")) == 2
+    _capture(sdk, "legacy-rows", [{"role": "user", "content": "t0"}],
+             session_existed=True)
+    assert sorted(sdk_mod._capture_turn_ids(proj, "legacy-rows")) == [
+        "legacy-rows_t0"], (
+        "a session with NO id-space mark kept its surplus turn — the sweep must "
+        "name the residue from the rows the stores hold, not from the mark")
 
 
 def test_turn_max_index_survives_a_journal_only_rebuild(sdk, monkeypatch):
@@ -1682,9 +1702,13 @@ def test_the_record_high_water_is_the_sweep_bound_when_the_graph_is_gone(
     # the shape a re-capture after a shrink has (`_t0` already existed; the
     # pinned datum here is the session's HIGH-WATER mark, not the prior row).
     monkeypatch.setattr(sdk_mod, "_record_prior_vectors", lambda *a, **k: {})
-    # The record's own highest index. `_RlsConn` below pins the read that
-    # produces it; here it is the value such a read returns for `_t0.._t3`.
-    monkeypatch.setattr(sdk_mod, "_record_turn_high_water", lambda *a, **k: 3)
+    # The record's own residue — the ROWS at/above the new window's end, as
+    # `_record_turn_residue` names them (`_RlsConn` below pins the read that
+    # produces them; here it is what such a read returns for `_t0.._t3`).
+    # ⛔ NOT an integer: the sweep must be handed the ids (#10021 review P2).
+    monkeypatch.setattr(
+        sdk_mod, "_record_turn_residue",
+        lambda _sdk, _sid, _first: [f"{_sid}_t{i}" for i in range(_first, 4)])
     _bind_tenant(sdk)
     turns = [{"role": "user", "content": f"t{i}"} for i in range(4)]
     _capture(sdk, "lost-session", turns)
@@ -1708,9 +1732,9 @@ def test_a_write_breaker_does_not_hide_the_records_surplus_from_the_sweep(
         sdk, monkeypatch):
     """⛔ #10021 review P1: the sweep's RECORD read is not gated on the WRITE door.
 
-    `_record_turn_high_water` was consulted only under `_record_first` — the
+    `_record_turn_residue` was consulted only under `_record_first` — the
     write door's own predicate, `consult_breaker=True` included — so the one
-    datum that names the RECORD's surplus was read only when THIS capture could
+    read that names the RECORD's surplus ran only when THIS capture could
     write to the record. That is the conflation this change exists to remove:
     one failed connect opens the breaker for `LIVE_WRITE_BREAKER_SECONDS` (60 s,
     a fixed cooldown, so the record may already be healthy again), and a SHORTER
@@ -1724,7 +1748,7 @@ def test_a_write_breaker_does_not_hide_the_records_surplus_from_the_sweep(
     same session, which for a once-captured session may never come. The write
     path reports success throughout.
 
-    Mutation: restore `if _record_first:` around the `_record_turn_high_water`
+    Mutation: restore `if _record_first:` around the `_record_turn_residue`
     call — the seam receives no delete record and the surplus survives both
     stores. This leg is the sibling above with the WRITE breaker open, so the
     two differ in exactly the one input the fix is about.
@@ -1735,8 +1759,11 @@ def test_a_write_breaker_does_not_hide_the_records_surplus_from_the_sweep(
     seam = _RecordSeam(_APPLIED)
     monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
     monkeypatch.setattr(sdk_mod, "_record_prior_vectors", lambda *a, **k: {})
-    # The record's own highest index, as the read below returns it for `_t0.._t3`.
-    monkeypatch.setattr(sdk_mod, "_record_turn_high_water", lambda *a, **k: 3)
+    # The record's own residue, as `_record_turn_residue` names it for `_t0.._t3`
+    # (#10021 review P2: ids, never a single stored index).
+    monkeypatch.setattr(
+        sdk_mod, "_record_turn_residue",
+        lambda _sdk, _sid, _first: [f"{_sid}_t{i}" for i in range(_first, 4)])
     # The breaker is a MODULE GLOBAL: pin it so this leg neither inherits a
     # sibling's trip nor leaks its own (monkeypatch restores the original value
     # even though `_trip_live_breaker` mutates the global afterwards).
@@ -1797,6 +1824,151 @@ def test_the_record_high_water_read_orders_by_index():
         empty, org_id="org-1", graph_id="g-1", session_id="sess") is None, (
         "a record holding no turn row must answer None (a fresh capture), not "
         "an index")
+
+
+def test_the_record_residue_read_names_rows_and_never_the_id_space(monkeypatch):
+    """⛔ #10021 review P2 (availability): the sweep's candidates are ROWS.
+
+    `turn_high_water` answers the residue question as ONE NUMBER, and
+    `sdk._write_capture_turns` turned that number into an id LIST —
+    `[_capture_turn_id(session, i) for i in range(_first_live, bound + 1)]`. The
+    bound is a STORED integer nothing validates at write time (`_turn_index`
+    accepts any suffix `int()` can parse, `_turns` selects with no LIMIT, and
+    `tools/backfill_graph_turns.py` copies ids in verbatim), so ONE legacy or
+    copied row at index 10**9 made a capture allocate ~10⁹ id strings, journal
+    ~2 × 10⁹ records and issue a 10⁹-element `IN $ids` — CWE-407 (Scope:
+    Availability) plus CWE-770 (allocation without a limit), inside a write the
+    caller sees SUCCEED.
+
+    This leg is the READ half: the replacement read NAMES THE ROWS at/above the
+    floor, costs O(rows), and honours the same tenant scope and the same
+    "empty ≠ failure" contract as `turn_high_water`. The write half (that the
+    sweep actually consumes these ids and asks for no range) is
+    `test_a_stale_sweep_names_rows_not_the_turn_id_space`.
+
+    Mutation: restore the `range(...)` candidate list in `_write_capture_turns`
+    and the sibling leg REDs on the guarded `range` (`RangeWalked`); swapping
+    this read for a CAP (`if span > 10**6: report a gap`) reds assertion (1)
+    here, because the row at 10**9 must still be NAMED, not summarised.
+    """
+    import builtins
+
+    real_range = builtins.range
+    walked: list[int] = []
+
+    class RangeWalked(AssertionError):
+        pass
+
+    def guarded_range(*args):
+        span = real_range(*args)
+        if len(span) > 10 ** 6:
+            walked.append(len(span))
+            raise RangeWalked(
+                f"the capture asked for a {len(span)}-entry range — the sweep "
+                "is building the id space instead of naming the rows")
+        return span
+
+    monkeypatch.setattr(builtins, "range", guarded_range)
+
+    rows = [_turn_row(i, f"[user] t{i}") for i in (0, 1, 999_999_999)]
+    conn = _RlsConn(org_id="org-1", turn_rows=rows)
+    keys = record_read.turn_keys_at_or_above(
+        conn, org_id="org-1", graph_id="g-1", session_id="sess",
+        first_index=1)
+    assert not walked, (
+        f"the residue read materialised `range` objects of length(s) {walked} — "
+        "a stored turn index sizes the read")
+    assert keys == ("sess_t1", "sess_t999999999"), (
+        "the residue read must name every row at or above the floor, in index "
+        f"order (a lexical order puts `_t999999999` first): {keys!r}")
+    assert any("set_config" in sql for sql in conn.statements), (
+        "the residue read did not install the tenant scope, so RLS would answer "
+        "'no turn rows' and the sweep would delete nothing")
+
+    # The floor is inclusive of the rows AT it and excludes the ones below it —
+    # the same `>= _first_live` rule the sweep states.
+    assert record_read.turn_keys_at_or_above(
+        conn, org_id="org-1", graph_id="g-1", session_id="sess",
+        first_index=2) == ("sess_t999999999",), (
+        "the floor must exclude the rows below it (an APPEND's own prefix)")
+    assert record_read.turn_keys_at_or_above(
+        conn, org_id="org-1", graph_id="g-1", session_id="sess",
+        first_index=1_000_000_000) == (), (
+        "a floor above every stored row must answer EMPTY — the clean 'no "
+        "residue' answer, not a failure")
+
+    assert record_read.turn_keys_at_or_above(
+        _RlsConn(org_id="org-1"), org_id="org-1", graph_id="g-1",
+        session_id="sess", first_index=0) == (), (
+        "a record holding no turn row must answer () (a fresh capture), never "
+        "rows from another tenant")
+
+
+def test_a_stale_sweep_names_rows_not_the_turn_id_space(sdk, monkeypatch):
+    """⛔ #10021 review P2 (availability): a CAPTURE must not allocate the ids.
+
+    The sweep's candidates used to be
+    `[_capture_turn_id(session, i) for i in range(_first_live, _stale_bound + 1)]`
+    with `_stale_bound` the MAX of two stored, unvalidated integers — the graph
+    mark (`s.turn_max_index`) and the record's highest index. That is the exact
+    construct this PR's previous commit removed from the READ side
+    (`record_read._shortfall`), three functions away: a cost of O(max index)
+    whose bound is a STORED integer, not the request's own size. One row at index
+    10**9 made a capture allocate ~10⁹ id strings, journal ~2 × 10⁹ records
+    (`PointRetracted` + `EntityMutated` per id) and issue a 10⁹-element
+    `IN $ids` — while the write path reported SUCCESS. CWE-407 (Scope:
+    Availability) + CWE-770 (allocation without a limit).
+
+    Two assertions, because either alone is escapable: (1) MECHANISM — the sweep
+    may MINT only as many turn ids as the window it writes plus the rows the
+    stores name, so a fix that merely caps the span still fails here (a cap of
+    10**6 still mints 10**6 ids; the cap is the thing the review forbids anyway:
+    it misreports a legitimately long session); (2) BEHAVIOUR — the surplus the
+    two stores can actually NAME is still swept, so the fix cannot buy the bound
+    by sweeping less.
+
+    Mutation: restore the `range(...)` candidate list — the sweep mints an id per
+    index, so the counter below REDs within a few hundred calls (before any
+    allocation), where the pre-fix expression would have minted 10⁹.
+    Dropping `prior_graph_turns` from the union leaves `_t1.._t3` wired and the
+    behaviour assertion fails.
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    proj = sdk._get_proj()
+    turns = [{"role": "user", "content": f"t{i}"} for i in range(4)]
+    _capture(sdk, "huge-index", turns)
+    assert len(sdk_mod._capture_turn_ids(proj, "huge-index")) == 4
+    # The stored index a legacy/copied row leaves behind: nothing validates it
+    # at write time, and the old sweep turned it straight into a range.
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) SET s.turn_max_index=1000000000",
+        params={"sid": "huge-index"})
+
+    real_mint = sdk_mod._capture_turn_id
+    minted: list[int] = []
+
+    class IdSpaceMinted(AssertionError):
+        pass
+
+    def counting_mint(*args, **kwargs):
+        minted.append(1)
+        if len(minted) > 100:
+            raise IdSpaceMinted(
+                "the stale-turn sweep minted more than 100 turn ids for a "
+                "one-turn capture — it is walking a STORED index, not naming "
+                "the rows the stores hold")
+        return real_mint(*args, **kwargs)
+
+    monkeypatch.setattr(sdk_mod, "_capture_turn_id", counting_mint)
+    _capture(sdk, "huge-index", turns[0:1], session_existed=True)
+
+    assert len(minted) <= 100, (
+        f"the capture minted {len(minted)} turn ids for one written turn — a "
+        "single stored turn index sized the sweep's allocation")
+    assert sorted(sdk_mod._capture_turn_ids(proj, "huge-index")) == [
+        "huge-index_t0"], (
+        "the surplus turns the graph can NAME were not swept — buying the bound "
+        "by sweeping less is the other half of the defect")
 
 
 def test_a_record_row_above_the_live_id_space_is_not_a_complete_transcript():
