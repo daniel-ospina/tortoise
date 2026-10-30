@@ -296,18 +296,31 @@ def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
                   "first)")
 
 
-def _remove_if_ours(path: Path, mine: os.stat_result) -> None:
-    """Unlink ``path`` only if it is still the inode this run created.
+def _remove_if_same(path: Path, mine: os.stat_result) -> bool:
+    """Unlink ``path`` only if it is still the inode ``mine`` describes.
 
-    A create-then-cleanup is not atomic: a peer can replace the canonical path
-    between our ``O_EXCL`` open and our failure, and an unqualified unlink would
-    then delete the PEER's verified archive — the one loss this tool may not
-    cause. Identity is the only sound test, so it is the one used.
+    Returns True when the name was removed, False when it now belongs to
+    somebody else. Callers HOLD A DESCRIPTOR on ``mine`` while this runs: an
+    open fd pins the inode from being recycled, so a matching ``st_dev``/
+    ``st_ino`` really is the file this run created. Without the pin, a peer's
+    replacement file is statistically likely to reuse the freed inode (measured
+    40/40 on this filesystem), which is exactly the loss this exists to prevent.
     """
     with contextlib.suppress(OSError):
         now = os.stat(path)
         if now.st_dev == mine.st_dev and now.st_ino == mine.st_ino:
             os.unlink(path)
+            return True
+    return False
+
+
+def _remove_held(path: Path, held: int) -> None:
+    """Remove ``path`` only while ``held`` still proves it is our inode."""
+    with contextlib.suppress(OSError):
+        mine = os.fstat(held)
+        if mine.st_nlink == 0:      # our name was already replaced: never unlink
+            return
+        _remove_if_same(path, mine)
 
 
 def _create_exclusive(target: Path, plain: bytes) -> None:
@@ -319,9 +332,9 @@ def _create_exclusive(target: Path, plain: bytes) -> None:
     removed before the error propagates, and the plain source was never touched.
     """
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    mine: os.stat_result | None = None
+    held: int | None = None
     try:
-        mine = os.fstat(fd)
+        held = os.dup(fd)        # pins the inode: cleanup can prove it is ours
         with os.fdopen(fd, "wb") as out:
             fd = -1                      # fdopen owns the descriptor now
             out.write(gzip.compress(plain, mtime=0))
@@ -331,9 +344,13 @@ def _create_exclusive(target: Path, plain: bytes) -> None:
         if fd >= 0:
             with contextlib.suppress(OSError):
                 os.close(fd)
-        if mine is not None:
-            _remove_if_ours(target, mine)
+        if held is not None:
+            _remove_held(target, held)
         raise
+    finally:
+        if held is not None:
+            with contextlib.suppress(OSError):
+                os.close(held)
 
 
 def _publish_bytes(tmp: Path, target: Path, plain: bytes) -> None:
@@ -354,42 +371,53 @@ def _publish_bytes(tmp: Path, target: Path, plain: bytes) -> None:
     _create_exclusive(target, plain)
 
 
-def _preserve_aside(src: Path, aside: Path) -> None:
+def _preserve_aside(src: Path, aside: Path) -> os.stat_result:
     """Keep the peer's archive under a NEW name, never over one.
 
-    A hard link keeps both names on the same inode for free; a filesystem with
-    no links gets an exclusive copy (``"xb"``), so an existing aside is never
-    overwritten and ``FileExistsError`` still means "another run owns that name".
+    Returns the identity of the preserved copy, so the caller can remove the
+    original name only while it still refers to THOSE bytes. A hard link keeps
+    both names on one inode for free; a filesystem with no links gets an
+    exclusive copy (``O_EXCL``), fsynced — file AND directory — before the
+    original name is dropped, so a power loss cannot take the only archive.
     """
     try:
         os.link(src, aside)
-        return
-    except (FileExistsError,):
+    except FileExistsError:
         raise
     except OSError as e:
         if e.errno not in _NO_HARD_LINK_ERRNOS:
             raise
-    fd = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    mine: os.stat_result | None = None
+    else:
+        return os.stat(aside)
+    fd = os.open(src, os.O_RDONLY)
+    out_fd: int | None = None
+    held: int | None = None
     try:
-        mine = os.fstat(fd)
-        with os.fdopen(fd, "wb") as out:
-            fd = -1
-            data = src.read_bytes()
-            out.write(data)
-            out.flush()
-            os.fsync(out.fileno())
+        staged = os.fstat(fd)    # the inode whose bytes we are about to copy
+        data = b""
+        while chunk := os.read(fd, 1 << 20):
+            data += chunk
+        out_fd = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        held = os.dup(out_fd)    # pins OUR aside inode: only it may be removed
+        view = memoryview(data)
+        while view:
+            view = view[os.write(out_fd, view):]
+        os.fsync(out_fd)
+        _fsync_dir(aside.parent)
+        return staged
     except BaseException:
-        if fd >= 0:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        if mine is not None:
-            _remove_if_ours(aside, mine)   # a torn aside is not a preserved one
+        if held is not None:
+            _remove_held(aside, held)
         raise
+    finally:
+        for fd_to_close in (out_fd, held, fd):
+            if fd_to_close is not None and fd_to_close >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd_to_close)
 
 
-def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
-                        digest: str) -> tuple[str, str]:
+def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str,
+                        source_absent: bool) -> tuple[str, str]:
     """Publish an archive WITHOUT ever destroying bytes this run did not verify.
 
     Returns ``(verdict, detail)``:
@@ -428,9 +456,10 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
         stale_sha = _sha256(raced)[:8]
         aside = target.with_name(f"{target.name}.superseded-{stale_sha}")
         attempt = 0
+        staged: os.stat_result | None = None
         while True:
             try:
-                _preserve_aside(target, aside)
+                staged = _preserve_aside(target, aside)
                 break
             except FileExistsError:
                 attempt += 1
@@ -439,11 +468,13 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
             except OSError as e:
                 return "disagree", (f"could not preserve the stale archive ({e}) "
                                     "— left it and the source in place")
-        try:
-            os.unlink(target)   # the inode survives via `aside`
-        except OSError as e:
-            return "disagree", (f"the stale archive is kept at {aside} but "
-                                f"{target} could not be cleared: {e}")
+        if not _remove_if_same(target, staged):
+            # A peer published between the aside link and this unlink. Its
+            # archive is NEWER than the bytes we staged, so publishing over it
+            # would destroy records this run never read.
+            return "disagree", (f"a peer published {target} after the stale "
+                                f"archive was kept at {aside} — left it; this "
+                                "run's bytes are in the source")
         try:
             _publish_bytes(tmp, target, plain)
         except FileExistsError:
@@ -572,7 +603,8 @@ def seal_one(root: Path, path: Path) -> Sealed:
             # holds exactly the bytes WE read, which says nothing about what a
             # peer's archive holds — never publish it blind.
             source_absent = True
-            verdict, detail = _publish_no_clobber(tmp, target, plain, digest)
+            verdict, detail = _publish_no_clobber(tmp, target, plain, digest,
+                                                  True)
             if verdict in ("unreadable", "disagree"):
                 return Sealed(day, "conflict", len(plain),
                               _size_or_zero(target), detail)
@@ -586,7 +618,8 @@ def seal_one(root: Path, path: Path) -> Sealed:
         if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), 0,
                           "file changed while sealing — source kept")
-        verdict, detail = _publish_no_clobber(tmp, target, plain, digest)
+        verdict, detail = _publish_no_clobber(tmp, target, plain, digest,
+                                              False)
         if verdict in ("unreadable", "disagree"):
             return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                           detail)

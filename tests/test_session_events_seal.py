@@ -749,6 +749,80 @@ def test_the_source_present_publish_cannot_clobber_a_peer_archive(tmp_path, monk
     assert result.ok, result
 
 
+def test_an_unpublished_name_taken_says_the_bytes_exist_only_in_the_source(tmp_path):
+    """When even `.unpublished-<sha8>` is taken, the verdict must not name a file
+    that holds nothing — it must say where the bytes actually are.
+
+    This row REDs with a `NameError` on the pre-fix shape (the flag the message
+    needs was a `seal_one` local), which crashed the whole `--apply` loop.
+    """
+    day = TODAY - timedelta(days=9)
+    full = b'{"n": 1}\n{"n": 2}\n'
+    path = _write(tmp_path, day, full)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(b'{"n": 1}\n', mtime=0))
+    digest = seal._sha256(full)
+    (target.parent / f"{target.name}.unpublished-{digest[:8]}").write_bytes(b"taken")
+
+    real_link, real_unlink = seal.os.link, seal.os.unlink
+
+    def no_links(*a, **k):
+        raise OSError(errno.ENOTSUP, "no hard links here")
+
+    def third_run_wins(p, *a, **k):
+        result = real_unlink(p, *a, **k)
+        if Path(p) == target:
+            target.write_bytes(gzip.compress(b'{"third": 3}\n', mtime=0))
+        return result
+
+    seal.os.link, seal.os.unlink = no_links, third_run_wins
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        seal.os.link, seal.os.unlink = real_link, real_unlink
+
+    assert result.status == "conflict", result
+    assert "only in the plain source" in result.detail, result.detail
+
+
+def test_a_peer_that_publishes_during_the_supersede_is_not_overwritten(tmp_path):
+    """The aside step and the unlink of the canonical name are two operations: a
+    peer can publish in the gap. Its archive is NEWER than the bytes we staged,
+    so it must be left alone and the verdict must be a conflict, not `sealed`.
+
+    Mutation: `_remove_if_same(target, staged)` replaced by a bare `os.unlink`
+    REDs here (the peer's archive is deleted and the status is `sealed`).
+    """
+    day = TODAY - timedelta(days=9)
+    full = b'{"n": 1}\n{"n": 2}\n'
+    path = _write(tmp_path, day, full)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(b'{"n": 1}\n', mtime=0))
+    peer = gzip.compress(b'{"peer": 9}\n', mtime=0)
+
+    real_link = seal.os.link
+
+    def peer_in_the_gap(src, dst, *a, **k):
+        result = real_link(src, dst, *a, **k)
+        if ".superseded-" in Path(dst).name:
+            # The moment AFTER the stale archive is preserved and BEFORE the
+            # canonical name is dropped: a peer replaces it with its own archive.
+            target.unlink()
+            target.write_bytes(peer)
+        return result
+
+    seal.os.link = peer_in_the_gap
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        seal.os.link = real_link
+
+    assert result.status == "conflict", result
+    assert gzip.decompress(target.read_bytes()) == b'{"peer": 9}\n'
+
+
 def test_a_failed_create_never_deletes_a_peers_archive(tmp_path):
     """The cleanup after a failed exclusive create must remove OUR inode only:
     a peer can replace the canonical path inside that window, and an unqualified
