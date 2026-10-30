@@ -56,9 +56,13 @@ claim nothing supports. They are still UNWITNESSABLE through
 ``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
-``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold,
-``tortoise/sdk.py:14221`` (``"stats": out.get("stats") or {}`` inside
-``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
+``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold in
+``tortoise/sdk.py`` — the line carrying ``"stats": out.get("stats") or {}``
+inside ``_extract_session_v2``, whose sibling key is never copied. That cite is
+NOT typed in this file: it is resolved from the tree at import as
+``META_FOLD_CITE`` (and a cite that will not resolve to exactly one line makes
+the probe REFUSE), because it is the one number no reader can keep true by hand
+and a stale one sends #9116's fixer to the wrong line. That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
 forbids.
@@ -121,29 +125,6 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-def _sdk_line(code: str) -> int:
-    """The ONE line of ``tortoise/sdk.py`` carrying ``code`` — READ, never typed.
-
-    The meta fold moves on every merge that touches ``sdk.py`` above it (#9964
-    inserted 326 lines; main's own commits move it too), so a typed cite in a
-    cause this probe emits is stale the moment the branch is merged — and a stale
-    cite sends the #9116 fixer to the wrong line. The SYMBOL-quoting convention
-    documented at the top of this file is what this implements: the number is a
-    convenience, re-derived from the tree on each run.
-    """
-    hits = [n for n, line in enumerate(
-        (ROOT / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines(), 1)
-        if code in line]
-    if len(hits) != 1:  # pragma: no cover - a moved/ambiguous cite is a refusal
-        raise AssertionError(
-            f"`{code}` is on {len(hits)} lines of sdk.py {hits} — one expected")
-    return hits[0]
-
-
-#: The meta fold's cite, in the exact shape the causes below print it — derived
-#: from the tree at run time (see ``_sdk_line``), never typed.
-META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line('"stats": out.get("stats")')}"
-
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
@@ -151,6 +132,46 @@ E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
 CORPUS_DIR = "tests/eval/write_path"
+
+#: The meta fold's cite, in the exact shape the causes below print it, READ out of
+#: `sdk.py` on every run instead of typed.
+#:
+#: A line cite is the one number in this bundle no reader can keep true by hand:
+#: any commit that inserts a line above the fold moves it, and this branch alone
+#: has now moved it twice (its own docstring insert in `sdk.py`, and `main`'s
+#: `#9964`). Typed here, the CAUSE re-stales SILENTLY — the shipped cause named
+#: `:13593` for a fold that had moved to `:13611`, and the only thing that caught
+#: it was `tests/test_7949_capstone_measure.py`, which derives the line in the
+#: PIN and compares. Deriving it here too means the cause a reader (and #9116's
+#: fixer) actually reads cannot re-stale on a merge that touched nothing this
+#: bundle owns. The symbol is authoritative and the line is a convenience (the
+#: bundle's own cite convention), so deriving it is the same answer Sphinx gives
+#: (`py:obj` resolves to a symbol, not a line).
+#:
+#: ⛔ It REFUSES rather than printing a claim nothing supports: a cite that cannot
+#: be resolved to exactly ONE line is not a number this run may print (the `arm:`
+#: read-back rule, applied to a cite).
+META_FOLD_CODE = '"stats": out.get("stats")'
+
+
+def _meta_fold_cite() -> str:
+    """`tortoise/sdk.py:<n>` for the line carrying `META_FOLD_CODE` — read, not typed."""
+    source = ROOT / "tortoise/sdk.py"
+    if not source.exists():
+        raise RuntimeError(
+            f"cannot resolve the meta fold's cite: {source} is not in this checkout, "
+            "and a cause that names no real line is worse than no cite (#9116)")
+    hits = [n for n, line in enumerate(
+        source.read_text().splitlines(), 1) if META_FOLD_CODE in line]
+    if len(hits) != 1:
+        raise RuntimeError(
+            f"the meta fold's cite is ambiguous: {META_FOLD_CODE!r} is on {len(hits)} "
+            f"lines of sdk.py {hits} — the cause names ONE line, so this run refuses "
+            f"rather than pick (#9116)")
+    return f"tortoise/sdk.py:{hits[0]}"
+
+
+META_FOLD_CITE = _meta_fold_cite()
 
 SCHEMA = "capstone-verdict-v1"
 BEGIN = "=== CAPSTONE-VERDICT-BEGIN ==="
@@ -171,7 +192,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2573-2598``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:14502`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:14658`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -186,7 +207,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2573-2598 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:14502 "
+    "the capture path at tortoise/sdk.py:14658 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:614-622 "
@@ -804,9 +825,10 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596 and "
-        ":8616), and each VET pass is gated on the LIST — `if vet_enabled and "
-        "embed_list:` (:8684), `if vet_enabled and complete_list:` (:8806) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596, the "
+        "flag; :8600, the early return; :8616, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:8684), "
+        "`if vet_enabled and complete_list:` (:8806) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
         "returns {} on its fail-open path, :8478-8481)."

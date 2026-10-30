@@ -18828,7 +18828,9 @@ def _record_unavailable() -> HTTPException:
     served in its place.
 
     On an armed **journaling** deployment the turns are RECORD rows (the
-    per-turn `PointAdded` records, #10000/#10011) and the graph keeps only the
+    turn-record carrier's ``public.point`` rows — ``TurnsRecorded``, #10017;
+    before that change, the per-turn `PointAdded` records of #10000/#10011) and
+    the graph keeps only the
     Session's counters — so when the record read FAILS, the fail-soft fallback
     below answers zero turn nodes, which is byte-identical to a session that has
     no turns. Serving that as ``200 {"turn_points": []}`` is the shape #8447
@@ -19087,7 +19089,8 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # #10000: WHICH STORE holds the turns is the same CAPABILITY question the
     # capture writer asks (`_record_tenant_for_read`, the ONE resolution). With
     # the record holding them,
-    # the graph has no turn nodes and this read must come from the record;
+    # the turn-record carrier's `public.point` rows (#10017) — and no
+    # turn NODE, so this read must come from the record;
     # otherwise it reads the graph exactly as before, which is what keeps both
     # the pre-arming deployment AND the refused-write lane byte-identical.
     #
