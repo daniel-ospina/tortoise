@@ -1575,6 +1575,20 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           still no `env:`/`uses:`/`$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code
 #:           swallowing, no early return; `grep -qE 'failure|cancelled'` survives as a
 #:           literal line of code (#9240).
+#:   #10186 — `changes`: `Emit push matrix (#1472/#6135)` + `Tier-2 duration split (#1473)` — digest-only
+#:           movement, and it is the `env:` block being MOVED, not added or widened. #6897's
+#:           `CI_SHARD_ROUTING` opt-in was at JOB scope; this pin's `_SAFE_JOB_ENV` is empty and names
+#:           this job as the reason, because any key at job scope hangs over this gate step and can
+#:           hook the interpreter (`BASH_ENV`, a `PYTHONPATH` `sitecustomize.py`, `LD_PRELOAD`,
+#:           `PATH`) — so `ci_ordering_half_violations` returned one violation on the real workflow and
+#:           red a REQUIRED fast shard (`test (e)`, run `41002293616`). The SAME single key now sits on
+#:           the two steps that emit `fast_matrix` and nowhere else: both `run:` scripts are byte-identical
+#:           (`_code()` unchanged), neither writes `$GITHUB_PATH`/`$GITHUB_ENV`, neither swallows an exit
+#:           code, and the step set and order are unchanged — so the sibling-shim, shim and `_ALWAYS_RUN`
+#:           checks stay quiet and this allow-list is not widened. The lever still reaches every emitter,
+#:           pinned by `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`,
+#:           and job scope is now forbidden by
+#:           `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (

@@ -441,8 +441,8 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
     """⛔ THE UNION'S NAMED CARVE-OUT (a): `ubuntu-<version>` is DROPPED, not carried forward.
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
-    decision (not just a style choice): `docs/ops/ci-runner-x64.md:66` — "these runners
-    deliberately **do not** claim any `ubuntu-<version>` label" — and `docs/ops/ci-runner-x64.md:75`,
+    decision (not just a style choice): `docs/ops/ci-runner-x64.md:66-67` — "these runners
+    deliberately **do not** claim any `ubuntu-<version>` label" — and `docs/ops/ci-runner-x64.md:75-76`,
     an out-of-band
     attachment "cannot survive a re-registration or `tools/install-ci-runner-x64.sh
     --repair-labels`". `tools/runner_autoscale.py::_preserve_labels` already drops the family
@@ -484,9 +484,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:225`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:225-226`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:344-346`). Keeping
+    (`docs/ops/ci-runner-x64.md:344-347`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -979,7 +979,7 @@ def test_label_coverage_reads_yaml_workflows_too(tmp_path: Path):
     GitHub accepts both `.yml` and `.yaml`, and the reader globbed only `*.yml` — so a `.yaml`
     workflow's `runs-on:` was dropped while the block still printed "every one has an online
     self-hosted answer". The repo has 0 `.yaml` workflows today, which is exactly why nothing caught
-    it: the block's own contract (`docs/ops/ci-runner-x64.md:234`) is that an unread label must
+    it: the block's own contract (`docs/ops/ci-runner-x64.md:234-235`) is that an unread label must
     never read as healthy.
 
     Non-vacuity: with the glob reverted to `*.yml` the `macos-14` row never appears and the summary

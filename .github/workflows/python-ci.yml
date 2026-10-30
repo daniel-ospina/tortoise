@@ -392,6 +392,8 @@ jobs:
         # of include rows is whatever the selector emits — nothing here counts
         # shards.
         id: push-matrix
+        env:
+          CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
         run: |
           MATRIX=$(python3 tools/ci_selection.py --emit-push-matrix)
           # #1472 regression fix: SPACE-JOINED strings inside the matrix (the
@@ -413,10 +415,6 @@ jobs:
           # `config/ci-surfaces.yml::slow_shards` LPT bins by the same `durations`
           # map the fast band uses. Emitted like the two above (one JSON line).
           echo "slow_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["slow_matrix"]))')" >> "$GITHUB_OUTPUT"
-        # #6897: emitter #1 of 2 — the other is `split` below, and BOTH must
-        # carry the mode or a tier-2 PR silently resolves to hosted-only.
-        env:
-          CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
       - name: Non-gating lanes — what this gate does NOT run (#10194)
         # #10194: a MEMBERSHIP change is invisible in a CI log unless the log
         # says what left it. "the evals aren't running" and "the evals are
@@ -446,15 +444,14 @@ jobs:
         # ALWAYS empty and would crash --split with empty stdin (#1492).
         id: split
         if: github.event_name == 'pull_request' && steps.select.outputs.full == 'false'
+        # #6897/#10186: the SECOND emitter `fast_matrix` can come from, so it
+        # carries the same opt-in as `push-matrix`. Omitted here, the lever is
+        # dead on exactly the event type every PR uses.
+        env:
+          CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
         run: |
           SPLIT=$(echo '${{ steps.select.outputs.test_files }}' | python3 tools/ci_selection.py --split)
           echo "fast_matrix=$(echo "$SPLIT" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["fast_matrix"]))')" >> "$GITHUB_OUTPUT"
-        # #6897: emitter #2 of 2. This output OVERRIDES the push matrix on
-        # tier-2 PRs (`outputs.fast_matrix`), so without the mode here the
-        # opt-in is dead on exactly the event type every PR uses — measured on
-        # head `3db8f7d78`, which carried it on the push step alone.
-        env:
-          CI_SHARD_ROUTING: ${{ vars.CI_SHARD_ROUTING }}
       # The manifest drift gate used to run HERE. It moved to its own peer job
       # (`manifest-integrity`) — #2656. Living in `changes`, which every other
       # job needs, meant one missing manifest line SKIPPED the entire test
