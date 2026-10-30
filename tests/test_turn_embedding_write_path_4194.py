@@ -40,7 +40,11 @@ import pytest
 from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
 from tortoise.embeddings import EmbeddingModel, compute_embedding
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import (
+    TortoiseSDK,
+    _capture_turn_window,
+    _clip_capture_turn_content,
+)
 from tortoise.search_engine import run_vector_query
 
 
@@ -451,17 +455,24 @@ def test_long_turn_and_coerced_content_still_store_the_encoded_text(
     """
     _keyless(monkeypatch)
     long_turn = " ".join(f"w{i}" for i in range(1200))  # > 512 words
+    # ⚠️ The 5,000-char stored-text clip is NOT deleted with the door:
+    # `_capture_turn_window` -> `_clip_capture_turn_content` survive and every
+    # production caller windows BEFORE the writer (`hosted_api.py:14580`).
+    # `_write_session_and_turns` does no windowing of its own, so the window is
+    # applied here to reproduce the production corpus exactly — otherwise this
+    # test would silently stop covering the #1532/#4897 clip.
     _write(sdk, "sess-4194-long",
-           [{"role": "user", "content": long_turn},
-            {"role": None, "content": 123}])
+           _capture_turn_window(
+               [{"role": "user", "content": long_turn},
+                {"role": None, "content": 123}]))
     rows = {r[0]: (r[1], r[2]) for r in _turn_rows(sdk, "sess-4194-long")}
 
-    # The long turn: the vector is the encode of its 512-WORD truncation, not
-    # of the raw stored string. ⚠️ #4282 removed the 6,096-char capture clip
-    # (`_clip_capture_turn_content`) with the door, so the stored text is now
-    # the full turn and the two assertions that pinned that clip's marker are
-    # the only ones dropped — the parity this test is NAMED for still holds.
+    # The long turn: the node stores the clipped text; the vector is the encode
+    # of its 512-WORD truncation (not the raw stored string).
     stored0, emb0 = rows["sess-4194-long_t0"]
+    assert stored0 == "[user] " + _clip_capture_turn_content(long_turn), stored0[:60]
+    assert "[truncated:" in stored0, (
+        "the node must carry the #4897 marker, not a silent cut")
     assert emb0 is not None
     truncated = " ".join(stored0.split()[:512])
     assert np.allclose(emb0, embedder.encode([truncated])[0], atol=1e-6)

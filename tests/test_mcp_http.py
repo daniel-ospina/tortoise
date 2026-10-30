@@ -2111,6 +2111,10 @@ class TestQuotaEnforcement:
             graphs = _j.loads(text)
         except Exception:
             graphs = []
+        # A non-empty answer first: `all(...)` and `not in` are both vacuously
+        # true on [], so a JSON-RPC error or a parse failure used to satisfy
+        # this test (review round 16). The team owns its default `org_…` graph.
+        assert graphs, f"no graphs returned at all: {text!r}"
         assert all(g.startswith("org_") for g in graphs), f"foreign graphs leaked: {graphs}"
         assert "registry" not in graphs
 
