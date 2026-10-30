@@ -213,7 +213,12 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2573-2598 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:14647 "
+    # ⛔ NOT a typed number: `E3_RULE` is PRINTED (`add(f"e3 rule: {E3_RULE}")`,
+    # `"rule": E3_RULE` in the scored log), so a hand-kept line here re-stales
+    # on the next insert above the symbol and the scored row names a line no
+    # reader can resolve — the exact defect this PR set out to end (#10199
+    # review P1: the merge restored `main`'s 14432 into this string).
+    f"the capture path at {REFERENCES_EDGE_CITE} "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:614-622 "

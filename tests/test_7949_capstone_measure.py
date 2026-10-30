@@ -1033,6 +1033,28 @@ def test_the_probes_printed_sdk_cites_are_derived_from_the_tree_not_typed():
     assert measure.META_FOLD_CITE == _META_FOLD_CITE, (
         "the probe and this pin derive the meta fold from different code strings: "
         f"{measure.META_FOLD_CITE} vs {_META_FOLD_CITE}")
+    # ⛔ #10199 review P1: the three constants above are held to the tree, but a
+    # typed number INSIDE a printed string was outside this leg's reach — and
+    # that is exactly what `E3_RULE` carried. Its text is PRINTED into the scored
+    # log (`add(f"e3 rule: {E3_RULE}")`, `"rule": E3_RULE`), and the merge that
+    # resolved `sdk.py` conflicts restored `main`'s number into it while the
+    # merged `sdk.py` was the branch's — so the same probe printed a derived
+    # `REFERENCES_EDGE_CITE` and a typed cause line that contradicted it. The
+    # rule must therefore carry the DERIVED cite, and must carry no
+    # `tortoise/sdk.py:<n>` literal at all (a correct-by-accident number is the
+    # one that re-stales at the next insert above the symbol).
+    assert measure.REFERENCES_EDGE_CITE in measure.E3_RULE, (
+        "E3_RULE no longer carries the derived REFERENCES_EDGE_CITE "
+        f"({measure.REFERENCES_EDGE_CITE}), so the line it prints is typed and "
+        "will re-stale on the next insert above `link_source_to_event`")
+    # The derived cite INTERPOLATES to `tortoise/sdk.py:<n>`, so the typed-number
+    # search runs over the string with that one occurrence removed: any
+    # `tortoise/sdk.py:<n>` still standing is a literal somebody typed.
+    residual = measure.E3_RULE.replace(measure.REFERENCES_EDGE_CITE, "<derived>")
+    typed_in_rule = re.findall(r"tortoise/sdk\.py:\d+", residual)
+    assert not typed_in_rule, (
+        f"E3_RULE hard-codes {typed_in_rule} — it is printed into the scored log, "
+        "so the number must be derived (`{REFERENCES_EDGE_CITE}`), never typed")
 
 
 #: The cites `_IDLE_CITES` PRINTS for each surface: ``(printed, line, code)``.
