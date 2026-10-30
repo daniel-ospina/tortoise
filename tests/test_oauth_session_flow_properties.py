@@ -886,12 +886,63 @@ _PYTEST_TESTS_FAILED = 1
 # (the sixth column of `PROPERTY_MUTATIONS`) and must not carry this prefix.
 _HARNESS_FAILURE = "harness scenario"
 
-# Four children per run. Measured cost of the whole item is ~206 s (~50 s a
-# child), so 200 s a child is ~4x headroom AND keeps the four inner bounds under
-# the 900 s outer mark below — the per-property bound binds first, so a slow
-# child names itself instead of the item dying as a bare timeout with no
-# diagnostic (#10343 review P2).
+# Budget arithmetic — every INNER bound sits under the 1200 s outer mark below, so
+# a slow child names itself instead of the item dying as a bare timeout with no
+# per-property diagnostic (#10343 review cycle 1, P2):
+#     baseline child, 4 nodes ......... 200 s
+#     4 mutated children, 1 node each .. 4 x 200 s = 800 s
+#     ---------------------------------------------------
+#     worst case .................... 1000 s  <  1200 s
+# Measured cost at this head is ~24 s for the whole item (~6 s a child); the 200 s
+# per-child bound is headroom for the loaded box where the hand-run version
+# measured 206 s.
 _PROPERTY_RUN_TIMEOUT_S = 200
+
+
+def _assert_baseline_green() -> None:
+    """Every property test must be GREEN before anything is mutated.
+
+    A kill is RELATIVE TO A BASELINE or it is not evidence. A property test that
+    was already failing for its own stated reason satisfies every check in
+    `_property_test_fails` — exit 1, a `FAILED` line, no harness prefix, its own
+    message — without the mutation changing anything, so the proof would report a
+    kill it never established. That is the one shape the checks below cannot see,
+    and it bites hardest when the proof is most worth running: someone
+    investigating a suspected regression in `token.ts` / `consent-flow.ts`, where
+    the baseline is exactly what is in doubt.
+
+    Mutation testing's own definition of a kill presupposes this — "at least one
+    test FAILED **while this mutant was active**" — and its tooling runs the suite
+    unmutated first for the same reason. Aborts BEFORE any write, so a red
+    baseline never touches a tracked source.
+    """
+    nodes = [node for _label, _path, _span, _repl, node, _expected in PROPERTY_MUTATIONS]
+    argv = [
+        sys.executable, "-m", "pytest",
+        *(f"{TEST_FILE}::{node}" for node in nodes),
+        "-q", "--no-header", "-rf",
+    ]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=_PROPERTY_RUN_TIMEOUT_S,
+            cwd=str(REPO),
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            f"the four property tests did not finish unmutated within "
+            f"{_PROPERTY_RUN_TIMEOUT_S}s — there is no baseline to measure a kill "
+            "against, and a mutation applied to an unmeasured tree proves nothing."
+        )
+    assert proc.returncode == _PYTEST_OK, (
+        "the property tests are ALREADY red unmutated — a mutation cannot be shown "
+        "to have killed anything against a baseline that was never green. Fix the "
+        "source, or the test, before amending `PROPERTY_MUTATIONS`.\n"
+        f"stdout:\n{proc.stdout[-4000:]}\nstderr:\n{proc.stderr[-2000:]}"
+    )
+    assert "FAILED " not in proc.stdout, (
+        "the baseline child exited 0 but still reported a FAILED line, which is not "
+        f"a shape a green baseline takes.\nstdout:\n{proc.stdout[-4000:]}"
+    )
 
 
 def _property_test_fails(node: str, expected: str) -> bool:
@@ -913,7 +964,7 @@ def _property_test_fails(node: str, expected: str) -> bool:
         pytest.fail(
             f"{node}: exceeded {_PROPERTY_RUN_TIMEOUT_S}s with the property removed — "
             "the budget, not the property, decided this leg (see the outer "
-            "`pytest.mark.timeout(900)`)."
+            "`pytest.mark.timeout(1200)`)."
         )
     if proc.returncode == _PYTEST_TESTS_FAILED:
         assert f"FAILED {TEST_FILE}::{node}" in proc.stdout, (
@@ -949,11 +1000,11 @@ def _property_test_fails(node: str, expected: str) -> bool:
     )
 
 
-# 900 s for the whole item: the four 200 s inner bounds total 800 s, so they are
-# the binding constraint and the outer mark is the backstop (pyproject.toml's
-# repo-wide `timeout = 300` is a PER-ITEM budget this item legitimately exceeds —
-# "a leg that needs a longer single item must SAY so").
-@pytest.mark.timeout(900)
+# 1200 s for the whole item, so the inner bounds above are the binding constraint
+# and this mark is the backstop (pyproject.toml's repo-wide `timeout = 300` is a
+# PER-ITEM budget this item legitimately exceeds — "a leg that needs a longer
+# single item must SAY so").
+@pytest.mark.timeout(1200)
 @pytest.mark.skipif(
     os.environ.get("TORTOISE_MUTATION_PROOF") != "1",
     reason="opt-in (~3.5 min, four subprocess runs): TORTOISE_MUTATION_PROOF=1",
@@ -961,13 +1012,16 @@ def _property_test_fails(node: str, expected: str) -> bool:
 def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
     """Break each property in the real source; its own test must fail.
 
-    The restore is byte-identical and ASSERTED by sha256 — and the assertion runs
-    in the `finally`, on the error path too, because the paths that skip the loop
-    body are exactly the ones a mutated tracked file could survive: an unexpected
+    The four nodes are proved GREEN unmutated first, so every kill below is
+    relative to a baseline this artifact established itself. The restore is
+    byte-identical and ASSERTED by sha256 — and the assertion runs in the
+    `finally`, on the error path too, because the paths that skip the loop body
+    are exactly the ones a mutated tracked file could survive: an unexpected
     mutation, a harness error, a budget red. The write is bytes-to-bytes, so the
     comparison is bytes-to-bytes as well. The previous version of this proof ran
     by hand, where no restore was asserted at all.
     """
+    _assert_baseline_green()
     for label, path, span, replacement, node, expected in PROPERTY_MUTATIONS:
         original_bytes = path.read_bytes()
         original = original_bytes.decode("utf-8")
