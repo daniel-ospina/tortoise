@@ -91,22 +91,75 @@ function corsJson(env: Env, origin: string, body: unknown, status: number): Resp
 }
 
 /**
- * The origin allowlist, as one function so the preflight and the real request cannot drift.
+ * The origin allowlist's verdict, as ONE function so the preflight, the mint and the 405 arm cannot
+ * drift.
  *
  * ⛔ EXACT match on the parsed ORIGIN, never on the raw header and never a prefix/suffix test:
  * `https://api.premiselabs.co.evil.example` startsWith-matches the AS origin, and a suffix test
  * admits `https://api.premiselabs.co.attacker.tld`. Parsing and comparing `origin` cannot be
  * fooled by either — it is the same primitive `safeNext` uses for the same reason.
+ *
+ * ⛔ The two refusals are NOT the same kind of event and must not be collapsed:
+ * `no_origin`/`mismatch` are CLIENT faults (a hostile or non-browser caller, which must learn
+ * nothing), while `misconfigured` is an OPERATOR fault — `CONSENT_AS_ORIGIN` does not parse as a
+ * URL at all, so this deployment cannot mint for ANY origin. Reporting that as `forbidden_origin`
+ * made a scheme-less binding indistinguishable from a rejected caller, with no log line anywhere:
+ * the same silent-operational-fault class `start.ts::parseAsOrigin` already names for the sibling
+ * route on the same knob (one binding, one treatment).
  */
-function allowedOrigin(env: Env, request: Request): string | null {
+type OriginVerdict =
+  | { ok: true; origin: string }
+  | { ok: false; reason: "no_origin" | "mismatch" | "misconfigured" };
+
+function originVerdict(env: Env, request: Request): OriginVerdict {
   const raw = request.headers.get("Origin");
-  if (!raw) return null;                       // absent is REFUSED here, deliberately
+  if (!raw) return { ok: false, reason: "no_origin" };  // absent is REFUSED here, deliberately
+  let asOrigin: string;
   try {
-    if (new URL(raw).origin === new URL(consentAsOrigin(env)).origin) return raw;
+    const parsed = new URL(consentAsOrigin(env));
+    // A non-http(s) binding is the SAME operator fault one step along, and `start.ts::parseAsOrigin`
+    // already refuses it: `javascript:alert(1)` does not throw, it yields an OPAQUE origin whose
+    // `.origin` is the string "null", so without this arm every real caller simply mismatches and
+    // the operator is back to a silent 403 that reads exactly like a rejected attacker.
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return { ok: false, reason: "misconfigured" };
+    }
+    asOrigin = parsed.origin;
   } catch {
-    return null;
+    return { ok: false, reason: "misconfigured" };
   }
-  return null;
+  try {
+    if (new URL(raw).origin === asOrigin) return { ok: true, origin: raw };
+  } catch {
+    return { ok: false, reason: "mismatch" };
+  }
+  return { ok: false, reason: "mismatch" };
+}
+
+/**
+ * The refusal a non-`ok` verdict earns.
+ *
+ * `bodyless` is the credentialed PREFLIGHT, which must answer with NO CORS headers so the browser
+ * never completes the call. Every other caller gets the JSON refusal, whose `forbidden_origin` body
+ * is unchanged by this function — the four byte-identical refusals the mint must emit stay theirs to
+ * emit.
+ */
+function refuseOrigin(
+  env: Env,
+  verdict: { ok: false; reason: "no_origin" | "mismatch" | "misconfigured" },
+  bodyless = false,
+): Response {
+  if (verdict.reason === "misconfigured") {
+    // Fail closed, typed, and NAMED. The log line is the one place an operator can learn WHICH
+    // binding is wrong — `start.ts` refuses the same value the same way, for the same reason.
+    console.error("CONSENT_AS_ORIGIN is not an absolute http(s) origin", env.CONSENT_AS_ORIGIN);
+    return bodyless
+      ? new Response(null, { status: 503, headers: new Headers({ Vary: "Origin" }) })
+      : json({ error: "unavailable", reason: "as_origin_misconfigured" }, { status: 503 });
+  }
+  return bodyless
+    ? new Response(null, { status: 403, headers: new Headers({ Vary: "Origin" }) })
+    : json({ error: "forbidden_origin" }, { status: 403 });
 }
 
 /**
@@ -114,20 +167,20 @@ function allowedOrigin(env: Env, request: Request): string | null {
  * for the Pages routing rule that makes every handler here non-exported.
  */
 async function preflight(request: Request, env: Env): Promise<Response> {
-  const origin = allowedOrigin(env, request);
+  const verdict = originVerdict(env, request);
   // A refused origin answers the bare preflight refusal with NO CORS headers, so the browser
   // never completes the credentialed call. 403 rather than 204: a silent 204 with
-  // Allow-Origin absent is indistinguishable from a misconfiguration in the network log.
-  if (!origin) return new Response(null, { status: 403, headers: new Headers({ Vary: "Origin" }) });
-  return new Response(null, { status: 204, headers: corsHeaders(env, origin) });
+  // Allow-Origin absent is indistinguishable from a misconfiguration in the network log. An
+  // UNPARSEABLE binding is an operator fault, not a caller fault, so it is a typed 503 instead.
+  if (!verdict.ok) return refuseOrigin(env, verdict, true);
+  return new Response(null, { status: 204, headers: corsHeaders(env, verdict.origin) });
 }
 
 /** The mint. Module-private for the same routing reason as `preflight` (see `onRequest`). */
 async function mint(request: Request, env: Env): Promise<Response> {
-  const origin = allowedOrigin(env, request);
-  if (!origin) {
-    return json({ error: "forbidden_origin" }, { status: 403 });
-  }
+  const verdict = originVerdict(env, request);
+  if (!verdict.ok) return refuseOrigin(env, verdict);
+  const origin = verdict.origin;
 
   // ── the signing key first: without it there is nothing this route can do ────────────
   // Fail CLOSED and NAMED (§2.3). Never a hardcoded default: a default secret is a
@@ -286,7 +339,7 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   // carries no CORS header, and a refusal the browser cannot read is one the page reports as a
   // network error (which is what the arm below says it prevents). The exact-origin gate runs first,
   // so a hostile origin gets a body-less 403 with no `Allow-Origin` and learns nothing.
-  const origin = allowedOrigin(env, request);
-  if (!origin) return json({ error: "forbidden_origin" }, { status: 403 });
-  return corsJson(env, origin, { error: "method_not_allowed" }, 405);
+  const verdict = originVerdict(env, request);
+  if (!verdict.ok) return refuseOrigin(env, verdict);
+  return corsJson(env, verdict.origin, { error: "method_not_allowed" }, 405);
 };

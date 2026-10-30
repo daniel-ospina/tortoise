@@ -515,6 +515,23 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     };
   }
 
+  // 2b. An UNPARSEABLE `CONSENT_AS_ORIGIN` is an OPERATOR fault, not a caller fault: the same
+  //     preflight must answer a typed 503 with no CORS header, never a bare 403 that reads exactly
+  //     like a rejected attacker. Pre-fix `allowedOrigin` swallowed the throw and returned null.
+  {
+    const eBad = env({ SESSIONS: new FakeD1({ sessions: [sessionRow()] }),
+                       CONSENT_AS_ORIGIN: "api.premiselabs.co" });
+    const res = await tokenRoute.onRequest({
+      request: new Request(URL_, { method: "OPTIONS",
+        headers: { Origin: AS, "Access-Control-Request-Method": "POST" } }),
+      env: eBad });
+    out.cases.preflight_misconfigured = {
+      status: res.status,
+      allowOrigin: res.headers.get("Access-Control-Allow-Origin"),
+      body: await res.text(),
+    };
+  }
+
   // 2. …and the same preflight from the two SUFFIX look-alikes must be refused with NO CORS
   //    header, or the browser completes the credentialed call to an attacker origin.
   out.cases.preflight_refused = [];
@@ -529,8 +546,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     });
   }
 
-  // 3. A simple cross-site POST can set `text/plain` WITHOUT a preflight, so the media-type gate
-  //    is the half that actually stops it. No cookie is sent here on purpose: the refusal must be
+  // 3. A simple cross-site POST can set `text/plain` WITHOUT a preflight, so the media-type gate  //    is the half that actually stops it. No cookie is sent here on purpose: the refusal must be
   //    the MEDIA TYPE, not `no_session` — otherwise this test would pass on a route that had lost
   //    the gate entirely (the status would just be 401 for a different reason).
   out.cases.wrong_media_type = [];
@@ -875,6 +891,47 @@ def test_the_mint_route_refuses_an_origin_that_is_not_the_as() -> None:
     out = _run("mint_cross_origin")
     assert out["status"] == 403
     assert out["body"]["error"] == "forbidden_origin"
+
+
+def test_a_misconfigured_AS_origin_is_a_TYPED_503_at_the_MINT_too() -> None:
+    """ONE binding, ONE treatment: the mint must not report an operator fault as a caller fault.
+
+    PRE-FIX (measured at `cf6ccc129`'s successor): `token.ts::allowedOrigin` parsed
+    `CONSENT_AS_ORIGIN` inside a `catch` that returned `null`, so a scheme-less binding — the
+    natural slip for a knob this project tells operators to set per deployment — was
+    indistinguishable from a HOSTILE caller: `403 forbidden_origin`, with nothing in the response
+    and nothing in the logs naming the binding. `start.ts::parseAsOrigin` refuses the same value
+    with a typed `503 as_origin_misconfigured` plus one log line (the cd340c836 fix); this arm is
+    the mint's half of that parity, so an operator sees ONE answer for one mistake.
+
+    The client-fault refusals are deliberately NOT changed by this: a genuinely hostile origin still
+    gets the same `403 forbidden_origin` body (pinned by the test above), and the four
+    byte-identical refusals the mint emits stay theirs to emit.
+    """
+    for bad in (
+        "api.premiselabs.co",              # scheme-less: the operator slip
+        "not a url at all",                # unparseable
+        "javascript:alert(1)",             # parses alone, but is not an http(s) origin
+    ):
+        out = _run("mint_ok", asOrigin=bad)
+        assert out["status"] == 503, (bad, out)
+        assert out["body"] == {"error": "unavailable", "reason": "as_origin_misconfigured"}, (
+            bad, out["body"])
+        # ...and the operator's only signal. A silent refusal is indistinguishable from an outage.
+        assert "CONSENT_AS_ORIGIN" in out["stderr"], (bad, out["stderr"][-600:])
+
+
+def test_a_misconfigured_AS_origin_on_the_PREFLIGHT_is_a_503_with_no_CORS_header() -> None:
+    """The preflight is a third call site, so it is pinned separately: a typed 503, no Allow-Origin.
+
+    Reaching the credentialed mint requires THIS answer, so an unparseable binding must fail closed
+    there too — and it must not hand a CORS header to a caller it has not verified.
+    """
+    out = _run("mint_transport")
+    case = out["cases"]["preflight_misconfigured"]
+    assert case["status"] == 503, case
+    assert case["allowOrigin"] is None, case
+    assert case["body"] == "", case
 
 
 def test_the_mint_route_fails_closed_when_the_signing_key_is_absent() -> None:

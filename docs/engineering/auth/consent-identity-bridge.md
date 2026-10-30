@@ -110,10 +110,13 @@ required, and neither substitutes for `bind`.
 **Mint site (DELIVERED — this is the shipped contract, not a sketch):** `POST /api/consent/token`
 (`website/apps/dashboard/functions/api/consent/token.ts`), JSON body `{state, attempt_key}`, which:
 
-1. enforces an **exact-origin CORS allowlist of the AS origin** (`allowedOrigin`: the request's
+1. enforces an **exact-origin CORS allowlist of the AS origin** (`originVerdict`: the request's
    `Origin`, parsed, must equal the configured AS origin — an ABSENT `Origin` is refused too) with
    `Access-Control-Allow-Credentials: true`, and a refused origin answers **403 `forbidden_origin`**
-   with no CORS headers. That allowlist is what stops a cross-site page from driving the mint with the
+   with no CORS headers. A binding that does not parse as an absolute http(s) origin is a DIFFERENT
+   event and answers **503 `{error: "unavailable", reason: "as_origin_misconfigured"}`** plus one
+   `console.error` naming `CONSENT_AS_ORIGIN` — the same treatment `start.ts::parseAsOrigin` gives
+   that knob, so an operator mistake is never reported as a rejected caller. That allowlist is what stops a cross-site page from driving the mint with the
    victim's cookie. A request that DOES carry the AS origin must then send
    `Content-Type: application/json`, or it is refused **415 `unsupported_media_type`** — the media-type
    gate is the second layer, so a cross-site form post is answered `403` by the allowlist first;
@@ -141,7 +144,7 @@ on the consent path, with its own failure semantics) and is deliberately **not**
 here rather than implied to be closed by a comment claiming more than the code does.
 
 ⚠️ It is a `POST`, not the `GET` this section first sketched, and the guard is the route's OWN: the
-`allowedOrigin` allowlist above plus the JSON media type. ⛔ It must NOT use `csrf.ts`'s
+`originVerdict` allowlist above plus the JSON media type. ⛔ It must NOT use `csrf.ts`'s
 `guardStateChangingRequest`: that helper's origin layer is `guardOrigin`, which refuses anything that is not
 `appOrigin(env)` — so adding it here would answer `403 forbidden_origin` to every legitimate `api.*` call
 and kill the consent arm. The route both returns `{token, exp}` and never takes a bind from the caller — do

@@ -134,7 +134,9 @@ const DEFAULT_AS_ORIGIN = "https://api.premiselabs.co";
  * an untyped 500 on every request to the public consent entry, with nothing in the response — or in
  * the logs — naming the cause. That is the same class this file's contract already refuses for the
  * store (property 3: a store fault is a typed 503, never a redirect), and the sibling mint route
- * survives the same bad value already (`token.ts::allowedOrigin` parses it inside a try/catch).
+ * survives the same bad value already — `token.ts::originVerdict` parses it inside a try/catch
+ * and, since #10283's review, answers the SAME typed `503 as_origin_misconfigured` with the same
+ * log line, so one binding has one treatment across the two routes.
  *
  * A non-http(s) scheme is refused for the same reason one step along: `new URL("/x", "javascript:…")`
  * does NOT throw — it resolves a URL of an opaque scheme, which this route would then happily send a
