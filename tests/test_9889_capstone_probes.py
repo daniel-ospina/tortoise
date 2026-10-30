@@ -16,7 +16,10 @@ allowed to call its own output a measurement.
 * `e1_paired_arm` refuses, measuring nothing, when ANY switch that arms the
   passes is already set — including `TORTOISE_S2_DECISION_SEAM`, which arms the
   same pass through the arbiter and so would produce an ON population under an
-  OFF label.
+  OFF label — refuses (exit **2**, writing no record) when the run's `:Object`
+  denominator is under E1's frozen `denominator_floors.e1_objects`, reads that
+  floor out of the pre-registration rather than typing it, and refuses before
+  any model call when the backend cannot extract.
 * `e2a_value_units` refuses when injecting every lost unit's verbatim anchor
   moves the survival counter by nothing (an inert counter), and its
   `--check-denominator` reads §3.3's denominator off the gold rather than
@@ -170,6 +173,146 @@ def test_the_off_arm_accepts_an_explicit_zero(monkeypatch):
     arm = e1_paired_arm.off_arm_readback()
 
     assert set(arm.values()) == {"0"}
+
+
+# ── e1_paired_arm: the before-share is refused when E1's own record refuses it ─
+
+def _fake_arm_census(object_names: list[str]):
+    def census(uri: str) -> dict:
+        assert "/" in uri, f"a graph URI was expected, got {uri!r}"
+        return {"object_names": list(object_names), "label_counts": {}}
+    return census
+
+
+def _run_paired_arm(monkeypatch, tmp_path, *, object_names: list[str],
+                    ok: bool = True, floor: int = 30,
+                    ready: tuple[bool, str] = (True, "ok")) -> tuple[int, list]:
+    """Drive `main()` itself — the run, the record and the refusals.
+
+    Pre-fix, no case in this module called `e1_paired_arm.main` at all, so the
+    DB refusal, the run, the record shape, the failed-session exit and the
+    denominator refusal below all shipped untested.
+    """
+    for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
+    monkeypatch.setattr(e1_paired_arm, "backend_ready", lambda: ready)
+    monkeypatch.setattr(e1_paired_arm, "object_floor", lambda: floor)
+    monkeypatch.setattr(e1_paired_arm, "census", _fake_arm_census(object_names))
+    runs: list[tuple[str, list[str]]] = []
+
+    def fake_run(graph: str, sessions: list[str]) -> list[dict]:
+        runs.append((graph, sessions))
+        return [{"session_id": "wp01_quarry_debug", "ok": ok,
+                 "extracted": True, "elapsed_s": 0.5}]
+
+    monkeypatch.setattr(e1_paired_arm, "run_corpus", fake_run)
+    exit_code = e1_paired_arm.main(
+        ["--graph", "g", "--out", str(tmp_path / "off.json")])
+    return exit_code, runs
+
+
+def test_the_paired_arm_refuses_a_denominator_under_the_frozen_floor(
+        monkeypatch, tmp_path, capsys):
+    """12 Objects is not a before-share: the record itself REFUSES that reading.
+
+    E1's bar is a SHARE, and the frozen record floors its denominator at 30
+    Objects (`denominator_floors.e1_objects`, applied by
+    `capstone_measure.e1_outcome`). Emitting the share anyway would hand the
+    next reader a decidable-looking pair out of a run the record calls
+    undecidable — on the metric this PR itself measures as noise-dominated.
+    """
+    exit_code, _ = _run_paired_arm(
+        monkeypatch, tmp_path,
+        object_names=[f"the rail {n}" for n in range(12)])
+
+    assert exit_code == 2
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "12 :Object nodes" in out
+    assert "denominator_floors.e1_objects = 30" in out, (
+        "the refusal must cite the frozen floor it applied, not a bare number")
+    assert not (tmp_path / "off.json").exists(), (
+        "a refused number must leave no artifact behind — a record IS what a "
+        "later reader scores")
+
+
+def test_the_paired_arm_refuses_a_zero_denominator(monkeypatch, tmp_path,
+                                                   capsys):
+    """#9889 acceptance item 2, applied to the arm E1 is actually scored on."""
+    exit_code, _ = _run_paired_arm(monkeypatch, tmp_path, object_names=[])
+
+    assert exit_code == 2
+    out = capsys.readouterr().out
+    assert "no :Object nodes" in out
+    assert "objects=0" in out
+    assert not (tmp_path / "off.json").exists()
+
+
+def test_the_paired_arm_measures_at_the_floor(monkeypatch, tmp_path):
+    """Exactly the floor is a measurement — the refusal must not overreach."""
+    exit_code, runs = _run_paired_arm(
+        monkeypatch, tmp_path,
+        object_names=["the deploy rail", *[f"item {n}" for n in range(29)]])
+
+    assert exit_code == 0
+    assert len(runs) == 1, "one pass over the pre-registered corpus, not two"
+    record = json.loads((tmp_path / "off.json").read_text())
+    assert record["objects"] == 30
+    assert record["bare_definite"] == 1
+    assert record["share"] == 1 / 30
+    assert record["object_floor"] == 30, (
+        "the record must name the floor that gated it, so a reader can see the "
+        "number was produced above one")
+
+
+def test_the_paired_arm_still_reports_a_failed_session(monkeypatch, tmp_path):
+    """A measured-but-failed arm is exit 1, distinct from the floor refusal."""
+    exit_code, _ = _run_paired_arm(
+        monkeypatch, tmp_path,
+        object_names=["the deploy rail", *[f"item {n}" for n in range(29)]],
+        ok=False)
+
+    assert exit_code == 1
+    assert (tmp_path / "off.json").exists()
+
+
+def test_the_paired_arm_refuses_a_keyless_backend_before_the_run(
+        monkeypatch, tmp_path):
+    """`backend_ready` is a precondition of this run, not of `capstone_measure`'s.
+
+    A keyless capture extracts nothing (#3892), so the arm would measure the
+    ABSENCE of a key while printing an OFF share. It must stop before the model
+    call — and before any graph write — rather than one layer down.
+    """
+    import pytest
+
+    with pytest.raises(SystemExit) as caught:
+        _run_paired_arm(
+            monkeypatch, tmp_path,
+            object_names=["the deploy rail"],
+            ready=(False, "DEEPSEEK_API_KEY is not set — a keyless capture "
+                           "extracts nothing"))
+
+    assert "DEEPSEEK_API_KEY" in str(caught.value)
+    assert not (tmp_path / "off.json").exists()
+
+
+def test_the_object_floor_is_read_out_of_the_frozen_record_not_typed(
+        monkeypatch):
+    """A floor typed into the probe is a floor nobody froze."""
+    prereg_path = _REPO / "docs/evidence/7949-capstone/preregistration.json"
+    prereg = json.loads(prereg_path.read_text())
+    moved = json.loads(json.dumps(prereg))
+    moved["denominator_floors"]["e1_objects"] = 42
+    monkeypatch.setattr(e1_paired_arm, "read_preregistration", lambda sha: moved)
+    monkeypatch.setattr(e1_paired_arm, "resolve_head", lambda: "0" * 40)
+
+    assert e1_paired_arm.object_floor() == 42, (
+        "the floor must MOVE with the record — a constant here would let a lane "
+        "move E1's floor by editing the probe instead of the pre-registration")
+    assert prereg["denominator_floors"]["e1_objects"] == 30, (
+        "the frozen floor these cases apply is 30 Objects; if the record moved, "
+        "re-measure rather than re-typing this assertion")
 
 
 # ── e2a_value_units: the frozen denominator and the anchor direction ────────

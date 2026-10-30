@@ -22,7 +22,7 @@ both gaps, plus the numbers they measured. No `tortoise/` file changed.
 
 | probe | the question it answers | falsifier |
 |---|---|---|
-| `probes/e1_paired_arm.py` | what is E1's **before** share on the pre-registered corpus, with the selection passes OFF? | refuses (measures nothing) if any pass switch is already set |
+| `probes/e1_paired_arm.py` | what is E1's **before** share on the pre-registered corpus, with the selection passes OFF? | refuses (measures nothing) if any pass switch is already set, if the backend cannot extract (no key → a measurement of a key's ABSENCE), or — exit 2, writing no record — if the run wrote fewer `:Object` nodes than E1's frozen floor |
 | `probes/e1_gate_drops.py` | does the v4 value-gate predicate drop **any** `^the <X>` Object? (deterministic, zero model calls) | exit 2 if the positive controls stop dropping, or if the graph yields no Object names |
 | `probes/e2a_value_units.py` | how many of the frozen **14** value-bearing planted units STRICTLY survive? | `--inject-anchor` refuses (exit 2) if injecting every lost unit's anchor moves the counter by nothing |
 
@@ -52,6 +52,18 @@ export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n 's/^expo
 uv run python docs/evidence/7949-capstone/probes/e1_paired_arm.py \
     --graph capstone_off_54922a800_$(date +%s) --out /tmp/off-arm.json
 ```
+
+**The share is only emitted above E1's own denominator floor.** E1 scores a
+share, and the frozen record floors that share's denominator at **30** `:Object`
+nodes (`denominator_floors.e1_objects`; criterion E1: "all `:Object` nodes
+written by the run, same arm, same commit"), which is why
+`capstone_measure.e1_outcome` reports `below_floor=True` → `REFUSED` instead of a
+verdict. This probe produces the number that bar is written over, so it reads
+the same floor out of the same pre-registration and applies it: under 30 Objects
+(and at zero, #9889 acceptance item 2) it exits **2** and writes **no record** —
+a below-floor before-share is precisely the decidable-looking pair an undecidable
+run could otherwise hand a reader. Both arms below cleared the floor (78 and 69),
+so their shares are measurements.
 
 Measured (two independent OFF runs, because a single realization cannot show
 whether a difference is the arm or the model):
