@@ -6308,20 +6308,33 @@ def test_live_required_job_runs_only_declared_live_tests():
 def test_test_slow_job_carries_junitxml_manifest_guard():
     """cycle-7 P2-1 (int-1) + Task 9 Step 5: the test-slow legs flip to
     docker with the fast job's exact wiring — (a) the pytest invocation
-    carries --junitxml=/tmp/junit.xml -o junit_family=xunit1 AND -r fEs
-    (never the historical -rfE — pytest 9.1.1 replaces the report set on
-    repeated -r flags, so a trailing -rfE would suppress the skip summary
-    the guard depends on), (b) a manifest-generation step exists BEFORE the
-    pytest step (echoing each leg's ${{ matrix.files }} to
-    ${RUNNER_TEMP}/pytest-files + --collect-only -m 'not track_b' ->
-    /tmp/expected-nodeids.txt), and (c) a skip-guard step gated on rc==0 AND
-    non-empty $FILES runs tools/skip-guard.py with --manifest."""
+    carries --junitxml under the job's own ${RUNNER_TEMP} AND -o
+    junit_family=xunit1 AND -r fEs (never the historical -rfE — pytest 9.1.1
+    replaces the report set on repeated -r flags, so a trailing -rfE would
+    suppress the skip summary the guard depends on), (b) a
+    manifest-generation step exists BEFORE the pytest step (echoing each
+    leg's ${{ matrix.files }} to ${RUNNER_TEMP}/pytest-files + --collect-only
+    -m 'not track_b' -> ${RUNNER_TEMP}/expected-nodeids.txt), and (c) a
+    skip-guard step gated on rc==0 AND non-empty $FILES runs
+    tools/skip-guard.py with --manifest.
+
+    ⛔ THE PATHS ARE PER-JOB (`${RUNNER_TEMP}`), NOT `/tmp`, AND THAT IS PART OF
+    THE CONTRACT (#7815). This pin used to assert the `/tmp/junit.xml` and
+    `/tmp/expected-nodeids.txt` LITERALS; on the self-hosted pool several
+    runner installs share one `/tmp`, so the literals let this guard decide on
+    ANOTHER job's manifest — run 40986966578's `test-track-b` wrote 4 nodeids,
+    its tests passed, and the guard reported 630 absent from a peer's file.
+    Asserting the literal re-opened that clobber. What is pinned now is the
+    invariant: the manifest step and the guard share ONE per-runner path."""
     wf = _load_python_ci()
     steps = wf["jobs"]["test-slow"]["steps"]
     run = next(s for s in steps
                if s.get("name", "").startswith("Run slow test suite"))
     invocation = run["run"]
-    assert "--junitxml=/tmp/junit.xml" in invocation
+    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in invocation
+    assert "/tmp/junit.xml" not in invocation.replace(
+        "${RUNNER_TEMP:-/tmp}/junit.xml", ""), \
+        "test-slow must not write the host-global /tmp/junit.xml (#7815)"
     assert "-o junit_family=xunit1" in invocation
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
@@ -6348,7 +6361,11 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                  if s.get("name", "").startswith("Skip-fail guard"))
     grun = guard["run"]
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in grun
-    assert "--manifest /tmp/expected-nodeids.txt" in grun
+    assert '--manifest "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"' in grun
+    # the guard must read the SAME per-runner manifest/junit the step above wrote
+    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in grun
+    assert '--output "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"' in mrun, \
+        "the manifest step and the skip-fail guard must share ONE path"
     # the slow legs no longer carry carve-out files (E2E-4 owns them)
     # #9539: read the DERIVED legs — the workflow holds no literal rows.
     leg_files = slow_leg_files(load_manifest())
@@ -6551,7 +6568,100 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert (job["strategy"]["matrix"]
             == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
         "the carve-out matrix must come from the selector's carve_matrix output"
-    assert "--junitxml=/tmp/junit.xml" in run["run"]
+    # #7815: per-runner junit, never the host-global literal (a peer job on the
+    # same host wrote /tmp/junit.xml, and this job's skip-guard READS it).
+    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in run["run"]
+
+
+#: The basenames a skip-fail guard DECIDES on. Each is written by one step and
+#: read back by the guard two steps later, so a fixed host-global path lets a
+#: CONCURRENT job substitute its own file and the guard votes on another leg's
+#: evidence. `expected-nodeids.txt` is the manifest the comparison is against;
+#: `junit*.xml` is the observed set it compares.
+_GUARD_DECIDED_BASENAMES = ("expected-nodeids.txt", "junit.xml", "junit-d14.xml")
+
+#: The jobs that emit a coverage manifest and/or feed one to a guard.
+_GUARD_JOBS = (
+    "test", "test-slow", "test-track-b", "test-carve-out",
+    "test-d14-hosted-api", "test-concurrency-falkor",
+)
+
+
+def test_no_leg_decides_on_a_host_global_manifest_or_junit():
+    """#7815: a skip-fail guard must never read a path a peer job can write.
+
+    MEASURED, not hypothesised. On run 40986966578 the `test-track-b` job wrote
+    `emit-manifest: 4 expected nodeids` at 02:57:07, ran its 4 track_b tests
+    green at 02:58:41, and the guard then reported
+
+        ❌ skip-guard failed (coverage manifest, epic #1647):
+           - tests/test_10122_point_name_not_indexed.py::…
+           - tests/test_ci_runner_x64_install.py::…
+        630 expected nodeid(s) absent from the junitxml testcases
+
+    — not one of them a file that job collected. Four jobs in this workflow
+    wrote the ONE host-global `/tmp/expected-nodeids.txt`, and on the
+    self-hosted pool several runner installs share one `/tmp` (#10289: four
+    shards of a single matrix reported `Machine name: 'cmux'`), so whichever
+    job read last got another job's set. The result is a FALSE RED on a
+    required check (`ci-introduced-failure` then blocked the PR as a NEW
+    failure that main's failure-only baseline could not explain), and in the
+    other direction a peer's clean file can HIDE this leg's availability skip.
+
+    The invariant: every manifest/junit path a guard writes or reads resolves
+    under `${RUNNER_TEMP}` (or the job's own `$PYTEST_*` variables derived from
+    it), or is the checked-in frozen manifest. Comment lines are exempt — they
+    are prose, and the blocks above deliberately quote the old literal to
+    explain the defect."""
+    wf = _load_python_ci()
+    offenders: list[str] = []
+    seen_sites = 0
+    for job_name in _GUARD_JOBS:
+        for step in wf["jobs"][job_name]["steps"]:
+            blobs = []
+            if isinstance(step.get("run"), str):
+                blobs.append(step["run"])
+            with_block = step.get("with")
+            if isinstance(with_block, dict) and isinstance(with_block.get("path"), str):
+                blobs.append(with_block["path"])
+            for blob in blobs:
+                # A job MAY alias the per-runner base (`base="$RUNNER_TEMP"`,
+                # the `test` job's publish step) and spell the basenames off
+                # that alias. That is still per-runner — but only because the
+                # alias is defined from `RUNNER_TEMP` in the SAME blob, which
+                # is the second half of the exemption below; an alias with no
+                # such definition is an offender like any other.
+                alias_is_per_runner = any(
+                    line.split("=", 1)[0].strip().endswith("base")
+                    and "RUNNER_TEMP" in line.split("=", 1)[1]
+                    for line in blob.splitlines()
+                    if "=" in line and not line.lstrip().startswith("#"))
+                for line in blob.splitlines():
+                    if line.lstrip().startswith("#"):
+                        continue
+                    for basename in _GUARD_DECIDED_BASENAMES:
+                        start = line.find(basename)
+                        while start != -1:
+                            seen_sites += 1
+                            head = line[max(0, start - 40):start]
+                            per_runner = (
+                                "RUNNER_TEMP" in head or "runner.temp" in head
+                                or "$PYTEST_" in head
+                                or ("$base" in head and alias_is_per_runner)
+                                or "config/ci-expected-nodeids" in line)
+                            if not per_runner:
+                                offenders.append(f"{job_name}: {line.strip()}")
+                            start = line.find(basename, start + 1)
+    assert seen_sites, (
+        "no guard-decided manifest/junit site found in any job — this pin is "
+        "vacuous, so the basenames or the job list have drifted")
+    assert not offenders, (
+        "#7815: a skip-fail guard decides on a path a CONCURRENT job can write. "
+        "Several runner installs on the self-hosted pool share ONE /tmp, so a "
+        "fixed name lets a peer's manifest/junit stand in for this leg's and "
+        "the guard reds (or greens) on evidence belonging to no test it ran. "
+        "Resolve the path under ${RUNNER_TEMP}. Offending sites:\n  "
+        + "\n  ".join(offenders))
 
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────

@@ -1112,11 +1112,20 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 _TAIL_SITE_RE = re.compile(r"^tail\s+-n?\s*\d+\s+(\S+)$")
 #: The per-runner indirection a hardened job writes through, as it appears in a `tail`.
 _RUNNER_TEMP_LOG = "\"$PYTEST_LOG\""
+#: The other per-runner spelling: a job whose log lives in its OWN
+#: `${RUNNER_TEMP}` — #7815 moved `test-slow`, `test-concurrency-falkor`,
+#: `test-track-b`, `test-carve-out` and `test-d14-hosted-api` there, because a
+#: `/tmp` literal is shared between concurrent jobs on a self-hosted runner.
+#: Quoting is preserved from the line it came from, so the `--log <token>`
+#: pairing below compares like with like.
+_RUNNER_TEMP_TMPL_RE = re.compile(
+    r"^\"?\$\{RUNNER_TEMP:-/tmp\}/[^\"\s|]+\.(?:log|xml)\"?$")
 #: A leg may persist its output through `| tee /tmp/x.log` instead of a tail; both are
 #: "this leg keeps a log", so both owe the reporter a call. This one has to SEARCH a
 #: longer command line (the capture sits mid-pipeline, followed by `|| rc=$?`), so it
 #: is not end-anchored — which is why comment lines are filtered out before matching.
-_TEE_SITE_RE = re.compile(r"\|\s*tee\s+(/tmp/[^\s|]+\.log)")
+_TEE_SITE_RE = re.compile(
+    r"\|\s*tee\s+(\"?\$\{RUNNER_TEMP:-/tmp\}/[^\s|]+\.log\"?|/tmp/[^\s|]+\.log)")
 
 
 def capture_site(line: str) -> str | None:
@@ -1145,6 +1154,12 @@ def capture_site(line: str) -> str | None:
         # window assertion below compares this same token (the call is
         # `--log "$PYTEST_LOG"`), so the pairing is checked exactly as it is for
         # a literal `/tmp/*.log`.
+        return target
+    if _RUNNER_TEMP_TMPL_RE.match(target):
+        # The `${RUNNER_TEMP:-/tmp}/<name>` spelling: ALSO per-runner, and the one
+        # every hardened job in this workflow now uses (#7815). Returned verbatim
+        # so the `--log <token>` pairing is the same string comparison as the
+        # literal case.
         return target
     if not (target.startswith("/tmp/") and target.endswith(".log")):
         return None
@@ -1184,9 +1199,9 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
             )
     # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
     # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
-    # `"$PYTEST_LOG"` since #10028, then the three `/tmp/pytest.log` literals
-    # `test-slow` (300), `test-concurrency-falkor` (120) and `test-carve-out` (200) —
-    # plus `trackb.log`,
+    # `"$PYTEST_LOG"` since #10028, then `test-slow` (300),
+    # `test-concurrency-falkor` (120) and `test-carve-out` (200), all three through
+    # `${RUNNER_TEMP:-/tmp}/pytest.log` since #7815 — plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
@@ -1318,7 +1333,16 @@ def _run_step_body(
     shim = bin_dir / "timeout"
     shim.write_text(TIMEOUT_SHIM, encoding="utf-8")
     shim.chmod(0o755)
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        # The step spells its log/junit as `${RUNNER_TEMP:-/tmp}/…` (#7815) and
+        # the body rewrite below sandboxes `/tmp/`. Pin `RUNNER_TEMP` to the
+        # EMPTY string so the `:-` fallback always wins: an ambient value would
+        # aim the step at a real directory while the sandbox is what gets
+        # rewritten, and the file the stub writes would never be the one read.
+        "RUNNER_TEMP": "",
+    }
     return subprocess.run(
         ["bash", "-e", str(script)],
         cwd=REPO,
@@ -1337,7 +1361,7 @@ def _run_step_body(
             WORKFLOW,
             "test-d14-hosted-api",
             "Run the embedded_only marker selection",
-            "/tmp/pytest-d14.log",
+            '"${RUNNER_TEMP:-/tmp}/pytest-d14.log"',
         ),
     ],
     ids=["d14"],
