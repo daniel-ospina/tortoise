@@ -1348,10 +1348,15 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
     `⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS` paragraph that retires it (PR #10244
     review, P3). It said *"every leg writes the SAME global path"*, which stopped being
     true when #10028 migrated the fast matrix and the `test-slow` migration in this PR
-    completed the second job, and #10280 then migrated `test-concurrency-falkor`: 15
-    legs now write `${RUNNER_TEMP}/pytest.log`, while the
-    rest still write a host-global literal. A header claiming the retired premise teaches
-    the opposite of what the code does, in the exact sentence the next lane quotes.
+    completed the second job, and #10280 then migrated the remaining `python-ci.yml`
+    legs: every one of them now resolves its log under `${RUNNER_TEMP}`, so no leg of
+    that workflow writes a host-global literal at all. (No count is stated here on
+    purpose — the split has moved three times and a count in prose is not derived by
+    any pin, so it goes stale silently. Read `_STATED_PER_RUNNER_PYTEST_LOG_SITES` /
+    `_STATED_LITERAL_PYTEST_LOG_SITES` and
+    `test_the_stated_inventory_matches_the_workflows` for the numbers.) A header
+    claiming the retired premise teaches the opposite of what the code does, in the
+    exact sentence the next lane quotes.
 
     ⛔ THE DELIVERED STATE (#7815, PR #10143): Four of the five legs this pin used to
     derive as residuals — `test-concurrency-falkor`, `test-track-b`, `test-carve-out`,
