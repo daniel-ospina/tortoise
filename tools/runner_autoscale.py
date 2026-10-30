@@ -1547,7 +1547,9 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     ⛔ THAT DROP STANDS WHILE THE #6897 MITIGATION IS ENGAGED, and the residual is NAMED rather than
     hidden: the installer can attach `ubuntu-24.04` (`CI_RUNNER_OS_LABEL=on|auto`, #10275), so a
     runner RE-registered by this path loses a pin it legitimately carried. Nothing here re-attaches
-    it — `--repair-labels` does (it KEEPS the class while the flag is `on|auto`) — and `--status`'
+    it — a deliberate `--repair-labels` pass does (with the flag `on|auto` it KEEPS `$OS_LABEL` and
+    DROPS the rest of the family with a `NOT KEPT:` line, `tools/install-ci-runner-x64.sh`) — and
+    `--status`'
     `label-coverage` exit 5 is what makes that gap visible instead of silent.
     """
     host_derived = {"self-hosted", "Linux", "macOS", "Windows", "X64", "ARM64", "ARM"}

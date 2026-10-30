@@ -804,12 +804,12 @@ if [ "$MODE" = status ]; then
             if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) { denom = narm; cls = "arm"; num = na }
             else if (want == fallbacklabel) cls = "fallback"
             else if (want ~ /^ubuntu-[0-9][0-9.]*$/) { denom = nx64; cls = "bare"; num = nx }
-            # ⛔ THE FALLBACK PAIRS THE DENOMINATOR WITH ITS OWN NUMERATOR. When the sub-pool is
-            # empty the denominator becomes the whole pool — so the numerator must widen with it,
-            # or a label carried by a runner OUTSIDE the (measured-empty) sub-pool would read as
-            # `0 of N` and exit 5 on a carrier it had just counted. Both halves stay ONLINE-only, so
-            # the widening can never pull an offline carrier back in as coverage.
-            if (denom == 0) { denom = pool_online; num = n }
+            # ⛔ AN EMPTY SUB-POOL IS THE INCIDENT — NEVER WIDEN THE NUMERATOR TO THE WHOLE POOL. `n`
+            # counts every online carrier, so widening (which this line did until review) counted
+            # foreign-arch runners wrongly carrying the label as coverage — 0 x64 + 5 arm64
+            # carriers read `5 of 5` / rc 0. The numerator stays class-paired: `0 of 0` is honest and
+            # the zero arm above verdicts it. No-op for `fallback`/`other`, where both were already
+            # the whole pool. Pinned by test_label_coverage_never_widens_a_class_numerator_to_foreign_arch_carriers.
             printf "%d %d %s %d %d", num+0, denom+0, cls, offhit+0, total-online }')"
     n="${counts%% *}"
     rest="${counts#* }"
