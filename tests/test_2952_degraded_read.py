@@ -505,18 +505,3 @@ class _LegStub:
             leg_trace.extend(self._entries)
         return []
 
-
-class TestRetrievalLegs:
-    """(C) — the SDK probe: declare the legs, optionally refuse."""
-
-    @pytest.fixture(autouse=True)
-    def _clean_embedder_state(self, monkeypatch):
-        monkeypatch.setattr(EmbeddingModel, "_instance", None, raising=False)
-        monkeypatch.setattr(EmbeddingModel, "_last_failed_at", None, raising=False)
-        monkeypatch.setattr(EmbeddingModel, "_last_error", None, raising=False)
-
-
-
-
-
-

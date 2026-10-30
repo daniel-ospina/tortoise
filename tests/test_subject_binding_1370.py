@@ -758,17 +758,6 @@ _SLOTS_PAYLOAD = {
     "operators": [], "chain_notes": [], "link_before_create": [],
 }
 
-
-class _SlotsMock:
-    """Offline v2 extractor stand-in that emits participant slots (#1370)."""
-
-    def complete(self, *, system: str, user: str,
-                 max_tokens: int | None = None) -> str:
-        if "STORY SUMMARIZER" in system:
-            return "The session revealed a team decision."
-        return json.dumps(_SLOTS_PAYLOAD)
-
-
 #: A foreign-namespace entity/slot (T2): neither the entity nor the slot may
 #: become a Subject, and the binder must refuse it.
 _FOREIGN_KIND_PAYLOAD = {
@@ -803,21 +792,6 @@ _CASE_PAYLOAD = {
     }],
     "operators": [], "chain_notes": [], "link_before_create": [],
 }
-
-
-class TestCaptureSeam:
-    @pytest.fixture(autouse=True)
-    def _slots_extractor(self, monkeypatch):
-        import tortoise.sdk as sdk_mod
-        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-        monkeypatch.setattr(sdk_mod, "_V2SessionMock", _SlotsMock)
-
-
-
-
-
-
-
 
 # ══════════════════════════════════════════════════════════════════════════
 # D. Audit tooling + quality gate

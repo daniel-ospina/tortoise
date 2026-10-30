@@ -12,11 +12,23 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: I001
+import pytest
 
 from tortoise.domain_loader import known_kinds, register_kind  # noqa: F401
 from tortoise.sdk import TortoiseSDK
 
+
+def _corrects_into(sdk, point_id: str) -> list:
+    """CORRECTS edges pointing AT `point_id`, read directly.
+
+    `sdk.traverse(...)` was deleted by #4282 and these pins only ever used it as
+    a READER, so the same query is inlined rather than the coverage dropped.
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id})-[r:CORRECTS]->(m:Point) RETURN m.id",
+        params={"id": point_id},
+    ).result_set
+    return [{"id": r[0]} for r in rows]
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -420,6 +432,86 @@ class TestInvalidateSupersede:
         new = _make_point(sdk, content="new")
         with pytest.raises(ValueError, match="No point"):
             sdk.supersede_point("missing-old", new["id"])
+
+    def test_invalidate_sets_outdated_and_corrects_edge(self, sdk):
+        old = _make_point(sdk, content="old claim")
+        new = _make_point(sdk, content="new claim")
+        result = sdk.invalidate_point(old["id"], new["id"])
+        assert result["invalidated"] is True
+        assert result["id"] == old["id"]
+        assert result["corrected_by"] == new["id"]
+        # Verify outdated flag persisted
+        old_after = sdk.get_point(old["id"])
+        assert old_after["outdated"] is True
+        # Verify CORRECTS edge exists (traverse outgoing from new)
+        corrected = _corrects_into(sdk, new["id"])
+        assert len(corrected) == 1
+        assert corrected[0]["id"] == old["id"]
+
+    def test_invalidate_missing_old_is_false(self, sdk):
+        # #330: invalidate_point must not report success for a missing old point
+        new = _make_point(sdk, content="new")
+        result = sdk.invalidate_point("missing-old", new["id"])
+        assert result["invalidated"] is False
+        assert result["id"] == "missing-old"
+        assert result["corrected_by"] == new["id"]
+        # No CORRECTS edge was created
+        corrected = _corrects_into(sdk, new["id"])
+        assert len(corrected) == 0
+
+    def test_invalidate_self_raises(self, sdk):
+        # #330: a self-CORRECTS edge poisons traversal/credibility — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.invalidate_point(old["id"], old["id"])
+        assert not sdk.get_point(old["id"]).get("outdated")
+        assert len(_corrects_into(sdk, old["id"])) == 0
+
+    def test_supersede_idempotent_corrects_edge(self, sdk):
+        # #432: repeated supersede is an illegal transition (superseded is
+        # terminal). The CORRECTS edge from the first call is still unique.
+        old = _make_point(sdk, content="old-sup")
+        new = _make_point(sdk, content="new-sup")
+        sdk.supersede_point(old["id"], new["id"])
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.supersede_point(old["id"], new["id"])
+        corrected = _corrects_into(sdk, new["id"])
+        assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
+
+    def test_invalidate_idempotent_corrects_edge(self, sdk):
+        # #330: re-invalidating the same pair must not duplicate CORRECTS.
+        # #2498: the repeat is now an ILLEGAL transition — the shared lifecycle
+        # guard treats the `outdated=true` flag invalidate just wrote as
+        # terminal, so the second call raises instead of re-asserting. The old
+        # #330 re-assert moved `expiredAt` forward and MERGEd one CORRECTS edge
+        # per distinct corrector onto a node every read surface already
+        # excludes. The first call's CORRECTS edge stays unique.
+        old = _make_point(sdk, content="old")
+        new = _make_point(sdk, content="new")
+        r1 = sdk.invalidate_point(old["id"], new["id"])
+        assert r1["invalidated"] is True
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.invalidate_point(old["id"], new["id"])
+        corrected = _corrects_into(sdk, new["id"])
+        assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
+
+    def test_supersede_missing_new_raises(self, sdk):
+        # #547: missing new point would orphan an outdated old — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.supersede_point(old["id"], "missing-new")
+        # Old point must NOT be marked outdated (no partial write)
+        assert not sdk.get_point(old["id"]).get("outdated")
+        # No CORRECTS edge
+        assert len(_corrects_into(sdk, old["id"])) == 0
+
+    def test_supersede_self_raises(self, sdk):
+        # #547: a self-CORRECTS edge poisons traversal — must raise
+        old = _make_point(sdk, content="old")
+        with pytest.raises(ValueError):
+            sdk.supersede_point(old["id"], old["id"])
+        assert not sdk.get_point(old["id"]).get("outdated")
+        assert len(_corrects_into(sdk, old["id"])) == 0
 
 
 class TestClose:

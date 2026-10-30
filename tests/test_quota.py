@@ -397,20 +397,6 @@ class TestNonePreservation:
 
 
 # ── #947 (epic #909 slice 2): sessions branch + is_episodic + constants ──
-
-class TestSessionsQuota:
-    """#947 P0: the sessions branch counts Session nodes, NOT all nodes.
-
-    Pre-fix ``_count_resource("sessions")`` fell through to ``MATCH (n)`` —
-    ~25 nodes per captured session → false 402 after ~40 captures. #4010: the
-    stored ``t.max_sessions`` is no longer honoured as a cap (sessions are
-    unlimited for every tier), so the same fixture that used to gate the 41st
-    capture now stores it — the #947 count property is unchanged.
-    """
-
-
-
-
 # ── #1726 Slice 1: documents resource (derived-constant cap) ─────
 
 class TestDocumentsQuota:

@@ -225,63 +225,6 @@ class TestCaller2SummaryEnforcerGate:
 
 
 
-
-class TestCaller2SdkV1GateOutage:
-    """#5339 review round 2 (P1) — the v1 sibling of the outage guard.
-
-    ``_commit_session_v1`` resolved ``_installed_namespaces_for_gate``
-    OUTSIDE any error handling, so the same bound-but-unreachable graph that
-    raised out of ``_commit_session_v2`` also raised out of the public
-    ``commit_session`` on BOTH v1 routes (a direct ``summary=`` and
-    ``extractor="v1"``). The base (``9c4788400``) had no resolver call in v1
-    at all, so this is a regression introduced by the #5339 fix, not a
-    pre-existing hole.
-
-    Fail-closed, same as v2: record the failure and return BEFORE the
-    extraction/validation that would need the gate, so the result is a
-    structured ``ok=False`` and nothing is POSTed. ``installed = None`` would
-    mean NO gate (the catalog union) and silently admit another pack's kinds,
-    so the guard must never degrade to it.
-
-    FAIL-ON: the resolver raise escapes both v1 routes.
-    REACHABLE: the graph handle IS bound (a real SDK), and the resolver is
-    patched to raise exactly as an unreachable graph does.
-    """
-
-    @staticmethod
-    def _outage_sdk(tmp_path):
-        from tortoise.sdk import TortoiseSDK
-        return TortoiseSDK(db_path=str(tmp_path / "g5339_v1.db"),
-                           namespace="test_g5339_v1")
-
-    @staticmethod
-    def _unreachable(monkeypatch):
-        import tortoise.pack_state as ps_mod
-
-        def _raise(*a, **k):
-            raise RuntimeError("graph unreachable (simulated outage)")
-        monkeypatch.setattr(ps_mod, "graph_installed_namespaces", _raise)
-
-    @staticmethod
-    def _no_post(monkeypatch):
-        from tortoise import sdk as sdk_mod
-        posted = []
-        monkeypatch.setattr(sdk_mod, "_post_commit",
-                            lambda *a, **k: posted.append(a) or {"ok": True})
-        return posted
-
-    def _assert_structured_outage(self, out, posted):
-        assert isinstance(out, dict), out
-        assert out["ok"] is False, out
-        assert any("gate resolution failed" in e for e in out["errors"]), \
-            out["errors"]
-        # Fail-CLOSED: the union fallback would have admitted this payload
-        # and reached the POST.
-        assert posted == [], "an unreadable gate must not POST a payload"
-
-
-
-
 class TestCaller2SdkV2GateOutage:
     """#5339 review (P2) — a graph outage must not RAISE out of the SDK's
     client-side Layer-1 pre-check, and must not WIDEN the gate either.

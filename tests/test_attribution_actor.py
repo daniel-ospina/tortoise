@@ -562,16 +562,3 @@ class TestMcpToolSweepStripActor:
 # GraphEvent keeps A; writer B's identical content dedup-hits the canonical
 # and emits NOTHING (no second PointAdded with B). This survives even if a
 # hosted capture event leg is dropped (the plan's escape-hatch precision).
-
-class TestTwoActorDedupSdkLane:
-    """Two writers, one shared claim — first writer's event keeps the actor;
-    the second write returns the canonical and emits no B event."""
-
-    def _graph_events(self, sdk, type_: str):
-        import json
-        rows = sdk._get_proj().g.query(
-            "MATCH (e:GraphEvent {type:$t}) RETURN e.payload ORDER BY e.seq",
-            params={"t": type_}).result_set
-        return [json.loads(r[0]) for r in rows]
-
-

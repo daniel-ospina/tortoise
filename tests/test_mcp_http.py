@@ -562,6 +562,54 @@ class TestTortoiseHealthTruth:
             assert "no_sdk_registered" not in str(result)
             assert isinstance(result.get("graph_size"), int)
 
+    def test_tortoise_health_probes_team_graph_not_registry(self, tmp_path,
+                                                             monkeypatch):
+        """The tool's db/graph_size come from the SERVED team graph — probing
+        the registry namespace would auto-create/report a different graph
+        (#669 discipline: health probes never open the registry namespace).
+        Seed one point as the team, then assert graph_size reflects it."""
+        from tortoise.mcp_server import create_http_app
+
+        # Deterministic embedded env (mirrors the quota fixtures): the team
+        # graph lives on this DB, so graph_size is asserted against the same
+        # store the request-scoped SDK serves.
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "health.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.org_create("health-truth-team")
+        reg._get_proj().g.query(
+        "MATCH (t:Team {id:$id}) SET t.max_points = 1000",
+        params={"id": team["id"]})
+        key = reg.apikey_create(team["id"], "h")["api_key"]
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            # Seed through the served surface (create_point resolves the same
+            # team SDK the health probe uses).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/call",
+                                     "params": {"name": "tortoise_create_point",
+                                                "arguments": {"kind": "statement",
+                                                              "content": "health-truth seed"}}})
+            assert r.status_code == 200, r.text
+            assert "error" not in str(body), body
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/call",
+                                     "params": {"name": "tortoise_health",
+                                                "arguments": {}}})
+            assert r.status_code == 200, r.text
+            result = self._tool_result(body)
+            assert result.get("status") == "ok", body
+            assert result.get("graph_size") >= 1, body
+
 
 # ── GET /mcp metadata ───────────────────────────────────────────────────────
 
