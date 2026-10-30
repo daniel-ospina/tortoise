@@ -3602,17 +3602,20 @@ _VERSION_PIN_LABEL_ROWS = frozenset({25, 26})
 def _version_pin_comment_sites() -> dict[str, str]:
     """The two comment blocks that describe the version-pin DROP, found by their own anchors.
 
-    Located by CONTENT, never by line: this file has been re-derived numerically four times, and a
-    pin keyed on a number reports the move instead of the defect.
+    Located by CONTENT, never by line: the tool file has been re-derived numerically four times,
+    and a pin keyed on a number reports the move instead of the defect.
     """
     lines = (REPO_ROOT / "tools" / "runner_autoscale.py").read_text().splitlines()
 
     head = next((i for i, ln in enumerate(lines) if "`ubuntu-24.04`-shaped labels" in ln), None)
     assert head is not None, (
-        "`VERSION_PINNED_HOSTED_LABEL`'s comment lost its `ubuntu-24.04`-shaped` opener — re-anchor "
+        "`VERSION_PINNED_HOSTED_LABEL`'s comment lost its `ubuntu-24.04`-shaped opener — re-anchor "
         "this pin rather than deleting it"
     )
-    const = next((i for i in range(head, len(lines)) if lines[i].startswith("VERSION_PINNED_HOSTED_LABEL")), None)
+    const = next(
+        (i for i in range(head, len(lines)) if lines[i].startswith("VERSION_PINNED_HOSTED_LABEL")),
+        None,
+    )
     assert const is not None, "`VERSION_PINNED_HOSTED_LABEL` itself is gone — re-anchor this pin"
 
     fn = next((i for i, ln in enumerate(lines) if ln.startswith("def _preserve_labels(")), None)
