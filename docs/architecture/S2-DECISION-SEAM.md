@@ -356,11 +356,10 @@ above the 39,484 B / 23,292 B the row carried before, which is what makes the tw
 comparable rather than merely newer. ⚠️ The single figure this sentence carried until round 8 of
 PR #10302's review was the VET cell's and false for the classify cell — a reproduction claim has to
 bound what was measured, cell by cell. ⚠️ The **token** cells of that earlier row
-(`9,265` / `6,112`) are NOT reproducible
-and are not a baseline: a re-count of the same request gives `9,103` / `6,594`, and the
-byte difference (60 B / 40 B) is an order of magnitude too small to explain the gap, so
-those two cells are superseded — every percentage below is derived from the measured
-pair above.
+(`9,265` / `6,112`) are NOT reproducible and are not a baseline: a re-count of the same
+request gives `9,103` / `6,594`, and the byte difference (60 B / 40 B) is an order of
+magnitude too small to explain the gap, so those two cells are superseded — every
+percentage below is derived from the measured pair above.
 
 The framing itself is therefore **+10,460 B / +2,120 tok (+23% of tokens)** on `vet-v2`
 and **+5,230 B / +1,080 tok (+16% of tokens)** on `classify-v2` (as BYTES those deltas are +26.5%

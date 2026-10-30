@@ -1191,6 +1191,7 @@ untrusted block cannot certify itself" had nothing proving it bites. The positio
 predicate (`_position_gaps`), used by the real payload assertion and by a rebuilt mutant that leaves
 every question framed and appends the clause to a `state` element: the wording guard reports nothing
 and only position reds. Measured both ways, restored `diff`-identically.
+
 ## 2026-10-30 (round 8) — the reproduction tolerance covered one cell, not both, and a guard comment overstated its reach (`#10077`)
 
 Three claim-accuracy defects from the next fresh-context review of PR #10302, all in the §7 pass the
@@ -1213,8 +1214,8 @@ superseded `\$0.00039` cell the same section declares is "never … a comparison
 measured pair.
 
 **A guard comment claimed coverage the pattern did not have.** `_V1_FIGURE`'s comment said its "unit
-alternation" covered the CHANGELOG's `50,004 B ≈ 11,223` / `input
-tokens` wrap. There was no alternation: the pattern was `\s+tok(?:en)?s?\b`, that pair did not
+alternation" covered the CHANGELOG's `50,004 B ≈ 11,223` / `input tokens` wrap — the pair the
+CHANGELOG publishes by wrapping it mid-figure. There was no alternation: the pattern was `\s+tok(?:en)?s?\b`, that pair did not
 match, and it sat outside the legacy-figure guard where a hand-edited token shipped green. The unit
 group is now `\s+(?:input\s+)?tok(?:en)?s?\b`, and the test asserts the widened form both matches
 that wrap and flags an edit under it — a comment that overstates its reach is the failure this guard
