@@ -5744,7 +5744,7 @@ def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
 
     The env is asserted through `_effective_step_env` (job + step, merged per
     step) and additionally, at STEP scope alone, by
-    `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate` —
+    `test_the_changes_job_carries_no_job_scope_env` —
     job scope is barred by the capstone pin; the emitter set is DISCOVERED from
     the run commands rather than named, so a THIRD emitter added later cannot
     silently miss the lever either.
@@ -5767,7 +5767,7 @@ def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
         f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
 
 
-def test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate():
+def test_the_changes_job_carries_no_job_scope_env():
     """#10186 review ISSUE 1 (blocking): the lever may NOT live at JOB scope.
 
     `changes` also owns the capstone pre-registration gate step, and
@@ -5789,6 +5789,16 @@ def test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate():
     Non-vacuous: at `3eaf43fda` the job carried
     `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
     assertions below fail on that tree.
+
+    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:448`
+    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1590`)
+    both send an operator here by name, and both advertised
+    `test_the_changes_job_carries_no_job_scope_env` while the function carried a
+    longer, unrelated name — so `pytest -k test_the_changes_job_carries_no_job_scope_env`
+    collected ZERO tests and its green "no tests ran" read as confirmation
+    (#10186 review, FINDING 1). Renamed to the name the documents already
+    advertise; `test_every_test_name_the_runbook_names_exists` in
+    `tests/test_ci_runner_x64_install.py` now keeps the two in sync.
     """
     from tests.test_capstone_preregistration_9075 import _SAFE_JOB_ENV
 

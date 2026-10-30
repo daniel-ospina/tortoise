@@ -1890,6 +1890,9 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
         226: r"A foreign arch marker",
         235: r'answers "who answers this `runs-on:` label"',
         346: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
+        # so a future shift of that sentence reds here instead of leaving the quotation adrift.
+        448: r"test_the_changes_job_carries_no_job_scope_env",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -1927,6 +1930,140 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
     assert not wrong, (
         "this file quotes the runbook but cites a line range that does not say it — re-derive the "
         "number from the runbook at this head: " + "; ".join(wrong)
+    )
+
+
+# ── 8g. the TEST NAMES the runbook advertises must exist ─────────────────────────────────
+_RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+)")
+
+
+def test_every_test_name_the_runbook_names_exists():
+    """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
+
+    `docs/ops/ci-runner-x64.md:448` told the operator the job-scope lever is a red check
+    "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
+    that name existed in the tree (the guard was
+    `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
+    runbook→installer pins above check SYMBOLS in the installer, and no pin resolved a TEST name.
+    So `pytest -k test_the_changes_job_carries_no_job_scope_env` collected **zero** tests and its
+    green "no tests ran" is exactly what an operator reads as "the rule is enforced" (#10186
+    review, FINDING 1 — the same relay-accuracy class, one surface out).
+
+    Resolved against the AST rather than by collection: a name that is defined (or a class that
+    holds it) passes, and a name that moved, was renamed, or never existed reds with the real
+    names the file does define. Both directions are pinned — a reference to a missing FILE reds too.
+
+    Non-vacuity: with the pre-fix runbook text (`test_the_changes_job_carries_no_job_scope_env`
+    against the pre-rename module) this reds with `NAME-MISSING`.
+    """
+    import ast
+
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    refs = sorted(set(_RUNBOOK_TEST_REF.findall(doc)))
+    assert refs, (
+        "the runbook no longer names a test — re-anchor this pin rather than deleting it; a pin "
+        "over an empty reference set checks nothing"
+    )
+
+    defined: dict[str, set[str]] = {}
+    missing: list[str] = []
+    for rel, name in refs:
+        path = REPO_ROOT / rel
+        if rel not in defined:
+            if not path.exists():
+                defined[rel] = set()
+            else:
+                tree = ast.parse(path.read_text(), filename=rel)
+                defined[rel] = {
+                    node.name
+                    for node in ast.walk(tree)
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                }
+        if name not in defined[rel]:
+            near = sorted(n for n in defined[rel] if name[:24] in n or n[:24] in name)
+            missing.append(f"{rel}::{name}" + (f" (did you mean {near}?)" if near else ""))
+
+    assert not missing, (
+        "the runbook sends an operator to a test that does not exist — a `-k` filter over a phantom "
+        "name collects zero tests and reads as confirmation. Rename the test to the advertised "
+        "name (or fix the citation): " + "; ".join(missing)
+    )
+
+
+# ── 8h. `tools/` citations INTO the runbook ────────────────────────────────────────────────
+_TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_autoscale.py")
+
+# cited landing line -> a regex the cited line (or range) must match, i.e. the sentence the
+# citing comment names. Keyed by the runbook line the citation must point at at THIS head.
+_TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
+    13: r"^# x86_64 CI runners",
+    25: r"`ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted only\*\*",
+    67: r"deliberately \*\*do not\*\* claim any `ubuntu-<version>` label",
+}
+
+
+def test_every_tools_citation_into_the_runbook_lands_on_what_it_names():
+    """⛔ THE RUNBOOK'S OWN EDIT BROKE TWO `tools/` CITATIONS AND NOTHING REDDED.
+
+    This file's citations into the runbook are pinned (8e above), and so is the runbook→installer
+    direction — but the `tools/*` → runbook direction had no pin at all, so when the ARM64/X64
+    bullet grew the runbook by six lines, `tools/install-ci-runner-x64.sh:299` and
+    `tools/runner_autoscale.py:31` kept citing `:61` for the "these runners deliberately **do not**
+    claim any `ubuntu-<version>` label" rule while `:61` had become the `--fallback auto` paragraph
+    (the sentence moved to `:67`). Both citations were CORRECT on `main` and wrong at this head —
+    which is precisely why the numbers are pinned by CONTENT here and not trusted (#10186 review,
+    FINDING 2).
+
+    Three arms, all two-way: every fully-qualified citation in those files must be a landing line
+    this pin knows (a new citation reds until it is anchored), every anchor must still be cited (a
+    pin quietly shrunk to nothing reds), and each citation must land on the sentence it names — the
+    failure message reports the line where that sentence actually is, so re-anchoring is mechanical.
+
+    Known residual, stated rather than hidden: the runbook shorthand `` `:33-34` `` that follows a
+    fully-qualified citation in the same sentence is NOT scanned (a bare `:NN` is ambiguous in a
+    file that also cites installer lines by number).
+
+    Non-vacuity: on the pre-fix number (`:61` in both files) this reds twice, naming `:67`.
+    """
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+    ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
+
+    cited: dict[tuple[str, int], int] = {}
+    for rel in _TOOLS_CITING_THE_RUNBOOK:
+        lines = (REPO_ROOT / rel).read_text().splitlines()
+        for i, line in enumerate(lines):
+            for m in ref.finditer(line):
+                start = int(m.group(1))
+                cited[(f"{rel}:{i + 1}", start)] = int(m.group(2) or start)
+    assert cited, (
+        "no `tools/` file cites the runbook any more — re-anchor this pin rather than deleting it"
+    )
+
+    unknown = sorted({start for _, start in cited} - _TOOLS_RUNBOOK_ANCHORS.keys())
+    assert not unknown, (
+        "a `tools/` citation points at a runbook line this pin does not anchor — read that line, "
+        f"re-derive the number, and add it to `_TOOLS_RUNBOOK_ANCHORS`: {unknown}"
+    )
+    stale = sorted(_TOOLS_RUNBOOK_ANCHORS.keys() - {start for _, start in cited})
+    assert not stale, (
+        "this pin anchors runbook line(s) nothing in `tools/` cites any more — a pin over refs "
+        f"that were re-worded or removed is pinning nothing: {stale}"
+    )
+
+    wrong: list[str] = []
+    for (where, start), end in sorted(cited.items()):
+        assert 1 <= start <= end <= len(doc), (
+            f"{where} cites docs/ops/ci-runner-x64.md:{start}-{end}, past EOF ({len(doc)} lines)"
+        )
+        text = "\n".join(doc[start - 1:end])
+        if not re.search(_TOOLS_RUNBOOK_ANCHORS[start], text):
+            actual = [
+                i + 1 for i, line in enumerate(doc) if re.search(_TOOLS_RUNBOOK_ANCHORS[start], line)
+            ]
+            wrong.append(f"{where} cites :{start} but that is {text.strip()!r} (the sentence is at {actual})")
+    assert not wrong, (
+        "a `tools/` comment sends a reader to a runbook line that does not say what the comment "
+        "claims — re-derive the number from the runbook at this head: " + "; ".join(wrong)
     )
 
 

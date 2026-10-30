@@ -459,14 +459,14 @@ Naming both labels is the only shape that routes: `self-hosted-x64` alone matche
 must satisfy EVERY label in `runs-on`), and `[self-hosted, self-hosted-x64]` matches only these x64
 runners, which carry both. What that costs is exactly the trade the rule refuses:
 
-* **No hosted half on those four legs.** With the gate in `fallback_off` (the normal state on a
+- **No hosted half on those four legs.** With the gate in `fallback_off` (the normal state on a
   healthy day), or the box simply down, a `self-hosted` pin does not degrade to anything — it
   WAITS. `test (b)`, `(d)`, `(f)`, `(h)` sit `queued`/`pending` with no GitHub-hosted runner able to
   answer them, so `python-ci-gate` stays pending and the PR does not merge until the pool is back.
   This is what turns "the pool is slower" (residual 2 above) into "the gate is blocked": measured
   2026-10-27..30, three pool legs were killed at their own watchdogs while hosted legs finished in
   10-12 m of a 20 m budget (the table above).
-* **The even rows keep the opposite residual.** `ubuntu-latest` is answered by GitHub-hosted *or* by
+- **The even rows keep the opposite residual.** `ubuntu-latest` is answered by GitHub-hosted *or* by
   the pool while the gate carries the fallback label, so a pool runner can take an even shard:
   `test (i)` — the canary — was taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s in run
   `40986603502`. Neither half is class-safe in either mode; that is why the split is off.
