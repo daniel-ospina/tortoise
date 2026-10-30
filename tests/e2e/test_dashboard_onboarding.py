@@ -1702,7 +1702,7 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     # never see it (see `_wait_until`). The wait is for "at least one"; the
     # EXACTLY ONCE pin is the assert below, so a double fetch still reds.
     _wait_until(lambda: cap["capabilities"] > 0, page=page, timeout_ms=10_000,
-                message="the registry catalog fetch from the fork card")
+                message="the registry catalog fetch from the fork card")  # a PUMPED poll only needs CI-load margin
     assert cap["capabilities"] == 1, (
         "#2004 (W8): the registry catalog must be fetched exactly once, from the "
         f"fork card — observed {cap['capabilities']}")
@@ -1712,8 +1712,13 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
     # #2763: the fetch is once per session and the gate no longer names the
     # connect step at all — advancing past the card must not add a request.
-    assert cap["capabilities"] == 1, \
-        f"#2004 (W8): the registry catalog must be fetched exactly once, from the fork card: {cap['capabilities']}"
+    # This is the SECOND half of the exactly-once pin, so its message names the
+    # stage: the failure that red-ed 2963b8a44 was at THIS card's fetch, and a
+    # message that cannot say which stage was checked sends the next reader back
+    # to the wrong end of the test (it reported `False`, i.e. neither 0 nor 2).
+    assert cap["capabilities"] == 1, (
+        "#2004 (W8): advancing past the fork card must NOT add a registry fetch — "
+        f"the journey must carry exactly one, observed {cap['capabilities']}")
     # #3913: the fork is the ONLY checkpoint the dashboard writes. The old
     # assertion here was the opposite — it required the catalog-presented mark;
     # that write is deleted, so the meaningful pin is now its ABSENCE, and the
