@@ -6831,11 +6831,6 @@ from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
 from tortoise.projection.propagation import _PropagationMixin  # noqa: E402
 # #2795: cycle-free derived-hash helper for the PointRevised replay writer.
 from tortoise.ids import content_hash as _content_hash  # noqa: E402
-# #8864 review P2: the replay models below must materialise the SAME
-# Object/Subject carrier set the graph does, including the name-STUBs a
-# mention mints, so they read the stub id from the ONE generator the fold
-# uses (`entities._entity_name_id`, #7936) rather than re-deriving it.
-from tortoise.ids import entity_name_id as _entity_name_id  # noqa: E402
 
 # #244: Event FTS index migration (subject-only → subject+name) is tracked by a
 # persisted DB marker (Meta node 'event_fts_v2'), not a process-local flag — a
@@ -7693,25 +7688,31 @@ _ENTITY_CREATION_EVENT_LABEL: dict[str, str] = {
     "SubjectAdded": "Subject",
     "EventRecorded": "Event",
 }
-#: The labels whose graph fold MERGEs the NODE by ``name``
-#: (``_upsert_object`` / ``_upsert_subject``), so a second registration of ONE
-#: name under a fresh id RE-IDS the matched node(s) and the earlier id stops
-#: existing. ``Event`` is absent: ``_upsert_event`` MERGEs on its id
-#: (``eventId``), so it never collapses. This is the MERGE-by-name SUBSET of
-#: the node table :func:`journal_epistemic_existence` simulates: that table
-#: covers every ``_EPISTEMIC_BOUNDARY_LABELS`` label, but only these two key
-#: their MERGE on ``name`` (the others key it on ``id``/``eventId``, so they
-#: never collapse a second node). ``journal_object_surviving_keys`` models
-#: the SAME key choice for Object ALONE, mapping each name to the SET of ids
-#: carrying it: a registration of a name with 2+ carriers ADDS a carrier
-#: rather than evicting the earlier one (#8864 — the graph stops keying on a
-#: shared name). It is a bounded sibling, NOT the same collapse in general.
-#: ``consistency._NAME_MERGE_LABELS``
-#: declares the set for the state-op guard. Kept local (not imported from
-#: ``consistency``, which already imports this module) so the belief boundary
-#: does not reach upward. The two declarations are pinned equal by
+#: The labels whose CREATION RECORD carries a mutable ``name``
+#: (``ObjectRegistered`` / ``SubjectAdded``). ⛔ It is NOT a merge key: since
+#: #3590 ``_upsert_object`` / ``_upsert_subject`` MERGE the NODE on the record's
+#: own ``id`` UNCONDITIONALLY, so a second registration of one name under a
+#: fresh id keeps BOTH nodes — nothing is re-id'd and no earlier id stops
+#: existing. This comment used to declare the opposite (a name-MERGE that
+#: re-ids the matched node, evading that only once a name was shared, #8864),
+#: and two read-side models were built on it: ``journal_object_surviving_keys``
+#: evicted the earlier carrier and reported a live id as dead, and
+#: ``consistency._fold_journal_entities`` refused a state op on it as a
+#: non-exempt ``state-op-miss`` — both the fail-CLOSED direction, on graphs the
+#: fold itself keeps green (#3590 review F1).
+#:
+#: What the set still decides HERE: whether the record's ``name`` gates the
+#: node's materialization at all — the ``name``-writability early-return below,
+#: because ``_upsert_*`` returns BEFORE the MERGE when the name is not
+#: ``_writable_id``-writable, so the record creates NO node.
+#: ``consistency._NAME_MERGE_LABELS`` declares the same set for the reference
+#: fold (its own comment already states the name is not a merge key, and it
+#: keeps the pre-#3590 constant NAME for its emitted bounds); the two are pinned
+#: equal by
 #: ``tests/test_rebuild_parity_fail_loud_3585.py::
 #: TestReferenceFoldEntityLabelSetHasOneHome::test_the_name_merge_label_sets_have_one_home``.
+#: Kept local (not imported from ``consistency``, which already imports this
+#: module) so the belief boundary does not reach upward.
 _NAME_KEYED_ENTITY_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 #: The labels the belief fold can target — ``tortoise.live.EPISTEMIC_LABELS``.
 #: That name is imported ABOVE this literal in this module, and the pin is a
@@ -7764,8 +7765,14 @@ _ENTITY_MUTATION_OPS: tuple[str, ...] = (
     "delete", "rename", "restatus", "revise", "supersede",  # fold arms exist
     "retract",                                       # recorded on #3299 — no arm yet
 )
-# FOLD capability, not producer reach: the `rename` arm is implemented and must
-# stay so, but the PRODUCER deliberately does not emit `rename` yet — see
+# FOLD capability, not producer reach. ⚠️ #3590 CHANGED THE PRODUCER HALF: the
+# SDK's `_update_entity` rename branch now EMITS `rename`, because a minted id
+# made a rename journalable (`EntityMutated op=rename` on the stable id) where
+# the derived name-id had to withhold it. So the historical note below is
+# HISTORY, not current state — the producer does emit `rename`.
+#
+# Historical (pre-#3590): the arm was implemented and had to stay so, while the
+# PRODUCER deliberately did not emit `rename` — it was withheld by
 # `sdk._update_entity`'s `name` branch. The arm applies `state`, so a raw/legacy
 # or future `rename` record folds ONLY if it carries the new name as
 # `state["name"]`; a record carrying just a top-level `name` unfolds and is
@@ -8144,67 +8151,6 @@ def _creation_entity_id_from_record(t: str, ev: dict):
     return ev.get(_ENTITY_ID_PROP[label])
 
 
-def _event_mentioned_name_stubs(ev: dict) -> list[tuple[str, str]]:
-    """``(label, name)`` for every name-STUB an ``EventRecorded`` record MINTS.
-
-    The replay models that simulate the Object/Subject carrier table
-    (:func:`journal_epistemic_existence`, :func:`journal_object_surviving_keys`)
-    read registrations — ``ObjectRegistered`` / ``SubjectAdded`` plus
-    ``EntityMutated`` renames. ``_event_plain_merge`` is a SECOND,
-    registration-free carrier source that runs on replay too: a mention's
-    ``subject``, ``object`` (unless ``objectType`` is ``Document``, which mints
-    a ``:Source`` instead) and every ``uses[]`` name MERGE a stub by NAME with
-    a DETERMINISTIC id (``entity_name_id(label, name)``, #7936) written
-    ``ON CREATE`` only. So the stub appears iff NO node already carries the
-    name, and nothing else in the carrier table moves.
-
-    ⛔ Why the models cannot skip them since #8864: the MERGE-key branch is
-    decided by the CARRIER COUNT (``_name_holder_count`` in
-    ``projection/entities.py``), so a carrier they cannot see can put them on
-    the OPPOSITE branch from every real graph — a name whose only visible
-    carrier is a registration takes the name-keyed (collapsing) branch in the
-    model while the graph, holding a stub as well, keys by id and moves
-    nothing. The model then reports an id BURIED that the graph keeps, i.e. it
-    refuses a fold ``rebuild_all`` performs: the fail-CLOSED direction these
-    readers exist to avoid. Measured on the pre-fix models (the reproduction in
-    ``tests/test_8864_shared_name_merge_key.py``): mention ``Acme`` → ``X``
-    renamed to ``Acme`` → register ``Acme`` ⇒ graph keeps both carriers, model
-    buried ``X``.
-
-    Read exactly as the fold reads it: the nested ``{event: {...}}`` shape and
-    the flat one both work, an absent/empty name mints nothing
-    (``_writable_id``), and a non-dict ``uses[]`` item is ``str()``-coerced
-    into a name — the same three spellings ``_event_plain_merge`` accepts.
-
-    ⚠️ KNOWN RESIDUAL — the SAME class, not closed here: ``edges._mint_subject_stub``
-    is a third registration-free Subject carrier source (it MERGEs the stub by
-    name with ``id=$name``) and it runs on replay for an about*/participatesIn
-    link whose Subject endpoint did not resolve (``resolve_structural_target``,
-    ``wire_about_link``). Its carrier set depends on the link-resolution fold
-    rather than on an event field, so modelling it is a separate change (#8914).
-    A Subject name carried by one registration plus one such stub can therefore
-    still put :func:`journal_epistemic_existence` on the collapsing branch while
-    the graph keys by id.
-    """
-    inner = ev.get("event")
-    inner = inner if isinstance(inner, dict) else ev
-    out: list[tuple[str, str]] = []
-    if _writable_id(inner.get("subject")):
-        out.append(("Subject", inner["subject"]))
-    if ((inner.get("objectType") or "") != "Document"
-            and _writable_id(inner.get("object"))):
-        out.append(("Object", inner["object"]))
-    uses = inner.get("uses")
-    if isinstance(uses, (str, dict)):
-        uses = [uses]
-    if isinstance(uses, (list, tuple)):
-        for use in uses:
-            nm = use.get("name", "") if isinstance(use, dict) else str(use)
-            if _writable_id(nm):
-                out.append(("Object", nm))
-    return out
-
-
 def journal_first_materialization(events) -> dict[tuple[str, str], int]:
     """The FIRST journal seq at which the replay MATERIALIZES each entity.
 
@@ -8349,10 +8295,10 @@ def journal_epistemic_existence(events) -> dict:
     reports a single first-materialization seq, so a re-creation (or a
     collapse-driven burial) leaves them disagreeing. For the NAME-keyed labels
     (Object, Subject) the disagreement is structural: ``_upsert_object`` /
-    ``_upsert_subject`` MERGE the NODE by ``name`` while a name identifies
-    exactly ONE carrier, and by the record's own ``id`` once it is carried by
-    TWO OR MORE (#8864, ``_name_holder_count``) — so a shared name no longer
-    re-ids anything, and the node table is many-to-many either way: no
+    ``_upsert_subject`` MERGE the NODE by the record's own ``id`` (#3590 — the
+    name key is gone for every name, where #8864 had already stopped it being a
+    key once a name was carried by TWO OR MORE) — so a shared name never re-ids
+    anything, and the node table is many-to-many either way: no
     id-keyed map can answer existence. Every one of the four epistemic labels
     is therefore
     modelled by SIMULATING the graph's node table (``nodes`` below) and
@@ -8600,69 +8546,23 @@ def journal_epistemic_existence(events) -> dict:
                 if label in _NAME_KEYED_ENTITY_LABELS:
                     name = ev.get("name")
                     # `_upsert_object`/`_upsert_subject` early-return before
-                    # the MERGE when the name is not a writable MERGE key, so
-                    # the record materializes NO node — do not open an
-                    # incarnation the graph fold never created.
+                    # the MERGE when the name is not writable, so the record
+                    # materializes NO node — do not open an incarnation the
+                    # graph fold never created.
                     if not _writable_id(name):
                         continue
-                    # `MERGE (n:L {name:$name}) ON MATCH SET n.id=$eid` — the
-                    # MERGE matches EVERY node already carrying this name and
-                    # the SET re-ids ALL of them; with no match it creates ONE
-                    # node. Modelling that 1:many is the whole point (see
-                    # `nodes`).
-                    #
-                    # #8864: that is the SINGLE-carrier shape only. Once a
-                    # name is carried by 2+ nodes the graph stops keying on it
-                    # at all (`_name_holder_count` in `projection/entities.py`
-                    # picks the record's own ``id`` instead), because a
-                    # name-MERGE over several carriers stamped ONE id onto ALL
-                    # of them. The id-keyed MERGE matches at most the node
-                    # already carrying ``eid``, and its `ON MATCH` writes only
-                    # the id (the name is `ON CREATE`), so NOTHING moves.
-                    name_matches = list(by_name.get((label, name), ()))
-                    if len(name_matches) > 1:
-                        # #8864: the record's own id IS the key, so this
-                        # registration neither re-ids nor renames an existing
-                        # carrier — it folds into the node that already
-                        # carries ``eid``, or creates ONE new node.
-                        if not by_id.get((label, eid)):
-                            was_live = _id_live(label, eid)
-                            _track(label, _Node(eid, eid, name))
-                            _note_presence(label, eid, seq, was_live)
-                    elif name_matches:
-                        matches = name_matches
-                        affected = {n.id for n in matches
-                                    if isinstance(n.id, str)}
-                        affected.add(eid)
-                        was = {k: _id_live(label, k) for k in affected}
-                        for n in matches:
-                            #: name-keyed labels key BOTH coordinates on `id`.
-                            _reindex(label, n, by_eid, n.eid, eid)
-                            n.eid = eid
-                            _reindex(label, n, by_id, n.id, eid)
-                            n.id = eid
-                        for k in affected:
-                            _note_presence(label, k, seq, was[k])
-                    else:
+                    # #3590: the MERGE key is the record's own `id` — one node
+                    # per id, always. A record whose id is already tracked folds
+                    # onto that node (the name is a property, never a key), so
+                    # nothing moves; otherwise it creates exactly ONE node. The
+                    # #8864 dual-key branch this replaces existed only because a
+                    # NAME-DERIVED id made several carriers share one name.
+                    if not by_id.get((label, eid)):
                         was_live = _id_live(label, eid)
                         _track(label, _Node(eid, eid, name))
                         _note_presence(label, eid, seq, was_live)
                 else:
                     _seed_merge_key(label, eid, seq)
-                    if t == "EventRecorded":
-                        # #8864 review P2: this record ALSO mints
-                        # Object/Subject name-STUBs, and those carriers decide
-                        # the MERGE-key branch. See
-                        # :func:`_event_mentioned_name_stubs`.
-                        for stub_label, stub_name in _event_mentioned_name_stubs(ev):
-                            if by_name.get((stub_label, stub_name)):
-                                # `MERGE … {name:$name}` matched: the id is
-                                # written `ON CREATE` only, so nothing moves.
-                                continue
-                            stub = _entity_name_id(stub_label, stub_name)
-                            was_live = _id_live(stub_label, stub)
-                            _track(stub_label, _Node(stub, stub, stub_name))
-                            _note_presence(stub_label, stub, seq, was_live)
         elif t == "EntityMutated" and ev.get("op") == "delete":
             rid = ev.get("id")
             if not isinstance(rid, str):
@@ -8885,17 +8785,19 @@ def journal_object_surviving_keys(
     the Point/Operator leg of `journal_first_materialization`; it additionally
     accounts for the sweep's position after the deletes.
 
-    The Object graph MERGEs by NAME (`_upsert_object`) while that name has ONE
-    carrier, and by the record's own `id` once it has TWO OR MORE (#8864,
-    `_name_holder_count`): a name-MERGE over several carriers stamped one id
-    onto all of them, so a shared name stopped being a key at all. The model
-    therefore maps each name to the SET of ids carrying it, and a registration
-    of a shared name ADDS a carrier instead of replacing the earlier one — a
-    1:1 carrier would report the surviving ids as dead and refuse a supersede
-    `rebuild_all` folds (the fail-CLOSED direction, which is the one error this
-    guard must never make). A delete removes the id that actually carries the
-    node (`_delete_entity_by_id`), so a delete naming a superseded-away id is a
-    no-op here too.
+    The Object graph MERGEs by the record's own `id` (`_upsert_object`, #3590:
+    the name key is retired for every name), so a registration NEVER collapses
+    a node: a second registration of ONE name opens a SECOND live node and the
+    earlier id still addresses its own. The model therefore maps each name to
+    the SET of ids carrying it and ADDS on every registration — a registration
+    that replaced the earlier carrier would report a surviving id as dead and
+    refuse a supersede `rebuild_all` folds (the fail-CLOSED direction, which is
+    the one error this guard must never make). ⛔ ADD-ON-ANY-COUNT, not
+    add-only-when-shared (#3590 review F1): the 0-or-1-carrier arm used to
+    evict the earlier id, which is the pre-#3590 name-MERGE model and made the
+    map say `{B}` for a graph holding `{A, B}`. A delete removes the id that
+    actually carries the node (`_delete_entity_by_id`), so a delete naming a
+    superseded-away id is a no-op here too.
     """
     name_to_ids: dict[str, set[str]] = {}
     id_to_name: dict[str, str] = {}
@@ -8920,41 +8822,37 @@ def journal_object_surviving_keys(
             if not (isinstance(oid, str) and oid
                     and isinstance(name, str) and name):
                 continue
-            carriers = name_to_ids.setdefault(name, set())
-            if len(carriers) > 1:
-                # #8864: the name is SHARED, so this registration keys on the
-                # record's own id — it folds into the node already carrying
-                # `oid` (whose `ON MATCH` writes only the id) or opens ONE new
-                # carrier. No existing carrier is re-id'd away.
-                if oid not in id_to_name:
-                    carriers.add(oid)
-                    id_to_name[oid] = name
-                continue
-            old = next(iter(carriers), None)
-            if old is not None and old != oid:
-                id_to_name.pop(old, None)
-                carriers.discard(old)
-            carriers.add(oid)
+            # ⛔ NO EVICTION, on ANY carrier count (#3590 review F1).
+            # `_upsert_object` MERGEs the node on the record's own `id`
+            # unconditionally (`merge_key = "id"`), so a second registration of
+            # one name opens a SECOND live node while the earlier id keeps
+            # addressing its own. This arm used to evict the earlier id whenever
+            # the name had 0-or-1 carriers — the pre-#3590 name-MERGE model —
+            # so a journal `[Reg(A, N), Reg(B, N)]` reported `{B}` for a graph
+            # holding `{A, B}`: the `ObjectSuperseded` end-state gate then
+            # called A dead and recorded a NON-exempt `object-superseded-miss`
+            # (so `rebuild` / `recover_from_log` raise) while `rebuild_all`'s
+            # sweep and the graph both fold it — one journal, two dispositions
+            # (R8), in the fail-CLOSED direction this map exists to avoid.
+            # `consistency._fold_journal_entities` already carries the same
+            # add-never-evict rule for its own carrier index; this is the third
+            # model of one fold and it must agree with them.
+            name_to_ids.setdefault(name, set()).add(oid)
             id_to_name[oid] = name
         elif t == "EventRecorded":
-            # #8864 review P2: the SECOND carrier source, and it runs on replay
-            # too — a mention's `object` / `uses[]` name MERGEs a name-stub
-            # (`_event_plain_merge`) whose id exists `ON CREATE` only. Skipping
-            # it made this model undercount the carriers that decide the
-            # MERGE-key branch and report a live carrier as dead (see
-            # :func:`_event_mentioned_name_stubs`).
-            for stub_label, stub_name in _event_mentioned_name_stubs(ev):
-                if stub_label != "Object":
-                    continue
-                carriers = name_to_ids.setdefault(stub_name, set())
-                if carriers:
-                    continue
-                stub = _entity_name_id("Object", stub_name)
-                carriers.add(stub)
-                # A node already carrying this id keeps its own name bookkeeping
-                # (`id_to_name` is 1:1); the duplicate-id shape is a graph
-                # defect this reader does not model, not one it may raise on.
-                id_to_name.setdefault(stub, stub_name)
+            # #3590: `_event_plain_merge` no longer MINTS Object/Subject name
+            # stubs for a mention — the fold RESOLVES the name and, when it
+            # resolves to no live holder, drops the link and records the exempt
+            # `unfolded-mention`. ⛔ NOT because the door registers the names:
+            # since D1 (RULED 2026-10-26) the door mints nothing for a mention
+            # either ("an unresolvable mention drops its link, records the
+            # miss, and mints nothing"), so a claim that it does is a reason
+            # that stopped being true (#9876 review P2). The conclusion stands
+            # on the fold's resolve-only arm: this record contributes NO Object
+            # carrier of its own. (The one surviving name-keyed mint is
+            # `aboutSubject`'s `_mint_subject_stub`, #8914 — the `about` leg,
+            # not this one.)
+            pass
         elif t == "EntityMutated":
             rid, label = ev.get("id"), ev.get("label")
             if not isinstance(rid, str):
@@ -9029,9 +8927,9 @@ def journal_object_established(events) -> JournalObjectEstablished:
     to the separately-carried ``supersede-target-deleted`` bound and must keep
     refusing here. So this reads the positive sources alone and never subtracts.
 
-    THREE name sources, and all three are required — each one is a route by
-    which a name reaches the Object MERGE key, so missing any of them would
-    exempt a supersede the journal COULD have addressed:
+    TWO name sources, and both are required — each one is a route by which a
+    name reaches the Object MERGE key, so missing either would exempt a
+    supersede the journal COULD have addressed:
 
     * ``ObjectRegistered`` — the obvious one.
     * an ``EntityMutated`` **state op** — the fold applies ``SET n += $state``,
@@ -9040,33 +8938,43 @@ def journal_object_established(events) -> JournalObjectEstablished:
       key"). Without it a rename-produced name looked unestablished,
       ``rebuild_all`` exempted a record ``rebuild()`` folded, and the supersede
       was silently lost (#10107 review P1).
-    * an ``EventRecorded`` **mention stub** — ``_event_plain_merge`` MERGEs an
-      Object by that name. It is not a *registration* (a mention does not
-      create an entity, #3590 D1), which is why it is counted here as an
-      ADDRESS rather than as an entity, and not reusing the sibling's carrier
-      model was a scope error (#10107 review P2): once such a stub was deleted,
-      a name-only supersede of it was exempted as "never established" while
-      ``main`` refused.
+
+    ⛔ A THIRD name source — an ``EventRecorded`` mention stub — was counted
+    here and is now DELETED by #3590 (`_event_plain_merge` no longer MERGEs an
+    Object by a mention's name; the fold never mints, D9), so an
+    ``EventRecorded`` establishes NO Object name and NO deterministic stub id.
+    Counting it would exempt a supersede of a carrier the journal never created,
+    against a graph that folds nothing — the fail-open this oracle exists to
+    keep closed. #10107 review P2 added it when it WAS a real address; the
+    source's removal is what retires it. The ``:Subject`` stub mint survives in
+    ``edges._mint_subject_stub`` and is a different label — it cannot reach an
+    Object MERGE key.
+
+    A pre-`#3590` journal DOES carry such stubs (the retired fold minted them),
+    so for those journals this oracle no longer counts an address the old graph
+    had. That is deliberate and bounded: the fold cannot recreate those
+    carriers, so a supersede of one is not addressable on replay either — the
+    loss is the retired-mint class carried by the `unfolded-mention` exemption,
+    not a missing registration.
 
     The ``ids`` half is the second limb of the same question: a record that
     carries an id the journal established IS addressable, even if the name it
     also carries is one nothing established (a collapsed-away carrier, #5285
     cycle-4 FIX 2) — so such a record must keep refusing rather than being
-    exempted on the name alone (#10107 review P1). Its THREE id sources mirror
-    the name sources for the same reason — each is a route by which the id
-    reaches a live node, so missing one exempts a supersede the journal COULD
-    have addressed:
+    exempted on the name alone (#10107 review P1). Its id sources mirror the
+    name sources for the same reason — each is a route by which the id reaches a
+    live node, so missing one exempts a supersede the journal COULD have
+    addressed:
 
     * ``ObjectRegistered``'s ``id``.
-    * an ``EventRecorded`` mention stub's DETERMINISTIC id —
-      ``_event_plain_merge`` writes it ``ON CREATE``, and a later registration
-      re-ids that node, so the stub id is addressable at the stub's own seq
-      (#10107 review P1).
-    * an ``EntityMutated`` state op's TARGET ``id`` — the record names an
-      Object the journal could address by id, so referring to that id is not
+    * an ``EntityMutated`` state op's TARGET ``id`` — the record names an Object
+      the journal could address by id, so referring to that id is not
       "established by nothing". Counting only the state-op NAME exempted a
-      supersede carrying the id of the very object the journal had just
-      mutated (#10107 review round 6).
+      supersede carrying the id of the very object the journal had just mutated
+      (#10107 review round 6).
+
+    ⛔ The ``EventRecorded`` mention-stub id is retired with the name source
+    above (same #3590 cause).
     """
     names: set[str] = set()
     ids: set[str] = set()
@@ -9097,19 +9005,14 @@ def journal_object_established(events) -> JournalObjectEstablished:
             state = ev.get("state")
             name = state.get("name") if isinstance(state, dict) else None
         elif t == "EventRecorded":
-            for stub_label, stub in _event_mentioned_name_stubs(ev):
-                if stub_label != "Object" or not stub:
-                    continue
-                names.add(stub)
-                # The stub's DETERMINISTIC id is established too, not just the
-                # name: `_event_plain_merge` writes it `ON CREATE`, so a record
-                # carrying that id IS addressable (the same id
-                # `journal_object_surviving_keys` counts as a carrier). Missing
-                # it exempted a record `rebuild()` folds — one journal, two
-                # graphs, opposite verdicts (#10107 review P1).
-                stub_id = _entity_name_id("Object", stub)
-                if isinstance(stub_id, str) and stub_id:
-                    ids.add(stub_id)
+            # ⛔ #3590: the OBJECT mention-stub source is GONE. `_event_plain_merge`
+            # no longer MERGEs an Object by a mention's name (the fold never
+            # mints — a fold-time mint is not replay-deterministic, D9), so an
+            # `EventRecorded` establishes NO Object name and NO deterministic
+            # stub id. Counting it here would exempt a supersede of a carrier
+            # the journal never created, against a graph that folds nothing.
+            # (The `:Subject` stub mint survives in `edges._mint_subject_stub`
+            # and is a different label — it cannot reach an Object MERGE key.)
             continue
         else:
             continue
@@ -12299,14 +12202,28 @@ class FalkorProjection(
             # REFUSAL only, and for the refusal the JOURNAL-END key is the
             # right predicate: `rebuild_all` does fold it, so refusing here
             # would be a false refusal.
+            #
+            # ⛔ #3590: `_survives` reads the ID limb ONLY. Both surviving
+            # halves used to suppress the refusal, which was correct while the
+            # fold had a name branch (`MATCH (o:Object {name:$name})`) — a
+            # surviving NAME then really was a target `rebuild_all` would fold.
+            # That branch is RETIRED: `_fold_object_superseded` now issues
+            # `MATCH (o:Object {id:$id})` and nothing else, so a name-only
+            # record misses on EVERY engine, including `rebuild_all`'s sweep.
+            # Counting the name as "the sweep will fold it" made the three
+            # engines disagree on ONE journal — measured on
+            # `[ObjectRegistered(obj-5285-a, TERM), ObjectSuperseded(name=TERM)
+            # ×2]`: `rebuild_all` raised `NonFoldedEventsError`
+            # (`object-superseded-miss`, the name WAS established) while
+            # `rebuild(log)` and `recover_from_log` finished GREEN with the
+            # Object still `live`. R8 requires one journal → one disposition.
+            # A surviving name is no longer evidence of anything: the record
+            # carries no address the fold can use.
             folded, _ = self._fold_object_superseded(ev)
             if folded == 0 and journal_object_surviving is not None:
-                _cids, _cnames = journal_object_surviving
+                _cids, _ = journal_object_surviving
                 _oid, _oname = ev.get("id"), ev.get("name")
-                _survives = (
-                    (isinstance(_oid, str) and _oid in _cids)
-                    or (isinstance(_oname, str) and bool(_oname)
-                        and _oname in _cnames))
+                _survives = isinstance(_oid, str) and _oid in _cids
                 _deleted = (isinstance(_oid, str)
                             and journal_object_deleted is not None
                             and _oid in journal_object_deleted)

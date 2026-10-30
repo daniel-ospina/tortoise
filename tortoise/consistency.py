@@ -56,7 +56,6 @@ from .exceptions import UnrepresentableNumberError
 
 # #8864 review P1: the stub carrier's id is the SHARED deterministic mint
 # (`_event_plain_merge` / `_upsert_object` both use it), never a re-derivation.
-from .ids import entity_name_id
 from .projection import (
     _CANONICAL_ENTITY_LABELS,
     _ENTITY_ID_PROP,
@@ -66,7 +65,6 @@ from .projection import (
     _annotator_value_ok,
     _apply_one,
     _creation_entity_id_from_record,
-    _event_mentioned_name_stubs,
     _hard_deleted_any,
     _journal_forward_reference,
     _load_prewipe_snapshot,
@@ -1732,11 +1730,13 @@ def _fold_journal(events: list[dict], retracted_out: dict | None = None) -> dict
 #     a presence comparison there would be a false positive by construction.
 #   * Only `status` is compared, not `name` — `#3574`'s ``name[:200]``
 #     truncation is a known journal/graph asymmetry.
-#   * Object/Subject PRESENCE is resolved by NAME as well as id, because the
-#     graph MERGEs those labels by name (`_upsert_object`/`_upsert_subject`):
-#     two journal registrations of one name under different ids are ONE node
-#     carrying the LAST id, and an id-only key would report the older one
-#     `absent-from-graph` on a correctly-replayed graph.
+#   * Object/Subject PRESENCE is compared by ID, and by id ONLY: since #3590
+#     `_upsert_object`/`_upsert_subject` MERGE on the record's own `id`, so two
+#     journal registrations of one name under different ids are TWO nodes and a
+#     journal id has exactly one carrier. The name fallback that used to sit
+#     here — justified by the `name`-keyed MERGE those writers no longer issue —
+#     is RETIRED; `_compare_entities` records the false-GREEN it produced, and
+#     an id absent from the graph is ABSENT, with no name standing in for it.
 #   * A name-only `ObjectSuperseded` (no id, >1 carrier) leaves the object's
 #     status AMBIGUOUS: the fold's own resolution is heuristic, so those
 #     objects' STATUS leg is excluded from the comparison — PRESENCE is still
@@ -1841,16 +1841,20 @@ _ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
 #: `_ENTITY_CREATION` above, so adding a row here cannot leave the two folds
 #: disagreeing silently.
 _ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
-#: Labels whose graph fold MERGEs the NODE by `name` (`_upsert_object` /
-#: `_upsert_subject`). A second registration of ONE name under a fresh id
-#: therefore COLLAPSES the node onto the LAST id, and a state op naming the
-#: collapsed-away id folds 0 rows there (`MATCH (n:$label {id:$rid})`). An
-#: id-keyed label (`Event`) never collapses, so it is absent. This is the
-#: DECLARATION for the name-resolution leg, the state-op guard below, and the
-#: emitted `name_keyed`/`identity` bounds —
-#: `journal_object_surviving_keys` is deliberately Object-only (it models
-#: `_upsert_object` alone) and `_graph_entities` indexes EVERY label, so
-#: neither can share this constant without changing what it means.
+#: Labels that CARRY a `name` as a mutable natural key (R2), and so are the
+#: labels whose registrations the carrier index tracks by name. ⚠️ `name` is
+#: **not** their MERGE key: since #3590 `_upsert_object` / `_upsert_subject`
+#: MERGE on the record's own `id`, so a second registration of ONE name under a
+#: fresh id creates a SECOND node and NOTHING collapses. What the name still
+#: decides is whether a node is written AT ALL (the writers early-return on a
+#: name that fails `_writable_id`), which is why the carrier index is keyed on
+#: it and why `no_node_ids` is a name-keyed question. An id-keyed label with no
+#: such property (`Event`) is absent. This is the DECLARATION for the
+#: name-resolution leg, the state-op guard below, and the emitted
+#: `name_keyed`/`identity` bounds — `journal_object_surviving_keys` is
+#: deliberately Object-only (it models `_upsert_object` alone) and
+#: `_graph_entities` indexes EVERY label, so neither can share this constant
+#: without changing what it means.
 _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 
 #: The labels whose ``status`` the COMPARISON decides. ``Event`` carries
@@ -1929,6 +1933,11 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # `rebuild_all`'s sweep folds the LAST incarnation (a false `content`
     # divergence on a correct journal). Deferring EVERY supersede subsumes the
     # forward-reference case and removes the second path that kept drifting.
+    # ⛔ #3590: only the ID half is read. The NAMES half fed the retired
+    # name-keyed supersede resolution (and the `_stub_hit` arm); the fold is
+    # now `MATCH (o:Object {id:$id})` on every surface, so a surviving NAME is
+    # not evidence that any engine could fold the record. Named `_` rather than
+    # dropped so the sibling oracle's pair stays unpacked in ONE place.
     surviving_ids, _surviving_names = journal_object_surviving_keys(events)
     # #3590 D2: the journal's OWN addressability oracle — the sibling of the
     # surviving-keys pair, and the third surface `classify_terminalizer_miss`
@@ -1946,12 +1955,14 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # The seq of the last `status`-writing state op per entity, so the
     # trailing sweep honours `rebuild_all`'s #4743 ordering.
     last_status_seq: dict = {}
-    # #5285 (DEFECT 1): the ids CURRENTLY carrying each name-MERGE key, built
-    # as the walk proceeds. Since the graph MERGEs Object/Subject by NAME under
-    # the LAST registration's id, a state op folds there iff its id is a live
-    # carrier AT ITS OWN SEQ — the journal-END `surviving_ids` key set is the
-    # wrong question for an INLINE state op (an id that was the carrier early
-    # and collapsed away later genuinely folded at that earlier point). Keyed by
+    # #5285 (DEFECT 1): the ids CURRENTLY carrying each name, built as the walk
+    # proceeds. ⚠️ Since #3590 this is NOT a MERGE-collapse model — an id-keyed
+    # MERGE keeps every carrier — it is the SEQ-AWARE table the state-op guard
+    # consults, together with `no_node_ids` (a name failing `_writable_id`
+    # writes no node at all). A state op folds iff its id is a live carrier AT
+    # ITS OWN SEQ: the journal-END `surviving_ids` key set is the wrong question
+    # for an INLINE state op (an id that was the carrier early and was renamed
+    # or deleted away later genuinely folded at that earlier point). Keyed by
     # ``(label, name)`` because Object and Subject MERGE in SEPARATE spaces, so
     # a shared name must not alias one label's carrier onto the other. The value
     # is a SET, not a single id: a RENAME `SET`s the name property in place, so
@@ -1961,35 +1972,28 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     # disagreement with the graph fold in the fail-CLOSED direction, the one
     # error this guard must never make.
     carriers_by_name: dict[tuple[str, str], set] = {}
-    # #10157: the mention-stub carrier ids, per Object NAME — the SAME ids the
-    # seeding below lands in `carriers_by_name`, kept under their own name
-    # because the trailing supersede sweep has to ask "does an Object NODE
-    # carry this name?". A stub is a node the GRAPH has and the ENTITY model
-    # deliberately does not (#3590 D1: a mention creates no entity), so
-    # `_object_target` — which resolves from `entities` — cannot see it and
-    # recorded `object-superseded-miss` for a journal `rebuild_all` folds. Two
-    # halves of one classification reading two carrier tables is exactly the
-    # split the seeding comment below warns about; this is the second half's
-    # view of the first half's table.
-    #
-    # ⛔ BOTH limbs are needed. The graph's `_fold_object_superseded` matches
-    # `MATCH (o:Object {id:$id})` FIRST and consults the name only when the id
-    # branch bound 0 rows (entities.py), so a record carrying a stub's id
-    # alongside an unestablished name folds there by ID. Keying the resolution
-    # on the name alone refused exactly that record — the same "counting the
-    # address without teaching the resolver to reach it" defect in the other
-    # limb, found by review at the head this comment was written on.
-    mention_stub_carriers: dict[str, set] = {}
-    mention_stub_ids: set = set()
-    # #5285 cycle-6: the GRAPH's MERGE key per id — `_upsert_object` /
-    # `_upsert_subject` MERGE on `name` ALONE, and an empty name is skipped by
-    # `_writable_id` (no node is created), so `title` is NEVER a merge key. The
-    # display name below legitimately falls back to `title` for PARITY, but the
-    # carrier index must not: keying it on the display name let a title-only
+    # ⛔ #3590: the `mention_stub_carriers` / `mention_stub_ids` tables that
+    # used to live here are GONE, together with the `_stub_hit` arm that read
+    # them. They modelled the retired fold's Object mention STUB (a node
+    # `_event_plain_merge` MERGEed by the mention's name, `ON CREATE` id = that
+    # name) so the trailing supersede sweep could keep a journal the graph
+    # folded out of the refusal report. `_event_plain_merge` no longer mints an
+    # Object stub (D9: the fold never mints — a fold-time mint is not
+    # replay-deterministic) and `_fold_object_superseded` is id-keyed, so
+    # nothing populated either table and nothing could reach the arm. A
+    # never-populated table is worse than an absent one: it reads as live
+    # protection for the #10157/#5285 shapes while protecting nothing.
+    # #5285 cycle-6: the NAME each id was registered under — since #3590 the
+    # writers MERGE on `id`, but they still early-return on a `name` that fails
+    # `_writable_id` (no node is created), and `title` is NEVER that name. So
+    # this table answers "which name gates this id's node, and is it a name the
+    # graph actually carries", never "what is this id's MERGE key". The display
+    # name below legitimately falls back to `title` for PARITY, but the carrier
+    # index must not: keying it on the display name let a title-only
     # registration EVICT the live carrier of the real node, and the state-op
     # guard then falsely refused `state-op-miss` a journal all three replay
-    # engines fold (review round 6, P1). An id with no merge key recorded here
-    # has no graph node this fold can model, so the guard stays fail-OPEN for it.
+    # engines fold (review round 6, P1). An id with no name recorded here has no
+    # graph node this fold can model, so the guard stays fail-OPEN for it.
     merge_key_by_id: dict[tuple[str, str], str] = {}
     # #5285 cycle-7: ids whose journal CREATION produced NO graph node at all,
     # because `_writable_id` skips an empty / non-writable MERGE key. The graph's
@@ -2013,55 +2017,57 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
         or every LATER zero-carrier supersede of a once-ambiguous name is
         silently exempted — passing a journal `rebuild_all` refuses.
 
-        #5285 cycle-3: a `status != "superseded"` predicate here gated
-        # target EXISTENCE, not just the ambiguity decision. The graph
-        fold matches a name-only supersede on NAME and re-folds
-        UNCONDITIONALLY (`_fold_object_superseded`, `cas=False`), so a SINGLE
-        carrier is resolvable whether or not it is already terminal: a SECOND
-        name-only supersede of a once-superseded name is a 1-row fold there,
-        never a miss. Filtering terminal carriers out made the carrier list
-        empty, so the reference fold held the second supersede `pending` and
-        flushed it as `object-superseded-miss` — a false refusal of a journal
-        all three replay engines accept (and a `divergence="non-folded"` on a
-        correct graph). The predicate now gates only the >1-carrier ambiguity
-        decision: `EXISTENCE` is "any carrier at all", and one already-terminal
-        carrier resolves.
+        ⛔ #3590: this resolves by ID ONLY, mirroring the query the graph fold
+        actually issues — ``MATCH (o:Object {id:$id})`` and nothing else. The
+        name branch of ``_fold_object_superseded`` is RETIRED, so a name-keyed
+        resolution here *invented* a target no engine folds and the two halves
+        of one classification disagreed on the same journal. Measured on
+        ``[ObjectRegistered(obj-5285-a, TERM), ObjectSuperseded(name=TERM)]``:
+        the graph engines refuse (``object-superseded-miss``) while this fold
+        resolved the name, wrote ``status='superseded'`` into the ENTITY model,
+        and reported a bogus ``content`` divergence against the correct graph.
+        R8's contract is one journal -> one disposition on every surface.
+
+        #5285 cycle-4 (FIX 2) still applies to the ID limb: two ids sharing a
+        name collapse into ONE node carrying the LAST id, so
+        ``MATCH (o:Object {id:$oid})`` folds 0 rows for the collapsed-away id
+        and every replay engine REFUSES. A bare ``entities`` membership test
+        recorded NO miss (the collapsed-away id is still in the reference
+        index), so ``check_consistency`` passed a journal the graph refuses —
+        the fail-open this lane exists to remove. An id is a live carrier only
+        when it SURVIVES to the journal's end (the same key set the apply
+        engines' refusal gate reads).
+
+        The name is read in the NO-ID arm ONLY to report the >1-carrier
+        ambiguity, never to resolve a target: an id-less record is
+        unaddressable on every engine (the D2 exemption or the
+        ``object-superseded-miss`` refusal, decided by
+        ``_supersede_name_unregistered``), so resolving it here would be the
+        same false fold in the other direction.
         """
-        if (isinstance(oid, str) and ("Object", oid) in entities
-                and oid in surviving_ids):
-            # #5285 cycle-4 (FIX 2): the graph MERGEs Objects by NAME, so two
-            # ids sharing a name collapse into ONE node carrying the LAST id —
-            # `MATCH (o:Object {id:$oid})` then folds 0 rows for the
-            # collapsed-away id and every replay engine REFUSES
-            # (`object-superseded-miss`). A bare `entities` membership test
-            # recorded NO miss (the collapsed-away id is still in the
-            # reference index), so `check_consistency` passed a journal the
-            # graph refuses — the fail-open this lane exists to remove. An id
-            # is a live carrier only when it is the SURVIVING id for its name
-            # (the same journal-end key set the apply engines' refusal gate
-            # reads); otherwise fall through to the name branch / miss path.
-            return ("Object", oid), False
-        if isinstance(oname, str) and oname:
-            # #5285 (DEFECT 2): read the ONCE-built `name -> [keys]` index
-            # instead of rescanning ALL of `entities` on EVERY call. The scan
-            # was O(len(entities)) PER SUPERSEDE, so a journal of N name-only
-            # supersedes cost O(N^2) (measured: 4000 supersedes = 17.5s, 8000 =
-            # 61.7s) — a denial of service on this very health gate. The index
-            # preserves the scan's EXACT semantics: same membership, same
-            # `entities` insertion order, and it is built only after the walk,
-            # so nothing mutates underneath it.
-            carriers = object_keys_by_name.get(oname, [])
-            if len(carriers) == 1:
-                return carriers[0], False
-            if len(carriers) > 1:
-                # More than one carrier for one MERGE key is the ambiguity the
-                # status leg reports — but exactly ONE still-live carrier is
-                # the only one a supersede could still claim, so it resolves.
-                live = [k for k in carriers
-                        if entities[k].get("status") != "superseded"]
-                if len(live) == 1:
-                    return live[0], False
-                return None, True
+        if isinstance(oid, str) and oid:
+            if ("Object", oid) in entities and oid in surviving_ids:
+                return ("Object", oid), False
+            # A stale / absent / collapsed-away id is a MISS, never a name
+            # re-resolution: the graph fold does not consult the name either.
+            return None, False
+        # #5285 (DEFECT 2): read the ONCE-built `name -> [keys]` index instead
+        # of rescanning ALL of `entities` on EVERY call. The scan was
+        # O(len(entities)) PER SUPERSEDE, so a journal of N name-only supersedes
+        # cost O(N^2) (measured: 4000 supersedes = 17.5s, 8000 = 61.7s) — a
+        # denial of service on this very health gate. The index preserves the
+        # scan's EXACT semantics: same membership, same `entities` insertion
+        # order, and it is built only after the walk, so nothing mutates
+        # underneath it.
+        carriers = (object_keys_by_name.get(oname, [])
+                    if isinstance(oname, str) and oname else [])
+        if len(carriers) > 1:
+            # #5285 cycle-3: `status != "superseded"` gates the >1-carrier
+            # AMBIGUITY decision only (exactly one still-live carrier is the
+            # only one a fold could claim), never target EXISTENCE.
+            live = [k for k in carriers
+                    if entities[k].get("status") != "superseded"]
+            return None, len(live) != 1
         return None, False
 
     def _object_hard_deleted(oid) -> bool:
@@ -2121,10 +2127,11 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                       or default_status)
             if isinstance(status, str) and status and "status" not in rec:
                 rec["status"] = status
-            # #5285 cycle-6 (P1): the MERGE key is `name` ALONE — `title` is a
-            # DISPLAY fallback the graph never merges on, and an empty name
-            # creates no node at all. The carrier index must use the merge key,
-            # never the display name.
+            # #5285 cycle-6 (P1): `name` is the WRITE GATE — `title` is a
+            # DISPLAY fallback the writers never gate on, and an unwritable name
+            # creates no node at all (both `_upsert_*` early-return; the MERGE
+            # key itself is the `id` since #3590). The carrier index must use
+            # this gate key, never the display name.
             # #5285 cycle-8 (P2): the predicate is the GRAPH's own writability
             # check, not "a non-empty str". `_writable_id` is what
             # `_upsert_object` / `_upsert_subject` use, and it rejects a
@@ -2138,11 +2145,14 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             _merge_key = (_merge_key if _writable_id(_merge_key) else None)
             if label in _NAME_MERGE_LABELS:
                 if _merge_key is not None:
-                    # The graph MERGEs Object/Subject by name, so the LAST
-                    # registration of a merge key OWNS its node id — the MERGE
-                    # re-ids the existing node, REMOVING the earlier id. Update
-                    # the carriers AT THIS SEQ; a re-creation of the same id
-                    # under a new key drops the id from its OLD key's set first.
+                    # Since #3590 the graph MERGEs Object/Subject on the record's
+                    # own `id`, so a registration neither re-ids NOR evicts any
+                    # other carrier of the key — the LAST registration does not
+                    # own the node (see `_NAME_MERGE_LABELS`, and the
+                    # `_live.add` arm below). What this arm still tracks is
+                    # which key THIS id carries: a re-creation of the same id
+                    # under a new key drops the id from its OLD key's set first,
+                    # so the index never holds one id under two names.
                     _old = merge_key_by_id.pop((label, eid), None)
                     if _old is not None:
                         _prev = carriers_by_name.get((label, _old))
@@ -2152,19 +2162,28 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                     no_node_ids.discard((label, eid))
                     _live = carriers_by_name.setdefault(
                         (label, _merge_key), set())
-                    if len(_live) > 1:
-                        # The key ALREADY has >1 live carrier (a rename
-                        # collision). Since #8864 the graph stops keying on
-                        # that name entirely — it merges on the record's own
-                        # `id` (`_name_holder_count`), so NO carrier is re-id'd
-                        # and all of them survive. Keeping them all is
-                        # therefore both the graph's behaviour and the only
-                        # choice that cannot refuse a node the graph still
-                        # holds (fail OPEN, never closed).
-                        _live.add(eid)
-                    else:
-                        _live.clear()
-                        _live.add(eid)
+                    # #3590: NO COLLAPSE, on any carrier count. `_upsert_object`
+                    # / `_upsert_subject` MERGE on the record's OWN `id`
+                    # unconditionally, so a second registration of ONE name
+                    # under a fresh id creates a SECOND node and BOTH ids stay
+                    # live carriers of that name (D2: `name` is a mutable
+                    # natural key, not an identity) — whatever the count was
+                    # when this record arrived.
+                    #
+                    # This arm used to `clear()` the set first, for EVERY
+                    # count. That modelled the pre-#3590 graph, where the node
+                    # was MERGEed by `name` and re-id'd onto the LAST id, so
+                    # the earlier id really did stop existing. Under an
+                    # id-keyed MERGE the eviction is a modelling error in the
+                    # fail-CLOSED direction: the state-op guard below then
+                    # sees `eid` missing from the set of a name the graph folded
+                    # two live nodes under and records a NON-EXEMPT
+                    # `state-op-miss` — refusing a legal journal on all three
+                    # replay engines (`#9876` review P1,
+                    # `check-fail-closed-false-refusal`). Adding without
+                    # clearing is also the only choice that cannot refuse a node
+                    # the graph still holds.
+                    _live.add(eid)
                 elif (label, eid) not in merge_key_by_id:
                     # #5285 cycle-7: the graph writes NOTHING for this creation —
                     # no node exists for the id, so a state op on it is refused
@@ -2176,57 +2195,13 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 # popping them hid the later collapse from the guard (review
                 # round 7, P1).
             if t == "EventRecorded":
-                # #8864 review P1: this record is the SECOND carrier source, and
-                # it runs on replay too. `_event_plain_merge` MERGEs a
-                # name-STUB for the mention's `subject` / `object` (unless
-                # `objectType` is `Document`) / every `uses[]` name, writing a
-                # DETERMINISTIC id `ON CREATE` only (#7936). The stub is a real
-                # graph carrier that this fold could not see, so the carrier
-                # COUNT below — the thing the graph's MERGE-key branch is
-                # decided by (`_name_holder_count`) — undercounted: a name whose
-                # only OTHER carrier was a registration took the name-keyed
-                # (collapsing) branch here while the graph, holding a stub as
-                # well, keys on the record's own `id` and moves NOTHING. The
-                # stub carrier was then evicted from `carriers_by_name`, and the
-                # state-op guard below recorded a `state-op-miss` for an id the
-                # graph still holds — a fail-CLOSED refusal of a legal journal
-                # (`recover_from_log` refuses to open, `rebuild` parity
-                # fail-loud, `backup.restore`'s `assert_no_non_folded`).
-                # The two read-side models got exactly this seeding in the same
-                # review round (`journal_epistemic_existence`,
-                # `journal_object_surviving_keys`); `_fold_journal` is the third
-                # model of one fold and must not read a different carrier table.
-                # `edges._mint_subject_stub` remains the unmodelled source
-                # (#8914) — recorded in `_event_mentioned_name_stubs`.
-                for _stub_label, _stub_name in _event_mentioned_name_stubs(ev):
-                    if _stub_label not in _NAME_MERGE_LABELS:
-                        continue
-                    _stub_id = entity_name_id(_stub_label, _stub_name)
-                    # #10157 review P2: a mention RE-mints a stub the journal
-                    # deleted earlier — `MERGE (o:Object {name:$name})` with an
-                    # `ON CREATE` id binds no node once the old one is gone, so
-                    # it creates one carrying that same deterministic id. The
-                    # id is therefore live again, exactly as a later creation
-                    # record revives its incarnation (`deleted.discard` in the
-                    # creation branch). Without this the sweep still believed
-                    # the stub deleted and refused a journal all three graph
-                    # engines fold.
-                    # ⛔ BEFORE the `continue` below: a RE-mention finds the
-                    # carrier set already populated (it is never pruned), so
-                    # clearing the mark after that branch would never run.
-                    deleted.discard((_stub_label, _stub_id))
-                    _stub_carriers = carriers_by_name.setdefault(
-                        (_stub_label, _stub_name), set())
-                    if _stub_carriers:
-                        # `MERGE … {name:$name}` matched an existing carrier, so
-                        # the stub id (an `ON CREATE` write) does NOT land and
-                        # no carrier moves. Same rule the fold applies.
-                        continue
-                    _stub_carriers.add(_stub_id)
-                    if _stub_label == "Object":
-                        mention_stub_carriers.setdefault(
-                            _stub_name, set()).add(_stub_id)
-                        mention_stub_ids.add(_stub_id)
+                # #3590: `_event_plain_merge` no longer MINTS Object/Subject
+                # name stubs for a mention (the projection never mints — a
+                # fold-time mint is not replay-deterministic), so this record
+                # contributes no carrier of its own. The former #8864 seeding
+                # here modelled a stub the fold no longer creates; keeping it
+                # would invent carriers that do not exist.
+                pass
             name = payload.get("name") or payload.get("title")
             if isinstance(name, str) and name:
                 rec["name"] = name
@@ -2288,17 +2263,20 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                         )
                     continue
                 # #5285 (DEFECT 1): the graph fold MATCHes a state op by primary
-                # ID (`MATCH (n:$label {id:$rid}) SET n += $s`), but
-                # `_upsert_object`/`_upsert_subject` MERGE the NODE by NAME — so
-                # when ONE name is registered under two ids the node collapses
-                # onto the LAST id and a state op naming the collapsed-away id
-                # folds 0 rows there. `entities` still holds the collapsed-away
-                # id (the reference index is keyed by every id the journal ever
-                # saw), so the `rec is None` gate above does NOT catch it: this
-                # fold used to APPLY state the graph dropped, and
-                # `check_consistency` passed a journal all three replay engines
-                # refuse — the fail-open this lane exists to remove. Refuse with
-                # the SAME `state-op-miss` shape the malformed branch records.
+                # ID (`MATCH (n:$label {id:$rid}) SET n += $s`), so a state op
+                # whose id the graph does not hold folds 0 rows there while
+                # `entities` still holds that id (the reference index is keyed by
+                # every id the journal ever saw) — the `rec is None` gate above
+                # does NOT catch it. This fold used to APPLY state the graph
+                # dropped, and `check_consistency` passed a journal all three
+                # replay engines refuse — the fail-open this lane exists to
+                # remove. Refuse with the SAME `state-op-miss` shape the
+                # malformed branch records.
+                # ⚠️ The reachable cases are `no_node_ids` (checked next) and a
+                # carrier index that disagrees with itself, NOT a name collapse:
+                # since #3590 both writers are id-keyed, so one name registered
+                # under two ids keeps BOTH nodes (`carriers_by_name` adds, never
+                # evicts).
                 # SEQ-AWARE by construction: `carriers_by_name` is the carrier
                 # SET at THIS point in the walk, so an id that WAS the sole
                 # carrier before a later same-name registration still folds here
@@ -2306,8 +2284,11 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                 # A name the fold never indexed stays fail-OPEN, exactly as
                 # `_object_target` falls through — an unmodelled shape must not
                 # become a false refusal. The guard fires only when the name IS
-                # indexed and this id is NOT among its live carriers (the
-                # collapsed-away case).
+                # indexed and this id is NOT among its live carriers — i.e. the
+                # carrier index contradicts itself, which the walk cannot
+                # produce; it is retained so a future edit that breaks that
+                # invariant fails closed with a recorded disposition instead of
+                # silently accepting a graph the fold does not model.
                 # #5285 cycle-7 (P1): an id whose CREATION produced no graph node
                 # (an empty / non-writable merge key) is a 0-row miss there, so
                 # the reference fold must refuse it too. This check sits BEFORE
@@ -2322,8 +2303,8 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
                                 "entity"),
                     )
                     continue
-                # #5285 cycle-6 (P1): read the id's GRAPH merge key, never the
-                # display name — see `merge_key_by_id`. An id with no merge key
+                # #5285 cycle-6 (P1): read the id's NAME GATE, never the
+                # display name — see `merge_key_by_id`. An id with no name gate
                 # has no node this fold models, so the guard stays fail-open.
                 _carrier_name = (merge_key_by_id.get((label, eid))
                                  if label in _NAME_MERGE_LABELS else None)
@@ -2436,76 +2417,24 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             # (`supersede-target-deleted`), never a miss.
             pass
         else:
-            # #10157: the graph's deferred sweep MERGEs an Object by NAME, and
-            # an `EventRecorded` mention stub is a real Object node carrying
-            # that name (`_event_plain_merge` mints it, `ON CREATE`). The
-            # reference ENTITY model does not carry it (#3590 D1: a mention
-            # creates no entity), so `_object_target` cannot resolve it from
-            # `entities` — yet the journal DID fold that supersede onto that
-            # node. Recording a miss here is a false refusal of a journal every
-            # replay engine accepts, and it is the fail-CLOSED direction this
-            # gate must never take when the journal is faithful.
+            # The record addressed nothing: it carries no id (or one the
+            # journal does not leave in place), and the graph fold — now
+            # ID-KEYED ONLY — folded nothing there either. The classifier is
+            # the SAME one the three replay engines use, so the two halves of
+            # one disposition cannot disagree.
             #
-            # ⛔ BOTH limbs, because the graph's fold has both: it matches
-            # `MATCH (o:Object {id:$id})` FIRST and falls back to the name only
-            # when that bound 0 rows (entities.py). A record carrying a stub's
-            # id alongside an unestablished name therefore folds by ID, so
-            # resolving on the name alone refused it.
-            #
-            # The carrier set is the one the seeding above already maintains,
-            # filtered to the nodes that still EXIST at the journal's END: a
-            # stub the journal hard-deletes is genuinely gone, so its supersede
-            # stays a miss (`tests/test_rebuild_parity_fail_loud_3585.py::
-            # test_mention_established_then_deleted_name_still_refuses`, which
-            # also asserts `check_consistency` refuses — the guard below is
-            # otherwise pinned by nothing).
-            #
-            # ⛔ EXISTENCE is the JOURNAL's own surviving-id oracle, not
-            # `deleted` (review 10, P1). `deleted` is the ENTITY model's
-            # end-state set, and a mention stub is never an entity (#3590 D1)
-            # — so a delete that removes the stub in the GRAPH is
-            # unrepresentable there whenever it is not scoped to
-            # `label="Object"` (`_delete_entity_by_id` falls back to the
-            # id-wide delete, and the fold's id-wide branch can only mark keys
-            # that exist in `entities`). Measured: a mention, an id-wide
-            # `EntityMutated delete`, then a supersede by name gave
-            # `rebuild_all` REFUSED while this fold returned `ok=True
-            # refused=0` — a journal the health gate CERTIFIED and every engine
-            # refused, with the record absent from the report entirely.
-            # `mention_stub_ids` is never pruned either (by design, so a
-            # re-mention can revive), so it also reported a stub the journal
-            # re-id'd via a registration or renamed away.
-            # `journal_object_surviving_keys` models all three — the id-wide
-            # delete, the re-id, the rename — and a re-mention revives the id
-            # in it, which is the control this must NOT refuse.
-            _surviving_stub_ids = mention_stub_ids & surviving_ids
-            # ⛔ BOTH limbs, and the NAME limb needs its own survival test
-            # (review 11, P1). `journal_object_surviving_keys` models a rename
-            # in its NAMES half alone: a rename moves the node to a new name
-            # and the id survives. So an id-only intersect still called the OLD
-            # name addressable (its id survived) after the stub had been
-            # renamed away, `_stub_hit` fired, and a supersede every engine
-            # refuses stayed out of the report entirely.
-            # `mention_stub_carriers` is the MENTION's name table and no rename
-            # ever updates it, which is why the name half cannot be inferred
-            # from that table alone.
-            _stub_hit = (
-                (isinstance(oid, str) and oid in _surviving_stub_ids)
-                or (oname in _surviving_names
-                    and any(_sid in _surviving_stub_ids
-                            for _sid in mention_stub_carriers.get(oname, ()))))
-            if _stub_hit:
-                continue
-            # Genuinely unresolvable: an id no journaled registration leaves
-            # in place AND no name the journal knows matched nothing in the
-            # graph fold either, so the graph engines and this fold must reach
-            # the SAME verdict — the two dispositions differ and both are
-            # correct:
-            # `object-superseded-miss` (refused) when the record carries an
-            # address the journal established, and, #10204, the EXEMPT
-            # `object-superseded-unregistered` when it carries at least one
-            # address the journal established NONE of. `_record_supersede_miss`
-            # classifies; it does not decide the verdict.
+            # ⛔ #3590 removed the `_stub_hit` arm that used to sit here. It
+            # existed because the retired fold MERGEed an Object by a mention
+            # STUB's name (`_event_plain_merge`, `ON CREATE` id = the name),
+            # which the reference ENTITY model deliberately does not carry
+            # (#3590 D1: a mention creates no entity) — so the arm kept a
+            # journal the graph folded out of the refusal report. Both halves
+            # of that premise are gone: no mention stub is minted for an
+            # Object, and the fold is id-keyed. The tables it read
+            # (`mention_stub_carriers` / `mention_stub_ids`) were removed with
+            # it, because a never-populated table is a guard that READS as
+            # live protection while protecting nothing — the next lane would
+            # assume #10157/#5285's shapes were still covered by it.
             _record_supersede_miss(seq, ev)
     return entities, deleted, ambiguous
 
@@ -2725,7 +2654,7 @@ def _entities_from_view(graph_view: dict) -> tuple[dict, dict]:
     return out, by_name
 
 
-def _compare_entities(journal_entities, graph_entities, graph_names,
+def _compare_entities(journal_entities, graph_entities,
                       deleted, ambiguous) -> tuple[list, int, list]:
     """Field-aware non-Point comparison.
 
@@ -2741,29 +2670,27 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
     for key, rec in journal_entities.items():
         label, eid = key
         # #3585 re-review: the ambiguity bound applies to the STATUS leg only.
-        # Presence is decidable by name (the graph MERGEs Object/Subject by
-        # name), so excluding it too could hide a genuine burial — and a
-        # name-only supersede with NO carrier no longer marks ambiguity at all.
+        # Presence is decidable by ID (#3590 retired the name-keyed MERGE, so a
+        # journal id has exactly one carrier), so excluding it too could hide a
+        # genuine burial — and a name-only supersede with NO carrier no longer
+        # marks ambiguity at all.
         ambiguous_status = label == "Object" and rec.get("name") in ambiguous
         if ambiguous_status:
             excluded_ambiguous.append((label, eid, rec.get("name")))
+        # ⛔ PRESENCE IS AN IDENTITY QUESTION, AND THE NAME FALLBACK IS RETIRED
+        # (#3590 round-5 review). The fallback that used to sit here resolved a
+        # journal id the graph does not carry onto a SAME-NAME node under a
+        # DIFFERENT id, justified by "the graph MERGEs these labels by NAME".
+        # That premise is exactly what this change removes: `_upsert_object` /
+        # `_upsert_subject` now merge on `id` (projection/entities.py), so a
+        # second registration of one name under a fresh id is TWO nodes. Keeping
+        # the fallback made the presence leg compare the STATUS of the wrong
+        # incarnation and report a faithful graph — a false GREEN on the "the
+        # faithful node is buried, an impostor of the same name survives" shape,
+        # which is the one failure mode this file must never produce (the `:Event`
+        # leg above was hardened for the identical reason).
+        # An id absent from the graph is ABSENT; no name can stand in for it.
         g = graph_entities.get(key)
-        if g is None and label in _NAME_MERGE_LABELS:
-            # The graph MERGEs these labels by NAME, so a second registration
-            # of the same name under a fresh id is ONE node carrying the LAST
-            # id — resolve by name before declaring a burial (#3585 review).
-            #
-            # This is the PRESENCE leg's name resolution, not the STATUS leg, so it
-            # reads `_NAME_MERGE_LABELS` — the home whose declared meaning is exactly
-            # the sentence above. Round 2 hoisted the status pair and pointed BOTH
-            # `_compare_entities` sites at it; the two constants coincide in value
-            # today, which is why the mis-wiring was invisible. When a reference-fold
-            # label becomes name-MERGE'd (forced into `_NAME_MERGE_LABELS` by
-            # `test_the_name_merge_label_sets_have_one_home`) while the status set
-            # stays Object/Subject, this site would miss the name resolution and
-            # report `absent-from-graph` on a FAITHFUL graph — measured. There is no
-            # live verdict change today (#8859 follow-up review round 3, P2).
-            g = graph_names.get((label, rec.get("name")))
         if g is None:
             count += 1
             if len(mismatches) < _MAX_DIVERGENT_POINTS:
@@ -2991,11 +2918,10 @@ def check_consistency(log_path: str, projection, *,
     # #3585: the non-Point leg. `_fold_journal`/`_compare_views` above are
     # Point-only, so an Object/Subject burial would be invisible; this compares
     # the journal's entity reference against the graph's entity nodes.
-    graph_entities, graph_entity_names = _entities_from_view(graph_view)
+    graph_entities, _graph_entity_names = _entities_from_view(graph_view)
     entity_mismatches, entity_divergent_count, entity_ambiguous_excluded = (
         _compare_entities(journal_entities, graph_entities,
-                          graph_entity_names, entity_deleted,
-                          entity_ambiguous))
+                          entity_deleted, entity_ambiguous))
     entities_ok = not entity_mismatches
     # `db_hash` is a pure function of the GRAPH — the fields the verdict covers
     # PLUS the embedding, so a vector-only rewrite of an otherwise-identical
