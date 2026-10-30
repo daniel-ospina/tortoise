@@ -203,6 +203,18 @@ def test_docs_scanning_gates_stay_in_tier1():
     )
 
 
+    assert "test_substrate_map.py" in tier1, (
+        "#5086 review (P1-2): the substrate map's drift guard must be in tier1 — "
+        "the map IS a document (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`), "
+        "the doc it must stay registered in is another (`docs/00_index.md`), and "
+        "BOTH are under NON_PYTHON_PREFIXES — so the docs-only edit that let the "
+        "map go stale three times selects no surface and runs tier1 ONLY. "
+        "Registered in `core` alone it ran on `tortoise/` diffs, i.e. on the one "
+        "half of the map that is not the artifact that went stale (#4309 class, "
+        "same dual registration as the sibling doc guards above)"
+    )
+
+
 def test_v4_membership_gate_runs_on_both_architecture_docs():
     """#9778 review (P2): pin the SELECTION, not just the manifest string.
 
@@ -255,6 +267,50 @@ def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
         "edited one digit, or deleted and merge green (#10108 review P1, "
         "#4309 class)"
     )
+
+
+def test_substrate_map_guard_runs_on_the_diffs_it_guards():
+    """#5086 review (P1-2): pin the SELECTION on all three arms, not the string.
+
+    `tests/test_substrate_map.py` re-measures
+    `docs/architecture/SUBSTRATE-REBUILD-MAP.md` against the tree. Three distinct
+    diffs can break it, and before this fix NONE of them selected it — the row had
+    been appended to the `ep:` list rather than `core:`, and neither `core` nor
+    the early return reaches the file anyway:
+
+    - a **docs-only** edit of the map (or of the `docs/00_index.md` row it must
+      stay registered in) → measured `surfaces=[]`, tier-1 set WITHOUT the pin;
+      `tier1` is the only surface that runs, so the row above is the whole fix.
+    - a **tool-only** edit of `tools/substrate_map_check.py` → measured
+      `surfaces=[]` (a flat `NON_PYTHON_PREFIXES` entry, no `SOURCE_PATTERNS`
+      match), so the tool's own test never ran on the PR editing the tool. Closed
+      by `CORE_ALSO` in `tools/ci_selection.py` (#1349/#3332/#3616 class).
+    - a **`tortoise/`** symbol move (what the interface map places) → `core`,
+      through the `tortoise/` prefix fallback.
+
+    Measured after the fix: docs `surfaces=[]` + pin present, tool
+    `surfaces=['core']` + pin present, `tortoise/projection/edges.py`
+    `surfaces=['core', ...]` + pin present.
+    """
+    docs = _sel(["docs/architecture/SUBSTRATE-REBUILD-MAP.md"])
+    assert docs["full"] is False
+    assert docs["surfaces"] == [], docs["surfaces"]
+    assert "test_substrate_map.py" in docs["test_files"], (
+        "a docs-only edit of the map must run the guard that re-measures it — "
+        "otherwise it goes stale a fourth time with every gate green"
+    )
+
+    tool = _sel(["tools/substrate_map_check.py"])
+    assert tool["full"] is False
+    assert "test_substrate_map.py" in tool["test_files"], (
+        "a tool-only edit must run the tool's own negative controls — `tools/` "
+        "is swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing "
+        "that keeps this out of the docs-only early return"
+    )
+
+    symbol_move = _sel(["tortoise/projection/edges.py"])
+    assert "core" in symbol_move["surfaces"], symbol_move["surfaces"]
+    assert "test_substrate_map.py" in symbol_move["test_files"]
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():

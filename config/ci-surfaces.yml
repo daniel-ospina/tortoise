@@ -5245,6 +5245,37 @@ surfaces:
   # itself is kept in change-selection via `CORE_ALSO` (tools/ci_selection.py)
   # so an extractor-only diff keeps the `core` fallback alive.
   - test_cli_extraction.py
+  # #5086: the substrate map's drift guard — `docs/architecture/SUBSTRATE-REBUILD-MAP.md`
+  # vs the tree. `core` is its HOME surface (and what `manifest-integrity` needs),
+  # and it is DUAL-REGISTERED in `tier1` for the docs-only arm — the `core`=home /
+  # `tier1`=docs-only pairing every doc guard above uses.
+  #
+  # ⛔ The pre-fix version of this comment claimed `core` "is exactly what selects
+  # this guard for the diff it guards" and that a tools-only diff "also falls
+  # through to `core`". Both were FALSE, and measured false (#5086 review P1-2):
+  #
+  #  - a `docs/`-only diff returns **`tier1`**, never the `core` surface
+  #    (`select()`'s early return emits the `tier1` set; this row lives under
+  #    `surfaces.core`) → the map could go stale a fourth time with every gate
+  #    green. `tier1` is where the docs arm must live; deleting that row
+  #    re-opens the hole.
+  #  - a `tools/substrate_map_check.py`-only diff ALSO took that early return:
+  #    `tools/` is a flat `NON_PYTHON_PREFIXES` entry and no `SOURCE_PATTERNS`
+  #    row matches the tool, so `changed == []`. That arm is closed in
+  #    `CORE_ALSO` (`tools/ci_selection.py`), where the repo's recorded remedies
+  #    for it live — a `core` row cannot close it on its own.
+  #  - the `tortoise/` arm (a symbol move) does select `core`, but through the
+  #    `tortoise/` prefix fallback rather than through this row.
+  #
+  # This row is still REQUIRED: without it the file is in NO surface and
+  # `ci_selection.py --integrity` lists it as drift (redding the REQUIRED
+  # `manifest-integrity` leg) — the #1349/#2938 silent-drop class.
+  #
+  # Reviewer note, now corrected: the row originally landed in the `ep:` list (it
+  # was appended after `test_9121_onboarding_residual_pins.py`, the last `ep`
+  # row), so before this fix the guard ran on `ep`-matching diffs only — not even
+  # on the `tortoise/` arm the comment described.
+  - test_substrate_map.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -5455,18 +5486,6 @@ surfaces:
   # otherwise never run it (the #1349/#2938 silent-drop class; full rationale in
   # the `api` entry above).
   - test_9121_onboarding_residual_pins.py
-  # #5086: the substrate map's drift guard — `docs/architecture/SUBSTRATE-REBUILD-MAP.md`
-  # vs the tree. Registered on `core` because the diff that can red it is a
-  # DOCS-ONLY change (the map is a doc), and a docs-only PR takes `select()`'s
-  # tier-1 path, whose test set is the `core` smoke set — so a `core`-only
-  # entry is exactly what selects this guard for the diff it guards. The second
-  # arm is a `tortoise/` symbol move: `tools/` matches NO `SOURCE_PATTERNS` entry
-  # so a `tools/substrate_map_check.py`-only diff also falls through to `core`,
-  # and a `tortoise/projection/edges.py` diff matches `core` directly. Without
-  # this row the file is in NO surface: `ci_selection.py --integrity` lists it as
-  # drift (redding the REQUIRED `manifest-integrity` leg) and no test leg selects
-  # the suite at all — the #1349/#2938 silent-drop class.
-  - test_substrate_map.py
   onboarding:
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `api`, for the
   # same reason as the `api` arm — `test_selfhost_seed_surface_does_not_fabricate_a_kind`
@@ -6573,6 +6592,7 @@ tier1:
 - test_7818_plan_record_5362.py  # #7818/#5362: the #5362 plan's RES-1 / out-of-scope read-path record vs the shipped reply contract (hermetic doc pin; a docs-only plan edit runs only tier1) — dual-registered with `core`
 - test_9399_search_path_claim_scope.py  # #9399: §13's `aboutObject` headline claim vs the scope of the grep it quotes (hermetic doc↔code pin, and the claim's own file list is what a docs-only edit falsifies fastest) — dual-registered with `core`
 - test_10191_record_move_doc_pin.py  # #10191/#10244: the record applies a 2b `DirectEdgeRepoint` as a MOVE — docs/ONTOLOGY.md §3.1 + the docs/INGEST_CONTRACT.md supersede row vs `_structural_repoint_statements` (hermetic doc↔code pin; a docs-only INGEST edit selects no surface and runs tier1 ONLY) — dual-registered with `core`
+- test_substrate_map.py  # #5086: the substrate map's drift guard — a docs-only edit of `docs/architecture/SUBSTRATE-REBUILD-MAP.md` (or of the `docs/00_index.md` row it must stay registered in) selects NO surface and runs tier1 ONLY, so this is the arm that catches the map going stale a fourth time — dual-registered with `core` (#5086 review P1-2: without this row the guard ran on `tortoise/` diffs only)
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
@@ -8287,7 +8307,7 @@ durations:
   test_postmerge_dedup.py: 0.7  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_session_index_health.py: 1.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.1
   test_suspension_parity.py: 2.5
-  test_substrate_map.py: 0.4  # #5086: locally measured — 13 cases, `testcase/@time` 0.05 s for the whole file (this worktree, quiet host, 2026-10-30); the ~5 s this file costs in a real session is the repo conftest's import/teardown, which the pool pays once per leg and which no per-file weight can attribute. DB-free, graph-free and network-free: it reads the doc, `docs/00_index.md` and `tortoise/` symbols, and runs ONE bounded `git merge-base` (7 ms for a present sha; the 10 s bound exists because an ABSENT sha costs ~24 s on a partial clone trying to lazy-fetch — measured, see `tools/substrate_map_check.py`). `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  test_substrate_map.py: 3.7  # #5086: locally measured — 17 cases, `testcase/@time` 3.74 s for the whole file (this worktree, quiet host, 2026-10-30: `--junitxml` sum over 17 testcase nodes). The pre-fix 0.4 covered a 13-case file whose only cost was the repo conftest import/teardown; the four cases added by the #5086 review fixes (P1-1 shallow/absent-object state error, P2-1 declaration-vs-mention, P2-2 the two state-error exit paths, plus the unverified-exit arm) drive `sys.executable` subprocesses and ONE real `git merge-base`, so the weight now carries real seconds rather than a near-zero reading. ⚠️ Still DB-free, graph-free and network-free. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_2206_confidence_surfaces.py: 78.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.2
   test_2350_validity_precision.py: 9.5  # #2350: required for the durations coverage half as well as the surface half (#4348 trap — do not drop the row without re-deriving the floor at that head) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.6
   test_ask_regression_llm.py: 0.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.5

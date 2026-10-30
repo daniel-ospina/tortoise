@@ -24,6 +24,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
@@ -36,16 +38,52 @@ def _doc() -> str:
     return DOC.read_text(encoding="utf-8")
 
 
+def _ancestry_is_verifiable_here() -> bool:
+    """Whether THIS clone carries the object `measured_at_commit` names.
+
+    Probed with its own `git` call on purpose — NOT via `smc._is_shallow_clone()`,
+    so a bug in the helper cannot make the test agree with it. `actions/checkout`
+    fetches one commit by default, so in the CI `test` job this is False and the
+    ancestry claim is unprovable there; the REQUIRED `docs` job (fetch-depth 0)
+    is where it is proved.
+    """
+    sha = smc._FRONTMATTER_SHA.search(_doc()).group(1)
+    probe = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    return probe.returncode == 0
+
+
 def test_the_shipped_map_is_clean() -> None:
     """Fails if the document and the tree disagree about any guarded claim.
 
     Reachable today: `measure()` reads the real document, the real
     `docs/00_index.md`, the real `tortoise/` tree and `git merge-base`. Dropping
     any one of them (e.g. unregistering the doc from the index) reds this.
+
+    ⚠️ The ancestry claim is the ONE exception and it is stated, not silently
+    skipped: a `fetch-depth: 1` checkout (the CI `test` job's) does not carry the
+    object, so the question is unanswerable THERE. The offline half is asserted
+    FIRST — in a shallow clone a real drift still reds this — and only then is the
+    ancestry half handed to the job that has the history.
     """
     result = smc.measure()
+    assert result["problems"] == [], result["problems"]
+    if not _ancestry_is_verifiable_here():
+        assert result["verdict"] == "UNVERIFIED", result
+        assert len(result["unverified"]) == 1, result["unverified"]
+        assert "cannot be verified here" in result["unverified"][0]
+        pytest.skip(
+            "shallow checkout: `measured_at_commit` is absent here, so the offline "
+            "half is all this job proves; the ancestry claim is proved by the "
+            "REQUIRED `docs` job, which checks out at fetch-depth: 0 and runs "
+            "`tools/substrate_map_check.py --check` unconditionally"
+        )
     assert result["verdict"] == "CLEAN", result["problems"]
-    assert result["problems"] == []
+
 
 
 def test_a_lane_family_that_does_not_resolve_is_drift() -> None:
@@ -157,23 +195,25 @@ def test_an_unregistered_document_is_drift(monkeypatch, tmp_path: Path) -> None:
     assert any("not registered" in p for p in problems), problems
 
 
-def test_an_unresolvable_measured_at_commit_is_drift(monkeypatch) -> None:
-    """Fails if a missing/typo'd sha is treated as clean.
+def test_an_absent_object_is_a_state_error_not_document_drift(monkeypatch) -> None:
+    """Fails if an object this clone does NOT have is scored as document drift.
 
-    Reachable: `git merge-base --is-ancestor` exits **128** (not 1) on an object
-    it does not have — a shallow/partial clone, or a sha copied from another
-    repo. Falling through to 0 on 128 is the no-op-gate shape this asserts
-    against. The probe is stubbed here on purpose: the REAL 128 path costs ~24 s
-    on this box's partial clone (git attempts a lazy fetch and burns CPU in ref
-    enumeration), and a hermetic test must not pay that. The real call is
-    exercised by `test_the_shipped_map_is_clean`.
+    Reachable, and MEASURED in CI before this fix: `actions/checkout` fetches one
+    commit by default, so the `test` job's clone does not carry the
+    `measured_at_commit` object and `git merge-base --is-ancestor` exits **128**
+    (reproduced in a real depth-1 clone of this repo: `fatal: Not a valid commit
+    name`, exit 128). Scoring that as `DRIFTED` redded three tests in the shard AND
+    told the reader "the document and the tree disagree — do not delete the row to
+    make this green", the wrong instruction for a shallow clone: nothing is wrong
+    with the document. It must read as a STATE ERROR (exit 2) — never a pass, and
+    never a drift. The probe is stubbed here on purpose: the real 128 path costs
+    ~24 s on this box's partial clone (git attempts a lazy fetch).
     """
     doc = _doc().replace(
         "measured_at_commit: 4f68a2aa73be4572c3ea88367981ca874ca0e54b",
         "measured_at_commit: 0123456789abcdef0123456789abcdef01234567",
         1,
     )
-
     monkeypatch.setattr(
         smc.subprocess,
         "run",
@@ -181,16 +221,32 @@ def test_an_unresolvable_measured_at_commit_is_drift(monkeypatch) -> None:
             a[0], 128, "", "fatal: Not a valid commit name"
         ),
     )
-    problems = smc.check_measured_at_commit(doc)
-    assert any("cannot be resolved" in p for p in problems), problems
+    monkeypatch.setattr(smc, "_is_shallow_clone", lambda: True)
+    problems, unverified = smc.check_measured_at_commit(doc)
+    assert problems == [], problems
+    assert len(unverified) == 1, unverified
+    assert "cannot be verified here" in unverified[0]
+    # The report must name the CAUSE, so the reader is not sent to the document.
+    assert "SHALLOW" in unverified[0]
+    assert "not a valid commit" in unverified[0].lower()
 
+
+def test_a_sha_that_is_not_an_ancestor_is_drift(monkeypatch) -> None:
+    """Fails if a genuinely unrelated tree is reported as merely unverified.
+
+    Reachable: exit **1** is `git merge-base --is-ancestor`'s "no, not an
+    ancestor" — a re-cut against a branch, a rebase that dropped the commit, or a
+    sha from another repository. That IS a disagreement between the document and
+    the tree, so it must never collapse into the state-error arm.
+    """
     monkeypatch.setattr(
         smc.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess(a[0], 1, "", ""),
     )
-    problems = smc.check_measured_at_commit(doc)
+    problems, unverified = smc.check_measured_at_commit(_doc())
     assert any("not an ancestor" in p for p in problems), problems
+    assert unverified == [], unverified
 
 
 def test_an_unbounded_ancestry_probe_cannot_hang_the_gate(monkeypatch) -> None:
@@ -205,7 +261,7 @@ def test_an_unbounded_ancestry_probe_cannot_hang_the_gate(monkeypatch) -> None:
         raise subprocess.TimeoutExpired(cmd="git", timeout=smc.ANCESTRY_TIMEOUT_S)
 
     monkeypatch.setattr(smc.subprocess, "run", _boom)
-    problems = smc.check_measured_at_commit(_doc())
+    problems, _unverified = smc.check_measured_at_commit(_doc())
     assert any("could not be verified within" in p for p in problems), problems
 
 
@@ -218,9 +274,99 @@ def test_a_missing_measured_at_commit_is_drift() -> None:
     doc = "\n".join(
         line for line in _doc().splitlines() if not line.startswith("measured_at_commit:")
     )
-    assert smc.check_measured_at_commit(doc) == [
-        "frontmatter carries no `measured_at_commit: <sha>`"
-    ]
+    assert smc.check_measured_at_commit(doc) == (
+        ["frontmatter carries no `measured_at_commit: <sha>`"],
+        [],
+    )
+
+
+def test_a_constant_the_document_places_must_be_DECLARED_not_mentioned(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Fails if "still declared" is a bare substring match over the file.
+
+    Reachable on the SHIPPED tree: `_DOC_RETIRED_KEYS` is declared once and
+    mentioned on six further lines of `projection/entities.py` (a docstring, two
+    comments, three `self.` readers — `_SOURCE_HANDLED` has seven). So blanking
+    the D10 retirement ALLOWLIST itself — the mechanism §5 of the document and the
+    tool docstring both say this guard holds, on the one claim the doc compensates
+    for by dropping the `:Document` regex — still returned `[]`: a false CLEAN.
+    The mutation below is exactly that state: the declaration line replaced, every
+    mention kept.
+    """
+    monkeypatch.setattr(
+        smc,
+        "INTERFACE_SYMBOLS",
+        (("_DOC_RETIRED_KEYS", "tortoise/projection/entities.py"),),
+    )
+    # Positive control first: the shipped declaration satisfies the check, so the
+    # failure below cannot come from the pair simply never resolving.
+    assert smc.check_interface_symbols(_doc()) == []
+
+    lines = (REPO / "tortoise/projection/entities.py").read_text(encoding="utf-8").splitlines(
+        keepends=True
+    )
+    decl = next(
+        i for i, line in enumerate(lines) if line.lstrip().startswith("_DOC_RETIRED_KEYS:")
+    )
+    lines[decl] = "    # D10 allowlist declaration REMOVED by this test\n"
+    mutated = "".join(lines)
+    assert "_DOC_RETIRED_KEYS" in mutated, "the mentions must survive the mutation"
+
+    (tmp_path / "tortoise" / "projection").mkdir(parents=True)
+    (tmp_path / "tortoise" / "projection" / "entities.py").write_text(
+        mutated, encoding="utf-8"
+    )
+    monkeypatch.setattr(smc, "ROOT", tmp_path)
+    problems = smc.check_interface_symbols(_doc())
+    assert any("_DOC_RETIRED_KEYS declaration missing" in p for p in problems), problems
+
+
+def test_a_state_error_exits_2_not_the_drift_code(monkeypatch, tmp_path: Path) -> None:
+    """Fails if "the map is GONE" reports the exit code that means "the map DRIFTED".
+
+    Reachable: `raise SystemExit("<message>")` prints the message and exits **1**
+    — the DRIFTED code — so the documented tri-state (0 clean · 1 drifted · 2 a
+    state error) was implemented for USAGE only, and an operator separating the
+    two by exit code re-measured the document instead of fixing the checkout. Both
+    state paths are asserted here: the absent document in-process, and the whole
+    CLI end-to-end (a copy of the tool with nothing beside it — the same state a
+    `mv` of the document produces).
+    """
+    missing = tmp_path / "docs" / "architecture" / "SUBSTRATE-REBUILD-MAP.md"
+    monkeypatch.setattr(smc, "ROOT", tmp_path)
+    monkeypatch.setattr(smc, "DOC", missing)
+    with pytest.raises(SystemExit) as excinfo:
+        smc.measure()
+    assert excinfo.value.code == 2, excinfo.value.code
+
+    tool_dir = tmp_path / "tools"
+    tool_dir.mkdir()
+    tool = tool_dir / "substrate_map_check.py"
+    tool.write_text(Path(smc.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+    run = subprocess.run([sys.executable, str(tool), "--check"], capture_output=True, text=True)
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert "state error" in run.stderr, run.stderr
+
+
+def test_an_unverified_ancestry_probe_is_a_state_error_exit(monkeypatch) -> None:
+    """Fails if UNVERIFIED becomes a pass (exit 0) or a drift (exit 1).
+
+    Reachable in CI by construction: the `test` job's checkout is shallow, so
+    `measure()` returns UNVERIFIED there. That must exit **2** — the documented
+    "an input is unreadable/absent, a state error, NOT a pass" arm — so a caller
+    that only checks for 0 cannot mistake it for a clean map.
+    """
+    monkeypatch.setattr(
+        smc.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 128, "", "fatal: Not a valid commit name"),
+    )
+    monkeypatch.setattr(smc, "_is_shallow_clone", lambda: True)
+    result = smc.measure()
+    assert result["verdict"] == "UNVERIFIED", result
+    assert result["problems"] == [], result["problems"]
+    assert smc.main(["substrate_map_check.py", "--check"]) == 2
 
 
 def test_the_json_manifest_names_what_it_does_not_check() -> None:
@@ -233,20 +379,29 @@ def test_the_json_manifest_names_what_it_does_not_check() -> None:
     result = smc.measure()
     assert any("issue_state" in entry for entry in result["not_checked"]), result
     assert "lane_and_hotspot_file_families" in result["checked"]
+    # The unverified channel is part of the manifest: a caller must be able to see
+    # WHICH claim a state error stopped, instead of inferring it from the exit code.
+    assert "unverified" in result, result
 
 
 def test_cli_exit_codes() -> None:
-    """0 clean · 1 drifted · 2 usage — and 2 is never 0.
+    """0 clean · 1 drifted · 2 usage/state — and no arm collapses into another.
 
-    Reachable: all three arms are exercised on the shipped tree (clean) and on
-    an unknown flag (usage). The drift arm is covered by the negative controls
-    above; here it is only asserted that no arm collapses into another.
+    Reachable: the clean arm on the shipped tree, the usage arm on an unknown
+    flag, and (in a `fetch-depth: 1` checkout, which is what CI gives the `test`
+    job) the state arm with 2 in place of 0. Asserting `0` unconditionally here is
+    what redded this file in CI: the clone cannot answer the ancestry question.
+    The drift arm is covered by the negative controls above.
     """
     tool = REPO / "tools" / "substrate_map_check.py"
     clean = subprocess.run(
         [sys.executable, str(tool), "--check"], capture_output=True, text=True
     )
-    assert clean.returncode == 0, clean.stdout + clean.stderr
+    expected = 0 if _ancestry_is_verifiable_here() else 2
+    assert clean.returncode == expected, clean.stdout + clean.stderr
+    if expected == 2:
+        assert "UNVERIFIED" in clean.stdout, clean.stdout
+        assert "cannot be verified here" in clean.stdout, clean.stdout
     usage = subprocess.run(
         [sys.executable, str(tool), "--nonsense"], capture_output=True, text=True
     )
@@ -255,7 +410,7 @@ def test_cli_exit_codes() -> None:
     manifest = subprocess.run(
         [sys.executable, str(tool), "--json"], capture_output=True, text=True
     )
-    assert manifest.returncode == 0, manifest.stdout + manifest.stderr
+    assert manifest.returncode == expected, manifest.stdout + manifest.stderr
     payload = json.loads(manifest.stdout)
-    assert payload["verdict"] == "CLEAN"
+    assert payload["verdict"] == ("CLEAN" if expected == 0 else "UNVERIFIED"), payload
     assert payload["document"] == "docs/architecture/SUBSTRATE-REBUILD-MAP.md"

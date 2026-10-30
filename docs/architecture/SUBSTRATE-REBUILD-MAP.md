@@ -346,20 +346,35 @@ map — the half that drifted every previous time — and fails when the documen
 the tree disagree:
 
 ```bash
-.venv/bin/python tools/substrate_map_check.py --check     # 0 clean · 1 drifted
+.venv/bin/python tools/substrate_map_check.py --check     # 0 clean · 1 drifted · 2 unverified
 .venv/bin/python tools/substrate_map_check.py --json      # the measurements it read
 ```
+
+`2` is a **state error, not a pass**: this checkout could not read the document,
+or could not *answer* one of the claims — the case that matters here is the
+ancestry claim in a shallow clone, which is reported as `UNVERIFIED` with the
+cause named, never as drift (the document is not wrong; the clone is shallow).
+
+### Where the guard runs, and which half runs where
+
+Dual-registered on purpose, because the two halves need different checkouts:
+
+| home | what it proves | why there |
+|---|---|---|
+| `core` + `tier1` (`config/ci-surfaces.yml`) → the `test` shards | everything except the ancestry claim | a **docs-only** edit of this file selects no surface at all and runs `tier1` only, so a `core`-only row would never fire on the diff that actually staled three times |
+| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all five claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where the object is absent by construction) |
+| `CORE_ALSO` (`tools/ci_selection.py`) | the same `test`-shard set, on a **tool-only** edit | `tools/` is a flat non-python prefix and matches no `SOURCE_PATTERNS` row, so without that entry an edit to the tool itself selected nothing |
 
 What it checks, and deliberately does not:
 
 | checked | not checked |
 |---|---|
 | every **file family** a lane declares resolves on disk | whether a lane is *live* (that is the tracker's job — §1's command) |
-| every **symbol** the interface map places is still declared in the file it names (`STRUCTURAL_REL_LABELS`, `stub_key`, `_SOURCE_HANDLED`, `_DOC_RETIRED_KEYS`, `relabel_legacy_documents`, `build_master_list`, `compile_vocab`, `compile_value_brief`) — and that the document still *names* it | whether the symbol still *means* what the map says |
+| every **symbol** the interface map places is still **declared** in the file it names (`STRUCTURAL_REL_LABELS`, `stub_key`, `_SOURCE_HANDLED`, `_DOC_RETIRED_KEYS`, `relabel_legacy_documents`, `build_master_list`, `compile_vocab`, `compile_value_brief`) — *declared*, not merely mentioned: a comment or a reader does not satisfy it — and that the document still *names* it | whether the symbol still *means* what the map says |
 | | whether `:Document` is minted anywhere — **not regex-checkable**, and §5 records the measurement showing why |
 | | the tracker state of any issue — **the 76/33 split above is a point-in-time measurement, and it is dated in the frontmatter** |
 | this document is registered in `docs/00_index.md` | the correctness of the placement judgements |
-| `measured_at_commit` is an ancestor of `HEAD` (the map names the tree it was cut from) | |
+| `measured_at_commit` is an ancestor of `HEAD` (the map names the tree it was cut from) — proved by the required `docs` job, which has the history | |
 
 **The tracker half cannot be machine-checked, and pretending otherwise would be
 the exact failure this document exists to prevent.** So §1 records the *command*,

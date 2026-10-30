@@ -21,7 +21,13 @@ tree disagree:
   4. the document is registered in `docs/00_index.md`;
   5. the document's `measured_at_commit` is an ancestor of `HEAD` — the map names
      the tree it was cut from (`tools/finding_provenance.py`'s rule, applied to a
-     doc rather than to a finding).
+     doc rather than to a finding). ⚠️ **(5) is the one claim that needs history.**
+     `actions/checkout` fetches ONE commit by default, so in the `test` job the
+     object is absent and the question is unanswerable THERE. That is reported as
+     `UNVERIFIED` — a state error (exit 2), never a drift, because the document is
+     not wrong, the clone is shallow. The claim is proved by the REQUIRED `docs`
+     job: it checks out at `fetch-depth: 0` and runs `--check` unconditionally,
+     which is also the only home a docs-only PR reaches (#4454's precedent).
 
 ⛔ What it deliberately does NOT check, and why:
 
@@ -41,11 +47,13 @@ false PASS the document exists to prevent.
 
 Usage:
     python tools/substrate_map_check.py           # same as --check
-    python tools/substrate_map_check.py --check   # 0 clean · 1 drifted
+    python tools/substrate_map_check.py --check   # 0 clean · 1 drifted · 2 unverified
     python tools/substrate_map_check.py --json    # print the measurements read
 
-Exit codes: 0 clean · 1 drifted · 2 the document or a measurement input is
-unreadable/absent (a state error, NOT a pass).
+Exit codes: 0 clean · 1 drifted · 2 the document, a measurement input, or the
+object a claim names is unreadable/ABSENT here (a state error, NOT a pass).
+2 therefore means "this checkout cannot answer the question" — a shallow clone
+excuses nothing, it just moves the proof to the job that has the history.
 
 Pinned by `tests/test_substrate_map.py`.
 """
@@ -91,6 +99,37 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _state_error(message: str) -> SystemExit:
+    """A state error is exit **2** — never 1, which means the document drifted.
+
+    `raise SystemExit("<message>")` prints the message and exits **1**, the code
+    already reserved for drift — so an operator or a caller separating "the map
+    drifted" from "the map is gone / git is broken" by exit code got the answer
+    of the wrong branch, and was pointed at the document instead of the checkout
+    (#5086 review P2-2). The tri-state below is only real if 2 is actually
+    produced.
+    """
+    print(f"state error: {message}", file=sys.stderr)
+    return SystemExit(2)
+
+
+def _declaration_re(symbol: str) -> re.Pattern[str]:
+    """The DECLARATION shape of *symbol*, not merely its name.
+
+    A bare substring over the whole file is satisfied by prose or by a reader, not
+    by a declaration: `_DOC_RETIRED_KEYS` also occurs on six non-declaration lines
+    in `projection/entities.py` and `_SOURCE_HANDLED` on seven, so blanking the D10
+    retirement allowlist itself — the mechanism §5 of the document says this guard
+    holds, on the one claim the doc compensates for by dropping the `:Document`
+    regex — still read as CLEAN. That is the false PASS this tool exists to
+    prevent (#5086 review P2-1). A declaration is a `def` or an assignment
+    (`NAME = …`, `NAME: T = …`) that STARTS a line.
+    """
+    if symbol.startswith("def "):
+        return re.compile(rf"^\s*{re.escape(symbol)}\b", re.M)
+    return re.compile(rf"^\s*{re.escape(symbol)}\s*(?::[^=\n]*)?=", re.M)
+
+
 def check_lane_families(doc: str) -> list[str]:
     """§3/§4/: every backticked path under the lane and hotspot tables resolves.
 
@@ -114,8 +153,13 @@ def check_lane_families(doc: str) -> list[str]:
             or "*" in path
         ):
             # `.md`/`.yml` are cited as documents/registries, not as code
-            # families; `config/ci-surfaces.yml` is checked by (4) instead, and a
-            # GLOB (`tests/*.py`) is a rule about a directory, not a family path.
+            # families; a GLOB (`tests/*.py`) is a rule about a directory, not a
+            # family path. `docs/00_index.md`'s REGISTRATION is checked by (4)
+            # instead — and nothing here checks that a cited `.yml` exists at all,
+            # because the document cites it as a registry it DESCRIBES. (An
+            # earlier version of this comment claimed `config/ci-surfaces.yml` was
+            # "checked by (4) instead"; (4) is the index registration, so the
+            # comment taught a check that does not exist — #5086 review P3.)
             continue
         seen.add(path)
         if not (ROOT / path).exists():
@@ -136,9 +180,8 @@ def check_interface_symbols(doc: str) -> list[str]:
         if not target.exists():
             problems.append(f"interface file does not resolve: {rel}")
             continue
-        if symbol not in _read(target):
-            kind = "declaration" if symbol.startswith("def ") else "binding"
-            problems.append(f"{name} {kind} missing from {rel}")
+        if not _declaration_re(symbol).search(_read(target)):
+            problems.append(f"{name} declaration missing from {rel}")
     return problems
 
 
@@ -151,8 +194,36 @@ def check_registered(doc_text: str) -> list[str]:
     return []
 
 
-def check_measured_at_commit(doc: str) -> list[str]:
+def _is_shallow_clone() -> bool | None:
+    """Whether this checkout is shallow; `None` when git cannot say.
+
+    Local and cheap (no network, no lazy fetch) — called only on the path where
+    the ancestry probe already failed to resolve the object, to say WHY in the
+    report instead of blaming the document.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=ANCESTRY_TIMEOUT_S,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (subprocess.TimeoutExpired, OSError):  # pragma: no cover - defensive
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() == "true"
+
+
+def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     """`measured_at_commit` is an ancestor of HEAD — the map names its tree.
+
+    Returns `(problems, unverified)`. A problem means the document and the tree
+    disagree; *unverified* means THIS checkout cannot answer the question (the
+    object is absent — a shallow or partial clone), which is a state error and
+    never a drift: the document may be perfectly correct.
 
     ⛔ **Bounded on purpose.** `git merge-base --is-ancestor` is ~7 ms for an
     object that is present locally, but it attempts a lazy fetch for one that is
@@ -164,7 +235,7 @@ def check_measured_at_commit(doc: str) -> list[str]:
     """
     match = _FRONTMATTER_SHA.search(doc)
     if not match:
-        return ["frontmatter carries no `measured_at_commit: <sha>`"]
+        return (["frontmatter carries no `measured_at_commit: <sha>`"], [])
     sha = match.group(1)
     try:
         proc = subprocess.run(
@@ -176,20 +247,43 @@ def check_measured_at_commit(doc: str) -> list[str]:
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"},
         )
     except subprocess.TimeoutExpired:
-        return [
-            f"measured_at_commit {sha} could not be verified within "
-            f"{ANCESTRY_TIMEOUT_S}s (git is trying to fetch an object it does not have)"
-        ]
+        return (
+            [
+                f"measured_at_commit {sha} could not be verified within "
+                f"{ANCESTRY_TIMEOUT_S}s (git is trying to fetch an object it does not have)"
+            ],
+            [],
+        )
     except OSError as exc:  # pragma: no cover - git absent is a state error
-        raise SystemExit(f"state error: git unavailable ({exc})") from exc
+        raise _state_error(f"git unavailable ({exc})") from exc
     if proc.returncode == 1:
-        return [f"measured_at_commit {sha} is not an ancestor of HEAD"]
+        return ([f"measured_at_commit {sha} is not an ancestor of HEAD"], [])
     if proc.returncode != 0:
-        # 128 = the object is unknown here (a shallow clone, or a typo'd sha).
-        # That is a state error, not a clean pass — never fall through to 0.
+        # 128 = git does not HAVE the object. That says nothing about the
+        # document: `actions/checkout` fetches one commit by default, so in the
+        # `test` job this is the normal state of a perfectly correct map. Scoring
+        # it as drift handed the reader the wrong instruction — "the document and
+        # the tree disagree, do not delete the row to make this green" — so it is
+        # reported as the state error it is: unverified, exit 2, never a pass
+        # (#5086 review P1-1, P2-2).
         detail = (proc.stderr or proc.stdout).strip().splitlines()
-        return [f"measured_at_commit {sha} cannot be resolved: {detail[0] if detail else '?'}"]
-    return []
+        why = detail[0] if detail else "git gave no detail"
+        shallow = _is_shallow_clone()
+        if shallow:
+            hint = (
+                "this checkout is SHALLOW (depth 1), so the object is absent by "
+                "construction — the REQUIRED `docs` job runs this check at "
+                "fetch-depth: 0, and that is where the claim is proved"
+            )
+        elif shallow is False:
+            hint = (
+                "this clone is not shallow but does not carry the object (a "
+                "partial clone, or a sha that does not exist at all)"
+            )
+        else:  # pragma: no cover - git answered the ancestry probe but not this
+            hint = "git could not say whether this checkout is shallow"
+        return ([], [f"measured_at_commit {sha} cannot be verified here: {why} ({hint})"])
+    return ([], [])
 
 
 def _section(doc: str, marker: str) -> str:
@@ -205,14 +299,15 @@ def _section(doc: str, marker: str) -> str:
 def measure() -> dict:
     """Read the claims; never raise for a drift (only for an unreadable input)."""
     if not DOC.exists():
-        raise SystemExit(f"state error: {DOC.relative_to(ROOT)} does not exist")
+        raise _state_error(f"{DOC.relative_to(ROOT)} does not exist")
     doc = _read(DOC)
     problems = (
         check_lane_families(doc)
         + check_interface_symbols(doc)
         + check_registered(doc)
-        + check_measured_at_commit(doc)
     )
+    ancestry_problems, unverified = check_measured_at_commit(doc)
+    problems += ancestry_problems
     return {
         "document": str(DOC.relative_to(ROOT)),
         "checked": [
@@ -225,7 +320,12 @@ def measure() -> dict:
             "issue_state (tracker — network; §1 records the command and a dated result)",
         ],
         "problems": problems,
-        "verdict": "CLEAN" if not problems else "DRIFTED",
+        #: Claims this checkout cannot adjudicate. Non-empty => UNVERIFIED, and
+        #: `main()` exits 2 — a state error, deliberately not a pass.
+        "unverified": unverified,
+        "verdict": (
+            "DRIFTED" if problems else ("UNVERIFIED" if unverified else "CLEAN")
+        ),
     }
 
 
@@ -244,12 +344,18 @@ def main(argv: list[str]) -> int:
         print(f"substrate map: {result['verdict']} ({result['document']})")
         for problem in result["problems"]:
             print(f"  ✗ {problem}")
+        for entry in result.get("unverified", []):
+            print(f"  ? {entry}")
         if result["problems"]:
             print(
                 "\nThe document and the tree disagree. Re-measure the claim and correct "
                 "whichever of the two is wrong — do not delete the row to make this green."
             )
-    return 0 if not result["problems"] else 1
+    if result["problems"]:
+        return 1
+    # UNVERIFIED is a state error (2), never a pass: something this run needed was
+    # not readable — or not present — HERE.
+    return 2 if result.get("unverified") else 0
 
 
 if __name__ == "__main__":
