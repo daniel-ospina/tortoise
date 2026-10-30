@@ -1144,7 +1144,39 @@ now measured at a known head so that re-cut starts from this base.
 **Tests.** `tests/test_s2_decision_seam_5087.py::test_every_question_frames_state_as_untrusted_data`
 asserts the three properties on the **serialized request both halves build**, pins the position (no
 `state` element may carry the clause), pins both versions to `-v2`, and carries four wording mutants
-plus a position mutant, each reddening on exactly the property it drops.
+plus a position mutant. Each reds on exactly the property it drops — and the position one is
+constructed so that it *has* to: it leaves every question framed and appends the clause to a `state`
+element, so `_framing_gaps` reports nothing at all and only the position guard reds. That detail is
+recorded because the first version of that mutant stripped the clause from `instructions` as well,
+which made it red on the wording and left the position assertion with no mutation reaching it. See
+the 2026-10-30 entry below.
 `tests/test_s2_decision_record_5087.py::test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload`
 rebuilds §7's construction and requires the recorded byte figures to equal the live measurement, so
 a future wording change reddens in CI instead of falsifying four artifacts silently.
+
+## 2026-10-30 — the retracted citation was still alive in `tests/`, and the position guard had no mutant (`#10077`)
+
+Two claim-accuracy defects found by fresh-context review on PR #10302, both in artifacts the
+2026-10-29 entry above added or re-cut. Neither was a code bug; both were the entry's own standard
+failing one file over.
+
+**The remedy paraphrase survived outside the corpus.** The 2026-10-29 pass retracted the
+`trusted`-fields paraphrase of the vendor's remedy in the module, the design record and this
+changelog — and left it standing in `tests/test_s2_decision_seam_5087.py`'s docstring, presented as
+the vendor's prescription. The citation-honesty guard could not see it, for two independent reasons:
+its corpus was `(module, doc, changelog)`, so `tests/` was never read, and its marker was a plain
+substring keyed on the bare `be explicit` form — which does not match the sentence as actually
+written, where the verb arrives as `prescribes …ing explicit …`. A guard that cannot match the
+phrasing it exists to refuse reports green for the wrong reason. Both are fixed: the marker is a
+regex covering both verb forms and the backticked spelling, and the seam test is a corpus member
+(this file stays out only because it carries the paraphrase as a deliberate fixture, which is now a
+stated reason rather than an uncovered artifact).
+
+**§8 certified a position assertion no mutant reached.** The census row claimed the "clause moved into
+the `state` array" mutant reds the position check; that mutant stripped the clause out of every
+question too, so it redded on the wording report the emptied-constant row already covers. Measured
+with the position guard made inert, that mutant still **passed** — the one guard whose job is "the
+untrusted block cannot certify itself" had nothing proving it bites. The position half is now its own
+predicate (`_position_gaps`), used by the real payload assertion and by a rebuilt mutant that leaves
+every question framed and appends the clause to a `state` element: the wording guard reports nothing
+and only position reds. Measured both ways, restored `diff`-identically.
