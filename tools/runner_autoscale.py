@@ -28,7 +28,7 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   survive the next RE-REGISTRATION (a repair that only restarts a healthy runner never re-registers
   it). The invariant stays OBSERVED, not ASSERTED: `read_pool()` reads the live label set on every
   pass and `_preserve_labels` drops a pin from it, but no test and no gate compares the live set to
-  the invariant (`docs/ops/ci-runner-x64.md:61`), so re-measure it after any runner is registered.
+  the invariant (`docs/ops/ci-runner-x64.md:67`), so re-measure it after any runner is registered.
 
 THE CEILING IS A PREDICATE, NOT A NUMBER
     ceiling = min(core_ceiling, runners_live + headroom_by_memory)
