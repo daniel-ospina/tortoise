@@ -1303,10 +1303,25 @@ def _sha256_file(path: Path) -> str | None:
     ASSERTION about a user-editable file (``~/.pi/agent/extensions/…``), and a
     digest reader that raised would turn a reported divergence into a
     traceback — the same contract ``hook_install.read_hook_version`` keeps.
+
+    The ``is_file`` gate is that contract's OTHER half and is load-bearing:
+    ``open()`` on a FIFO or a socket BLOCKS until a writer appears, so a reader
+    with no regular-file guard can hang the caller instead of answering
+    (``read_hook_version`` carries the same gate for the same reason, and
+    ``detect_artifact_install`` reports a non-regular artifact WITHOUT reading
+    it).  Here it is the TOCTOU backstop: :func:`assert_seam_target` already
+    refuses a non-regular path it resolved, but the entry can be swapped
+    between that stat and this open.  A directory is refused here too, for a
+    duller reason — ``open`` raises ``IsADirectoryError`` on POSIX and
+    ``PermissionError`` on Windows, i.e. an OSError the caller would otherwise
+    have to tell apart.
+
     Read in chunks so a large refactor of the seam cannot make this allocate
     the whole artifact twice.
     """
     try:
+        if not path.is_file():
+            return None
         digest = hashlib.sha256()
         with open(path, "rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
@@ -1319,6 +1334,7 @@ def _sha256_file(path: Path) -> str | None:
 def assert_seam_target(harness: str,
                        *,
                        home: str | os.PathLike[str] | None = None,
+                       require_present: bool = False,
                        ) -> str:
     """``""`` when the file ``harness`` LOADS is the file this repo SHIPS.
 
@@ -1343,13 +1359,28 @@ def assert_seam_target(harness: str,
     * the comparison is BYTES (sha256), not the ``tortoise-hook-version``
       marker.  The marker is a proxy: the seam bumps it on a PROSE-only edit
       precisely because the byte comparison is what a reader trusts (seam
-      generation 4 records why), so the digest is the ground truth here.
+      generation 4 records why), so the digest is the ground truth here.  The
+      marker is still read to say which WAY the bytes differ, so an install
+      from a NEWER CLI is not accused of running "older or locally edited"
+      logic and told to downgrade (`detect_artifact_install` draws the same
+      `ahead-artifact` distinction, and it is not a defect there either).
 
     Returns a loud sentence naming BOTH paths — the loaded path (plus the path
-    it resolves to, when that differs) and the shipped artifact — with BOTH
-    digests, when they differ.  An ABSENT seam is not this function's finding:
-    ``missing-artifact`` already reports it, and an absent file has no
-    divergence to assert.
+    it resolves to, when resolving changes it) and the shipped artifact — with
+    BOTH digests, when they differ.  ``require_present`` decides what ABSENCE
+    means: ``False`` (the read-side default) answers ``""`` because
+    ``missing-artifact`` already owns absence; ``True`` is for the INSTALLER,
+    which has just written the file, so absence is this install's failure.
+
+    Never raises and never blocks: an unsearchable path, a symlink loop and a
+    non-regular file (FIFO/socket/directory) each get a sentence instead of a
+    traceback or a hang.
+
+    KNOWN LIMITATION, the same one ``hook_install.detect_artifact_install``
+    records: this grades the contract's ONE artifact.  Pi also loads a legacy
+    ``tortoise-capture/index.ts`` as a SECOND extension, which is #3713's
+    duplicate-producer ruling (open) — do not read ``""`` here as "the whole
+    Pi seam is healthy".
 
     ``home`` defaults to the running user's home, matching
     :func:`install_capture`; every path comes from
@@ -1365,7 +1396,22 @@ def assert_seam_target(harness: str,
     if root is None:  # pragma: no cover - registry membership is checked above
         return ""
     loaded = root / contract.install_name
-    if not loaded.is_symlink() and not loaded.exists():
+    try:
+        present = loaded.is_symlink() or loaded.exists()
+    except OSError as e:
+        # A non-searchable parent: the harness cannot load this path at all.
+        return (f"the capture extension {harness} loads cannot be inspected: "
+                f"{loaded} → {e.__class__.__name__}: {e}. Fix the directory "
+                f"permissions, then re-run `tortoise install {harness}`.")
+    if not present:
+        if require_present:
+            # The installer just claimed it wrote this path.
+            return (
+                f"the {harness} capture seam was not written: {loaded} does "
+                f"not exist after the install — the copy of the shipped "
+                f"{shipped} did not land, so nothing will capture. Re-run "
+                f"`tortoise install {harness}`."
+            )
         return ""  # absent, not divergent: `missing-artifact` owns that
     try:
         resolved = loaded.resolve()
@@ -1375,6 +1421,15 @@ def assert_seam_target(harness: str,
         return (f"the capture extension {harness} loads cannot be resolved: "
                 f"{loaded} → {e.__class__.__name__}: {e}. Remove the symlink "
                 f"and re-run `tortoise install {harness}`.")
+    if not resolved.is_file():
+        # A directory / FIFO / socket is not divisible into bytes, and READING
+        # a FIFO would block — report it without hashing, exactly as
+        # `detect_artifact_install` does for the same path.
+        return (
+            f"the file {harness} LOADS is not a regular file: {loaded} → "
+            f"{resolved}. Move it aside, then re-run "
+            f"`tortoise install {harness}`."
+        )
     loaded_digest = _sha256_file(resolved)
     shipped_digest = _sha256_file(shipped)
     if shipped_digest is None:
@@ -1385,6 +1440,21 @@ def assert_seam_target(harness: str,
     if loaded_digest == shipped_digest:
         return ""
     via = "" if resolved == loaded else f" (which resolves to {resolved})"
+    found = hook_install.read_hook_version(resolved)
+    expected = hook_install.read_hook_version(shipped)
+    if found is not None and expected is not None and found > expected:
+        # NEWER than this CLI ships. Still "not the file this repo ships" —
+        # still worth naming both paths — but the advice is inverted: running
+        # the installer here DOWNGRADES a working seam, so do not tell the
+        # user it is capturing with older logic.
+        return (
+            f"the file {harness} LOADS is not the file this repo SHIPS: "
+            f"{loaded}{via}, sha256 {loaded_digest or 'unreadable'}, differs "
+            f"from the shipped {shipped}, sha256 {shipped_digest} — the "
+            f"installed seam is generation {found}, NEWER than this CLI's "
+            f"{expected}, so it captures with newer logic and "
+            f"`tortoise install {harness}` would replace it with {expected}."
+        )
     return (
         f"the file {harness} LOADS is not the file this repo SHIPS: "
         f"{loaded}{via}, sha256 {loaded_digest or 'unreadable'}, differs from "
@@ -1401,7 +1471,15 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     legacy = ext_dir / LEGACY_PI_DIRNAME
     legacy_disabled = ext_dir / PI_DISABLED_DIRNAME
 
-    src = PACKAGE_DIR / "pi-hooks" / PI_EXTENSION_NAME
+    # The shipped artifact comes from the SAME declaration the assertion
+    # compares against (``ARTIFACT_CONTRACTS['pi'].source``), never a second
+    # ``PACKAGE_DIR`` derivation: two derivations of "the shipped artifact"
+    # would mean the installer writes artifact A while the assert demands
+    # artifact B, and the failure is asymmetric (a moved contract source
+    # makes the assert FAIL-OPEN via an unreadable digest, while a moved
+    # ``PACKAGE_DIR`` makes every install fail naming two paths for one
+    # logical artifact).  #4680's rule is one declaration, consumers derive.
+    src = hook_install.ARTIFACT_CONTRACTS[harness].source
     if not src.is_file():
         return InstallResult(harness, error=(
             f"shipped capture extension not found at {src} — this install is "
@@ -1484,8 +1562,13 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     # the NO-OP path too, because "already current — nothing to do" is equally
     # a claim about the file on disk. A dry run wrote nothing, so it can assert
     # nothing; the action lines already say what WOULD happen.
+    #
+    # ``require_present=True``: the write above claimed this path, so ABSENCE
+    # is this install's failure — not the "another check owns it" case the
+    # read-side callers get.
     if not dry_run:
-        divergence = assert_seam_target(harness, home=home)
+        divergence = assert_seam_target(harness, home=home,
+                                       require_present=True)
         if divergence:
             return InstallResult(harness, changed=changed,
                                  actions=tuple(actions), error=divergence)

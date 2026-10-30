@@ -959,6 +959,34 @@ def test_pi_install_asserts_the_resolved_target_instead_of_trusting_the_write(
     assert hashlib.sha256(stale).hexdigest() in res.error, res.error
     assert hashlib.sha256(_PI).hexdigest() in res.error, res.error
     assert dst.read_bytes() == stale, "the fixture's stale copy was overwritten"
+    # The writes that DID land are still reported on the failure result, so a
+    # caller cannot hide completed state behind a failure (#10241 review).
+    assert any("backed up" in a for a in res.actions), res.actions
+
+
+def test_pi_install_fails_when_the_write_leaves_no_file_at_all(home, monkeypatch):
+    """#10241 review: the ABSENT shape, which the read-side verdict deliberately
+    does not own. After a real write, a missing loaded path is THIS install's
+    failure — before this test's fix the installer returned
+    `ok=True/changed=True/installed …` over a path that does not exist, which is
+    the same "success claimed from write intent" class the issue exists to
+    close.
+
+    Mutation: drop `require_present=True` from `_install_pi`'s call (the assert
+    then answers "" for absence and the install passes)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    # A writer that does not create the file — an external reaper racing the
+    # install, or an overlay/immutable destination whose rename does not land.
+    monkeypatch.setattr(capture_install, "_atomic_bytes",
+                        lambda dst, data, mode: None)
+
+    res = install_capture("pi", home=home)
+
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    assert not dst.exists()
+    assert not res.ok, f"the install claimed success over a missing file: {res.actions}"
+    assert str(dst) in res.error, res.error
 
 
 def test_pi_install_passes_the_resolved_target_assertion(home):
@@ -1006,6 +1034,65 @@ def test_seam_target_assertion_names_both_paths_for_a_stale_install(home):
     assert str(shipped) in msg, msg
     assert hashlib.sha256(stale).hexdigest() in msg, msg
     assert hashlib.sha256(_PI).hexdigest() in msg, msg
+    assert "older or locally edited" in msg, msg
+
+
+def test_seam_target_assertion_calls_a_newer_install_newer_not_stale(home):
+    """#10241 review: bytes-always must not collapse `ahead-artifact` into
+    "older logic". An install from a NEWER CLI is still not the file this repo
+    ships (both paths, both digests) — but accusing it of older logic invites a
+    DOWNGRADE of a healthy seam, which is a wrong outcome for the read-side
+    callers this function is exported for.
+
+    Mutation: always emit the "older or locally edited" sentence."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    newer = b"// tortoise-hook-version: 16\n// from a newer CLI\n"
+    (ext_dir / capture_install.PI_EXTENSION_NAME).write_bytes(newer)
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    assert msg, "a newer installed seam was reported as clean"
+    assert "NEWER" in msg, msg
+    assert "older or locally edited" not in msg, msg
+
+
+def test_seam_target_assertion_never_reads_a_non_regular_file(home):
+    """#10241 review: `open()` on a FIFO BLOCKS, so a checker without a
+    regular-file guard hangs the caller instead of answering — while the
+    sibling detector (`hook_install.detect_artifact_install`) deliberately
+    reports a non-regular artifact WITHOUT reading it. This pins that parity
+    (and `_sha256_file`'s `is_file` gate) with a real FIFO, under a timeout so
+    a regression FAILS rather than hanging the suite.
+
+    Mutation: drop the `resolved.is_file()` sentence (the FIFO then falls to
+    `_sha256_file`, whose own gate answers None, so the message says
+    "unreadable" instead of naming a non-regular file — RED), and the
+    `_sha256_file` gate is pinned by the DIRECT call at the end, which hangs
+    without it (the alarm turns that hang into a RED failure)."""
+    from tests._signal_hygiene import harness_safe_sigalrm
+
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    fifo = ext_dir / capture_install.PI_EXTENSION_NAME
+    os.mkfifo(fifo)
+
+    def _alarm(signum, frame):  # pragma: no cover - only fires on regression
+        raise AssertionError("assert_seam_target HUNG on a FIFO")
+
+    # #7655: the alarm goes through `harness_safe_sigalrm`, never a bare
+    # `signal.alarm` — pytest-timeout owns `ITIMER_REAL` for this item, and a
+    # bare disarm would leave a later hang in the test uncaught.
+    with harness_safe_sigalrm(10, _alarm):
+        msg = capture_install.assert_seam_target("pi", home=home)
+        # The reader's own regular-file gate, reached DIRECTLY: it is the
+        # TOCTOU backstop the resolve-time guard cannot cover, so it gets its
+        # own assertion instead of riding on the sentence above.
+        assert capture_install._sha256_file(fifo) is None
+
+    assert msg, "a FIFO at the loaded path was reported as clean"
+    assert str(fifo) in msg, msg
+    assert "not a regular file" in msg, msg
 
 
 def test_seam_target_assertion_names_the_resolved_target_of_a_symlink(home):
@@ -1013,9 +1100,11 @@ def test_seam_target_assertion_names_the_resolved_target_of_a_symlink(home):
     message must name the RESOLVED target as well as the loaded path — a user
     reading only the loaded path would edit the wrong file.
 
-    Mutation: hash `loaded` instead of `loaded.resolve()` (identical for a
-    real file, wrong for the symlink shape this checks, and the message then
-    omits the target it actually read)."""
+    Mutation: drop the `via` segment from the sentence (the path the bytes were
+    actually read from disappears — the assertion below reds).  Hashing
+    `loaded` instead of `resolved` does NOT red this test (``open`` follows the
+    link, so the digest is identical); the load-bearing part is the reported
+    resolution, which is what the assertion pins."""
     real_home = home.resolve()
     ext_dir = real_home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
@@ -1030,8 +1119,37 @@ def test_seam_target_assertion_names_the_resolved_target_of_a_symlink(home):
     shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
     assert msg, "a symlinked install pointing at a stale copy passed"
     assert str(dst) in msg, msg
-    assert str(old_copy) in msg, msg
+    assert f"which resolves to {old_copy}" in msg, msg
     assert str(shipped) in msg, msg
+
+
+def test_pi_install_failure_still_reports_the_writes_that_landed(home, capsys):
+    """#10241 review: a FAILED install may still have written state — the
+    backup of the user's own seam, the legacy directory renamed aside. The CLI
+    must print those action lines beside the failure, or the user is told
+    "FAILED" while their machine was modified and cannot find the backup.
+
+    Mutation: move the `for action in result.actions` loop back below the
+    `if not result.ok` short-circuit in `__main__._install_capture_seam` (only
+    the FAILED line prints)."""
+    from types import SimpleNamespace
+
+    from tortoise import __main__ as cli
+    from tortoise.capture_install import InstallResult
+
+    def _stub(*_args, **_kwargs):
+        return InstallResult(
+            "pi", changed=True,
+            actions=("backed up /x/tortoise-capture.ts → /x/tortoise-capture.ts.bak",),
+            error="the file pi LOADS is not the file this repo SHIPS: …")
+
+    args = SimpleNamespace(harness="pi", dir=str(home), dry_run=False)
+    rc = cli._install_capture_seam(args, _stub)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "backed up" in captured.out, captured.out
+    assert "Capture install FAILED for pi" in captured.err, captured.err
 
 
 # ── codex: the artifact + the $CODEX_HOME registration (#3818) ──────────

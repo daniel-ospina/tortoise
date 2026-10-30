@@ -1,8 +1,8 @@
 ---
 title: "Pi capture architecture — the hybrid (in-process hook + store-sync backstop)"
-type: architecture
+type: engineering
 domain: platform
-doc_status: current
+doc_status: live
 created: 2026-10-23
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
@@ -360,13 +360,20 @@ I write?"), so an install could report `installed …` — and `tortoise install
 could print `Pi capture extension installed.` — over bytes it had never read back:
 measured on the reference box, the installed seam was generation 14 (149,736 B)
 against a shipped generation 15 (152,752 B). `capture_install.assert_seam_target`
-now runs after every real `_install_pi` write (and on the no-op path): it RESOLVES
-the path Pi will load, sha256s it, compares that with the shipped artifact, and
-fails the install with a message naming **both** paths (and both digests, plus the
-resolved target when the install is a symlink) instead of claiming success. What
-is still open is only the STARTUP surface — reporting the same divergence at
-session start rather than at the next `tortoise install pi` — which keeps the
-fail-loud-vs-warn decision above.
+now runs after every real `_install_pi` write (and on the no-op path), with
+`require_present=True` so a missing file after a claimed write is a FAILURE rather
+than "another check owns that": it RESOLVES the path Pi will load, sha256s it,
+compares that with the shipped artifact, and fails the install with a message
+naming **both** paths (plus the resolved target whenever resolving changes the
+path — a symlink, or a symlinked ancestor such as macOS `/tmp`) and **both**
+digests. The generation marker is read only to say which WAY the bytes differ, so
+an install from a newer CLI is not accused of running older logic and told to
+downgrade. It never raises and never blocks: a non-regular artifact (a FIFO, which
+`open` would block on) and an unsearchable path each get a sentence, matching
+`detect_artifact_install`'s report-without-reading posture. What is still open is
+only the STARTUP surface — reporting the same divergence at session start rather
+than at the next `tortoise install pi` — which keeps the fail-loud-vs-warn decision
+above; it stays on **#10241**, not on a closed issue.
 
 ---
 
