@@ -268,9 +268,9 @@ ARCH_LABEL = {
     "arm64": "self-hosted-arm64",
 }
 
-#: `ubuntu-24.04`-shaped labels — a VERSION-pinned GitHub-hosted label. The pool deliberately
-#: claims only `ubuntu-latest` and never one of these (`docs/ops/ci-runner-x64.md:25-26`), because
-#: a job that pins a version asks for the GitHub-hosted image specifically.
+#: `ubuntu-24.04`-shaped labels — a VERSION-pinned GitHub-hosted label. The pool's DEFAULT label set
+#: is `ubuntu-latest` alone (`docs/ops/ci-runner-x64.md:25-26`) — though since the 2026-10-29 #6897
+#: mitigation the installer CAN attach it (`CI_RUNNER_OS_LABEL=on|auto`, #10275).
 #:
 #: The class is bounded by what GitHub's hosted images ANSWER TO, not by a spelling: the same label
 #: table publishes the arm64 variants `ubuntu-24.04-arm` / `ubuntu-22.04-arm` / `ubuntu-26.04-arm`
@@ -1519,14 +1519,15 @@ def _preserve_labels(current: list[str], machine: str) -> str:
 
     ⛔ A VERSION-PINNED HOSTED LABEL (`ubuntu-24.04`-shaped, INCLUDING GitHub's arm64 spelling
     `ubuntu-24.04-arm` — see `VERSION_PINNED_HOSTED_LABEL`) is the ONE exception, and it is
-    dropped rather than preserved. The recorded invariant is that the pool claims `ubuntu-latest`
-    and never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:25-26`), and that label is
-    precisely what a lane pins to ESCAPE this pool. Preserving it on re-registration is how a label
-    attached once out of band — the 2026-10-24 drift that put `finding-provenance` on
-    `pi-runner-vm-*` with `ubuntu-24.04` (`tests/test_runner_tool_contract.py:5-12`) — becomes
-    permanent, and it would silently un-pin every observer job pinned to it. Dropping it restores
-    the invariant; no workflow is starved by that, because a job naming the label wants the
-    GitHub-hosted image. `ubuntu-latest` itself is NOT dropped: that one is the fallback label.
+    dropped rather than preserved. The DEFAULT is that the pool claims `ubuntu-latest` and never
+    an `ubuntu-<version>`, but `docs/ops/ci-runner-x64.md:26` records the 2026-10-29 #6897
+    mitigation: the installer DOES attach `ubuntu-24.04` (`CI_RUNNER_OS_LABEL=on|auto`, #10275), so
+    a pin here is legitimate operator state and this drop is a NAMED residual, not the invariant.
+    It stays because a pin this path made PERMANENT outlives the mitigation and silently un-pins
+    every observer job pinned to it — the 2026-10-24 drift that put `finding-provenance` on
+    `pi-runner-vm-*` with `ubuntu-24.04` (`tests/test_runner_tool_contract.py:5-12`) — and NOT
+    because a pinned job can get the hosted image: in a hosted outage it cannot, which is exactly
+    what the mitigation answers. `ubuntu-latest` itself is NOT dropped: it is the fallback label.
 
     ⛔ The arch marker is RE-DERIVED from this box, never preserved: a mis-registered runner can
     carry the OTHER arch's marker, and passing it straight back lets an x86 box register with

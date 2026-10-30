@@ -3505,6 +3505,7 @@ _TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_aut
 _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
     25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
+    26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     87: r"still does \*\*not\*\* claim any",
     92: r"DROPS the whole class on re-registration",
 }
@@ -3575,6 +3576,134 @@ def test_every_tools_citation_into_the_runbook_lands_on_what_it_names():
         "a `tools/` comment sends a reader to a runbook line that does not say what the comment "
         "claims — re-derive the number from the runbook at this head: " + "; ".join(wrong)
     )
+
+
+# ── 8h-bis. the version-pin DROP's own prose cannot DENY the mitigation it cites ────────────
+_VERSION_PIN_CITATION_RE = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
+
+#: The flag the INSTALL side spells the mitigation with. A comment about the version-pin DROP that
+#: never names it is describing the pre-2026-10-29 world, where dropping a pin was pure restoration.
+_MITIGATION_FLAG = "CI_RUNNER_OS_LABEL"
+
+#: Absolutes that were TRUE on `main` and are FALSE since the mitigation: `:26` of the runbook says
+#: the pool claims `ubuntu-24.04` too, so a comment citing the table to prove the opposite now
+#: refutes itself — the exact class this PR corrected on nine other surfaces.
+_PRE_MITIGATION_ABSOLUTES = ("never one of these", "no workflow is starved by that")
+
+#: The runbook's label-contract table — the two rows a comment about what the pool CLAIMS must land
+#: on. A citation of `:13` (whose pool this is) is not a claim about the pin and is not in scope.
+_VERSION_PIN_LABEL_ROWS = frozenset({25, 26})
+
+
+def _version_pin_comment_sites() -> dict[str, str]:
+    """The two comment blocks that describe the version-pin DROP, found by their own anchors.
+
+    Located by CONTENT, never by line: this file has been re-derived numerically four times, and a
+    pin keyed on a number reports the move instead of the defect.
+    """
+    lines = (REPO_ROOT / "tools" / "runner_autoscale.py").read_text().splitlines()
+
+    head = next((i for i, ln in enumerate(lines) if "`ubuntu-24.04`-shaped labels" in ln), None)
+    assert head is not None, (
+        "`VERSION_PINNED_HOSTED_LABEL`'s comment lost its `ubuntu-24.04`-shaped` opener — re-anchor "
+        "this pin rather than deleting it"
+    )
+    const = next((i for i in range(head, len(lines)) if lines[i].startswith("VERSION_PINNED_HOSTED_LABEL")), None)
+    assert const is not None, "`VERSION_PINNED_HOSTED_LABEL` itself is gone — re-anchor this pin"
+
+    fn = next((i for i, ln in enumerate(lines) if ln.startswith("def _preserve_labels(")), None)
+    assert fn is not None, "`_preserve_labels` is gone — re-anchor this pin"
+    start = next(
+        (i for i in range(fn, len(lines)) if "⛔ A VERSION-PINNED HOSTED LABEL" in lines[i]), None
+    )
+    assert start is not None, "`_preserve_labels` lost its version-pin paragraph — re-anchor this pin"
+    stop = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("⛔")), len(lines)
+    )
+    return {
+        "label-constant": "\n".join(lines[head:const]),
+        "preserve-labels": "\n".join(lines[start:stop]),
+    }
+
+
+def _mitigation_denials(text: str, runbook: list[str]) -> list[str]:
+    """Everything a DROP comment says that the 2026-10-29 mitigation made untrue.
+
+    Three arms, each of which the pre-fix prose fails: it must NAME the flag (or it states the
+    pre-mitigation default as if it still held), it must not repeat a pre-fix absolute, and every
+    runbook citation in it must land on a row that records the mitigation — a comment sent to a row
+    that contradicts it is worse than no citation, because the reader believes the fix is recorded.
+    """
+    problems: list[str] = []
+    if _MITIGATION_FLAG not in text:
+        problems.append(f"does not name `{_MITIGATION_FLAG}`, so it describes the pool as it was before 2026-10-29")
+    mentioned = [a for a in _PRE_MITIGATION_ABSOLUTES if a in text]
+    if mentioned:
+        problems.append(f"still asserts the pre-mitigation absolute(s) {mentioned}")
+    for m in _VERSION_PIN_CITATION_RE.finditer(text):
+        lo = int(m.group(1))
+        hi = int(m.group(2) or lo)
+        if not (_VERSION_PIN_LABEL_ROWS & set(range(lo, hi + 1))):
+            continue  # not a citation of the label-contract rows: no claim about the pin is made
+        assert 1 <= lo <= hi <= len(runbook), f"cites :{lo}-{hi}, past EOF ({len(runbook)} lines)"
+        span = "\n".join(runbook[lo - 1:hi])
+        if "mitigation" not in span:
+            problems.append(
+                f"cites :{lo}-{hi}, which records no mitigation: {span.strip()!r}"
+            )
+    return problems
+
+
+def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
+    """⛔ THE DROP'S RATIONALE WAS TRUE ON `main` AND SELF-REFUTING AT THIS HEAD (#10275 review).
+
+    Two comment sites said the pool *never* carries a version-pinned label and cited
+    `docs/ops/ci-runner-x64.md:25-26` as the warrant — while `:26`, the row this very PR rewrote,
+    says the pool claims `ubuntu-24.04` as the temporary #6897 mitigation. The PR had corrected that
+    absolute on nine other surfaces (six workflow comments, `test_runner_tool_contract.py`, the
+    runbook, `MEMORY.md`), so these two were the residue of a re-derivation that moved the numbers
+    (1417 -> 272 / 1523) without re-pointing the claim.
+
+    The `:1527-1529` half was the load-bearing one: *"no workflow is starved by that"* is FALSE under
+    the mitigation — a job naming the label wants the hosted IMAGE, and during a hosted outage it
+    cannot get one, which is the deadlock `CI_RUNNER_OS_LABEL` exists for. A maintainer reading the
+    drop's rationale saw "harmless" thirty lines above the sentence naming it as a residual.
+
+    Mutation: restore either pre-fix sentence -> the checker reports the pre-fix absolute and the
+    missing flag, and the citation arm reds too when the prose is re-pointed at a row with no
+    mitigation. Control: the real sites pass on all three arms, so this is not a pin that "never"
+    matches.
+    """
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+    sites = _version_pin_comment_sites()
+    assert set(sites) == {"label-constant", "preserve-labels"}, sorted(sites)
+    bad = {name: _mitigation_denials(text, runbook) for name, text in sites.items()}
+    assert not any(bad.values()), (
+        "a version-pin comment still states the pre-mitigation absolute the runbook row it cites "
+        "has refuted — scope it to the DEFAULT and name the suspension: "
+        + "; ".join(f"{name}: {', '.join(v)}" for name, v in bad.items() if v)
+    )
+
+    # Non-vacuity, executable: the SAME checker must reject this PR's pre-fix prose (head
+    # `ef26ae634`), sentence for sentence, or it is pinning nothing.
+    pre_fix = {
+        "label-constant": (
+            "#: claims only `ubuntu-latest` and never one of these "
+            "(`docs/ops/ci-runner-x64.md:25-26`), because a job that pins a version asks for the "
+            "GitHub-hosted image specifically."
+        ),
+        "preserve-labels": (
+            "dropped rather than preserved. The recorded invariant is that the pool claims "
+            "`ubuntu-latest` and never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:25-26`). "
+            "Dropping it restores the invariant; no workflow is starved by that, because a job "
+            "naming the label wants the GitHub-hosted image."
+        ),
+    }
+    for name, text in pre_fix.items():
+        assert _mitigation_denials(text, runbook), (
+            f"{name}: the checker no longer sees the pre-fix defect it exists for — it would pass "
+            "the very prose this test was written against."
+        )
 
 
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
