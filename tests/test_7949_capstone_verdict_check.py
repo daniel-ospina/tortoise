@@ -2026,7 +2026,7 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
             + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
             "the line moved and the cite did not")
     # (d) The probe's ENTRY-POINT sentence, the same (def, call) pair rule (a)
-    # pins in the README (#10021 review). Rule (c) covers only the probe's eight
+    # pins in the README (#10021 review). Rule (c) covers only the probe's nine
     # bare STEP cites, so this sentence — the one that names the entry point a
     # reader reproduces from — was the ONLY cite in the bundle that nothing
     # re-checked. It rotted exactly as rule (a)'s README twin did: the
