@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-runner-pool, ci-headroom-guards
 aboutObjects: tortoise, tools/install-ci-runner-x64.sh, scripts/ci_runner_gate.sh
 created: 2026-10-22
-updated: 2026-10-23
+updated: 2026-10-30
 ---
 
 # x86_64 CI runners — the fallback pool's second architecture
@@ -399,3 +399,26 @@ whose unit carries `on` KEEPS the pin. When #10275 lands both writers read the s
   `grep -n CI_RUNNER_OS_LABEL /etc/systemd/system/runner-autoscale.service` (the systemd path — an
   empty answer is the expected one today, since nothing in this tree writes the flag), then
   `gh api repos/<owner>/<repo>/actions/runners --jq '.runners[]|select(.name|startswith("pi-runner-x64"))|{name,labels:[.labels[].name]}'`.
+
+## The fast-matrix split is OPT-IN (`CI_SHARD_ROUTING=pool-split`)
+
+**Decision relay (PR #10186, 2026-10-30).** #6897's ruling is *use the compute capacity wherever
+it is, throughput first*. An earlier cut of #10186 read that as *route 4 of 9 gated fast shards to
+the pool by default* — which is an adoption over the `fallback-only` decision above, and not a
+lane's to take. It was rejected on measurement, not on taste:
+
+| run | what ran | result |
+| --- | --- | --- |
+| `40981781885` (`main`, plain `ubuntu-latest`) | pool won 5 of 9 legs by the fallback race | **5 of 5 pool legs killed**; 4 of 4 hosted legs passed in 10-12 m of a 20 m budget |
+| `40986603502` (head `5a2ae6aa1`, split ON) | odd → `self-hosted-x64`, even/canary → `ubuntu-latest` | 3 of 4 pool legs failed — two on `redis ConnectionError 111 localhost:6379`, not on the budget; `test (i)` (**the canary**) was taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s |
+
+So the split ships **available and off**: `tools/ci_selection.py::resolve_shard_routing()` is the one
+decision point, `CI_SHARD_ROUTING=pool-split` opts in, and **unset / empty / `hosted-only` / any
+other value resolves to hosted-only** — every fast row back on `ubuntu-latest`, exactly what main
+does. A typo or a fork with no `vars` therefore fails SAFE, never onto the contended class.
+`python-ci.yml`'s `test` job takes its class from `matrix.runner` only, so there is no second copy
+of the mode to drift.
+
+Changing the DEFAULT is a decision, and its home is #6897: it needs idle pool capacity at schedule
+time **and** a pool job wall within ~1.2x hosted on these rows, neither of which the runs above
+show. Do not set `pool-split` to "try it out" — a killed leg is a required check.
