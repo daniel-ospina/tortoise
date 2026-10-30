@@ -767,19 +767,24 @@ def test_the_purity_guard_cannot_be_bypassed_by_an_inline_comment_in_a_string() 
 # test go red" is, and that evidence rots the moment nobody re-runs it.
 #
 # So the proof is a test. Each entry below is ONE mutation that removes ONE
-# property, the exact source span it rewrites, and the node that must then FAIL.
-# `TORTOISE_MUTATION_PROOF=1` runs them (≈2 min: four subprocess pytest runs);
+# property, the exact source span it rewrites, the node that must then FAIL, and
+# the property assertion's own message — because "the child exited 1" and "the
+# property's assertion fired" are different claims, and only the second is a kill
+# (`_property_test_fails` requires both, so a failure for any OTHER reason is
+# loud here instead of counted as proof). `TORTOISE_MUTATION_PROOF=1` runs them;
 # the default lane runs only the structural pin, which is what keeps the table
 # honest for free.
 
-#: (property, file, exact source span, replacement, the test that must go RED)
-PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str], ...] = (
+#: (property, file, exact source span, replacement, the test that must go RED,
+#:  a fragment of THAT test's own failure message)
+PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str, str], ...] = (
     (
         "single-flight",
         TOKEN_TS,
         "  const running = inFlightRefreshes.get(handle);\n  if (running) return running;\n",
         "  // MUTATION: the in-flight map is no longer consulted\n",
         "test_property_1_single_flight_issues_exactly_one_refresh",
+        "the in-flight guard is gone",
     ),
     (
         "refresh-once",
@@ -788,6 +793,7 @@ PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str], ...] = (
         " && row.access_token_expires_at - REFRESH_SKEW_MS > now) {\n",
         "  if (false) {\n",
         "test_property_2_refresh_once_is_bounded_by_skew_and_cooldown",
+        "the skew no longer holds",
     ),
     (
         "never-sign-out",
@@ -795,6 +801,7 @@ PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str], ...] = (
         '    if (refreshed.retryable) return { ok: false, reason: "unavailable" };\n',
         '    if (refreshed.retryable) return { ok: false, reason: "no_session" };\n',
         "test_property_3_never_sign_out_a_transient_failure_is_not_a_dead_session",
+        "a fault read as a session verdict is the #3485 sign-out",
     ),
     (
         "auto-advance",
@@ -804,6 +811,7 @@ PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str], ...] = (
         "  }\n",
         "  // MUTATION: a usable session no longer advances on its own\n",
         "test_property_4_auto_advance_without_a_manual_click",
+        "the advance decision table changed",
     ),
 )
 
@@ -826,7 +834,7 @@ def test_every_property_mutation_still_targets_exactly_one_span() -> None:
     instead of only under `TORTOISE_MUTATION_PROOF=1`.
     """
     collected = _collected_node_ids()
-    for label, path, span, _replacement, node in PROPERTY_MUTATIONS:
+    for label, path, span, _replacement, node, _expected in PROPERTY_MUTATIONS:
         assert path.is_file(), f"{label}: {path} is gone — re-point the mutation"
         hits = path.read_text().count(span)
         assert hits == 1, (
@@ -869,6 +877,15 @@ def _collected_node_ids() -> set[str]:
 _PYTEST_OK = 0
 _PYTEST_TESTS_FAILED = 1
 
+# The OTHER half of a kill, and the one the exit code cannot see: a mutation that
+# breaks the module still reddens its test — `_run` (above) wraps every non-zero
+# node exit as "harness scenario … failed", so the child exits 1, prints a
+# `FAILED` line, and would be recorded as a kill while the assertion never ran.
+# The field calls that a `Runtime error` and excludes it from the score (#10343
+# review cycle 2). So the child's output must carry the property's OWN message
+# (the sixth column of `PROPERTY_MUTATIONS`) and must not carry this prefix.
+_HARNESS_FAILURE = "harness scenario"
+
 # Four children per run. Measured cost of the whole item is ~206 s (~50 s a
 # child), so 200 s a child is ~4x headroom AND keeps the four inner bounds under
 # the 900 s outer mark below — the per-property bound binds first, so a slow
@@ -877,12 +894,14 @@ _PYTEST_TESTS_FAILED = 1
 _PROPERTY_RUN_TIMEOUT_S = 200
 
 
-def _property_test_fails(node: str) -> bool:
+def _property_test_fails(node: str, expected: str) -> bool:
     """Run ONE property test in a fresh process; True only when it goes RED.
 
-    "Red" means a NAMED test failed. Any other non-zero exit RAISES rather than
-    returning True: a run that never reached its assertions — a bad node id, an
-    unparsable mutation, a missing pytest — is not evidence about the property.
+    "Red" means a NAMED test failed — and failed on the property's own assertion.
+    Every other shape RAISES rather than returning True, because each is a run
+    that never reached the assertion: a bad node id (pytest exit 4), an
+    unparsable mutant (the harness wrapper, exit 1), a missing pytest. A run that
+    does not execute the assertion is not evidence about the property.
     """
     argv = [sys.executable, "-m", "pytest", f"{TEST_FILE}::{node}", "-q", "--no-header", "-rf"]
     try:
@@ -902,6 +921,21 @@ def _property_test_fails(node: str) -> bool:
             "its output, so this non-zero exit is not that test failing and proves "
             f"nothing about the property.\nstdout:\n{proc.stdout[-4000:]}\n"
             f"stderr:\n{proc.stderr[-2000:]}"
+        )
+        assert _HARNESS_FAILURE not in proc.stdout, (
+            f"{node}: the child died inside the HARNESS, not inside the property — "
+            f"`_run` wraps any non-zero node exit as {_HARNESS_FAILURE!r}, so a "
+            "mutation that makes the module unparsable reddens this test with exit "
+            "1 and a FAILED line and would otherwise be counted as a kill. A mutant "
+            "that does not parse is a Runtime error — not a kill, and not evidence "
+            "about the property. Fix the mutation's `replacement` so it still "
+            f"parses.\nstdout:\n{proc.stdout[-4000:]}"
+        )
+        assert expected in proc.stdout, (
+            f"{node}: the test failed, but its output does not carry the property's "
+            f"own message ({expected!r}), so it failed for some other reason and "
+            "proves nothing about the property.\nstdout:\n"
+            f"{proc.stdout[-4000:]}"
         )
         return True
     if proc.returncode == _PYTEST_OK:
@@ -927,21 +961,31 @@ def _property_test_fails(node: str) -> bool:
 def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
     """Break each property in the real source; its own test must fail.
 
-    The restore is byte-identical and ASSERTED by sha256, so a failure mid-loop
-    cannot leave the tree carrying a mutation — the previous version of this
-    proof ran by hand, where it could.
+    The restore is byte-identical and ASSERTED by sha256 — and the assertion runs
+    in the `finally`, on the error path too, because the paths that skip the loop
+    body are exactly the ones a mutated tracked file could survive: an unexpected
+    mutation, a harness error, a budget red. The write is bytes-to-bytes, so the
+    comparison is bytes-to-bytes as well. The previous version of this proof ran
+    by hand, where no restore was asserted at all.
     """
-    for label, path, span, replacement, node in PROPERTY_MUTATIONS:
-        original = path.read_text()
-        before = hashlib.sha256(original.encode()).hexdigest()
+    for label, path, span, replacement, node, expected in PROPERTY_MUTATIONS:
+        original_bytes = path.read_bytes()
+        original = original_bytes.decode("utf-8")
+        before = hashlib.sha256(original_bytes).hexdigest()
         assert original.count(span) == 1, f"{label}: span is no longer unique"
-        path.write_text(original.replace(span, replacement))
+        path.write_bytes(
+            original_bytes.replace(span.encode("utf-8"), replacement.encode("utf-8"))
+        )
         try:
-            went_red = _property_test_fails(node)
+            went_red = _property_test_fails(node, expected)
         finally:
-            path.write_text(original)
-        after = hashlib.sha256(path.read_bytes()).hexdigest()
-        assert before == after, f"{label}: restore is NOT byte-identical ({before} → {after})"
+            path.write_bytes(original_bytes)
+            after = hashlib.sha256(path.read_bytes()).hexdigest()
+            assert before == after, (
+                f"{label}: restore is NOT byte-identical ({before[:16]}… → {after[:16]}…) — "
+                f"{path.name} is still carrying the mutation. `git checkout -- {path}` "
+                "before doing anything else."
+            )
         assert went_red, (
             f"{label}: {node} stayed GREEN with the property removed — the test does "
             "not test the property it is named for"
