@@ -928,6 +928,20 @@ def get_client(cp, client_id: str) -> dict | None:
     return row
 
 
+def resolve_authorize_scope(requested: str | None, client: dict | None) -> str:
+    """THE scope a flow will actually be bound with: request → client default → `mcp`.
+
+    ⛔ One function, because TWO call sites must agree or the consent screen lies. The page
+    renders it (`resolved_scope`, so the visitor sees what they are granting) and the code
+    mint binds it (`/oauth/consent`); when these were two copies of the same expression, a
+    visitor could be shown `mcp` while the token carried the client's wider registered scope
+    — the under-disclosure round 9 of #10346's review measured, and the divergence a silently
+    edited copy would reintroduce (round 10). `validate_scope` still runs on the result in
+    `validate_authorize_params`, so this decides the VALUE, not the allow-list.
+    """
+    return (requested or "").strip() or (client or {}).get("scope") or "mcp"
+
+
 def resolve_client(cp, client_id: str) -> dict | None:
     """Client lookup for the authorize/token paths: registry first (DCR or
     operator-issued), then **CIMD** (#2847).

@@ -41682,6 +41682,7 @@ async def oauth_authorize(request: Request):
         consent_app_origin,
         consent_bounce_url,
         consent_page_html,
+        resolve_authorize_scope,
         validate_authorize_params,
     )
     try:
@@ -41808,7 +41809,7 @@ async def oauth_authorize(request: Request):
         # scope the visitor is granting rather than the one the URL named. The raw
         # `scope` param still rides along untouched — it is what the page POSTS back.
         params={**params, "redirect_target": redirect_target,
-                "resolved_scope": params["scope"] or client.get("scope") or "mcp"},
+                "resolved_scope": resolve_authorize_scope(params["scope"], client)},
         raw_query=request.url.query,
         app_origin=app_origin,
     )
@@ -41949,6 +41950,7 @@ async def oauth_consent(request: Request):
         OAuthError,
         canonical_redirect_target,
         issue_auth_code,
+        resolve_authorize_scope,
         validate_authorize_params,
     )
     try:
@@ -42101,7 +42103,7 @@ async def oauth_consent(request: Request):
             redirect_uri=mint["redirect_uri"],
             code_challenge=mint["code_challenge"],
             state=mint["state"],
-            scope=body.get("scope") or client.get("scope") or "mcp",
+            scope=resolve_authorize_scope(body.get("scope"), client),
             resource=body.get("resource") or None,
         )
     except OAuthError as exc:

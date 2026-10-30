@@ -880,15 +880,65 @@ def test_the_page_displays_the_scope_that_will_actually_be_BOUND(api_client, tmp
     assert '"resolved_scope": "mcp"' in r2.text, (
         "the request's own scope must win over the client's registered default")
 
-    # ⛔ AND THE PAGE MUST RENDER IT. Carrying the value in PARAMS proves nothing on its own —
-    # the pre-fix page carried `scope` and still printed `mcp`; this is the assertion that the
-    # visitor's screen shows the resolved scope, driven through the real page script.
+    # ⛔ AND THE SCREEN SHOWS **THE SCOPE THE CODE ACTUALLY CARRIES** — end to end, not a copy
+    # of the fallback expression. Asserting the render against a literal mirrored the same
+    # `scope or client scope or "mcp"` the code computes, so editing the MINT's fallback
+    # (hosted_api: `scope=body.get("scope") or "mcp"`) would leave the screen saying
+    # `mcp offline_access` while the token carried `mcp` — round 9's defect back, all cases
+    # green (round 10, executed). So: render → approve the page's OWN body → exchange the code
+    # → compare the screen with the `scope` the token carries.
     raw_q = r.request.url.query
-    out = _run_page(r.text, {"search": "?" + (raw_q.decode() if isinstance(raw_q, bytes)
-                                              else raw_q)}, tmp_path)
-    assert out["afterLoad"]["scopeLine"] == "mcp offline_access", (
-        f"the consent screen shows {out['afterLoad']['scopeLine']!r} while the code grants "
-        "'mcp offline_access' — the screen must not under-state what it authorizes")
+    out = _run_page(r.text, {
+        "search": "?" + (raw_q.decode() if isinstance(raw_q, bytes) else raw_q),
+        "click": True,
+        "responses": [
+            {"status": 200, "body": {"token": "ct-scope"}},
+            _SOLE_ORG,
+            {"status": 200, "body": {"code": "ac_scope", "state": params["state"],
+                                     "redirect_uri": REDIRECT,
+                                     "redirect_target": REDIRECT}},
+        ],
+    }, tmp_path)
+    shown = out["afterLoad"]["scopeLine"]
+    assert shown == "mcp offline_access", (
+        f"the consent screen shows {shown!r} — the screen must not under-state what it "
+        "authorizes")
+
+    # ⛔ AND THE GRANT AGREES WITH THE SCREEN — measured from the TOKEN, not from a copy of the
+    # expression. A test that compared the render with `resolve_authorize_scope(...)` mirrored
+    # the seam instead of checking the outcome: editing the MINT's arm alone
+    # (`scope=body.get("scope") or "mcp"`) left every case green while the screen said
+    # `mcp offline_access` and the token carried `mcp` (round 10, executed). So the real
+    # approval runs here and the scope is read back off `/oauth/token`.
+    _verifier, challenge = _pkce()
+    token = _mint(_U1, {"client_id": params["client_id"],
+                        "redirect_uri": params["redirect_uri"],
+                        "code_challenge": challenge,
+                        "state": params["state"]})
+    r_ok = tc.post("/oauth/consent", json={
+        "consent_token": token,
+        "client_id": params["client_id"],
+        "redirect_uri": params["redirect_uri"],
+        "response_type": "code",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": params["state"],
+        # ⛔ EXACTLY what the page posts when the URL named no scope: the empty string.
+        "scope": params.get("scope", ""),
+        "resource": None,
+    })
+    assert r_ok.status_code == 200, r_ok.text
+    granted_body = r_ok.json()
+    exchanged = tc.post("/oauth/token", data={
+        "grant_type": "authorization_code", "code": granted_body["code"],
+        "redirect_uri": params["redirect_uri"], "client_id": params["client_id"],
+        "code_verifier": _verifier,
+    })
+    assert exchanged.status_code == 200, exchanged.text
+    granted = exchanged.json()["scope"]
+    assert shown == granted, (
+        f"the consent screen shows {shown!r} while the code carries {granted!r} — the screen "
+        "must show exactly what it grants")
 
 
 def test_the_authorize_click_posts_the_token_and_navigates_with_the_state_echoed(

@@ -1932,7 +1932,12 @@ def _page_live_acceptances(scanned: str) -> list[str]:
     """
     found: list[str] = []
     # See `_FILE_TOKEN`: a dotted filename must not terminate the noun-first span.
-    masked = _FILE_TOKEN.sub("\u2039file\u203a", scanned)
+    # ⛔ SAME-LENGTH REPLACEMENT, so the reported excerpt stays aligned with the document.
+    # A shorter placeholder shifted every subsequent offset, and the excerpt — cut from
+    # `scanned` with the masked offsets — started mid-sentence and stopped BEFORE the claim it
+    # was reporting (round 10, executed). Padding also keeps the 40-char span measuring real
+    # characters: a filename inside it must not silently widen it.
+    masked = _FILE_TOKEN.sub(lambda m: "\u2039" + "\u00b7" * (len(m.group(0)) - 1), scanned)
     for pattern, negatable in (
         (_PAGE_LIVE_NOUN_FIRST, True),
         (_PAGE_LIVE_VERB_FIRST, False),
