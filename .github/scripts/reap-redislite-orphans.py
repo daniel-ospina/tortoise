@@ -132,10 +132,19 @@ _SOCKET_FLAG = "unixsocket"
 # ceiling, or a job's outer cap, reds this file's own suite — instead of
 # silently turning the proof back into a live-peer kill (the #3653 defect).
 #
-# Deliberately NOT lowered to the 30-minute dir-litter floor the same step uses
-# for `find`: a directory carries no live-process risk, a SIGTERM to a live
-# server does. A conservative arm costs a leak the orphan gate reports; a
-# too-low arm costs somebody else's red PR.
+# NOT the same question as the 30-minute dir-litter floor the same step gives
+# `find`, and NOT a safe floor to borrow: that arm deletes by mtime ALONE, with
+# no liveness check at all, and its 30 minutes sit BELOW both the 55-minute
+# watchdog ceiling and the 90-minute job cap this arm is derived from — so it
+# CAN unlink a running peer's socket directory (redislite's `mkdtemp` dir, whose
+# mtime is set at instance start). That is not harmless litter: the unlinked
+# socket is exactly the "socket dir gone" input the first arm below reaps on.
+# It is #3653's REMAINING HALF — the issue's own "Candidates for the deleter"
+# names this `find`, and its "Suggested direction" asks for the pid/socket
+# liveness check that would make the floor safe. Closing it is a behavioural
+# change and is deliberately not attempted here. This ARM is not lowered toward
+# that floor for the reason it is not lowered at all: a conservative arm costs a
+# leak the orphan gate reports; a too-low arm costs somebody else's red PR.
 #
 # Mirrored as literals rather than imported: this script is deliberately
 # stdlib-only and 3.9-clean, and it runs in a setup step under the runner's

@@ -361,6 +361,50 @@ def test_the_age_arm_clears_the_widest_permitted_leg_watchdog(reaper):
     )
 
 
+#: What the derivation block must SAY about the sibling 30-minute dir-litter
+#: `find` floor, and the sentence it must no longer say.
+_DIR_FLOOR_RISK_PROSE = ("3653", "CAN unlink a running peer's socket directory")
+_DIR_FLOOR_REFUTED_PROSE = "no live-process risk"
+
+
+def _derivation_block() -> str:
+    """The comment block that derives the age arm, as shipped in the script."""
+    text = SCRIPT.read_text()
+    return text[text.index("the age arm: DERIVED") : text.index("WIDEST_EMBEDDED_JOB_TIMEOUT")]
+
+
+def test_the_derivation_block_names_the_dir_floor_as_open_risk():
+    """NON-VACUOUS: reds on the block the pre-fix diff shipped.
+
+    That block stated the 30-minute dir-litter floor is safe because "a directory
+    carries no live-process risk, a SIGTERM to a live server does" — the one claim
+    the block's OWN arithmetic two paragraphs above disproves. The sibling `find
+    ... -mmin +30 -exec rm -rf` deletes by mtime alone, with no liveness check, so
+    its 30 minutes sit below both the 55-minute watchdog ceiling and the
+    90-minute job cap this arm is derived from, and it can unlink a running
+    peer's `mkdtemp` socket directory — which is exactly arm 1's "socket dir
+    gone" input, not harmless litter. It is #3653's remaining half (the issue's
+    own "Candidates for the deleter" names that `find`). The block is the
+    authority a maintainer recomputes the arm from, so a sentence calling that
+    floor harmless can get the floor raised — or this arm lowered back toward it
+    — on the strength of a claim the same block refutes (#10327 review, ISSUE 1
+    at `3d0f0ce06`).
+    """
+    block = _derivation_block()
+    assert _DIR_FLOOR_REFUTED_PROSE not in block, (
+        "the derivation block calls the 30-minute dir-litter floor safe again — its "
+        "own arithmetic shows that floor is BELOW both the 55-minute watchdog "
+        "ceiling and the 90-minute job cap, so it can unlink a live peer's socket "
+        "directory; state it as #3653's remaining half instead"
+    )
+    missing = [marker for marker in _DIR_FLOOR_RISK_PROSE if marker not in block]
+    assert missing == [], (
+        "the derivation block no longer names what the sibling `find` floor costs "
+        f"(missing {missing}) — a maintainer who meets that `find` with no warning "
+        "here has only the false reading this pin replaced"
+    )
+
+
 @pytest.mark.parametrize(
     "argv,expected",
     [
