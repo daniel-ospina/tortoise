@@ -567,11 +567,18 @@ def _poolable_label(text: str) -> bool:
     silent skip, one shape further out): a YAML ALIAS (`runs-on: *pool_labels`), a
     BLOCK SCALAR (`runs-on: >-` or `runs-on: |` with the label on the next line), a
     next-line plain scalar or FLOW list (`runs-on:` then `  ubuntu-latest` /
-    `  [self-hosted, ubuntu-latest]`), and a `<<:` merge-key line. None is used in the
-    tree today — all 86 `runs-on:` keys are inline scalars, so the miss is latent, not
-    live — and they are named here so the next author writing one of them knows the
-    scan is a text reader rather than a YAML parser, and adds the shape instead of
-    assuming coverage.
+    `  [self-hosted, ubuntu-latest]`), a next-line nested MAP — the `group:` / `labels:`
+    pair GitHub documents as a `runs-on` value, written as `runs-on:` then
+    `  group: ubuntu-runners` / `  labels: ubuntu-24.04-16core` — and a `<<:` merge-key
+    line. The nested MAP is worth its own clause because it is ASYMMETRIC: the INLINE
+    flow spelling (`runs-on: {group: …, labels: ubuntu-24.04}`) IS answered, since the
+    inline arm text-searches the whole rest of the line, while the BLOCK one stops at
+    `group:` — no `- ` item matches, the item loop breaks, and the job comes back
+    invisible although `ubuntu-24.04` is named one line below in `labels:`. None is
+    used in the tree today — all 86 `runs-on:` keys are inline scalars, so the miss is
+    latent, not live — and they are named here so the next author writing one of them
+    knows the scan is a text reader rather than a YAML parser, and adds the shape
+    instead of assuming coverage.
     """
     lines = text.splitlines()
     for i, line in enumerate(lines):
