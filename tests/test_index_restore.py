@@ -447,14 +447,19 @@ def test_t12_unknown_record_types_fail_closed_r8(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# T12 cycle-19 (c): INSTANTIATES (aboutObject) edges join the rebuild-drop
-# scope — count==0 post-rebuild, restored after the re-index.
+# T12 cycle-19 (c): INSTANTIATES (aboutObject) edges — since #3590 they are
+# JOURNALED (the session Event carries `about_entities`), so replay rebuilds
+# them: they SURVIVE rebuild instead of being dropped and re-wired.
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_t12_instantiates_edges_rebuild_drop_and_restore(tmp_path):
-    """T12 cycle-19 (c): a session Event's issue/PR aboutObject edges are
-    DROPPED by rebuild (created indexer-side, never journaled) and RESTORED
-    by the re-index (the session upsert re-runs _connect_issue_objects)."""
+    """T12 cycle-19 (c), re-based on #3590: a session Event's issue/PR
+    aboutObject edges are created by the indexer AND named in the journaled
+    event's `about_entities`, so the replay fold re-creates the same edges —
+    the rebuild SURVIVES them, and the following re-index is idempotent on
+    them (no duplicates, none lost). Before #3590 the names were unjournaled,
+    the rebuild dropped the edges, and only the re-index (the session upsert
+    re-running _connect_issue_objects) restored them."""
     events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text(
@@ -471,10 +476,19 @@ def test_t12_instantiates_edges_rebuild_drop_and_restore(tmp_path):
         assert n_live >= 2, f"expected issue/PR edges live, got {n_live}"
         proj = sdk._get_proj()
         proj.rebuild_all(str(events_dir), confirm_destructive=True)
-        # the aboutObject edges are DROPPED (indexer-side, unjournaled)
+        # ⛔ #3590 re-based this pin. The old assertion here required the
+        # edges to be DROPPED ("indexer-side, unjournaled", #5048's gap) and
+        # the re-index to restore them. At this head the session Event's
+        # `about_entities` names are journaled and the fold resolves them, so
+        # replay rebuilds the SAME edges — which is the property the
+        # drop/restore cycle only approximated. Scoped to this session's Event
+        # so the pin cannot be satisfied by an unrelated edge elsewhere.
         assert g.query(
-            "MATCH ()-[:aboutObject]->() RETURN count(*)").result_set[0][0] == 0
-        # re-index restores them (the session upsert re-wires)
+            "MATCH (e:Event {eventId:'session_r9'})-[:aboutObject]->(o:Object) "
+            "RETURN count(o)").result_set[0][0] == n_live, (
+            "rebuild must replay the journaled about_entities names, not drop "
+            "them (#3590)")
+        # re-index is idempotent on them (the session upsert re-wires, no dupes)
         sdk.index_directory(str(corpus), extract_metadata=False)
         assert g.query(
             "MATCH (e:Event {eventId:'session_r9'})-[:aboutObject]->(o:Object) "
