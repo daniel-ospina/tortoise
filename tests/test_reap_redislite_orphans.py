@@ -61,7 +61,7 @@ def _age_bound_s(reaper) -> float:
     Round 15 of the PR review: every boundary test used to pass `45 * 60` by hand,
     so the suite stayed green while the shipped default disagreed with the repo's
     own watchdog policy. The bound is read from the module under test here, and
-    its two SOURCES are pinned by `test_the_age_arm_clears_every_reaper_job_outer_timeout`
+    its two SOURCES are pinned by `test_the_age_arm_clears_every_embedded_lane_job_outer_timeout`
     and `test_the_age_arm_clears_the_widest_permitted_leg_watchdog` below — the
     tests that actually fail when the constant drifts out of safety.
     """
@@ -170,6 +170,23 @@ def _truthy(value: object) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _workflow_files(workflows_dir: Path | None = None) -> list[Path]:
+    """Every workflow file — BOTH `.yml` and `.yaml`.
+
+    GitHub accepts either extension (workflow syntax: "Workflow files use YAML
+    syntax, and must have either a `.yml` or `.yaml` file extension"), so a
+    `.yml`-only glob makes every "EVERY workflow" claim in this file quietly
+    false for the other half. This repo has no `.yaml` workflow today, which is
+    exactly why the `.yaml` half needs its own test — the same trap, and the
+    same remedy, as `tests/test_ci_selection.py::_workflow_files`. Handing every
+    scan below through this one function is what makes dropping an extension
+    visible instead of silent. `workflows_dir` is injectable so the extension
+    pin can point it at a fixture without touching the real workflows.
+    """
+    wf_dir = workflows_dir if workflows_dir is not None else REPO_ROOT / ".github" / "workflows"
+    return sorted({*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")})
+
+
 def _job_strings(node: object) -> list[str]:
     """Every scalar under a job, so `run:` bodies are searched too."""
     if isinstance(node, dict):
@@ -179,7 +196,9 @@ def _job_strings(node: object) -> list[str]:
     return [] if node is None else [str(node)]
 
 
-def _embedded_lane_job_outer_timeouts() -> dict[str, int | None]:
+def _embedded_lane_job_outer_timeouts(
+    workflows_dir: Path | None = None,
+) -> dict[str, int | None]:
     """Job-level `timeout-minutes` for every job that can OWN a redislite server.
 
     Keyed `<workflow>:<job>`. GitHub cancels a job at its OWN `timeout-minutes`
@@ -200,7 +219,7 @@ def _embedded_lane_job_outer_timeouts() -> dict[str, int | None]:
     today's such jobs, and every one of them is capped below the arm.
     """
     found: dict[str, int | None] = {}
-    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+    for path in _workflow_files(workflows_dir):
         workflow = yaml.safe_load(path.read_text()) or {}
         workflow_env = workflow.get("env") or {}
         for name, job in (workflow.get("jobs") or {}).items():
@@ -276,6 +295,45 @@ def test_the_age_arm_clears_every_embedded_lane_job_outer_timeout(reaper):
         f"the age arm ({reaper.DEFAULT_MAX_AGE_MINUTES} min) does not clear the widest "
         f"job cancel bound ({widest} min): a leg can still be RUNNING with a server "
         "that old, so the SIGTERM is the #3653 live-peer kill, not a proof"
+    )
+
+
+def test_the_embedded_lane_scan_reads_every_workflow_extension(tmp_path):
+    """NON-VACUOUS: reds if either half of the glob goes missing.
+
+    GitHub accepts `.yml` AND `.yaml`, so the population's claim to cover EVERY
+    workflow is only true while the scan keeps both. The repo has no `.yaml`
+    workflow today — which is precisely why this hole is invisible in the real
+    tree, and why the fixture below carries one embedded job per extension and
+    points the scan at it. `yaml-leg.yaml` is deliberately UNCAPPED: that is the
+    state the age arm cannot prove ownership under (GitHub's 360-minute
+    default), so a scan that missed it would keep reporting `uncapped == []`
+    while a real workflow sat in the gap — the drift class of #10327 review
+    round 2, one file-extension wide.
+    """
+    (tmp_path / "yml-leg.yml").write_text(
+        "jobs:\n"
+        "  yml-lane:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    timeout-minutes: 20\n"
+        "    steps:\n"
+        "      - run: .github/scripts/reap-redislite-orphans.py --apply\n"
+    )
+    (tmp_path / "yaml-leg.yaml").write_text(
+        "env:\n"
+        "  TORTOISE_TEST_CARVE_OUT: '1'\n"
+        "jobs:\n"
+        "  yaml-lane:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: pytest -q\n"
+    )
+
+    found = _embedded_lane_job_outer_timeouts(tmp_path)
+    assert found == {"yml-leg.yml:yml-lane": 20, "yaml-leg.yaml:yaml-lane": None}, (
+        "the population scan did not read every workflow extension, so a `.yaml` "
+        "workflow that can own an embedded redislite server is invisible to the "
+        f"age-arm proof: {found}"
     )
 
 
@@ -458,7 +516,7 @@ def test_no_ci_step_reaps_embedded_redis_by_process_name():
     the other killing peers.
     """
     offenders: list[str] = []
-    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+    for path in _workflow_files():
         for i, line in enumerate(path.read_text().splitlines(), 1):
             if line.lstrip().startswith("#"):
                 continue
@@ -512,7 +570,7 @@ def test_no_ci_step_duplicates_its_tempdir_cleanup():
     consecutive cleanup lines rather than over the file's total count.
     """
     offenders: list[str] = []
-    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+    for path in _workflow_files():
         for run in _cleanup_runs(path.read_text()):
             if len(run) != 3:
                 offenders.append(
