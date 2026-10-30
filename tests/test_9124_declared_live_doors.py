@@ -456,8 +456,8 @@ _UNRESOLVED = {
     "_read_capture_passthrough_props",
     "_reachable_claim_count",
     # #3590: `_refuse_ambiguous_rename` interpolates the LABEL into its probe
-    # (`f"MATCH (n:{label} {{id: $id}}) RETURN n.name"` — `sdk.py:37322` — over a
-    # literal `("Object", "Subject")` loop), so the resolver cannot unfold the
+    # (`f"MATCH (n:{label} {{id: $id}}) RETURN n.name"` over a literal
+    # `("Object", "Subject")` loop), so the resolver cannot unfold the
     # statement — hence this set rather than a silent read. Checked by hand:
     # the only handle reaches are that `MATCH … RETURN n.name` read (twice, once
     # per label) and `entity_identity.live_name_holder_ids`, which is itself a
