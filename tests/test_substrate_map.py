@@ -539,6 +539,47 @@ def test_an_index_git_that_cannot_answer_is_a_state_error_not_an_empty_populatio
     )
 
 
+def test_a_leaf_row_that_imports_internally_is_drift() -> None:
+    """Fails if §5 can call a module a `*leaf*` while it imports `tortoise/` code.
+
+    Reachable, and it WAS the shipped state (#5086 review cycle 5, P2 — the half
+    of finding 3 the inbound-count fix left behind): the interface map's `depends
+    on` column said `*leaf*` for `vet_gate.py` while that file opens with a
+    module-level `from . import value_gate` (`vet_gate.py:149`). Every other row
+    lists the modules it depends on, so the `*leaf*` cells are the only ones
+    asserting EMPTINESS — and emptiness is what a lane plans a rebase on.
+
+    Three things are pinned, and each fails on a state that was real or is one
+    edit away: (a) the shipped document has no such row; (b) restoring the
+    pre-fix cell (`*leaf*` beside `vet_gate.py`) reds with that module named — on
+    the pre-fix document this IS the shipped text, so the check reds there; (c)
+    a document whose `*leaf*` cells have all been renamed reports that it is
+    measuring nothing, rather than passing over an empty set.
+    """
+    doc = _doc()
+    assert smc.check_leaf_rows(doc) == [], smc.check_leaf_rows(doc)
+
+    drifted = doc.replace("| `vet_gate.py` | `value_gate` |", "| `vet_gate.py` | *leaf* |")
+    assert drifted != doc, (
+        "the substitution anchor is gone — the `vet_gate.py` row no longer reads "
+        "`value_gate` in its `depends on` cell, so update this control's anchor "
+        "(and re-check §5) rather than deleting the control"
+    )
+    problems = smc.check_leaf_rows(drifted)
+    assert any("vet_gate.py" in p and "value_gate" in p for p in problems), (
+        f"§5 calling `vet_gate.py` a *leaf* must be drift, naming the import it "
+        f"hides; got: {problems}"
+    )
+
+    emptied = doc.replace("| *leaf* |", "| nothing |")
+    assert emptied != doc, "§5 has no `*leaf*` cell to rename — see (a)"
+    problems = smc.check_leaf_rows(emptied)
+    assert any("no `*leaf*` depends-on row" in p for p in problems), (
+        "a document with no `*leaf*` row must report that the check is measuring "
+        f"nothing, not pass over an empty set; got: {problems}"
+    )
+
+
 def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     """Fails if §5's `:Document` figure is a FILE count wearing a line's name.
 

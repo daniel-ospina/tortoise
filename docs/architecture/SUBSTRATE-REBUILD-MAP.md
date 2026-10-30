@@ -197,7 +197,7 @@ Taken from the import graph, not from prose.
 | `projection/edges.py` | `source_identity` | `STRUCTURAL_REL_LABELS` (`:55`) + `stub_key` (`:84`) — **the replay keys** | #5026 · #5025 (closed) |
 | `source_identity.py` | *leaf* | canonical source identity (the dedup key) | #5038 |
 | `fanout.py` | *leaf* | the fan-out cap | #4999 |
-| `vet_gate.py` | *leaf* | the S2.2 VET decision | E1's remaining steps |
+| `vet_gate.py` | `value_gate` | the S2.2 VET decision | E1's remaining steps |
 | `embeddings.py` | `env_truthy` · `ids` | embed/serialise — the journal payload | #5004 |
 | `consistency.py` | `projection` | divergence detection | #5011 |
 | `assembly.py` · `subgraph.py` | `fanout` | traversal + assembly | #5010 |
@@ -213,6 +213,26 @@ declared family (§3), so the single inbound edge is inside one lane rather than
 across the dependency graph: a `vet_gate` interface change is L3's business.
 The leaves created by the merged lanes are still leaves. **The contention
 remains entirely in the pre-existing aggregators.**
+
+What a *leaf* cell means in that table, stated because it is narrower than
+"dependency-free": **no module-level import of anything under `tortoise/`** —
+the property the contention argument rests on, since a module-level cycle is what
+serializes two lanes. `fanout`, `source_identity` and `quota` hold on that
+reading (verified at `4f68a2aa7`: none has a column-0 internal import). Two of
+them are **not** dependency-free in the wider sense, and the difference is
+deliberate rather than stale: `source_identity.py:271` and eleven sites in
+`quota.py` (`:78`, `:476`, `:518`, `:556`, `:604`, `:647`, `:724`, `:883`,
+`:1035`, `:1249`, `:1648`) import an internal module **inside functions**,
+lazily, to break import cycles — ten as `tortoise.*` and one (`:1035`)
+relatively, `from .security import redact_error`. A lane editing `projection`'s
+private helpers still has those call sites to consider.
+
+`vet_gate.py` is consequently **not** a `depends on` leaf: it carries one
+internal dependency of its own — `value_gate`, the stdlib-only identifier
+predicate that both it and `extractor_v2` import (`vet_gate.py:149`).
+`tools/substrate_map_check.py`'s `check_leaf_rows` re-measures exactly this: a
+row whose `depends on` cell says `*leaf*` must import nothing under `tortoise/`
+at module level, and a row that does is a drift (§10).
 
 ### The one interface that must not be broken
 
@@ -385,7 +405,7 @@ Dual-registered on purpose, because the two halves need different checkouts:
 | home | what it proves | why there |
 |---|---|---|
 | `core` + `tier1` (`config/ci-surfaces.yml`) → the `test` shards | everything except the ancestry claim | a **docs-only** edit of this file selects no surface at all and runs `tier1` only, so a `core`-only row would never fire on the diff that actually staled three times |
-| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all five claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where the object is absent by construction) |
+| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all six claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where the object is absent by construction) |
 | `CORE_ALSO` (`tools/ci_selection.py`) | the same `test`-shard set, on a **tool-only** edit | `tools/` is a flat non-python prefix and matches no `SOURCE_PATTERNS` row, so without that entry an edit to the tool itself selected nothing |
 
 What it checks, and deliberately does not:
@@ -394,6 +414,7 @@ What it checks, and deliberately does not:
 |---|---|
 | every **file family** a lane declares resolves on disk | whether a lane is *live* (that is the tracker's job — §1's command) |
 | every **symbol** the interface map places is still **declared** in the file it names (`STRUCTURAL_REL_LABELS`, `stub_key`, `_SOURCE_HANDLED`, `_DOC_RETIRED_KEYS`, `relabel_legacy_documents`, `build_master_list`, `compile_vocab`, `compile_value_brief`) — *declared*, not merely mentioned: a comment or a reader does not satisfy it — and that the document still *names* it | whether the symbol still *means* what the map says |
+| every §5 row whose `depends on` cell says `*leaf*` really imports nothing under `tortoise/` at **module level** (a lazy in-function import does not count — that is how `source_identity` and `quota` break their cycles) | whether a row's dependency list is *complete*: the non-leaf rows name the interfaces that matter to the contention argument, not every import |
 | | whether `:Document` is minted anywhere — **not regex-checkable**, and §5 records the measurement showing why |
 | | the tracker state of any issue — **the 76/33 split above is a point-in-time measurement, and it is dated in the frontmatter** |
 | this document is registered in `docs/00_index.md` | the correctness of the placement judgements |

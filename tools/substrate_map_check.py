@@ -19,9 +19,12 @@ tree disagree:
      writers and `relabel_legacy_documents` in the graph migration (both are
      interface symbols, so they are covered by (2));
   4. the document is registered in `docs/00_index.md`;
-  5. the document's `measured_at_commit` is an ancestor of `HEAD` — the map names
+  5. every §5 row whose `depends on` cell says `*leaf*` really imports nothing under
+     `tortoise/` at MODULE level (a lazy in-function import does not count: it is
+     how `source_identity` and `quota` deliberately break their cycles);
+  6. the document's `measured_at_commit` is an ancestor of `HEAD` — the map names
      the tree it was cut from (`tools/finding_provenance.py`'s rule, applied to a
-     doc rather than to a finding). ⚠️ **(5) is the one claim that needs history.**
+     doc rather than to a finding). ⚠️ **(6) is the one claim that needs history.**
      `actions/checkout` fetches ONE commit by default, so in the `test` job the
      object is absent and the question is unanswerable THERE. That is reported as
      `UNVERIFIED` — a state error (exit 2), never a drift, because the document is
@@ -73,6 +76,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
         f"`uv run python tools/substrate_map_check.py`"
     )
 
+import ast
 import json
 import os
 import re
@@ -194,6 +198,86 @@ def check_interface_symbols(doc: str) -> list[str]:
             continue
         if not _declaration_re(symbol).search(_read(target)):
             problems.append(f"{name} declaration missing from {rel}")
+    return problems
+
+
+#: §5's `depends on` cell for a module that imports nothing under `tortoise/`.
+_LEAF_CELL = "*leaf*"
+
+
+def _module_level_internal_imports(path: Path) -> list[str]:
+    """Internal imports at MODULE level in `path` — not inside a function.
+
+    Module level is the level the `*leaf*` claim is about: a module-level cycle is
+    what serializes two lanes, while a lazy in-function import (`source_identity.py`'s
+    one, `quota.py`'s eleven) breaks the cycle deliberately and does not. A
+    `TYPE_CHECKING`-guarded import is nested inside an `if`, so it is not module
+    level either — and creates no runtime cycle, which is the property at stake.
+    """
+    tree = ast.parse(_read(path))
+    found: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = "." * node.level + (node.module or "")
+                if node.module is None:
+                    # `from . import value_gate` carries the name in the ALIAS, so
+                    # reporting the bare module stem would render as `.` — an
+                    # operator needs the name that creates the edge.
+                    found += [f"{base}{alias.name}" for alias in node.names]
+                else:
+                    found.append(base)
+            elif node.module and node.module.split(".")[0] == "tortoise":
+                found.append(node.module)
+        elif isinstance(node, ast.Import):
+            found += [
+                alias.name for alias in node.names if alias.name.split(".")[0] == "tortoise"
+            ]
+    return sorted(set(found))
+
+
+def check_leaf_rows(doc: str) -> list[str]:
+    """§5: a `*leaf*` `depends on` cell really means "imports nothing internal".
+
+    Every other row of the interface table lists the modules it depends on, so the
+    `*leaf*` cells are the only ones asserting EMPTINESS — and emptiness is the claim
+    a lane plans a rebase on. Shipped wrong once: the `vet_gate.py` row said `*leaf*`
+    while that file opens with a module-level `from . import value_gate`
+    (`vet_gate.py:149`), a defect the inbound-count fix beside it did not reach
+    (#5086 review cycle 5, P2).
+    """
+    section = _section(doc, "## 5.")
+    if not section:
+        return ["§5 (the interface map) not found in the document"]
+    problems: list[str] = []
+    leaves = 0
+    for line in section.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or cells[1] != _LEAF_CELL:
+            continue
+        names = re.findall(r"`([^`]+)`", cells[0])
+        if not names:
+            problems.append(f"§5 leaf row names no module: {line.strip()}")
+            continue
+        for name in names:
+            target = ROOT / "tortoise" / name
+            if not target.exists():
+                problems.append(f"§5 leaf row names a file that does not resolve: tortoise/{name}")
+                continue
+            imports = _module_level_internal_imports(target)
+            if imports:
+                problems.append(
+                    f"§5 calls tortoise/{name} a *leaf*, but it imports at module "
+                    f"level: {', '.join(imports)}"
+                )
+            leaves += 1
+    if not leaves:
+        problems.append(
+            "§5 carries no `*leaf*` depends-on row — the table shape changed, so this "
+            "check is measuring nothing"
+        )
     return problems
 
 
@@ -329,6 +413,7 @@ def measure() -> dict:
     problems = (
         check_lane_families(doc)
         + check_interface_symbols(doc)
+        + check_leaf_rows(doc)
         + check_registered(doc)
     )
     ancestry_problems, unverified = check_measured_at_commit(doc)
@@ -338,6 +423,7 @@ def measure() -> dict:
         "checked": [
             "lane_and_hotspot_file_families",
             "interface_symbols",
+            "interface_leaf_rows",
             "docs_index_registration",
             "measured_at_commit_ancestry",
         ],
