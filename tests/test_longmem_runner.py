@@ -5130,9 +5130,20 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # The evidence flag is a REQUIRED keyword (PEP 3102) with no default: a
     # caller that forgets it must fail loudly instead of being handed the
     # SELECTED vocabulary by omission — the same permissive-default shape
-    # this module exists to remove. #4821 review P2. RED pre-fix (the old
-    # signature defaulted `measured=True` and printed SELECTED).
-    with pytest.raises(TypeError):
+    # this module exists to remove. #4821 review P2.
+    #
+    # ``match=`` is load-bearing (#4821 review P3): the pre-fix signature took
+    # no ``measured`` at all (`origin/main`'s `_print_winner(winner, *,
+    # ingest_mode, context_cap)`), so this call raised `unexpected keyword
+    # argument 'measured'` — NOT a missing required argument. A bare
+    # ``pytest.raises(TypeError)`` was satisfied by that incompatible call, so
+    # the arm could not tell the required-argument contract from a
+    # signature that merely does not accept the keyword. The earlier comment
+    # claimed the pre-fix signature "defaulted `measured=True` and printed
+    # SELECTED"; that default never existed on main or on this branch, and the
+    # assertion is now tied to the wording only the required-argument shape
+    # produces.
+    with pytest.raises(TypeError, match=r"required keyword-only argument.*measured"):
         sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
                           "context_tokens_mean": 10.0},
                          ingest_mode="v2", context_cap=8000)
@@ -5398,6 +5409,44 @@ def test_sweep_granularity_rolls_up_per_question_embedding_coverage(monkeypatch)
             "the census pair must be known or unknown TOGETHER — a None "
             "total beside a 0 embedded is an invented zero")
         assert results[0]["vector_strategy"] == "enabled"
+
+
+def test_points_census_reads_the_pair_from_one_filtered_list():
+    """#4821 review P3: the census is ONE pair, not two independent sums.
+
+    Filtering each half on its own key let a HETEROGENEOUS census take its
+    total from one population and its embedded count from another — an
+    impossible ratio that ``_dense_leg_verified`` reads as MEASURED, because
+    its zero-coverage arm only fires on ``== 0.0``. A pair whose halves are
+    not BOTH known is excluded as a pair.
+
+    RED on the pre-fix body: the mixed case returned ``(3, 7)`` and coverage
+    ``2.3333`` instead of ``(3, 0)`` and ``0.0``. No embedder involved, so
+    this runs and fails in any environment."""
+    from tools.longmem_eval.sweep_granularity import (
+        _aggregate_embedding_coverage,
+        _points_census,
+    )
+
+    mixed = [
+        {"question_id": "q0", "points_total": None,
+         "points_embedded": 7, "embedding_coverage": None},
+        {"question_id": "q1", "points_total": 3,
+         "points_embedded": 0, "embedding_coverage": 0.0},
+    ]
+    assert _points_census(mixed) == {"points_total": 3,
+                                    "points_embedded": 0}
+    assert _aggregate_embedding_coverage(mixed) == 0.0, (
+        "a mixed census must never publish an impossible ratio")
+
+    # The homogeneous shapes the rest of the suite relies on are unchanged.
+    assert _points_census([{"points_total": 4, "points_embedded": 2}] * 2) \
+        == {"points_total": 8, "points_embedded": 4}
+    assert _points_census([{"points_total": None,
+                            "points_embedded": None}] * 2) \
+        == {"points_total": None, "points_embedded": None}
+    assert _aggregate_embedding_coverage(
+        [{"points_total": None, "points_embedded": None}] * 2) is None
 
 
 def test_embedding_coverage_is_never_on_the_retrieval_aggregate(
