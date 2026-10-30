@@ -2437,6 +2437,177 @@ _SESSION_REDACTIONS_CYPHER = (
 )
 
 
+#: "This capture cannot attest the value" — distinct from ``None``, which is a
+#: real absence (a fresh turn) the journalled snapshot must state. A snapshot key
+#: carrying this sentinel is OMITTED, and an omitted column is one the record's
+#: upsert's ``DO UPDATE SET`` never names — so a row that ALREADY exists keeps
+#: its value — and the graph fold's ``coalesce`` leaves alone on match (#10000
+#: review P1).
+#:
+#: ⛔ THE INSERT ARM IS NOT COVERED BY THAT, and this paragraph used to say it was
+#: (#10021 review, P3). ``record_projection._upsert_statement`` builds the
+#: ``INSERT ... (columns)`` list from the same ``col_values`` keys, so an omitted
+#: column is absent from BOTH lists; a row that does not exist yet has nothing to
+#: "not touch" and takes its declared DEFAULT or NULL (PostgreSQL INSERT
+#: contract). ``public.point.status``/``created_at`` declare no default, so a
+#: fresh row lands NULL — the recorded residual, stated at its producer
+#: (``sdk._write_capture_turns``' omitted-field note) and pinned by
+#: ``tests/test_10000_turns_record_only.py::
+#: test_the_omitted_pair_is_safe_on_the_update_arm_only``.
+_UNATTESTABLE = object()
+
+
+def _record_prior_vectors(sdk, session_id: str,
+                          turn_ids: list[str]) -> dict[str, Any] | None:
+    """``{turn_id: PriorTurn}`` for the ids the RECORD already holds.
+
+    ⛔ THE NAME IS THE VECTOR HALF'S, THE MAPPING IS THE WHOLE PRIOR ROW: the same
+    read answers "what vector does the record hold for this turn" (#5004) and
+    "what ``created_at``/``status`` does it hold" (the fold's absolute upsert,
+    which the graph path never needs because its Cypher coalesces).
+
+    The record half of #5004 round-3's PRESERVE rule (#10000 review P1). On the
+    graph path the writer learns what its write LEFT from the write's own
+    read-back (`_TURN_WRITE_CYPHER`'s ``RETURN ... t.embedding``): a re-capture
+    with the embedder unavailable PRESERVES the node's prior vector when the
+    content is unchanged, and the journal carries THAT value, never the ``None``
+    this capture encoded — journalling ``None`` tells the replay the vector is
+    genuinely gone and CLEARS it. With the turns in the record there is no node
+    to read back, so the prior value is read from the record, and the caller
+    applies the same content-unchanged rule the Cypher applies — which is why
+    the stored CONTENT comes back with the vector. The rule's left-hand side is
+    what the RECORD holds, never this capture's own ``turn_texts[i]`` — `_row["c"]`
+    is computed FROM that value, so a comparison against it is the text with
+    itself: every row would look unchanged and a vector for replaced text would
+    be preserved, which is the dense-leg lie #5004 exists to remove.
+
+    Fail-soft in ONE direction only: an unreadable record yields ``None`` — NOT
+    ``{}`` — and logs a WARNING. ``None`` means "this capture cannot know", and it
+    has TWO consequences in the caller, one per half of the row:
+
+    * the VECTOR half is CLEARED: the caller folds ``None`` to an empty map, so no
+      prior row is known for any id and the journalled embedding stays ``None``
+      (the replay's instruction to drop the stored vector);
+    * the ``created_at``/``status`` half is OMITTED, not cleared: the caller marks
+      them ``_UNATTESTABLE`` and the journalled snapshot leaves both fields out,
+      so the replay cannot assert this capture's own values over the record's.
+      ⛔ That protects the row the record ALREADY holds; a row it does not hold
+      takes the omitted column's declared default or NULL, and these two columns
+      declare none (the residual, stated at ``sdk._write_capture_turns``).
+
+    That asymmetry is why ``{}`` is the wrong value here: ``{}`` means "the record
+    holds no row for these ids" (a fresh turn), which licenses the caller to
+    write this capture's own ``created_at``/``status`` — restoring the
+    re-stamp/demote bug this rule fixes. The honest reading is the one that
+    cannot attest a value it could not read; it is a DEGRADATION, not a normal
+    path, so it is never silent. The alternative (omit the key entirely) would
+    let the replay RE-ENCODE the text under whatever model is active, which is
+    the #5004 defect.
+
+    No tenant, no read: the record's key is ``(org_id, graph_id)``, and a tenant
+    the write itself would be refused for is not one this may read from.
+    """
+    from tortoise.record_read import turn_prior_vectors
+    from tortoise.record_serve import open_record
+    from tortoise.record_writer import record_tenant
+
+    tenant = getattr(sdk, "_record_tenant", None) or record_tenant()
+    if tenant is None or not turn_ids:
+        return {}
+    org_id, graph_id = tenant
+    conn = None
+    try:
+        conn = open_record()
+        return turn_prior_vectors(
+            conn, org_id=org_id, graph_id=graph_id, session_id=session_id,
+            turn_ids=turn_ids)
+    except Exception:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "could not read the record's prior turn rows for session %s — this "
+            "capture journals no vector for %d turn(s), so the stored vector is "
+            "cleared rather than preserved (#5004), and it leaves "
+            "created_at/status OUT of the journal rather than asserting this "
+            "capture's own values over the record's", session_id,
+            len(turn_ids), exc_info=True)
+        # ``None`` is NOT ``{}``: ``{}`` means "the record holds no row for these
+        # ids" (a fresh turn), while ``None`` means "this capture cannot know" —
+        # and the journalled snapshot must then OMIT the fields it cannot attest
+        # rather than write a value over the record's.
+        return None
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+
+def _record_turn_residue(sdk, session_id: str,
+                         first_live: int) -> list[str] | None:
+    """The RECORD's turn ids at or above ``first_live`` — the #1920 sweep's ids.
+
+    ⛔ A FACT ABOUT THE GRAPH IS NOT A LICENCE ABOUT THE RECORD (#10021 review
+    P2), and the sweep was the second place that rule was not yet applied. Its
+    whole range used to come from the graph `:Session`'s ``turn_max_index``, read
+    by the caller only when a probe of the graph node said the session already
+    existed — so a session whose ``:Session`` node is gone (the state §2.0 makes
+    normal: the graph is a rebuildable cache, and §9.1's D7 is measured with it
+    destroyed) swept NOTHING, while the record kept every surplus row of the
+    previous, longer capture. Both doors then served those rows as a COMPLETE
+    transcript.
+
+    ``turn_prior_vectors`` answers the same question for the CURRENT window's
+    ids; this answers it for the whole session, which is what a REMOVAL needs.
+    Two bounded reads per armed capture is the cost, and it does not scale with
+    turn count in the way #3086 measures (that pin is about per-turn work and
+    on-loop GRAPH work; this is one fixed record read).
+
+    ⛔ IT NAMES THE ROWS, IT DOES NOT RETURN THE HIGHEST NUMBER (#10021 review
+    P2, CWE-407 / CWE-770). This returned ``turn_high_water``'s single integer,
+    and the caller built the sweep's id list from it with a ``range()`` — an
+    allocation whose size is a STORED integer nothing validates (a legacy or
+    copied row at index ``10**9`` meant ~10⁹ id strings, ~2 × 10⁹ journal
+    appends and a 10⁹-element ``IN $ids``). :func:`record_read.turn_keys_at_or_above`
+    visits the same rows and hands back the ones that exist, so the sweep's cost
+    is O(rows held) whatever the stored index says — enumeration, never a cap
+    (the ruling ``record_read._shortfall`` records for the READ side, applied to
+    the second consumer of the same datum).
+
+    ``None`` — not ``[]`` — when the record cannot be asked: ``[]`` is the clean
+    answer "the record holds no turn at or above this floor", while ``None``
+    means this capture could not look, and the caller reports the un-nameable id
+    space instead of inventing one. Same tenant resolution and same failure
+    posture as ``_record_prior_vectors``: a tenant this capture cannot resolve is
+    a tenant this may not read from.
+    """
+    from tortoise.record_read import turn_keys_at_or_above
+    from tortoise.record_serve import open_record
+    from tortoise.record_writer import record_tenant
+
+    tenant = getattr(sdk, "_record_tenant", None) or record_tenant()
+    if tenant is None:
+        return None
+    org_id, graph_id = tenant
+    conn = None
+    try:
+        conn = open_record()
+        keys = turn_keys_at_or_above(
+            conn, org_id=org_id, graph_id=graph_id, session_id=session_id,
+            first_index=first_live)
+        return list(keys)
+    except Exception:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "could not read the record's turn rows at or above index %d for "
+            "session %s — a shorter re-capture sweeps only the ids the graph "
+            "can name, so record turn rows above the session's live id space "
+            "may survive as residue (#1920/#10021); the next capture asks the "
+            "record again, and that read does not inherit this one's failure",
+            first_live, session_id, exc_info=True)
+        return None
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+
 def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
     """The deterministic per-turn Point id: ``{session_id}_t{index + offset}``.
 
@@ -2495,6 +2666,65 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
             if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 
 
+def _split_graph_turn_ids(session_id: str, raw: Any) -> list[tuple[str, int | None]]:
+    """The prior read's collected ids → ``(id, index)``, each index parsed once.
+
+    The SAME guard ``_capture_turn_ids`` applies, for the same reasons: str-only
+    (a non-string id would make the suffix slice raise), and a suffix that is
+    ``isdecimal()`` — NOT ``isdigit()``, because ``'²'.isdigit()`` is True while
+    ``int('²')`` raises — with the ``int()`` itself wrapped, because ``int()``
+    also refuses a decimal string longer than its conversion limit, so
+    ``isdecimal()`` being True does not imply parseable.
+
+    An id that cannot be PLACED is returned as ``(id, None)`` rather than
+    dropped, and the sweep LEAVES IT ALONE: "never delete where we cannot place
+    it" is the direction the recorded contract pins
+    (``tests/test_write_session_and_turns_3551.py::
+    test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture``), and no
+    writer mints such an id anyway (``_capture_turn_id`` formats an ``int``), so
+    it cannot be the live window's turn either way.
+    """
+    prefix = f"{session_id}_t"
+    out: list[tuple[str, int | None]] = []
+    for tid in (raw or []):
+        if not isinstance(tid, str) or not tid.startswith(prefix):
+            continue
+        suffix = tid[len(prefix):]
+        if not suffix.isdecimal():
+            continue
+        try:
+            out.append((tid, int(suffix)))
+        except (TypeError, ValueError):
+            out.append((tid, None))
+    return out
+
+
+def _prior_mark_index(turn_max_index: Any, turn_count: Any) -> int:
+    """The prior ``:Session`` read's two arms → the id-space end (or ``-1``).
+
+    ⛔ ``turn_max_index`` is an INDEX and ``turn_count`` is a COUNT (#10021
+    review P3). They used to be read through ONE
+    ``coalesce(s.turn_max_index, s.turn_count, 0)``, which substitutes a COUNT
+    ``N`` for a max index of ``N - 1`` — so a session captured before the mark
+    existed named ONE ID PAST ITS OWN END in the stale-turn sweep. Harmless on a
+    healthy lane (that id does not exist) but a wrong bound is exactly the kind
+    of thing that stops being harmless later, and it is the SAME defect
+    ``hosted_api._prior_stored_turn_count`` was split for on the metering side
+    ("the two arms are converted separately"). So: the mark IS an index and is
+    used as one, the count is converted by ``- 1``, and "neither present" is
+    ``-1`` — which sweeps no id.
+    """
+    for value, delta in ((turn_max_index, 0), (turn_count, -1)):
+        if value is None:
+            continue
+        try:
+            return int(value) + delta
+        except (TypeError, ValueError):
+            # Fail toward deleting NOTHING rather than toward a bad range.
+            return -1
+    return -1
+
+
 @_declares_apply_first_write_lane("_write_capture_turns")
 def _write_capture_turns(
     proj,
@@ -2508,6 +2738,7 @@ def _write_capture_turns(
     texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
     turn_offset: int = 0,
     prior_turn_max_index: int = -1,
+    prior_graph_turns: list[tuple[str, int | None]] | None = None,
 ) -> int:
     """Write a capture's episodic turn stream — to the RECORD when it can hold it (#10000).
 
@@ -2557,12 +2788,28 @@ def _write_capture_turns(
     a hard ``DETACH DELETE``, journaled as an ``EntityMutated`` op=delete
     (the ``delete_point`` record) so a rebuild cannot resurrect the orphan.
 
-    ``session_existed`` is the caller's own pre-MERGE probe: when False the
-    Session had no prior capture, so there can be no stale turn to scan for
-    and the prune read is skipped (the fresh-capture hot path keeps its exact
-    query count — #3086 measures this path). It DEFAULTS TO TRUE — the
-    conservative direction: a caller that omits it prunes, so forgetting the
-    parameter cannot silently reinstate #1920.
+    The sweep's CANDIDATES are the ids the two stores can NAME, never a range
+    built from a stored index (#10021 review P2):
+    ``_record_turn_residue`` (the record's own rows at or above this window's end
+    — read whenever a tenant resolves and the record can carry the delete
+    records, INDEPENDENT of whether this capture can WRITE the record, because a
+    reader must not inherit the write breaker — #10021 review P1) and
+    ``prior_graph_turns`` (the graph's ``CONTAINS``-wired turn ids, the one
+    witness a ``SET`` cannot destroy — #10021 review P2). ``prior_turn_max_index``
+    is still read by the caller and still arrives; it is a COMPARISON here (does
+    the stored id space reach past this window at all), never the size of an
+    allocation.
+
+    ``session_existed`` is the caller's own pre-MERGE probe of the graph
+    ``:Session``. ⛔ IT NO LONGER GATES THE SWEEP OR THE PRIOR-ROW READ (#10021
+    review P2): both asked it for a licence about the RECORD, and a graph probe
+    is not evidence about the record (§2.0 — the graph is the cache, and §9.1's
+    D7 is measured with it destroyed). It is still forwarded by
+    ``_write_session_and_turns``, which uses it for the graph mark read and for
+    its own replay/retry gate; the record half now takes its own candidates from
+    the record (`_record_turn_residue`). It DEFAULTS TO TRUE — the conservative
+    direction: a caller that omits it prunes, so forgetting the parameter cannot
+    silently reinstate #1920.
 
     #4911: RETURNS the number of credential-shaped spans redacted from this
     window, and writes the same number to the Session as ``capture_redactions``
@@ -2645,31 +2892,49 @@ def _write_capture_turns(
     # `session_id`, so a re-issue targets the same node), the CONTAINS edge is
     # a MERGE, and `status`/`createdAt` use `coalesce` — a re-issued statement
     # can neither duplicate a turn nor demote or re-stamp a stored one.
-    # #10000: WHICH STORE holds the turns is a CAPABILITY question, never a
-    # policy flag. The per-turn `PointAdded` records below are gated on a
-    # configured journal (`sdk._get_event_log()`), and the record is armed only
-    # with `TORTOISE_RECORD_DSN`; if either is absent the graph is the only store
-    # that can hold the turns, so this writer keeps both paths and selects by
-    # what is actually available. Removing the graph write unconditionally would
-    # write the transcript to NO store on an unarmed deployment — silent loss of
-    # the capture's whole point.
-    from tortoise.record_writer import record_dsn as _record_dsn
-    _record_holds_turns = (sdk._get_event_log() is not None
-                           and _record_dsn() is not None)
-    if _record_holds_turns:
-        sdk._graph_write_with_retry(
-            lambda: proj.g.query(
-                _SESSION_REDACTIONS_CYPHER,
-                params={"sid": session_id, "redactions": redacted_total},
-            ),
-            what="capture session redaction count",
-        )
-        # No graph read-back: the record holds createdAt/status/embedding, and the
-        # value this writer records next IS the stored value. #5004's
-        # preserved-vector branch cannot be reached from here — there is no node
-        # whose prior vector could have been preserved.
-        stored: dict[str, tuple] = {}
-    else:
+    # ── WHICH STORE HOLDS THE TURNS (#10000) ──────────────────────────────
+    # A CAPABILITY question, never a policy flag (§9.1/D1 puts the transcript in
+    # Postgres; this asks only whether Postgres can hold it right now). Two
+    # halves, and the SECOND one is what the review's P0 was about:
+    #
+    #   1. BEFORE the write: `record_writer.record_holds_turns` — the write
+    #      door's OWN predicate (armed DSN + durable journal + a tenant + a
+    #      closed connect breaker). The record path then SKIPS the graph write
+    #      entirely (the `if not _record_first` batch below), so there is no node
+    #      read-back to learn `createdAt`/`status`/`vector` from: those come from
+    #      the record's PRIOR row instead (`_record_prior_vectors`), which is
+    #      what the journal must carry for a replay to leave the record alone.
+    #      The graph path is the one that writes first and reads back.
+    #   2. AFTER the write: the outcome each emit actually reported. A record
+    #      write can still be REFUSED after the preflight approved it — the
+    #      database went unreachable mid-capture, the breaker tripped on it, the
+    #      fold refused the record — and those turns are then in NO store. So
+    #      every turn whose record write did not LAND is written to the graph
+    #      below, per turn.
+    #
+    # ⛔ A DECISION MADE BEFORE THE WRITE IS NOT A DECISION. Gating only on
+    # journal+DSN (what this code did) meant an armed deployment whose record
+    # write declines wrote the transcript to NO store while the capture returned
+    # success — the one outcome this change may not have.
+    #
+    # Removing the graph write unconditionally would do the same on an UNARMED
+    # deployment, so the graph path is not transitional scaffolding: it is the
+    # store of every lane where the record cannot hold the turns, and it stays
+    # until the record can carry them everywhere.
+    from tortoise.record_writer import record_holds_turns
+    _log = sdk._get_event_log()
+    # DURABILITY IS READ, not assumed — the same value `_emit_event` hands
+    # `write_live_record` (a scratch buffer is not a journal, so the record
+    # declines it, so it cannot hold the turns).
+    _journal_configured = _log is not None
+    _record_first = record_holds_turns(
+        journal_configured=_journal_configured,
+        durable=_journal_configured and getattr(_log, "durable", True),
+        tenant=getattr(sdk, "_record_tenant", None))
+    stored: dict[str, tuple] = {}
+    if not _record_first:
+        # The record cannot hold this capture's turns: the graph is the store,
+        # exactly as before #10000 (byte-identical, read-back included).
         _rows = sdk._graph_write_with_retry(
             lambda: proj.g.query(
                 _TURN_WRITE_CYPHER,
@@ -2680,6 +2945,77 @@ def _write_capture_turns(
         ).result_set
         stored = {r[0]: (r[1], r[2], r[3]) for r in (_rows or [])}
 
+    if _record_first:
+        # ── WHAT THE RECORD'S WRITE *LEAVES* (#5004 round-3, #10000 review P1) ──
+        # Two of the three journalled fields depend on what the record already
+        # holds, and the record path has no node read-back to learn them from, so
+        # they are read here:
+        #
+        #   * the VECTOR — this capture may have encoded none (the embedder was
+        #     unavailable), and journalling `None` is the replay's instruction to
+        #     CLEAR; an unavailable embedder is not a statement that the stored
+        #     vector should be dropped (`#5004`).
+        #   * `created_at` / `status` — the record's upsert writes them from
+        #     EXCLUDED ABSOLUTELY (`record_projection._upsert_statement`), unlike
+        #     `_TURN_WRITE_CYPHER`'s `coalesce`. Journalling this capture's
+        #     `now`/`"draft"` for a turn that is ALREADY stored therefore
+        #     re-stamps its `created_at` and demotes a promoted turn to `draft`
+        #     on the store of record, permanently and silently. Journalling the
+        #     prior values is what makes the fold's write idempotent, and it is
+        #     the same "journal what the write LEFT" rule the graph read-back
+        #     provides on the other path.
+        #
+        # ⛔ THE GATE IS THE RECORD'S OWN READ, NEVER THE GRAPH'S PROBE (#10021
+        # review P2). This used to run only when `session_existed` — a probe of
+        # the GRAPH's `:Session` node — was true. That premise ("a fresh session
+        # has no prior row") is a fact about the GRAPH; the licence it granted
+        # ("so this capture may journal its own `now`/`draft`") is a fact about
+        # the RECORD, and the two coincide only while every captured session also
+        # has a graph `:Session`. §2.0 makes the record the authority and the
+        # graph its cache, and §9.1's capstone D7 is measured with the graph
+        # destroyed: with `session_existed=False` and record rows PRESENT, the
+        # old gate left `_prior` empty and `_prior_unknown` False, so the FRESH
+        # branch journalled this capture's `status="draft"`/`createdAt=now` and
+        # the record's upsert wrote them from EXCLUDED ABSOLUTELY — re-stamping
+        # `created_at` and demoting an already-promoted turn on the store that IS
+        # the system of record, permanently and silently.
+        #
+        # `turn_prior_vectors` already answers "the record holds no row for this
+        # id" with `{}` — the exact value the old `else` branch fabricated — so
+        # asking it costs one bounded record read and buys correctness. The
+        # #3086 hot path keeps its guarantee: that pin is about work scaling with
+        # TURN COUNT and about on-loop graph work, not about one fixed read.
+        _prior: dict[str, Any] = {}
+        _prior_unknown = False
+        if turn_rows:
+            _read = _record_prior_vectors(
+                sdk, session_id, [row["id"] for row in turn_rows])
+            _prior_unknown = _read is None
+            _prior = _read or {}
+        for _i, _row in enumerate(turn_rows):
+            _held = _prior.get(_row["id"])
+            _emb = turn_embs[_i]
+            if _emb is None and _held is not None:
+                # The SAME rule the Cypher applies: a preserved vector survives
+                # only when the content did not change — a vector for text no
+                # longer stored is the dense-leg lie #5004 exists to remove. The
+                # comparison is against what the RECORD holds (`_held.content`),
+                # never against this capture's own `turn_texts[i]`: `_row["c"]`
+                # is computed FROM that value, so that comparison is the text
+                # with itself.
+                _unchanged = _held.content == _row["c"]
+                _emb = _held.embedding if (
+                    _held.embedding is not None and _unchanged) else None
+            if _held is not None:
+                _left_created, _left_status = _held.created_at, _held.status
+            elif _prior_unknown:
+                # Cannot attest: OMIT (see `_UNATTESTABLE`) so the replay leaves
+                # the record's values alone.
+                _left_created = _left_status = _UNATTESTABLE
+            else:
+                _left_created = _left_status = None
+            stored[_row["id"]] = (_left_created, _left_status, _emb)
+
     # #1920, re-homed by #10000: a SHORTER re-capture must remove the previous
     # capture's turns beyond the new window, or the stored transcript keeps rows
     # the session no longer holds. The candidates come from the ID SPACE — the
@@ -2688,25 +3024,141 @@ def _write_capture_turns(
     # (``_capture_turn_ids`` would return nothing and the surplus rows would keep
     # being served). A non-zero ``turn_offset`` is an APPEND, so only ids at or
     # beyond ``turn_offset + len(window)`` are stale.
-    stale: list[str] = []
-    if session_existed:
-        _first_live = turn_offset + len(turn_rows)
-        if prior_turn_max_index >= _first_live:
-            stale = [_capture_turn_id(session_id, _i)
-                     for _i in range(_first_live, prior_turn_max_index + 1)]
-        # Which store the removal targets is the same capability question as the
-        # write above: with the record holding the turns there is no node to
-        # delete, and the record delete is the `PointRetracted` +
-        # `EntityMutated` pair emitted below (folded as a hard delete).
-        if stale and not _record_holds_turns:
-            sdk._graph_write_with_retry(
-                lambda: proj.g.query(
-                    "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                    "WHERE t.id IN $ids DETACH DELETE t",
-                    params={"sid": session_id, "ids": stale},
-                ),
-                what="capture stale-turn sweep",
-            )
+    #
+    # ⛔ THE BOUND IS THE MAX OF BOTH STORES, AND IT IS NOT GATED ON THE GRAPH
+    # (#10021 review P2). Every id that could hold residue has to be named, and
+    # the two stores carry DIFFERENT residue in the two directions that matter:
+    # the graph mark names the surplus a graph-lane capture left, and the
+    # record's own highest index names the surplus a record-lane capture left —
+    # including the case the graph cannot answer at all (`:Session` gone, mark
+    # absent, or a failed mark read). The old `if session_existed:` gate asked a
+    # fact about the GRAPH and used it to decide a removal from the RECORD; with
+    # the node gone the record kept `_t0.._t3` while `turn_count` became 1, and
+    # the read side served four turns as COMPLETE.
+    _first_live = turn_offset + len(turn_rows)
+    # ⛔ THE RECORD'S RESIDUE IS A READ, AND A READER MUST NOT INHERIT THE WRITE
+    # BREAKER (#10021 review P1). This asked `_record_first` — the WRITE door's
+    # predicate, breaker included — so the one read that names the RECORD's
+    # residue (`_record_turn_residue`) ran only when THIS capture could WRITE to
+    # the record, which is the conflation the whole change exists to remove. The
+    # reachable failure: a record connect fails once, the breaker stays open for
+    # `LIVE_WRITE_BREAKER_SECONDS` (60 s, a fixed cooldown, not a probe) — so the
+    # record may be healthy again — and a SHORTER re-capture inside that window
+    # swept nothing, because neither store could name the surplus: the record was
+    # never asked, `prior_turn_max_index` was already lowered by this capture's
+    # own MERGE, and `prior_graph_turns` is empty by construction for a
+    # record-holding session (its turns are not graph nodes). The record then
+    # kept `_t0.._t3` while the session declared one turn, and from that moment
+    # BOTH serving doors refuse it (`record_read._shortfall`'s residue arm ->
+    # `served_turn_count` -> `RecordUnavailable` / HTTP 503) until a later
+    # record-first capture of that same session — which, for a session captured
+    # once, may never come. The write path reports success throughout.
+    #
+    # So the gate is the SAME one declaration asked the way the two READ doors
+    # ask it (`sdk._record_turn_answer`, `hosted_api._record_tenant_for_read`):
+    # `consult_breaker=False`. It still refuses `unarmed` / `malformed_dsn` /
+    # `no_tenant`(-`_carried`) and a journal that cannot carry the delete records,
+    # because those are facts about WHERE a past capture's turns went; it no
+    # longer refuses on `circuit_open`, which is a fact about the last 60 s of
+    # THIS process. The cost is one bounded read on a capture that write-refuses
+    # (the read doors pay the same connect on every request); the alternative is
+    # a transcript no door can serve.
+    # ⚠️ The `no_durable_journal` arm is refused ON PURPOSE: the record half of
+    # the removal is the `EntityMutated` op=delete pair emitted below, which
+    # reaches the record through the journal, so a scratch buffer sweeps nothing
+    # here either — the journal-less/scratch arm is out of this fix's reach by
+    # construction, not by oversight.
+    _record_readable = record_holds_turns(
+        journal_configured=_journal_configured,
+        durable=_journal_configured and getattr(_log, "durable", True),
+        tenant=getattr(sdk, "_record_tenant", None),
+        consult_breaker=False)
+    # ⛔ THE SWEEP NAMES THE IDS THE STORES HOLD; IT NEVER BUILDS THEM FROM A
+    # STORED BOUND (#10021 review P2 — CWE-407 Scope: Availability + CWE-770
+    # allocation without a limit). The candidates used to be
+    # `[_capture_turn_id(session, i) for i in range(_first_live, _stale_bound+1)]`,
+    # with `_stale_bound` the MAX of two stored integers — the graph mark
+    # (`s.turn_max_index`) and the record's highest index — neither validated at
+    # write time (`_turn_index` accepts any suffix `int()` can parse,
+    # `tools/backfill_graph_turns.py` copies ids in verbatim). One row at index
+    # 10**9 therefore made a CAPTURE allocate ~10⁹ id strings, journal ~2 × 10⁹
+    # records and issue a 10⁹-element `IN $ids` — while reporting success. Both
+    # stores can name their own rows, and the surplus is by definition the rows
+    # at/above `_first_live`, so the enumeration below is exact AND O(rows):
+    #   * the record half is `_record_turn_residue` (O(rows), see there);
+    #   * the graph half is `prior_graph_turns`, already collected in the same
+    #     statement as the mark.
+    # No threshold is introduced: a cap would swap one invented bound for another
+    # and misreport a legitimately long session — the ruling `record_read.
+    # _shortfall` records for the READ side, applied to this, the second consumer
+    # of the same datum. The MARK is still read by the caller and still arrives
+    # as `prior_turn_max_index`; it is a COMPARISON here (does the id space reach
+    # past this window at all), never an allocation.
+    _record_residue: list[str] | None = None
+    if _record_readable:
+        _record_residue = _record_turn_residue(sdk, session_id, _first_live)
+    # ⛔ THE STATEMENT-PROOF WITNESS (#10021 review P2). The id space is bounded
+    # by `s.turn_max_index`, and the MERGE this capture already ran LOWERS that
+    # mark to its own window's end — so on the lanes where `_record_first` is
+    # False the mark WAS the sweep's only witness, and one tolerated failure (a
+    # prior read that raised, or a sweep statement that failed after the MERGE
+    # had lowered the mark) left ids NOBODY would name again: every later capture
+    # read the lowered mark, found nothing beyond the window, and the surplus
+    # turn nodes stayed `CONTAINS`-wired forever, with the read side then
+    # publishing a body that contradicts itself (#8447). Main's monotone-up mark
+    # bounded that exposure to one cycle; the live mark (decision (c),
+    # `sdk.py:3431`) is right and stays — so the ids have to come from something
+    # the statement cannot overwrite. `CONTAINS`-wired turn nodes ARE that thing
+    # (`_capture_turn_ids` is the same witness `record_read.turn_high_water`
+    # keeps for the record), read by the caller in the SAME statement that reads
+    # the mark, so the re-capture path pays no extra round-trip. Every id at or
+    # beyond this window's end is residue whatever the mark says, in both
+    # directions: a mark lowered by a previous shrink, a mark read that failed,
+    # and a mark that never existed. An id whose index cannot be PARSED is not
+    # swept — "never delete where we cannot place it", the direction
+    # `tests/test_write_session_and_turns_3551.py` pins.
+    _graph_residue = [tid for (tid, _index) in (prior_graph_turns or [])
+                      if _index is not None and _index >= _first_live]
+    # ⛔ THE TWO HALVES ARE THE UNION OF NAMED ROWS, AND NEITHER IS DERIVED FROM
+    # AN INTEGER (#10021 review P2). The old `_stale_bound` was the MAX of the two
+    # stored indexes and the candidate list was built from it with a `range()`;
+    # both stores can name their own rows, so the list is their union and the
+    # sweep's size is the residue's size, whatever index a stored row carries.
+    stale: list[str] = sorted({*(_record_residue or ()), *_graph_residue})
+    if (_record_residue is None and _record_readable
+            and prior_turn_max_index >= _first_live):
+        # The id space reaches past this window and the record could not be asked
+        # which of its rows are up there. Sweeping the range the mark names is the
+        # allocation this fix removes, so the honest move is to say so: the
+        # graph's own ids are swept below, and the record's rows are named by the
+        # NEXT capture — its read is a reader-flavoured one, so it does not
+        # inherit this failure's breaker state, and its `_first_live` floor is
+        # the same or lower.
+        _logger.warning(
+            "the record could not be asked for session %s's turn rows at or "
+            "above index %d while the session's stored id space reaches %d — "
+            "sweeping only the ids the graph names; a later capture names the "
+            "rest (#1920/#10021 review P2)",
+            session_id, _first_live, prior_turn_max_index)
+    # The RECORD half of the removal is the `PointRetracted` +
+    # `EntityMutated` pair emitted below (its fold is a hard delete), and it is
+    # emitted whatever store holds the turns. The GRAPH half runs when the
+    # graph holds the surplus — which is (a) whenever this capture wrote there,
+    # and (b) whenever a PREVIOUS capture did, i.e. any session captured before
+    # the record was armed. A no-op `DETACH DELETE` on ids the graph does not
+    # carry costs one statement; leaving residue instead is #1920 itself, and it
+    # is reachable from the armed path precisely because arming is new (the
+    # record-capability gate used to be asked with this process's journal, and
+    # that left every pre-arming surplus turn served forever).
+    if stale:
+        sdk._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.id IN $ids DETACH DELETE t",
+                params={"sid": session_id, "ids": stale},
+            ),
+            what="capture stale-turn sweep",
+        )
 
     # #3947: journal the turn writes so a rebuild can recreate them.
     # `contains_session` rides the EVENT ENVELOPE, not the point payload —
@@ -2736,6 +3188,11 @@ def _write_capture_turns(
         # fold tombstones (the wrong meaning for a removal).
         sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
         sdk._journal_entity_mutation("Point", tid, "delete")
+    #: turn id -> what the RECORD write for it actually did (a `RecordWrite`, or
+    #: `None` when the seam was unarmed/declined/failed). Filled by the emit loop
+    #: below through `record_sink`; only read when the record was meant to hold
+    #: the turns (§"WHICH STORE" above).
+    _record_outcome: dict[str, Any] = {}
     for i, _turn in enumerate(windowed):
         turn_id = _capture_turn_id(session_id, i, turn_offset)
         created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
@@ -2759,9 +3216,52 @@ def _write_capture_turns(
             # #5445: the redacted role (see the turn_rows write above).
             "speaker": _capture_turn_role_text(turn_texts[i])[0],
             "is_episodic": True,
-            "status": status if status is not None else "draft",
-            "createdAt": created_at if created_at is not None else now,
         }
+        # ⛔ AN OMITTED FIELD IS NOT A CLAIM (#10000 review P1). `status` and
+        # `createdAt` are journalled as what the write LEAVES, and both folds
+        # apply the snapshot absolutely (the graph path's `coalesce` is the write
+        # rule; the record's upsert is `EXCLUDED`). So the key is present when
+        # this capture knows the value — the prior row's, or the fresh-turn
+        # defaults — and ABSENT when the prior read could not tell it, while a key
+        # carrying `now`/`draft` DEMOTES and RE-STAMPS a stored turn.
+        #
+        # ⛔ AND ABSENT IS SAFE ON **ONE** ARM, NOT TWO (#10021 review, P3). On the
+        # UPDATE arm `_upsert_statement` builds `DO UPDATE SET` from the supplied
+        # columns' own keys (`updates = ", ".join(... col_values)`), so an omitted
+        # column is not named and the stored value survives — that half is exactly
+        # right. On the **INSERT** arm the same omission takes the column out of
+        # the `INSERT ... (columns)` list too, and a row that does not exist yet
+        # has nothing to "not touch": per PostgreSQL's INSERT contract (\"each column
+        # not present in the explicit or implicit column list will be filled with
+        # a default value, either its declared default value or null if there is
+        # none\") the column takes its DEFAULT or NULL — and `public.point.status`
+        # / `public.point.created_at` are nullable `text` with NO default
+        # (`supabase/migrations/20261012000003_record_epistemic.sql`).
+        #
+        # So this arm's RECORDED RESIDUAL is: when the record does not already
+        # hold the turn (the whole window of a FRESH capture, and any newly
+        # appended turn) the row lands with `created_at = NULL`, `status = NULL`,
+        # where every other writer guarantees a value — the graph path
+        # (`_TURN_WRITE_CYPHER`'s coalesce, above), the fresh-turn branch below,
+        # and `projection/entities.py`'s replay fold
+        # (`n.createdAt=coalesce($ca, n.createdAt, $now)`, :2104;
+        # `n.status=coalesce($st, n.status, 'live')`, :2088). `record_read`
+        # then serves `"created_at": null` for those turns. The trigger is narrow
+        # — `_prior_unknown` needs the prior READ to raise while the subsequent
+        # turn WRITES succeed — and the capture warns; it is recorded here rather
+        # than silently traded because the alternative (journalling
+        # `now`/`draft`) is the demote/re-stamp bug this arm exists to fix.
+        #
+        # ⛔ WHY NOT `coalesce(EXCLUDED.c, point.c)` (the rule the graph applies)?
+        # It does not reach this arm: on a fresh row EXCLUDED.c IS the omitted
+        # NULL, so the coalesce yields NULL too. Making the omission safe both ways
+        # needs a DECLARED DEFAULT on the two columns (then the omission is safe by
+        # contract, and `test_the_omitted_pair_is_safe_on_the_update_arm_only`
+        # reds to say so) — a schema change this lane did not take.
+        if status is not _UNATTESTABLE:
+            _turn_snapshot["status"] = status if status is not None else "draft"
+        if created_at is not _UNATTESTABLE:
+            _turn_snapshot["createdAt"] = created_at if created_at is not None else now
         _turn_snapshot["embedding"] = (
             turn_embs[i] if turn_embs[i] is not None else stored_emb)
         # #5004 round-3: when THIS capture encoded nothing, what rides the
@@ -2772,6 +3272,7 @@ def _write_capture_turns(
         # `stamp_journal_embedding` stamps no identity.
         if turn_embs[i] is None and stored_emb is not None:
             _turn_snapshot["embedding_preserved"] = True
+        _sink: list = []
         sdk._emit_event(
             # Parity with `create_point`'s emission (#3947 review F5): the
             # PAYLOAD carries `content_hash`. It belongs here and NOT in the
@@ -2783,7 +3284,70 @@ def _write_capture_turns(
              "content_hash": turn_hashes[i]},
             point=_turn_snapshot,
             contains_session=session_id,
+            # #10000: what the RECORD did with this turn, so the store decision
+            # below is made from the write's own outcome rather than from the
+            # preflight's expectation.
+            record_sink=_sink,
         )
+        _record_outcome[turn_id] = _sink[0] if _sink else None
+
+    # ── THE STORE DECISION, FROM WHAT THE WRITES ACTUALLY DID (#10000) ────
+    # The preflight above said the record would accept these writes. It can still
+    # be wrong — a connect that fails mid-capture, the breaker tripping on that
+    # failure, an unreachable database, a fold that refuses the record — and the
+    # graph write was SKIPPED on the strength of it. So each turn's outcome is
+    # read here and every turn the record did not take is written to the graph.
+    # A turn reaches at least one store; there is no path in this function where
+    # it reaches neither.
+    if _record_first:
+        def _landed(outcome: Any) -> bool:
+            """Did the record actually store this turn?
+
+            `applied` says the plan executed; `statements` says the fold found
+            something to execute FOR THIS RECORD, which is what a refused record
+            (no usable id, no snapshot) does not. Both must hold: an armed seam
+            that folds nothing would otherwise read as "the record holds it".
+            """
+            return (outcome is not None
+                    and getattr(outcome, "applied", False)
+                    and getattr(outcome, "statements", 0) >= 1)
+
+        _unrecorded = [i for i, _row in enumerate(turn_rows)
+                       if not _landed(_record_outcome.get(_row["id"]))]
+        if _unrecorded:
+            # Loud, because a re-capture's journalled snapshot for these turns is
+            # this capture's `now`/`draft` rather than the values a read-back
+            # would have given — the residual of deciding after the append. The
+            # turn is stored either way; losing it is the alternative.
+            _logger.warning(
+                "capture of session %s: the record did not take %d of %d "
+                "turn(s) — writing them to the GRAPH so the transcript is not "
+                "lost (#10000). The record heals on replay from the journal.",
+                session_id, len(_unrecorded), len(turn_rows))
+            sdk._graph_write_with_retry(
+                lambda: proj.g.query(
+                    _TURN_WRITE_CYPHER,
+                    params={
+                        "turns": [turn_rows[i] for i in _unrecorded],
+                        "sid": session_id, "now": now,
+                        # The turn statement carries the count for the same
+                        # reason the batch does: it cannot be separated from the
+                        # write by a later failure (#4911).
+                        "redactions": redacted_total},
+                ),
+                what="capture turn fallback write",
+            )
+        else:
+            # The record holds every turn, so the graph keeps the Session's
+            # counters and nothing else (#10000): one node write, no rows, no
+            # `CONTAINS` edges.
+            sdk._graph_write_with_retry(
+                lambda: proj.g.query(
+                    _SESSION_REDACTIONS_CYPHER,
+                    params={"sid": session_id, "redactions": redacted_total},
+                ),
+                what="capture session redaction count",
+            )
 
     # #4911: the live `SET s.capture_redactions` above has no journal carrier
     # without this record — a journal-only ``rebuild()`` / ``recover_from_log``
@@ -2899,20 +3463,36 @@ def _write_session_and_turns(
                   # #10000: `turn_count` is a WINDOW LENGTH (``len(turns)``), not
                   # a max id index — an APPEND at ``turn_offset=2`` writes
                   # ``_t2``/``_t3`` while the count reads 2. The stale-turn sweep
-                  # needs the ID SPACE, so the high-water mark is stored beside
-                  # the count and only ever moves UP (an append must not lower it).
-                  "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
-                  "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END"]
+                  # needs the ID SPACE, so the id space's end is stored beside
+                  # the count.
+                  #
+                  # ⛔ IT IS THE **LIVE** END, NOT A PEAK (#10000 review P2).
+                  # The first shape kept the larger value (a monotone-up CASE),
+                  # which is right for the sweep — whose range is the PRIOR mark,
+                  # read before this MERGE — and WRONG for the reader that #10000
+                  # added on top of it: `record_read._shortfall` uses this mark as
+                  # the TAIL witness, so a session shrunk from 4 turns to 1 kept a
+                  # mark of 3 and every read of that HEALTHY session reported "the
+                  # tail is missing", forever, with a WARNING and a graph query
+                  # per read. The shrink this write performs is the same one whose
+                  # surplus it sweeps above, so the value the session now holds is
+                  # the value it must declare: one meaning, one consumer question.
+                  # A capture whose turn half fails AFTER this MERGE now leaves a
+                  # surplus only a later capture's sweep would have found — the
+                  # cost of a live witness, and bounded to one failed statement
+                  # (the MERGE precedes the turn write).
+                  "s.turn_max_index=$tmi"]
     merge_params: dict[str, Any] = {"sid": session_id, "now": now,
                                     "tc": turn_count,
                                     "tmi": turn_offset + turn_count - 1}
     session_record: dict[str, Any] = {
         "id": session_id, "created_at": now,
         "turn_count": turn_count, "is_episodic": True,
-        # #10000: the id-space high-water mark rides the SAME record as the count,
-        # so a record-sourced rebuild restores the property the stale-turn sweep
-        # reads (a replay that dropped it would leave the sweep unable to see a
-        # surplus it must remove).
+        # #10000: the id space's LIVE end rides the SAME record as the count, so
+        # a record-sourced rebuild restores the property BOTH consumers read (the
+        # stale-turn sweep's bound and the read's tail witness) to the value the
+        # live MERGE left — a replay that dropped it, or that restored a peak the
+        # live write had lowered, would diverge from the live node.
         "turn_max_index": turn_offset + turn_count - 1,
     }
     if harness:
@@ -3072,20 +3652,49 @@ def _write_session_and_turns(
     # to walk. Read only on a re-capture: a fresh capture has no prior Session and
     # therefore no stale turn, so the fresh-capture hot path keeps its exact query
     # count (#3086).
+    # #10021 review P2/P3: ONE read answers both questions the sweep needs, so
+    # the re-capture path keeps its exact query count (#3086).
+    #
+    #   * the MARK's two arms, converted SEPARATELY (`_prior_mark_index`):
+    #     `turn_max_index` is an INDEX, `turn_count` a COUNT, and the
+    #     `coalesce(...)` that made one value of them named an id one past the
+    #     end for a session captured before the mark existed;
+    #   * the graph's OWN turn ids (`collect(t.id)`), the statement-proof bound.
+    #     The MERGE below lowers `s.turn_max_index`, so a failure between the
+    #     read and the sweep used to leave residue nothing would ever name
+    #     again; the CONTAINS-wired nodes are not something a SET can overwrite.
+    #     The `WHERE` is part of the OPTIONAL MATCH (MEASURED FalkorDB semantics:
+    #     a predicate after an OPTIONAL MATCH is absorbed into the optional
+    #     pattern — the same shape `activation_scorecard.FUNNEL_QUERY` uses), so
+    #     the collection carries TURN points only and a session with none
+    #     collects `[]`.
     prior_turn_max_index = -1
+    prior_graph_turns: list[tuple[str, int | None]] = []
     if session_existed:
         try:
             _prior = proj.g.query(
-                "MATCH (s:Session {id:$sid}) RETURN "
-                "coalesce(s.turn_max_index, s.turn_count, 0)",
-                params={"sid": session_id}).result_set
-            prior_turn_max_index = int(_prior[0][0]) if _prior else -1
+                "MATCH (s:Session {id:$sid}) "
+                "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true AND t.pointKind = 'event' "
+                "AND t.id STARTS WITH $prefix "
+                "RETURN s.turn_max_index, s.turn_count, collect(t.id)",
+                params={"sid": session_id,
+                        "prefix": f"{session_id}_t"}).result_set
+            if _prior:
+                prior_turn_max_index = _prior_mark_index(_prior[0][0],
+                                                         _prior[0][1])
+                prior_graph_turns = _split_graph_turn_ids(session_id,
+                                                          _prior[0][2])
         except Exception:
             # Fail toward deleting NOTHING rather than toward a bad range: a
-            # failed read leaves the mark at -1, which sweeps no id — the same
-            # conservative direction the turn-id parse guard takes ("never
-            # delete where we cannot place it").
+            # failed read leaves the mark at -1 and no witness, which sweeps no
+            # id — the same conservative direction the turn-id parse guard takes
+            # ("never delete where we cannot place it"). ⚠️ It costs ONE cycle,
+            # not the residue: the witness is derived from the NODES, so the next
+            # capture that can read re-derives the bound and sweeps. That is the
+            # property main's monotone-up mark had and this restores.
             prior_turn_max_index = -1
+            prior_graph_turns = []
     sdk._graph_write_with_retry(
         lambda: proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
@@ -3117,6 +3726,7 @@ def _write_session_and_turns(
         proj, sdk, session_id, turns, now=now, turn_embs=turn_embs,
         session_existed=session_existed, turn_offset=turn_offset,
         prior_turn_max_index=prior_turn_max_index,
+        prior_graph_turns=prior_graph_turns,
         texts_and_counts=(turn_texts, redaction_counts))
     return {
         "turn_count": turn_count,
@@ -3648,7 +4258,15 @@ _RESERVED_ENVELOPE_PROPS = (
 #: drop the reserved names before splatting, and `create_source` — the one door
 #: that bypasses intake — drops them itself. With every relay covered, the
 #: collision is impossible and live == replay.
-_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks")
+#: ``record_sink`` (#10000) is the second PER-CALL object the signature owns:
+#: the capture writer hands in a list and `_emit_event` appends the record
+#: write's OUTCOME to it, so the caller can decide a store from what the write
+#: actually did. A caller prop of that name splatted into the call would bind
+#: the parameter and silently suppress the outcome (the capture would then treat
+#: every turn as unrecorded and fall back to the graph — the safe direction, but
+#: a silent one), so it is reserved like the rest.
+_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
+                            "record_sink")
 
 
 def _drop_reserved_emit_props(props: dict) -> list[str]:
@@ -8723,7 +9341,8 @@ class TortoiseSDK:
     def _emit_event(self, type_: str, payload: dict | None = None, *,
                     point: dict | None = None,
                     id: str | None = None,
-                    recorded_ts: str | None = None, **extra) -> bool | None:
+                    recorded_ts: str | None = None,
+                    record_sink: list | None = None, **extra) -> bool | None:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
@@ -8736,7 +9355,19 @@ class TortoiseSDK:
         **Return value (the #7951 commit signal):** ``True`` when the record was
         appended to a configured JSONL journal, ``False`` when a configured
         journal's append RAISED, and ``None`` when there is nothing to log or no
-        journal is configured. The per-call value — not a delta of
+        journal is configured.
+
+        **``record_sink`` (#10000): the RECORD's outcome, not the journal's.**
+        A caller that supplied a list gets this emit's
+        `record_writer.write_live_record` result appended to it — a
+        :class:`~tortoise.record_writer.RecordWrite` when the Postgres record
+        took the record, ``None`` when the seam was unarmed or DECLINED it. It
+        is separate from the return value above on purpose: the two stores fail
+        independently, and the capture writer has to know which one actually
+        holds the turns to be able to put them in the other one when it does
+        not. A per-call OBJECT rather than a state on ``self``: this SDK is
+        shared by concurrent writers (#5612), so the outcome must not travel
+        through the instance. The per-call value — not a delta of
         ``_journal_write_failures`` — is what a live door must gate its cache
         write on: a shared instance counter can be incremented by a CONCURRENT
         writer (#5612), which would report a committed record as failed and
@@ -9033,11 +9664,16 @@ class TortoiseSDK:
         # for a record that persisted while killing the fold too. The loss is
         # observable instead (``monitoring.metrics()["record_write_failures"]``)
         # and ``replay`` heals it from the journal.
-        self._write_record_projection(event, seq=seq)
+        if record_sink is not None:
+            # #10000: the outcome travels to the caller that has to decide
+            # whether the record holds this write (`_write_capture_turns`).
+            record_sink.append(self._write_record_projection(event, seq=seq))
+        else:
+            self._write_record_projection(event, seq=seq)
         return True
 
     def _write_record_projection(self, record: dict,
-                                 seq: int | None) -> None:
+                                 seq: int | None) -> Any:
         """Hand one just-appended journal record to the Postgres record (#9188).
 
         THE production call site. Until this existed, `tortoise/record_projection.py`
@@ -9067,6 +9703,14 @@ class TortoiseSDK:
         already committed, so a record failure is a LOSS TO REPORT (counted in
         ``monitoring.metrics()["record_write_failures"]``, healed by a replay),
         never a reason to fail the caller's write.
+
+        RETURNS what the seam did — a
+        :class:`tortoise.record_writer.RecordWrite` when the record took the
+        record, ``None`` when it was unarmed or declined it (#10000). The
+        capture writer reads that to decide whether the turn is in the record at
+        all, so "the record write did not happen" must be answerable by the
+        caller and not only by a counter: a counter says a write SOMEWHERE
+        failed, and the turn this call is about is the one that goes missing.
         """
         try:
             from . import record_writer
@@ -9075,7 +9719,7 @@ class TortoiseSDK:
             # journal append already happened, so a failing import hook must
             # not hand the caller an ImportError for a write that SUCCEEDED.
             self._record_write_failure("seam_unimportable", exc)
-            return
+            return None
         # DURABILITY IS READ, not assumed (#9231 review P1): no log at all is
         # NOT durable, and a log that declares itself a scratch buffer is not
         # either. The seam DECLINES it and counts the decline on
@@ -9084,8 +9728,8 @@ class TortoiseSDK:
         # nothing was lost (#9231 review P2).
         log = self._event_log
         durable = log is not None and getattr(log, "durable", True)
-        record_writer.write_live_record(record, durable=durable, seq=seq,
-                                        tenant=self._record_tenant)
+        return record_writer.write_live_record(
+            record, durable=durable, seq=seq, tenant=self._record_tenant)
 
     def _bind_record_tenant(self, org_id: str, graph_id: str) -> None:
         """Bind this SDK's writes to one record tenant (#9188).
@@ -38558,7 +39202,13 @@ class TortoiseSDK:
             # The SDK read is BOUND to `SESSION_READ_FIELDS` by the parity
             # test, so this lane cannot serve a different vocabulary from the
             # hosted endpoint it mirrors.
-            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
+            # #10000 review P2: APPENDED (sess[12]) and NOT served — the turn
+            # read's id-space TAIL witness. `turn_count` is a WINDOW length, so
+            # a refused HIGHEST turn is invisible to it; `turn_max_index` is the
+            # mark the capture MERGE writes and the fold restores, so the record
+            # read can see a missing tail.
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane, "
+            "s.turn_max_index",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -38570,18 +39220,123 @@ class TortoiseSDK:
             "RETURN count(p)",
             params={"sid": session_id},
         ).result_set[0][0]
-        turn_rows = proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
-            params={"sid": session_id},
-        ).result_set
-        turn_points = []
-        for tr in turn_rows:
-            role, body = _capture_turn_role_text(tr[1] or "")
-            turn_points.append({
-                "id": tr[0], "role": role, "content": body,
-                "created_at": tr[2],
-            })
+        # #10000: the turns are RECORD rows once the record holds them, so this
+        # read asks the SAME question the capture writer asks — and reads the
+        # record through the SAME door the hosted endpoint uses
+        # (`record_read.session_turns`, which scopes the connection and reports
+        # whether the record ANSWERED). Without this arm the SDK's own detail
+        # read walked `CONTAINS -> Point {pointKind:'event'}` and served
+        # `turn_points: []` for every captured session on an armed deployment —
+        # the endpoint and the SDK twin disagreeing about one session, which
+        # #3557's parity contract exists to prevent.
+        turn_points: list[dict] = []
+        from tortoise.record_read import (
+            TurnAnswer,
+            merge_turn_payloads,
+            served_turn_count,
+            turn_payloads,
+        )
+        from tortoise.record_serve import RecordUnavailable
+
+        # The id-space high-water mark (sess[12], the `:Session` read above) is
+        # the TAIL witness the record's own `turn_count` cannot be: `None` when
+        # this session predates the mark, which makes the tail check abstain
+        # (#10000 review P2).
+        # ⛔ THE SECOND HALF OF THE ANSWER IS WHETHER THE READ FAILED (#10021
+        # review P2). `_record_turn_answer` returns `None` for three different
+        # states — no record tenant, a write-door refusal, and a read that
+        # RAISED — and only the last one leaves the body publishing one store's
+        # count over another store's list. Handing that state to
+        # `served_turn_count` as `read_failed` is what makes this door refuse
+        # where the hosted door refuses; without it the outage arm served
+        # `{"turns": N, "turn_points": []}` with a 200.
+        _answer, _read_failed = self._record_turn_answer(
+            session_id,
+            turn_max_index=sess[12] if isinstance(sess[12], int) else None)
+        if _answer is not None and _answer.answered:
+            turn_points = turn_payloads(_answer.turns)
+        else:
+            if _answer is not None:
+                # Reachable record, no answer for these turns, and the Session
+                # above states a count: a divergence between the two stores.
+                # Never silence, and never an empty transcript while another
+                # store holds one.
+                #
+                # ⛔ UNLESS THE RECORD NEVER SPOKE (#10021 review P2):
+                # `NO_ACCOUNT` is a session captured BEFORE the record was armed
+                # — no narrative row, no turn rows — which is the expected
+                # migrate-phase state and the largest population on a
+                # transitional deployment. Narrating it at WARNING is what makes
+                # a REAL divergence indistinguishable from healthy traffic. The
+                # union merge below is identical either way.
+                if _answer.kind == TurnAnswer.NO_ACCOUNT:
+                    _logger.debug(
+                        "session %s: the record holds no account of this "
+                        "session (%s) — serving the graph copy, which is the "
+                        "pre-arming state and not a divergence",
+                        session_id, _answer.reason)
+                else:
+                    _logger.warning(
+                        "session %s: the record did not answer for its whole "
+                        "transcript (%s) — merging the graph copy for the turns "
+                        "it does not hold", session_id, _answer.reason)
+            turn_rows = proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+                "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+                params={"sid": session_id},
+            ).result_set
+            graph_points: list[dict] = []
+            for tr in turn_rows:
+                role, body = _capture_turn_role_text(tr[1] or "")
+                graph_points.append({
+                    "id": tr[0], "role": role, "content": body,
+                    "created_at": tr[2],
+                })
+            # ⛔ A SHORT record answer is not an answer (#10000 review P0): the
+            # writer's store decision is per TURN while this read's is per
+            # SESSION, so a mid-capture refusal leaves part of the transcript in
+            # each store. `merge_turn_payloads` serves the UNION (the record's
+            # rows first, then the graph's for the ids it does not hold) — the
+            # same rule the hosted door applies, from the ONE definition.
+            turn_points = (
+                merge_turn_payloads(
+                    _answer, graph_points,
+                    # The residue filter: a row above the session's live
+                    # id-space end is not its transcript, and this is the door
+                    # that would otherwise SERVE it (#10021 review P3).
+                    turn_max_index=(sess[12] if isinstance(sess[12], int)
+                                    else None))
+                if _answer is not None else graph_points)
+        # ⛔ THE TWO NUMBERS IN THIS BODY MUST NOT CONTRADICT EACH OTHER
+        # (#10021 review P2). `turns` used to be the `:Session`'s `turn_count`
+        # (a WINDOW length) while `turn_points` is the union the record read and
+        # the graph copy produce, so on a split store the body served
+        # `{"turns": 4, "turn_points": [2 rows]}` with no error — the
+        # truncated-result-indistinguishable-from-complete shape #8447 forbids,
+        # one arm over from the failure path the hosted door already guarded.
+        # The rule is ONE shared definition (`record_read.served_turn_count`),
+        # applied here exactly as the hosted endpoint applies it, so the two
+        # doors cannot disagree about one session (#3557's parity contract).
+        #
+        # ⛔ `read_failed` IS PART OF "APPLIED EXACTLY AS THE HOSTED DOOR"
+        # (#10021 review P2). The hosted door passes it
+        # (`hosted_api.py`, `read_failed=_record_read_failed`) and this door did
+        # not, so the SAME rule answered differently on the one state it exists
+        # for: on a record read that RAISED, `answer is None` + `read_failed`
+        # True is "consulted, could not be verified" (refuse unless the graph
+        # copy agrees with the session's count), while the default `False` reads
+        # it as "never consulted" (an unarmed deployment) and publishes the
+        # session's count over whatever the graph holds.
+        served_turns, _turns_refusal = served_turn_count(
+            answer=_answer, served=len(turn_points), declared=sess[2],
+            read_failed=_read_failed)
+        if _turns_refusal:
+            _logger.warning("session %s: %s", session_id, _turns_refusal)
+            # An EXPLICIT error, never a shorter transcript served as complete:
+            # a new reply field would widen a public wire surface, so the
+            # refusal is the sanctioned shape (`#8447`: "an explicit error, or a
+            # reply field that says so").
+            raise RecordUnavailable(f"session {session_id}: {_turns_refusal}")
         ext_rows = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
             "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
@@ -38608,7 +39363,7 @@ class TortoiseSDK:
         return {
             "id": sess[0],
             "created_at": sess[1],
-            "turns": sess[2],
+            "turns": served_turns,
             "actor_user_id": sess[3],
             "actor_display": sess[3],
             "harness": sess[4],
@@ -38632,6 +39387,123 @@ class TortoiseSDK:
             "extracted_points": extracted_points,
             "source": source,
         }
+
+    def _record_turn_answer(self, session_id: str, *,
+                            turn_max_index: int | None = None
+                            ) -> tuple[Any, bool]:
+        """``(this session's turns AS THE RECORD ANSWERS THEM, read_failed)``.
+
+        The first element is a `record_read.TurnAnswer` — or ``None`` — imported
+        inside this method because the record's read path is not on this
+        module's import surface.
+
+        The SDK half of #10000's read switch: the hosted endpoint and this
+        client are the two surfaces a customer reads a transcript from, and both
+        must consult the store the writer actually used. A ``None`` answer means
+        the caller then serves the graph, which is where the capture writer put
+        the turns in exactly that case.
+
+        ⛔ TWO RETURNED HALVES, because ``None`` ALONE CONFLATES TWO STATES
+        (#10021 review P2). "The record was not consulted" (no tenant, or the
+        write door refuses this capability — an unarmed deployment, where the
+        graph IS the store and its copy is the transcript) and "the record was
+        consulted and the read RAISED" (where the graph is a cache of unknown
+        agreement) are different facts about the same ``None``, and the caller
+        reconciles the body's two numbers against them differently: the first
+        has one store, the second must prove the copy complete. The flag is
+        passed to `record_read.served_turn_count` as ``read_failed`` — the arm
+        the hosted door already supplies — so the parity contract (#3557) holds
+        on the failure state too, not only on the success one.
+
+        ⛔ IT ASKS THE RECORD'S CAPABILITY, NOT THIS PROCESS'S JOURNAL (#10000
+        review P2). The question "is the record where this session's turns are"
+        is about the process that CAPTURED the session, and this is a READ door:
+        a journal-less SDK (the documented embedded/dev lane, and the shape of any
+        reader that is not the writer) may be reading a session the hosted lane
+        captured WITH a journal. Asking its own journal answered a write-side
+        question about the wrong process — `None`, the graph — and the graph holds
+        no turn node, because the record took them: an empty transcript for a
+        captured session, mutely. So the gate is the record's capability for this
+        tenant (`live_write_refusal`: armed DSN + tenant; the WRITE breaker is
+        deliberately not consulted — see its `consult_breaker`) and
+        `session_turns.answered` is the AUTHORITY on whether this session's turns
+        are in there. A record that is unarmed — the graph-only lane — is still
+        answered `None` with no round trip, and a record that stays silent falls
+        back to the graph through the caller's existing `not answered` arm.
+        (Asking is not the same as trusting: the durability half is a WRITE
+        precondition and lives in `_write_capture_turns`, where it decides the
+        store.)
+
+        ``turn_max_index`` is the caller's `:Session` read (sess[12]), passed
+        straight through: the record's `turn_count` is a WINDOW length and
+        cannot witness a missing TAIL, so the id-space high-water mark is the
+        only datum that can, and the door that already read it supplies it
+        (#10000 review P2).
+
+        Deliberately fail-soft: a record that raises must not blank a transcript
+        the graph still holds, and the exception is logged rather than swallowed.
+        """
+        from tortoise.record_read import session_turns
+        from tortoise.record_serve import open_record
+        from tortoise.record_writer import live_write_refusal, record_tenant
+
+        tenant = self._record_tenant or record_tenant()
+        if tenant is None:
+            # No record tenant: the same SDK's capture is refused `no_tenant`
+            # and writes its turns to the graph, so the graph is the answer. NOT
+            # a read failure — there is nothing to be unverifiable against.
+            #
+            # ⚠️ RECORDED RESIDUAL (#10021 review N2, P3) — the justification
+            # above is a fact about the WRITING process, and this is a READ door:
+            # on a multi-tenant reader (`record_tenant()` is None by design
+            # without a declaration) reading a session whose turns the HOSTED
+            # writer put in the record, this arm answers "the graph is the
+            # store" and the caller serves `turn_points: []` beside the
+            # session's own `turns: N` — the #8447 self-contradicting body —
+            # SILENTLY. The narrowest true statement is that the tenant is
+            # unknowable here, which argues for a WARNING on this arm rather
+            # than a graph answer; not done in #10000 because the arm is
+            # unreachable whenever the SDK is the writer, so it cannot be
+            # measured from this branch. Strictly better than `main` either way
+            # (which never consulted the record at all).
+            return None, False
+        # `durable=True` is this read door's statement about the WRITER's side:
+        # whether the capturing process could journal is not observable here, and
+        # the record's own answer is what decides. A refusal (unarmed, malformed
+        # DSN) is the graph-only lane and costs no round trip.
+        #
+        # ⛔ `consult_breaker=False` — A READER MUST NOT INHERIT THE WRITE
+        # BREAKER (#10000 review P1). `circuit_open` is a cost bound on the write
+        # path, not a fact about where this session's turns are: asked with it,
+        # an armed deployment whose record holds the turns answered `None` here
+        # for 60 s after one failed capture connect, the caller served the
+        # graph's (non-existent) turn nodes, and its `_answer is not None`
+        # WARNING never fired — a silently empty transcript. Asking costs one
+        # bounded connect per read, and a failure is logged below.
+        if live_write_refusal(durable=True, tenant=tenant,
+                              consult_breaker=False) is not None:
+            # Same shape as the no-tenant arm: the record is not this SDK's
+            # store here, so its absence is not an unverifiable read.
+            return None, False
+        org_id, graph_id = tenant
+        conn = None
+        try:
+            conn = open_record()
+            return session_turns(conn, org_id=org_id, graph_id=graph_id,
+                                 session_id=session_id,
+                                 turn_max_index=turn_max_index), False
+        except Exception:  # noqa: BLE001, RUF100
+            _logger.warning(
+                "session %s: the record turn read failed — serving the graph "
+                "copy for this read", session_id, exc_info=True)
+            # ⛔ `True`, NOT a bare `None`: the record holds these turns and
+            # could not be asked, so the graph copy is a CACHE whose agreement
+            # with the session's count is the only evidence it is complete.
+            return None, True
+        finally:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
 
     def index_file(self, path: str,
                    file_type: str | None = None,   # "agent_session"|"meeting"|"doc"|None(auto)
