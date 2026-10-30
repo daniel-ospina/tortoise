@@ -1254,6 +1254,148 @@ def test_label_coverage_distinguishes_did_not_look_from_looked_and_found(tmp_pat
     assert "0 of 0 online self-hosted runner(s)" in r.stderr, r.stderr
 
 
+def test_label_coverage_refuses_a_workflow_it_cannot_read(tmp_path: Path):
+    r"""⛔ A WORKFLOW THE READ COULD NOT OPEN IS `exit 4`, NEVER A SILENTLY DROPPED FILE.
+
+    The extraction was a raw glob with `2>/dev/null`, which discarded grep's per-file read error: a
+    workflow that could not be OPENED contributed NOTHING, the surviving files still produced a row
+    set, no `!` was emitted, and the block printed a clean verdict and exited 0 over the one file it
+    had failed to read. Measured: an unreadable workflow naming `ubuntu-24.04` beside a readable
+    `ubuntu-latest` → `ubuntu-24.04` appeared NOWHERE in the report and `--status` exited 0; the same
+    tree with the mode restored → rc 5. That is the incident state this block exists to surface,
+    cleared through the one path its three exit-4 arms cannot see: they all inspect what the read
+    PRODUCED, never whether every file was read at all.
+
+    ⛔ GREP'S rc ALONE CANNOT DECIDE IT, which is why the checkpoint is the enumeration: with only
+    `*.yml` present the literal `.yaml` glob makes grep exit 2 for a reason that is NOT a read
+    failure (measured `grep-rc=2`), so a blanket `|| exit 4` would red the ordinary tree. The
+    predicate is "every ENUMERATED file could be opened" — the `[ -f ]`-per-path enumerator the
+    pre-rewrite script had and this one replaced with a glob.
+
+    Mutation: restore the glob + `2>/dev/null` → this exits 0 over a file it never read → RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    env = _env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on")
+
+    # A `.yml` entry that is NOT a regular file cannot be opened by any user, root included — so this
+    # arm states the same predicate as the permission case below without depending on the test uid.
+    repo = tmp_path / "repo"
+    wf = repo / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "aa-not-a-file.yml").mkdir()
+    (wf / "zz-readable.yml").write_text("jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n")
+    r = _run("--status", env=env, cwd=repo)
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "cannot READ" in r.stderr and "aa-not-a-file.yml" in r.stderr, r.stderr
+
+    # The shape the review measured: a readable file silently ABSORBS the one it could not open.
+    # Skipped under root, where a mode bit is not a fence — never asserted vacuously.
+    if os.geteuid() != 0:
+        repo2 = tmp_path / "repo2"
+        wf2 = repo2 / ".github" / "workflows"
+        wf2.mkdir(parents=True)
+        (wf2 / "aa-unreadable.yml").write_text("jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n")
+        (wf2 / "zz-readable.yml").write_text("jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n")
+        (wf2 / "aa-unreadable.yml").chmod(0o000)
+        try:
+            r = _run("--status", env=env, cwd=repo2)
+        finally:
+            (wf2 / "aa-unreadable.yml").chmod(0o644)
+        assert r.returncode == 4, (r.returncode, r.stderr)
+        assert "cannot READ" in r.stderr, r.stderr
+        # CONTROL: the same tree, readable, measures BOTH labels — so the 4 above is caused by the
+        # unreadable file and not by the fixture.
+        r = _run("--status", env=env, cwd=repo2)
+        assert r.returncode in (0, 5), (r.returncode, r.stderr)
+        assert "ubuntu-24.04" in r.stderr and "ubuntu-latest" in r.stderr, r.stderr
+
+
+def test_label_coverage_refuses_a_runs_on_in_flow_position(tmp_path: Path):
+    r"""⛔ A `runs-on` IN FLOW POSITION IS REFUSED, NOT CLEARED — `a: {runs-on: …}` is valid YAML.
+
+    The opener only ever saw a line that STARTS with `runs-on:`, so a job written as a flow mapping
+    opened no block, `keyseen` never incremented, the END rule had nothing to report, and the block
+    CLEARED. Measured on a fixture whose other workflow named `ubuntu-latest`: the `ubuntu-24.04`
+    leg was absent from the report entirely and the read exited 0. GitHub parses the JOB MAPPING, not
+    the formatting, so the leg is real and this instrument is the only thing that would notice it.
+
+    This pass does not carry flow-position keys, so counting them is what turns "invisible" into
+    "refused" — the same content-not-prefix rule the quoted-key and explicit-key spellings were
+    added for: a form the pass cannot read is refused rather than allowed to clear the rest.
+
+    Mutation: revert `keylike()` to the line-start spellings only → rc 0 with no `ubuntu-24.04` row
+    → RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    repo = tmp_path / "repo"
+    wf = repo / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "a.yml").write_text(
+        "jobs:\n"
+        "  a: {runs-on: ubuntu-24.04, steps: [{run: echo hi}]}\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=repo,
+    )
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "could not read 1 runs-on: block(s)" in r.stderr, r.stderr
+
+
+def test_label_coverage_matches_labels_case_insensitively(tmp_path: Path):
+    r"""⛔ A LABEL IS CASE-INSENSITIVE — GitHub matches runner labels that way.
+
+    The carrier match (`a[i]==want`), the class regexes and the shell-side identity compare all keyed
+    on the EXACT spelling, so a workflow naming `Ubuntu-24.04` beside a pool whose runners carry
+    `ubuntu-24.04` printed `Ubuntu-24.04 = 0 of 7`, fell to the `*)` class arm ("Not a label this
+    pool serves … a report, not a block") and exited 0 — the incident state, cleared, on a spelling
+    Actions treats as identical. This file already relies on the case-insensitivity elsewhere (the
+    repair block records that `Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64 marker,
+    `_preserve_labels` tests with `grep -qiE`, and `tools/runner_autoscale.py` uses
+    `re.IGNORECASE`), which made this read the only case-SENSITIVE member of the family.
+
+    The fold lives in `emit()` — the one choke point every documented `runs-on` form goes through —
+    so the label set, the carrier match, the class arms and `lab_asked` all see one spelling.
+
+    Mutation: drop `v = tolower(v)` from `emit()` → the mixed-case arms RED (0 of 1 / rc 0 instead
+    of covered / rc 5).
+    """
+    # A pool that answers the lowercase spelling only: `ubuntu-24.04` on ONE online x64 runner.
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-24.04")
+
+    # (a) The mixed-case REQUIRED label is MEASURED, not reported as somebody else's label.
+    covered = _repo_with_workflows(
+        tmp_path / "c",
+        "jobs:\n  a:\n    runs-on: Ubuntu-24.04\n    steps: []\n  b:\n    runs-on: UBUNTU-LATEST\n    steps: []\n",
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=covered,
+    )
+    assert "ubuntu-24.04 = 1 of 1" in r.stderr, r.stderr
+    assert "ubuntu-latest = 0 of 1" in r.stderr, r.stderr
+    assert "Not a label this pool serves" not in r.stderr, r.stderr
+    assert r.returncode == 0, (r.returncode, r.stderr)
+
+    # (b) And the fold does not CLEAR the incident state: the same mixed-case pin against a pool with
+    # NO carrier is still the verdict it is in lowercase. Without the fold `lab_asked` was 0 (the
+    # identity compare failed on case), so this arm exited 0 — a false clear in the blocking
+    # direction, on the one spelling Actions normalises away.
+    empty = _stub_gh(tmp_path / "empty", "r1\tself-hosted-x64,ubuntu-latest")
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{empty}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=_repo_with_workflows(
+            tmp_path / "e", "jobs:\n  a:\n    runs-on: Ubuntu-24.04\n    steps: []\n"
+        ),
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "0 of 1 online self-hosted runner(s)" in r.stderr, r.stderr
+
+
 def test_label_coverage_counts_only_online_carriers(tmp_path: Path):
     """⛔ A CARRIER THAT IS OFFLINE IS NOT AN ANSWER — `online` is a GATE, not a decoration.
 
@@ -2777,29 +2919,29 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
         399: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
         427: r"── status ──",  # the `--status` block
         450: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        735: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        743: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        752: r"found NO runs-on label to check",  # zero labels -> exit 4
+        790: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        798: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        807: r"found NO runs-on label to check",  # zero labels -> exit 4
         373: r"^\}$",  # "whose body ends at its `}` on"
-        970: r"exit 5",  # the uncovered verdict
-        992: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        1017: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1141: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1173: r'MODE" = labels',  # "`--print-labels`"
-        1200: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1205: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1208: r"FORK HEADROOM FIRST",  # "forks"
-        1228: r"DISK NEXT",  # "disk"
-        1235: r"CPU LAST",  # "cpu/memory"
-        1252: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1253: r'MODE" = uninstall',  # "`uninstall`"
-        1378: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1381: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1389: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1392: r"registration-token",  # "token"
-        1397: r"^    set -- --unattended",  # "one argv"
-        1399: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1409: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        1025: r"exit 5",  # the uncovered verdict
+        1047: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        1072: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1196: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1228: r'MODE" = labels',  # "`--print-labels`"
+        1255: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1260: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1263: r"FORK HEADROOM FIRST",  # "forks"
+        1283: r"DISK NEXT",  # "disk"
+        1290: r"CPU LAST",  # "cpu/memory"
+        1307: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1308: r'MODE" = uninstall',  # "`uninstall`"
+        1433: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1436: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1444: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1447: r"registration-token",  # "token"
+        1452: r"^    set -- --unattended",  # "one argv"
+        1454: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1464: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())

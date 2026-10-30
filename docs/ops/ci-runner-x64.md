@@ -465,22 +465,22 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:1378` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:1200` (arch refusal dies at `:1205`) and `uninstall` `:1253` ·
-  guards at `:1200-1251` (forks `:1208`, disk `:1228`, cpu/memory `:1235`) · sha256 pin +
-  registration at `:1389-1399` (verify `:1389`, token `:1392`, one argv `:1397`, `config.sh`
-  `:1399`; the run at `:1381` is the dry-run echo) · systemd install/start at `:1409-1411` · label
+- `--count N` → `tools/install-ci-runner-x64.sh:1433` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:1255` (arch refusal dies at `:1260`) and `uninstall` `:1308` ·
+  guards at `:1255-1306` (forks `:1263`, disk `:1283`, cpu/memory `:1290`) · sha256 pin +
+  registration at `:1444-1454` (verify `:1444`, token `:1447`, one argv `:1452`, `config.sh`
+  `:1454`; the run at `:1436` is the dry-run echo) · systemd install/start at `:1464-1466` · label
   resolution at `:272-373` (`fallback_engaged` `:276`, `resolve_os_label` `:304`, `resolve_labels`
   `:336`, whose body ends at its `}` on `:373`) · the union's label algebra at `:375-416` and the
-  repair that uses it, `repair` `:992` · the label-coverage block `:450-970` (its header `say` at
-  `:450`, its three no-verdict arms at `:735`, `:743` and `:752`, the uncovered verdict at `:970`)
-  and the `--status` block that contains it `:427-972` · `--print-labels` `:1173`.
+  repair that uses it, `repair` `:1047` · the label-coverage block `:450-1025` (its header `say` at
+  `:450`, its three no-verdict arms at `:790`, `:798` and `:807`, the uncovered verdict at `:1025`)
+  and the `--status` block that contains it `:427-1027` · `--print-labels` `:1228`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:235`): a `--count 0
   --uninstall` is a usage error (exit 1), not a silent no-op that reports success having deregistered
   nothing. `CI_RUNNER_OS_LABEL` is validated in the same place (`:299-302`), so a typo is refused in
   `--status` and `--uninstall` too — not only in the three modes that resolve labels.
 - **`--repair-labels` UNIONS — it can ADD a label, and the ONLY labels it removes are the two named
-  carve-outs below; never `ubuntu-latest` or a custom label a workflow targets** (`:992-1162`). The
+  carve-outs below; never `ubuntu-latest` or a custom label a workflow targets** (`:1047-1217`). The
   absolute form of that sentence was wrong one bullet later — `test-slow` and `workflow-lint` name
   the version pin, and the version-pin carve-out removes it — so the carve-outs are named here as the
   removals they are. It reads the runner's CURRENT labels and PUTs `current ∪ computed`, because the old
@@ -492,7 +492,7 @@ falls back.
   GitHub owns (`self-hosted`, `Linux`/`macOS`/`Windows`, `X64`/`ARM64`/`ARM` — refused by the API with
   HTTP 422) are left out of the body, and the before/after sets plus the derived `removed=[…]` list
   are printed BEFORE the PUT, so a removal would be visible in the output instead of inferred from a
-  queue that never moves. An unreadable current label set is a REFUSAL (`:1017`) — never "use
+  queue that never moves. An unreadable current label set is a REFUSAL (`:1072`) — never "use
   the computed set", which is the same strip through a different door — but it refuses THAT RUNNER,
   not the batch: it reports exit 3 and continues, because with `--count 2` an earlier runner's PUT
   may already have succeeded and exit 2 promises "nothing was changed" (`:109-136`). The same holds
@@ -504,12 +504,12 @@ falls back.
   workflow targets it": it stripped `ubuntu-latest` from the only pool answering the REQUIRED
   `python-ci-gate` aggregate (runs 40898791192 / 40901844458 — `jobs=0`, every PR blocked). The only
   removals left are the two named carve-outs below, and both are PRINTED.
-  ⛔ **`relabelled …` IS A CLAIM ABOUT THE SERVER, NOT ABOUT THE PUT'S EXIT STATUS** (`:1141`): the
+  ⛔ **`relabelled …` IS A CLAIM ABOUT THE SERVER, NOT ABOUT THE PUT'S EXIT STATUS** (`:1196`): the
   Set verb's own 200 carries the runner's resulting label set, and every label the repair asked for
   must be in it. A pool has already reported `set_labels ok=16 fail=0` for a label that was never
   attached (#6897), so a write that is accepted but not reflected is exit 3 with the returned set in
   the warning — never a `relabelled` line over a state nobody looked at.
-  ⛔ **`--repair-labels --fallback off` is REFUSED (exit 2, before any read or PUT)** (`:992-1001`):
+  ⛔ **`--repair-labels --fallback off` is REFUSED (exit 2, before any read or PUT)** (`:1047-1056`):
   a union cannot DETACH `ubuntu-latest`, so that invocation used to be accepted, print `removed=[]`,
   say `relabelled …` and exit 0 while the label it was asked to remove stayed attached. Detaching is
   the gate's writer; by hand it is `DELETE repos/<repo>/actions/runners/<id>/labels/ubuntu-latest`.
@@ -552,7 +552,7 @@ falls back.
      `self-hosted-x64` and KEPT on `ubuntu-latest` — that keep is exactly the measured false red (an
      arm64 box wins an `ubuntu-latest` job and dies in "Set up job", one shard per run). The
      host-derived label is the one witness a caller cannot talk the script out of.
-- **`--status` answers "who answers this `runs-on:` label"** (`:450-970`): per label the workflows
+- **`--status` answers "who answers this `runs-on:` label"** (`:450-1025`): per label the workflows
   name, it counts the ONLINE self-hosted runners that CAN answer it (the sub-pool for that label's
   architecture, so a two-arch pool is not misread as erosion), prints `N of M online runner(s)` —
   and only ONLINE carriers count, with the offline ones printed as context — and reports
@@ -561,8 +561,8 @@ falls back.
   from BOTH `.github/workflows/*.yml` and `*.yaml`, in every documented `runs-on:` form (a scalar, a
   flow array in either quoting, a block sequence, and a `group:`/`labels:` mapping — a runner GROUP
   is consumed, never counted as a label), and a `runs-on:` it cannot read as a STATIC label set is
-  refused (`:743`), never cleared: a partial read is not a coverage verdict. It reads nothing at all
-  → `:735`; it parses the files but finds no label to check → `:752`. All three are exit **4**.
+  refused (`:798`), never cleared: a partial read is not a coverage verdict. It reads nothing at all
+  → `:790`; it parses the files but finds no label to check → `:807`. All three are exit **4**.
   ⛔ **`0` is not a verdict on its own.** A zero answer is the incident ONLY when this pool is ASKED
   to serve that label — read from `CI_RUNNER_OS_LABEL` in the invoking shell, which is why the
   intent read can only ADD a verdict, never subtract one: `n > 0` (a measured carrier) outvotes a
@@ -572,9 +572,9 @@ falls back.
   readings — #6897's pin applied correctly, or erosion to zero — because one shell cannot tell them
   apart; `ubuntu-latest` at zero is likewise a report (that is the healthy state). `0 < n < M` is
   `⚠️ PARTIAL`, and its remedy is class-correct: only the bare pin is re-applied by this script.
-  Exit **5** when the pool IS asked for a required label and answers with none (`:970`).
+  Exit **5** when the pool IS asked for a required label and answers with none (`:1025`).
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:1252-1361`; the proof is `is_runner_install` at `:268`, which accepts `.runner` or  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
+  gone** (`:1307-1416`; the proof is `is_runner_install` at `:268`, which accepts `.runner` or  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
   operator input, so "a directory exists at this path" is not evidence of a runner — the earlier
@@ -614,8 +614,8 @@ falls back.
   operator or a future `--status && …` guard, not a change any caller currently reads.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:1200`, the `MODE = install`
-  block; the refusal itself dies at `:1205`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:1255`, the `MODE = install`
+  block; the refusal itself dies at `:1260`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 

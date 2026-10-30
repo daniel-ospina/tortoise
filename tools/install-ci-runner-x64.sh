@@ -546,8 +546,38 @@ if [ "$MODE" = status ]; then
   # exists to surface, cleared by the one arm that was meant to fail closed.
   # So: an expression member (or a `labels:` key that yields no static label at all, even with a
   # `group:` named beside it) prints `!`, exactly like a block with no readable label and no group.
-  coverage="$(grep -rhvE '^[[:space:]]*#' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
-      | awk '
+  # ⛔ ENUMERATE THE FILES, THEN REFUSE ON ONE THAT CANNOT BE OPENED. The raw glob with
+  # `2>/dev/null` discarded grep's per-file read error, so a workflow that could not be READ was
+  # SILENTLY DROPPED: its labels were never measured, the surviving files still produced a row set,
+  # no `!` was emitted, and the block printed a clean verdict and exited 0 over the one file it had
+  # failed to open. Measured: a `chmod 000` workflow naming `ubuntu-24.04` beside a readable
+  # `ubuntu-latest` → `ubuntu-24.04` appeared NOWHERE in the report, rc 0; restoring the mode on the
+  # same tree → rc 5. That is exactly the partial read the three exit-4 arms below exist to refuse,
+  # reached through the read they cannot see.
+  # ⛔ AND THE STATUS CANNOT BE KEYED ON GREP'S rc ALONE: with only `*.yml` present, the literal
+  # `.yaml` glob makes grep exit 2 for a reason that is NOT a read failure (measured `grep-rc=2`), so
+  # a blanket `|| exit 4` would red the normal tree. The predicate is "every ENUMERATED file could be
+  # opened", which is why the enumeration is the checkpoint — the same `[ -f ]`-per-path enumerator
+  # the pre-rewrite script had and this one replaced with a glob.
+  coverage_files=()
+  for coverage_f in .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -e "$coverage_f" ] || continue
+    if [ ! -f "$coverage_f" ] || [ ! -r "$coverage_f" ]; then
+      say "⛔ label-coverage cannot READ $coverage_f — a partial read is not a coverage verdict."
+      exit 4
+    fi
+    coverage_files+=("$coverage_f")
+  done
+  coverage_raw=""
+  coverage_rc=0
+  if [ "${#coverage_files[@]}" -gt 0 ]; then
+    coverage_raw="$(grep -hvE '^[[:space:]]*#' "${coverage_files[@]}")" || coverage_rc=$?
+  fi
+  if [ "$coverage_rc" -gt 1 ]; then
+    say "⛔ label-coverage could not read every workflow file under .github/workflows (grep rc=$coverage_rc) — a partial read is not a coverage verdict."
+    exit 4
+  fi
+  coverage="$(printf '%s\n' "$coverage_raw" | awk '
       # ⛔ CRLF: `\r` is not `[ \t]`, so a CRLF workflow left `ubuntu-24.04\r` in the emitted
       # label — a token that matches no class arm, so it fell to the "a report, not a block" default
       # and the whole read silently became "not a label this pool serves", exit 0 (measured: the
@@ -571,6 +601,21 @@ if [ "$MODE" = status ]; then
       function emit(t,   v) {
         v = unq(t)
         if (v == "") return
+        # ⛔ A LABEL IS CASE-INSENSITIVE, so the label set is FOLDED HERE — at the one choke point
+        # every documented form goes through — rather than at each of the four readers downstream.
+        # GitHub matches runner labels case-insensitively, and this file already relies on that in
+        # the repair block own note (`Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64
+        # marker, so a lower-case `runs-on:` still selects it); `_preserve_labels` tests with
+        # `grep -qiE` and `tools/runner_autoscale.py` with `re.IGNORECASE`, so this read was the only
+        # case-SENSITIVE member of the family. Measured before the fold, on a live pool whose two
+        # `ubuntu-24.04` carriers were online and asked: a workflow naming `Ubuntu-24.04` beside
+        # `ubuntu-latest` printed `Ubuntu-24.04 = 0 of 7`, fell to the `*)` class arm ("Not a label
+        # this pool serves … a report, not a block") and exited 0 — the incident state, cleared, on
+        # the one spelling variant Actions itself treats as identical.
+        # The fold is applied AFTER `unq()` and BEFORE the refusals below, so it cannot mask an
+        # expression, a space-bearing token, an alias or a block-scalar indicator: none of those
+        # become readable by being case-folded.
+        v = tolower(v)
         # ⛔ `bad++`, NOT a silent `return`: a value that is not a static label is not one this pass
         # can read, so the BLOCK has no static label set and must reach the exit-4 arm. Dropping it
         # let a parseable sibling (`self-hosted`) answer for the whole block.
@@ -644,8 +689,18 @@ if [ "$MODE" = status ]; then
       # still cannot carry is refused rather than clearing them all — the same content-not-prefix
       # rule `emit()` applies to a VALUE, applied to the KEY.
       function keylike(s) {
+        # ⛔ A KEY IN FLOW POSITION IS STILL A KEY. `keyis()` reads a `group:`/`labels:` member in a
+        # flow mapping, but the OPENER only ever saw a line that STARTS with `runs-on:`, so a job
+        # written as a flow mapping — `a: {runs-on: ubuntu-24.04, steps: [...]}`, valid GitHub YAML —
+        # opened no block. That left `keyseen` unincremented, so the END rule below had nothing to
+        # report and the block CLEARED: measured on a fixture whose only other workflow named
+        # `ubuntu-latest`, the `ubuntu-24.04` leg was absent from the report entirely and the read
+        # exited 0. This pass does not carry flow-position keys (no `!` there yet), so counting them
+        # is what turns "invisible" into "refused" — the same content-not-prefix rule the two
+        # scalar spellings were added for.
         return (s ~ /^["\047]?runs-on["\047]?[ \t]*:/ \
-             || s ~ /^\?[ \t]+["\047]?runs-on["\047]?[ \t]*$/)
+             || s ~ /^\?[ \t]+["\047]?runs-on["\047]?[ \t]*$/ \
+             || s ~ /^.*[{,][ \t]*["\047]?runs-on["\047]?[ \t]*:/)
       }
       function finish() {
         if (!pend) return
@@ -789,7 +844,7 @@ if [ "$MODE" = status ]; then
     counts="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" -v x64label="$ARCH_LABEL" -v armlabel="$ARM_POOL_LABEL" \
       -v fallbacklabel="$FALLBACK_LABEL" -v pool_total="$pool_total" -v pool_online="$pool_online" '
       {k=split($3,a,","); hit=0; x64=0; arm=0
-       for(i=1;i<=k;i++){ if(a[i]==want) hit=1; if(a[i]==x64label) x64=1; if(a[i]==armlabel) arm=1 }
+       for(i=1;i<=k;i++){ c=tolower(a[i]); if(c==want) hit=1; if(c==x64label) x64=1; if(c==armlabel) arm=1 }
        # ⛔ ONLINE IS A GATE, NOT A DECORATION: an offline runner is "not connected to GitHub", so
        # it cannot be handed the job. Every count below is online-only, which is what makes an
        # all-offline pool read `0 of N` (a verdict) instead of `N of N` (a false green).

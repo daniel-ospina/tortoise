@@ -6,10 +6,21 @@ Why a test rather than trust
 version pin. The fallback pool has served BOTH: `scripts/ci_runner_gate.sh` attaches
 `ubuntu-latest` while the fallback is engaged, and 2026-10-24's measurement found every
 failing `finding-provenance` `classify` job that ran on `pi-runner-vm-*` holding the
-`ubuntu-24.04` pin as well — a live violation of the recorded invariant that no self-hosted
-runner claims an `ubuntu-<version>` label (`docs/ops/ci-runner-x64.md`, `MEMORY.md`, and the
-drift arm in `tests/test_ci_selection.py` that reads the GATE'S TEXT rather than the live
-label set, which is why it did not fire).
+`ubuntu-24.04` pin as well — a live violation, AT THE TIME, of the invariant that no
+self-hosted runner claims an `ubuntu-<version>` label (the drift arm in
+`tests/test_ci_selection.py` reads the GATE'S TEXT rather than the live label set, which is
+why it did not fire).
+
+⚠️ **THAT INVARIANT IS NO LONGER IN FORCE, AND THIS MEASUREMENT IS THE DOCUMENTED STATE.** Since
+the 2026-10-29 departure recorded on #6897 (`OVERRIDES:` in `docs/ops/ci-runner-x64.md` §*the label
+contract*, and `MEMORY.md` `[ci-runners]`), the pool claiming a version-pinned hosted label is an
+**explicit opt-in mitigation** (`CI_RUNNER_OS_LABEL=on|auto`, default `off`) for the deadlock where
+the pinned legs are never dispatched and every PR stays BLOCKED; `--status`' `label-coverage` block
+now reports and verdicts that state. So a runner carrying `ubuntu-24.04` is **not** a defect to
+repair — the revert is `CI_RUNNER_OS_LABEL=off` plus `--repair-labels`, never an ad-hoc label strip,
+which is how one would silently remove the mitigation. What this file still proves is the OTHER
+claim, which the departure does not touch: a pool runner is a BARE box whose service `PATH` lacks
+the hosted image's tools, so any job that can land on it must carry the tool contract.
 
 Either label can land a job on a bare runner whose service environment is a minimal
 NON-login `PATH`, where a tool of the hosted image is simply absent. Measured 2026-10-24,
