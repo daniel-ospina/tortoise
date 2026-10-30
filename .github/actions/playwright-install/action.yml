@@ -1,0 +1,74 @@
+name: playwright-install
+description: >-
+  Install a Playwright browser AND the system dependencies it needs — with apt
+  told to WAIT for its lock instead of losing the race against a co-tenant job on
+  the same runner host.
+
+  WHY (#10214). `python -m playwright install --with-deps <browser>` shells out to
+  `apt-get install` for the browser's system libraries, and apt-get's DEFAULT is
+  to fail IMMEDIATELY when another process holds `/var/lib/apt/lists/lock`. This
+  repo's `ubuntu-latest` label is answered by a self-hosted pool where many jobs
+  share ONE host (the same pool `.github/actions/ensure-rsync` documents for
+  #7026), so a co-tenant running anything apt-based reds a job whose own code is
+  fine. Measured 2026-10-30 on PR #10214 (run 41022359663, job 123952387502):
+
+      E: Could not get lock /var/lib/apt/lists/lock. It is held by process 3984745 (apt-get)
+
+  That killed the REQUIRED `legal-e2e` check at its FIRST step, so the eight steps
+  that follow — the preview boot and the entire suite the job exists to run —
+  never ran. The red described a neighbour's apt, not this branch, and re-running
+  it is a coin flip on who else is installing at that moment.
+
+  THE FIX is apt's own mechanism, not a wrapper: `DPkg::Lock::Timeout`
+  (apt.conf(5), the DPkg group) makes an apt invocation WAIT that many seconds for
+  the lock instead of failing. It is written ONCE into `Dir::Etc::Parts`
+  (`/etc/apt/apt.conf.d/`, which every apt tool reads at startup), so it reaches
+  the `apt-get` calls Playwright makes INTERNALLY — which a `-o` flag on our own
+  command line cannot, because we do not issue that call. `ensure-rsync` already
+  passes the same option for the same race; this makes it the job's default.
+inputs:
+  browser:
+    description: Playwright browser name (chromium, firefox, webkit).
+    required: false
+    default: chromium
+  lock-timeout:
+    description: >-
+      Seconds apt may WAIT for the dpkg/apt lock. Comfortably longer than a
+      co-tenant's own install, and affordable against the job timeouts
+      (ci.yml: legal-e2e 20m, dashboard-e2e 15m, welcome-e2e 15m).
+    required: false
+    default: "600"
+runs:
+  using: composite
+  steps:
+    - name: Install ${{ inputs.browser }} + its system dependencies (#10214)
+      shell: bash
+      env:
+        BROWSER: ${{ inputs.browser }}
+        LOCK_TIMEOUT: ${{ inputs.lock-timeout }}
+      run: |
+        set -euo pipefail
+        conf=/etc/apt/apt.conf.d/99-ci-dpkg-lock-timeout
+        printf 'DPkg::Lock::Timeout "%s";\n' "$LOCK_TIMEOUT" | sudo tee "$conf" >/dev/null
+        # ASSERT the write, do not assume it: apt SILENTLY IGNORES a configuration
+        # key it does not know, so on an apt without this option a no-op here
+        # would leave the race exactly as it was while this step reported green.
+        grep -q "DPkg::Lock::Timeout \"$LOCK_TIMEOUT\"" "$conf" || {
+          echo "::error::$conf does not carry DPkg::Lock::Timeout — apt will NOT wait for the lock"
+          exit 1
+        }
+        # Bounded retry for the residual the timeout cannot cover: a co-tenant
+        # holding the lock for longer than LOCK_TIMEOUT. Same three-attempt shape
+        # (and backoff) as the wrangler install loops, and the last attempt is
+        # HARD — falling through would report a green step for an install that
+        # never happened, and every suite behind it would fail on a missing
+        # browser instead of saying so here.
+        for attempt in 1 2 3; do
+          if python -m playwright install --with-deps "$BROWSER"; then
+            exit 0
+          fi
+          echo "::warning::playwright install --with-deps $BROWSER failed on attempt $attempt — apt's lock was still held"
+          sleep $((attempt * 20))
+        done
+        echo "::error::python -m playwright install --with-deps $BROWSER failed after 3 attempts — apt never released its lock"
+        exit 1

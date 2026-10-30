@@ -1343,3 +1343,245 @@ def test_no_document_uploads_from_the_repository_root() -> None:
         "pass green having examined nothing, so a fence that changed shape (or a "
         "wrong `COMMAND_DOCS`) would read as compliance"
     )
+
+
+# ------------------------------- 7. the browser install waits for apt's lock
+
+#: A Playwright browser install run DIRECTLY in a step's `run:`, i.e. the shape
+#: that races apt: `--with-deps` shells out to `apt-get install` for chromium's
+#: system libraries, and apt's default is to FAIL the moment a co-tenant holds
+#: `/var/lib/apt/lists/lock` (measured 2026-10-30, PR #10214 run 41022359663 job
+#: 123952387502: the REQUIRED `legal-e2e` check reded on its FIRST step, so the
+#: preview boot and the whole suite behind it never ran).
+INLINE_PLAYWRIGHT_INSTALL = re.compile(r"\bpython -m playwright install\b")
+
+#: The one place a browser install may live now: the composite action that makes
+#: apt WAIT for its lock before installing.
+PLAYWRIGHT_ACTION = "./.github/actions/playwright-install"
+
+#: Its document, as `_workflow_paths()` labels it. Exempt from the INLINE arm
+#: because `test_the_playwright_action_waits_then_retries_and_fails_hard` reads
+#: that file in detail — the two arms would otherwise contradict each other.
+PLAYWRIGHT_ACTION_FILE = PLAYWRIGHT_ACTION.removeprefix("./") + "/action.yml"
+
+
+def _code(step: dict) -> str:
+    """A step's `run:` with comment tails cut — prose must not satisfy or red an arm."""
+    return "\n".join(_cut_comment(line) for line in str(step.get("run") or "").splitlines())
+
+
+def _inline_playwright_installs(docs: list[tuple[str, dict]]) -> list[str]:
+    """`label:job` for every step that installs a browser WITHOUT the action.
+
+    `docs` is `[(label, document)]` so a self-test can hand it a synthetic
+    workflow and PROVE the verdict reds on the shape the arm names, instead of
+    asserting that it would.
+    """
+    offenders: list[str] = []
+    for label, doc in docs:
+        if label == PLAYWRIGHT_ACTION_FILE:
+            continue
+        for job_name, step in _document_steps(doc or {}):
+            if INLINE_PLAYWRIGHT_INSTALL.search(_code(step)):
+                offenders.append(f"{label}:{job_name}")
+    return offenders
+
+
+def test_every_browser_install_goes_through_the_lock_waiting_action() -> None:
+    docs = [(p.relative_to(REPO_ROOT).as_posix(), _load(p)) for p in _workflow_paths()]
+    sites = [
+        f"{label}:{job_name}"
+        for label, doc in docs
+        for job_name, step in _document_steps(doc or {})
+        if str(step.get("uses") or "").strip() == PLAYWRIGHT_ACTION
+    ]
+    # The population this arm is about must be complete: the six `--with-deps`
+    # call sites #10214 converted (ci.yml x3, deploy-pages, prod-csp-monitor,
+    # welcome-e2e-monitor). A seventh site added later is a site that races apt.
+    assert len(sites) >= 6, (
+        f"only {len(sites)} job(s) use {PLAYWRIGHT_ACTION}: {sites} — every job that "
+        "installs a browser must go through it, or its install races a co-tenant's "
+        "apt and reds this check for a reason that is not this branch's code"
+    )
+    offenders = _inline_playwright_installs(docs)
+    assert not offenders, (
+        "these steps install a Playwright browser directly, so apt FAILS instead of "
+        f"WAITING when a co-tenant holds its lock (#10214): {offenders}"
+    )
+
+
+def test_the_apt_lock_arm_reds_on_the_shape_it_names() -> None:
+    """Non-vacuity, on synthetic documents — the arm above must be able to fail."""
+    inline = {
+        "jobs": {
+            "legal-e2e": {
+                "steps": [{"run": "python -m playwright install --with-deps chromium"}]
+            }
+        }
+    }
+    assert _inline_playwright_installs([("synthetic.yml", inline)]) == [
+        "synthetic.yml:legal-e2e"
+    ]
+    # Through the action: nothing for the arm to say.
+    via_action = {"jobs": {"legal-e2e": {"steps": [{"uses": PLAYWRIGHT_ACTION}]}}}
+    assert _inline_playwright_installs([("synthetic.yml", via_action)]) == []
+    # A COMMENT that names the command is not an install (the action's own prose
+    # and deploy-pages.yml's recipe both mention it).
+    commented = {
+        "jobs": {
+            "j": {
+                "steps": [
+                    {
+                        "run": "# playwright install --with-deps chromium → pytest\n"
+                        "pip install -e '.[test]'"
+                    }
+                ]
+            }
+        }
+    }
+    assert _inline_playwright_installs([("synthetic.yml", commented)]) == []
+    # The action file itself is exempt HERE because the arm below reads it in
+    # full; without the exemption the two arms would contradict each other.
+    assert (
+        _inline_playwright_installs(
+            [
+                (
+                    PLAYWRIGHT_ACTION_FILE,
+                    {
+                        "runs": {
+                            "using": "composite",
+                            "steps": [
+                                {"run": "python -m playwright install --with-deps chromium"}
+                            ],
+                        }
+                    },
+                )
+            ]
+        )
+        == []
+    )
+
+
+def _playwright_action_offenders(actions: dict[str, dict]) -> list[str]:
+    """What is wrong with the `playwright-install` action, if anything.
+
+    Takes `actions` (as `_composite_action_docs()` returns it) so a self-test can
+    hand it a broken synthetic action and prove each arm reds.
+    """
+    key = PLAYWRIGHT_ACTION.removeprefix("./")
+    doc = actions.get(key)
+    if doc is None:
+        return [f"no composite action at {PLAYWRIGHT_ACTION}"]
+    steps = list((doc.get("runs") or {}).get("steps") or [])
+    installing = [step for step in steps if INLINE_PLAYWRIGHT_INSTALL.search(_code(step))]
+    if not installing:
+        return [f"{key}: no step runs a Playwright browser install"]
+    problems: list[str] = []
+    for step in installing:
+        run = _code(step)
+        if "DPkg::Lock::Timeout" not in run:
+            problems.append(
+                f"{key}: the install does not make apt WAIT for its lock — apt's default "
+                "is to fail immediately, which is the #10214 red"
+            )
+            continue
+        if run.index("DPkg::Lock::Timeout") > run.index("python -m playwright install"):
+            problems.append(
+                f"{key}: the lock wait is written AFTER the install it must cover"
+            )
+        if "grep -q" not in run:
+            problems.append(
+                f"{key}: the lock-wait write is never read back — apt silently ignores a "
+                "configuration key it does not know, so a no-op would read as compliance"
+            )
+        bodies = _retry_loop_bodies(run, "for attempt in 1 2 3;")
+        if not any(INLINE_PLAYWRIGHT_INSTALL.search(body) for body in bodies):
+            problems.append(
+                f"{key}: the install is a single unprotected call — one contended lock "
+                "still reds the job"
+            )
+        for body in bodies:
+            if not re.search(r"sleep \$\(\(attempt \* \d+\)\)", body):
+                problems.append(f"{key}: the retry carries no backoff")
+        if not re.search(r"after 3 attempts", run):
+            problems.append(
+                f"{key}: the loop has no hard failure after the last attempt — falling "
+                "through reports a green step for an install that never happened"
+            )
+        if "|| true" in run or "set +e" in run:
+            problems.append(f"{key}: the install is allowed to fail")
+    return problems
+
+
+def _synthetic_action(run: str) -> dict[str, dict]:
+    return {
+        PLAYWRIGHT_ACTION.removeprefix("./"): {
+            "runs": {"using": "composite", "steps": [{"name": "install", "run": run}]}
+        }
+    }
+
+
+def test_the_playwright_action_waits_then_retries_and_fails_hard() -> None:
+    problems = _playwright_action_offenders(_composite_action_docs())
+    assert not problems, "\n".join(problems)
+
+
+def test_the_playwright_action_arm_reds_on_a_no_op_lock_wait() -> None:
+    """Each arm above is PROVED to fail on the shape it names (#10214)."""
+    good = (
+        "set -euo pipefail\n"
+        'printf \'DPkg::Lock::Timeout "600";\\n\' | sudo tee /etc/apt/apt.conf.d/x >/dev/null\n'
+        'grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n'
+        "for attempt in 1 2 3; do\n"
+        '  if python -m playwright install --with-deps chromium; then exit 0; fi\n'
+        "  sleep $((attempt * 20))\n"
+        "done\n"
+        "echo failed after 3 attempts\n"
+        "exit 1\n"
+    )
+    assert _playwright_action_offenders(_synthetic_action(good)) == []
+
+    # No lock wait at all — apt fails immediately and the red comes back.
+    no_wait = good.replace("DPkg::Lock::Timeout", "someone_elses_key")
+    assert any(
+        "WAIT" in p
+        for p in _playwright_action_offenders(_synthetic_action(no_wait))
+    )
+    # The wait written AFTER the install it must cover.
+    after = (
+        "python -m playwright install --with-deps chromium\n"
+        'printf \'DPkg::Lock::Timeout "600";\\n\' | sudo tee /etc/apt/apt.conf.d/x\n'
+        'grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n'
+        "echo failed after 3 attempts\n"
+    )
+    assert any("AFTER" in p for p in _playwright_action_offenders(_synthetic_action(after)))
+    # Written but never read back: apt ignores an unknown key SILENTLY.
+    unasserted = good.replace('grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n', "")
+    assert any(
+        "read back" in p for p in _playwright_action_offenders(_synthetic_action(unasserted))
+    )
+    # A single unprotected call: no retry at all.
+    once = (
+        'printf \'DPkg::Lock::Timeout "600";\\n\' | sudo tee /etc/apt/apt.conf.d/x\n'
+        'grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n'
+        "python -m playwright install --with-deps chromium\n"
+        "echo failed after 3 attempts\n"
+    )
+    assert any(
+        "single unprotected" in p for p in _playwright_action_offenders(_synthetic_action(once))
+    )
+    # The loop falls through instead of failing the step.
+    soft = good.replace("exit 1\n", "").replace("echo failed after 3 attempts", "")
+    assert any(
+        "hard failure" in p for p in _playwright_action_offenders(_synthetic_action(soft))
+    )
+    # A retry that cannot fail is not a gate.
+    swallowed = good.replace(
+        "if python -m playwright install --with-deps chromium; then exit 0; fi",
+        "python -m playwright install --with-deps chromium || true",
+    )
+    assert any(
+        "allowed to fail" in p for p in _playwright_action_offenders(_synthetic_action(swallowed))
+    )
+    # A missing action is a problem, not an empty offender list.
+    assert _playwright_action_offenders({})

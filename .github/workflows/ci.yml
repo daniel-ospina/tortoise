@@ -1843,7 +1843,7 @@ jobs:
         with:
           node-version: '22'   # .ts type stripping + syntax detection is DEFAULT-ON from 22.18; the parity driver passes --experimental-strip-types (>= 22.7), test_pi_capture_hooks' `node --test` does not (#373 harness, #4714 parity test)
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
       # #1511: serve THIS branch's website/ (wrangler pages dev, mirroring the
       # legal-e2e job) instead of the LIVE page — the strict-validity gates,
       # the provision-401 clear→/auth path and the waitForSession validity
@@ -2037,7 +2037,7 @@ jobs:
       # Install the package (pulls falkordblite/redislite needed by
       # tortoise/__init__) + the e2e test extras (playwright, pytest-playwright).
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
       # The boot below runs the binary this step verified (#8816): the version
       # comes from config/wrangler-version and is asserted against what npm
       # resolved, before the boot clock starts (#2178: a cold fetch used to eat
@@ -2227,7 +2227,7 @@ jobs:
         with:
           node-version: '22'
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
       # #3775: `dist/` is a build artifact (untracked). Build it before any
       # preview boots — `npm ci` is lockfile-pinned, so this is the same
       # vite output the deploy-dashboard job ships (byte-identical, verified
