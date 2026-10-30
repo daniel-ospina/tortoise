@@ -2951,11 +2951,24 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # Measured on the pre-fix head: `_sel([<this path>])` -> surfaces=[],
         # full=False, so editing the very file the pin parses ran no guard.
         "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
-        # #10017 R2: the FORWARD migration that re-declares
-        # `chk_point_props_no_derived` to refuse `cache_tier` — and the one file
-        # that can silently SHRINK `point`'s refusal set, because the SQL CHECK
-        # REPLACES while `refused_props_names()` UNIONS (so the parser keeps
-        # reporting every name refused after the database stopped refusing it).
+        # #10017 R2: the FORWARD migration that ADDS `public.point.cache_tier`
+        # (`ALTER TABLE public.point ADD COLUMN`) and re-declares
+        # `chk_point_props_no_derived` to refuse it. Both readers must run on a
+        # change to this file alone — `test_record_projection.py` reads its
+        # ALTER for the column set and its constraint for the refusal,
+        # `test_record_schema_placement.py` pins the record schema. It is also
+        # the one file that can silently SHRINK `point`'s refusal set, because
+        # the SQL CHECK REPLACES while `refused_props_names()` UNIONS (so the
+        # parser keeps reporting every name refused after the database stopped
+        # refusing it). Measured on the pre-fix head: `_sel([<this path>])` ->
+        # `surfaces: []`, `full: false`, both readers ABSENT, so adding the
+        # column and skipping the placement table would have merged with no
+        # guard running at all.
+        # ONE entry, not two: this file was registered here (PR #10070, landing
+        # the same migration on main) and again by this branch's own base, and
+        # the #10258 merge of `origin/main` brought both copies in. The arm
+        # asserted the same three things twice; the duplicate is removed rather
+        # than left to double-run.
         "supabase/migrations/20261029000001_record_point_cache_tier.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
