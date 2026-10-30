@@ -749,6 +749,95 @@ def test_the_source_present_publish_cannot_clobber_a_peer_archive(tmp_path, monk
     assert result.ok, result
 
 
+def test_a_peer_superset_published_inside_the_preserve_window_wins(tmp_path):
+    """Defense in depth behind `_remove_if_same`: if a peer republishes between
+    the read and the preserve, the staged-bytes check refuses to supersede.
+
+    REGRESSION PIN, not a mutation proof: `_remove_if_same` already catches this
+    interleaving (the peer's file is a different inode), so deleting the sha
+    comparison was measured to leave this row green. It pins the intended
+    verdict, not the mechanism that produces it.
+    """
+    day = TODAY - timedelta(days=9)
+    full = b'{"n": 1}\n{"n": 2}\n'
+    peer = b'{"n": 1}\n{"n": 2}\n{"peer": 9}\n'
+    path = _write(tmp_path, day, full)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(b'{"n": 1}\n', mtime=0))
+
+    real_preserve = seal._preserve_aside
+
+    def peer_republishes(src, aside):
+        result = real_preserve(src, aside)
+        target.unlink()                 # a peer REPLACES the name (new inode)
+        target.write_bytes(gzip.compress(peer, mtime=0))
+        return result
+
+    seal._preserve_aside = peer_republishes
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        seal._preserve_aside = real_preserve
+
+    assert result.status == "conflict", result
+    assert gzip.decompress(target.read_bytes()) == peer
+    assert path.exists(), "the source is kept: the peer's archive is the newer one"
+
+
+def test_a_valid_gzip_of_no_events_is_not_proof_that_a_day_was_sealed(tmp_path):
+    """`gzip.compress(b"")` is 20 bytes, so the size check alone accepts it — and
+    `--check` would answer ok over a day whose records exist nowhere. Proof is
+    the payload: released events, one JSON object per line.
+
+    Mutation: `_looks_like_events` dropped from the proof REDs here (the day is
+    reported already-sealed).
+    """
+    day = TODAY - timedelta(days=3)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    target.write_bytes(gzip.compress(b"", mtime=0))          # valid, zero events
+    result = seal._already_gone(tmp_path, day, 5)
+    assert result.status == "verify-failed", result
+    assert "exist nowhere" in result.detail
+
+    target.write_bytes(gzip.compress(b'{"peer": 9}\nnot json\n', mtime=0))
+    assert seal._already_gone(tmp_path, day, 5).status == "verify-failed"
+
+    target.write_bytes(gzip.compress(b'{"n": 1}\n', mtime=0))
+    assert seal._already_gone(tmp_path, day, 5).status == "already-sealed"
+
+
+def test_restore_never_leaves_a_zero_byte_day_file_when_dup_fails(tmp_path):
+    """The cleanup after a failed write is keyed on a `dup` of the creating
+    descriptor. If the `dup` itself fails (EMFILE), the 0-byte plain day file it
+    just created must still be removed — otherwise every consumer reads a whole
+    day as empty and every later restore answers "different content" forever.
+
+    Mutation: the `elif fd >= 0: _remove_held(dst, fd)` arm removed REDs here.
+    """
+    day = TODAY - timedelta(days=3)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(b'{"n": 1}\n', mtime=0))
+    dst = tmp_path / f"{day.isoformat()}.jsonl"
+
+    real_dup = seal.os.dup
+
+    def no_fds(fd):
+        raise OSError(errno.EMFILE, "too many open files")
+
+    seal.os.dup = no_fds
+    try:
+        message = seal.restore(tmp_path, day)
+    finally:
+        seal.os.dup = real_dup
+
+    assert message.startswith("restore failed"), message
+    assert not dst.exists(), "a 0-byte day file must not survive a failed restore"
+
+
 def test_the_copy_branch_pins_the_inode_it_compares(tmp_path):
     """On a filesystem with no hard links the aside is a COPY, so the staged
     `st` is not pinned by any name: a peer's replacement file can reuse the freed

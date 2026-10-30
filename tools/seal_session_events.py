@@ -70,6 +70,7 @@ import argparse
 import contextlib
 import gzip
 import hashlib
+import json
 import os
 import re
 import tempfile
@@ -305,6 +306,29 @@ def _read_archive(path: Path) -> bytes | None:
         return None
 
 
+def _looks_like_events(payload: bytes) -> bool:
+    """True when every non-empty line of a sealed payload is a JSON object.
+
+    ``_read_archive`` rejects a 0-byte file, but a 20-byte ``gzip.compress(b"")``
+    — or a valid gzip of another day's records, or of unrelated bytes — gunzips
+    fine and would "prove" that a vanished candidate's records exist somewhere.
+    The producer writes one JSON object per line, so that is the test: an
+    unparseable payload is not evidence, and claiming otherwise is a false PASS
+    of the very alarm this tool exists to be.
+    """
+    seen = False
+    for line in payload.splitlines():
+        if not line.strip():
+            continue
+        try:
+            if not isinstance(json.loads(line), dict):
+                return False
+        except (ValueError, UnicodeDecodeError):
+            return False
+        seen = True
+    return seen
+
+
 def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
     """The source is gone; answer with what the ARCHIVE proves, never with hope.
 
@@ -318,11 +342,12 @@ def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
     must be proved by reading an archive (#6388 review, P0/P1).
     """
     target = archive_path(root, day)
-    if _read_archive(target) is None:
+    payload = _read_archive(target)
+    if not payload or not _looks_like_events(payload):
         return Sealed(day, "verify-failed", plain_bytes, _size_or_zero(target),
-                      "the source is gone and no readable archive proves the "
-                      f"day was sealed ({target.name}) — the records exist "
-                      "nowhere")
+                      "the source is gone and no archive holding released events "
+                      f"proves the day was sealed ({target.name}) — the records "
+                      "exist nowhere")
     return Sealed(day, "already-sealed", plain_bytes, _size_or_zero(target),
                   "the source was already gone (a concurrent run sealed it "
                   "first)")
@@ -509,19 +534,22 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str,
         try:
             # The aside must hold the archive we decided to supersede — not
             # whatever a peer published between the read and the preserve.
-            staged_bytes = gzip.decompress(aside.read_bytes())
-        except (OSError, EOFError, zlib.error) as e:
-            return "disagree", (f"could not re-read the staged archive {aside}: "
-                                f"{e}")
-        if _sha256(staged_bytes) != _sha256(raced):
-            return "disagree", (f"a peer published a different archive at "
-                                f"{target} while it was being preserved (kept at "
-                                f"{aside}) — left it; this run's bytes are in "
-                                "the source")
-        try:
+            try:
+                staged_bytes = gzip.decompress(aside.read_bytes())
+            except (OSError, EOFError, zlib.error) as e:
+                return "disagree", ("could not re-read the staged archive "
+                                    f"{aside}: {e}")
+            if _sha256(staged_bytes) != _sha256(raced):
+                return "disagree", (f"a peer published a different archive at "
+                                    f"{target} while it was being preserved "
+                                    f"(kept at {aside}) — left it; this run's "
+                                    "bytes are in the source")
             gone = (_remove_held(target, hold) if hold >= 0
                     else _remove_if_same(target, staged))
         finally:
+            # The pin lives exactly as long as the compare: a run that bails out
+            # above must not leak the descriptor it was holding (a long --apply
+            # would then reach EMFILE and start failing its own creates).
             if hold >= 0:
                 with contextlib.suppress(OSError):
                     os.close(hold)
@@ -793,9 +821,11 @@ def restore(root: Path, day: date) -> str:
             out.flush()
             os.fsync(out.fileno())
         _fsync_dir(root)
-    except OSError as e:
+    except BaseException as e:
         if held is not None:
             _remove_held(dst, held)
+        elif fd >= 0:
+            _remove_held(dst, fd)   # fd still pins it: ownership is provable
         return f"restore failed: {e}"
     finally:
         if fd >= 0:
