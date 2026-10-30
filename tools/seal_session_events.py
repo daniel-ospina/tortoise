@@ -1,0 +1,1028 @@
+#!/usr/bin/env python3
+"""#6388 — SEAL the session-events substrate instead of deleting anything.
+
+The measured problem (re-measured on this box, see the PR):
+
+    ~/.tortoise/session-events/   4 daily JSONL files, 651 records, 2.75 MiB,
+                                  +222..263 records/day, no rotation, no drain
+
+That substrate is a **deposit-only** write-ahead log: ``reflect-hook`` appends a
+session record on shutdown, and its consumer (the #3515 store-sync second-JSONL
+leg, ``tools/build_window_transcript.py`` for window work) reads whole day
+files.  It never shrinks.  The remedy the issue names first is
+**compress / seal / rotate rather than discard** — and that is what this tool
+does, because the alternative (a TTL / a reaper) contradicts an owner ruling.
+
+Contradiction test (#3870, owner): *"the local capture spool is type-2 user data
+kept until the user deletes it"* — a TTL, a max-age or a "prune after N days"
+is FORBIDDEN.  This tool therefore **deletes nothing that is not provably
+archived**:
+
+1. a day file is only SEALED (gzip) after a byte-for-byte round-trip check;
+2. the original is removed only when the sealed copy's decompressed sha256
+    equals the original's — the sealed file *is* the evidence, re-encoded;
+3. a differing archive is never clobbered — it is a conflict to report, not a
+   thing to overwrite.  The ONE exception is a strict PREFIX of the source: a
+   stale re-encoding of an earlier snapshot of the same file, which is
+   SUPERSEDED through the same round-trip verification, because accepting it
+   there would unlink the only copy of the missing tail;
+4. today's file is never sealed, even at ``--keep-days 0``: it is being
+   appended to right now, and sealing a live append is how a record is torn;
+5. the source is removed only once it is provably archived, and a source that
+   is ALREADY gone is the goal state, not a failure (see
+   :func:`_unlink_source`) — a concurrent run that finished the same day first
+   must not red the alarm.
+
+Bounds, stated honestly: sealing bounds the **plain working set** (files
+younger than the window) and multiplies the archive's capacity by the gzip
+ratio (JSONL measures ~9-14x here).  It cannot bound TOTAL bytes — bounding a
+write-only log without discarding records is impossible, and #3870 forbids
+discarding.  What it removes is the unbounded *growth of the readable set*.
+
+Usage::
+
+    python tools/seal_session_events.py --check            # exit 1 = drift
+    python tools/seal_session_events.py --apply            # seal eligible days
+    python tools/seal_session_events.py --restore 2026-10-27
+
+``--check`` is the alarm half (a bound nobody measures is not a bound);
+``--apply`` is the action half and is deliberately explicit — it is not wired
+into a session path, because it touches files a live hook is appending to.
+"""
+from __future__ import annotations
+
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below.  This module does
+# `from datetime import UTC` at module level, which is 3.11+; on the ambient
+# `python3` (Apple CLT 3.9.6) the documented `python tools/x.py --check` form
+# would die with an unattributed ImportError before any diagnostic — the exact
+# harm #5128 was filed for.  The gate that enforces this shape is
+# tests/test_entry_point_python_guard.py, not a style rule (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/seal_session_events.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/seal_session_events.py`"
+    )
+
+import argparse
+import contextlib
+import gzip
+import hashlib
+import json
+import os
+import re
+import tempfile
+import time
+import zlib
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from errno import EMLINK, ENOSYS, ENOTSUP, EOPNOTSUPP, EPERM
+from pathlib import Path
+
+#: The substrate this tool owns.  Overridable in every entry point so a test
+#: can never seal the developer machine's real captures.
+DEFAULT_ROOT = Path.home() / ".tortoise" / "session-events"
+#: Days kept PLAIN (readable without gunzip).  The consumer
+#: ``tools/build_window_transcript.py`` takes a plain ``--events <file>.jsonl``,
+#: so recent days stay directly readable and only settled history is sealed.
+DEFAULT_KEEP_DAYS = 7
+#: Sealed files land here, so the plain set and the archive never interleave.
+ARCHIVE_DIRNAME = "archive"
+#: A day file whose mtime is newer than this is treated as possibly LIVE and is
+#: never sealed.  `reflect-hook` names its file from `toISOString()` (UTC) while
+#: this tool reads the clock, so "today" on one clock can be "yesterday" on the
+#: other; the settle grace is the timezone-INDEPENDENT answer to "is a writer
+#: still on this file", and it is the guard that does not depend on which clock
+#: the producer picked.
+SETTLE_GRACE_SECONDS = 3600
+#: ``os.link`` failures that mean "this filesystem has no hard links", not
+#: "something is broken": the publish falls back to an exclusive create.
+_NO_HARD_LINK_ERRNOS = frozenset({ENOTSUP, EOPNOTSUPP, EPERM, EMLINK, ENOSYS})
+
+_DAY_FILE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.jsonl$")
+
+EXIT_OK = 0
+EXIT_DRIFT = 1
+EXIT_ERROR = 2
+
+
+@dataclass(frozen=True)
+class Sealed:
+    """The outcome of one seal attempt (never a silent success)."""
+
+    day: date
+    status: str  # "sealed" | "already-sealed" | "verify-failed" | "conflict"
+    plain_bytes: int
+    sealed_bytes: int
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status in ("sealed", "already-sealed")
+
+
+def _day_of(path: Path) -> date | None:
+    """The day a substrate file name declares, or ``None`` for a foreign file.
+
+    Only ``YYYY-MM-DD.jsonl`` is ours.  A foreign name (``.tmp``, a test
+    fixture, a hand-kept note) is never sealed — the name IS the contract the
+    consumer reads.
+    """
+    m = _DAY_FILE_RE.match(path.name)
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def archive_path(root: Path, day: date) -> Path:
+    return root / ARCHIVE_DIRNAME / f"{day.isoformat()}.jsonl.gz"
+
+
+def eligible(root: Path, *, keep_days: int, today: date,
+             now: float | None = None,
+             settle_seconds: int = SETTLE_GRACE_SECONDS,
+             unreadable: list[Path] | None = None,
+             deferred: list[Path] | None = None,
+             vanished: list[Path] | None = None) -> list[Path]:
+    """Plain day files OLDER than the keep window, oldest first.
+
+    Two exclusions, both load-bearing:
+
+    * **today** is never eligible, whatever ``keep_days`` says — it is being
+      appended to by ``reflect-hook`` while this runs, and a seal of a
+      partially-written file is the one loss this tool exists to prevent.
+    * a file modified within ``settle_seconds`` is skipped whatever its name
+      says — the producer names its day file from UTC while this tool reads the
+      local clock, so the NAME is not proof that no writer is on it (#6388
+      review P1).  A seal of a file that is mid-append loses the appended bytes
+      with the unlinked inode.
+    * the boundary is STRICT (``day < cutoff``): with ``keep_days=7`` a file
+      from exactly seven days ago is still plain, so the window means "seven
+      full days of directly-readable history", not six.  ``keep_days=0``
+      therefore means "seal everything except today", not "seal nothing",
+      and a NEGATIVE window (a cutoff in the future) still cannot reach
+      today's file — the two exclusions are independent on purpose.
+    """
+    # No clamp on ``keep_days``: an absurd value (negative -> a cutoff in the
+    # FUTURE) must be caught by the today guard below, not silently by
+    # arithmetic that would also swallow the guard's job.
+    cutoff = today - timedelta(days=keep_days)
+    clock = time.time() if now is None else now
+    out = []
+    # `Path.glob` swallows EVERY scandir OSError (pathlib's wildcard selector
+    # returns an empty iterator), so an unreadable substrate read as "nothing to
+    # do" — the same defect fixed one surface over in `_unreadable_archives`.
+    # `os.scandir` is explicit; `main` maps an OSError out of here to EXIT_ERROR.
+    for path in sorted(Path(entry.path) for entry in os.scandir(root)
+                       if entry.name.endswith(".jsonl")):
+        day = _day_of(path)
+        if day is None or day >= today or day >= cutoff:
+            continue
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            if path.is_symlink():
+                # A DANGLING LINK is a broken candidate, not a peer-finished
+                # day: it is still on disk and must stay visible to the alarm.
+                if unreadable is not None:
+                    unreadable.append(path)
+                continue
+            # A peer finished this day between the scan and the stat: gone is
+            # not unreadable, and `--check` must not raise over it.
+            if vanished is not None:
+                vanished.append(path)
+            continue
+        except OSError:
+            # "could not look" is not "clean": the caller gets the path so
+            # `--check` can answer EXIT_ERROR instead of ok (the same rule the
+            # non-directory root arm applies), while `--apply` skips it.
+            if unreadable is not None:
+                unreadable.append(path)
+            continue
+        # SETTLED, on a clock the producer cannot confuse: a file modified
+        # within the grace is treated as live whatever its NAME says.
+        if settle_seconds > 0 and clock - st.st_mtime < settle_seconds:
+            # SEEN and skipped — reported so `--apply` never claims "no plain
+            # day file older than N days" over a file that is exactly that.
+            if deferred is not None:
+                deferred.append(path)
+            continue
+        out.append(path)
+    return out
+
+
+def _size_or_zero(path: Path) -> int:
+    """The archive's size, or 0 when it cannot be read — used only for REPORTING
+    a verdict, so an unreadable target must never abort the run (#6388 review
+    cycle 3, P2)."""
+    with contextlib.suppress(OSError):
+        return path.stat().st_size
+    return 0
+
+
+def _changed_since(path: Path, before: os.stat_result | None, size: int) -> bool:
+    """Did the source move while we were working on it?
+
+    FAIL CLOSED: an unverifiable source (``before is None``) counts as changed,
+    so the only data-loss check in this tool never degrades to "unchanged" when
+    it cannot answer.  A size mismatch covers the read->stat window; identity +
+    mtime covers the stat->unlink window.
+    """
+    if before is None:
+        return True
+    return not _unchanged_since(path, before) or size != before.st_size
+
+
+def _source_gone(path: Path) -> bool:
+    """True when the source is ABSENT — a concurrent run finished this day.
+
+    A peer `--apply` (or a second lane on the same box) can remove the plain
+    file at ANY point after we read it, so absence is a first-class state at
+    every refusal site, not just at the unlink. Reporting it as a failure reds
+    `--apply` and prints "their plain copies are untouched" over a substrate
+    where every byte IS archived — the false alarm this file exists not to be.
+    """
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _unlink_source(path: Path) -> bool:
+    """Remove a source that is provably archived.  ``True`` when THIS call
+    removed the entry, ``False`` when it was already gone.
+
+    A source that has already disappeared is the GOAL state, not a failure:
+    POSIX ``unlink`` answers ``ENOENT`` for a link that does not exist, and the
+    two readers that can get here — a second ``--apply`` and a peer lane on the
+    same box — may both have sealed the same day, with the peer's unlink landing
+    between our post-publish change test and this call.  Reporting that as
+    ``verify-failed`` reds ``--apply`` (EXIT_ERROR, "could NOT be sealed; their
+    plain copies are untouched") on a substrate where every record IS sealed,
+    which is the false alarm this file exists to *not* be (#6388).
+
+    Only ``ENOENT`` is swallowed: ``EACCES``/``EISDIR``/``EBUSY`` still raise, so
+    the caller's "archived but the source could not be removed" verdict keeps
+    meaning what it says.  The same absent-vs-unreadable split
+    ``tortoise/capture_spool.py`` makes for its own spool.  (A vanished PARENT
+    directory also answers ENOENT; that is why the callers re-verify the archive
+    before they call an absence a success.)
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _read_archive(path: Path) -> bytes | None:
+    """Decompress an archive, or None when it is absent/empty/unreadable.
+
+    An EMPTY file is not a sealed day: ``gzip.decompress(b"")`` returns ``b""``
+    without raising, so a zero-length archive (killed mid-create, torn copy,
+    interrupted restore) would otherwise "prove" that records exist somewhere.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        return gzip.decompress(raw)
+    except (OSError, EOFError, zlib.error):
+        return None
+
+
+def _looks_like_events(payload: bytes) -> bool:
+    """True when every non-empty line of a sealed payload is a JSON object.
+
+    ``_read_archive`` rejects a 0-byte file, but a 20-byte ``gzip.compress(b"")``
+    — or a valid gzip of another day's records, or of unrelated bytes — gunzips
+    fine and would "prove" that a vanished candidate's records exist somewhere.
+    The producer writes one JSON object per line, so that is the test: an
+    unparseable payload is not evidence, and claiming otherwise is a false PASS
+    of the very alarm this tool exists to be.
+    """
+    seen = False
+    for line in payload.splitlines():
+        if not line.strip():
+            continue
+        try:
+            if not isinstance(json.loads(line), dict):
+                return False
+        except (ValueError, UnicodeDecodeError):
+            return False
+        seen = True
+    return seen
+
+
+def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
+    """The source is gone; answer with what the ARCHIVE proves, never with hope.
+
+    A peer run (a second ``--apply``, or another lane on the same box) can seal
+    and remove a day at any point after we selected it, and absence then means
+    SUCCESS — but only if an archive holding the record still exists and reads.
+    ``_size_or_zero`` cannot tell "absent" from "unreadable" from "0 bytes", so
+    the verdict is derived from a real decompress HERE. The publish-derived
+    absence verdicts are not centralised (they know the archive is the inode this
+    run just verified); what is centralised is the rule that an absence claim
+    must be proved by reading an archive (#6388 review, P0/P1).
+    """
+    target = archive_path(root, day)
+    payload = _read_archive(target)
+    if not payload or not _looks_like_events(payload):
+        return Sealed(day, "verify-failed", plain_bytes, _size_or_zero(target),
+                      "the source is gone and no archive holding released events "
+                      f"proves the day was sealed ({target.name}) — the records "
+                      "exist nowhere")
+    return Sealed(day, "already-sealed", plain_bytes, _size_or_zero(target),
+                  "the source was already gone (a concurrent run sealed it "
+                  "first)")
+
+
+def _remove_if_same(path: Path, mine: os.stat_result) -> bool:
+    """Unlink ``path`` only if it is still the inode ``mine`` describes.
+
+    Returns True when the name was removed, False when it now belongs to
+    somebody else. Callers HOLD A DESCRIPTOR on ``mine`` while this runs: an
+    open fd pins the inode from being recycled, so a matching ``st_dev``/
+    ``st_ino`` really is the file this run created. Without the pin, a peer's
+    replacement file is statistically likely to reuse the freed inode (measured
+    40/40 on this filesystem), which is exactly the loss this exists to prevent.
+    """
+    with contextlib.suppress(OSError):
+        now = os.stat(path)
+        if now.st_dev == mine.st_dev and now.st_ino == mine.st_ino:
+            os.unlink(path)
+            return True
+    return False
+
+
+def _remove_held(path: Path, held: int) -> bool:
+    """Remove ``path`` only while ``held`` still proves it is our inode."""
+    with contextlib.suppress(OSError):
+        mine = os.fstat(held)
+        if mine.st_nlink == 0:      # our name was already replaced: never unlink
+            return False
+        return _remove_if_same(path, mine)
+    return False
+
+
+def _create_exclusive(target: Path, plain: bytes) -> None:
+    """Write the archive with ``O_EXCL``; a torn/failed write is removed.
+
+    ``os.fdopen(...).write`` happens IN the canonical file here, so a failure
+    (ENOSPC, EIO) would leave a truncated archive at the one path every reader
+    trusts — a permanent red this tool must not manufacture. The partial file is
+    removed before the error propagates, and the plain source was never touched.
+    """
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    held: int | None = None
+    try:
+        held = os.dup(fd)        # pins the inode: cleanup can prove it is ours
+        with os.fdopen(fd, "wb") as out:
+            fd = -1                      # fdopen owns the descriptor now
+            out.write(gzip.compress(plain, mtime=0))
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException:
+        if held is not None:
+            _remove_held(target, held)
+        elif fd >= 0:
+            _remove_held(target, fd)   # fd still pins it: ownership provable
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        raise
+    finally:
+        if held is not None:
+            with contextlib.suppress(OSError):
+                os.close(held)
+
+
+def _publish_bytes(tmp: Path, target: Path, plain: bytes) -> None:
+    """Put our verified bytes at ``target`` without clobbering.
+
+    ``FileExistsError`` means somebody got there first (the caller decides what
+    that means); a filesystem with no hard links (exFAT/SMB/FAT/overlay) falls
+    back to an exclusive create, so the no-clobber contract holds everywhere.
+    """
+    try:
+        os.link(tmp, target)
+        return
+    except FileExistsError:
+        raise
+    except OSError as e:
+        if e.errno not in _NO_HARD_LINK_ERRNOS:
+            raise
+    _create_exclusive(target, plain)
+
+
+def _preserve_aside(src: Path, aside: Path) -> tuple[os.stat_result, int]:
+    """Keep the peer's archive under a NEW name, never over one.
+
+    Returns ``(identity, held_fd)``. ``held_fd`` is -1 on the hard-link branch,
+    where the aside NAME pins the inode; on the copy branch it is the descriptor
+    the caller must hold until it has proved which inode ``src`` still refers to
+    — an unpinned ``stat_result`` is a number that a peer's replacement file can
+    reuse (measured 40/40), which is how a "verified" unlink deletes a peer's
+    archive. The caller closes it.
+    """
+    try:
+        os.link(src, aside)
+    except FileExistsError:
+        raise
+    except OSError as e:
+        if e.errno not in _NO_HARD_LINK_ERRNOS:
+            raise
+    else:
+        return os.stat(aside), -1     # the NAME pins that inode
+    fd = os.open(src, os.O_RDONLY)
+    out_fd: int | None = None
+    held: int | None = None
+    try:
+        staged = os.fstat(fd)    # the inode whose bytes we are about to copy
+        data = b""
+        while chunk := os.read(fd, 1 << 20):
+            data += chunk
+        out_fd = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        held = os.dup(out_fd)    # pins OUR aside inode: only it may be removed
+        view = memoryview(data)
+        while view:
+            view = view[os.write(out_fd, view):]
+        os.fsync(out_fd)
+        _fsync_dir(aside.parent)
+        keep, fd = fd, -1        # the CALLER now holds the pin
+        return staged, keep
+    except BaseException:
+        if held is not None:
+            _remove_held(aside, held)
+        raise
+    finally:
+        for fd_to_close in (out_fd, held, fd):
+            if fd_to_close is not None and fd_to_close >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd_to_close)
+
+
+def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str,
+                        source_absent: bool) -> tuple[str, str]:
+    """Publish an archive WITHOUT ever destroying bytes this run did not verify.
+
+    Returns ``(verdict, detail)``:
+
+    * ``published`` — the entry is now ours (linked atomically, or written
+      O_EXCL on a filesystem with no hard links);
+    * ``identical`` — a peer published exactly our bytes first;
+    * ``theirs-newer`` — a peer's archive is a strict SUPERSET of ours (it
+      appended while we compressed): more evidence than we hold, kept;
+    * ``disagree`` — divergent archives, or a third run won the gap: every copy
+      stays on disk and the detail names where this run's bytes went;
+    * ``unreadable`` — we could not publish, or an archive does not read.
+
+    Three rules, each earned by a review round. (a) ``os.replace`` is never a
+    blind writer: the change test is a stat, not a transaction. (b) A supersede
+    never REPLACES the peer's archive: it hard-links it aside (atomic, keeps
+    both) under a name that is never reused, then publishes ours. (c) A run that
+    loses the gap keeps its own bytes on disk too — a verdict that says "both
+    copies stay" must be true.
+    """
+    try:
+        _publish_bytes(tmp, target, plain)
+        return "published", ""
+    except FileExistsError:
+        pass
+    except OSError as e:
+        return "unreadable", f"could not publish to {target}: {e}"
+    try:
+        raced = gzip.decompress(target.read_bytes())
+    except (OSError, EOFError, zlib.error) as e:
+        return "unreadable", f"the archive at {target} is unreadable: {e}"
+    if _sha256(raced) == digest:
+        return "identical", ""
+    if plain.startswith(raced):
+        # Ours is a strict superset: theirs is a stale prefix. PRESERVE it.
+        stale_sha = _sha256(raced)[:8]
+        aside = target.with_name(f"{target.name}.superseded-{stale_sha}")
+        attempt = 0
+        staged: os.stat_result | None = None
+        hold = -1
+        while True:
+            try:
+                staged, hold = _preserve_aside(target, aside)
+                break
+            except FileExistsError:
+                attempt += 1
+                aside = target.with_name(
+                    f"{target.name}.superseded-{stale_sha}-{attempt}")
+            except OSError as e:
+                return "disagree", (f"could not preserve the stale archive ({e}) "
+                                    "— left it and the source in place")
+        try:
+            # The aside must hold the archive we decided to supersede — not
+            # whatever a peer published between the read and the preserve.
+            try:
+                staged_bytes = gzip.decompress(aside.read_bytes())
+            except (OSError, EOFError, zlib.error) as e:
+                return "disagree", ("could not re-read the staged archive "
+                                    f"{aside}: {e}")
+            if _sha256(staged_bytes) != _sha256(raced):
+                return "disagree", (f"a peer published a different archive at "
+                                    f"{target} while it was being preserved "
+                                    f"(kept at {aside}) — left it; this run's "
+                                    "bytes are in the source")
+            gone = (_remove_held(target, hold) if hold >= 0
+                    else _remove_if_same(target, staged))
+        finally:
+            # The pin lives exactly as long as the compare: a run that bails out
+            # above must not leak the descriptor it was holding (a long --apply
+            # would then reach EMFILE and start failing its own creates).
+            if hold >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(hold)
+        if not gone:
+            # A peer published between the aside link and this unlink. Its
+            # archive is NEWER than the bytes we staged, so publishing over it
+            # would destroy records this run never read.
+            return "disagree", (f"a peer published {target} after the stale "
+                                f"archive was kept at {aside} — left it; this "
+                                "run's bytes are in the source")
+        try:
+            _publish_bytes(tmp, target, plain)
+        except FileExistsError:
+            lost = target.with_name(f"{target.name}.unpublished-{digest[:8]}")
+            try:
+                _publish_bytes(tmp, lost, plain)   # link, else exclusive create
+                kept = f"this run's bytes are kept at {lost}"
+            except OSError as e:
+                kept = (f"this run's bytes could NOT be kept ({e}) — they exist "
+                        "nowhere" if source_absent else
+                        f"this run's bytes could NOT be kept ({e}); they exist "
+                        "only in the plain source")
+            return "disagree", (f"a third run published {target} while this run "
+                                f"superseded {aside}; {kept}")
+        except OSError as e:
+            try:   # put theirs back, through the same no-clobber helper
+                _publish_bytes(aside, target, gzip.decompress(aside.read_bytes()))
+                restored = f"{target} was restored from {aside}"
+            except OSError as e2:
+                restored = (f"{target} could NOT be restored ({e2}); the archive "
+                            f"is kept at {aside}")
+            return "unreadable", (f"publishing after the supersede failed: {e} — "
+                                  f"{restored}")
+        return "published", ("superseded a stale prefix; the previous archive is "
+                             f"kept at {aside}")
+    if raced.startswith(plain):
+        return "theirs-newer", ("a peer's archive holds bytes we did not read — "
+                                "kept theirs")
+    return "disagree", ("a peer's archive disagrees and is not a superset — "
+                        "left both copies in place")
+
+
+def seal_one(root: Path, path: Path) -> Sealed:
+    """Seal ONE day file.  Returns a verdict; never raises on a bad file."""
+    day = _day_of(path)
+    if day is None:  # pragma: no cover - caller filters, kept total
+        raise ValueError(f"not a session-events day file: {path}")
+    try:
+        plain = path.read_bytes()
+        stat_before = path.stat()
+    except FileNotFoundError:
+        # A peer run sealed and removed this day between our selection and this
+        # read. Success ONLY if its archive proves the day was sealed.
+        return _already_gone(root, day, 0)
+    except OSError as e:
+        return Sealed(day, "verify-failed", 0, 0, f"unreadable: {e}")
+    digest = _sha256(plain)
+    target = archive_path(root, day)
+
+    # An archive already on disk splits into exactly three states, and only ONE
+    # of them may short-circuit:
+    #  * IDENTICAL content -> a run was interrupted between the publish and the
+    #    unlink. Finish the job (through the same change test as any other
+    #    unlink — a writer may have appended since that snapshot).
+    #  * a strict PREFIX of the source -> a stale re-encoding of an earlier
+    #    snapshot of THIS file (a race published before a late append landed).
+    #    It must be SUPERSEDED, never accepted: accepting it here would unlink
+    #    the only copy of the missing tail and report success (#6388 review
+    #    cycle 3, P0).  Falls through to the publish path below.
+    #  * anything else -> genuine disagreement. NEVER clobber; keep both.
+    # No `target.exists()` gate: it is a TOCTOU, and it is not total — EACCES
+    # propagates out of `seal_one` and aborts the whole `--apply` loop. Branch
+    # off the read instead (absence is a first-class case).
+    try:
+        prior: bytes | None = gzip.decompress(target.read_bytes())
+    except FileNotFoundError:
+        prior = None
+    except (OSError, EOFError, zlib.error) as e:
+        return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                      f"existing archive is unreadable: {e}")
+    if prior is not None:
+        if _sha256(prior) == digest:
+            if _source_gone(path):
+                return _already_gone(root, day, len(plain))
+            if _changed_since(path, stat_before, len(plain)):
+                return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                              "file changed while sealing — source kept")
+            try:
+                _unlink_source(path)
+            except OSError as e:
+                return Sealed(day, "verify-failed", len(plain),
+                              _size_or_zero(target),
+                              f"archived but the source could not be removed: {e}")
+            try:
+                _fsync_dir(root)
+            except OSError as e:
+                # The archive holds the full content; the removal may not be
+                # durable. Disclose it rather than escaping after the unlink.
+                return Sealed(day, "already-sealed", len(plain),
+                              _size_or_zero(target),
+                              f"sealed; a post-removal fsync failed: {e}")
+            return Sealed(day, "already-sealed", len(plain), _size_or_zero(target))
+        if not (plain.startswith(prior) and len(prior) < len(plain)):
+            return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                          f"{target} already exists with different content — "
+                          "left both copies in place")
+        # else: stale prefix -> supersede it below (verified, as any publish).
+
+    tmp: Path | None = None
+    published = False
+    removed = False
+    already_gone = False
+    source_absent = False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent),
+                                        prefix=target.name + ".", suffix=".tmp")
+        tmp = Path(tmp_name)
+        with os.fdopen(fd, "wb") as out:
+            out.write(gzip.compress(plain, mtime=0))
+            out.flush()
+            os.fsync(out.fileno())
+        # THE VERIFICATION IS THE POLICY: the source is removed only when the
+        # file that replaced it decompresses to exactly the original bytes.
+        # A `gzip` that wrote a truncated archive must leave the plain file
+        # alone — a bound that costs a record is worse than an unbounded disk.
+        if _sha256(gzip.decompress(tmp.read_bytes())) != digest:
+            return Sealed(day, "verify-failed", len(plain), _size_or_zero(tmp),
+                          "sealed copy does not round-trip — source kept")
+        # THE CHANGE TEST RUNS BEFORE PUBLISH: a file that grew while we read it
+        # must not publish an archive at all, or the archive becomes a truncated
+        # day that looks complete and every later run calls it a conflict —
+        # an alarm that can never be cleared (#6388 review cycle 2).
+        if _source_gone(path):
+            # A peer removed the source while we were compressing. Our `tmp`
+            # holds exactly the bytes WE read, which says nothing about what a
+            # peer's archive holds — never publish it blind.
+            source_absent = True
+            verdict, detail = _publish_no_clobber(tmp, target, plain, digest,
+                                                  True)
+            if verdict in ("unreadable", "disagree"):
+                return Sealed(day, "conflict", len(plain),
+                              _size_or_zero(target), detail)
+            if verdict == "theirs-newer":
+                return Sealed(day, "already-sealed", len(plain),
+                              _size_or_zero(target), detail)
+            _fsync_dir(target.parent)
+            return Sealed(day, "sealed", len(plain), _size_or_zero(target),
+                          "the source was already gone; this run's verified "
+                          "bytes are archived")
+        if _changed_since(path, stat_before, len(plain)):
+            return Sealed(day, "conflict", len(plain), 0,
+                          "file changed while sealing — source kept")
+        verdict, detail = _publish_no_clobber(tmp, target, plain, digest,
+                                              False)
+        if verdict in ("unreadable", "disagree"):
+            return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                          detail)
+        if verdict == "theirs-newer":
+            return Sealed(day, "already-sealed", len(plain),
+                          _size_or_zero(target), detail)
+        published = True
+        _fsync_dir(target.parent)
+        # The LAST belt: the file changed between the publish above and this
+        # unlink. The archive is a verified prefix, the source stays — and the
+        # stale-prefix arm above heals this state on the next run.
+        if _source_gone(path):
+            return Sealed(day, "sealed", len(plain), _size_or_zero(target),
+                          "the source was already gone — this run published "
+                          "verified bytes of its own")
+        if _changed_since(path, stat_before, len(plain)):
+            return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                          "file changed while sealing — source kept")
+        already_gone = not _unlink_source(path)
+        removed = True
+        # The unlink happened in `root`, so `root` is the entry that needs to be
+        # durable — fsyncing the archive dir here would leave the removal
+        # resurrectable after a power loss (#6388 review cycle 3, P2).
+        _fsync_dir(root)
+    except (OSError, EOFError, zlib.error) as e:
+        if removed:  # pragma: no cover - only a post-unlink fsync can land here
+            return Sealed(day, "sealed", len(plain), _size_or_zero(target),
+                          f"sealed; a post-removal fsync failed: {e}")
+        if published:
+            return Sealed(day, "verify-failed", len(plain), _size_or_zero(target),
+                          f"archive published but the source was NOT removed "
+                          f"({e}) — both copies are on disk")
+        if source_absent:
+            return Sealed(day, "verify-failed", len(plain),
+                          _size_or_zero(target),
+                          f"the source was already gone and publishing failed: {e}")
+        return Sealed(day, "verify-failed", len(plain), _size_or_zero(target),
+                      f"seal failed: {e} — source kept")
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+    return Sealed(day, "sealed", len(plain), _size_or_zero(target),
+                  "the source was already gone (a concurrent run sealed it "
+                  "first)" if already_gone else "")
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a rename in ``path`` durable before the only other copy is removed.
+
+    ``tortoise/capture_spool.py`` carries the same rule for the same reason: a
+    rename whose directory entry was never fsynced can vanish in a power loss,
+    and here the source is unlinked immediately after.
+    """
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _unchanged_since(path: Path, before: os.stat_result) -> bool:
+    """True when ``path`` still has the inode/size/mtime observed before the read."""
+    try:
+        now = path.stat()
+    except OSError:
+        return False
+    return (now.st_ino == before.st_ino and now.st_size == before.st_size
+            and now.st_mtime_ns == before.st_mtime_ns)
+
+
+def restore(root: Path, day: date) -> str:
+    """Write the plain day file back from its archive.  ``""`` on success.
+
+    The archive is KEPT: restoring is a read convenience for
+    ``tools/build_window_transcript.py``, not a request to un-seal.
+    """
+    target = archive_path(root, day)
+    if not target.is_file():
+        return f"no archive for {day.isoformat()} at {target}"
+    dst = root / f"{day.isoformat()}.jsonl"
+    if dst.exists():
+        # NEVER os.replace over a live day file: a writer holding the old fd
+        # would append into the orphaned inode and the record would vanish with
+        # no error anywhere.  An existing plain file is either already what we
+        # would write (nothing to do) or a disagreement we refuse.
+        try:
+            if dst.read_bytes() == gzip.decompress(target.read_bytes()):
+                return ""
+        except (OSError, EOFError, zlib.error) as e:
+            return f"{dst} already exists and the archive is unreadable: {e}"
+        return (f"{dst} already exists with different content — refusing to "
+                "overwrite it")
+    # EXCLUSIVE CREATE, never os.replace: `dst.exists()` above is a TOCTOU, and
+    # an os.replace reaching a file created after that check swaps the inode
+    # under a writer's fd, losing its appended bytes silently (#6388 review
+    # cycle 3, P1). O_EXCL makes "someone else created it" an error we report.
+    try:
+        plain = gzip.decompress(target.read_bytes())
+    except (OSError, EOFError, zlib.error) as e:
+        return f"{target} is unreadable: {e}"
+    try:
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return (f"{dst} appeared while restoring — refusing to overwrite it")
+    except OSError as e:
+        return f"restore failed: {e}"
+    held: int | None = None
+    try:
+        held = os.dup(fd)      # pins the inode we created: only it may be removed
+        with os.fdopen(fd, "wb") as out:
+            fd = -1
+            out.write(plain)
+            out.flush()
+            os.fsync(out.fileno())
+        _fsync_dir(root)
+    except BaseException as e:
+        if held is not None:
+            _remove_held(dst, held)
+        elif fd >= 0:
+            _remove_held(dst, fd)   # fd still pins it: ownership is provable
+        return f"restore failed: {e}"
+    finally:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if held is not None:
+            with contextlib.suppress(OSError):
+                os.close(held)
+    return ""
+
+
+def _unreadable_archives(root: Path) -> list[Path]:
+    """Sealed files that cannot be decompressed — an archive that lost its
+    bytes is the one state where the evidence no longer exists."""
+    out = []
+    archive_dir = root / ARCHIVE_DIRNAME
+    # `Path.glob` cannot report "could not look": pathlib's wildcard selector
+    # swallows the scandir OSError, so a mode-000 archive dir answered "clean"
+    # (#6388 review cycle 3, P1). `os.scandir` is explicit, and only the genuine
+    # "there is no archive yet" errnos are benign.
+    try:
+        entries = list(os.scandir(archive_dir))
+    except (FileNotFoundError, NotADirectoryError):
+        return out
+    candidates = sorted(Path(e.path) for e in entries
+                        if e.name.endswith(".jsonl.gz"))
+    for path in candidates:
+        # `_read_archive` treats a ZERO-LENGTH file as unreadable: gzip returns
+        # b"" for it without raising, so a torn create would otherwise pass as
+        # clean (an empty gzip of empty content is never 0 bytes).
+        if _read_archive(path) is None:
+            out.append(path)
+    return out
+
+
+def _report(rows: list[Sealed], *, stream) -> None:
+    for row in rows:
+        ratio = (f"{row.plain_bytes / row.sealed_bytes:.1f}x"
+                 if row.sealed_bytes else "-")
+        print(f"{row.day.isoformat()}  {row.status:<14} "
+              f"{row.plain_bytes:>9} B -> {row.sealed_bytes:>7} B  ({ratio})"
+              + (f"  {row.detail}" if row.detail else ""), file=stream)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Seal settled session-events day files (compress, never "
+                    "discard — #6388 / #3870).")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT,
+                        help=f"substrate directory (default: {DEFAULT_ROOT})")
+    parser.add_argument("--keep-days", type=int, default=DEFAULT_KEEP_DAYS,
+                        help="days kept plain (default: %(default)s)")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true",
+                      help="exit 1 when a day file is past the keep window")
+    mode.add_argument("--apply", action="store_true", help="seal eligible days")
+    mode.add_argument("--restore", metavar="YYYY-MM-DD",
+                      help="write a sealed day back out as plain JSONL")
+    parser.add_argument("--today", metavar="YYYY-MM-DD",
+                        help="override the clock (tests / backfills)")
+    args = parser.parse_args(argv)
+
+    root: Path = args.root
+    if not root.is_dir():
+        # "could not look" is NOT "clean": an alarm that answers ok on a
+        # missing or mistyped substrate is the inert gate this repo forbids.
+        print(f"cannot inspect {root} — it is not a directory", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        # UTC, matching the producer: `reflect-hook` names its day file from
+        # `toISOString()`, so a local-clock "today" can name the file a writer
+        # is on right now as "yesterday" (#6388 review P1).
+        today = (date.fromisoformat(args.today) if args.today
+                 else datetime.now(UTC).date())
+    except ValueError as e:
+        print(f"--today: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.restore:
+        try:
+            day = date.fromisoformat(args.restore)
+        except ValueError as e:
+            print(f"--restore: {e}", file=sys.stderr)
+            return EXIT_ERROR
+        problem = restore(root, day)
+        if problem:
+            print(problem, file=sys.stderr)
+            return EXIT_ERROR
+        print(f"restored {root / f'{day.isoformat()}.jsonl'} from archive")
+        return EXIT_OK
+
+    unreadable: list[Path] = []
+    deferred: list[Path] = []
+    vanished: list[Path] = []
+    try:
+        pending = eligible(root, keep_days=args.keep_days, today=today,
+                           unreadable=unreadable, deferred=deferred,
+                           vanished=vanished)
+    except OSError as e:
+        print(f"cannot list {root}: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    if args.check and unreadable:
+        print(f"UNREADABLE: {len(unreadable)} day file(s) under {root} could "
+              "not be stat'd — cannot tell whether they are past the window:",
+              file=sys.stderr)
+        for path in unreadable:
+            print(f"  {path.name}", file=sys.stderr)
+        return EXIT_ERROR
+    unproven = [p for p in vanished
+                if (d := _day_of(p)) is None or not _already_gone(root, d, 0).ok]
+    if args.check:
+        broken = []
+        try:
+            broken = _unreadable_archives(root)
+        except OSError as e:
+            print(f"cannot list {root / ARCHIVE_DIRNAME}: {e}", file=sys.stderr)
+            return EXIT_ERROR
+        if broken:
+            print(f"UNREADABLE ARCHIVE: {len(broken)} sealed day file(s) under "
+                  f"{root / ARCHIVE_DIRNAME} cannot be decompressed:",
+                  file=sys.stderr)
+            for path in broken:
+                print(f"  {path.name}", file=sys.stderr)
+            return EXIT_DRIFT
+        if unproven:
+            print(f"UNPROVEN ABSENCE: {len(unproven)} day file(s) disappeared "
+                  "and no readable archive proves the day was sealed:",
+                  file=sys.stderr)
+            for path in unproven:
+                print(f"  {path.name}", file=sys.stderr)
+            return EXIT_DRIFT
+        if not pending:
+            if deferred:
+                print(f"nothing to seal — {len(deferred)} day file(s) are "
+                      f"inside the {SETTLE_GRACE_SECONDS} s settle grace "
+                      f"(still being written, or written recently)",
+                      file=sys.stderr)
+                for path in deferred:
+                    print(f"  {path.name}", file=sys.stderr)
+            if vanished:  # each one PROVED archived above
+                print(f"ok — {len(vanished)} day file(s) disappeared mid-scan "
+                      "(a peer sealed them)", file=sys.stderr)
+            if not deferred and not vanished:
+                print(f"ok — no plain day file older than {args.keep_days} days "
+                      f"under {root}")
+            return EXIT_OK
+        print(f"UNSEALED: {len(pending)} day file(s) older than "
+              f"{args.keep_days} days under {root}:", file=sys.stderr)
+        for path in pending:
+            with contextlib.suppress(OSError):
+                print(f"  {path.name}  {path.stat().st_size} B", file=sys.stderr)
+        print("run `python tools/seal_session_events.py --apply`",
+              file=sys.stderr)
+        return EXIT_DRIFT
+
+    if unproven:
+        print(f"UNPROVEN ABSENCE: {len(unproven)} day file(s) disappeared and "
+              "no readable archive proves the day was sealed:", file=sys.stderr)
+        for path in unproven:
+            print(f"  {path.name}", file=sys.stderr)
+        return EXIT_DRIFT
+    rows = [seal_one(root, path) for path in pending]
+    _report(rows, stream=sys.stdout)
+    if not rows:
+        # Do not assert "no old day file exists" when `eligible` skipped entries
+        # it could not stat: that sentence would be false over a candidate still
+        # sitting on disk (#6388 review cycle 5).
+        if deferred:
+            print(f"nothing sealable — {len(deferred)} day file(s) are inside "
+                  f"the {SETTLE_GRACE_SECONDS} s settle grace", file=sys.stderr)
+        if vanished:
+            print(f"nothing sealable — {len(vanished)} day file(s) disappeared "
+                  "mid-scan (a peer sealed them)", file=sys.stderr)
+        if not (unreadable or deferred or vanished):
+            print(f"nothing to seal — no plain day file older than "
+                  f"{args.keep_days} days under {root}")
+    bad = [r for r in rows if not r.ok]
+    if bad:
+        print(f"{len(bad)} day file(s) could NOT be sealed; their plain copies "
+              "are untouched", file=sys.stderr)
+        return EXIT_ERROR
+    if unreadable:
+        # "Could not look" is not "clean" — the rule `--check` already applies
+        # (`:930-938`).  Printing the warning and falling through to EXIT_OK made
+        # `--apply` answer SUCCESS over a candidate still sitting on disk, which
+        # is the false success that matters the moment the action half is wired
+        # into a cron or session path (#6388 review, 10daca609 P3).  The failure
+        # is additive: the readable candidates above were already sealed, so the
+        # error reports the unread one, it does not abort the work.
+        print(f"UNREADABLE: {len(unreadable)} day file(s) under {root} could "
+              "not be stat'd — cannot tell whether they are past the window:",
+              file=sys.stderr)
+        for path in unreadable:
+            print(f"  {path.name}", file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

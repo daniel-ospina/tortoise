@@ -3627,6 +3627,13 @@ surfaces:
   # tortoise/__main__.py); this `core` entry is what runs the guard when the
   # spool module itself — an unmatched `tortoise/` path — changes.
   - test_capture_spool.py
+  # #6388: the session-events SEAL policy (`tools/seal_session_events.py` —
+  # compress, never discard, per the #3870 ruling). `tools/` is a flat
+  # NON_PYTHON_PREFIXES entry, so a change to that tool selects NO surface on
+  # its own; without this registration its guard would never run on the diff
+  # that edits it. Registered on `core` (the fallback surface), not a named
+  # one, because nothing under `tools/` maps to a named surface.
+  - test_session_events_seal.py
   # #3516 §B: the capture-lane marker. `tortoise/capture_spool.py` (the spool
   # carry-forward), `tortoise/pi-hooks/` (the producer stamp) and
   # `tortoise/projection/entities.py` (the journal fold) match no named surface
