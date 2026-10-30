@@ -205,6 +205,7 @@ def test_rewrite_without_an_embedder_preserves_a_stored_vector(sdk, embedder):
     that runs while the embedder is down. The CASE guard must preserve it.
     """
     before = _write(sdk, "s-4194-recap", CONV)
+    assert len(before["turn_texts"]) == len(CONV), before
     v_before = _vectors(sdk, "s-4194-recap")
     assert len(v_before) == len(CONV) and all(v is not None for v in v_before.values())
 
@@ -223,46 +224,22 @@ def test_rewrite_with_CHANGED_content_and_no_embedder_clears_the_vector(sdk, emb
     vector STALE, so it must be cleared rather than preserved. Pinning only the
     preserve half would pass on a guard that never clears.
     """
-    _write(sdk, "s-4194-changed", CONV)
+    res = _write(sdk, "s-4194-changed", CONV)
+    assert len(res["turn_texts"]) == len(CONV), res
     assert all(v is not None for v in _vectors(sdk, "s-4194-changed").values())
 
     changed = [dict(t) for t in CONV]
     changed[0] = {**changed[0], "content": "A completely different first turn."}
     _write(sdk, "s-4194-changed", changed, embed=False)
+    # The node itself DID change (base asserted the stored text; the vector
+    # being cleared is only half the contract).
+    rows = {r[0]: (r[1], r[2]) for r in _turn_rows(sdk, "s-4194-changed")}
+    assert "completely different" in rows["s-4194-changed_t0"][0], rows
     vec = _vectors(sdk, "s-4194-changed")
     kept = [tid for tid, v in vec.items() if v is not None]
     assert kept == ["s-4194-changed_t1"], (
         "the CHANGED turn (t0) must carry NO vector while the untouched t1 keeps "
         f"its own; vectors surviving: {kept}")
-
-
-def test_no_embedder_still_stores_the_turn(sdk, embedder):
-    """A write with no embedder stores the turn and simply writes no vector —
-    it must not drop the node (the leg is impaired, the content is not lost)."""
-    _write(sdk, "s-4194-noemb", CONV, embed=False)
-    rows = _turn_rows(sdk, "s-4194-noemb")
-    assert len(rows) == len(CONV), rows
-    assert all(r[1] for r in rows), "the turn text must still be stored"
-    assert all(r[2] is None for r in rows), "no embedder must write no vector"
-
-
-def test_wrong_width_embedder_output_degrades_to_no_vector(sdk, embedder, monkeypatch):
-    """A model whose output width is not the index's must not be stored: a
-    wrong-width vector is unqueryable, and storing it would look healthy."""
-    class _WrongWidth(_FakeEmbedder):
-        DIM = _FakeEmbedder.DIM + 7
-
-    monkeypatch.setattr(
-        EmbeddingModel, "get",
-        classmethod(lambda cls, load_timeout=None: _WrongWidth()))
-    EmbeddingModel._reset()
-    _write(sdk, "s-4194-width", CONV)
-    vec = _vectors(sdk, "s-4194-width")
-    assert vec, "the turns must still be stored"
-    assert all(v is None for v in vec.values()), (
-        f"a wrong-width vector was stored: {[v for v in vec.values() if v is not None]}")
-
-
 def test_required_embedding_dim_follows_the_index_not_the_mode(sdk, monkeypatch):
     """The declared width follows the INDEX, not the deployment flag (#4280).
 
@@ -410,7 +387,8 @@ def test_captured_turn_embedding_matches_the_query_encoder(sdk, embedder,
     (a unit-norm rewrite on one side only) fails the value comparison.
     """
     _keyless(monkeypatch)
-    _write(sdk, "sess-4194", CONV)
+    res = _write(sdk, "sess-4194", CONV)
+    assert len(res["turn_texts"]) == len(CONV), res
 
     rows = _turn_rows(sdk, "sess-4194")
     assert [r[0] for r in rows] == [f"sess-4194_t{i}" for i in range(len(CONV))]
@@ -483,3 +461,119 @@ def test_long_turn_and_coerced_content_still_store_the_encoded_text(
     assert stored1 == "[unknown] 123"
     assert emb1 is not None
     assert np.allclose(emb1, embedder.encode([stored1])[0], atol=1e-6)
+
+
+def test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired(
+        sdk, monkeypatch):
+    """Degradation stays VISIBLE: no embedder must never read as ``available``.
+
+    The turn is still stored (the capture is unconditional, #3892) with NO
+    vector — never a junk one. The read path then declares its vector leg
+    not-run under the shared vocabulary (``no_embedder`` /
+    ``vector_leg_unavailable``) and reports ``hybrid: False``.
+    """
+    _keyless(monkeypatch)
+    monkeypatch.setattr(
+        EmbeddingModel, "get",
+        classmethod(lambda cls, load_timeout=None: None))
+    EmbeddingModel._reset()
+
+    res = _write(sdk, "sess-4194-noemb", CONV, embed=False)
+    assert len(res["turn_texts"]) == len(CONV), res
+
+    rows = _turn_rows(sdk, "sess-4194-noemb")
+    assert [r[0] for r in rows] == [
+        f"sess-4194-noemb_t{i}" for i in range(len(CONV))]
+    for tid, content, stored in rows:
+        assert content, (tid, "the turn must still be stored")
+        assert stored is None, (
+            f"{tid}: no embedder yet a vector was written — a fabricated "
+            "vector is worse than an honest NULL")
+
+    legs = _legs(sdk, "auth dead-end", limit=5)
+    marker = legs["declared_degraded_read"]
+    assert marker is not None, (
+        "a vector leg that never ran was reported as available")
+    assert marker["vector_leg_unavailable"] is True, marker
+    assert marker["missing_legs"] == ["vector"], marker
+    assert marker["reason"] == "no_embedder", marker
+    assert marker["degraded_read"] is True, marker
+    assert marker["hybrid"] is False, marker
+    assert legs["hybrid"] is False, legs
+
+def test_wrong_width_model_output_degrades_to_no_vector(sdk, monkeypatch, embedder):
+    """A width the STORE cannot hold degrades to no vector (#4194, #4280).
+
+    The width constraint belongs to the Point HNSW index — which exists only on
+    the non-embedded lane — so the STORE declares it
+    (``FalkorProjection.required_embedding_dim``) and the write path applies it
+    at the store-scoped entry point (``embeddings.encode_for_store`` /
+    ``encode_batch_for_store``). Asserted there, and then end-to-end: a
+    wrong-width model captured into a store that declares :data:`EMBEDDING_DIM`
+    stores the turn with NO vector instead of handing ``vecf32`` a wrong-space
+    vector, and the same model into a store that declares ``None`` (no index —
+    the embedded brute-force lane) stores its own vector.
+
+    ⛔ The encoder SEAM (``compute_embedding`` / ``compute_embeddings``)
+    deliberately does NOT apply the guard and keeps its own narrow call shape:
+    it is a widely-REPLACED interception point (``tools/longmem_eval/
+    encode_cache.py`` and the longmem eval doubles swap the function itself),
+    so a caller-side width keyword would raise ``TypeError`` inside every
+    replacement and be swallowed by the write paths' ``except Exception`` —
+    the same silent degrade in a new place (#4280 review).
+    """
+    from tortoise.embeddings import (
+        EMBEDDING_DIM,
+        compute_embedding,
+        compute_embeddings,
+        encode_batch_for_store,
+        encode_for_store,
+    )
+    from tortoise.projection import FalkorProjection
+
+    assert len(embedder.encode(["x"])[0]) == EMBEDDING_DIM
+
+    class _WrongDim:
+        def encode(self, texts, batch_size=32, show_progress_bar=False):
+            return np.zeros((len(texts), EMBEDDING_DIM - 1))
+
+    monkeypatch.setattr(
+        EmbeddingModel, "get",
+        classmethod(lambda cls, load_timeout=None: _WrongDim()))
+    EmbeddingModel._reset()
+
+    # The seam encodes whatever the model returns (an index-less lane holds it)…
+    assert len(compute_embedding("a")) == EMBEDDING_DIM - 1
+    assert len(compute_embeddings(["a", "b"])[0]) == EMBEDDING_DIM - 1
+    # … and the STORE's declared width is what degrades it.
+    assert encode_for_store("a", EMBEDDING_DIM) is None
+    assert encode_batch_for_store(["a", "b"], EMBEDDING_DIM) == [None, None]
+    # No index declared → the encoder's own width governs (nothing dropped).
+    assert encode_for_store("a", None) is not None
+    assert encode_batch_for_store(["a"], None)[0] is not None
+
+    # End-to-end: an INDEXED store (declares EMBEDDING_DIM) stores the turn
+    # with no vector — the turn itself still lands.
+    _keyless(monkeypatch)
+    monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                        property(lambda self: EMBEDDING_DIM))
+    res = _write(sdk, "sess-4194-wrongdim", CONV)
+    assert len(res["turn_texts"]) == len(CONV), res
+    rows = _turn_rows(sdk, "sess-4194-wrongdim")
+    assert len(rows) == len(CONV)
+    for tid, content, stored in rows:
+        assert content, f"{tid}: the turn must still be stored"
+        assert stored is None, (
+            f"{tid}: a {EMBEDDING_DIM - 1}-wide vector was stored in a "
+            f"{EMBEDDING_DIM}-wide index")
+
+    # Same model, a store with NO index: the encoder's own width is stored.
+    monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
+                        property(lambda self: None))
+    res2 = _write(sdk, "sess-4194-noidx", CONV)
+    assert len(res2["turn_texts"]) == len(CONV), res2
+    for tid, _content, stored in _turn_rows(sdk, "sess-4194-noidx"):
+        assert stored is not None, (
+            f"{tid}: the index-less lane must keep the encoder's vector")
+        assert len(stored) == EMBEDDING_DIM - 1, tid
+
