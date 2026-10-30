@@ -40,6 +40,43 @@ both gaps, plus the numbers they measured. No `tortoise/` file changed.
 ⚠️ **These are NOT the numbers in the issue body.** They were re-measured, not
 carried; the differences are stated in "Against the issue's table" below.
 
+### Which probe revision produced each artifact
+
+Two of the committed records are **older than the probe that ships beside them**,
+and the README says so here rather than leaving a reader to diff the key sets:
+
+* **`e1-paired-off-arm-1.json` / `-2.json`** were produced by the
+  `e1_paired_arm.py` revision in **`7ea740082`** (the commit that added the probe
+  and these records). The two review-fix commits after it — `76c2e1f09`
+  (E1's Objects floor) and `fcc2157d9` (the corpus pin and
+  `e1_min_before_share`) — taught the probe to pin four fields, so the shipped
+  probe writes **13** keys and these two records carry **9**
+  (`arm, graph, sessions, objects, bare_definite, share, object_names,
+  label_counts, elapsed_s`). The four added fields — `head`, `fixtures_hash`,
+  `object_floor`, `min_before_share` — **postdate them**.
+* **`e2a-value-units-falsifier.json`** predates the `strict_all` label fix:
+  its `with_anchor.per_session[*].strict_all` values are the **as-written**
+  readings (the probe sourced that field from the pre-injection count on both
+  passes), so the two blocks look identical in that one field. The shipped probe
+  reports each block's own reading and keeps the pre-injection figure as
+  `strict_all_as_written`.
+
+They were **not re-recorded**, and the reason is this bundle's own finding: the
+graphs lived in a disposable `tools/test_lane.py` container that has since been
+removed (a graph is a key in the keyspace — gone with it), and a re-run is a
+*new LLM realization*, not these numbers. So for these two records the head, the
+corpus hash and the two floors are the **prose facts in the section above**
+(`54922a800f96…`, `fixtures_hash=sha256:dd7e8520…`, `e1_objects` 30,
+`e1_min_before_share` 0.20) rather than fields of the artifact. No published
+number moves: both OFF populations clear both floors (78 and 69 Objects;
+0.3590 and 0.5652), and the falsifier's claim is `value_survived` 8/14 → 14/14
+(recovered 6 of 6), which was the injected count in the record as committed.
+
+A record that cannot name the revision that produced it is an artifact without
+provenance — so a future record is expected to be written by the probe at the
+head it claims (the shipped probe does this; these two were `git add`-ed from a
+run taken before it did).
+
 ## Probe 1 — `e1_paired_arm.py`: E1's before arm
 
 The same corpus, the same entry point (`capstone_measure.run_corpus`), the same
@@ -202,11 +239,11 @@ metric's own precision.
 | file | what it is |
 |---|---|
 | `on-arm.log` | the measured-arm run's own log (`capstone_measure.py`, `# generated: 2026-10-30T16:48:36Z`, head `54922a800`). **Not** named `capstone-measured-*.log` on purpose: that glob is the bundle's "shipped log" and a second one reds its README pins. |
-| `e1-paired-off-arm-1.json` | `e1_paired_arm.py` record, OFF run 1 |
-| `e1-paired-off-arm-2.json` | `e1_paired_arm.py` record, OFF run 2 |
+| `e1-paired-off-arm-1.json` | `e1_paired_arm.py` record, OFF run 1 — produced by the probe at `7ea740082`, so it predates the four pin fields the shipped probe writes (see "Which probe revision produced each artifact") |
+| `e1-paired-off-arm-2.json` | `e1_paired_arm.py` record, OFF run 2 — same revision, same caveat |
 | `e1-gate-drops.json` | `e1_gate_drops.py` record (every Object name, its verdict, the controls) |
 | `e2a-value-units.json` | `e2a_value_units.py` record, as written (per-session ids, survived and lost) |
-| `e2a-value-units-falsifier.json` | the same with `--inject-anchor` — both readings in one record |
+| `e2a-value-units-falsifier.json` | the same with `--inject-anchor` — both readings in one record. Predates the `strict_all` label fix: its `with_anchor.strict_all` carries the as-written reading |
 
 The probes themselves live beside the instruments they reuse, in
 `docs/evidence/7949-capstone/probes/`; their falsifiers are pinned in

@@ -525,22 +525,29 @@ def test_an_anchor_bearing_point_is_what_the_strict_counter_observes():
 
 
 def _graded(before_survived: int, after_survived: int, *,
-            memory_points: int = 12):
+            memory_points: int = 12, strict_total: int = 16):
     """A `grade` stub whose two readings differ ONLY by the injection.
 
     `memory_points` is the run's per-session CENSUS (`runner.snapshot_session`'s
     own snapshot size) — the population the number is scored over. 0 is the
     absent-graph reading the probe must refuse rather than score.
+
+    `strict_all` is the STRICT reading over all planted units (the shipped
+    `grading.strict_survival_counts` shape), and it differs between the two
+    passes — as it does in a real run, where the injected anchors make units
+    strictly survive. The two numbers are what tells the two blocks apart.
     """
     def grade(graph: str, *, inject_anchor: bool) -> dict:
+        survived = after_survived if inject_anchor else before_survived
+        row = {"memory_points": memory_points,
+               "strict_all": f"{survived}/{strict_total}"}
         return {"graph": graph,
                 "injected_anchor": inject_anchor,
                 "value_units": 14,
-                "value_survived": after_survived if inject_anchor
-                else before_survived,
+                "value_survived": survived,
                 "per_session": {
-                    "wp01_quarry_debug": {"memory_points": memory_points},
-                    "wp05_retro_writeup": {"memory_points": memory_points},
+                    "wp01_quarry_debug": dict(row),
+                    "wp05_retro_writeup": dict(row),
                 }}
     return grade
 
@@ -643,3 +650,68 @@ def test_a_clean_run_is_not_refused_by_the_falsifier(monkeypatch, tmp_path):
     exit_code = _run_e2a(monkeypatch, tmp_path, before=14, after=14)
 
     assert exit_code == 0
+
+
+def test_the_falsifier_labels_each_block_with_its_own_strict_reading(
+        monkeypatch, tmp_path):
+    """`with_anchor.strict_all` must be the INJECTED reading, not the input one.
+
+    The record exists so both readings of the same graph sit in one artifact
+    (`as_written` / `with_anchor`), which makes the label on each read as the
+    whole claim. Pre-fix, `strict_all` was sourced from the PRE-injection count
+    on both passes — so the `with_anchor` block reported the very number the
+    injection was supposed to move, and a reader parsing it as "what strict
+    survival became with the anchors injected" read the wrong condition. The
+    pre-injection figure now keeps its own key, so neither reading is lost.
+
+    This drives the REAL `grade()` (only its two I/O seams are stubbed), so the
+    injection loop and the shipped `strict_survival_counts` both run: a gold of
+    two units, one anchor-bearing, over Points holding neither anchor. Strict
+    survival is 0 of 2 as written and 1 of 2 once the anchor is injected.
+    """
+    import tortoise.sdk as sdk_module
+    from tests.eval.write_path import corpus, runner
+
+    gold = {
+        "planted_units": [
+            {"id": "wp01_u_01", "verbatim_anchor": "40 rows"},
+            {"id": "wp01_u_02", "verbatim_anchor": "the batch"},
+        ],
+        "salient_units": [
+            {"id": "wp01_u_01", "verbatim_anchor": "40 rows",
+             "survival": {"provenance_required": True,
+                          "ep_update_required": True}},
+            {"id": "wp01_u_02", "verbatim_anchor": "the batch",
+             "survival": {"provenance_required": True,
+                          "ep_update_required": True}},
+        ],
+    }
+    gold_file = tmp_path / "wp01_quarry_debug.gold.json"
+    gold_file.write_text(json.dumps(gold))
+    monkeypatch.setattr(e2a_value_units, "gold_path", lambda sid: gold_file)
+    monkeypatch.setattr(corpus, "session_ids", lambda: ["wp01_quarry_debug"])
+    monkeypatch.setattr(sdk_module, "TortoiseSDK", lambda graph_name: object())
+    monkeypatch.setattr(runner, "snapshot_session", lambda sdk, sid: {
+        "points": [{"point_id": "p1", "content": "a batch of rows",
+                    "provenance_present": True, "ep_updated": True}],
+        "rephrase_edges": [],
+    })
+
+    injected = e2a_value_units.grade("g", inject_anchor=True)
+    as_written = e2a_value_units.grade("g", inject_anchor=False)
+
+    row = injected["per_session"]["wp01_quarry_debug"]
+    assert row["strict_all"] == "1/2", (
+        "the with_anchor block must carry the INJECTED strict reading; 0/2 is "
+        "the number the injection moved and must not stand in for it")
+    assert row["strict_all_as_written"] == "0/2", (
+        "the pre-injection reading must stay legible under its own key")
+    assert injected["value_survived"] == 1
+
+    # The plain path observes ONE condition, so it must not grow a second label
+    # — and its `strict_all` is its own number, not a carried-over default.
+    plain = as_written["per_session"]["wp01_quarry_debug"]
+    assert plain["strict_all"] == "0/2"
+    assert "strict_all_as_written" not in plain, (
+        "the as-written pass has nothing to disambiguate; a second label there "
+        "would invite a parser to read them as two conditions")

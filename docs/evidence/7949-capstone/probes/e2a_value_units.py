@@ -51,6 +51,14 @@ population and a losing pipeline read IDENTICALLY through this counter:
 Without them the probe's own falsifier CERTIFIES the failure: on an empty graph
 `before` is `0/14` and the injection recovers all 14 synthetic anchors, so
 `recovered 14 of lost 14` prints green beside a number that measured nothing.
+
+Each per-session row reports the reading of the pass that produced it: on the
+`--inject-anchor` pass `strict_all` is the INJECTED count (the one the anchors
+moved) and the pre-injection figure is kept beside it as
+`strict_all_as_written`, because the record shipped here exists precisely so both
+readings are legible in one artifact — a field labelled `with_anchor` that
+carries the as-written number is the reading the injection was meant to move,
+reported as if it had not moved.
 """
 from __future__ import annotations
 
@@ -115,6 +123,10 @@ def grade(graph: str, *, inject_anchor: bool) -> dict:
             gold, points, snapshot["rephrase_edges"])
         survived = [uid for uid in value_ids
                     if uid in set(as_written["survived_ids"])]
+        # The counts THIS pass observed: the pre-injection read, replaced by the
+        # post-injection one below — so `strict_all` is never the other
+        # condition's number (see the module docstring).
+        reading = as_written
         if inject_anchor:
             anchors = {unit["id"]: unit.get("verbatim_anchor")
                        for unit in gold.get("planted_units") or []}
@@ -130,15 +142,24 @@ def grade(graph: str, *, inject_anchor: bool) -> dict:
                 gold, points, snapshot["rephrase_edges"])
             survived = [uid for uid in value_ids
                         if uid in set(with_anchor["survived_ids"])]
+            reading = with_anchor
         units_total += len(value_ids)
         survived_total += len(survived)
-        per_session[session_id] = {
+        row = {
             "memory_points": len(snapshot["points"]),
             "value_ids": value_ids,
             "value_survived": survived,
             "value_lost": [v for v in value_ids if v not in set(survived)],
-            "strict_all": f"{as_written['survived']}/{as_written['total']}",
+            "strict_all": f"{reading['survived']}/{reading['total']}",
         }
+        if inject_anchor:
+            # Both readings in ONE record — so the label on each is the whole
+            # point. `strict_all` above is what the injection produced; the
+            # number it moved away from keeps its own key rather than
+            # disappearing (or, worse, standing in for the injected one).
+            row["strict_all_as_written"] = (
+                f"{as_written['survived']}/{as_written['total']}")
+        per_session[session_id] = row
     return {
         "graph": graph,
         "injected_anchor": inject_anchor,
