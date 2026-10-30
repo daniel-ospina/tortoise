@@ -47,6 +47,7 @@ from tortoise.bm25 import (
     LEXICAL_WEIGHT_MAX,
     bm25_rank,
     bm25_scores,
+    bm25_tokens,
     resolve_lexical_weight,
 )
 from tortoise.embeddings import EmbeddingModel
@@ -61,10 +62,20 @@ from tortoise.search_engine import (
 )
 
 # ── the fixture corpus ────────────────────────────────────────────────────
-#: The rare exact token. `keep_numeric=False` (the shipped search-lane policy,
-#: #8933 untouched) shreds it to `err`, so the lexical signal here is the RARE
-#: WORD — the numeric half of the identifier is the owner's pending decision.
-RARE = "ERR-4032"
+#: The rare exact token.
+#:
+#: #8933 UPDATE (owner ruling, 2026-10-26): this fixture used to carry the
+#: IDENTIFIER `ERR-4032`, which the shipped search lane shredded to `err` — the
+#: numeric half was "the owner's pending decision" and the fixture knowingly
+#: depended on it. That decision has LANDED: the search lane now preserves an
+#: identifier (`err4032` + the adjacency phrase `"err 4032"`), so the shipped
+#: leg matches this record exactly and the rank-lift assertion below lost its
+#: headroom (`on.index == off.index`, measured). The rare token is therefore a
+#: plain OOV WORD — which is what this file is actually about: a token the dense
+#: leg cannot see (the lexicon has no direction for it) and the shipped scorer
+#: under-prices (no idf). Re-pinned by name rather than waived; the #8933
+#: subject has its own file (`tests/test_identifier_tokens_8933.py`).
+RARE = "zebra"
 
 #: Six documents about the query's TOPIC and holding none of its rare token.
 TOPIC_DOCS = [
@@ -260,17 +271,32 @@ class TestBM25Scorer:
         assert bm25_scores("the of and", [("a", "the of and")]) == {}
 
     def test_keep_numeric_threads_the_caller_policy_never_decides_it(self):
-        """#8933 is the OWNER's reopen — this module only passes the choice on.
+        """The numeric-token policy is the CALLER's; this module only threads it.
 
-        With the shipped default the numeric segment of a punctuated identifier
-        is dropped by the shared tokenizer, so `ERR-4032` contributes `err`
-        only; with ``keep_numeric=True`` the ``4032`` segment participates. The
-        DEFAULT is untouched (asserted here rather than left implicit).
+        With the shipped default a BARE numeric token is dropped by the shared
+        tokenizer, so `40` in "spend 40 on lights" contributes nothing; with
+        ``keep_numeric=True`` it participates. The DEFAULT is untouched
+        (asserted here rather than left implicit).
+
+        #8933 UPDATE: the assertion used to ride `ERR-4032`, which was the wrong
+        vehicle once the identifier ruling landed — an identifier's digits are
+        preserved as the COMPOSITE alias (`err4032`), which is not a numeric
+        policy at all and is present on BOTH sides (asserted explicitly below).
+        The bare-numeric lever this test exists for is now measured on a bare
+        numeric token, where ``keep_numeric`` is the only variable.
         """
-        docs = [("d", f"failure {RARE}")]
-        with_numeric = bm25_scores(RARE, docs, keep_numeric=True)
-        without = bm25_scores(RARE, docs)
+        docs = [("d", "spend 40 on lights")]
+        with_numeric = bm25_scores("spend 40 on lights", docs, keep_numeric=True)
+        without = bm25_scores("spend 40 on lights", docs)
         assert with_numeric["d"] > without["d"] > 0
+        # The identifier alias is NOT gated by keep_numeric: the token list
+        # carries `err4032` under BOTH policies, because preserving an
+        # identifier is a different control from the numeric-token policy
+        # (#8933). keep_numeric only ADDS the bare `4032` on top.
+        assert "err4032" in bm25_tokens("failure ERR-4032")
+        assert "err4032" in bm25_tokens("failure ERR-4032", keep_numeric=True)
+        assert "4032" not in bm25_tokens("failure ERR-4032")
+        assert "4032" in bm25_tokens("failure ERR-4032", keep_numeric=True)
 
 
 # ── the bound (#7704 / #1657) ─────────────────────────────────────────────
