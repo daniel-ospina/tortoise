@@ -77,8 +77,8 @@ instrument in the fleet: on 2026-10-19 twelve PR heads carried ZERO check-runs
 while 44-49 runs sat queued behind one reporting workflow, and "pending" read as
 "CI is slow". So the queue is measured ONCE per pass
 (`tools/ci_queue_health.py`, the repo-level `CI: FLOOD(<workflow>, queued=N,
-pr_running=0)` state, or `CI: PR-STARVED(...)` when PR CI is not running but no
-trim-safe offender can be blamed) and a context whose producing run is QUEUED
+pr_running=0)` state, or `CI: PR-STARVED(...)` when PR CI is not running and the
+dominance clause declined) and a context whose producing run is QUEUED
 while the repo is starved — `QueueHealth.starves_pr`, i.e. either verdict — is
 reported as STARVED — a named state, distinct from PENDING and from UNTRIGGERED
 — instead of as pending. A starved context is NOT repaired here:
@@ -432,8 +432,10 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
     whose producing runs EXIST but are all QUEUED (none executing) while the repo
     has WITNESSED PR starvation is ALSO recorded in `starved` (#9115). The seam is
     `QueueHealth.starves_pr`, which is true for BOTH measured-starvation verdicts,
-    `FLOOD` and `PR-STARVED` — they differ only in whether the governor has an
-    offender to trim, which is not what a per-head reading can act on, and
+    `FLOOD` and `PR-STARVED` — they differ only in whether THIS READING reaches the
+    governor's block (FLOOD's always does, and it trims only when its leader is
+    trim-safe; PR-STARVED's returns ABOVE it). That is a difference in what each
+    reading can DO, not in what a per-head reading can act on, and
     PR-STARVED is the LATE STAGE of the same incident (a flood inflates the PR
     backlog it starves). `PR-UNWITNESSED` is deliberately NOT starvation: a
     page-capped feed did not measure the wait. It stays in `pending` as well,
