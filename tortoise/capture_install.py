@@ -1361,10 +1361,20 @@ def _install_guard(harness: str, home: Path) -> tuple[Path, str]:
     a ``$HOME``-scoped guard ACCEPTS it and the message would then promise
     ``tortoise install openclaw`` replaces it, while ``_install_openclaw``
     refuses exactly that leaf through this same root.
+
+    KNOWN LIMITATION for ``openclaw`` — this root models the ENTRY leaf only.
+    ``_install_openclaw`` runs the same guard over TWO paths (the entry AND
+    ``openclaw.json``), so a shape whose ``openclaw.json`` escapes the state
+    dir is refused by the installer while this declaration accepts the entry
+    and the remedy says nothing about the settings file.  Nothing wires the
+    assertion for OpenClaw yet, so the shape is latent rather than wrong
+    today; the settings half is tracked in #10332.  Pi has ONE guarded path,
+    so this limitation does not reach it.
     """
     if harness == "openclaw":
         # The plugin directory is ``<state>/extensions/tortoise``, so the state
         # directory the installer guards is its parent's parent (#2120).
+        # ENTRY leaf only — see the KNOWN LIMITATION above (#10332).
         return (openclaw_home(home).parents[1], "OpenClaw state dir")
     return (home, "install home")
 

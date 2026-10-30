@@ -207,6 +207,12 @@ def test_seam_target_remedy_reads_the_openclaw_state_dir_guard(tmp_path):
     Mutation: pass `Path(home)` / `label="install home"` to `_symlink_escape`
     instead of `_install_guard(harness, home)` — the in-`$HOME` leaf is then
     accepted, `refused` is `""`, and both the sentence and the label go RED.
+
+    SCOPE: this fixture covers the ENTRY leaf, which is what the remedy models.
+    `_install_openclaw` also guards `openclaw.json`, so a shape whose settings
+    file escapes the state dir is refused while this message says nothing about
+    it — latent, tracked as the settings half of #10332 (the `_install_guard`
+    docstring records the same limitation next to the code).
     """
     home = tmp_path / "home"
     plugin_dir = openclaw_home(home)
