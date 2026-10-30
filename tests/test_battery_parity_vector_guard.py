@@ -278,6 +278,15 @@ class TestRealLaneCapabilityGuard:
         assert cell.samples == 2
         assert "capability_gate" not in cell.detail
 
+    def test_tortoise_memory_probe_traces_the_product_surface(self, monkeypatch,
+                                                              tmp_path):
+        """``TortoiseCrMemory.retrieval_legs`` reads through ``recall_state``
+        with a leg trace — the same call shape ``recall`` uses."""
+        sdk, mem = _real_memory(monkeypatch, tmp_path, vector_ran=True)
+        trace = mem.retrieval_legs("Where was Thomas Kyd born?", 5)
+        assert {e["leg"] for e in trace} == {"fts", "vector"}
+        assert sdk.calls and sdk.calls[-1]["traced"] is True
+
 
 # ── The product surface must keep the trace contract ───────────────────
 

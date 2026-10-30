@@ -19,7 +19,7 @@ from tortoise.sdk import TortoiseSDK
 
 
 def _corrects_into(sdk, point_id: str) -> list:
-    """CORRECTS edges pointing AT `point_id`, read directly.
+    """CORRECTS edges pointing FROM `point_id`, read directly.
 
     `sdk.traverse(...)` was deleted by #4282 and these pins only ever used it as
     a READER, so the same query is inlined rather than the coverage dropped.

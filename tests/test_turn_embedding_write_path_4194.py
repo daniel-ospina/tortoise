@@ -41,6 +41,7 @@ from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
 from tortoise.embeddings import EmbeddingModel
 from tortoise.sdk import TortoiseSDK
+from tortoise.search_engine import run_vector_query
 
 
 class _FakeEmbedder:
@@ -167,6 +168,27 @@ def _write(sdk, session_id: str, conv, *, embed=True):
     return sdk_mod._write_session_and_turns(
         proj, sdk, session_id, conv,
         now="2026-06-01T00:00:00+00:00", embed_fn=embed_fn)
+
+
+def _legs(sdk, query: str, *, kind: str | None = None, limit: int = 10) -> dict:
+    """The deleted `retrieval_legs` probe, rebuilt from the survivors it wrapped.
+
+    #4282 deleted the wrapper, not the declaration surface it reported:
+    `recall_state(..., leg_trace=)` + `declared_degraded_read` +
+    `require_hybrid_read` are all live and are exactly what it called.
+    """
+    from tortoise.exceptions import HybridReadUnavailableError
+    from tortoise.search_engine import declared_degraded_read, require_hybrid_read
+
+    trace: list[dict] = []
+    sdk.recall_state(query, kind=kind, limit=limit, leg_trace=trace)
+    marker = declared_degraded_read(trace)
+    try:
+        require_hybrid_read(trace or None)
+        hybrid = True
+    except HybridReadUnavailableError:
+        hybrid = False
+    return {"legs": trace, "declared_degraded_read": marker, "hybrid": hybrid}
 
 
 def _vectors(sdk, session_id: str):
@@ -298,3 +320,74 @@ def test_hosted_capture_embeds_turn_points(client, monkeypatch, embedder):
             f"{tid}: hosted turn write skipped the embedding")
         assert len(stored) == len(embedder.encode(["x"])[0]), tid
         assert np.allclose(stored, embedder.encode([content])[0], atol=1e-6), tid
+
+
+def test_rebuild_recomputes_the_turn_embedding(tmp_path, embedder, monkeypatch):
+    """live == rebuild for the new field.
+
+    The journal deliberately omits ``embedding`` and
+    ``projection/entities._upsert_point_props`` recomputes it from ``content``
+    on replay — so a rebuilt turn Point must still carry the (same) vector.
+    Without this, a rebuild could silently drop the field the whole fix is
+    about, exactly the #3947 class.
+    """
+    _keyless(monkeypatch)
+    from tortoise.log import EventLog
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
+    try:
+        _write(s, "sess-4194-rebuild", CONV)
+        before = _turn_rows(s, "sess-4194-rebuild")
+        assert before and all(r[2] is not None for r in before), before
+
+        s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+
+        after = _turn_rows(s, "sess-4194-rebuild")
+        assert [r[0] for r in after] == [r[0] for r in before]
+        for (_bid, _bc, bvec), (aid, _ac, avec) in zip(before, after,
+                                                      strict=True):
+            assert aid == _bid
+            assert avec is not None, (
+                f"{aid}: the rebuilt turn lost its embedding")
+            assert np.allclose(bvec, avec, atol=1e-6), aid
+    finally:
+        s.close()
+
+
+def test_dense_leg_returns_the_captured_turn(sdk, embedder, monkeypatch):
+    """Searching the turn's own content finds it THROUGH the dense leg.
+
+    ``run_vector_query`` is the vector leg in isolation — no lexical leg is
+    involved — so its returning the turn proves the leg now has material. The
+    leg trace records it as ran/not-degraded with a non-zero count, and the
+    product declaration surface reports the read as hybrid.
+    """
+    _keyless(monkeypatch)
+    _write(sdk, "sess-4194-dense", CONV)
+    proj = sdk._get_proj()
+    turn_id = "sess-4194-dense_t0"
+    turn_text = proj.g.query(
+        "MATCH (t:Point {id:$id}) RETURN t.content",
+        params={"id": turn_id}).result_set[0][0]
+
+    trace: list[dict] = []
+    qvec = embedder.encode([turn_text])[0].tolist()
+    hits = run_vector_query(
+        proj.g, qvec, limit=10,
+        is_embedded=getattr(proj, "_is_embedded", True),
+        entity_type="point", leg_trace=trace)
+    assert turn_id in [h[0] for h in hits], (
+        f"the turn's own vector did not surface it: {[h[0] for h in hits]}")
+
+    vec = next(e for e in trace if e["leg"] == "vector")
+    assert vec["ran"] is True, vec
+    assert vec["degraded"] is False, vec
+    assert vec["count"] >= 1, vec
+
+    # The product's own declaration agrees: the read is hybrid (not a declared
+    # single-leg/keyword-only read).
+    legs = _legs(sdk, turn_text, limit=5)
+    assert legs["declared_degraded_read"] is None, legs
+    assert legs["hybrid"] is True, legs
+    assert any(e["leg"] == "vector" and e["count"] >= 1
+               for e in legs["legs"]), legs["legs"]

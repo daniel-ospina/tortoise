@@ -557,8 +557,10 @@ class TestMcpToolSweepStripActor:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# #2600 Phase 1 Task 6 — deterministic LLM-free two-actor dedup (E2E-5,
-# SDK lane). The load-bearing dedup-actor contract: writer A's PointAdded
-# GraphEvent keeps A; writer B's identical content dedup-hits the canonical
-# and emits NOTHING (no second PointAdded with B). This survives even if a
-# hosted capture event leg is dropped (the plan's escape-hatch precision).
+# #2600 Phase 1 Task 6 — deterministic LLM-free two-actor dedup (E2E-5).
+#
+# ⚠️ #4282 REMOVED the SDK-lane half of this contract (`TestTwoActorDedupSdkLane`)
+# with `capture_session`: `create_point` does not dedup — identical content
+# yields two distinct points — so the "writer B dedup-hits the canonical and
+# emits nothing" leg existed only for the deleted door. The hosted capture
+# event leg above is what remains, and it is not claimed here to cover it.

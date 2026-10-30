@@ -736,28 +736,10 @@ class TestReplayParity:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# C. Seam integration (the v2 capture write path)
+# C. Seam integration — the v2 capture write path (#4282 removed the
+#    `capture_session` entry point these drove; the slot-extractor payload
+#    they fed had no other consumer, so it went with them.)
 # ══════════════════════════════════════════════════════════════════════════
-
-_SLOTS_PAYLOAD = {
-    "entities": [
-        {"name": "the team", "kind": "core:team", "lifecycle": "created",
-         "supersedes": None, "note": None},
-        {"name": "the plan", "kind": "core:plan", "lifecycle": "created",
-         "supersedes": None, "note": None},
-    ],
-    "events": [],
-    "points": [{
-        "content": "the team approved the plan", "pointKind": "statement",
-        "about_entities": ["the team", "the plan"],
-        "slots": {"subject": [{"name": "the team", "kind": "core:team",
-                               "confidence": 0.9}],
-                  "object": [{"name": "the plan", "kind": "core:plan",
-                              "confidence": 0.9}]},
-    }],
-    "operators": [], "chain_notes": [], "link_before_create": [],
-}
-
 #: A foreign-namespace entity/slot (T2): neither the entity nor the slot may
 #: become a Subject, and the binder must refuse it.
 _FOREIGN_KIND_PAYLOAD = {

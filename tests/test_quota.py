@@ -396,8 +396,10 @@ class TestNonePreservation:
         assert limits["max_sessions"] is None  # unlimited (#4010)
 
 
-# ── #947 (epic #909 slice 2): sessions branch + is_episodic + constants ──
 # ── #1726 Slice 1: documents resource (derived-constant cap) ─────
+# (#4282: the #947 sessions-branch class above went with `capture_session`;
+#  the count property it pinned still holds at test_quota.py's hosted pins
+#  and by test_issue_4010_sessions_unlimited.)
 
 class TestDocumentsQuota:
     """#1726: the documents gate fires on /v1/index/docs ONLY, with the

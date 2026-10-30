@@ -287,3 +287,43 @@ class TestGraphC1Status:
         assert sdk._graph_count(team["id"]) == 2
 
 
+class TestAPIKeyC1Tenancy:
+    def test_apikey_create_legacy_shape_unchanged(self, sdk, team):
+        """Back-compat: no kwargs → no tenancy props on the node, list shows
+        None-safe defaults (legacy class)."""
+        result = sdk.apikey_create(team["id"], "user-1")
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
+            "k.delegation_depth, k.created_by_key_id",
+            params={"id": result["id"]},
+        ).result_set
+        assert (rows[0][0], rows[0][1], rows[0][2], rows[0][3]) == (None, None, None, None)
+        # #4282 deleted apikey_list; the props it projected are
+        # asserted directly above, off the node the create door wrote.
+
+    def test_apikey_create_scoped_graph_key_stores_props(self, sdk, team):
+        """A C1-minted graph-bound key stores its tenancy props."""
+        result = sdk.apikey_create(
+            team["id"], "user-1",
+            graph_id="g_abc123def4567890",
+            scopes=["graphs:read", "graphs:write"],
+            created_by_key_id="key-parent-000",
+            delegation_depth=0,
+        )
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
+            "k.delegation_depth, k.created_by_key_id",
+            params={"id": result["id"]},
+        ).result_set
+        assert rows[0][0] == "g_abc123def4567890"
+        assert rows[0][1] == ["graphs:read", "graphs:write"]
+        assert rows[0][2] == 0
+        assert rows[0][3] == "key-parent-000"
+        # #4282 deleted apikey_list; the props it projected are
+        # asserted directly above, off the node the create door wrote.
+        # Still authenticates (registry parity: hash path unchanged)
+        valid = sdk.apikey_verify(result["api_key"])
+        assert valid is not None
+        assert valid["org_id"] == team["id"]

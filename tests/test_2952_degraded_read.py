@@ -491,17 +491,3 @@ class TestHealthyRankingByteIdentical:
         finally:
             sdk.close()
 
-
-class _LegStub:
-    """Minimal recall_state surface for retrieval_legs (no DB)."""
-
-    def __init__(self, entries):
-        self._entries = entries
-        self.calls: list = []
-
-    def recall_state(self, query, *, kind=None, limit=10, leg_trace=None):
-        self.calls.append({"query": query, "kind": kind, "limit": limit})
-        if leg_trace is not None:
-            leg_trace.extend(self._entries)
-        return []
-
