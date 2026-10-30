@@ -816,7 +816,16 @@ def test_every_property_mutation_still_targets_exactly_one_span() -> None:
     claim about a file that no longer exists in that shape. So the cheap check
     runs every lane, and it FAILS with a re-pointing instruction rather than
     quietly passing.
+
+    The NODE id rots the same way and is pinned here for the same reason. The
+    table above is the only place those four test ids are written down, and a
+    rename reddens nothing on its own: the opt-in proof would run
+    `pytest <file>::<gone-node>`, collect zero tests, exit 4 — and before this
+    pin existed the harness read that as a kill (#10343 review P1). Checking the
+    collection on EVERY lane makes a rename loud where the span check already is,
+    instead of only under `TORTOISE_MUTATION_PROOF=1`.
     """
+    collected = _collected_node_ids()
     for label, path, span, _replacement, node in PROPERTY_MUTATIONS:
         assert path.is_file(), f"{label}: {path} is gone — re-point the mutation"
         hits = path.read_text().count(span)
@@ -825,20 +834,95 @@ def test_every_property_mutation_still_targets_exactly_one_span() -> None:
             "implementation moved. Re-point `PROPERTY_MUTATIONS` at the line that now "
             f"carries {label!r}; do not delete the leg (see {node})."
         )
+        assert f"{TEST_FILE}::{node}" in collected, (
+            f"{label}: `{node}` is not collected by {TEST_FILE} — the test was renamed "
+            "or removed. Re-point `PROPERTY_MUTATIONS` at the test that now carries "
+            f"{label!r}; a mutation aimed at a node that does not exist proves nothing."
+        )
+
+
+def _collected_node_ids() -> set[str]:
+    """Every node id pytest collects from this file — collected, never run."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", TEST_FILE, "--collect-only", "-q", "--no-header"],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO),
+    )
+    assert proc.returncode == 0, (
+        f"collecting {TEST_FILE} exited {proc.returncode}; the node-id pin cannot "
+        f"answer and must not read as a pass.\nstdout:\n{proc.stdout[-4000:]}\n"
+        f"stderr:\n{proc.stderr[-2000:]}"
+    )
+    return {line.strip() for line in proc.stdout.splitlines() if "::" in line}
+
+
+# pytest's exit-code table is the only thing that separates a KILL from a harness
+# error, and it is why `returncode != 0` is not a test failure
+# (docs.pytest.org/en/stable/reference/exit-codes.html):
+#   0 all passed · 1 collected and run, some FAILED · 2 interrupted ·
+#   3 internal error · 4 usage error, INCLUDING a node id that does not exist ·
+#   5 no tests were collected.
+# Only 1 is a kill — which is Stryker's own definition of one ("at least one test
+# failed while this mutant was active"; `Runtime error` and `Compile error` are
+# explicitly NOT in the score). Treating every non-zero exit as a kill is a FALSE
+# GREEN (#10343 review P1): rename a property test and pytest exits 4 having run
+# zero tests, yet the proof would print "<node> RED with the property removed".
+_PYTEST_OK = 0
+_PYTEST_TESTS_FAILED = 1
+
+# Four children per run. Measured cost of the whole item is ~206 s (~50 s a
+# child), so 200 s a child is ~4x headroom AND keeps the four inner bounds under
+# the 900 s outer mark below — the per-property bound binds first, so a slow
+# child names itself instead of the item dying as a bare timeout with no
+# diagnostic (#10343 review P2).
+_PROPERTY_RUN_TIMEOUT_S = 200
 
 
 def _property_test_fails(node: str) -> bool:
-    """Run ONE property test in a fresh process; True when it goes RED."""
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", f"{TEST_FILE}::{node}", "-q", "--no-header"],
-        capture_output=True, text=True, timeout=300, cwd=str(REPO),
+    """Run ONE property test in a fresh process; True only when it goes RED.
+
+    "Red" means a NAMED test failed. Any other non-zero exit RAISES rather than
+    returning True: a run that never reached its assertions — a bad node id, an
+    unparsable mutation, a missing pytest — is not evidence about the property.
+    """
+    argv = [sys.executable, "-m", "pytest", f"{TEST_FILE}::{node}", "-q", "--no-header", "-rf"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=_PROPERTY_RUN_TIMEOUT_S,
+            cwd=str(REPO),
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            f"{node}: exceeded {_PROPERTY_RUN_TIMEOUT_S}s with the property removed — "
+            "the budget, not the property, decided this leg (see the outer "
+            "`pytest.mark.timeout(900)`)."
+        )
+    if proc.returncode == _PYTEST_TESTS_FAILED:
+        assert f"FAILED {TEST_FILE}::{node}" in proc.stdout, (
+            f"{node}: pytest exited 1 but no `FAILED {TEST_FILE}::{node}` line is in "
+            "its output, so this non-zero exit is not that test failing and proves "
+            f"nothing about the property.\nstdout:\n{proc.stdout[-4000:]}\n"
+            f"stderr:\n{proc.stderr[-2000:]}"
+        )
+        return True
+    if proc.returncode == _PYTEST_OK:
+        return False
+    pytest.fail(
+        f"{node}: pytest exited {proc.returncode}, which is not the tests-failed code "
+        "(1) — per pytest's exit-code table 2=interrupted, 3=internal error, 4=usage "
+        "error (a node id that does not exist), 5=nothing collected. A run that never "
+        "executed the assertion cannot prove the property.\n"
+        f"stdout:\n{proc.stdout[-4000:]}\nstderr:\n{proc.stderr[-2000:]}"
     )
-    return proc.returncode != 0
 
 
+# 900 s for the whole item: the four 200 s inner bounds total 800 s, so they are
+# the binding constraint and the outer mark is the backstop (pyproject.toml's
+# repo-wide `timeout = 300` is a PER-ITEM budget this item legitimately exceeds —
+# "a leg that needs a longer single item must SAY so").
+@pytest.mark.timeout(900)
 @pytest.mark.skipif(
     os.environ.get("TORTOISE_MUTATION_PROOF") != "1",
-    reason="opt-in (~2 min, four subprocess runs): TORTOISE_MUTATION_PROOF=1",
+    reason="opt-in (~3.5 min, four subprocess runs): TORTOISE_MUTATION_PROOF=1",
 )
 def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
     """Break each property in the real source; its own test must fail.
