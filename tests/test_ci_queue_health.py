@@ -37,8 +37,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools import ci_queue_health as Q
 from tools import ci_check_repair as R
+from tools import ci_queue_health as Q
 
 NOW = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
 
