@@ -1264,12 +1264,15 @@ def _live_write_verdict(
     # a second copy is what #10067 exists to end (#10067 review P1: the producer
     # and the seam disagreed and the transcript went to neither store).
     resolved = record_tenant_effective(tenant)
-    if resolved is not None and not (
-            isinstance(resolved, tuple) and len(resolved) == 2
-            and all(isinstance(part, str) and part for part in resolved)):
+    if resolved is not None and not is_usable_tenant(resolved):
         # The seam's ONLY injection point must not be its weakest carrier: an
         # empty/half pair would be unpacked straight into `write_records` and
         # file the row under a tenant nobody named (#9188 review F4).
+        # ⛔ THE TEST IS THE SHARED DECLARATION, not a second copy of it: the
+        # capability read that decides WHETHER to hand the record a write asks
+        # the SAME function (`record_holds_turns` -> `live_write_refusal`), so
+        # there is one validity rule rather than two spellings of one (#10067
+        # review P3).
         return "no_tenant_carried", None, resolved
     if resolved is None:
         return "no_tenant", None, None
@@ -1328,11 +1331,14 @@ def record_holds_turns(*, journal_configured: bool, durable: bool = True,
     puts the transcript in Postgres, so nothing here may be a toggle that sends
     it back):
 
-    * ``journal_configured`` — the turns reach the record ONLY through the
-      per-turn `PointAdded` records (`_write_capture_turns` emits them when the
-      SDK has a journal), so without one the record cannot be where they are,
-      whatever its DSN says. ``durable`` is the same fact one step in: a scratch
-      buffer is not a journal and the seam declines it.
+    * ``journal_configured`` — a capture's turns reach Postgres through the
+      RECORD WRITES the journal carries (`_write_capture_turns` emits them when
+      the SDK has a journal): ONE `TurnsRecorded` carrier per capture on the
+      record-only lane (#10067), and one node-creating `PointAdded` per turn only
+      where the GRAPH already holds the turns. Either way the journal is the
+      vehicle, so without one the record cannot be where the turns are, whatever
+      its DSN says. ``durable`` is the same fact one step in: a scratch buffer is
+      not a journal and the seam declines it.
     * :func:`live_write_refusal` — the write door's own preconditions (armed
       DSN, a tenant, a closed connect breaker). A reason it names is a write this
       record will refuse, so its turns stay in the graph.
