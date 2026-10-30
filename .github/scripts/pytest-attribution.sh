@@ -136,22 +136,49 @@ fi
 # `${RUNNER_TEMP}` (#10280); both matrix jobs already pass one, so for them the
 # signals below are a backstop rather than the load-bearing defence.
 #
-# ⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS (2026-10-29, #10028). `python-ci.yml`'s
-# `test` job — the fast matrix, NINE legs, and the largest share of this failure —
-# passes `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and
-# therefore per-job, since a runner runs one job at a time), and `test-slow`'s FIVE
-# legs now pass it too. That second half was a measured false red, not a tidy-up:
-# run 40808264676's `test-slow (a)` printed its own `365 passed, 2 skipped` (= its
-# manifest's 367 expected nodeids) AND its own `pytest exit code: 0` banner, and the
-# job still concluded `failure`, because a sibling's `> /tmp/pytest.log` truncated
-# the file between the leg's `tail` and this reporter's read. For those two jobs
-# signals (1)-(3) are a backstop against a test that shells out to pytest, not the
-# load-bearing defence against a co-tenant.
+# ⚠️ STATUS: APPLIED TO EVERY `python-ci.yml` LEG THAT WRITES A `> ...` CAPTURE
+# (2026-10-29 #10028 for `test`/`test-slow`; 2026-10-30 #10280 for the rest).
+# `python-ci.yml`'s `test` job — the fast matrix, NINE legs, and the largest share of
+# this failure — passes `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`,
+# per-runner and therefore per-job, since a runner runs one job at a time), and
+# `test-slow`'s FIVE legs pass it too. That second half was a measured false red, not
+# a tidy-up: run 40808264676's `test-slow (a)` printed its own `365 passed, 2 skipped`
+# (= its manifest's 367 expected nodeids) AND its own `pytest exit code: 0` banner, and
+# the job still concluded `failure`, because a sibling's `> /tmp/pytest.log` truncated
+# the file between the leg's `tail` and this reporter's read. For those jobs signals
+# (1)-(3) are a backstop against a test that shells out to pytest, not the load-bearing
+# defence against a co-tenant.
+#
+# #10280 then migrated the three legs that still wrote a `>` capture — measured, not
+# prophylactic: on run 40990582554 `test-track-b` wrote `4 expected nodeids ->
+# /tmp/expected-nodeids.txt` and then reconciled its own 4 testcases against a
+# `test-carve-out (c)` leg's register (`emit-manifest: 616 expected nodeids ->` the same
+# shared path, 11s earlier), concluding `616 expected nodeid(s) absent from the
+# junitxml` with every test in the leg passing — a FALSE RED on a required check, and
+# the mirror image of the false PASS the shared manifest makes reachable. Those three
+# jobs (`test-concurrency-falkor`, `test-track-b`, `test-carve-out`) now pass per-job
+# `"$PYTEST_LOG"` / `"$PYTEST_JUNIT"` / `"$PYTEST_MANIFEST"` paths, so for them too
+# these signals are a backstop.
 #
 # The legs that still write `/tmp/...` literals, and still need the same change, are
 # the deliberate residual named on #10280, which carries the rest of the migration:
 #
 #   `validate`                  (`/tmp/pmv-pytest.log`)  — `post-merge-validation.yml`
+#
+# `validate` is residual for its LITERAL, not its redirect, and the distinction matters
+# (PR #10264 review, verified against `capture_site`):
+#
+#   `validate` WRITES its log with `> /tmp/pmv-pytest.log 2>&1` and is COUNTED at the
+#   separate `tail -n 300 /tmp/pmv-pytest.log` site, whose branch
+#   (`^tail\s+-n?\s*\d+\s+(\S+)$`) accepts ANY single token — so migrating it would be
+#   counted without a widening. `capture_site` has NO `>` branch at all: the `>` write is
+#   not a shape it reads, which is why this leg is residual for its LITERAL, not its
+#   redirect.
+#
+# The OTHER leg #10264 named in this paragraph captures through `| tee` rather than a
+# tail, and it is MIGRATED (#7815, PR #10143) — so it is NOT residual and is deliberately
+# not named here. The counter widening it owed is recorded BELOW the delimiter that ends
+# this list, because naming a migrated leg inside the window is itself a red.
 #
 # ⛔ THIS LIST IS DERIVED, NOT REMEMBERED — do not edit it from memory. It is
 # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
@@ -167,11 +194,25 @@ fi
 #
 # ⚠️ THE FOUR `python-ci.yml` LEGS THIS LIST USED TO NAME — `test-concurrency-falkor`,
 # `test-track-b`, `test-carve-out` and `test-d14-hosted-api` — are MIGRATED (#7815, PR
-# #10143): each now writes and reads its own `${RUNNER_TEMP:-/tmp}/...`, which is why
-# `test-track-b` is no longer a residual. It was the sharpest of the five and #10280's own
+# #10143), which is why `test-track-b` is no longer a residual. They are migrated in TWO
+# spellings, and the difference is deliberate: #10280 moved the first three onto
+# `"$PYTEST_LOG"` / `"$PYTEST_JUNIT"` / `"$PYTEST_MANIFEST"`, resolved once in the job's
+# first step and failing CLOSED on `${RUNNER_TEMP:?}`, while `test-d14-hosted-api` keeps
+# this PR's per-step `${RUNNER_TEMP:-/tmp}/...`. Both are per-runner (a runner runs one
+# job at a time); neither writes a host-global `/tmp` artifact.
+#
+# `test-track-b` was the sharpest of the five and #10280's own
 # ROOT measurement — its shared `/tmp/expected-nodeids.txt` + `/tmp/junit.xml` produced
 # `4 expected nodeids -> 640 absent`, a false red on a required check — and that is
 # exactly what the per-job paths closed.
+#
+# `test-d14-hosted-api` owed the counter widening #10264 predicted, because it captures
+# through `| tee` rather than a tail: the `tee` branch matched a `/tmp/...` LITERAL only,
+# so a migrated `tee` would have gone UNCOUNTED and the leg's reporter obligation would
+# have stopped being checked at all. That widening is delivered in
+# `tests/test_pytest_attribution.py`'s `_TEE_SITE_RE`, which now accepts the
+# `"${RUNNER_TEMP:-/tmp}/<name>.log"` spelling as well — a guard whose subject is this
+# drift must not be spelling-dependent.
 #
 # For the legs still named above the three signals below stay load-bearing, and they keep
 # the KILL path — the one that produced the "timeout flakes" — from being fooled.

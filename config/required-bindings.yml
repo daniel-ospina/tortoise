@@ -342,3 +342,71 @@ projects:
           Upstream for the /api/v1 Token Handler proxy
           (website/apps/dashboard/functions/api/v1/[[path]].ts). Without it the
           proxy answers 503 proxy_not_configured.
+
+      # ── #3524 §9 step 1/3 — the consent identity bridge's signing key ──────
+      # `required`, per `docs/engineering/auth/consent-identity-bridge.md` §2.3 ("declared
+      # in `config/required-bindings.yml` so the deploy preflight fails closed until it
+      # exists") and §8's operator checklist. This deliberately takes the `required` route
+      # rather than CONTACT_INTAKE_URL's `recommended` one, and the reason is AVAILABILITY:
+      # an unset key makes every mint answer a typed 503, which is a route that silently
+      # cannot work — and the BFF mints, so the whole consent arm is dead until it is set.
+      #
+      # ⛔ THIS GATE IS NOT THE ANTI-FORGERY CONTROL, and reading it as one is how the real
+      # one gets loosened. A token signed with a key the AS does not hold is simply refused
+      # (`401 invalid_token` on every redemption) — an outage, not an oracle: it cannot
+      # assert a `sub` the AS accepts. The control that stops a key being reused from the
+      # ANON key (public — the consent page embeds it in HTML) or the service-role key is
+      # `consent_token_secret_problem()` in `tortoise/consent_token.py`, which refuses a
+      # blank, padded, too-short or reused value; that function is what the operator note
+      # below points at, and it is where a "just set something" shortcut must be stopped.
+      #
+      # ⚠️ ORDERING CONSEQUENCE, stated because `required` reds a deploy: the operator sets
+      # this in the Pages project BEFORE (or with) the deploy that ships
+      # `api/consent/token.ts`. A deploy without it fails this preflight (#3616's gate).
+      # That is the intended direction of failure, not an oversight.
+      - name: CONSENT_TOKEN_SECRET
+        kind: required
+        type: env_vars
+        envs: [production]
+        note: >-
+          HMAC-SHA256 key for the consent bridge's session-origin assertion
+          (tortoise/consent_token.py; minted by functions/api/consent/token.ts).
+          DEDICATED and >= 32 UTF-8 bytes: §2.3 forbids the service-role key and
+          the anon key (public — the consent page embeds it in HTML), and the API
+          treats a reused or short value as UNPROVISIONED with a typed 503 that
+          names the reason. The SAME value must be set on the hosted API (Fly,
+          via gh-secret:CONSENT_TOKEN_SECRET in
+          .github/scripts/fly-managed-secrets.txt) — the BFF mints with it and
+          the AS verifies with it, so a mismatch makes every redemption
+          `invalid_token` with no other symptom.
+
+      # #3524 §9 step 3 — the two knobs the mint/bounce routes read. Both carry a correct
+      # in-code default (the AS origin and the app origin), so absence is NOT an outage:
+      # `recommended`, matching the APP_ORIGIN/AUTH_CALLBACK_URL classification and their
+      # reasoning. They are declared rather than left silent so the deploy preflight can see
+      # them: the whole point of `CONSENT_TOKEN_ISSUER` is that a PREVIEW deployment verifies
+      # its OWN mint (§2.1), and a knob whose purpose is to differ per deployment is exactly
+      # the one an undeclared surface would let drift with no gate at all — an `iss` mismatch
+      # answers every redemption `401 invalid_token` with no other symptom.
+      - name: CONSENT_AS_ORIGIN
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          The authorization server's origin — the ONE origin allowed to call
+          /api/consent/token with credentials (exact-origin CORS allowlist,
+          §10). Defaults to https://api.premiselabs.co in
+          functions/api/consent/token.ts; set it explicitly for a preview whose
+          AS is not production's.
+
+      - name: CONSENT_TOKEN_ISSUER
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          The `iss` the mint stamps (§2.1). Defaults to
+          https://app.premiselabs.co and to NOTHING else — the mint does not
+          read APP_ORIGIN, so setting that binding never moves `iss`.
+          A preview deployment must set it to its OWN origin so the AS it talks
+          to accepts the mint; the value must match CONSENT_TOKEN_ISSUER on
+          that API or every redemption is `401 invalid_token`.

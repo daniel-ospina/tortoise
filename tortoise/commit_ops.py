@@ -540,8 +540,9 @@ def _supersession_fold_order(proj, records):
     pre-fix per-record semantics. Id-less nodes can never be a VISIBLE
     successor (the fold-time gate requires an id), so chains through them as
     a middle/tail link are order-insensitive — but an id-less TARGET still
-    participates as a needer of its own successor and sorts normally (pinned
-    by test_apply_supersessions_chain_idless_target_converges). The main
+    participates as a needer of its own successor and sorts normally (its
+    refusal is the MAIN LOOP's, not an ordering artifact — pinned by
+    test_apply_supersessions_chain_idless_target_is_refused). The main
     loop re-probes per record at fold time (its gates are STATUS-dependent —
     the pre-pass resolves structure only, so no TOCTOU: the Object graph is
     write-static inside apply_supersessions, entities precede every call).
@@ -1257,17 +1258,11 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                      f"nor name — skipped (never-guess)")
                 continue
             obj_id, obj_name, o_status, o_sb = by_name[0]
-        # REAL id captured BEFORE the legacy synthesis below: for a legacy
-        # id-less target this stays None (the canonical id is synthesized
-        # next for the journal — the graph node itself carries no id, and an
-        # id-branch fold on a synthesized id would MISS on replay without
-        # the name fallback). The alias + visible-successor scans need the
-        # REAL id: a synthesized id could equal a canonical successor's id
-        # only if a canonical Object with the same name coexists — impossible
-        # (the ref probe's >1-name never-guess would have skipped it
-        # earlier).
+        # #3590: the target's id IS the identity, and there is no synthesized
+        # fallback — an id-less target is refused below. Everything downstream
+        # (the alias scan, the visible-successor scan, the journal record and
+        # the fold) addresses the id alone.
         real_obj_id = obj_id
-        legacy_no_id = False
         if not obj_id:
             # #2164 review (P2-1): a legacy id-less Object (raw-Cypher-created
             # BEFORE canonical obj-<sha26(name)> minting — every supported write
@@ -1280,12 +1275,24 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 warn(f"supersession ref {ref!r} resolved to an Object with "
                      f"neither id nor name — skipped (never-guess)")
                 continue
-            # Synthesize the canonical deterministic id (sdk._entity_name_id —
-            # the exact id create_entity would have minted) so the journal
-            # carries a real, auditable id.
-            from tortoise.sdk import _entity_name_id
-            legacy_no_id = True
-            obj_id = _entity_name_id("Object", obj_name)
+            # #3590: REFUSE, never synthesize. The old branch fabricated the
+            # canonical name-derived id (`obj-<sha26(name)>`) so the journal
+            # carried "a real, auditable id" for an id-less legacy node. That
+            # id was a function of the NAME — the defect this change removes —
+            # and it does not exist any more. Synthesizing one now would fold
+            # onto nothing live and, worse, mint a phantom identity in the
+            # journal. An id-less target is unaddressable: record it and skip.
+            # ⛔ The candidates must name what the refusal COUNTED (#9876 review
+            # round 14, minor): this branch is reached with exactly one holder —
+            # the id-less one — and `[]` said the refusal had none. `shape` is
+            # the module's own spelling for it (`entity_identity._refuse`'s
+            # `unaddressable-name`): the target IS registered, it just carries
+            # no id, so `unregistered-reference` described the wrong thing.
+            record_non_folded("Object", ref, display_holder_ids([obj_id]),
+                              shape="unaddressable-name")
+            warn(f"supersession ref {ref!r} resolves to an id-less Object "
+                 f"(no id to address or journal) — skipped (#3590)")
+            continue
         # #2164 review (P1 advisory + round-2 ISSUE 4): the string-equality
         # self-guard above only catches ref == supersedes_by on the SAME
         # string. Two remaining hazards share one root — a successor
@@ -1427,21 +1434,13 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 id=obj_id, name=obj_name, supersedes_by=supersedes_by,
                 session_id=session_id, evidence=evidence,
             )
-            # _fold_object_superseded prefers the id branch when id is
-            # truthy (entities.py: MATCH (o:Object {id:$id})) but FALLS BACK
-            # to the name branch when the id branch matches nothing and a
-            # name is present (#2164 ISSUE B) — a legacy node carries no id
-            # property (or a pre-canonical one), so folding on the
-            # synthesized id alone would MISS on replay. Fold by NAME — the
-            # only key the legacy node actually has; the fold id branch is
-            # kept (real id present) so canonical nodes fold by id. The
-            # journaled event still carries the synthesized id for audit +
-            # replay (a node canonicalized by a later create_entity gains
-            # the id and replay folds by it; an id-less one is recovered by
-            # the replay name fallback).
-            fold_ev = {"name": obj_name, "supersedes_by": supersedes_by}
-            if not legacy_no_id:
-                fold_ev["id"] = obj_id
+            # #3590: the fold is ID-KEYED, and the name-keyed fallback is
+            # retired (a fold that reaches a node by NAME can fold a same-name
+            # carrier — the #3573/#2164 burial class). `legacy_no_id` can no
+            # longer be set (the id-less target is refused above), so the id is
+            # always present here.
+            fold_ev = {"name": obj_name, "supersedes_by": supersedes_by,
+                       "id": obj_id}
             folded, fold_matched = proj._fold_object_superseded(
                 fold_ev, cas=True)  # #2242: the LIVE path opts into the CAS
             if folded == 0:

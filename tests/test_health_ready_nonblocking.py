@@ -2022,6 +2022,52 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _fresh_coordinators(monkeypatch, mod, *, ready_timeout=None, control_timeout=None):
+    """Start a behavioural probe test from NO in-flight probe and NO verdict.
+
+    ⛔ A readiness read JOINS an in-flight probe (#2850 single-flight), so a
+    test that inherits one from the test above answers from THAT probe's
+    verdict instead of from the ``_probe_db`` / ``_probe_control_plane`` it just
+    installed. That is not hypothetical: ``test_hung_data_plane...`` abandons a
+    WEDGED data-plane worker (it never returns; the test only stops waiting for
+    it), so ``test_hung_control_plane...`` joined it, failed closed on the
+    DATA plane and reported ``Database unreachable`` — red ``test (e)`` on PR
+    #10021 (run 40861595063), where the assertion reads ``assert 'Control
+    plane' in 'Database unreachable'``. ``reset()`` is the coordinator's own
+    documented escape hatch for exactly this (``HealthProbe.reset``: "used by
+    tests and by app startup so each process/app instance begins from a clean
+    probe state").
+
+    It also sheds the *cached* verdict: with ``fresh_only=True`` a completed
+    result stays serviceable for the read budget, so a leftover ``{ok: False}``
+    from the previous test would answer this one (again naming the wrong
+    plane).
+
+    ⛔ The read-budget overrides go through ``monkeypatch.setattr`` — pytest's
+    documented undo ("All modifications will be undone after the requesting
+    test function or fixture has finished") is the ONLY thing that puts
+    ``_timeout`` back. ``HealthProbe.reset()`` does not touch the bound
+    (``tortoise/monitoring.py::HealthProbe.reset`` resets ``_seq``, ``_running``,
+    ``_worker``, ``_result``, ``_started_at``, ``_completed_at``,
+    ``_supersedes``), so a plain ``probe._timeout = value`` here rewrites the two
+    process-global read budgets for the REST of the pytest session: this file's
+    own bound pins (``_READY_PROBE._timeout == DB_PROBE_HARD_TIMEOUT``,
+    ``_READY_PROBE._timeout > PROBE_DB_TOTAL_TIMEOUT``,
+    ``_CONTROL_PLANE_PROBE._timeout == CONTROL_PLANE_HARD_TIMEOUT``) only passed
+    because they are defined ABOVE the first override, and
+    ``test_probe_reset_inflight_4608.py`` sorts AFTER this file and would drive
+    ``_READY_PROBE.wait()`` on a 2.0s budget instead of 5.6s (review P2 on
+    #10021) — definition/collection order doing the work ``monkeypatch`` is
+    supposed to do.
+    """
+    mod._READY_PROBE.reset()
+    mod._CONTROL_PLANE_PROBE.reset()
+    if ready_timeout is not None:
+        monkeypatch.setattr(mod._READY_PROBE, "_timeout", ready_timeout)
+    if control_timeout is not None:
+        monkeypatch.setattr(mod._CONTROL_PLANE_PROBE, "_timeout", control_timeout)
+
+
 def test_loop_stays_responsive_while_probes_are_slow(monkeypatch):
     """The decisive test: with a probe that BUSY-WAITS, a blocking
     implementation starves the ticker. Deterministic by construction — the
@@ -2048,6 +2094,7 @@ def test_loop_stays_responsive_while_probes_are_slow(monkeypatch):
 
     monkeypatch.setattr(mod, "_probe_db", slow_probe)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+    _fresh_coordinators(monkeypatch, mod)
 
     async def scenario():
         ticks = 0
@@ -2098,8 +2145,7 @@ def test_hung_data_plane_returns_503_within_the_bound(monkeypatch):
     import tortoise.hosted_api as mod
 
     release = threading.Event()
-    monkeypatch.setattr(mod._READY_PROBE, "_timeout", 0.2)
-    mod._READY_PROBE.reset()
+    _fresh_coordinators(monkeypatch, mod, ready_timeout=0.2)
     monkeypatch.setattr(mod, "_probe_db", lambda: release.wait(30))
 
     async def scenario():
@@ -2125,8 +2171,9 @@ def test_hung_control_plane_returns_503_within_the_bound(monkeypatch):
     import tortoise.supabase_control as sc
 
     release = threading.Event()
-    monkeypatch.setattr(mod._CONTROL_PLANE_PROBE, "_timeout", 0.2)
-    mod._CONTROL_PLANE_PROBE.reset()
+    # BOTH coordinators: the data plane is healthy here, so a leftover in-flight
+    # probe from the test above would be JOINED and would decide this answer.
+    _fresh_coordinators(monkeypatch, mod, control_timeout=0.2)
     monkeypatch.setattr(mod, "_probe_db", lambda: {"ok": True, "latency_ms": 1.0, "error": None})
     monkeypatch.setattr(mod, "_probe_control_plane", lambda: release.wait(30))
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
@@ -2161,8 +2208,7 @@ def test_ready_when_both_planes_answer(monkeypatch):
         called.append(1)
         return {"ok": True, "latency_ms": 1.0, "error": None}
 
-    mod._CONTROL_PLANE_PROBE.reset()
-    mod._READY_PROBE.reset()
+    _fresh_coordinators(monkeypatch, mod)
     monkeypatch.setattr(mod, "_probe_control_plane", _fake_control)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
 
@@ -2178,6 +2224,7 @@ def test_dead_db_is_503_and_never_probes_the_control_plane(monkeypatch):
     import tortoise.hosted_api as mod
     import tortoise.supabase_control as sc
 
+    _fresh_coordinators(monkeypatch, mod)
     monkeypatch.setattr(mod, "_probe_db", lambda: {"ok": False, "latency_ms": 0.0, "error": "down"})
     probed = []
     monkeypatch.setattr(mod, "_probe_control_plane", lambda: probed.append(1))
@@ -2187,3 +2234,178 @@ def test_dead_db_is_503_and_never_probes_the_control_plane(monkeypatch):
         _run(mod.health_ready())
     assert excinfo.value.status_code == 503
     assert probed == []
+
+
+def test_a_leftover_wedged_data_plane_probe_cannot_decide_the_control_plane_answer(
+    monkeypatch,
+):
+    """The exact red that #10021's ``test (e)`` hit, made deterministic.
+
+    ``HealthProbe.begin()`` JOINS an in-flight probe rather than starting a new
+    one (#2850 single-flight). ``test_hung_data_plane_returns_503_within_the_bound``
+    ABANDONS a wedged worker — ``run()`` stops waiting for it, the thread stays
+    parked in ``release.wait`` — so the next readiness read joined that worker's
+    verdict and named the DATA plane while the data plane was healthy:
+
+        E  AssertionError: assert 'Control plane' in 'Database unreachable'
+        tests/test_health_ready_nonblocking.py:2145
+
+    Non-vacuous: without ``_fresh_coordinators``' data-plane reset the joined
+    probe fails closed after this test's own ``ready_timeout`` and the
+    assertion above reproduces (measured: it fails in ~2s).
+    """
+    import threading
+
+    import tortoise.hosted_api as mod
+    import tortoise.supabase_control as sc
+
+    release = threading.Event()
+    try:
+        # 1. A data-plane probe is started and WEDGED; nothing releases it.
+        _fresh_coordinators(monkeypatch, mod, ready_timeout=0.2)
+        monkeypatch.setattr(mod, "_probe_db", lambda: release.wait(30))
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        with pytest.raises(HTTPException) as first:
+            _run(mod.health_ready())
+        assert first.value.status_code == 503
+        assert "Database" in str(first.value.detail)
+        assert mod._READY_PROBE.info()["in_flight"] is True, (
+            "the wedged data-plane worker is not in flight — this pin assumes "
+            "it outlives its test, which is what makes begin() join it"
+        )
+
+        # 2. A healthy data plane + a wedged CONTROL plane. The answer must name
+        #    the control plane; the leaked worker from step 1 must not decide it.
+        monkeypatch.setattr(
+            mod, "_probe_db",
+            lambda: {"ok": True, "latency_ms": 1.0, "error": None},
+        )
+        monkeypatch.setattr(mod, "_probe_control_plane", lambda: release.wait(30))
+        _fresh_coordinators(monkeypatch, mod, ready_timeout=2.0, control_timeout=0.2)
+        with pytest.raises(HTTPException) as second:
+            _run(mod.health_ready())
+        assert second.value.status_code == 503
+        assert "Control plane" in str(second.value.detail), (
+            "the 503 named the WRONG plane — this read inherited an in-flight "
+            f"data-plane probe: {second.value.detail!r}"
+        )
+    finally:
+        release.set()
+
+
+def test_every_behavioural_probe_test_starts_from_a_clean_coordinator():
+    """No behavioural test may inherit a coordinator's in-flight probe.
+
+    The leak that reddened ``test (e)`` on #10021 is not specific to one test:
+    ANY test that installs its own ``_probe_db`` / ``_probe_control_plane`` and
+    does not reset the coordinator that dispatches it can be answered by the
+    previous test's probe. Structural pin, so a new behavioural test cannot
+    reintroduce it by copy-paste.
+    """
+    tree = ast.parse(Path(__file__).read_text())
+    probe_owners = {"_probe_db": "_READY_PROBE",
+                    "_probe_control_plane": "_CONTROL_PLANE_PROBE"}
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+            continue
+        installed = set()
+        resets = set()
+        delegates = False
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            name = _callee_name(call.func)
+            if name == "setattr" and len(call.args) >= 2:
+                target = call.args[1]
+                if isinstance(target, ast.Constant) and target.value in probe_owners:
+                    installed.add(probe_owners[target.value])
+            elif name == "reset" and isinstance(call.func, ast.Attribute):
+                owner = call.func.value
+                if isinstance(owner, ast.Attribute) and owner.attr.endswith("_PROBE"):
+                    resets.add(owner.attr)
+            elif name == "_fresh_coordinators":
+                delegates = True
+        if delegates:
+            continue
+        missing = sorted(installed - resets)
+        if missing:
+            offenders.append(f"{node.name} -> {', '.join(missing)}")
+    assert not offenders, (
+        "these tests monkeypatch a probe function without resetting the "
+        "coordinator that dispatches it, so a probe leaked by the test above "
+        "can answer them (PR #10021's red `test (e)`): " + "; ".join(offenders)
+    )
+
+    # The `delegates` exemption above is only sound if the ONE delegated path
+    # restores everything it mutates. `_fresh_coordinators` is exempted BY NAME,
+    # so it is the one path outside the loop — pin it: a plain
+    # `probe._timeout = …` there rewrites a process-global read budget for every
+    # later test in the session (review P2), which is the same leak one
+    # attribute over. `HealthProbe.reset()` does not restore the bound, so only
+    # `monkeypatch.setattr` gives teardown something to undo.
+    helper = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef) and n.name == "_fresh_coordinators"),
+        None,
+    )
+    assert helper is not None, (
+        "the delegation exemption names `_fresh_coordinators`, but this file "
+        "defines no such helper — the exemption then hides nothing and the pin "
+        "states a fact that is not true"
+    )
+    bound_writes = sorted({
+        ast.unparse(target)
+        for node in ast.walk(helper)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute) and target.attr == "_timeout"
+    })
+    assert not bound_writes, (
+        "`_fresh_coordinators` writes a probe read budget by plain assignment ("
+        + ", ".join(bound_writes)
+        + "); `HealthProbe.reset()` does not restore `_timeout`, so the bound "
+        "stays rewritten for the rest of the pytest session and this file's own "
+        "bound pins only pass because they run first — route it through "
+        "`monkeypatch.setattr` so teardown restores it (review P2 on #10021)"
+    )
+
+
+def test_the_fresh_coordinators_helper_restores_every_bound_it_sets():
+    """Every read-budget override the helper applies must be UNDONE at teardown.
+
+    Non-vacuous at the pre-fix shape twice over: the helper took no
+    ``monkeypatch`` (so this call is a ``TypeError``), and the mutant that keeps
+    the new signature but assigns the bound directly leaves both singletons
+    rewritten after ``undo()``, reddening the final assertion. This is the leak
+    the pin above only describes structurally — the two process-global
+    coordinators are shared by every later test, so a leaked 0.2s control-plane
+    budget (this file's last override) changes their answers, not just their
+    numbers.
+
+    Ordering-independent on purpose: it snapshots whatever the bounds ARE
+    rather than asserting they equal the module defaults, so it cannot itself
+    become a test that only passes because of where pytest happened to start.
+    """
+    import tortoise.hosted_api as mod
+
+    mp = pytest.MonkeyPatch()
+    before = (mod._READY_PROBE._timeout, mod._CONTROL_PLANE_PROBE._timeout)
+    try:
+        _fresh_coordinators(mp, mod, ready_timeout=0.2, control_timeout=0.25)
+        assert mod._READY_PROBE._timeout == 0.2, (
+            "the helper did not apply the requested data-plane bound, so the "
+            "restore half of this pin would pass vacuously"
+        )
+        assert mod._CONTROL_PLANE_PROBE._timeout == 0.25, (
+            "the helper did not apply the requested control-plane bound"
+        )
+    finally:
+        mp.undo()
+    assert (mod._READY_PROBE._timeout,
+            mod._CONTROL_PLANE_PROBE._timeout) == before, (
+        "the helper's read-budget override survived teardown "
+        f"({mod._READY_PROBE._timeout} / {mod._CONTROL_PLANE_PROBE._timeout} "
+        f"instead of {before}) — `HealthProbe.reset()` does not touch "
+        "`_timeout`, so this state leaks into every later test in the session"
+    )
