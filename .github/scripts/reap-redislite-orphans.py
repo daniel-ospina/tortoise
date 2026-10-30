@@ -53,7 +53,11 @@ Usage:
     python3 .github/scripts/reap-redislite-orphans.py --apply          # kill
     python3 .github/scripts/reap-redislite-orphans.py --max-age-minutes 45 --apply
 
-Exit codes: 0 = ran (dry or apply), 2 = the inventory could not be read at all.
+Exit codes: 0 = ran (dry or apply) — INCLUDING when it found nothing to look at;
+2 = something this tool was told to read could not be read (`--proc-json`, or the
+process inventory itself: neither `/proc` nor `ps` answered, so NOTHING was
+measured and nothing was reaped). Every other unmeasurable case is per-row and
+KEEPS its process with a printed reason, which is still exit 0.
 """
 
 from __future__ import annotations
@@ -155,18 +159,32 @@ def _process_age(pid: int) -> float | None:
     return age if age is not None else _age_from_ps(pid)
 
 
-def _iter_proc_inventory() -> list[dict]:
+def _iter_proc_inventory() -> list[dict] | None:
     """Every redis-server carrying a unix socket in argv, with its age.
 
     Linux reads /proc directly (no subprocess, no shell, no glob). Anywhere
     else it shells out to `ps -eo pid=,args=`. A row whose argv cannot be read
     is still returned — with `socket_dir` None — so the caller can report it
     rather than silently dropping it.
+
+    `None` — not `[]` — when the inventory could not be read AT ALL: /proc
+    unlistable, or absent with `ps` unavailable/failing. The distinction is the
+    documented exit 2, and it is the difference between "measured the host and
+    found no litter" and "never saw the host": returning `[]` for both printed
+    `0 candidate(s), 0 reaped` and exited 0, so the tool's one failure signal
+    could not fire where it was meant to (PR #10254 review, round 13). A single
+    unreadable `/proc/<pid>/cmdline` is NOT this case — that pid simply
+    vanished mid-scan, and skipping it keeps the process, which is the safe
+    direction.
     """
     rows: list[dict] = []
     proc = os.path.isdir("/proc/self")
     if proc:
-        for entry in sorted(os.listdir("/proc")):
+        try:
+            entries = sorted(os.listdir("/proc"))
+        except OSError:
+            return None
+        for entry in entries:
             if not entry.isdigit():
                 continue
             pid = int(entry)
@@ -201,7 +219,7 @@ def _iter_proc_inventory() -> list[dict]:
             check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return rows
+        return None
     for line in out.splitlines():
         line = line.strip()
         if not line:
@@ -304,6 +322,16 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     else:
         rows = _iter_proc_inventory()
+        if rows is None:
+            # Exit 2 is the ONE documented failure signal: the host was never read, so
+            # "0 candidate(s)" would be a claim this run cannot make. Reported on
+            # stderr and kept distinct from "measured, found nothing" (exit 0).
+            print(
+                "could not read the process inventory at all (neither /proc nor `ps`) — "
+                "nothing was measured, so nothing was reaped",
+                file=sys.stderr,
+            )
+            return 2
 
     return run(rows, args.max_age_minutes * 60.0, args.apply)
 

@@ -166,6 +166,50 @@ def test_the_cli_reads_its_inventory_from_the_proc_json_seam(tmp_path):
     assert "dry-run" in out.stdout
 
 
+def test_an_unreadable_inventory_is_exit_2_not_a_silent_zero(reaper, monkeypatch):
+    """NON-VACUOUS: this reds on the pre-fix code, which returned `[]` here.
+
+    The module documents exactly one failure signal — exit 2, "the inventory could not
+    be read at all" — and it could not fire on the host path: `_iter_proc_inventory()`
+    returned an empty list both when it had looked and found no redis-server and when
+    it had never been able to look at all, so `run()` printed `0 candidate(s), 0
+    reaped` and exited 0. "Measured the host, no litter" and "never saw the host" are
+    different facts about a cleanup step, and only one of them is safe to call success
+    (PR #10254 review, round 13).
+    """
+    # no /proc (the `ps` branch), and `ps` itself unavailable
+    monkeypatch.setattr(reaper.os.path, "isdir", lambda _p: False)
+
+    def _no_ps(*_a, **_k):
+        raise OSError("ps: not found")
+
+    monkeypatch.setattr(subprocess, "run", _no_ps)
+    assert reaper._iter_proc_inventory() is None, (
+        "an unreadable inventory must be None (exit 2), never an empty list — the "
+        "empty list is what let a blind run report success"
+    )
+    assert reaper.main([]) == 2, "the documented failure signal must reach the exit code"
+
+
+def test_an_unlistable_proc_is_exit_2_too(reaper, monkeypatch):
+    """`/proc` present but unlistable is the same "never saw the host" case."""
+    monkeypatch.setattr(reaper.os.path, "isdir", lambda _p: True)
+
+    def _no_listdir(_p):
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr(reaper.os, "listdir", _no_listdir)
+    assert reaper._iter_proc_inventory() is None
+
+
+def test_a_measured_empty_host_is_still_exit_0(reaper, tmp_path):
+    """The other direction: an inventory that WAS read and held no litter is exit 0."""
+    inventory = tmp_path / "proc.json"
+    inventory.write_text("[]")
+    assert reaper.main(["--proc-json", str(inventory)]) == 0
+    assert reaper.run([], max_age_s=45 * 60, apply=True) == 0
+
+
 # ── the workflow shape: the blind, host-global reap must not come back ──────
 
 
