@@ -614,6 +614,46 @@ def test_a_failed_post_removal_fsync_still_reports_the_truth(tmp_path, monkeypat
     assert "fsync" in result.detail, result.detail
 
 
+def test_a_source_a_peer_removed_before_our_READ_is_success_not_an_error(tmp_path):
+    """The window the peer's `_unlink_source` fix does NOT cover: the source is
+    gone before our read/stat, so there is nothing to read and nothing to keep.
+    The day IS sealed; reporting failure prints a false "plain copies are
+    untouched".
+
+    Mutation: the read arm's `except FileNotFoundError` removed (folded back
+    into the `OSError` arm) REDs here with `verify-failed`.
+    """
+    day = TODAY - timedelta(days=9)
+    path = _write(tmp_path, day, b'{"session_id": "g"}\n')
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(path.read_bytes(), mtime=0))
+    path.unlink()  # the peer won the whole race
+
+    result = seal.seal_one(tmp_path, path)
+
+    assert result.status == "already-sealed", result
+    assert result.ok
+    assert "already gone" in result.detail
+
+
+def test_apply_does_not_claim_absence_over_a_settle_deferred_file(tmp_path, capsys):
+    """The settle grace is the second exclusion that can empty `pending`; the
+    message must say so instead of asserting no old day file exists.
+
+    Mutation: reporting `deferred` dropped REDs here on the false sentence.
+    """
+    _write(tmp_path, TODAY - timedelta(days=30), aged=False)  # old name, fresh mtime
+
+    code = seal.main(["--root", str(tmp_path), "--today", TODAY.isoformat(),
+                      "--keep-days", "7", "--apply"])
+    err = capsys.readouterr().err
+
+    assert code == seal.EXIT_OK
+    assert "settle grace" in err, err
+    assert "no plain day file older than" not in err
+
+
 def test_a_differing_archive_is_never_clobbered(tmp_path):
     """Two copies that disagree: NEITHER is discarded — a human decides.
 

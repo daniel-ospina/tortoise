@@ -131,7 +131,8 @@ def archive_path(root: Path, day: date) -> Path:
 def eligible(root: Path, *, keep_days: int, today: date,
              now: float | None = None,
              settle_seconds: int = SETTLE_GRACE_SECONDS,
-             unreadable: list[Path] | None = None) -> list[Path]:
+             unreadable: list[Path] | None = None,
+             deferred: list[Path] | None = None) -> list[Path]:
     """Plain day files OLDER than the keep window, oldest first.
 
     Two exclusions, both load-bearing:
@@ -178,6 +179,10 @@ def eligible(root: Path, *, keep_days: int, today: date,
         # SETTLED, on a clock the producer cannot confuse: a file modified
         # within the grace is treated as live whatever its NAME says.
         if settle_seconds > 0 and clock - st.st_mtime < settle_seconds:
+            # SEEN and skipped — reported so `--apply` never claims "no plain
+            # day file older than N days" over a file that is exactly that.
+            if deferred is not None:
+                deferred.append(path)
             continue
         out.append(path)
     return out
@@ -205,7 +210,25 @@ def _changed_since(path: Path, before: os.stat_result | None, size: int) -> bool
     return not _unchanged_since(path, before) or size != before.st_size
 
 
-def _unlink_source(path: Path, root: Path) -> bool:
+def _source_gone(path: Path) -> bool:
+    """True when the source is ABSENT — a concurrent run finished this day.
+
+    A peer `--apply` (or a second lane on the same box) can remove the plain
+    file at ANY point after we read it, so absence is a first-class state at
+    every refusal site, not just at the unlink. Reporting it as a failure reds
+    `--apply` and prints "their plain copies are untouched" over a substrate
+    where every byte IS archived — the false alarm this file exists not to be.
+    """
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _unlink_source(path: Path) -> bool:
     """Remove a source that is provably archived.  ``True`` when THIS call
     removed the entry, ``False`` when it was already gone.
 
@@ -221,7 +244,9 @@ def _unlink_source(path: Path, root: Path) -> bool:
     Only ``ENOENT`` is swallowed: ``EACCES``/``EISDIR``/``EBUSY`` still raise, so
     the caller's "archived but the source could not be removed" verdict keeps
     meaning what it says.  The same absent-vs-unreadable split
-    ``tortoise/capture_spool.py`` makes for its own spool.
+    ``tortoise/capture_spool.py`` makes for its own spool.  (A vanished PARENT
+    directory also answers ENOENT; that is why the callers re-verify the archive
+    before they call an absence a success.)
     """
     try:
         path.unlink()
@@ -238,6 +263,13 @@ def seal_one(root: Path, path: Path) -> Sealed:
     try:
         plain = path.read_bytes()
         stat_before = path.stat()
+    except FileNotFoundError:
+        # A peer run sealed and removed this day between our selection and this
+        # read: the day is DONE, not failed.
+        return Sealed(day, "already-sealed", 0,
+                      _size_or_zero(archive_path(root, day)),
+                      "the source was already gone (a concurrent run "
+                      "sealed it first)")
     except OSError as e:
         return Sealed(day, "verify-failed", 0, 0, f"unreadable: {e}")
     digest = _sha256(plain)
@@ -266,11 +298,16 @@ def seal_one(root: Path, path: Path) -> Sealed:
                       f"existing archive is unreadable: {e}")
     if prior is not None:
         if _sha256(prior) == digest:
+            if _source_gone(path):
+                return Sealed(day, "already-sealed", len(plain),
+                              _size_or_zero(target),
+                              "the source was already gone (a concurrent run "
+                              "sealed it first)")
             if _changed_since(path, stat_before, len(plain)):
                 return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                               "file changed while sealing — source kept")
             try:
-                _unlink_source(path, root)
+                _unlink_source(path)
             except OSError as e:
                 return Sealed(day, "verify-failed", len(plain),
                               _size_or_zero(target),
@@ -314,6 +351,15 @@ def seal_one(root: Path, path: Path) -> Sealed:
         # must not publish an archive at all, or the archive becomes a truncated
         # day that looks complete and every later run calls it a conflict —
         # an alarm that can never be cleared (#6388 review cycle 2).
+        if _source_gone(path):
+            # A peer removed the source while we were compressing. Our `tmp`
+            # holds EXACTLY the bytes we read and verified, so publish it: the
+            # day is sealed, and nothing plain is left behind.
+            os.replace(tmp, target)
+            _fsync_dir(target.parent)
+            return Sealed(day, "sealed", len(plain), _size_or_zero(target),
+                          "the source was already gone (a concurrent run "
+                          "sealed it first)")
         if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), 0,
                           "file changed while sealing — source kept")
@@ -323,10 +369,14 @@ def seal_one(root: Path, path: Path) -> Sealed:
         # The LAST belt: the file changed between the publish above and this
         # unlink. The archive is a verified prefix, the source stays — and the
         # stale-prefix arm above heals this state on the next run.
+        if _source_gone(path):
+            return Sealed(day, "sealed", len(plain), _size_or_zero(target),
+                          "the source was already gone (a concurrent run "
+                          "sealed it first)")
         if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                           "file changed while sealing — source kept")
-        already_gone = not _unlink_source(path, root)
+        already_gone = not _unlink_source(path)
         removed = True
         # The unlink happened in `root`, so `root` is the entry that needs to be
         # durable — fsyncing the archive dir here would leave the removal
@@ -504,9 +554,10 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
 
     unreadable: list[Path] = []
+    deferred: list[Path] = []
     try:
         pending = eligible(root, keep_days=args.keep_days, today=today,
-                           unreadable=unreadable)
+                           unreadable=unreadable, deferred=deferred)
     except OSError as e:
         print(f"cannot list {root}: {e}", file=sys.stderr)
         return EXIT_ERROR
@@ -532,6 +583,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {path.name}", file=sys.stderr)
             return EXIT_DRIFT
         if not pending:
+            if deferred:
+                print(f"nothing to seal — {len(deferred)} day file(s) are "
+                      f"inside the {SETTLE_GRACE_SECONDS} s settle grace "
+                      f"(still being written, or written recently)",
+                      file=sys.stderr)
+                for path in deferred:
+                    print(f"  {path.name}", file=sys.stderr)
+                return EXIT_OK
             print(f"ok — no plain day file older than {args.keep_days} days "
                   f"under {root}")
             return EXIT_OK
@@ -553,6 +612,9 @@ def main(argv: list[str] | None = None) -> int:
         if unreadable:
             print(f"nothing sealable — but {len(unreadable)} day file(s) could "
                   f"not be stat'd (run --check)", file=sys.stderr)
+        elif deferred:
+            print(f"nothing sealable — {len(deferred)} day file(s) are inside "
+                  f"the {SETTLE_GRACE_SECONDS} s settle grace", file=sys.stderr)
         else:
             print(f"nothing to seal — no plain day file older than "
                   f"{args.keep_days} days under {root}")
