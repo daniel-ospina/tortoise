@@ -4260,9 +4260,24 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     is GREEN; re-pointed at `:448` (where the sentence lives on `origin/main`, i.e. a plausible
     offset re-derivation) it reds again — which is what makes this a landing check and not a
     range check.
-    """
-    citing = (REPO_ROOT / _CITING_TEST_FILE).read_text().splitlines()
 
+    ⛔ AND THE SURFACE IS DISCOVERED, NOT NAMED, BECAUSE NAMING IT IS WHAT LET THE DRIFT THROUGH.
+    The pin as first written hard-coded ONE sibling file, so it reproduced the defect it exists to
+    remove at the next level up: `tests/test_reporting_workflow_concurrency.py` relays the same
+    runbook by number (`:25-26`, the two inventory rows it contrasts) and sat outside every pin for
+    the same reason `tests/test_ci_selection.py` did — a scan surface that names its files is
+    incomplete the moment a file is added, and the file it misses is unread in BOTH directions. So
+    every OTHER `tests/**/*.py` is now scanned for runbook citations and folded into the same
+    two-way anchor set: a runbook citation in a sibling this pin does not know FAILS, and an anchor
+    nothing cites FAILS. Only the runbook is discovered — a sibling's citations into the *tree* are
+    that file's own business, and requiring anchors for them would widen this pin into an unrelated
+    ref audit. A `:N-M` range is anchored on its first line.
+
+    Non-vacuity for the discovered half (measured): re-pointing `tests/test_reporting_workflow_
+    concurrency.py`'s citation at a line that does not carry the inventory row reds with `cites
+    docs/ops/ci-runner-x64.md:<n>, but that line is …`; with this pin absent the same edit is
+    silent, because no other surface reads that file.
+    """
     # (target file, cited line) -> a regex the CITED LINE ITSELF must match
     anchors: dict[tuple[str, int], str] = {
         # the /docs guard's import of the schema types the citing paragraph names
@@ -4273,22 +4288,37 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # the capstone pin's re-cut history, which names it too
         ("tests/test_capstone_preregistration_9075.py", 1590):
             r"test_the_changes_job_carries_no_job_scope_env",
+        # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
+        # moving alias the observers must NOT pin to, which the version pin below it replaces
+        ("docs/ops/ci-runner-x64.md", 25): r"^\| `ubuntu-latest` \|",
     }
 
     ref = re.compile(r"((?:tests/[A-Za-z0-9_/]+\.py)|(?:docs/ops/ci-runner-x64\.md)):(\d+)")
-    cited: dict[tuple[str, int], list[int]] = {}
-    for i, line in enumerate(citing):
-        for m in ref.finditer(line):
-            cited.setdefault((m.group(1), int(m.group(2))), []).append(i + 1)
+    runbook_ref = re.compile(r"(docs/ops/ci-runner-x64\.md):(\d+)")
+    # cited[target, line] -> every place that cites it, as ``file:line``, so a failure names the
+    # file the reader should open — the discovered half does not live in _CITING_TEST_FILE.
+    cited: dict[tuple[str, int], list[str]] = {}
+
+    def _collect(path: Path, pattern: re.Pattern[str]) -> None:
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            for m in pattern.finditer(line):
+                cited.setdefault((m.group(1), int(m.group(2))), []).append(f"{rel}:{n}")
+
+    _collect(REPO_ROOT / _CITING_TEST_FILE, ref)
+    this_file = (REPO_ROOT / "tests" / "test_ci_runner_x64_install.py").resolve()
+    for sibling in sorted((REPO_ROOT / "tests").rglob("*.py")):
+        if sibling.resolve() != this_file:
+            _collect(sibling, runbook_ref)
     assert cited, (
-        f"{_CITING_TEST_FILE} no longer cites the runbook or the tree — re-anchor this pin rather "
-        "than deleting it; a pin over an empty reference set checks nothing"
+        "no surface cites the runbook or the tree any more — re-anchor this pin rather than "
+        "deleting it; a pin over an empty reference set checks nothing"
     )
 
     unknown = sorted(set(cited) - anchors.keys())
     assert not unknown, (
-        f"{_CITING_TEST_FILE} cites target(s) this pin does not know — re-derive them against the "
-        f"tree at this head and add them to `anchors`: {unknown}"
+        "a citation this pin does not know — re-derive it against the tree at this head and add it "
+        f"to `anchors`: {unknown}"
     )
     stale = sorted(anchors.keys() - set(cited))
     assert not stale, (
@@ -4297,14 +4327,14 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     )
 
     wrong: list[str] = []
-    for (target, n), citing_lines in sorted(cited.items()):
+    for (target, n), places in sorted(cited.items()):
         path = REPO_ROOT / target
-        assert path.is_file(), f"{_CITING_TEST_FILE}:{citing_lines} cites a missing file: {target}"
+        assert path.is_file(), f"{places} cites a missing file: {target}"
         lines = path.read_text().splitlines()
         assert 1 <= n <= len(lines), f"{target}:{n} is past EOF ({len(lines)} lines)"
         if not re.search(anchors[(target, n)], lines[n - 1]):
             wrong.append(
-                f"{_CITING_TEST_FILE}:{citing_lines} cites {target}:{n}, but that line is "
+                f"{places} cites {target}:{n}, but that line is "
                 f"{lines[n - 1].strip()!r}"
             )
     assert not wrong, (
