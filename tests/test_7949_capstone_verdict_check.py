@@ -1945,6 +1945,27 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         assert symbol.split(".")[-1] in text, (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not")
+    # (c) The probe's eight bare step cites (#10211). They name a SYMBOL and a
+    # bare `:NNNN` with no filename, so rule (b) cannot see them (it reads the
+    # README) and the bundle's own sweep cannot either (`_BUNDLE_CITE` requires
+    # `file.py:line`). Nothing watched them: `#10243` moved `extractor_v2.py` by
+    # +88 and all eight went stale while both pin files stayed green. Same rule
+    # as (b), applied to the file that carries them.
+    probe = re.sub(r"`{2}", "`", PROBE.read_text())
+    step_pairs = re.findall(
+        r"`([A-Za-z_][\w.]*)`(?:\s*/\s*`([A-Za-z_][\w.]*)`)?"
+        r"\s*\((?:S[\d.]+(?:\+S\d+)?|the gap filler),[^`]*`:(\d+)`",
+        probe)
+    assert len(step_pairs) >= 8, (
+        f"the probe's step list is gone or was reformatted: {step_pairs}")
+    for first, second, lineno in step_pairs:
+        text = sources["extractor_v2"][int(lineno) - 1]
+        named = [s.split(".")[-1] for s in (first, second) if s]
+        assert any(sym in text for sym in named), (
+            f"the probe cites `{first}`"
+            + (f" / `{second}`" if second else "")
+            + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
+            "the line moved and the cite did not")
 
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():

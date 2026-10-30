@@ -146,8 +146,8 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block in the step table below, not in the log. (The SYMBOL is what
-makes this line checkable: a bare number in this paragraph is read by no pin — the paragraph is
+the `result["classify_later"]` block at `8961-8967` here, not in the log. (The SYMBOL is what makes
+this line checkable: a bare number in this paragraph is read by no pin — the paragraph is
 `_BUNDLE_HISTORICAL`, deliberately — so a reader re-deriving it must land on the block the sentence
 names, not on the number alone.) That is deliberate: a scored log is a measurement record and the bundle's rule is
 that a row moves only by RE-RUNNING the probe and removing the file it replaces, never by editing a
@@ -235,7 +235,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:8608-8612`, `:8961-8967`). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:8608-8612`, `:8961-8975`). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -252,7 +252,7 @@ is reached. `vet_enabled` is computed at `extractor_v2.py:8592`, i.e. BEFORE the
 each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8680`), `if vet_enabled and
 complete_list:` (`:8802`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
-`{}` on its fail-open path, `:8479-8481`). Because `_witness_block` returns the first positive
+`{}` on its fail-open path, `:8478-8481`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
@@ -487,15 +487,15 @@ anchor in one direction (so its `:Event 0/41` contradicted its own `references=7
 fixed both, but its envelope was stale: every `tortoise/sdk.py` line it cited (`:12196` for the meta
 fold, `:12477` for `link_source_to_event`, `:2306-2331` for `_TURN_WRITE_CYPHER`) had moved under
 it when `main` advanced, so the one instruction it carried for #9116 — "the fix targets
-`sdk.py:12317`" — pointed into unrelated code. `8a8bbcba2` fixed
+`sdk.py:12196`" — pointed into unrelated code. `8a8bbcba2` fixed
 the OFF-block witness hazard, but its rule accepted `enabled: true` on its own — and `enabled` is the
 FLAG, not activity (see "The eight steps" above), so a single flag-on/empty-list session could have
 made V5 pass on a step nobody observed; its derivation figure was also circular (`132/132`, a class
 defined by the link it measures). `6020cbd5f` (the stamped run THIS one replaces) fixed that rule but
 left two prose defects this round repairs: its flag-on/no-activity cause was templated for the surface
 NAME while every citation in it was the VET pass's, so the S2.3 line sent a reader to code the
-classify pass never runs (`classify_later` at `:8473`, its `if classify_later and …` / `if items:`
-gates at `:8604`/`:8607`/`:8729`/`:8739`), and its absent-surface cause asserted "so the pass RAN"
+classify pass never runs (`classify_later` at `:8561`, its `if classify_later and …` / `if items:`
+gates at `:8692`/`:8695`/`:8817`/`:8827`), and its absent-surface cause asserted "so the pass RAN"
 from the forced-and-read-back flag alone — the very equation `_pass_ran` rejects — so an unobserved
 step read as a pass that ran and was merely hidden. Keeping any of them alongside the corrected run
 would leave two artifacts claiming to be THE measurement. **Superseding is how a row moves: re-run the probe, DELETE
