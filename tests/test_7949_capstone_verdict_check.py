@@ -1573,7 +1573,11 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
 
     Non-vacuity: at the pre-fix head `sdk.py:10341` is a comment line inside
     `_extract_session_v2`, so the `startswith("def …")` assertion reds, and
-    `:9358` carries no call to it, so the call-site assertion reds too.
+    `:9358` carries no call to it, so the call-site assertion reds too. For
+    rule (d) the #10021 head is the pre-fix tree: the probe's call cite said
+    `:11682` (`from tortoise.commit_schema import compute_client_commit_id`)
+    and the assertion reds on it while the corrected `:12273`
+    (`extracted, meta = self._extract_session_v2(`) passes.
     """
     readme = (PROBE.parents[1] / "README.md").read_text()
     sources = {
@@ -1636,6 +1640,26 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
             + (f" / `{second}`" if second else "")
             + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
             "the line moved and the cite did not")
+    # (d) The probe's ENTRY-POINT sentence (#10021 review): rule (a) reads the
+    # README's `sdk.py:<def>`; called at `:<call>` pair, and this file's own
+    # sweep reads the `sdk.py:<def>` half of the probe's copy, but the probe's
+    # bare call cite had NO reader at all — neither sweep can see it (it names
+    # no filename, and rule (c) covers only the eight `extractor_v2` step
+    # cites). It therefore went stale twice unnoticed: at this head it said
+    # `:11682`, a `from tortoise.commit_schema import …` line, while the README
+    # said `:12308`, a comment 35 lines below the call — two documents, two
+    # different wrong answers for one fact. A number no leg reads is exactly
+    # the class this bundle exists to refuse, so the pair is pinned here.
+    probe_entry = re.search(r"`sdk\.py:(\d+)`,\s*called at `:(\d+)`", probe)
+    assert probe_entry, (
+        "the probe's entry-point sentence moved; re-derive it, do not drop the pin")
+    probe_def, probe_call = (int(n) for n in probe_entry.groups())
+    assert sources["sdk"][probe_def - 1].lstrip().startswith("def _extract_session_v2("), (
+        f"the probe cites the _extract_session_v2 def at sdk.py:{probe_def}, which is "
+        f"{sources['sdk'][probe_def - 1].strip()!r} — the line moved and the cite did not")
+    assert "self._extract_session_v2(" in sources["sdk"][probe_call - 1], (
+        f"the probe cites the call at sdk.py:{probe_call}, which is "
+        f"{sources['sdk'][probe_call - 1].strip()!r} — the line moved and the cite did not")
 
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():

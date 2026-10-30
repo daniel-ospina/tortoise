@@ -16,7 +16,7 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:13236``, called at ``:11682``) →
+   (``sdk.py:13236``, called at ``:12273``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
    ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
    ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
@@ -24,8 +24,11 @@ the corrected reading:
    ``:8700``), ``search_graph`` (S3, ``:8717``), ``run_s4`` (the gap filler,
    ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``). The SYMBOL is
    authoritative and the line is a convenience: the three FILE-NAMED cites
-   above are resolved against the tree by the bundle's pin, and these eight
-   bare step cites are re-read by that same pin file
+   above are resolved against the tree by the bundle's pin, this sentence's
+   bare call cite is re-read by that same pin file (rule (d), which exists
+   because it was the only unchecked number in the bundle — it said `:11682`,
+   a `commit_schema` import, two heads running), and these eight bare step
+   cites are re-read by it too
    (`tests/test_7949_capstone_verdict_check.py`,
    `test_the_readmes_line_citations_resolve_to_the_symbols_they_name`). They
    need that separate leg because a bare `:NNNN` carries no filename, so the
