@@ -175,7 +175,7 @@ here so "swept" is never read into a number nothing re-checks.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:14273` is the fold (`"stats": out.get("stats") or {}`) — while the
+`tortoise/sdk.py:14307` is the fold (`"stats": out.get("stats") or {}`) — while the
 extractor builds `result["classify_later"]` (`tortoise/extractor_v2.py:8965`) and
 `result["vet"]` (`tortoise/extractor_v2.py:8975`) on a surface the receipt never
 carries. `#9116` is open and still true at this head.
