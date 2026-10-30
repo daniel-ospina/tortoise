@@ -533,7 +533,7 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
     the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:520-522`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:675-676`). Keeping
+    (`docs/ops/ci-runner-x64.md:677-678`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -2877,7 +2877,7 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
     anchors: dict[int, str] = {
         82: r"DROPS the whole class on re-registration",
         520: r"A foreign arch marker",
-        675: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        677: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
         448: r"test_the_changes_job_carries_no_job_scope_env",
