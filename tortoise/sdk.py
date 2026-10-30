@@ -24728,8 +24728,31 @@ class TortoiseSDK:
         # misses and the retry mints its own arity. Bounded to that pre-fix
         # shape, and the retry THEN exact-matches the clean operator it minted.
         _slots = list(inputs)
+        # ── #10305 (tie-break): WHICH id repeats is part of the SHAPE ────────
+        # The arity leg above compares COUNTS, and two shapes over one endpoint
+        # set can share a count: a pre-#9750 duplicate-TARGET operator
+        # (`[a, b, b]`) and the SELF-SUPPORT shape a caller can spell
+        # (`[a, a, b]`) are both 3 slots / 2 endpoints, so both satisfy
+        # `n_edges = size($slots)` and `ORDER BY n_edges ASC, o.id` then bound
+        # the request to the OLDER one — the legacy operator, because it was
+        # written first. Measured (round 6,
+        # `test_exact_arm_prefers_the_SHAPE_the_request_spelled`): a request
+        # `[a, a, b]` was answered with the `[a, b, b]` operator, so EP
+        # propagated a factor whose source slot occurs ONCE where the caller
+        # asserted it twice — the same "a model the caller never asserted" class
+        # this PR exists to close, one shape over.
+        # The two shapes differ in exactly one observable: how many slots carry
+        # the REQUEST's source id (`$src` — the operator's `idx` 0 endpoint, so
+        # it is always a member of `slot_ids`). `src_slots` counts them on the
+        # graph side, `$src_count` on the request side, and the ORDER preference
+        # is their distance. ⛔ This is an ORDER, never a CONDITION: nothing that
+        # matches today stops matching, so it cannot resurrect #9750's hazard (a
+        # miss would MINT the duplicate operator). `n_edges ASC, o.id` still
+        # break every remaining tie, so the binding stays deterministic.
+        _src = _slots[0] if _slots else None
         params: dict = {"op": op_type, "inputs": _inputs_distinct,
-                        "slots": _slots}
+                        "slots": _slots, "src": _src,
+                        "src_count": _slots.count(_src)}
         conds = [
             "size(targets) = size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
@@ -24777,7 +24800,10 @@ class TortoiseSDK:
         # `ids["connections"]` unstable across runs for the same bundle (the
         # #7822 row-order-dependence class). Ordering by edge count ASC prefers
         # the operator whose edges EQUAL its distinct endpoints (the clean one)
-        # and is deterministic on the tie.
+        # and is deterministic on the tie. ⚠️ Edge count alone cannot separate
+        # two SAME-width shapes (`[a, b, b]` legacy vs `[a, a, b]` self-support —
+        # both 3/2), so the ORDER's FIRST key is the source-slot multiplicity
+        # distance described above, and `n_edges` is the second.
         # `slot_ids` (NOT DISTINCT — one entry per typed edge) and
         # `from_slots` (the `idx` 0 target, i.e. the operator's SOURCE slot)
         # exist for the #10305 arity condition above; both are counted from the
@@ -24791,7 +24817,11 @@ class TortoiseSDK:
             f"collect(CASE WHEN r.idx = 0 THEN t.id ELSE null END) "
             f"AS from_slots "
             f"WHERE {' AND '.join(conds)} "
-            f"RETURN o.id, o.status ORDER BY n_edges ASC, o.id LIMIT 1",
+            f"WITH o, n_edges, "
+            f"size([x IN slot_ids WHERE x = $src]) AS src_slots "
+            f"RETURN o.id, o.status "
+            f"ORDER BY abs(src_slots - $src_count) ASC, n_edges ASC, o.id "
+            f"LIMIT 1",
             params=params,
         ).result_set
         if rows:
