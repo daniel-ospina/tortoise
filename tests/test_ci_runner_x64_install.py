@@ -1953,8 +1953,9 @@ def test_every_test_name_the_runbook_names_exists():
     holds it) passes, and a name that moved, was renamed, or never existed reds with the real
     names the file does define. Both directions are pinned — a reference to a missing FILE reds too.
 
-    Non-vacuity: with the pre-fix runbook text (`test_the_changes_job_carries_no_job_scope_env`
-    against the pre-rename module) this reds with `NAME-MISSING`.
+    Non-vacuity, measured: restoring the pre-fix runbook text (the phantom name) reds this with the
+    phantom reference named in the message; a reference to a file that does not exist reds the same
+    way.
     """
     import ast  # local: a top-level import would shift this file's own cited line numbers (8d)
 
@@ -2023,7 +2024,9 @@ def test_every_tools_citation_into_the_runbook_lands_on_what_it_names():
     fully-qualified citation in the same sentence is NOT scanned (a bare `:NN` is ambiguous in a
     file that also cites installer lines by number).
 
-    Non-vacuity: on the pre-fix number (`:61` in both files) this reds twice, naming `:67`.
+    Non-vacuity, measured both arms: with the pre-fix number (`:61` in both files) the COVERAGE arm
+    reds, reporting `[61]` as unanchored; with a simulated +6-line runbook shift the LANDING arm
+    reds and names `:73` — the line the sentence actually moved to.
     """
     doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
