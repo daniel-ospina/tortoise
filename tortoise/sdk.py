@@ -156,7 +156,16 @@ from .projection.entities import (  # #3998: the declared :Source surface
 # `EventAPI.add_point` stored NOTHING.
 from .projection.entities import (
     flatten_search_keys_prop as _flatten_search_keys_prop,
+    revise_identifier_aliases as _revise_identifier_aliases,
 )
+# #8933 Stage 2 — the write half at the CREATE door. Both are the SAME helpers
+# `_upsert_point_props` uses, so a live create and a rebuild replay derive
+# identically instead of drifting (the ruling's criterion 2).
+from .projection.entities import (
+    append_identifier_aliases,
+    point_identifier_aliases,
+)
+from .sparse import identifier_tokens_enabled as _identifier_tokens_enabled
 # #10122: the FULLTEXT index FIELD TABLE (the one that CREATES the indexes).
 # The Point `name` advisory below reads the Point's fields OFF it rather than
 # re-typing `content`/`search_keys` — so the advisory cannot drift from the
@@ -299,6 +308,20 @@ def _journal_snapshot_from_create_map(
     unusable vector is omitted here and re-added as an explicit `None` by the
     producer's own `setdefault` in `_emit_event` (PRESENCE IS OWNERSHIP,
     #5004), so the key is still on every snapshot a PointAdded emits.
+
+    The DERIVED identifier alias (#8933) IS an exception to "exactly the
+    properties the `CREATE` writes", and it is the only one: the create door
+    snapshots the caller's intent (`_intended`) BEFORE the alias enters
+    `_create_map`, so `search_keys` reaches the store and never the record.
+    That is deliberate — the alias is DERIVED from `content` by
+    `sparse.identifier_alias`, so a replay re-derives it from the same input
+    (the create door and `projection._revise_point` both do). Journaling it
+    would promote a derived value into the truth, and the record would then be
+    able to disagree with the rule that produced it. A CALLER-supplied
+    `search_keys` is not derived and still rides the record. Pinned by
+    `TestWritePath::test_journal_payload_is_never_mutated` and the two SDK-door
+    parity tests. (#10203 review round 11: this docstring was one exception
+    short of the truth.)
     """
     out: dict = {}
     for key, expr in create_map.items():
@@ -5608,9 +5631,27 @@ def _warn_point_name_not_lexically_indexed(
             effective[field] = stored.get(field)
         else:
             effective[field] = None
+    # ⛔ WRITE SIDE for the INDEXED half (#10203 review round 12, P2).
+    # ``indexed_tokens`` must be the terms the INDEX will hold, and the index
+    # is written by the WRITE half of the #8933 identifier asymmetry —
+    # ``point_identifier_aliases`` -> ``identifier_aliases(space_separated=
+    # False)`` — which deliberately does NOT mint a composite from prose
+    # (``_IDENTIFIER_SPAN_RE`` admits no whitespace, so "sprint 2024 planning"
+    # indexes ``sprint``/``2024``/``planning`` and never ``sprint2024``).
+    # The tokenizer's DEFAULT is the READ side (it mints ``sprint2024`` from
+    # that prose), so tokenising the indexed text with the default made a
+    # name of ``sprint2024`` intersect ``indexed_tokens`` and this advisory
+    # fall SILENT about a name the engine cannot find — the exact
+    # stored-but-unfindable case it exists to report, silenced by a token no
+    # search can produce. Same fix, same reasoning, as ``tortoise/bm25``
+    # applies to its corpus.
+    # ``name_tokens`` above stays on the READ side on purpose: the name is
+    # caller-typed and reaches the engine as a QUERY (``build_or_query``), so
+    # the read side is the correct half for it.
     for field in fields:
         indexed_tokens.update(tokenize_sparse_query(
-            _lexical_text(effective[field]), keep_numeric=True))
+            _lexical_text(effective[field]), keep_numeric=True,
+            space_separated_identifiers=False))
     if not any(ch.isalnum() for ch in str(name)):
         # Silent only when the name carries NO alphanumeric character at all
         # (pure punctuation/whitespace): then there is nothing to index and the
@@ -11377,6 +11418,35 @@ class TortoiseSDK:
         # (plan §6.7), not a committed rebuild record: the JSONL journal (the
         # rebuild source) holds nothing.
         _intended = _journal_snapshot_from_create_map(_create_map, _create_params)
+        # ── #8933 Stage 2, WRITE HALF — at CAPTURE ──
+        # The ruling says "at capture, write a normalised copy of each identifier
+        # into the indexed text", and `create_point` is the door the mint uses
+        # (`_capture_session_impl` -> `self.create_point`). It used to reach only
+        # `_flatten_search_keys_prop`, so no SDK-created or captured Point ever
+        # held the alias while a REPLAY of the same `PointAdded` did
+        # (`apply` -> `_upsert_point_props`) — `derived = replay(journal)` was
+        # false on `search_keys`, and a query typed with no separator
+        # (`err4032`, the ruling's "dashes, spaces, or none") matched nothing.
+        #
+        # ⛔ It is DERIVED into the node and never RECORDED: `_intended` is
+        # snapshotted on the line above, so the alias reaches the CREATE map and
+        # nothing else. The journal keeps E3's spelling and a rebuild re-derives
+        # the same value from `content` + the payload's own `search_keys` — the
+        # SAME `point_identifier_aliases`/`append_identifier_aliases` pair
+        # `_upsert_point_props` calls, never a second normaliser (the ruling's
+        # criterion 2, and the Elastic `normalizer`-on-the-field shape).
+        _alias_view = {"content": content}
+        if isinstance(props.get("search_keys"), str):
+            _alias_view["search_keys"] = props["search_keys"]
+        if append_identifier_aliases(
+                _alias_view, point_identifier_aliases(_alias_view)):
+            # Rebuilt here (not earlier) so the un-patched path builds the field
+            # list byte-identically to before this change.
+            _create_params["_cp_alias"] = _alias_view["search_keys"]
+            _create_map["search_keys"] = "$_cp_alias"
+            _create_fields = "".join(
+                f", `{str(_k).replace('`', '``')}`: {_v}"
+                for _k, _v in _create_map.items())
         # The append's OWN outcome is the commit signal — a per-call value, not
         # a delta of the shared `_journal_write_failures` counter: a concurrent
         # writer on the same instance can increment that counter between the
@@ -15398,8 +15468,84 @@ class TortoiseSDK:
         # so a stale hash after update_point(content=...) silently breaks
         # dedup and diverges the live graph from JSONL replay (which derives
         # the hash from PointRevised.new_content).
+        #
+        # #8933 Stage 2 (review round 8, F1): tracks whether the ``search_keys``
+        # this door writes was DERIVED, so it can be kept out of the record the
+        # way ``content_hash`` and the derived vector already are. Declared here
+        # (not inside the ``if`` below) because the emit is far below and reads
+        # it unconditionally.
+        _derived_search_keys = False
         if "content" in props:
             props["content_hash"] = _content_hash(props["content"])
+            # #8933 Stage 2 / #10203 (measured P0): a content edit is the THIRD
+            # derived value this door recomputes in the same round trip, for the
+            # same reason as the hash (#1904) and the vector (#4208) — the live
+            # node must equal what a replay of `PointRevised` produces, and the
+            # ruling writes the alias AT CAPTURE, so a revision has to re-derive
+            # it. Leaving it alone meant an edit that introduced an identifier
+            # never indexed it, an edit that removed one kept a stale alias that
+            # still matched the old code, and `check_consistency` reported an
+            # unclearable `divergence="content"` on `search_keys` for a faithful
+            # graph (its reference view derived the NEW content's alias while the
+            # node could only hold the creation's).
+            #
+            # The node's previous value says which tokens are STALE and is not in
+            # the event, so it is read here; `revise_identifier_aliases` then
+            # keeps every non-alias key and swaps the derived half. A
+            # caller-supplied `search_keys` owns the list and wins as the base.
+            #
+            # ⛔ DERIVED, so NOT RECORDED (the #1904/#4208 rule, applied to the
+            # third derived field on this door). `_revise_point` re-derives the
+            # value from `new_content` and the node's own previous keys, so a
+            # journalled copy is dead weight at best and a producer claim the
+            # replay does not honour at worst (#5004/#5046). Left in the record,
+            # `search_keys` is a COLUMN (`public.point`, record_projection
+            # patches columns from the flat `NodePatch`), so a DERIVED value
+            # would become authoritative in the record lane — which that
+            # module's own doctrine forbids, and `chk_*_props_no_derived`
+            # cannot catch it for a name that has a column.
+            #
+            # A CALLER-supplied key is different: it is owned by the call, the
+            # replay cannot recompute it, and it rode `emit_props` before
+            # #8933 too — so that case keeps its record, with the #5046
+            # caller-owned parity gap unchanged (not widened here).
+            # ⛔ AN EXPLICIT `search_keys=None` IS A CLEAR, NOT AN ABSENT KEY
+            # (#10203 review round 12, P3). ``props.get(...)`` cannot tell the
+            # two apart, so a call that edits content AND clears the vocabulary
+            # — ``update_point(id, content=…, search_keys=None)``, the same
+            # documented ``None``-clears shape ``tags``/``embedding`` use in
+            # this very function — used to be REPLACED by the recomputed
+            # derived value, which keeps the node's previous non-alias keys:
+            # the caller was told the write succeeded while the vocabulary it
+            # asked to drop survived on the node and in the FTS index (the
+            # stale-index-value class, reached through argument-default
+            # ambiguity rather than a bad clause).
+            #
+            # So the gate is on the KEY, not the value. The ``None`` then rides
+            # ``SET n += $props`` exactly as it did before #8933 (a null REMOVES
+            # the property) and rides the record too: a clear is CALLER intent,
+            # not a derived value, so it keeps the same caller-owned record
+            # parity a caller-supplied list has (and the same #5046 gap — the
+            # replay fold has no clear clause — neither widened nor narrowed
+            # here). When no content is edited the block below is never even
+            # reached, which is why the defect only ever bit the combined call.
+            if _identifier_tokens_enabled():
+                if "search_keys" in props and props["search_keys"] is None:
+                    _derived_search_keys = False  # caller-owned CLEAR
+                else:
+                    _prev = proj.g.query(
+                        "MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys",
+                        params={"id": id},
+                    ).result_set
+                    _old_content, _old_keys = _prev[0] if _prev else (None, None)
+                    _caller_keys = props.get("search_keys")
+                    props["search_keys"] = _revise_identifier_aliases(
+                        new_content=props["content"],
+                        old_content=_old_content,
+                        old_search_keys=_old_keys,
+                        caller_search_keys=_caller_keys,
+                    )
+                    _derived_search_keys = _caller_keys is None
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         # #5004 round-4: a caller-supplied vector is stored VERBATIM here
@@ -15718,10 +15864,18 @@ class TortoiseSDK:
         # would be dead weight, and #5004's presence-is-ownership rule would
         # read the key as a producer claim the replay does not honour (the
         # #5046 shape). A CALLER-supplied vector stays in the record, as before.
+        # #8933 (review round 8, F1): `search_keys` is the THIRD of these — the
+        # alias `_revise_point` re-derives on a content edit — and it was riding
+        # this record, making "derived, never recorded" (the PR body,
+        # `.env.example`, `point_identifier_aliases`, and the create door's own
+        # snapshot) false from this door onward. Stripped only when DERIVED: a
+        # caller-supplied `search_keys` is caller-owned and stays, exactly like
+        # the vector above.
         emit_props = {
             k: v for k, v in props.items()
             if k != "content_hash"
             and not (_derived_embedding and k == "embedding")
+            and not (_derived_search_keys and k == "search_keys")
         }
         _promote_arm = 'status' in props
 
