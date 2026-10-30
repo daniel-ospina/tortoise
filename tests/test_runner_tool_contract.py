@@ -516,10 +516,14 @@ def _looks_poolable(value: str) -> bool:
     resolved per leg at run time, so the text cannot show the label to be
     non-poolable. Admitting it is the whole point when the job uses `gh`; the cost of
     admitting it otherwise is a FALSE POSITIVE, stated rather than waved away — an
-    expression whose every leg is non-poolable (`os: [ubuntu-latest, macos-latest]`,
-    the matrix GitHub's own example uses) is admitted too, and if that job also uses
-    `gh` the pin's message asks for a declaration rather than a silent skip. Cheap in
-    the right direction: a demanded `KNOWN_UNCOVERED` reason, never an invisible job —
+    expression whose every leg is non-poolable (`os: [macos-latest, windows-latest]`)
+    is admitted too, and if that job also uses `gh` the pin's message asks for a
+    declaration rather than a silent skip. That polarity is per LEG, not per shape:
+    GitHub's own examples mix classes (`os: [macos-latest, ubuntu-latest]`), and there
+    admitting the job is a TRUE positive, because the `ubuntu-latest` leg really can
+    land on the pool — do not narrow this arm by analogy with the macOS-only case.
+    Cheap in the right direction: a demanded `KNOWN_UNCOVERED` reason, never an
+    invisible job —
     and note the remedy that message names (`ensure gh`) is Linux-only, so on a macOS
     leg the declaration is the correct answer rather than the install step.
     """
@@ -558,6 +562,15 @@ def _poolable_label(text: str) -> bool:
     "a matrix expression (`${{ … }}`) is not a label; it is resolved per job at run
     time" — but that reader resolves labels against the ONLINE runner list instead.
     This scan has no such second source, so it cannot skip: it must fail closed.
+
+    RESIDUAL — shapes this reader still does not see, all returning False (the same
+    silent skip, one shape further out): a YAML ALIAS (`runs-on: *pool_labels`), a
+    next-line plain scalar or FLOW list (`runs-on:` then `  ubuntu-latest` /
+    `  [self-hosted, ubuntu-latest]`), and a `<<:` merge-key line. None is used in the
+    tree today — all 86 `runs-on:` keys are inline scalars, so the miss is latent, not
+    live — and they are named here so the next author writing one of them knows the
+    scan is a text reader rather than a YAML parser, and adds the shape instead of
+    assuming coverage.
     """
     lines = text.splitlines()
     for i, line in enumerate(lines):
