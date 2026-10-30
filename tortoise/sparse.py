@@ -468,6 +468,21 @@ def expansion_tokens(
     Accepts a flat string, ``None``, or an iterable of strings (the extractor
     writes ``search_keys`` as a flat space-joined STRING after
     ``_flatten_search_keys_prop``; raw graph values may still be arrays).
+
+    ⛔ The chunks are INDEXED TEXT, so they take the **WRITE side** of the
+    #8933 identifier asymmetry (``space_separated_identifiers=False``) — the
+    same half ``tortoise.bm25`` passes for its corpus, the SDK's
+    ``_warn_point_name_not_lexically_indexed`` for ``indexed_tokens``, and
+    ``projection.entities.point_identifier_aliases`` for the stored alias.
+    The default (read side) is the permissive half that mints a composite from
+    a bare ``<word> <2+ digits>`` pair, which is a QUERY shape the #8933 ruling
+    widened for what a person types — never for text that already sits in the
+    index. Minting it here changed the SECOND FTS pass's bytes for questions
+    with no identifier shape at all: the base-graph pool's ``couch ikea 800
+    dollars`` harvested ``ikea800`` and displaced a golden row, breaking the
+    flag-OFF byte-identity golden (``tests/test_assembly_sdk.py``, CI shard
+    ``test (c)``). Restoring the write side keeps this call site silent on prose
+    while an ``ERR-4032``-shaped chunk still contributes its write-side alias.
     """
     if not aliases:
         return []
@@ -477,7 +492,8 @@ def expansion_tokens(
     seen: set[str] = set()
     out: list[str] = []
     for chunk in chunks:
-        for tok in tokenize_sparse_query(chunk, keep_numeric=True):
+        for tok in tokenize_sparse_query(
+                chunk, keep_numeric=True, space_separated_identifiers=False):
             if tok in reserved or tok in seen:
                 continue
             seen.add(tok)
