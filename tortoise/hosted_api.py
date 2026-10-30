@@ -41540,7 +41540,13 @@ async def oauth_authorize(request: Request):
                 response_type=params["response_type"] or None,
                 code_challenge=params["code_challenge"] or None,
                 code_challenge_method=params["code_challenge_method"] or None,
-                scope=params["scope"] or None),
+                scope=params["scope"] or None,
+                # §9 step 4: the page cannot complete a state-less flow (the BFF
+                # treats `state` as the attempt's identity), so refuse it HERE —
+                # as the client's error at the client's own redirect — instead of
+                # bouncing the visitor into a bare JSON 400 at the app.
+                state=params["state"],
+                require_state=True),
             op="oauth_authorize_params")
         # #3443: WHETHER the request may proceed and WHERE the browser is sent
         # are decided together, inside this try — the destination is rebuilt

@@ -1128,7 +1128,9 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                               response_type: str | None,
                               code_challenge: str | None,
                               code_challenge_method: str | None,
-                              scope: str | None = None) -> dict:
+                              scope: str | None = None,
+                              state: str | None = None,
+                              require_state: bool = False) -> dict:
     """Validate the /oauth/authorize request. Returns the client row.
 
     #3128: ``scope`` is the requested scope and is validated HERE — on the one
@@ -1136,6 +1138,17 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
     (code mint) — so an out-of-allow-list scope is refused before a code is
     stored. ``scope or client.get("scope")`` mirrors the mint fallback
     exactly.
+
+    #3524 §9 step 4: ``require_state`` is set by the PAGE-RENDER path only. The
+    page cannot complete a state-less flow at all — the BFF's `/api/consent/start`
+    and `/api/consent/token` use `state` as the ATTEMPT's identity and refuse an
+    empty one — so a state-less request used to reach the app's sign-in leg and
+    die there as a bare JSON 400 in the browser: no page, no link, no recovery,
+    and nothing naming the field. Refused HERE, it is the CLIENT's error
+    delivered at the client's own registered redirect (RFC 6749 §4.1.2.1), the
+    same shape every other refusal takes. ⛔ Redemption does NOT set it: §2.1's
+    `bind` admits `state: null`, and a token bound that way must still be
+    redeemable — this refusal is about the PAGE, not the flow.
     """
     client = resolve_client(cp, client_id)
     try:
@@ -1169,6 +1182,12 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
         if code_challenge_method != "S256":
             raise OAuthError(400, "invalid_request",
                              "Only code_challenge_method=S256 is supported.")
+        if require_state and not (state or "").strip():
+            raise OAuthError(
+                400, "invalid_request",
+                "state is required: this authorization server uses it as the "
+                "consent attempt's identity, so a flow without one cannot be "
+                "completed from the app's sign-in leg.")
         return client
     except OAuthError as exc:
         # #3669 finding 2: stamp the client resolved ABOVE onto the error

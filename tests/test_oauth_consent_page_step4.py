@@ -353,6 +353,78 @@ def test_an_invalid_authorize_request_still_gets_its_oauth_error_not_a_bounce(ap
         "sign-in leg — the app cannot fix a client error")
 
 
+def test_an_authorize_request_WITHOUT_state_is_the_clients_error_not_a_dead_end(
+        api_client):
+    """`state` is not required by RFC 6749, and the AS's own `bind` admits
+    `state: null` — but the APP's `start.ts`/`token.ts` use `state` as the
+    attempt's identity and refuse an empty one with a bare JSON 400.
+
+    So a state-less request that bounced would hand the visitor a JSON body in
+    the browser: no page, no link, no recovery, nothing naming the field. Refused
+    HERE it is the client's error, delivered at the client's own registered
+    redirect with `state` echoed — the same shape as every other refusal
+    (`RFC 6749 §4.1.2.1`).
+    """
+    tc, _ = api_client
+    reg = _register_client(tc)
+    _verifier, challenge = _pkce()
+    params = {"client_id": reg["client_id"], "redirect_uri": REDIRECT,
+              "response_type": "code", "code_challenge": challenge,
+              "code_challenge_method": "S256", "scope": "mcp",
+              "attempt_key": "ak-no-state"}          # no `state`
+    r = tc.get("/oauth/authorize", params=params, follow_redirects=False)
+    assert r.status_code in (302, 303, 307), (
+        f"a state-less authorize request must be refused to the CLIENT, not "
+        f"bounced to the app where it dies as JSON: {r.status_code} {r.text[:200]}")
+    from urllib.parse import parse_qs, urlsplit
+    parts = urlsplit(r.headers["location"])
+    assert f"{parts.scheme}://{parts.netloc}{parts.path}" == REDIRECT, parts
+    q = {k: v[0] for k, v in parse_qs(parts.query).items()}
+    assert q["error"] == "invalid_request", q
+    # ⛔ The TARGET is what discriminates: without the refusal this request would
+    # 302 to `{app}/auth?next=…` (the bounce), which is the dead end — the app's
+    # `start.ts` answers a state-less `next` with a bare JSON 400. `q` also proves
+    # the relay carried `state` (empty here), i.e. this is the authorize error
+    # shape and not some other redirect.
+    assert "/auth?next=" not in r.headers["location"], (
+        "a request the app's own routes will refuse must not be forwarded there")
+    # …and it is the authorize-error shape, not some other redirect: the relay
+    # adds `state` only when the request has one, so its ABSENCE here is expected
+    # and its presence would be a lie about the flow. What matters is the code.
+    assert set(q) <= {"error", "state", "error_description"}, q
+
+
+def test_the_served_button_ships_DISABLED_and_the_page_only_armss_it_later(
+        api_client, tmp_path):
+    """Fail-closed at PARSE time, not at script time.
+
+    The page is only safe if Authorize is inert before any of its logic runs — a
+    network stall between paint and the mint would otherwise show an armed button
+    for a flow with no assertion. Pinned on the SERVED MARKUP (the attribute), and
+    the harness now reads that attribute rather than assuming an element's initial
+    state, so removing `disabled` from the template reddens this test.
+    """
+    tc, _ = api_client
+    params = _authorize_params(tc, attempt_key="ak-markup")
+    r = tc.get("/oauth/authorize", params=params)
+    assert r.status_code == 200, r.text
+    assert re.search(r'<button[^>]*id="btn-auth"[^>]*\bdisabled\b', r.text), (
+        "the served Authorize button is not disabled in the MARKUP — the page "
+        "would be armed from first paint")
+    # …and the harness refuses to invent an element the served page does not have,
+    # so a renamed id is a TypeError instead of a silent no-op (asserted by
+    # construction in `_PAGE_DRIVER`; this test proves the driver still agrees).
+    out = _run_page(r.text, {"search": "?" + (r.request.url.query.decode()
+                                              if isinstance(r.request.url.query, bytes)
+                                              else r.request.url.query),
+                             "responses": [
+                                 {"status": 200, "body": {"token": "ct1.x.y"}},
+                                 _SOLE_ORG]}, tmp_path)
+    assert out["afterLoad"]["authDisabled"] is False, (
+        "a resolved org + a token must ARM the button after load — otherwise the "
+        "markup's `disabled` is never lifted and the flow cannot be completed")
+
+
 def test_a_request_carrying_an_attempt_key_renders_the_page(api_client):
     """The attempt key is the AS's only evidence the app advanced this flow.
 
@@ -520,11 +592,20 @@ function mkEl(id) {
   };
 }
 
-const ids = ['card', 'client-line', 'scope-line', 'resource-line', 'org-line',
-             'org-select', 'btn-deny', 'btn-auth', 'error', 'btn-retry',
-             'btn-signin', 'spinner'];
+// ⛔ THE MARKUP IS THE SOURCE OF TRUTH, not a list beside it. An id the served page
+// does not contain is NULL here, exactly as in a browser — so a renamed or typo'd id
+// surfaces as the TypeError it is, instead of being papered over by a shim that
+// invents every element it is asked for (#3524 round-3 review).
+const ids = (page.match(/\bid="([^"]+)"/g) || []).map((m) => m.slice(4, -1));
 const els = {};
 for (const id of ids) els[id] = mkEl(id);
+// `disabled` is an ATTRIBUTE in the served markup and a PROPERTY after load: the
+// initial state has to come from the markup, or a page that ships without it reads
+// as fail-closed here while a real browser renders an armed button.
+for (const id of ids) {
+  const tag = (page.match(new RegExp('<[^>]*\\bid="' + id + '"[^>]*>')) || [])[0] || '';
+  if (/\bdisabled\b/.test(tag)) els[id].disabled = true;
+}
 
 const navs = [];
 const fetchCalls = [];
@@ -559,7 +640,7 @@ function fetchStub(url, init) {
 
 const window = { location };
 const document = {
-  getElementById(id) { return els[id] || (els[id] = mkEl(id)); },
+  getElementById(id) { return els[id] === undefined ? null : els[id]; },
   createElement(tag) { return mkEl('<' + tag + '>'); },
 };
 const ctx = vm.createContext({
@@ -1090,22 +1171,52 @@ def test_the_preview_accepts_the_bound_consent_token_in_a_HEADER(api_client):
         "the assertion must never ride the query string")
 
 
-def test_a_preview_token_from_ANOTHER_flow_is_refused(api_client):
-    """§2.2 at the preview: the bind is COMPARED, not merely present.
+@pytest.mark.parametrize("field", ["client_id", "redirect_uri",
+                                   "code_challenge", "state"])
+def test_a_preview_token_from_ANOTHER_flow_is_refused(api_client, field):
+    """§2.2 at the preview: EVERY bind field is COMPARED, not merely present.
 
-    Without this a token minted for one authorize request could name a user and
-    read their teams from a completely different flow.
+    Parametrised one field at a time on purpose. A single "other flow" fixture
+    that differs in all four at once cannot attribute the 401 (`_bind_mismatch`
+    returns the FIRST mismatch), so dropping any one comparison from the preview's
+    `presented` dict would leave the suite green while the preview stopped
+    checking the CSRF nonce — the cross-flow read this route's docstring claims to
+    prevent. `/oauth/consent` carries the same parametrisation; this is its
+    preview-side twin.
     """
     from tortoise.oauth import CONSENT_TOKEN_HEADER
 
     tc, _cp = api_client
-    mine = _authorize_params(tc)
+    # ONE client, two registered redirect URIs, so `redirect_uri` can be mutated
+    # without also changing the client (which would confound the field under test).
+    second = "http://127.0.0.1:8765/other-callback"
+    reg = _register_client(tc, redirect_uris=[REDIRECT, second])
+    _verifier, challenge = _pkce()
+    _v2, challenge2 = _pkce()
+    mine = {"client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "code_challenge": challenge, "state": "st-mine"}
     token = _consent_token_for(mine)
-    other = _authorize_params(tc, state="st-somebody-elses")
-    r = tc.get("/oauth/consent/preview", params=_preview_bind(other),
+    # each field's "somebody else's" value — every one of them REACHABLE (a real
+    # second client, a real second registered URI), so a refusal can only be the
+    # bind comparison and never a shape error
+    elsewhere = {
+        "client_id": _register_client(tc)["client_id"],
+        "redirect_uri": second,
+        "code_challenge": challenge2,
+        "state": "st-somebody-elses",
+    }
+    presented = {"client_id": mine["client_id"],
+                 "redirect_uri": mine["redirect_uri"],
+                 "code_challenge": mine["code_challenge"],
+                 "state": mine["state"], "resource": ""}
+    presented[field] = elsewhere[field]       # EXACTLY one field differs
+    r = tc.get("/oauth/consent/preview", params=presented,
                headers={CONSENT_TOKEN_HEADER: token})
     assert r.status_code == 401, r.text
     assert r.json()["error"] == "invalid_token", r.text
+    assert f"bind.{field}" in r.json()["error_description"], (
+        f"the refusal must name the field that mismatched, or a future reader "
+        f"cannot tell which comparison fired: {r.json()}")
 
 
 def test_a_preview_does_NOT_spend_the_jti_so_the_visitor_can_still_approve(

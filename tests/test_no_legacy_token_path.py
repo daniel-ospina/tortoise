@@ -1709,7 +1709,6 @@ _NO_SURFACE_ACCEPTS = re.compile(
     r"|\bnot accepted\b(?!\s+by\b)",
     re.IGNORECASE,
 )
-_ACCEPTANCE_EXCEPTION = re.compile(r"\bother\b|\bexcept\b", re.IGNORECASE)
 # The pre-step-4 affirmation, now FORBIDDEN as a live claim: the consent page is an
 # accepting surface, and it is the only one. These are the same phrasings #3559 required,
 # which is what makes the inversion exact rather than approximate.
@@ -1737,7 +1736,9 @@ _CONSENT_PAGE_STILL_ACCEPTS = re.compile(
 # `The legacy cookie was never revoked, and the consent page still accepts it as its own
 # session.` — a live claim laundered by the auxiliary in front of it (measured on #10346's
 # review). A retirement marker must name a DISPOSITION (deleted / removed / formerly / no
-# longer / inert / retired…), never merely a tense.
+# longer / inert / retired…), never merely a tense — note that the claim is usually written
+# AS a change ("the page was updated so it re-reads the cookie"), which is the same hole
+# from the other side.
 _RETIRED_MARKERS = (
     "deleted", "removed", "formerly", "former", "used to", "no longer",
     "inert", "closed", "retired", "superseded", "historical", "gone", "pre-step-4",
@@ -1850,7 +1851,18 @@ def test_the_acceptance_claim_DISCRIMINATES_on_the_shipped_state():
     assert _consent_page_acceptance_violations(rel, silent), (
         "a doc with no closure statement passed the gate")
 
-    # (d) …and the retirement RECORD is still allowed, or the closure loses its evidence.
+    # (d) …and "was" is NOT an escape word: the pre-step-4 claim is usually written AS a
+    #     change, so excusing one `was` let a live acceptance claim through with the gate
+    #     green (round-3 review, executed against this predicate before the fix).
+    was_escape = good + (
+        "- The consent page was rewritten again: it now re-reads the legacy cookie as its "
+        "own session.\n"
+    )
+    assert _consent_page_acceptance_violations(rel, was_escape), (
+        "the word 'was' excused a LIVE acceptance claim — it is the past tense of 'to be', "
+        "not a disposition of the page")
+
+    # (e) …and the retirement RECORD is still allowed, or the closure loses its evidence.
     record = good + (
         "- **Formerly accepted by — the deleted consent page.** Its inline client read the "
         "legacy cookie back as its session until #3524 §9 step 4 REMOVED it.\n"
