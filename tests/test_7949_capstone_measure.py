@@ -64,6 +64,148 @@ def _sdk_line_naming(code: str) -> int:
 _META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line_naming('\"stats\": out.get(\"stats\")')}"
 
 
+# ── the `extractor_v2.py` cites, DERIVED from the tree ─────────────────────
+# The same rule `_sdk_line_naming` applies to the meta fold, applied to the
+# seven extractor sites `_IDLE_CITES` and the absent-surface cause print. They
+# were TYPED here until #10237, so every re-derivation of the bundle left the
+# pin asserting numbers the bundle no longer printed — `69f156db0` moved all
+# seven and this module went red at the head whose message said "so the shard
+# is green" (PR #10264 review, P1). A typed number can only be repaired by a
+# human re-derivation, and the repair re-stales on the next move; a DERIVED one
+# repairs itself and keeps its teeth, because the bundle's literal must still
+# match the line the tree actually carries.
+#
+# Each site is named by a CODE token, never by a number. `if items:` is not
+# uniquely searchable (it guards several passes), so each one is derived from
+# ITS OWN enclosing LIST gate; the two classify fail-open `except` lines are
+# byte-identical, so each is derived from its own gate as well.
+_EXTRACTOR = _REPO / "tortoise/extractor_v2.py"
+_EXTRACTOR_LINES = _EXTRACTOR.read_text().splitlines()
+
+
+def _extractor_lineno(code: str) -> int:
+    """The ONE non-comment line of `extractor_v2.py` that carries `code`.
+
+    Comments are excluded so a docstring quote of the code (`# … sets
+    ``classify_later = False``) cannot make the token ambiguous — the pin must
+    name a LINE OF CODE, which is what a cause sends its reader to.
+    """
+    hits = [n for n, line in enumerate(_EXTRACTOR_LINES, 1)
+            if code in line and not line.strip().startswith("#")]
+    assert len(hits) == 1, (
+        f"`{code}` is on {len(hits)} code lines of extractor_v2.py {hits} — "
+        f"the pin names one")
+    return hits[0]
+
+
+def _extractor_block_end(start: int) -> int:
+    """The LAST line of the bracket block the site at `start` opens.
+
+    Brace/bracket counted, so an `"enabled": \u2026` dict whose value list grows by
+    a key moves its own END with it — a range typed as `A-B` cannot.
+    """
+    depth, opened = 0, False
+    for n in range(start, len(_EXTRACTOR_LINES) + 1):
+        for ch in _EXTRACTOR_LINES[n - 1]:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+        if depth > 0:
+            opened = True
+        elif opened and depth == 0:
+            return n
+    raise AssertionError(f"no bracket block opens at extractor_v2.py:{start}")
+
+
+def _extractor_except_after(site: int) -> int:
+    """The FIRST fail-open `except` below `site` — that pass's own handler."""
+    for n in range(site + 1, len(_EXTRACTOR_LINES) + 1):
+        if _EXTRACTOR_LINES[n - 1].strip().startswith("except Exception"):
+            return n
+    raise AssertionError(f"no `except Exception` below extractor_v2.py:{site}")
+
+
+def _extractor_items_guard(gate: int) -> int:
+    """The `if items:` INSIDE the pass whose LIST gate sits at `gate`."""
+    for n in range(gate + 1, len(_EXTRACTOR_LINES) + 1):
+        if _EXTRACTOR_LINES[n - 1].strip() == "if items:":
+            return n
+    raise AssertionError(f"no `if items:` below extractor_v2.py:{gate}")
+
+
+#: The VET (S2.2) pass's own code: its flag, the OFF-arm block, its two LIST
+#: gates, and the fail-open handler whose `{}` leaves the same empty stats.
+_VET_FLAG = _extractor_lineno(
+    "vet_enabled = (vet_arbiter is not None or _vet_enabled()")
+_VET_EMPTY_BLOCK = _extractor_lineno(
+    '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}')
+_VET_S2_GATE = _extractor_lineno("if vet_enabled and embed_list:")
+_VET_UNION_GATE = _extractor_lineno("if vet_enabled and complete_list:")
+_VET_FAIL_OPEN = _extractor_except_after(
+    _extractor_lineno("def _run_vet_pass("))
+_VET_FAIL_OPEN_END = _extractor_block_end(_VET_FAIL_OPEN)
+
+#: The CLASSIFY (S2.3) pass's own code — a DIFFERENT pass with its own flag,
+#: its own two gates, each followed by an `if items:` guard, and its own two
+#: fail-open handlers. None of these may be described by the VET cites.
+_CLASSIFY_FLAG = _extractor_lineno(
+    "classify_later = kind_classifier is not None "
+    "or _classify_later_enabled()")
+_CLASSIFY_OFF_ARM = _extractor_lineno("classify_later = False")
+_CLASSIFY_EMPTY_START = _extractor_lineno(
+    '"classify_later": {"enabled": classify_later,')
+_CLASSIFY_EMPTY_END = _extractor_block_end(_CLASSIFY_EMPTY_START)
+_CLASSIFY_S2_GATE = _extractor_lineno("if classify_later and embed_list:")
+_CLASSIFY_S2_ITEMS = _extractor_items_guard(_CLASSIFY_S2_GATE)
+_CLASSIFY_S2_FAIL_OPEN = _extractor_except_after(_CLASSIFY_S2_GATE)
+_CLASSIFY_UNION_GATE = _extractor_lineno(
+    "if classify_later and complete_list:")
+_CLASSIFY_UNION_ITEMS = _extractor_items_guard(_CLASSIFY_UNION_GATE)
+_CLASSIFY_UNION_FAIL_OPEN = _extractor_except_after(_CLASSIFY_UNION_GATE)
+
+#: `result["vet"]` — the surface the absent-surface cause names, as a RANGE.
+_VET_EMIT_START = _extractor_lineno('result["vet"] = {')
+_VET_EMIT_END = _extractor_block_end(_VET_EMIT_START)
+
+#: The cites the VET cause must carry, in the exact shapes `_IDLE_CITES` prints
+#: them (a full `file:line` for the flag, bare `:NNN` continuations after it).
+_VET_CITES = (
+    f"tortoise/extractor_v2.py:{_VET_FLAG}",
+    f":{_VET_EMPTY_BLOCK}",
+    f":{_VET_S2_GATE}",
+    f":{_VET_UNION_GATE}",
+    f":{_VET_FAIL_OPEN}-{_VET_FAIL_OPEN_END}",
+)
+
+
+def _missing_vet_cites(cause: str) -> list[str]:
+    """Which DERIVED vet cites `cause` fails to carry — empty means all present.
+
+    Stated as a predicate rather than as a run of `assert … in …` so the
+    non-vacuity test can feed it a STALED copy of the same text and watch it name
+    the cite that went missing. The comparison is a real one: the expectation is
+    read out of `extractor_v2.py`, never out of the string being checked.
+    """
+    return [cite for cite in _VET_CITES if cite not in cause]
+
+#: The cites the VET cause must NOT carry: every one of them is the CLASSIFY
+#: pass's own line. Derived, so the exclusivity pin cannot go stale either.
+_CLASSIFY_CITES = tuple(f":{n}" for n in (
+    _CLASSIFY_FLAG, _CLASSIFY_OFF_ARM, _CLASSIFY_EMPTY_START,
+    _CLASSIFY_EMPTY_END, _CLASSIFY_S2_GATE, _CLASSIFY_S2_ITEMS,
+    _CLASSIFY_UNION_GATE, _CLASSIFY_UNION_ITEMS,
+    _CLASSIFY_S2_FAIL_OPEN, _CLASSIFY_UNION_FAIL_OPEN))
+
+#: … and the mirror image: the VET lines the CLASSIFY cause must not carry.
+_VET_CITES_IN_CLASSIFY = (
+    "vet_enabled", "_run_vet_pass", "if vet_enabled",
+    f":{_VET_FLAG}", f":{_VET_EMPTY_BLOCK}",
+    f":{_VET_S2_GATE}", f":{_VET_UNION_GATE}",
+    f":{_VET_FAIL_OPEN}", f":{_VET_FAIL_OPEN_END}",
+)
+
+
 def _load():
     spec = _ilu.spec_from_file_location("capstone_measure_pure", str(PROBE))
     assert spec and spec.loader
@@ -734,25 +876,32 @@ def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
 def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     """`enabled: true` with zero activity is a NON-witness, and not #9116.
 
-    `extractor_v2.py:8592` computes `vet_enabled` (the FLAG) BEFORE the
-    `if not edus:` early return at `:8596`, whose surface is literally
-    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8612`); the
-    VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
-    `:8680`, `if vet_enabled and complete_list:` `:8802`). So the flag-ON +
-    empty-list session emits `enabled: True` with empty counters and no pass ran —
-    and a FAILED vet pass leaves the same shape (`_run_vet_pass` returns `{}` on
-    its fail-open path, `:8478-8481`).
+    `extract_session_v2` computes the `vet_enabled` FLAG BEFORE its `if not edus:`
+    early return, and that return emits the surface literally as
+    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}`; the VET passes
+    themselves are gated on the LIST (`if vet_enabled and embed_list:` and
+    `if vet_enabled and complete_list:`). So the flag-ON + empty-list session
+    emits `enabled: True` with empty counters and no pass ran — and a FAILED vet
+    pass leaves the same shape (`_run_vet_pass` returns `{}` on its fail-open
+    path).
 
     The CLASSIFY pass is DIFFERENT CODE, so the cause is PER SURFACE:
-    `classify_later` is computed at `:8561`, its gates are
-    `if classify_later and embed_list:` (`:8692`) around `if items:` (`:8695`) and
-    `if classify_later and complete_list:` (`:8817`) around `if items:` (`:8827`),
-    and its fail-open `except` sits at `:8708` / `:8838`. A cause templated for the
-    surface NAME while citing the VET lines told a reader of the classify block
-    that the VET pass's gate idled it — false: an idle classify block comes from no
-    embed list or no classify ITEMS, and `embed_list` is only its first gate
-    (#9823 r4 P2). The assertions below are per step and mutually exclusive, so
-    SWAPPING the two causes fails.
+    `classify_later` is its own flag (set `False` when its classifier cannot be
+    built), its gates are `if classify_later and embed_list:` around `if items:`
+    and `if classify_later and complete_list:` around `if items:`, and it has its
+    own two fail-open `except`s. A cause templated for the surface NAME while
+    citing the VET lines told a reader of the classify block that the VET pass's
+    gate idled it — false: an idle classify block comes from no embed list or no
+    classify ITEMS, and `embed_list` is only its first gate (#9823 r4 P2). The
+    assertions below are per step and mutually exclusive, so SWAPPING the two
+    causes fails.
+
+    ⛔ NO LINE NUMBER IS TYPED IN THIS DOCSTRING, on purpose. All seven of these
+    cites moved together at `69f156db0`, and the typed copy of them here is what
+    left this module RED at the head whose own message claimed the shard was green
+    (PR #10264 review, P1). The numbers now live in the DERIVED constants above
+    (`_VET_CITES`, `_CLASSIFY_CITES`), read out of `extractor_v2.py` on every run,
+    so the pin repairs itself on a cite move and still reds on a stale bundle.
 
     Accepting that block as a witness made S2.2/S2.3 WITNESSED (6/8 -> 8/8) from
     ONE such session, because `_witness_block` returns the first positive anywhere
@@ -781,27 +930,26 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         assert _META_FOLD_CITE not in cause, cause
         assert "did NOT run" not in cause, cause
 
-    # ── S2.2 cites the VET pass's own code … ──────────────────────────────
-    assert "tortoise/extractor_v2.py:8592" in vet_cause, vet_cause
-    assert ":8612" in vet_cause, vet_cause
+    # ── S2.2 cites the VET pass's own code — every cite DERIVED from the tree ──
+    assert _missing_vet_cites(vet_cause) == [], (
+        vet_cause, _missing_vet_cites(vet_cause))
     assert "if vet_enabled and embed_list" in vet_cause, vet_cause
     assert "_run_vet_pass" in vet_cause, vet_cause
     # … and NOT the classify pass's flag or gates
-    for classify_cite in ("classify_later", "if classify_later", ":8561",
-                          ":8586", ":8608", ":8611", ":8692", ":8695",
-                          ":8817", ":8827", ":8708", ":8838"):
+    for classify_cite in ("classify_later", "if classify_later",
+                          *_CLASSIFY_CITES):
         assert classify_cite not in vet_cause, (classify_cite, vet_cause)
 
     # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
-    assert "tortoise/extractor_v2.py:8561" in classify_cause, classify_cause
+    assert f"tortoise/extractor_v2.py:{_CLASSIFY_FLAG}" in classify_cause, classify_cause
     assert "if classify_later and embed_list" in classify_cause, classify_cause
-    assert ":8692" in classify_cause, classify_cause
-    assert ":8695" in classify_cause, classify_cause
+    assert f":{_CLASSIFY_S2_GATE}" in classify_cause, classify_cause
+    assert f":{_CLASSIFY_S2_ITEMS}" in classify_cause, classify_cause
     assert "if classify_later and complete_list" in classify_cause, classify_cause
-    assert ":8817" in classify_cause, classify_cause
+    assert f":{_CLASSIFY_UNION_GATE}" in classify_cause, classify_cause
+    assert f":{_CLASSIFY_UNION_ITEMS}" in classify_cause, classify_cause
     # … and NOT the VET pass's flag, pass function or gates
-    for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                     ":8592", ":8612", ":8680", ":8802", ":8478", ":8481"):
+    for vet_cite in _VET_CITES_IN_CLASSIFY:
         assert vet_cite not in classify_cause, (vet_cite, classify_cause)
 
     # Different text, so neither cause can stand in for the other: a version
@@ -850,12 +998,73 @@ def test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass():
     assert "if items:" not in cites["vet"], cites["vet"]
 
 
+def test_the_extractor_cites_are_derived_from_the_tree_and_the_pin_has_teeth():
+    """The seven extractor cites are READ out of `extractor_v2.py`, and the
+    comparison they feed is not one the expectation was read out of.
+
+    Two things are proved here, and the second is the one a green suite hides.
+
+    1. Each derived site really carries the CODE token it was derived from, and
+       the two passes' sites are disjoint — so the exclusivity assertions in the
+       per-surface test cannot be satisfied by two passes that share a line.
+    2. `_missing_vet_cites` is NOT satisfiable by an arbitrary string: fed the
+       bundle's own text with ONE cite staled — the literal pre-#10237 number,
+       and a number no line of the extractor carries — it names exactly that
+       cite. A pin whose expectation came from the string under test would
+       return `[]` here too, and every re-derivation would pass it.
+    """
+    vet_sites = {
+        _VET_FLAG: "vet_enabled = (",
+        _VET_EMPTY_BLOCK: '"vet": {"enabled": vet_enabled',
+        _VET_S2_GATE: "if vet_enabled and embed_list:",
+        _VET_UNION_GATE: "if vet_enabled and complete_list:",
+        _VET_FAIL_OPEN: "except Exception",
+        _VET_FAIL_OPEN_END: "(fail-open)",
+    }
+    classify_sites = {
+        _CLASSIFY_FLAG: "or _classify_later_enabled()",
+        _CLASSIFY_OFF_ARM: "classify_later = False",
+        _CLASSIFY_EMPTY_START: '"classify_later": {"enabled"',
+        _CLASSIFY_EMPTY_END: '"slot_rekeys": 0}',
+        _CLASSIFY_S2_GATE: "if classify_later and embed_list:",
+        _CLASSIFY_S2_ITEMS: "if items:",
+        _CLASSIFY_UNION_GATE: "if classify_later and complete_list:",
+        _CLASSIFY_UNION_ITEMS: "if items:",
+        _CLASSIFY_S2_FAIL_OPEN: "except Exception",
+        _CLASSIFY_UNION_FAIL_OPEN: "except Exception",
+    }
+    for sites in (vet_sites, classify_sites):
+        for line, token in sites.items():
+            assert token in _EXTRACTOR_LINES[line - 1], (
+                line, token, _EXTRACTOR_LINES[line - 1])
+    # the ranges are ranges (a range that did not move its END is a typed END)
+    assert _VET_FAIL_OPEN_END > _VET_FAIL_OPEN
+    assert _CLASSIFY_EMPTY_END > _CLASSIFY_EMPTY_START
+    assert _VET_EMIT_END > _VET_EMIT_START
+    # the two passes' cited lines are DISJOINT — that is what makes the
+    # exclusivity assertions in the per-surface test meaningful rather than lucky
+    assert not set(vet_sites) & set(classify_sites), (
+        sorted(set(vet_sites) & set(classify_sites)))
+
+    live = measure._IDLE_CITES["vet"]
+    assert _missing_vet_cites(live) == [], _missing_vet_cites(live)
+    for cite in _VET_CITES:
+        # every cite the pin derives is actually IN the entry, so the derivation
+        # above cannot be a description of a string nobody checks
+        assert cite in live, (cite, live)
+        # …and staling ONE of them is detected, naming that one
+        staled = live.replace(cite, ":99999")
+        assert staled != live, cite
+        assert _missing_vet_cites(staled) == [cite], (
+            cite, _missing_vet_cites(staled))
+
+
 def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     """The cause is MEASURED, and it names the layer that actually drops it.
 
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (:8971-8975) and `result["classify_later"]` (:8961-8967). The
+    `result["vet"]` and `result["classify_later"]`. The
     drop is the meta fold at `tortoise/sdk.py:13473` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
@@ -882,7 +1091,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
     assert _META_FOLD_CITE in cause, cause
-    assert "tortoise/extractor_v2.py:8971-8975" in cause, cause
+    assert f"tortoise/extractor_v2.py:{_VET_EMIT_START}-{_VET_EMIT_END}" in cause, cause
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
@@ -1155,7 +1364,7 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
 # architecture doc carries ~15 cites belonging to other epics, so another epic's
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
-# continuation (the docs write `` `extractor_v2.py:8592` and `:8612` ``) is NOT a
+# continuation (the docs write `` `extractor_v2.py:8596` and `:8616` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
 # `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
@@ -1220,7 +1429,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     return scope is None or bool(scope.search(line))
 
 # `tortoise/sdk.py:13473`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
-# ``tortoise/extractor_v2.py:8971-8975``
+# ``tortoise/extractor_v2.py:8975-8979``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
@@ -1331,7 +1540,7 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     """The rule whose naming phrase sits NEAREST this cite — distance, not order.
 
     A document names a line with the phrase right beside it (`` `vet_enabled` is
-    computed at `extractor_v2.py:8592` ``), so the closest phrase is the one that
+    computed at `extractor_v2.py:8596` ``), so the closest phrase is the one that
     names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
     names the CLASSIFY pass and then the VET flag on one line, and taking the first
     table match bound the VET cite to the classify phrase ~40 characters away (a
