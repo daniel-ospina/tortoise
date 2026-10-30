@@ -5182,6 +5182,10 @@ def test_every_file_rides_exactly_one_shard_at_s_greater_than_two():
     assert len({e["half"] for e in inc}) == 5
     assert [e["half"] for e in inc] == ["a", "b", "c", "d", "e"]
     assert sum(len(e["files"].split()) for e in inc) == len(flat)
+    # #6897: every row carries its `runner`, and `fast_matrix_include` must not
+    # silently drop it — the whole lane is that key plus the workflow's `runs-on`.
+    for e in inc:
+        assert "runner" in e, f"the emitted matrix must carry the runner (#6897): {e['half']}"
     # #6145: the emitted headroom is this change's only new OUTPUT — the whole
     # feature is "the margin a leg actually got is visible" — and it had NO
     # assertion: deleting the key from `fast_matrix_include` left all 221 tests
@@ -5439,6 +5443,10 @@ def test_shard_count_is_stable_regardless_of_the_selection_size():
     assert [e["name"] for e in entries] == list("abcdefghi")
     inc = fast_matrix_include(entries)["include"]
     assert [e["half"] for e in inc] == list("abcdefghi")
+    # #6897: the routing is POSITIONAL and derived, so a tiny selection that leaves
+    # most shards EMPTY must still emit a class for every row — an empty shard is
+    # still a JOB, and a row without `runner` makes `runs-on` resolve to null.
+    assert all(e.get("runner") for e in inc), inc
     # every file still rides exactly one shard; the rest are legitimately empty
     flat = [f for e in entries for f in e["files"]]
     assert sorted(flat) == ["test_a", "test_b", "test_c"]
@@ -5534,6 +5542,305 @@ def test_no_required_check_names_a_fast_leg():
     assert not [c for c in record["required_contexts"] if c.startswith("test (")], (
         "no required context may be a shard leg — the shard set changes with S, so "
         "keying the required set on a leg name would make the gate unsatisfiable")
+
+
+# ── #6897: the fast matrix CAN route across both runner classes ──────────
+# The capacity decision is #6897's (owner ruling 2026-10-27: use the compute
+# capacity wherever it is; THROUGHPUT over runner class) — but it is delivered
+# as an OPT-IN, because the pool is **fallback-only** by a RECORDED DECISION
+# (`docs/ops/ci-runner-x64.md` -> "Contradiction test",
+# `scripts/ci_runner_gate.sh:1-30`), and making the pool a primary class by
+# default would be an adoption over that decision.
+#
+# So these pin FOUR properties: the DEFAULT is main's behaviour exactly
+# (`hosted-only`, every row on `ubuntu-latest`) — the one #10186's review found
+# violated, with 3 of 4 pool legs failing on its own head — the opt-in actually
+# splits, every row HAS a class (a missing key makes `runs-on` resolve to null
+# and the file is refused — #6253's zero-jobs case), and the canary producer
+# keeps the label it has always used so the streak stays comparable.
+#
+# ⛔ WHAT THESE DO **NOT** CLAIM: that the hosted half is GitHub-hosted. On this
+# repo `ubuntu-latest` is not hosted-only — `scripts/ci_runner_gate.sh` attaches
+# it to the self-hosted pool as a fallback, and #6897 measured it attached while
+# GitHub-hosted was healthy. The class a `ubuntu-latest` row lands on is main's
+# existing ambiguity, carried over unchanged; `SHARD_RUNNER_HOSTED` names the
+# LABEL, which is all this lane decides.
+
+
+def test_the_fast_split_is_off_by_default_so_the_pool_stays_fallback_only(monkeypatch):
+    """#6897/#10186: with no opt-in, EVERY row is main's `ubuntu-latest`.
+
+    This is the assertion the earlier cut of this branch failed: it routed odd
+    shards to `[self-hosted, self-hosted-x64]` unconditionally, which moved 4 of
+    9 gated shards onto a class the recorded `fallback-only` decision says is not
+    primary. It also fails SAFE on junk: an unset variable, an emptied one, a
+    fork with no `vars`, or a typo must all land on main's behaviour rather than
+    discovering the split when a leg dies.
+    """
+    from tools.ci_selection import (
+        SHARD_ROUTING_ENV,
+        SHARD_ROUTING_HOSTED_ONLY,
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_HOSTED,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+        resolve_shard_routing,
+    )
+    monkeypatch.delenv(SHARD_ROUTING_ENV, raising=False)
+    shards = push_legs(load_manifest())["shards"]
+    inc = fast_matrix_include(shards)["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    assert {e["runner"] for e in inc} == {json.dumps(SHARD_RUNNER_HOSTED)}, (
+        "the default must be hosted-only — the pool is fallback-only by recorded "
+        f"decision (#6897): {sorted(e['runner'] for e in inc)}")
+    # …and it must be the DEFAULT, not an accident of an unset environment: the
+    # mode resolver is the single decision point, and every non-opt-in value
+    # resolves to hosted-only, `hosted-only` itself included (the documented safe
+    # setting must stay legal).
+    for value in (None, "", "   ", SHARD_ROUTING_HOSTED_ONLY, "hosted-only ",
+                  "HOSTED-ONLY", "true", "1", "pool", "split", "pool-splits",
+                  "pool_split"):
+        assert resolve_shard_routing(value) == SHARD_ROUTING_HOSTED_ONLY, value
+    assert resolve_shard_routing(SHARD_ROUTING_POOL_SPLIT) == SHARD_ROUTING_POOL_SPLIT
+    assert resolve_shard_routing(" POOL-SPLIT ") == SHARD_ROUTING_POOL_SPLIT
+    # the environment is the operator lever, so it must reach the matrix — and
+    # only for the exact opt-in.
+    for value in ("", SHARD_ROUTING_HOSTED_ONLY, "nonsense"):
+        monkeypatch.setenv(SHARD_ROUTING_ENV, value)
+        got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+        assert got == {json.dumps(SHARD_RUNNER_HOSTED)}, (value, sorted(got))
+    monkeypatch.setenv(SHARD_ROUTING_ENV, SHARD_ROUTING_POOL_SPLIT)
+    got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+    assert len(got) == 2, f"the opt-in must actually split: {sorted(got)}"
+
+
+def test_every_fast_row_names_a_runner_and_the_split_uses_both_classes():
+    """#6897: `runner` is emitted per row, positional, and never degenerates.
+
+    Asserts the OPT-IN mode — the default is pinned by the test above.
+    """
+    from tools.ci_selection import (
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_HOSTED,
+        SHARD_RUNNER_X64,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+    )
+    inc = fast_matrix_include(push_legs(load_manifest())["shards"],
+                              routing=SHARD_ROUTING_POOL_SPLIT)["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    for e in inc:
+        assert "runner" in e, f"missing runner (#6897): {e['half']}"
+        # a JSON ARRAY STRING, not a bare label: `runs-on` needs an array, and a
+        # matrix value is always a string, so the workflow must `fromJSON` it.
+        parsed = json.loads(e["runner"])
+        assert isinstance(parsed, list) and parsed, e
+        assert all(isinstance(x, str) for x in parsed), e
+        assert parsed in (SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64), (
+            f"unexpected runner class on {e['half']}: {parsed}")
+    # THE CANARY PRODUCER STAYS ON THE HOSTED LABEL — the one it has always used,
+    # so the canary streak keeps comparing tests rather than classes. It is the
+    # HOSTED LABEL and not "GitHub-hosted": see this block's header for why that
+    # label's class is not a guarantee on this repo.
+    producer = [e for e in inc if e["canary_producer"]]
+    assert len(producer) == 1, producer
+    assert json.loads(producer[0]["runner"]) == SHARD_RUNNER_HOSTED, (
+        "the canary producer must stay on the hosted label, not the pool (#6897): "
+        f"{producer[0]['half']} -> {producer[0]['runner']}")
+    # BOTH CLASSES, or the routing is a rename of `ubuntu-latest` with extra
+    # failure modes. (The opposite degeneracy — every row on the pool — would
+    # ALSO lose the hosted fallback the ci_runner_gate exists for.)
+    classes = {e["runner"] for e in inc}
+    assert classes == {json.dumps(SHARD_RUNNER_HOSTED), json.dumps(SHARD_RUNNER_X64)}, (
+        f"the fast matrix must split across both classes, got {sorted(classes)}")
+
+
+def test_runner_routing_is_positional_and_the_last_shard_is_always_on_the_hosted_label():
+    """#6897: the routing rule, on SYNTHETIC shard counts.
+
+    The real manifest is S=9, where "alternate by index" and "the last shard
+    keeps the hosted label" happen to agree (index 8 is even) — so pinning the
+    rule only against the real config would let an S=10 change flip the canary
+    producer onto the pool without a red. This asserts the rule for both
+    parities.
+    """
+    from tools.ci_selection import SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64, fast_shard_runner
+    for count in range(2, 13):
+        runners = [fast_shard_runner(i, count) for i in range(count)]
+        assert runners[-1] == SHARD_RUNNER_HOSTED, (
+            f"S={count}: the last shard is the canary producer and must keep the "
+            "hosted label")
+        if count == 2:
+            # DEGENERATE BY CONSTRUCTION, and safe: with two shards, index 0 is
+            # even and index 1 IS the pinned last one, so there is no pool row to
+            # give. It falls back to exactly main's pre-#6897 behaviour (both on
+            # the hosted label) rather than inventing a split the rule does not
+            # describe.
+            assert runners == [SHARD_RUNNER_HOSTED, SHARD_RUNNER_HOSTED], runners
+        else:
+            assert set(map(tuple, runners)) == {
+                tuple(SHARD_RUNNER_HOSTED), tuple(SHARD_RUNNER_X64)
+            }, f"S={count}: a single class is not a split"
+        # positional alternation over every shard that is not the pinned last one
+        for i, got in enumerate(runners[:-1]):
+            want = SHARD_RUNNER_HOSTED if i % 2 == 0 else SHARD_RUNNER_X64
+            assert got == want, (count, i, got, want)
+        # the returned list is a COPY: a caller mutating one row's label array
+        # (json.dumps in `fast_matrix_include` reads it, so a later edit could
+        # plausibly extend it) must not change the class the NEXT row gets. The
+        # assertion compares against an INDEPENDENT literal and checks identity,
+        # because `==` against the module constant is an aliasing tautology —
+        # dropping the `list()` copy survives it (measured).
+        runners[0].append("mutated")
+        assert fast_shard_runner(0, count) == ["ubuntu-latest"], count
+        assert fast_shard_runner(0, count) is not SHARD_RUNNER_HOSTED, (
+            "fast_shard_runner must return a copy, never the module constant")
+        assert fast_shard_runner(1, count) is not SHARD_RUNNER_X64
+        # The hosted LABEL is pinned deliberately, and a change to it must be a
+        # deliberate change: `ubuntu-latest` is what main uses today, so moving to
+        # the hosted-ONLY `ubuntu-24.04` would also drop the outage fallback and
+        # break comparability with the canary streak's history. That is a decision
+        # (#6897), not a tidy-up — so it cannot happen behind a green suite.
+        assert SHARD_RUNNER_HOSTED == ["ubuntu-latest"], SHARD_RUNNER_HOSTED
+
+
+def test_the_test_job_takes_its_runner_from_the_matrix_with_a_variable_rollback():
+    """#6897: the workflow half of the routing.
+
+    Four claims the unit tests above cannot see: `runs-on` reads the selector's
+    per-row class (no literal that would ignore the matrix, and NO second copy of
+    the mode logic to drift from the selector's), the opt-in reaches the selector
+    as the repo VARIABLE rather than a code edit, the emitted value is parsed
+    (the row value is a JSON string; `runs-on` needs the array), and the job is
+    not renamed — branch protection and the merge rail key on `test (a)`….
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test"]
+    runs_on = str(job["runs-on"])
+    assert runs_on == "${{ fromJSON(matrix.runner) }}", (
+        "`test` must take its runner class from the selector's matrix row, and "
+        f"from nowhere else (got {runs_on!r})")
+    assert "self-hosted" not in runs_on and "ubuntu-" not in runs_on, (
+        "a literal runner label in `runs-on` would bypass the selector — and, "
+        "for a pool label, make the split the DEFAULT again (#10186 review)")
+    # THE OPT-IN IS WIRED, in the job that emits the matrix: without this env
+    # the selector never sees `CI_SHARD_ROUTING` and the split can never be
+    # turned on (the fail-safe direction, but a dead lever all the same).
+    emit = [s for s in wf["jobs"]["changes"]["steps"]
+            if s.get("id") == "push-matrix"]
+    assert len(emit) == 1, emit
+    env = _effective_step_env(wf, "changes", emit[0])
+    assert "vars.CI_SHARD_ROUTING" in env.get("CI_SHARD_ROUTING", ""), (
+        "the matrix emitter must pass the CI_SHARD_ROUTING repo variable to the "
+        f"selector (#6897); got env={env!r}")
+    # the job id and its `test (<half>)` name are branch-protection surfaces
+    assert job["name"] == "test (${{ matrix.half }})", job["name"]
+    # ⛔ and the legs that CANNOT run on the pool keep their version pin: a
+    # `self-hosted` here would let a 39.6m leg be killed at its watchdog (the
+    # measurement in the test-slow header).
+    assert wf["jobs"]["test-slow"]["runs-on"] == "ubuntu-24.04", (
+        "test-slow must stay version-pinned to GitHub-hosted (#6897 does not touch it)")
+
+
+def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
+    """#6897/#10186: ONE lever, EVERY emitter — the tier-2 split included.
+
+    `changes` emits `fast_matrix` from TWO steps: `push-matrix`
+    (`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs, and
+    its output OVERRIDES the push matrix — see the job `outputs:` block). The
+    opt-in is read from the ENVIRONMENT (`resolve_shard_routing(
+    os.environ.get("CI_SHARD_ROUTING"))`), so an emitter that does not carry
+    that variable silently resolves to hosted-only whatever the operator set:
+    a dead lever on exactly the event type every PR uses.
+
+    Measured on the pre-fix tree (`3db8f7d78`): the `env:` was attached to the
+    `push-matrix` STEP only, so with `CI_SHARD_ROUTING=pool-split` in the repo
+    variables a tier-2 PR still emitted nine rows on `["ubuntu-latest"]` and the
+    split never happened. Fail-SAFE (that is main's behaviour) but not the
+    documented contract — `docs/ops/ci-runner-x64.md` says `pool-split` opts in,
+    with no event qualification — and the failure mode is the worst kind: the
+    run looks exactly as if nobody had set the variable.
+
+    The env is asserted through `_effective_step_env` (job + step, merged per
+    step) and additionally, at STEP scope alone, by
+    `test_the_changes_job_carries_no_job_scope_env` —
+    job scope is barred by the capstone pin; the emitter set is DISCOVERED from
+    the run commands rather than named, so a THIRD emitter added later cannot
+    silently miss the lever either.
+    """
+    wf = _load_python_ci()
+    emitters = []
+    for step in wf["jobs"]["changes"]["steps"]:
+        run = str(step.get("run") or "")
+        if "--emit-push-matrix" in run or "--split" in run:
+            emitters.append(step)
+    names = [s.get("name") for s in emitters]
+    assert len(emitters) >= 2, (
+        "the `changes` job must still emit the matrix from both the push step "
+        f"and the tier-2 split step; discovered {names}")
+    missing = [s.get("name") for s in emitters
+               if "vars.CI_SHARD_ROUTING"
+               not in _effective_step_env(wf, "changes", s).get("CI_SHARD_ROUTING", "")]
+    assert not missing, (
+        "every step that emits `fast_matrix` must see CI_SHARD_ROUTING, or the "
+        f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
+
+
+def test_the_changes_job_carries_no_job_scope_env():
+    """#10186 review ISSUE 1 (blocking): the lever may NOT live at JOB scope.
+
+    `changes` also owns the capstone pre-registration gate step, and
+    `tests/test_capstone_preregistration_9075.py` refuses ANY `env:` key in a
+    scope above that step — `_SAFE_JOB_ENV` is empty for every job — because a
+    key there can hook the gate's interpreter or shell (`BASH_ENV`, a
+    `PYTHONPATH` `sitecustomize.py`, `LD_PRELOAD`, `PATH`) so `python3` exits 0
+    with the real check never running. A job-scope lever therefore reds a
+    required FAST shard: measured at head `3eaf43fda`, that pin reported 44
+    failures (`ci_ordering_half_violations` returned one violation, and the
+    unmutated-workflow assertion runs once per silencing-idiom parametrization).
+
+    So the rule is DERIVED from the pin instead of restated: whatever
+    `_SAFE_JOB_ENV` permits for `changes` is the entire allowance, and the lever
+    is carried by each emitter STEP's own `env:` instead. A future pin edit that
+    permits a key here loosens this test automatically, which is the point —
+    one rule, two readers.
+
+    Non-vacuous: at `3eaf43fda` the job carried
+    `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
+    assertions below fail on that tree.
+
+    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:448`
+    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1590`)
+    both send an operator here by name, and both advertised
+    `test_the_changes_job_carries_no_job_scope_env` while the function carried a
+    longer, unrelated name — so `pytest -k test_the_changes_job_carries_no_job_scope_env`
+    collected ZERO tests and its green "no tests ran" read as confirmation
+    (#10186 review, FINDING 1). Renamed to the name the documents already
+    advertise; `test_every_test_name_the_runbook_names_exists` in
+    `tests/test_ci_runner_x64_install.py` now keeps the two in sync.
+    """
+    from tests.test_capstone_preregistration_9075 import _SAFE_JOB_ENV
+
+    wf = _load_python_ci()
+    job = wf["jobs"]["changes"]
+    allowed = set(_SAFE_JOB_ENV.get("changes", frozenset()))
+    extra = sorted(set(job.get("env") or {}) - allowed)
+    assert not extra, (
+        "the `changes` job must not carry `env:` keys above the capstone gate "
+        f"step (#10186); only {sorted(allowed)} are permitted, found {extra}")
+    emitters = [s for s in job["steps"]
+                if "--emit-push-matrix" in str(s.get("run") or "")
+                or "--split" in str(s.get("run") or "")]
+    assert len(emitters) >= 2, [s.get("name") for s in emitters]
+    bare = [s.get("name") for s in emitters
+            if "vars.CI_SHARD_ROUTING"
+            not in str((s.get("env") or {}).get("CI_SHARD_ROUTING", ""))]
+    assert not bare, (
+        "each matrix emitter must carry `CI_SHARD_ROUTING` in its OWN `env:` "
+        "(step scope) — inheriting it from the job is what reds the capstone "
+        f"gate pin (#10186): {bare}")
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
@@ -6067,6 +6374,22 @@ def _load_python_ci() -> dict:
     return yaml.safe_load(wf_path.read_text())
 
 
+def _effective_step_env(wf: dict, job_id: str, step: dict) -> dict:
+    """The env a STEP actually sees, as GitHub Actions composes it.
+
+    Workflow -> `jobs.<id>.env` -> `jobs.<id>.steps[*].env`, each scope
+    overriding the one above (`docs.github.com` -> "Store information in
+    variables": "The scope of a custom variable set by this method is limited to
+    the element in which it is defined"). A test that reads only
+    `step["env"]` therefore asserts the narrower thing than it claims: it pins
+    WHERE the variable is written instead of THAT it reaches the step, which is
+    how #10186 shipped a lever wired to one of two emitters.
+    """
+    merged = {k: str(v) for k, v in (wf["jobs"][job_id].get("env") or {}).items()}
+    merged.update({k: str(v) for k, v in (step.get("env") or {}).items()})
+    return merged
+
+
 def test_expect_uri_gated_iff_uri():
     """cycle-7 P2-1 + Task 9 (P3): the docker URI and the E2E-6 tripwire
     signal (TORTOISE_TEST_EXPECT_URI) are set under the SAME gate —
@@ -6358,6 +6681,59 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     invocation = run["run"]
     assert '--junitxml="$PYTEST_JUNIT"' in invocation
     assert "-o junit_family=xunit1" in invocation
+    # (d) the resolve step comes FIRST (it publishes $GITHUB_ENV, which only
+    # reaches SUBSEQUENT steps) and fails CLOSED on a missing RUNNER_TEMP — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
+    resolve = steps[0]
+    assert resolve.get("name", "").startswith("Resolve per-job pytest artifact paths")
+    assert "${RUNNER_TEMP:?" in resolve["run"], \
+        "the resolve step must REFUSE to fall back to the host-global /tmp"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"), ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'echo "{var}=$base/{leaf}"' in resolve["run"]
+    # ... and no part of THIS job may name the host-global artifact again. The
+    # literals are what the collision needs, so their absence is the property —
+    # ACROSS EVERY KEY OF EVERY STEP, not just `run:`. All three literals lived in
+    # the `upload-artifact` step's `with: path:` block before #10028, so a
+    # `run`-only scan is green on exactly the key the collision rides: reverting
+    # that block re-points the upload at the host-global files while the step's
+    # own `if-no-files-found: ignore` + `continue-on-error: true` keep the leg
+    # green on ANOTHER job's `pytest.log`. `json.dumps` carries every YAML value
+    # verbatim (parsed data holds no comments), so the `"# "`-strip still forgives
+    # a shell comment that names a RETIRED path.
+    def host_global_hits(step_list):
+        blob = json.dumps(step_list)
+        return [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                                "/tmp/expected-nodeids.txt")
+                if lit in blob.replace("# " + lit, "")]
+
+    assert host_global_hits(steps) == [], (
+        f"{host_global_hits(steps)} is host-global: two concurrent jobs on a "
+        f"shared runner clobber it and red this leg on the clash (#10028, #7815)")
+    # ⛔ NON-VACUITY, asked of a COPY: reverting ONLY the upload's `path:` block to
+    # the pre-#10028 literals — the one shape a `run`-only scan cannot see — must
+    # red. The real file cannot be both correct and reverted, so the mutation is
+    # the only way to show the guard actually discriminates.
+    upload = next(s for s in steps
+                  if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+    reverted = [
+        {**s, "with": {**s["with"],
+                        "path": "/tmp/pytest.log\n/tmp/junit.xml\n"
+                                "/tmp/expected-nodeids.txt"}}
+        if s is upload else s
+        for s in steps
+    ]
+    assert host_global_hits(reverted) == ["/tmp/pytest.log", "/tmp/junit.xml",
+                                          "/tmp/expected-nodeids.txt"], (
+        "the guard must red on a reverted upload `path:` — that block is where "
+        "all three host-global literals live, and it is not a `run:` key")
+    # ...and this is the fail-open that mutation closes: the retired `run`-only
+    # scan sees NOTHING in those same steps, so it certified a reverting leg green.
+    assert [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                            "/tmp/expected-nodeids.txt")
+            if lit in "\n".join(s.get("run", "") for s in reverted)] == [], (
+        "a `run`-only scan is blind to the upload's `path:` — the blank result is "
+        "the defect this scan's broader key set fixes, not a passing check")
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
     cmdline = next(line for line in invocation.splitlines()
@@ -6676,7 +7052,126 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert (job["strategy"]["matrix"]
             == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
         "the carve-out matrix must come from the selector's carve_matrix output"
-    assert "--junitxml=/tmp/junit.xml" in run["run"]
+    # #10280: the junitxml is the PER-SHARD path, not the host-global literal it
+    # used to be (see the job loop in
+    # `test_every_pytest_capture_leg_resolves_its_artifacts_per_job`).
+    assert "--junitxml=\"$PYTEST_JUNIT\"" in run["run"]
+
+
+# ── #10280: no python-ci pytest leg may keep a host-global /tmp artifact ──
+#
+# The class, stated once so a future leg inherits the reasoning: every runner
+# install on this host shares ONE `/tmp`, and one runner runs one job at a time.
+# So a per-RUNNER path (`$RUNNER_TEMP`) is per-JOB, while a `/tmp` literal is
+# SHARED with whatever else the pool is doing. Measured consequences, in both
+# directions:
+#
+#   * FALSE RED (run 40990582554): `test-track-b` wrote `4 expected nodeids ->
+#     /tmp/expected-nodeids.txt`, then a concurrent `test-carve-out (c)` leg
+#     overwrote that file with its own `616 expected nodeids` (11s earlier on a
+#     sibling runner), and the required check reported `616 expected nodeid(s)
+#     absent from the junitxml` with every test in the leg passing.
+#   * FALSE RED (run 40808264676, #10028): a sibling's `> /tmp/pytest.log`
+#     truncated `test-slow (a)`'s log between its `tail` and the reporter's read,
+#     so a green leg concluded `STALE session summary` / `INCOMPLETE`.
+#   * FALSE PASS (the same sharing, inverted): a leg whose own manifest was
+#     replaced by a LARGER one can just as easily be replaced by a smaller set
+#     that its junitxml happens to satisfy — the coverage manifest is the thing
+#     that certifies "these tests ran", so it must not be writable by a peer.
+#
+# The three jobs below were the residue #10028 left (its own comment said the
+# `test-slow` migration was the second of four). They are asserted as a TABLE,
+# not one bespoke test per job, so a leg added to the selector's matrix inherits
+# the check by adding its job id here — and so the assertion cannot drift into
+# "whatever the last migrated job happens to look like".
+_PER_JOB_ARTIFACT_JOBS = (
+    "test",
+    "test-slow",
+    "test-track-b",
+    "test-carve-out",
+    "test-concurrency-falkor",
+)
+#: Every host-global pytest artifact spelling the migration retired. Widened
+#: beyond `/tmp/pytest.log` on purpose: filtering on that one literal is what let
+#: `trackb.log` and `junit.xml` read as "already fine" (#10280's review).
+_HOST_GLOBAL_PYTEST_ARTIFACTS = (
+    "/tmp/pytest.log",
+    "/tmp/junit.xml",
+    "/tmp/expected-nodeids.txt",
+    "/tmp/trackb.log",
+    "/tmp/pytest-d14.log",
+    "/tmp/junit-d14.xml",
+)
+
+
+def test_every_pytest_capture_leg_resolves_its_artifacts_per_job():
+    """#10280: every migrated leg resolves its artifacts under `$RUNNER_TEMP`.
+
+    Non-vacuous on the pre-fix workflow, by the reason that actually holds per leg:
+    NONE of the three newly-migrated legs (`test-track-b`, `test-carve-out`,
+    `test-concurrency-falkor`) had a resolver step — so assertion (1) fails on all
+    three — and EACH named at least one of the literals above from an executable
+    `run:` line — so assertion (2) fails on all three too. Both halves are what this
+    test rests on; how MANY distinct literals a leg had is not (the pre-fix counts
+    were 3, 3 and 1 respectively, and a count is the kind of restated measurement
+    that goes stale in the commit which changes the code). Restoring any one literal
+    (or the `/tmp` upload `path:`) reds it again.
+    """
+    wf = _load_python_ci()
+    for job_id in _PER_JOB_ARTIFACT_JOBS:
+        job = wf["jobs"][job_id]
+        steps = job["steps"]
+
+        # (1) resolved FIRST — `$GITHUB_ENV` reaches only SUBSEQUENT steps, and an
+        # empty `--junitxml=` is silently the wrong (empty) path.
+        first = steps[0]
+        assert first.get("name", "").startswith(
+            "Resolve per-job pytest artifact paths"
+        ), f"{job_id}: the artifact paths must be resolved in the FIRST step"
+        assert "${RUNNER_TEMP:?" in first["run"], (
+            f"{job_id}: RUNNER_TEMP must fail closed — a silent /tmp fallback is "
+            "the bug itself"
+        )
+        assert "$GITHUB_ENV" in first["run"], (
+            f"{job_id}: the resolver must export through $GITHUB_ENV"
+        )
+
+        # (2) no executable line of the job may name a host-global literal.
+        # Comments are exempt on purpose — the migration's rationale quotes them.
+        offenders = []
+        for step in steps:
+            body = step.get("run")
+            if not isinstance(body, str):
+                continue
+            for line in body.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                offenders += [f"{job_id} / {step.get('name')}: {line.strip()}"
+                              for lit in _HOST_GLOBAL_PYTEST_ARTIFACTS
+                              if lit in line]
+        assert not offenders, (
+            "a host-global /tmp pytest artifact is SHARED with every other runner "
+            "install on this host — a co-tenant then rewrites this leg's log, "
+            "manifest or junit (#7815/#10280): " + "; ".join(offenders)
+        )
+
+        # (3) the upload artifacts are the runner's own files, not `/tmp`'s.
+        # `runner` is a valid context in `steps.<id>.with` (see the #6253 note on
+        # test-slow), which is why this is read from the step rather than a
+        # job-level `env:` block.
+        for step in steps:
+            path = (step.get("with") or {}).get("path")
+            if path is None or "upload-artifact" not in str(step.get("uses", "")):
+                continue
+            for line in str(path).splitlines():
+                assert "${{ runner.temp }}" in line, (
+                    f"{job_id}: the uploaded pytest artifact {line.strip()!r} is not "
+                    "under ${{ runner.temp }} — it would upload a co-tenant's file"
+                )
+                assert "/tmp/" not in line, (
+                    f"{job_id}: the uploaded pytest artifact {line.strip()!r} names "
+                    "the host-global shared /tmp (#10280)"
+                )
 
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
