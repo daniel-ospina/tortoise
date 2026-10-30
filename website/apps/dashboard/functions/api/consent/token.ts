@@ -109,16 +109,21 @@ function allowedOrigin(env: Env, request: Request): string | null {
   return null;
 }
 
-export const onRequestOptions: PagesFunction<Env> = async ({ request, env }) => {
+/**
+ * The credentialed preflight, module-private ON PURPOSE — see `onRequest` at the foot of this file
+ * for the Pages routing rule that makes every handler here non-exported.
+ */
+async function preflight(request: Request, env: Env): Promise<Response> {
   const origin = allowedOrigin(env, request);
   // A refused origin answers the bare preflight refusal with NO CORS headers, so the browser
   // never completes the credentialed call. 403 rather than 204: a silent 204 with
   // Allow-Origin absent is indistinguishable from a misconfiguration in the network log.
   if (!origin) return new Response(null, { status: 403, headers: new Headers({ Vary: "Origin" }) });
   return new Response(null, { status: 204, headers: corsHeaders(env, origin) });
-};
+}
 
-export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+/** The mint. Module-private for the same routing reason as `preflight` (see `onRequest`). */
+async function mint(request: Request, env: Env): Promise<Response> {
   const origin = allowedOrigin(env, request);
   if (!origin) {
     return json({ error: "forbidden_origin" }, { status: 403 });
@@ -142,7 +147,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   // check. `json()` rejects only for an unparseable or disturbed body; it RESOLVES with whatever
   // JSON value the text holds (MDN: "an object, an array, a string, a number…"), so the body text
   // `null` yields JS `null`, the cast below succeeds, and the next property read throws a TypeError
-  // that the old `catch` could never see. That escaped `onRequestPost` as an UNTYPED 500 — on a
+  // that the old `catch` could never see. That escaped the mint handler as an UNTYPED 500 — on a
   // route reachable with no credential at all (the session is read further down), which is the same
   // class `start.ts` names as the thing a page cannot tell apart from a bug in itself.
   // A non-object body is therefore a 400 with a typed body, exactly like unparseable JSON.
@@ -247,11 +252,40 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     // A signing failure is infrastructure, never "you are signed out".
     return corsJson(env, origin, { error: "unavailable", reason: "mint_failed" }, 503);
   }
-};
+}
 
-/** Anything that is not POST/OPTIONS is not this route's business. */
-export const onRequest: PagesFunction<Env> = async ({ request, env, next }) => {
-  if (request.method === "POST" || request.method === "OPTIONS") return next();
+/**
+ * The route's ONE Pages handler export — and the module exports no other, on purpose.
+ *
+ * ⛔ CLOUDFLARE PAGES ROUTING RULE. Primary source, `developers.cloudflare.com/pages/functions/
+ * api-reference/`: "The `onRequest` method will be called **unless a more specific `onRequestVerb`
+ * method is exported**. For example, if both `onRequest` and `onRequestGet` are exported, **only
+ * `onRequestGet` will be called for GET requests**." And of `onRequest` itself: it "will be invoked
+ * on all requests no matter what the request method is, **as long as no specific request verb (like
+ * one of the methods below) is exported**."
+ *
+ * So an `onRequest` sitting BESIDE an exported `onRequestPost` / `onRequestOptions` is not a
+ * catch-all for the verbs that have no handler — its invocation is conditioned on there being no
+ * verb export at all. Exported that way, a `GET`/`PUT`/`DELETE` would be answered by the platform's
+ * default (a static 404 carrying NO `Access-Control-Allow-Origin`), which is exactly the unreadable
+ * refusal the 405 below exists to prevent, and nothing in this file would be running.
+ *
+ * ⛔ Therefore: `mint` and `preflight` are module-private, this is the only handler exported, and
+ * with no verb export the rule above makes `onRequest` unconditional — every method is answered BY
+ * THIS ROUTE. Do NOT add `export` back to a verb handler to "simplify" the dispatch: it silently
+ * moves the 405 arm back to the platform's 404, and no behavioural test can see the difference.
+ * `tests/test_oauth_consent_bff_routes.py::test_the_token_route_exports_onRequest_and_no_verb_
+ * handler` pins the export set precisely because the mutation is invisible from the responses.
+ */
+export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
+  if (request.method === "POST") return mint(request, env);
+  if (request.method === "OPTIONS") return preflight(request, env);
+
+  // Anything that is not POST/OPTIONS is not this route's business — but this route still ANSWERS
+  // it, and never forwards it: `next()` here would hand the request to the asset server, whose 404
+  // carries no CORS header, and a refusal the browser cannot read is one the page reports as a
+  // network error (which is what the arm below says it prevents). The exact-origin gate runs first,
+  // so a hostile origin gets a body-less 403 with no `Allow-Origin` and learns nothing.
   const origin = allowedOrigin(env, request);
   if (!origin) return json({ error: "forbidden_origin" }, { status: 403 });
   return corsJson(env, origin, { error: "method_not_allowed" }, 405);

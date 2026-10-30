@@ -324,7 +324,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     for (const [label, text] of Object.entries(opts.bodies || {})) {
       const one = { label, text };
       try {
-        const res = await tokenRoute.onRequestPost(
+        const res = await tokenRoute.onRequest(
           { request: postRaw("/api/consent/token", text, headers), env: e });
         one.status = res.status;
         one.body = await res.json();
@@ -338,17 +338,17 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   } else if (scenario === "mint_twice") {
     // TWO mints of ONE attempt in ONE process: separate `_run`s would each build a fresh in-memory
     // database, so asserting on them proves nothing about re-minting the SAME row.
-    const first = await tokenRoute.onRequestPost(
+    const first = await tokenRoute.onRequest(
       { request: post("/api/consent/token", mintBody, headers), env: e });
     out.first = { status: first.status, body: await first.json() };
-    const second = await tokenRoute.onRequestPost(
+    const second = await tokenRoute.onRequest(
       { request: post("/api/consent/token", mintBody, headers), env: e });
     out.second = { status: second.status, body: await second.json() };
     out.rowsAfter = e.SESSIONS.tables.consent_attempts;
     out.status = out.second.status;
     out.body = out.second.body;
   } else {
-    const res = await tokenRoute.onRequestPost(
+    const res = await tokenRoute.onRequest(
       { request: post("/api/consent/token", mintBody, headers), env: e });
     out.status = res.status;
     out.body = await res.json();
@@ -462,7 +462,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     });
     const one = { label };
     try {
-      const res = await tokenRoute.onRequestPost({
+      const res = await tokenRoute.onRequest({
         request: post("/api/consent/token", { state: "state-xyz", attempt_key: "test-attempt-key" },
                       { Cookie: "__Host-session=handle-1" }),
         env: e });
@@ -477,12 +477,21 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   out.status = out.cases.length ? out.cases[0].status : null;
   out.body = out.cases.length ? out.cases[0].body : null;
 } else if (scenario === "mint_transport") {
-  // #10291 — the three shipped arms of `token.ts` that the mint scenarios above never execute:
-  // the CORS PREFLIGHT (the mechanism that makes the credentialed cross-origin call possible at
-  // all), the media-type gate (what stops a cross-site form post from reaching the mint), and the
-  // 405 for every other method. None of them is dead code — deleting one leaves the route either
+  // #10291 — the three arms of `token.ts` that the mint scenarios above never execute: the CORS
+  // PREFLIGHT (the mechanism that makes the credentialed cross-origin call possible at all), the
+  // media-type gate (what stops a cross-site form post from reaching the mint), and the 405 for
+  // every other method. None of them is dead code — deleting one leaves the route either
   // unreachable from the consent page or open to a simple form post — and until this scenario
   // existed, deleting all three left the whole suite green.
+  //
+  // ⛔ EVERY arm below drives `onRequest`, because `onRequest` is the module's ONLY Pages handler
+  // export. That is not a stylistic choice: Cloudflare calls a verb handler IN PREFERENCE to
+  // `onRequest`, and calls `onRequest` only when no verb handler is exported at all
+  // (developers.cloudflare.com/pages/functions/api-reference). A test that reached a verb export
+  // directly would supply the routing decision the platform makes, so it could assert a response
+  // the deployed runtime never produces — the vacuous shape this scenario was written to remove.
+  // `tokenRoute.onRequest({...})` IS what the platform invokes, for all three methods.
+  out.handler_exports = Object.keys(tokenRoute).filter((k) => /^onRequest/.test(k)).sort();
   const e = env({ SESSIONS: new FakeD1({ sessions: [sessionRow()] }) });
   const AS = "https://api.premiselabs.co";
   const URL_ = "https://app.premiselabs.co/api/consent/token";
@@ -490,7 +499,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
 
   // 1. The preflight the consent page's credentialed fetch depends on.
   {
-    const res = await tokenRoute.onRequestOptions({
+    const res = await tokenRoute.onRequest({
       request: new Request(URL_, { method: "OPTIONS",
         headers: { Origin: AS, "Access-Control-Request-Method": "POST",
                    "Access-Control-Request-Headers": "content-type" } }),
@@ -510,7 +519,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   //    header, or the browser completes the credentialed call to an attacker origin.
   out.cases.preflight_refused = [];
   for (const bad of [AS + ".evil.example", "https://api.premiselabs.co.attacker.tld"]) {
-    const res = await tokenRoute.onRequestOptions({
+    const res = await tokenRoute.onRequest({
       request: new Request(URL_, { method: "OPTIONS",
         headers: { Origin: bad, "Access-Control-Request-Method": "POST" } }),
       env: e });
@@ -526,7 +535,7 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   //    the gate entirely (the status would just be 401 for a different reason).
   out.cases.wrong_media_type = [];
   for (const ct of ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"]) {
-    const res = await tokenRoute.onRequestPost({
+    const res = await tokenRoute.onRequest({
       request: post("/api/consent/token", { state: "state-xyz", attempt_key: "k" },
                   { "Content-Type": ct }),
       env: e });
@@ -534,17 +543,33 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   }
 
   // 4. Anything that is not POST/OPTIONS. `onRequest` must answer it ITSELF (405) rather than
-  //    hand it to `next()` — a Pages `onRequest` that forwards everything makes the route's method
-  //    surface whatever the framework defaults to.
+  //    hand it to `next()` — `next()` here would go to the ASSET SERVER, whose 404 carries no
+  //    `Access-Control-Allow-Origin`, i.e. the unreadable refusal this arm exists to prevent.
+  //    The harness's `next()` answers 418 on purpose and records whether it was reached at all.
   out.cases.wrong_method = [];
   for (const method of ["GET", "PUT", "DELETE"]) {
+    let nextCalled = false;
     const res = await tokenRoute.onRequest({
       request: new Request(URL_, { method, headers: { Origin: AS } }),
       env: e,
-      next: async () => new Response("NEXT WAS CALLED", { status: 418 }),
+      next: async () => { nextCalled = true; return new Response("NEXT WAS CALLED", { status: 418 }); },
     });
     out.cases.wrong_method.push({ method, status: res.status, body: await res.json(),
+                                  nextCalled,
                                   allowOrigin: res.headers.get("Access-Control-Allow-Origin") });
+  }
+
+  // 4b. The same arm with NO `Origin` at all. This route is credentialed and mints a
+  //     bearer-equivalent assertion, so "no Origin" must not be a way in (#3524 §10) — and the
+  //     refusal must carry no `Allow-Origin`, exactly like a foreign origin's.
+  out.cases.wrong_method_no_origin = [];
+  for (const method of ["GET", "PUT", "DELETE"]) {
+    const res = await tokenRoute.onRequest({
+      request: new Request(URL_, { method }), env: e,
+      next: async () => new Response("NEXT WAS CALLED", { status: 418 }) });
+    out.cases.wrong_method_no_origin.push({
+      method, status: res.status, body: await res.json(),
+      allowOrigin: res.headers.get("Access-Control-Allow-Origin") });
   }
 
   out.status = out.cases.preflight_allowed.status;
@@ -687,19 +712,68 @@ def test_the_mint_refuses_a_simple_cross_site_POST_by_MEDIA_TYPE_not_by_cookie()
 def test_a_method_that_is_neither_POST_nor_OPTIONS_is_answered_405_by_this_route() -> None:
     """#10291 — `onRequest` must own the refusal, not forward it.
 
-    A Pages `onRequest` that returned `next()` for everything would make this route's method surface
-    whatever the framework defaults to, and the 405 arm is where its CORS headers are attached — a
-    refusal the browser cannot read is a refusal the page reports as a network error. The harness's
-    `next()` answers 418 on purpose: reaching it at all is the failure.
+    `next()` here would reach the ASSET SERVER (there is no other Function to chain to), whose 404
+    carries no `Access-Control-Allow-Origin` — so the arm is driven with a `next()` that is
+    FORBIDDEN to succeed: the harness records whether it was reached and answers 418 if it was.
+    The 405 is where the refusal's CORS headers are attached, so without them the page sees a CORS
+    failure instead of the refusal.
     """
     out = _run("mint_transport")
     for case in out["cases"]["wrong_method"]:
         assert case["status"] == 405, case
         assert case["body"]["error"] == "method_not_allowed", case
+        assert case["nextCalled"] is False, (
+            "the 405 forwarded to `next()`, which in Pages reaches the static asset server — its "
+            f"404 carries no CORS header: {case}"
+        )
         assert case["allowOrigin"] == _AS_ORIGIN, (
             "the 405 carries no Allow-Origin, so the page sees a CORS failure instead of the "
             "refusal"
         )
+
+
+def test_a_non_POST_method_with_NO_origin_is_refused_instead_of_reflected() -> None:
+    """The 405 path runs the exact-origin gate FIRST, so a caller with no `Origin` is refused.
+
+    This route is credentialed and mints a bearer-equivalent assertion; §10 records that an absent
+    `Origin` is refused here (unlike the BFF's other routes). The 403 must also carry no
+    `Allow-Origin` — a refusal that reflects the caller's origin still completes the browser call.
+    """
+    out = _run("mint_transport")
+    for case in out["cases"]["wrong_method_no_origin"]:
+        assert case["status"] == 403, case
+        assert case["body"]["error"] == "forbidden_origin", case
+        assert case["allowOrigin"] is None, case
+
+
+def test_the_token_route_exports_onRequest_and_no_verb_handler() -> None:
+    """⛔ THE ROUTING CONTRACT: `onRequest` is the ONLY Pages handler `token.ts` may export.
+
+    PRIMARY SOURCE — developers.cloudflare.com/pages/functions/api-reference: "The `onRequest`
+    method will be called **unless a more specific `onRequestVerb` method is exported**. For
+    example, if both `onRequest` and `onRequestGet` are exported, only `onRequestGet` will be
+    called for GET requests." And: `onRequest` "will be invoked on all requests no matter what the
+    request method is, as long as no specific request verb … is exported."
+
+    So exporting a verb handler is not "a fast path apart" from `onRequest` — it TAKES the verb
+    away from `onRequest`. At `cf6ccc129` this route exported `onRequestPost` + `onRequestOptions`
+    + `onRequest`, and the 405 arm lived in the last of the three: for `GET`/`PUT`/`DELETE` the
+    platform answered with a static 404 carrying no `Access-Control-Allow-Origin`, while the
+    suite stayed green because it called `onRequest` directly and supplied the routing decision
+    the platform makes. This pin exists because that mutation is INVISIBLE from the responses: no
+    behavioural arm can distinguish "the 405 ran" from "the platform answered instead".
+
+    Non-vacuity: at the pre-fix head this set was `['onRequest', 'onRequestOptions',
+    'onRequestPost']` and the assertion fails on the first extra entry.
+    """
+    out = _run("mint_transport")
+    assert out["handler_exports"] == ["onRequest"], (
+        "the mint route exports a Pages handler besides `onRequest`: "
+        f"{out['handler_exports']}. Cloudflare calls a verb export INSTEAD OF `onRequest`, so the "
+        "405 arm in `onRequest` is dead for that verb and the refusal degrades to the platform's "
+        "static 404 with no CORS header. Keep `mint`/`preflight` module-private and dispatch them "
+        "from `onRequest`."
+    )
 
 
 def test_the_mint_route_allows_an_attempt_row_with_NO_owner_yet() -> None:
