@@ -2311,10 +2311,98 @@ def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
     # NO SELF-EDGE (E2E-11.6): a chain that collapses the endpoints onto one node
     # must not mint `(X)-[:aboutPoint]->(X)`.
     assert "dest.node_key <> tgt.node_key" in insert, insert
-    # A bare MERGE is what the fold's transfer is: no attribute SET, so an
-    # existing successor row keeps its own value (#9417) — `DO UPDATE` would
-    # overwrite it with the descriptor's absent attributes.
+    # ⛔ #10303: `DO NOTHING` is the fold's OWN precedence, not an approximation
+    # of it. Since `#10139` the transfer is `MERGE … ON CREATE SET nr += $attrs`:
+    # a row the successor does not have is created carrying the retired edge's
+    # attributes, a row it already has is left untouched. `DO NOTHING` reproduces
+    # exactly that (`DO UPDATE` would overwrite the successor's own value with
+    # the retired point's — the measured 0.91 -> 0.42, #9417 review P1).
     assert insert.rstrip().endswith("DO NOTHING"), insert
+
+
+def test_the_structural_carry_reads_the_folds_own_vocabulary():
+    """#10303 — ONE vocabulary, and the RECORD side reads the same tuple.
+
+    The move's carried set is the fold's replay vocabulary (`DIRECT_EDGE_ATTR_KEYS`,
+    `projection/edges.py`), so a key added to one side cannot be dropped by the
+    other. Pinned BOTH directions: an extra local key would carry an attribute
+    the graph LOSES (a new divergence in place of the old one), a missing one
+    drops an attribute it keeps.
+
+    ⛔ `source_version` is pinned ABSENT: it is the RECORD column name while the
+    graph writes the anchor as `sourceVersion`, so the fold's transfer and replay
+    drop it — a member here would make the record keep an attribute the graph does
+    not have. Its names are a SUBSET of `RelationUpsert.attrs` (the vocabulary
+    `_relation_upsert_statement` writes), which is what makes them writable here
+    at all.
+    """
+    from tortoise.projection.edges import DIRECT_EDGE_ATTR_KEYS
+
+    assert rp._DIRECT_EDGE_ATTR_KEYS == DIRECT_EDGE_ATTR_KEYS, (
+        rp._DIRECT_EDGE_ATTR_KEYS, DIRECT_EDGE_ATTR_KEYS)
+    assert "source_version" not in rp._DIRECT_EDGE_ATTR_KEYS
+    assert set(rp._DIRECT_EDGE_ATTR_KEYS) <= set(rp.RelationUpsert().attrs), (
+        rp._DIRECT_EDGE_ATTR_KEYS, rp.RelationUpsert().attrs)
+
+
+def test_a_structural_repoint_carries_the_descriptors_attributes():
+    """#10303 review P1 — the RECORD route carries what the descriptor carries.
+
+    `sdk.supersede_point` journals the retired edge's attributes FLAT on the 2b
+    descriptor (`#10139`) and the graph's pass-2b replay re-applies them
+    (`ON CREATE SET nr += $attrs`). This route wrote the moved row with NO
+    attributes at all, so ONE journal rebuilt to two different stores — the
+    journal route keeping `confidence`, the record route dropping it. That is a
+    divergence this PR CREATED rather than inherited: before `#10139` both routes
+    dropped the value and therefore agreed.
+
+    ⚠️ Where the cascade is observable: `direction`/`confidence`/`weight`/
+    `label`/`batch_id` are COLUMNS of `public.relation`, and `_split_properties`
+    routes each carried name to the column when there is one — so the values land
+    on the row's COLUMNS and the `props` tail stays `{}`. A reader looking for
+    the carry in `props` will not find it; the columns are the record's home for
+    these five (`#7968`'s placement).
+
+    RED before the fix (measured by reverting the carry in place): the INSERT had
+    no attribute column and no attribute param, so every assertion below on the
+    carried value failed while the move's topology assertions stayed green.
+    """
+    statements = rp.mutations_for(
+        _structural_repoint(confidence=0.83, batch_id="b-10139"),
+        org_id="o", graph_id="g")
+    insert = next(s for s in statements
+                  if "INSERT INTO public.relation" in s.sql)
+    assert "idx, confidence, batch_id, props)" in insert.sql, insert.sql
+    assert 0.83 in insert.params, insert.params
+    assert "b-10139" in insert.params, insert.params
+    # The tail carries none of the five (they all have columns) — stated so the
+    # empty tail is not read as "the carry was dropped again".
+    assert json.dumps({}) in insert.params, insert.params
+    # PRECEDENCE — see the docstring above the `DO NOTHING` in the module: this is
+    # `ON CREATE SET` on the record side, so a successor's OWN row is untouched.
+    assert insert.sql.rstrip().endswith("DO NOTHING"), insert.sql
+    assert "DO UPDATE" not in insert.sql, insert.sql
+    # The DELETE leg carries NOTHING: the graph deletes the edge by its internal
+    # id and the attributes transfer to the successor; they are not retained at
+    # the superseded point.
+    delete = next(s for s in statements
+                  if "DELETE FROM public.relation" in s.sql)
+    assert "confidence" not in delete.sql, delete.sql
+
+
+def test_a_structural_repoint_with_no_attributes_emits_the_same_shape():
+    """The BARE descriptor's statement is unchanged — the carry is additive.
+
+    A descriptor carrying none of the vocabulary's keys (the shape the PGlite
+    harness's `9972-move` case replays) must keep the column list it had before
+    `#10303`: the fix adds carried attributes to a row that carries some, it does
+    not re-cut every bare move's statement.
+    """
+    statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
+    insert = next(s for s in statements
+                  if "INSERT INTO public.relation" in s.sql)
+    assert "tgt_key, idx, props)" in insert.sql, insert.sql
+    assert json.dumps({}) in insert.params, insert.params
 
 
 def test_the_structural_move_reads_the_records_own_successor_chain():
