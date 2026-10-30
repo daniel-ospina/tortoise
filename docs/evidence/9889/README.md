@@ -22,9 +22,9 @@ both gaps, plus the numbers they measured. No `tortoise/` file changed.
 
 | probe | the question it answers | falsifier |
 |---|---|---|
-| `probes/e1_paired_arm.py` | what is E1's **before** share on the pre-registered corpus, with the selection passes OFF? | refuses (measures nothing) if any pass switch is already set, if the backend cannot extract (no key → a measurement of a key's ABSENCE), or — exit 2, writing no record — if the run wrote fewer `:Object` nodes than E1's frozen floor |
+| `probes/e1_paired_arm.py` | what is E1's **before** share on the pre-registered corpus, with the selection passes OFF? | refuses (measures nothing) if any pass switch is already set, if the backend cannot extract (no key → a measurement of a key's ABSENCE), or if the checkout's corpus is not the pre-registration's frozen one (`G1`); exit 2, writing no record, if the run's population is one E1's record refuses — a zero denominator, fewer `:Object` nodes than E1's frozen floor, or a before-share under the frozen `e1_min_before_share` |
 | `probes/e1_gate_drops.py` | does the v4 value-gate predicate drop **any** `^the <X>` Object? (deterministic, zero model calls) | exit 2 if the positive controls stop dropping, or if the graph yields no Object names |
-| `probes/e2a_value_units.py` | how many of the frozen **14** value-bearing planted units STRICTLY survive? | `--inject-anchor` refuses (exit 2) if injecting every lost unit's anchor moves the counter by nothing |
+| `probes/e2a_value_units.py` | how many of the frozen **14** value-bearing planted units STRICTLY survive? | refuses (exit 2, no record) when no searchable `TORTOISE_DB_URI` is set (the embedded fallback would read an empty graph as `0 of 14`) or when the graph holds no memory-level Points at all (an ABSENT population, not a losing pipeline); `--inject-anchor` refuses if injecting every lost unit's anchor moves the counter by nothing |
 
 ## The tree these numbers belong to
 
@@ -62,8 +62,25 @@ verdict. This probe produces the number that bar is written over, so it reads
 the same floor out of the same pre-registration and applies it: under 30 Objects
 (and at zero, #9889 acceptance item 2) it exits **2** and writes **no record** —
 a below-floor before-share is precisely the decidable-looking pair an undecidable
-run could otherwise hand a reader. Both arms below cleared the floor (78 and 69),
-so their shares are measurements.
+run could otherwise hand a reader.
+
+**Both halves of E1's bar are applied, and the record says which population it
+was taken on.** E1 is stored as a threshold AND the corpus it was argued over
+(#9076), so before any model call the probe runs the shipped `G1`
+(`capstone_measure.check_corpus`) against the pre-registration's
+`corpus.fixtures_hash` — a checkout whose corpus is not the frozen one is
+refused, never measured — and the record carries the `fixtures_hash` this run's
+corpus actually had plus the `head` it was taken at. E1 has a SECOND
+registered refusal, on the number itself rather than its denominator:
+`denominator_floors.e1_min_before_share: 0.20` — the criterion says a control
+arm under that share "cannot measure E1 (a share metric needs a non-trivial
+base)" and is **REFUSED**. A before-share under 0.20 therefore exits **2** and
+writes no record, citing the frozen floor. Both floors are read out of the
+record (`e1_objects` through `parse_bars`, `e1_min_before_share` straight off
+`denominator_floors`, which `parse_bars` does not expose), never typed here, and
+an absent or unreadable `e1_min_before_share` is refused rather than read as "no
+floor" (#9513). Both arms below clear both floors (0.3590 and 0.5652 against
+0.20; 78 and 69 Objects against 30), so their shares are measurements.
 
 Measured (two independent OFF runs, because a single realization cannot show
 whether a difference is the arm or the model):
@@ -156,6 +173,18 @@ is a property of the pipeline and not of an inert counter. Losses are per
 session, not uniform: `wp04_aurora_perf` lost 3 of 3, `wp05_retro_writeup` lost 2
 of 6, `wp01_quarry_debug` lost 1 of 4.
 
+**An absent population is refused, not scored — including by the falsifier.**
+Two preconditions are checked before any number is emitted: with no
+`TORTOISE_DB_URI` the SDK silently resolves the EMPTY embedded graph, and a
+`--graph` name that was never written (a typo, a reaped graph) reads empty rather
+than raising, so both produce the same confident `0 of 14` a real E2a regression
+would. The probe therefore refuses (exit **2**, no record) when no searchable
+backend is configured and when `sum(per_session[*].memory_points) == 0` — #9889
+acceptance item 2's zero-denominator rule applied to E2a's population. Without
+that check the falsifier CERTIFIES the failure: on an empty graph `before` is
+`0/14`, the injection recovers all 14 synthetic anchors, and the probe prints
+`recovered 14 of lost 14` green beside a number that measured nothing.
+
 ## Against the issue's table (which was measured at `5f40d832c`)
 
 | row | issue body, `5f40d832c` | measured here, `54922a800` | same verdict? |
@@ -207,6 +236,18 @@ metric's own precision.
 | `e1-gate-drops.json` | `e1_gate_drops.py` record (every Object name, its verdict, the controls) |
 | `e2a-value-units.json` | `e2a_value_units.py` record, as written (per-session ids, survived and lost) |
 | `e2a-value-units-falsifier.json` | the same with `--inject-anchor` — both readings in one record |
+
+⚠️ **Provenance of the two OFF records.** They were measured with the probe as it
+stood before the review rounds added the two floors and the corpus pin, so their
+keys are `[arm, bare_definite, elapsed_s, graph, label_counts, object_names,
+objects, sessions, share]` — no `object_floor`, `min_before_share`,
+`fixtures_hash` or `head`. The shipped probe always writes all four, and re-running
+it is what would bring the archived records into that shape (it needs a FalkorDB
+lane plus a model key). **No published number moves:** both shares clear both
+floors (0.3590 and 0.5652 against `e1_min_before_share` 0.20; 78 and 69 Objects
+against `e1_objects` 30), and the corpus the runs used is the one §"The tree these
+numbers belong to" pins. What a reader cannot check on the archived records is the
+population and commit directly — which is why the shipped record now carries them.
 
 The probes themselves live beside the instruments they reuse, in
 `docs/evidence/7949-capstone/probes/`; their falsifiers are pinned in
