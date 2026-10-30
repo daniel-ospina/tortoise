@@ -41475,14 +41475,40 @@ async def oauth_authorization_server_metadata(request: Request):
 
 @app.get("/oauth/authorize")
 async def oauth_authorize(request: Request):
-    """Authorization endpoint (P2) — validates the request and renders the
-    branded consent page (D2; the single custom HTML page reusing the
-    signup/signin pattern). The browser signs in via supabase-js, then posts
-    the session JWT to /oauth/consent which mints the auth code.
+    """Authorization endpoint (P2) — validates the request, then either renders
+    the branded consent page (D2) or BOUNCES to the app's own sign-in surface.
+
+    ⛔ #3524 §9 step 4 — THIS ENDPOINT DOES NOT RENDER A SIGN-IN PAGE, and the
+    page it renders does not sign anybody in. The AS holds no browser session it
+    can read (`__Host-session` is host-only to `app.*` and HttpOnly), so it
+    cannot tell an authenticated visitor from a cold one, and the pre-#4054
+    design answered that with a SECOND identity system: a JS-readable
+    `Domain=.premiselabs.co` cookie. That is deleted. The split is by evidence
+    the AS actually has:
+
+      * an authorize request that carries `attempt_key` is one the app ALREADY
+        advanced (its `/api/consent/start` route records the attempt, resolves
+        the session, and only then redirects here) → render the page, which asks
+        that same origin for a bound assertion;
+      * anything else has no evidence of a session → 302 to the app's sign-in
+        leg with the COMPLETE request carried as its return target
+        (`consent_bounce_url`), so nothing has to be reconstructed from memory
+        on the way back.
+
+    An attempt key is not a credential: a forged one renders a page whose mint
+    answers `403 no_authorize_attempt`, which is a typed refusal on the page and
+    never a code. What it does establish is that the app itself wrote this URL.
+
+    The params are validated BEFORE the bounce, so a malformed authorize request
+    still gets its RFC 6749 §4.1.2.1 error (redirect-vs-JSON, unchanged) instead
+    of being forwarded to the app to fail there.
     """
     from tortoise.oauth import (
+        CONSENT_ATTEMPT_KEY_PARAM,
         OAuthError,
         canonical_redirect_target,
+        consent_app_origin,
+        consent_bounce_url,
         consent_page_html,
         validate_authorize_params,
     )
@@ -41562,31 +41588,59 @@ async def oauth_authorize(request: Request):
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/authorize")
+    # ── #3524 §9 step 4: the app owns sign-in; this endpoint never renders one ──
+    # Resolved ONCE, and refused BEFORE either branch: an unusable binding is a
+    # deployment-wide fault, so neither a bounce to an unparseable origin nor a
+    # page whose mint cannot be reached is the right answer. Typed 503, named —
+    # the same treatment `start.ts::parseAsOrigin` and `token.ts::originVerdict`
+    # give the sibling half of the same knob.
+    app_origin = consent_app_origin()
+    if app_origin is None:
+        return _oauth_error_response(OAuthError(
+            503, "temporarily_unavailable",
+            "The consent bridge's session origin is misconfigured — retry shortly."))
+    # …and the page's OTHER hard dependency, refused the same way and for the
+    # same reason. Checked at RENDER, after the bounce: the bounce touches
+    # neither the key nor the mint, so an unauthenticated visitor must still be
+    # handed to the app's sign-in leg even while this AS is missing the key — the
+    # fault belongs to the page, and only the page needs it. Refusing at
+    # redemption alone is not enough: that check cannot fire until someone has
+    # already been told to click Approve.
+    # Evidence of a session, as the AS can actually observe it: the attempt key
+    # the app writes onto this URL (`ATTEMPT_KEY_PARAM`, start.ts). Absent ⇒ the
+    # app never advanced this flow ⇒ hand the COMPLETE request to the app's
+    # sign-in leg and let the one origin that holds the session decide.
+    if not request.query_params.get(CONSENT_ATTEMPT_KEY_PARAM):
+        return RedirectResponse(
+            consent_bounce_url(app_origin, request.url.query), status_code=302)
+    from tortoise.consent_token import consent_token_secret_problem
+    secret_problem = consent_token_secret_problem()
+    if secret_problem is not None:
+        return _oauth_error_response(OAuthError(
+            503, "temporarily_unavailable",
+            f"The consent bridge's signing key is unusable ({secret_problem}) — "
+            "retry shortly."))
     html, nonce = consent_page_html(
         client_name=client.get("client_name") or client["id"],
-        scope=params["scope"] or client.get("scope") or "mcp",
         # #3443: `redirect_target` rides along with the raw params — the page
         # navigates THAT (deny included, which has no server round trip) and
         # posts `redirect_uri` back for validation as before.
         params={**params, "redirect_target": redirect_target},
-        supabase_url=os.environ.get("SUPABASE_URL", ""),
-        supabase_anon_key=os.environ.get("SUPABASE_ANON_KEY", ""),
+        raw_query=request.url.query,
+        app_origin=app_origin,
     )
-    # CSP (PR #1264 review P1): script-src is nonce-gated so the inline
-    # consent logic runs while a payload that somehow escapes the JSON
-    # embedding still cannot execute; connect-src allows the supabase-js
-    # REST calls; frame-ancestors blocks clickjacking.
-    from urllib.parse import urlparse
-    supabase_origin = ""
-    _u = urlparse(os.environ.get("SUPABASE_URL", ""))
-    if _u.scheme and _u.netloc:
-        supabase_origin = f"{_u.scheme}://{_u.netloc}"
+    # CSP (PR #1264 review P1): script-src is nonce-gated so the inline consent
+    # logic runs (and NOTHING else does — the supabase-js CDN is gone with the
+    # inline client, #3524 §9 step 4) while a payload that somehow escapes the
+    # JSON embedding still cannot execute; connect-src is exactly the two
+    # origins this page talks to — itself for `/oauth/consent`, and the session
+    # origin for the mint; frame-ancestors blocks clickjacking.
     csp = (
         "default-src 'none'; "
-        f"script-src 'nonce-{nonce}' https://cdn.jsdelivr.net; "
+        f"script-src 'nonce-{nonce}'; "
         "style-src 'unsafe-inline'; "
         "img-src 'self' data:; "
-        f"connect-src 'self' {supabase_origin}; "
+        f"connect-src 'self' {app_origin}; "
         "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     )
     return Response(html, media_type="text/html",
@@ -41595,10 +41649,29 @@ async def oauth_authorize(request: Request):
 
 @app.get("/oauth/consent/preview")
 async def oauth_consent_preview(request: Request):
-    """Consent-page org preview (D4): which org a grant would bind, given
-    the session JWT + client-declared resource indicator. No state change.
+    """Consent-page org preview (D4): which org a grant would bind, given the
+    session JWT + client-declared resource indicator. No state change.
+
+    #3524 §9 step 4 — TWO identity sources, the same pair `POST /oauth/consent`
+    already accepts. The page holds NO bearer any more (it cannot read the app's
+    host-only HttpOnly session), so it presents the bound single-use consent
+    token it minted from the session origin, in `X-Consent-Token`, together with
+    the four authorize params it is bound to (§2.2 — the bind is COMPARED here
+    exactly as at redemption; without that comparison a token from another flow
+    could name a user and read their teams).
+
+    ⛔ The `jti` is NOT consumed: `verify_consent_token` is pure and this route
+    performs no write. That is deliberate — the preview runs BEFORE the visitor
+    decides, so spending the assertion here would make a page whose first preview
+    hit a store blip unable to approve at all, and would turn "which team" into a
+    single-use read of a token that exists to authorise exactly one CODE. `jti`
+    bounds a redemption, not a page load.
+
+    The BEARER arm is untouched (same call, same order, same errors): a client
+    that still presents a session JWT behaves exactly as it did before the
+    bridge.
     """
-    from tortoise.oauth import OAuthError, consent_preview
+    from tortoise.oauth import CONSENT_TOKEN_HEADER, OAuthError, consent_preview
     try:
         cp, enabled = _oauth_control_plane()
     except RuntimeError as exc:      # #3026: an unconfigured control plane
@@ -41609,6 +41682,31 @@ async def oauth_consent_preview(request: Request):
         return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
+    presented_token = request.headers.get(CONSENT_TOKEN_HEADER.lower())
+    if presented_token:
+        # §9 step 4: the assertion IS the identity, and its bind must match the
+        # flow it is being used for (same four fields, same comparison as
+        # `/oauth/consent`). A refusal here is a typed 401/503, never a 500 and
+        # never a silent fall-through to the bearer path.
+        from tortoise.consent_token import verify_consent_token
+        try:
+            assertion = verify_consent_token(presented_token, presented={
+                "client_id": request.query_params.get("client_id") or "",
+                "redirect_uri": request.query_params.get("redirect_uri") or None,
+                "code_challenge": request.query_params.get("code_challenge") or None,
+                "state": request.query_params.get("state"),
+            })
+        except OAuthError as exc:
+            return _oauth_error_response(exc)
+        except Exception as exc:        # last-resort: never a bare 500 detail (#3026)
+            return _oauth_unconverted_failure(exc, where="oauth/consent/preview token")
+        try:
+            return consent_preview(cp, assertion["sub"], _oauth_base(request),
+                                   request.query_params.get("resource") or None)
+        except OAuthError as exc:
+            return _oauth_error_response(exc)
+        except Exception as exc:        # last-resort: never a bare 500 detail (#3026)
+            return _oauth_unconverted_failure(exc, where="oauth/consent/preview")
     user = await verify_session_jwt(request)
     try:
         return consent_preview(cp, user["user_id"], _oauth_base(request),

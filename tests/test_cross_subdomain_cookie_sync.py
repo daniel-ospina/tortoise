@@ -62,6 +62,8 @@ BLOG_ADMIN = (
 BLOG_BACKEND = (
     REPO_ROOT / "website" / "apps" / "blog-admin" / "src" / "lib" / "backend.ts"
 )
+# The consent page — the LAST adapter copy until #3524 §9 step 4 deleted it; now
+# asserted ABSENT on the served page, not read for its router.
 OAUTH = REPO_ROOT / "tortoise" / "oauth.py"
 
 # #4054: main.jsx's SESSION adapter is deleted, but the file still writes the
@@ -81,23 +83,28 @@ SIGNUP_PAGE = (
 BRIDGE_SCRIPT = 'src="/assets/supabase-session.js"'
 
 # ── #3496: key-identity routing (allowlist of ONE key) ────────────────────
-# The router lives in the write/remove paths of the session adapter. With the
-# bridge and the blog-admin adapter deleted, `oauth.py` is the LAST copy; its
-# write/remove paths route a non-session key to the aux stores and never to the
-# cookie (`!==` on both methods).
+# The router lived in the write/remove paths of a session adapter. The bridge and
+# the blog-admin adapter were deleted first (#3559, #4178), leaving `oauth.py`'s
+# copy as the last one — and #3524 §9 step 4 deleted THAT, with the consent page's
+# inline client and its parent-domain cookie jar (§7's deletion set).
+#
+# ⛔ SO THE TABLE IS NOW EMPTY, DELIBERATELY. The contract cannot be violated by
+# a copy that does not exist, and an empty registry is only safe while the gate
+# still PROVES it would see a copy: `test_router_detector_matches_definitions_not_
+# call_sites` feeds the detector real definitions (it reds if the regex dies), and
+# `test_every_storage_adapter_copy_is_registered` feeds the WRITER detector a
+# synthetic `document.cookie = … sb-tortoise-auth-token` line for the same reason,
+# then fails on any unregistered copy that appears. If an adapter is ever written
+# again, register it here — an entry is what makes the polarity assertions bind.
 #
 # This table IS the contract's declared home (#5735): a copy of the adapter that
-# is not listed here is a copy no gate can see, so
-# `test_every_storage_adapter_copy_is_registered` below enumerates the copies and
-# fails on any that is missing.
+# is not listed here is a copy no gate can see.
 _ROUTER_KEY_CMP = re.compile(r"\bkey\s*(===|!==)\s*([A-Za-z_$][\w$]*)")
 _ROUTER_SHAPE_PREDICATE = re.compile(
     r"\.endsWith\(|\.startsWith\(|\.slice\(|\.charAt\(|\.includes\("
     r"|RegExp|\.test\(\s*key\b|\.match\(|typeof\s+key\b|\bkey\s*\["
 )
-_ROUTER_CASES = [
-    (OAUTH, "COOKIE_NAME", {"setItem": "!==", "removeItem": "!=="}),
-]
+_ROUTER_CASES = []
 
 
 def _read(path: Path) -> str:
@@ -387,11 +394,12 @@ def test_key_identity_router_allows_only_the_session_key() -> None:
     JS-readable parent-domain jar, and the rule that keeps it out must not be a
     denylist of verifier-shaped names.
 
-    Only `oauth.py` remains in `_ROUTER_CASES` — the bridge and the blog-admin
-    adapter that carried the other copies are deleted (#3559/#4178). The
-    contract is unchanged: EXACTLY ONE key-left comparison per method naming
-    that file's session-key constant, and NO string-shape predicate on `key`.
-    The behavioural counterpart is tests/test_oauth_consent_pkce.py."""
+    Only `oauth.py` remained in `_ROUTER_CASES` after #3559/#4178 — and §9 step 4
+    of #3524 deleted that copy too, so the table is EMPTY and this loop is a
+    contract with no current subject. It is kept (not deleted) because it is the
+    ONLY thing that would bind a future copy's polarity, and because the
+    detector's liveness is proved independently below. The behavioural
+    counterpart is tests/test_oauth_consent_page_step4.py."""
     for path, session_key, methods in _ROUTER_CASES:
         text = _read(path)
         for name, operator in methods.items():
@@ -411,6 +419,37 @@ def test_key_identity_router_allows_only_the_session_key() -> None:
                 "the credential jar for every name it has not heard of; route by "
                 "key identity instead (#3496)"
             )
+
+
+def test_the_consent_page_carries_no_parent_domain_cookie_writer() -> None:
+    """#3524 §9 step 4: the LAST adapter copy is deleted, asserted on the artefact.
+
+    `oauth.py`'s inline `cookieStorage` adapter was the final copy of this
+    contract — the one that wrote the JS-readable `Domain=.premiselabs.co` jar so
+    the consent page could hold a session of its own. `_ROUTER_CASES` is empty
+    because of it, and an empty registry is only honest if something proves the
+    copy is really GONE. That is this test: the page writes no cookie, carries no
+    adapter and names no session-cookie literal.
+
+    (The registry's own detectors are proved live on synthetic sources in
+    `test_every_storage_adapter_copy_is_registered`, so neither half of the gate
+    is vacuous while the table is empty.)
+    """
+    code = _scan_code(OAUTH)
+    assert _SESSION_COOKIE_LITERAL not in code, (
+        "tortoise/oauth.py names the legacy parent-domain session cookie again — "
+        "the page holds no session since #3524 §9 step 4, so nothing there has a "
+        "reason to name it"
+    )
+    assert not _COOKIE_ASSIGNMENT.search(code), (
+        "the consent page writes `document.cookie` again — §9 step 4 deleted the "
+        "JS-readable session jar, which was the second identity system itself"
+    )
+    assert not _ROUTER_METHOD.search(code), (
+        "a storage-adapter method definition is back in tortoise/oauth.py — that "
+        "is the adapter `_ROUTER_CASES` used to register; if one is really needed "
+        "again it must be key-routed and registered there (#5735)"
+    )
 
 
 # ── #5735: the registry is the contract's DECLARED HOME, and it must be complete ──
@@ -438,10 +477,11 @@ def test_key_identity_router_allows_only_the_session_key() -> None:
 #     decision #5735's task 4 asked the session-model lane to make.
 #
 # Scope: the PRODUCT source roots below. `tests/` is deliberately out of scope —
-# a harness embeds the adapter on purpose (this file pins bodies by text, and
-# tests/test_oauth_consent_pkce.py runs a JS `cookieStorage` over a mocked jar)
-# and can never reach a browser. The platform-wide absence of the JS-readable
-# artifact itself is owned by tests/test_no_legacy_token_path.py.
+# a harness embeds an adapter on purpose (this file pins bodies by text)
+# and can never reach a browser. (`tests/test_oauth_consent_pkce.py` used to be
+# the example, running a JS `cookieStorage` over a mocked jar; #3524 §9 step 4
+# deleted both that harness and the last product copy.) The platform-wide absence
+# of the JS-readable artifact itself is owned by tests/test_no_legacy_token_path.py.
 
 _PRODUCT_ROOTS = (
     "apps",
@@ -660,21 +700,27 @@ def test_every_storage_adapter_copy_is_registered() -> None:
         "the root list or the glob is broken, so every absence proved below would "
         "pass vacuously"
     )
-    assert OAUTH in copies and "router" in copies[OAUTH], (
-        f"the one live adapter copy ({OAUTH.relative_to(REPO_ROOT)}) was NOT "
-        "detected as a router — the detector is dead, so its silence proves nothing"
+    # ⛔ DETECTOR LIVENESS WITHOUT A LIVE COPY. Until #3524 §9 step 4 this was
+    # proved by `oauth.py`, the last adapter copy. The copy is deleted, so the
+    # proof has to come from a SYNTHETIC source that carries the contract's
+    # shape: with no live copy, a detector that silently stopped matching would
+    # make `copies` empty, `unregistered` empty, and this whole gate read as a
+    # clean bill of health. Each detector is therefore exercised on a literal
+    # before its silence is trusted.
+    assert _ROUTER_METHOD.search("setItem(key, value) {") and _ROUTER_KEY_CMP.search(
+        "if (key !== COOKIE_NAME) return;"), (
+        "the router detector no longer matches a real adapter definition — with no "
+        "live copy left, its silence would prove nothing"
     )
-    # #8701 review (P2): pin the WRITER detector too. `oauth.py` is the only
-    # product source that hits it, so if `_SESSION_COOKIE_LITERAL` /
-    # `_COOKIE_ASSIGNMENT` regress, `unregistered`, `stale` and `decorative`
-    # all stay empty and the test above reads as clean while the whole
-    # `cookie-writer` failure shape (#5735's "no routing — writes any key") goes
-    # unwatched. This assertion is what makes a dead writer detector fail.
-    assert OAUTH in copies and "cookie-writer" in copies[OAUTH], (
-        f"the one live adapter copy ({OAUTH.relative_to(REPO_ROOT)}) was NOT "
-        "detected as a cookie-writer — that detector is dead, so its silence "
-        "proves nothing and a `document.cookie` writer that names the session "
-        "cookie would land unregistered (#8701 review P2)"
+    synthetic_writer = (
+        'const COOKIE_NAME = "' + _SESSION_COOKIE_LITERAL + '";\n'
+        'document.cookie = key + "=" + value;'
+    )
+    assert (_SESSION_COOKIE_LITERAL in synthetic_writer
+            and _COOKIE_ASSIGNMENT.search(synthetic_writer)), (
+        "the cookie-writer detector no longer matches a synthetic parent-domain "
+        "write — with no live copy left, that detector's silence would prove "
+        "nothing (#8701 review P2)"
     )
 
     unregistered = sorted(copies.keys() - registered)

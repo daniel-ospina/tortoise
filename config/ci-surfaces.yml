@@ -1219,7 +1219,7 @@ surfaces:
   # `tortoise/activation_scorecard.py`'s LIMITATIONS text).
   - test_mcp_refusal_telemetry_9084.py
   - test_metering.py
-  - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
+  - test_oauth_consent_page_step4.py  # #3524 §9 step 4: the consent page STOPS signing people in. Owns the whole page surface now — the unauthenticated 302 bounce (with the complete authorize URL recoverable), the return target run through signup.html's REAL `APP_RETURN_ROUTES` under node, byte-exact `state`, the attempt-key carriage read from the page's own URL, the mint call, the token-bound `/oauth/consent` POST, and a bound token redeeming to a live code. It REPLACED test_oauth_consent_pkce.py wholesale (deleted with the inline client it pinned). DUAL-REGISTERED with `onboarding`: it reads `website/apps/dashboard/functions/**` (the mint's route files and the TS `ATTEMPT_KEY_PARAM` authority) and `public/signup.html`.
   - test_oauth_consent_bff_routes.py  # #3524 steps 1+3: the BFF mint + bounce routes and the TS<->Python token contract
   - test_oauth_consent_jti_store.py  # #3524 step 1: the control-plane jti STORE contract — first-claim vs replay mapping, the 401/503 split, the exp+leeway stamp, the prune. NOT atomicity and NOT the grants: atomicity is Postgres ON CONFLICT and the GRANT/RLS posture is executed by supabase/tests/20261030000001_oauth_consent_tickets.sql (pglite) — this file says so in its own header
   - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec + verifier guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5), and (since §9 step 2 landed) the `tortoise/consent_token.py` verifier's bind/`alg`/`jti`/strength contract. DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix. The verifier half is reachable through `api` only because `tortoise/consent_token.py` is a `SOURCE_PATTERNS["api"]` entry (tools/ci_selection.py; pinned by tests/test_ci_selection.py::test_a_consent_token_only_diff_runs_the_bridge_guard) — a named-surface match replaces the `core` fallback, and this file is not registered on `core`.
@@ -5624,6 +5624,15 @@ surfaces:
   # `onboarding` SOURCE_PATTERN — a named-surface match REPLACES the `core` fallback, so an
   # `api`-only registration would leave this guard asleep exactly when those routes change.
   - test_oauth_consent_bff_routes.py
+  # `test_oauth_consent_page_step4.py` needs THIS arm for the same reason (#3524 §9 step 4):
+  # it reads `functions/api/consent/{token,start}.ts` (the routes the page calls), the TS
+  # `ATTEMPT_KEY_PARAM` authority in `functions/_shared/auth/consent-bridge.ts`, and
+  # `public/signup.html` (the REAL return-to allowlist it executes).
+  # `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN and a named-surface
+  # match REPLACES the `core` fallback, so an `api`-only registration would leave the
+  # attempt-key cross-half pin asleep exactly when the TS constant moves — the failure that
+  # makes every mint answer `403 no_authorize_attempt` AFTER the visitor approved.
+  - test_oauth_consent_page_step4.py
   # #3524 task 3: the BEHAVIOURAL guard for the four session-flow properties.
   # It reads `website/apps/dashboard/functions/_shared/auth/{token,consent-flow}.ts`
   # and executes them under Node, so `website/apps/dashboard/functions/` — a
@@ -5809,7 +5818,8 @@ surfaces:
   # absence proof — the failed-write/destroyed-fragment class is unreachable
   # because no browser surface writes a session at all. Pure static, no
   # browser/network, so it runs in the python-ci matrix. It still exports
-  # `_require_node`, which `test_oauth_consent_pkce.py` imports.
+  # `_require_node`, which `test_oauth_consent_bff_routes.py` and
+  # `test_oauth_consent_page_step4.py` import.
   - test_session_bridge_fragment_retention.py
   - test_waitlist_form.py
   - test_w7_publish.py
@@ -7995,7 +8005,7 @@ durations:
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 11.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.9
   test_oauth_mcp.py: 14.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.4 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (9.4s) is a LOWER bound; kept 14.9
-  test_oauth_consent_pkce.py: 13.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.3
+  test_oauth_consent_page_step4.py: 12.0  # #3524 §9 step 4 — replaces test_oauth_consent_pkce.py (13.9). Unmeasured on the CI runner: a file ADDED BY A PR can never carry a CI junit reading (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` posture rather than a dev-box reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419). What it covers: 38 cases — the bounce + return-target recovery, the real allowlist executed under node, the page's inline script executed under node (several of those spawn node, ~2-4 s each), the #6001 placeholder set ×8, the org preview's two identity arms and the #1701 R1 chooser, and the token-bound AS round trips. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
   test_mcp_server.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_dashboard_client_paths_resolve.py: 9.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.6
   test_dashboard_login.py: 22.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.8
@@ -9380,6 +9390,7 @@ durations:
   test_mcp_wrap_envelope_error_8482.py: 2.7
   test_oauth_clients_count_2853.py: 0.2
   test_oauth_consent_bridge.py: 1.7
+  test_oauth_consent_page_step4.py: 12.0  # #3524 §9 step 4 (also registered on `api`, where its long comment lives). Node-spawning: three cases run the page's inline script / signup.html's allowlist under node.
   test_oauth_session_flow_properties.py: 3.2
   test_onboarding_selfhost_w12.py: 6.3
   test_operator_label_vocabulary.py: 0.6
