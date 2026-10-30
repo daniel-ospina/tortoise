@@ -1844,9 +1844,8 @@ jobs:
     # cannot answer it. Since the 2026-10-29 mitigation (#6897 suspended;
     # docs/ops/ci-runner-x64.md, "the label contract") the installer CAN emit
     # `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`
-    # (tools/install-ci-runner-x64.sh), and re-registration preserves it
-    # (tools/runner_autoscale.py::_preserve_labels) — so the premise this comment
-    # used to end on, "`ubuntu-24.04` is claimed by no self-hosted runner", is
+    # (tools/install-ci-runner-x64.sh), so the premise this comment used to end
+    # on, "`ubuntu-24.04` is claimed by no self-hosted runner", is
     # FALSE. Re-measure it rather than trusting this text:
     # `gh api repos/<owner>/<repo>/actions/runners`.
     # ⛔ THE COST, STATED: label matching is cumulative and unscoped (github/docs,
