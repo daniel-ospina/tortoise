@@ -74,8 +74,8 @@
 # ⛔ `ubuntu-24.04` USED to settle that ambiguity by being unclaimable from the
 # fleet. Since the 2026-10-29 mitigation (#6897 suspended;
 # docs/ops/ci-runner-x64.md, "the label contract") the installer CAN emit
-# `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto` and re-registration
-# preserves it, so BOTH jobs below are POOL-ELIGIBLE while the mitigation is
+# `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`, so BOTH jobs below are
+# POOL-ELIGIBLE while the mitigation is
 # engaged — the premise this comment used to end on, "a version-pinned label no
 # self-hosted runner claims", is FALSE. Re-measure it rather than trusting this
 # text: `gh api repos/<owner>/<repo>/actions/runners`.
