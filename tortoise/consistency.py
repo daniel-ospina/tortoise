@@ -72,9 +72,9 @@ from .projection import (
     _load_prewipe_snapshot,
     _norm,
     _object_hard_deleted_ids,
+    _object_supersede_miss_detail,
     _promotion_point_with_operator,
     _replay_write_scope,  # #7951 §17.1: replay folds are authorized, live ones are not
-    _supersede_name_unregistered,  # #3590 D2: the ONE predicate (see _record_supersede_miss)
     _writable_id,
     entities,
     fold_with_entities,
@@ -87,6 +87,7 @@ from .projection import (
     journal_recreate_seqs,
     plan_point_restamp_folds,
     prewipe_snapshot_path,
+    supersede_object_address,  # #3590 D2/#10204: the ONE address predicate
 )
 from .projection.entities import (
     BELIEF_BOOL_PROPS,
@@ -104,11 +105,13 @@ from .projection.entities import (
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
     SHAPE_STATE_OP_MISS,
+    assert_no_non_folded,
     classify_terminalizer_miss,
     collect_identity_skips,
     collect_malformed_envelopes,
     collect_non_folded,
     record_non_folded,
+    refusal_remedy,
     refused_events,
 )
 from .stored_form import narrow_to_stored_width
@@ -1863,29 +1866,32 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
     def _record_supersede_miss(seq: int, ev: dict) -> None:
         candidate = ev.get("name") if isinstance(ev.get("name"), str) \
             and ev.get("name") else ev.get("id")
-        # #3590 D2: exempt ONLY a record the journal cannot ADDRESS, so this
-        # fold agrees with `rebuild_all`'s sweep. BOTH limbs are required: the
-        # NAME must be unestablished (no `ObjectRegistered`, no `EntityMutated`
-        # state-op name carried into the Object MERGE key — the canonical-label
-        # gate applies, a Point rename is not an Object name — no
-        # `EventRecorded` mention stub) AND the id, if the
-        # record carries one, must not be an established id. Either one
-        # established — or a record carrying no name at all — stays
-        # `object-superseded-miss` and refuses (#10107 review P2: this comment
-        # previously stated the name limb as if it were the whole rule).
+        # #3590 D2 as amended on #10204: exempt ONLY a record the journal cannot
+        # ADDRESS, so this fold agrees with `rebuild_all`'s sweep. The bound is
+        # about ADDRESSES, not about a name: the record must carry AT LEAST ONE
+        # address (a name, an id, or both — they are two spellings of one
+        # assertion, #10183) and the journal must have established NONE of the
+        # addresses it carries. An established name (a registration, a rename's
+        # state op, a mention stub) or an established id (a registration, a
+        # stub's deterministic id, a state op's target id) keeps
+        # `object-superseded-miss` and refuses; a record carrying NO address at
+        # all gets its own refusing `object-superseded-no-address` shape.
         # #10107 review P2: the SAME predicate the two graph engines use, so
         # the two halves of one classification cannot read different spellings
         # (this fold iterates the RAW journal; they normalise).
+        _sup_shape = classify_terminalizer_miss(
+            "ObjectSuperseded", target_deleted=False,
+            object_address=supersede_object_address(
+                ev, object_established))
         record_non_folded(
-            classify_terminalizer_miss(
-                "ObjectSuperseded", target_deleted=False,
-                name_unregistered=_supersede_name_unregistered(
-                    ev, object_established)),
+            _sup_shape,
             event_id=ev.get("event_id"), event_type="ObjectSuperseded",
             seq=seq,
             id=ev.get("id") if isinstance(ev.get("id"), str) else None,
             candidates=(candidate,),
-            detail="reference fold: supersede matched no Object",
+            # #10183/#10204: the receipt names the outcome the caller can act on.
+            detail=_object_supersede_miss_detail(
+                _sup_shape, prefix="reference fold: "),
         )
 
     for seq, ev in enumerate(events):
@@ -2285,10 +2291,15 @@ def _fold_journal_entities(events: list[dict]) -> tuple[dict, set, set]:
             if _stub_hit:
                 continue
             # Genuinely unresolvable: an id no journaled registration leaves
-            # in place (and no usable name) matched nothing in the graph fold
-            # either, which records `object-superseded-miss` and fails — so
-            # the reference fold must refuse too, or `check_consistency`
-            # passes a journal `rebuild_all` refuses.
+            # in place AND no name the journal knows matched nothing in the
+            # graph fold either, so the graph engines and this fold must reach
+            # the SAME verdict — the two dispositions differ and both are
+            # correct:
+            # `object-superseded-miss` (refused) when the record carries an
+            # address the journal established, and, #10204, the EXEMPT
+            # `object-superseded-unregistered` when it carries at least one
+            # address the journal established NONE of. `_record_supersede_miss`
+            # classifies; it does not decide the verdict.
             _record_supersede_miss(seq, ev)
     return entities, deleted, ambiguous
 
@@ -2870,10 +2881,20 @@ def check_consistency(log_path: str, projection, *,
                                "before re-baselining"),
         "non-folded": ("the journal contains event(s) the reference fold "
                        "could not resolve to exactly one node, so both "
-                       "projections are equally incomplete (R8/#3585): fix "
-                       "the journal (a missing creation event, an out-of-order "
-                       "append, an unjournaled producer) — re-baselining would "
-                       "bake in the loss"),
+                       "projections are equally incomplete (R8/#3585) and "
+                       # ⛔ NOT "the loss" (#10211 review round 7): a refused
+                       # set that is SOLELY the no-address shape lost nothing
+                       # observable — the record names no target at all — so a
+                       # loss verdict would be the same unprovable claim the
+                       # receipt dropped. Scoped to the incompleteness, which
+                       # is true of every refused set.
+                       "re-baselining would bake in the incompleteness: "
+                       # #10204/#10183: the SAME remedy home the raised error
+                       # uses, so one record cannot get contradictory
+                       # instructions from the two surfaces. A refusal whose
+                       # only record carries no address does NOT
+                       # prescribe a journal reconciliation that cannot apply.
+                       + refusal_remedy(non_folded_refused)),
     }.get(divergence)
 
     return {
@@ -3939,6 +3960,16 @@ def recover_from_log(events_dir: str, projection) -> dict:
             "non_folded_events": [
                 str(e) for e in _nf_entries[:_MAX_DIVERGENT_POINTS]],
         }, after)
+    # #10204: the EXEMPT subset is reported through the SAME run boundary the
+    # other engines use. This surface cannot call `assert_no_non_folded`
+    # UNCONDITIONALLY — its refusal path has to roll the replay back first, so
+    # the refused case returns above — but once the refused set is empty the
+    # call can only take its exempt branch, and that branch is the ONE home of
+    # the wording (`#5380`: an exemption still requires the record). Without
+    # this, a journal this engine accepts reports an exemption NOWHERE: the
+    # record is collected and then dropped, so a record #10204 made exempt went
+    # from a loud refusal to a SILENT skip on the DB-recovery path.
+    assert_no_non_folded(_nf_entries, engine="recover_from_log")
     ok = applied > 0 and after is not None and after > 0
     if refused:
         logger.warning(

@@ -13,7 +13,17 @@
 > ```bash
 > uv run python tools/link_agent_infra_scripts.py           # create/repair scripts/ -> $AGENT_INFRA_PATH/scripts
 > uv run python tools/link_agent_infra_scripts.py --check   # assert it (exit 0 = resolves, 1 = missing/dangling/wrong target, 2 = no agent-infra checkout)
+> uv run python tools/link_agent_infra_scripts.py --pin-check  # assert the CHECKOUT is the pinned tree (exit 0 = at/carries the pin or no pin recorded, 1 = drift, 2 = cannot verify)
 > ```
+>
+> `--check` answers "does the pointer resolve"; `--pin-check` answers "is the tree behind it the
+> one this box is pinned to" (`$HARNESS_PIN` / `${CELL_HOME:-$HOME}/.pi/agent/state/HARNESS-PIN`, the
+> same `${CELL_HOME:-$HOME}` base `harness-up` resolves). The second
+> question is the one #10114 cost 18–25 PRs across three outages to learn to ask: a correct link
+> into a checkout older than the pin read as a healthy setup. `--check` now prints that drift as a
+> `!` note (its exit code is unchanged — the link IS correct), and `--pin-check` makes it a verdict.
+> They are separate invocations on purpose and are REFUSED together (`--check --pin-check` exits 2)
+> rather than silently answering only the cheaper question — run each on its own line.
 
 ---
 
@@ -405,11 +415,32 @@ mechanics** — pre-filter, batching, thresholds, caching, and fail-closed degra
 not let the model's probability *be* the verdict: the threshold band, the cache identity, and the
 failure paths belong to the caller, and they must be **measured and pinned, not assumed**.
 
-- **In-repo use:** ⛔ **none at present, and the previous one is deliberately gone.**
+- **In-repo use:** ✅ **one, internal and OFF by default** — `tortoise/s2_decision_seam.py` (`#5087`)
+  is the S2.2/S2.3 seam: `vet-v2` (`noul` + `score` per candidate) and `classify-v2` (a `choice`
+  over the kinds the kNN offered), every question carrying the untrusted-data framing
+  (`#10077`/`#10117`), armed only by `TORTOISE_S2_DECISION_SEAM`, consumed through
+  `vet_gate.vet_candidates(arbiter=…)` and `KindClassifier(tail_decider=…)`. That flag arms S2.2
+  unconditionally (it overrides an explicit `TORTOISE_VET=0`, because the seam *is* the arbiter) and
+  arms S2.3 only where a `KindClassifier` is built (`TORTOISE_CLASSIFY_LATER=1`). What it does, what
+  it does not do, and its measured cost: `docs/architecture/S2-DECISION-SEAM.md`. **Do not rebuild it.**
+  ⛔ **The previous use is deliberately gone.**
   `tools/collision_preflight.py` used JEV for the claim-ownership `Noul` question ("is this comment a
-  lane taking ownership of the issue's work?") — model pinned to `jev-1.13.0` (the pin
-  survives the move: the fleet's DEPLOYED callers send that same version to `api.typesafe.ai`, and the
-  agent-infra source caught up in #2859), prompt version
+  lane taking ownership of the issue's work?") — model `jev-1.13.0` at the time this was
+  measured. The fleet's model constant is `jev-latest` by owner ruling 2026-10-27, and the
+  switch **landed** in agent-infra#2914 (merged 2026-10-27), so agent-infra `main` sends the
+  alias as well. What can still lag is a COPY: the three deployed JEV callers under
+  `~/.pi/agent/scripts/` — `turn-classify.py`, `ask-owner.py`, and `lane-actions.py` (which
+  carries no constant of its own and sends `LV.JEV_MODEL` from `state/lane-verdict.py`) — are
+  DERIVED from an agent-infra checkout, so they mirror whatever that checkout held WHEN
+  BOOTSTRAPPED — a bootstrap from a checkout that predates that merge reverts
+  them to the pin (observed 2026-10-27 12:52), a derivation artefact rather than a decision. So
+  name which checkout YOUR copies came from; do not assume the pin means the fleet was never moved.
+  `~/.pi/agent/state/lane-verdict.py` is the exception: bootstrap never writes `state/`, so it
+  is hand-maintained and a pin there is an edit, not a derivation (a box without that file has
+  nothing to assert there). Assert all three after any bootstrap:
+  `grep -rn 'JEV_MODEL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py`
+  (three paths — a bare `grep 'JEV_MODEL ='` reads stdin and answers nothing). Either way a measurement
+  of this seam must name its model rather than assume one. Prompt version
   `claim-ownership-v1`, CLEAN at p < 0.50, the band `[0.50, 0.70)` a HIT. **#8175 deleted that
   path**, so the claim gate no longer calls JEV, no longer reads comment prose, and has no
   `COLLISION_PREFLIGHT_JEV*` seam at all: it decides from the **holder** — the fleet board's own
@@ -418,18 +449,16 @@ failure paths belong to the caller, and they must be **measured and pinned, not 
   is gone — `lane_live_map` folds a terminal workspace to dead even then, so the gate reads the pid
   directly). The reasons are recorded in that module's docstring under "Claim gate —
   the HOLDER, never prose"; the short version is that a **probability that only the caller can
-  interpret is not a mechanical answer**, and this gate needs one. The capability itself is
-  unchanged and still shared; the extraction journey is its next consumer, and it must
-  **build** the seam — `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §"✅ Jev for
-  classification is cheap — but ⚠️ the seam does **NOT** yet exist" (S2.2/S2.3): wiring it
-  "requires an adapter, a prompt, and a parser … it is work, not a config flag."
+  interpret is not a mechanical answer**, and this gate needs one.
 - **When a caller does wire it:** the request shape is pinned by the caller and verified against the
   live endpoint — it is deliberately NOT restated here. A shape copied out of prose is how the next
   caller gets a 400 that blames its own code; copy the working construction in the caller instead
   (#7866 is the open finding on that shape).
 - **Rationale and JEV's decision-only properties:** `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
-  (§"✅ Jev for classification is cheap — but ⚠️ the seam does **NOT** yet exist"; the extraction
-  journey's S2.2/S2.3 is where that seam would be built) — not this file.
+  §"✅ Jev for classification is cheap — but ⚠️ `llm_tail` is not the seam" (the live rationale), and
+  `docs/architecture/EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md` §"… the seam does NOT yet exist" — kept as
+  the record of *why* the seam was needed; the seam itself is built, see
+  `docs/architecture/S2-DECISION-SEAM.md` — not this file.
 
 ### ⛔ HARD RULE: Confirm the Dispatch Landed — `cmux send` Success Is Not Delivery
 
@@ -485,7 +514,7 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 | `tortoise/` | Python SDK, EP engine, MCP server, connectors |
 | `tests/` | Test suite (pytest) |
 | `graph-scripts/` | Historical graph operations (pricing decisions, migrations, audit) |
-| `scripts/` → `$AGENT_INFRA_PATH/scripts` | Agent-infra shared scripts — **machine-local symlink, gitignored, not tracked** (#9475). Materialise it with `uv run python tools/link_agent_infra_scripts.py`; assert it with `--check`. A fresh clone has no `scripts/` until that runs (or `agent-infra init`/`update` does), because a git symlink blob cannot hold `$AGENT_INFRA_PATH` |
+| `scripts/` → `$AGENT_INFRA_PATH/scripts` | Agent-infra shared scripts — **machine-local symlink, gitignored, not tracked** (#9475). Materialise it with `uv run python tools/link_agent_infra_scripts.py`; assert it with `--check`; assert the checkout itself is the pinned tree with `--pin-check` (#10114). A fresh clone has no `scripts/` until that runs (or `agent-infra init`/`update` does), because a git symlink blob cannot hold `$AGENT_INFRA_PATH` |
 | `tools/` | In-repo tooling — e.g. `collision_preflight.py` (pre-dispatch in-flight-work check, #3061) and `who_is_on.py` / `who-is-on.sh` (the "who is on #N?" verb + stranded-work inventory, #4256) |
 | `config/` | YAML configs (routing, pipelines) |
 | `docs/` | Architecture, ontology, legal, strategy docs |
@@ -555,6 +584,42 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 - Branch naming: `feat/`, `fix/`, `chore/` prefixes
 - PRs auto-merge by default (no staging hold unless `deploy:staging` label)
 - Pre-commit hook enforces agent-infra version sync via `.husky/pre-commit`
+
+### ⛔ HARD RULE: Every lane leaves a `WORKTREE-REPORT.md` — silence is not a result
+
+**Owner ruling, 2026-10-28 (#10220, relayed verbatim):** *"every lane writes
+`WORKTREE-REPORT.md` before it exits: worktree + branch, files changed, each suite run with
+pass/fail/skip counts, the commands used, and anything it could not do … name the file exactly
+`WORKTREE-REPORT.md`, put it at the worktree root, and include the suite commands verbatim (the
+verifier has no other way to tell 'ran 37 tests' from 'wrote 37')."*
+
+The reason it is a rule and not advice: a lane's outcome used to live **only in its reply**. Two
+measured lanes (#8933 stage 1, #10122) finished complete and green, ran past the 660-second
+silence threshold, returned *nothing at all*, and were recovered only because a human guessed to
+run `git status` inside `.worktrees/`. A file on disk survives a truncated reply; a message does
+not.
+
+```bash
+uv run python tools/worktree_report.py init --issue <N>          # FIRST, before any test run
+uv run python tools/worktree_report.py run --cmd '<the exact command you would type>'
+uv run python tools/worktree_report.py note --not-done '<what you could not do, and why>'
+uv run python tools/worktree_report.py check                     # 0 green · 3 red-but-valid · 1 invalid
+```
+
+- ⛔ **Never hand-write the report, and never assert a count.** The tool derives pass/fail/skip
+  from the output it captured, and has no flag that could accept a number from you — that is the
+  whole point of the artifact, and `check` re-parses the log to enforce it. A hand-written report
+  fails `state-missing`.
+- `init` is written BEFORE the first suite, so a lane that is killed mid-run still leaves its
+  worktree, branch and file list behind — that is the recovery artifact, not the final summary.
+- A **red** suite is recorded honestly and is valid evidence (`check` exits `3`, never `0`), so
+  never drop a failing suite from the report to make it look green.
+- Its files (`WORKTREE-REPORT.md`, `.worktree-report/`) are gitignored and never committed: they
+  describe the working tree, not the product.
+
+**Scope, so this is not duplicated:** this rule is the *producer*. The merge-path refusal to merge
+a lane whose report is missing/empty/unevidenced is `agent-infra#2977` (`merge-one.sh`), which
+calls `worktree_report.py check` rather than re-implementing the format.
 
 ### Testing
 

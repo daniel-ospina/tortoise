@@ -1358,13 +1358,18 @@ def record_record_write_failure(reason: str) -> None:
       the deployment: a MULTI-TENANT process (the default) wraps the write path
       in ``record_writer.use_record_tenant(...)`` — the MCP tenant lane does it
       per request, and the hosted REST lane binds the same resolution onto the
-      SDK it opens (#9188), so a refusal on EITHER of those lanes means the
-      credential named no graph (use a graph-bound key; an org-wide **API KEY**
-      — `tt_`/`tk_` — IS named from `default_graph_id` since #10025, while a
-      SESSION token on the hosted REST lane and an OAuth `oat_` connector stay
-      #10046's open scope); a
-      deployment that serves exactly ONE graph may
-      instead set ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` **and**
+      SDK it opens (#9188). Since #10046 EVERY request credential names its
+      tenant when the org's active ``kind='default'`` row can be read — an
+      org-wide **API KEY** (``tt_``/``tk_``) since #10025, and a SESSION/JWT
+      credential and an OAuth ``oat_`` token since #10046, all through
+      ``supabase_control.default_graph_id_for_credential`` — so a refusal on
+      those lanes is NOT a credential-class fact: it means that row could not be
+      named (missing, tombstoned, another org's, unreadable) or the tenant read
+      was lost. Heal the row, then re-check. The seed/background runners that
+      never see a request credential carry theirs from
+      ``hosted_api._bind_default_graph_record_tenant`` since #10047. A deployment
+      that serves exactly ONE graph may instead set
+      ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` **and**
       ``TORTOISE_RECORD_SINGLE_TENANT=1``. The pair alone is IGNORED (a
       process-global tenant on a multi-tenant process files every tenant's rows
       under one organisation). The warning distinguishes the two situations an

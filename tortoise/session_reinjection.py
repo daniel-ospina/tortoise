@@ -220,6 +220,21 @@ DEFAULT_REINJECTION_TOTAL_ITEMS = 10
 _TURN_SHAPE_FILTER = ("coalesce(p.is_episodic, false) = true "
                       "AND coalesce(p.content, '') STARTS WITH '['")
 
+#: ⚠️ #10000 RESIDUAL, stated where the predicate lives rather than left to be
+#: discovered: the turns this fetch expands to are TURN NODES, and §9.1/D1 moved
+#: the raw transcript OUT of the graph once the record is armed — after an armed
+#: capture the graph holds the Session and its counters, and no `:Point` for the
+#: turn node for the session (measured: `sdk._capture_turn_ids` -> `[]`). So on an
+#: armed deployment this fetch has nothing to expand to, and C4 reinjection is a
+#: silent no-op for exactly the sessions it exists to enrich.
+#:
+#: It is NOT re-pointed here because the seeds are the retrieval POOL's hits —
+#: graph search results — so "the transcript is reachable from the pool" is a
+#: retrieval question (§9.1 puts the text in Postgres and the graph indexes what
+#: it extracts), not a call-site swap. Deciding how retrieval sees transcripts is
+#: its own change; recorded on #10000 with the same evidence as this note, so the
+#: gap is owned instead of rediscovered.
+
 
 @dataclass(frozen=True)
 class SeededSession:

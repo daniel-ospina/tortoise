@@ -86,7 +86,60 @@ permissions:
 
 jobs:
   probe:
-    runs-on: ubuntu-latest
+    # ── HOSTED-ONLY PIN (deliberate, measured 2026-10-27) ─────────────
+    # `ubuntu-latest` is served by BOTH GitHub-hosted runners AND this repo's
+    # self-hosted pool — the pool advertises it WHILE the fallback is engaged
+    # (`scripts/ci_runner_gate.sh`; docs/ops/ci-runner-x64.md:25), so that is a
+    # CONDITIONAL property, not a standing one: measured again on 2026-10-27 with
+    # the fallback disengaged, none of the nine runners carried it. Measured over
+    # these four workflows' own SCHEDULED runs on 2026-10-27 (115 runs, 00:00-12:00
+    # UTC, jobs classified by `runner_name`): 83 created a job - 72 served by a
+    # GitHub-hosted runner, 11 by this repo's self-hosted runners (10 of them
+    # `pi-runner-*`, 1 `cmux`) - and 32 never got a runner at all.
+    # So the pin is not "escape a queue that is always the pool"; it removes
+    # the arm that FAILS.
+    #
+    # The pool arm does not starve — it HANGS, and it also fails fast. Of those
+    # 11 self-hosted jobs, TWO hung in `actions/checkout` and were killed at the
+    # job's OWN `timeout-minutes`, with the measuring step SKIPPED, which reads
+    # as a finished run that measured nothing; TWO failed in 9s/36s with the
+    # payload step actually run; SEVEN completed normally (10-46s). So the pin
+    # does not say "the pool never works" — it says the pool cannot be relied on
+    # to MEASURE. Both cited runs are `ci-queue-health`'s, whose timeout is
+    # `10`; this block is shared by four workflows with different timeouts
+    # (`repair` is `15`), so it names no single job's number as its own:
+    #     run 40456347720 → pi-runner-vm-2: checkout 8m40s, then cancelled
+    #     run 40451686065 → pi-runner-vm-4: checkout 4m41s, then cancelled
+    # (same day: 9/9 runners busy, 78 runs queued, and `ci-queue-health`
+    # completed 1 of its last 8 scheduled runs — 6 cancelled, 1 pending.)
+    #
+    # ⛔ THE PIN IS NOT A COMPLETE FIX, and this comment must not read as one.
+    # Hosted is queued too: 18 jobs were waiting on `ubuntu-24.04` with a max
+    # wait of 56m, and one `ci-queue-health` job waited 65 minutes for a hosted
+    # runner and then ran 15 seconds. GitHub keeps only ONE pending run per
+    # concurrency group, so while a wait exceeds this workflow's cadence each
+    # tick still cancels the previous PENDING tick. The pin removes the arm that
+    # hangs and usually serves in minutes; the cadence/concurrency question stays
+    # open and is tracked separately.
+    #
+    # `ubuntu-24.04` is HOSTED-ONLY **as measured 2026-10-27 with the fallback
+    # engaged**: all nine runners advertised `ubuntu-latest` and none advertised
+    # `ubuntu-24.04` (with the fallback disengaged, none carries either). The
+    # rule is recorded (docs/ops/ci-runner-x64.md:25-26) and honoured by the
+    # installer — `resolve_labels()` can emit only `self-hosted-x64` or
+    # `self-hosted-x64,ubuntu-latest` (tools/install-ci-runner-x64.sh), asserted
+    # at `tests/test_ci_runner_x64_install.py:181`, and the re-registration path
+    # strips a version-pinned hosted label (`_preserve_labels`,
+    # tools/runner_autoscale.py).
+    # ⛔ BUT the pin is OBSERVED, NOT GUARANTEED: no test in this repo reads the
+    # LIVE label set, and the pool HAS served this very label — 2026-10-24's
+    # `finding-provenance` jobs ran on `pi-runner-vm-*` carrying `ubuntu-24.04`
+    # (tests/test_runner_tool_contract.py:5-12), drift the gate's text-reading arm
+    # could not see. Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a
+    # runner's labels are re-cut: if the pool ever claims it again, this pin
+    # silently stops pinning and the failure mode is exactly the one it removes.
+    # Public repo, so hosted minutes are free: this spends nothing.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       # Left EMPTY on the scheduled path so the SCRIPT's single default applies
@@ -152,9 +205,9 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
       # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
       # The watchdog shells out to `gh` (availability-watchdog.sh) to read and
-      # file its incident issue. `runs-on: ubuntu-latest` normally means a
-      # GitHub-hosted image, but the fallback pool carries that label on a bare
-      # runner whose service PATH is a minimal non-login one with no `gh`.
+      # file its incident issue. This job names a hosted label, and the pool has
+      # served that label (measured 2026-10-24) on a bare runner whose service
+      # PATH is a minimal non-login one with no `gh`.
       # Measured 2026-10-24 on `pi-runner-vm-5/6`: `line 1008: gh: command not
       # found`, re-reported as "issue search failed on the recovery path — the
       # monitor cannot confirm incident state". That is the runner's fault

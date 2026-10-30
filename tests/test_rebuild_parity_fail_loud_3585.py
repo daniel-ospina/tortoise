@@ -56,6 +56,10 @@ from tortoise.projection import (
     FalkorProjection,
 )
 from tortoise.projection.nonfolded import (
+    _NO_ADDRESS_REMEDY,
+    EXEMPT_SHAPES,
+    NO_ADDRESS_INSTRUCTION,
+    SHAPE_EDGE_MESSAGE_MISS,
     NonFoldedEventsError,
     collect_non_folded,
     refused_events,
@@ -605,11 +609,11 @@ class TestReReviewRoundTwo:
         assert r["divergence"] != "non-folded", r["divergence"]
 
     def test_name_only_supersede_of_registered_then_deleted_name_still_refuses(
-            self, env):
+            self, env, caplog):
         """#3590 D2's BOUND: the exemption covers ONLY the never-registered
         case.
 
-        FAILS IF: `name_unregistered` is inferred from the GRAPH ("no live
+        FAILS IF: the address decision is inferred from the GRAPH ("no live
         holder") instead of the JOURNAL. A name the journal registered and
         then hard-deleted has no live holder either, so a graph-probe
         implementation would exempt it — and a supersede that COULD have
@@ -624,37 +628,204 @@ class TestReReviewRoundTwo:
         _raw(events, type="ObjectSuperseded", name="GONE",
              supersedes_by="other", event_id="e-gone")
         proj = sdk._get_proj()
-        with pytest.raises(NonFoldedEventsError) as ei:
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+                pytest.raises(NonFoldedEventsError) as ei:
             proj.rebuild_all(str(events), confirm_destructive=True)
         assert "object-superseded-miss" in str(ei.value), str(ei.value)
+        # ⛔ THE HARD-DELETE LIMB (#10211 review round 8). This record is NOT a
+        # divergence — live folded nothing either, because the delete is folded
+        # by id before the deferred sweep — and the only reason it misses is
+        # that this record carries no `id` for the anchored bound to read. The
+        # message must say so, or it sends the operator after a merge/rename or
+        # an unjournaled producer, neither of which exists here.
+        report = " ".join(r.getMessage() for r in caplog.records)
+        assert "HARD-DELETED under an `id` this record DOES NOT CARRY" in report, (
+            f"the miss arm does not name the hard-delete limb: {report}")
+        assert "CONSERVATIVE refusal" in report, (
+            f"the miss arm calls a conservative refusal a divergence: {report}")
+        # ⚠️ AND NOT "carries no `id`" — the bound reads the record's OWN id, so
+        # a record carrying an UNRELATED id (of another node) lands here too and
+        # would be falsified by the operator's own report line on the next
+        # output row. MEASURED (#10211 review round 9).
         assert "object-superseded-unregistered" not in str(ei.value), str(ei.value)
         r = check_consistency(str(events / "events.jsonl"), proj)
         assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
         assert r["divergence"] == "non-folded", r["divergence"]
+    def test_deleted_target_with_an_unrelated_id_never_claims_no_id(
+            self, env, caplog):
+        """#10211 review round 9: the hard-delete limb must not assert the
+        record carries NO `id`.
 
-    def test_id_only_absent_target_supersede_refuses_both_engines(self, env):
-        """FAILS IF: an `ObjectSuperseded` carrying an `id` no journaled
-        registration created — and NO usable `name` — is treated as a no-op by
-        the reference fold.
+        FAILS IF: the limb says "this record carries no `id`". The anchored
+        `supersede-target-deleted` bound reads the record's OWN id, so a record
+        carrying an UNRELATED id (of a different node) reaches this arm too —
+        and the same warning line sits beside a report row that visibly shows
+        the id, so the message is falsified by the operator's own output.
 
-        The recut left the `object-superseded-miss` refusal nested inside the
-        NAME branch's zero-carrier `else`, so an id-only miss left `target`
-        None and recorded NOTHING: `rebuild_all` raised `NonFoldedEventsError`
-        while `check_consistency` returned `ok=True divergence=None
-        nf_refused=0` — the classifier asymmetry #3585 exists to close.
-        REACHABLE: a hand-written id-only supersede for an id the journal never
-        registered (the writer emits no name with it)."""
+        REACHABLE: a raw/legacy producer pairing a deleted target's NAME with a
+        stale/unrelated id.
+        """
         sdk, events = env
+        oid = sdk.create_entity("object", name="GONE2")["node"]["id"]
+        sdk.delete_entity(oid)
+        _raw(events, type="ObjectSuperseded", name="GONE2", id="o-junk",
+             supersedes_by="other", event_id="e-gone2")
+        proj = sdk._get_proj()
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+                pytest.raises(NonFoldedEventsError):
+            proj.rebuild_all(str(events), confirm_destructive=True)
+        report = " ".join(r.getMessage() for r in caplog.records)
+        assert "HARD-DELETED under an `id` this record DOES NOT CARRY" in report, (
+            f"the miss arm does not name the hard-delete cause generically: "
+            f"{report}")
+        assert "carries no `id`" not in report, (
+            f"the miss arm asserts the record carries no id, which is false for "
+            f"this record (it carries 'o-junk'): {report}")
+
+    def test_state_op_writing_a_name_other_than_rename_is_covered(
+            self, env, caplog):
+        """#10211 review round 9: the non-creation limb's name route is ANY
+        entity-mutation state op, not only a rename.
+
+        FAILS IF: the limb enumerates "a rename's `SET`". `journal_object_established`
+        takes the name from any op in `_ENTITY_MUTATION_STATE_OPS` carrying
+        `state.name`, so an `op=supersede` (or any other op) writes an
+        established name the same way — and a cause list that names only
+        `rename` leaves that record in neither limb, the defect round 6 fixed
+        one spelling over.
+
+        REACHABLE: a raw/legacy producer emitting a state op that is not a
+        rename, then superseding the name it wrote.
+        """
+        sdk, events = env
+        _raw(events, type="ObjectRegistered", id="o-anchor", name="ANCHOR",
+             status="live", event_id="e-anchor")
+        _raw(events, type="EntityMutated", op="supersede", label="Object",
+             id="o-ghost", state={"name": "GHOST2"}, event_id="e-ghost")
+        _raw(events, type="ObjectSuperseded", name="GHOST2",
+             supersedes_by="other", event_id="e-ghost-sup")
+        proj = sdk._get_proj()
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+                pytest.raises(NonFoldedEventsError):
+            proj.rebuild_all(str(events), confirm_destructive=True)
+        report = " ".join(r.getMessage() for r in caplog.records)
+        assert "a state op's `SET`" in report, (
+            f"the non-creation limb does not name the state-op SET route: {report}")
+        assert "a rename's `SET`" not in report, (
+            f"the limb still narrows the name route to a rename: {report}")
+
+    def test_id_only_absent_target_supersede_is_exempt_both_engines(
+            self, env, tmp_path, caplog):
+        """#10204: an `ObjectSuperseded` carrying ONLY an `id` the journal never
+        established is EXEMPT — the amended D2 bound keys on ADDRESSES, not on
+        a name.
+
+        FAILS IF: the exemption still requires a name (the retired `#10107`
+        clause), so an id-only record stays `object-superseded-miss` and the
+        run ABORTS; OR the reference fold records NOTHING for it, which is the
+        classifier asymmetry `#3585` exists to close (an exemption still
+        requires the record, `#5380`).
+
+        REACHABLE: a hand-written id-only supersede for an id the journal never
+        registered — the spelling a model that keys on ids emits (the writer
+        emits both, so this is a raw/legacy producer).
+
+        ⚠️ RETIRED CONTRACT: this test previously asserted the OPPOSITE
+        (`object-superseded-miss`, refused, `divergence="non-folded"`). The
+        owner amended the bound on `#3590` comment `6453059051` (issue
+        `#10204`); the deciding reason is `#10183`'s admission test — for a
+        target nothing established there is no journal repair to prescribe, so
+        the surface must not refuse. The refusal it pinned did not disappear:
+        it moved to any record carrying an ESTABLISHED address, pinned by
+        `test_collapsed_away_id_with_an_unestablished_name_still_refuses`
+        (established id) and
+        `test_name_only_supersede_of_registered_then_deleted_name_still_refuses`
+        (established name).
+        """
+        sdk, events = env
+        # ⛔ ONE unrelated anchor registration, so the journal does not replay to
+        # an EMPTY graph: `recover_from_log` refuses an empty replay with its own
+        # pre-existing guard, which would mask the verdict under test.
+        _raw(events, type="ObjectRegistered", id="obj-d2-anchor",
+             name="D2-ANCHOR", status="live", event_id="e-d2-anchor")
         _raw(events, type="ObjectSuperseded", id="obj-never-registered",
              supersedes_by="other", event_id="e-sup-idonly")
-        with pytest.raises(NonFoldedEventsError) as ei:
-            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-        assert "object-superseded-miss" in str(ei.value), str(ei.value)
-        r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
-        assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
-        assert r["divergence"] == "non-folded", r["divergence"]
-        assert any("object-superseded-miss" in e
+        proj = sdk._get_proj()
+        # ⛔ The GRAPH surface's own report is asserted, not only the reference
+        # fold's: `assert_no_non_folded` names every exempt record, so a
+        # `record_non_folded` that silently dropped this shape would pass a
+        # reference-fold-only assertion — the green pass over an unfolded event
+        # R8/#5380 exists to prevent.
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.nonfolded"):
+            proj.rebuild_all(str(events), confirm_destructive=True)  # no raise
+        report = " ".join(r.getMessage() for r in caplog.records)
+        assert "[object-superseded-unregistered]" in report, report
+        assert "never established" in report, report
+        # ⛔ NO LOSS VERDICT (#10211 review round 3). This shape's OWN
+        # `EXEMPT_SHAPES` entry carries a DEGRADED GUARANTEE — "what is lost is
+        # the supersede a journal could not address" — and `NonFoldedEvent.__str__`
+        # appends that prose to the receipt, so a receipt claiming "nothing was
+        # lost" put both claims on ONE operator-visible line. The predicate
+        # cannot prove the claim (its RESIDUAL is the case where the supersede
+        # IS lost), so the receipt states what it establishes and stops.
+        assert "nothing was lost" not in report.lower(), (
+            "the receipt asserts a loss verdict the predicate cannot prove and "
+            f"the shape's own DEGRADED GUARANTEE contradicts: {report}")
+        assert "applies no supersede here" in report, (
+            f"the receipt was not rendered for the exempt record: {report}")
+        assert "no repair to make" not in report.lower(), (
+            "the receipt asserts the absence of a repair, which the shape's "
+            f"DEGRADED GUARANTEE contradicts (a repair DOES exist for that "
+            f"class): {report}")
+        # ⛔ The SECOND message must not name a cause the receipt denies: the
+        # genuine-miss arm's causes ("unjournaled capture SDK", "delete race")
+        # are exactly what an operator must not be sent to look for on an
+        # exempt record (#10183). MEASURED: deleting this shape's `_sup_why`
+        # arm otherwise leaves the file green.
+        # ⚠️ NOT "unjournaled capture SDK": the `EXEMPT_SHAPES` prose for this
+        # shape legitimately names that producer class in its RESIDUAL, so that
+        # phrase cannot discriminate the two messages. "delete race" is
+        # emitted by the genuine-miss arm alone.
+        assert "delete race" not in report, report
+        assert "the journal never established the target this record " \
+               "addresses" in report, report
+        r = check_consistency(str(events / "events.jsonl"), proj)
+        assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+        assert r["non_folded_count"] == 1, (
+            "the exempt miss was not RECORDED exactly once — an exemption must "
+            f"never be silent: {r['non_folded_events']}")
+        assert any("object-superseded-unregistered" in e
                    for e in r["non_folded_events"]), r["non_folded_events"]
+        assert r["divergence"] != "non-folded", r["divergence"]
+        # The exemption is a RUN-VERDICT decision, so it must hold at EVERY
+        # engine's own run boundary — a journal `rebuild_all` accepts cannot be
+        # refused by `rebuild()` or by `recover_from_log`.
+        #
+        # ⛔ And each of those boundaries must still RECEIVE the record: they
+        # are a SECOND `record_non_folded` call site (`apply()`), reached by
+        # `rebuild`/`recover_from_log`/`restore`, not the sweep the assertion
+        # above covers. MEASURED: recording the shape only when it is REFUSED —
+        # i.e. silently dropping the exempt record on the one-record engines —
+        # leaves this whole file GREEN.
+        for engine in ("rebuild", "recover_from_log"):
+            caplog.clear()
+            with caplog.at_level(logging.WARNING,
+                                 logger="tortoise.projection.nonfolded"):
+                proj = _drive(engine, tmp_path, events,
+                              _fresh(tmp_path, engine))
+                proj.close()
+            boundary = " ".join(r.getMessage() for r in caplog.records)
+            # The engine's own label is not asserted: `rebuild`'s boundary
+            # reports itself as `rebuild(log)` and the recovery one differs
+            # again, so keying on it would pin an incidental string. What must
+            # hold is that THIS run reported the exempt record and rendered its
+            # receipt.
+            assert "1 non-folded journal event(s) recorded but EXEMPT" in boundary, (
+                f"{engine} did not record the exempt miss at its own run "
+                f"boundary (#5380): {boundary}")
+            assert "[object-superseded-unregistered]" in boundary, boundary
+            assert "applies no supersede here" in boundary, boundary
 
     def test_pointsmerged_then_supersede_is_exempt_in_both_engines(
             self, env, tmp_path):
@@ -1112,22 +1283,73 @@ class TestBackupRestoreFailsLoud:
         # No tortoise.db: force the JSONL replay fallback.
         return src
 
-    def test_restore_refuses_an_id_only_absent_target_supersede(
-            self, tmp_path):
-        """P2 — FIX 3. FAILS IF the restore replay passes `apply(ev)` with no
-        journal context: `apply()`'s ObjectSuperseded refusal gate is keyed on
-        `journal_object_surviving is not None`, so without it an id-only
-        absent-target supersede restored silently and `restore` returned
-        `{"status": "ok"}` while `rebuild_all` refuses the identical journal.
-        REACHABLE: a backup journal whose only record is an id-only supersede
-        for an id no registration created."""
+    def test_restore_refuses_a_no_address_target_supersede(self, tmp_path):
+        """P2 — FIX 3, re-pointed at the `#10204` no-address shape. FAILS IF
+        the restore replay passes `apply(ev)` with no journal context:
+        `apply()`'s ObjectSuperseded refusal gate is keyed on
+        `journal_object_surviving is not None`, so without it a no-address
+        supersede restored silently and `restore` returned `{"status": "ok"}`
+        while `rebuild_all` refuses the identical journal.
+
+        ⚠️ RETIRED CONTRACT: this used to use an ID-ONLY absent-target record,
+        which `#10204` now EXEMPTS — an exempt record passes whatever the
+        restore supplies, so it could no longer discriminate the wiring. A
+        no-address record is the SMALLEST journal whose refusal depends on that
+        context (an established-address miss depends on it too, but needs a
+        carrier collapse to reach the gate), so the pin keeps its discriminating
+        power and gains an end-to-end pin on the new shape through the fourth
+        replay engine.
+        REACHABLE: a backup journal whose only record is a supersede carrying no
+        name and no id."""
         src = self._backup_with(tmp_path, [{
-            "type": "ObjectSuperseded", "id": "obj-never-registered",
-            "supersedes_by": "y", "event_id": "e-restore-d",
+            "type": "ObjectSuperseded", "supersedes_by": "y",
+            "event_id": "e-restore-d",
             "ts": "2026-01-01T00:00:00+00:00"}])
-        with pytest.raises(NonFoldedEventsError):
+        with pytest.raises(NonFoldedEventsError) as ei:
             restore(str(src), db_path=str(tmp_path / "r.db"),
                     events_path=str(tmp_path / "r.jsonl"), into_falkor=True)
+        assert "object-superseded-no-address" in str(ei.value), str(ei.value)
+
+    def test_restore_accepts_an_exempt_id_only_supersede(self, tmp_path, caplog):
+        """`#10204`: the FOURTH replay engine accepts a journal whose only
+        misaddress is an id-only supersede no event established — the same
+        verdict `rebuild_all` and `rebuild()` reach.
+
+        FAILS IF: `restore`'s own run boundary refuses a journal the graph
+        engines accept. It supplies `journal_object_established` too
+        (`backup.py`), so the derived `object_address` must land on
+        UNESTABLISHED here exactly as it does there; a wiring gap in either
+        direction is a lost-DB restore blocked (refusal) or an unmetered
+        divergence (exemption without the record). BOTH directions are
+        asserted below: the `status == "ok"` leg covers the refusal, and the
+        caplog leg covers the record on THIS boundary — `restore` reaches
+        `record_non_folded` through `apply()`, not through `rebuild_all`'s
+        sweep, so the sweep-side assertion in the exhaustiveness test does not
+        speak for it (MEASURED: unpinned, dropping this boundary's record
+        survived).
+
+        REACHABLE: a backup journal holding one registration and an id-only
+        supersede for an id nothing established.
+        """
+        src = self._backup_with(tmp_path, [{
+            "type": "ObjectRegistered", "id": "obj-10204-anchor",
+            "name": "ANCHOR-10204", "status": "live",
+            "event_id": "e-10204-anchor",
+            "ts": "2026-01-01T00:00:00+00:00"}, {
+            "type": "ObjectSuperseded", "id": "obj-10204-never-seen",
+            "supersedes_by": "y", "event_id": "e-10204-sup",
+            "ts": "2026-01-01T00:00:00+00:00"}])
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.nonfolded"):
+            result = restore(str(src), db_path=str(tmp_path / "d2.db"),
+                             events_path=str(tmp_path / "d2.jsonl"),
+                             into_falkor=True)
+        assert result["status"] == "ok", result
+        boundary = " ".join(r.getMessage() for r in caplog.records)
+        assert "restore: 1 non-folded journal event(s) recorded but EXEMPT" in boundary, (
+            f"restore accepted the journal but did not record the exempt miss "
+            f"(#5380): {boundary}")
+        assert "[object-superseded-unregistered]" in boundary, boundary
 
     def test_restore_still_succeeds_on_a_healthy_journal(self, tmp_path):
         """FAILS IF the new run boundary refuses a journal the graph folds:
@@ -2199,62 +2421,289 @@ def test_edge_message_known_scope_with_ids_still_folds(tmp_path):
 
 
 def test_classify_object_supersede_unregistered_is_its_own_exempt_shape():
-    """The never-registered case is a DISTINCT, exempt shape.
+    """The never-established case is a DISTINCT, exempt shape — keyed on
+    ADDRESSES since `#10204`, and the address-less case has its own refusing
+    label.
 
     FAILS IF: the exemption is expressed by exempting
     `object-superseded-miss` wholesale (which would also exempt a target the
-    journal registered — the fail-OPEN direction), or the new shape is left
-    non-exempt (the rebuild aborts again, the defect D2 exists to fix).
+    journal registered — the fail-OPEN direction), or the exemption shape is
+    left non-exempt (the rebuild aborts again, the defect D2 exists to fix), or
+    the no-address case is exempted or left sharing `object-superseded-miss`
+    (a caller then cannot tell the unrepairable case from the repairable one —
+    the `#9202` defect shape `#10204` closes).
     """
     from tortoise.projection.nonfolded import (
         EXEMPT_SHAPES,
+        OBJECT_ADDRESS_ESTABLISHED,
+        OBJECT_ADDRESS_NONE,
+        OBJECT_ADDRESS_UNESTABLISHED,
         SHAPE_OBJECT_SUPERSEDED_MISS,
+        SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS,
         SHAPE_OBJECT_SUPERSEDED_UNREGISTERED,
         SHAPE_SUPERSEDE_TARGET_DELETED,
         classify_terminalizer_miss,
     )
 
     assert classify_terminalizer_miss(
-        "ObjectSuperseded", name_unregistered=True,
+        "ObjectSuperseded", object_address=OBJECT_ADDRESS_UNESTABLISHED,
     ) == SHAPE_OBJECT_SUPERSEDED_UNREGISTERED
     assert SHAPE_OBJECT_SUPERSEDED_UNREGISTERED in EXEMPT_SHAPES
     assert SHAPE_OBJECT_SUPERSEDED_UNREGISTERED != SHAPE_OBJECT_SUPERSEDED_MISS
 
-    # The registered case keeps the refusal: exempting the OLD shape would make
+    # `#10204`: a record carrying NO address is a DIFFERENT, refusing shape.
+    assert classify_terminalizer_miss(
+        "ObjectSuperseded", object_address=OBJECT_ADDRESS_NONE,
+    ) == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS
+    # ⛔ THE PREDICATE IS SYMMETRIC (#10211 review round 5): every one of these
+    # CARRY something that is not an address — `{"name": 123}` and
+    # `{"name": ""}` carry a NAME — so the operator strings must say "neither
+    # `name` nor `id` is a non-empty string", not "carries no name", which was
+    # false for exactly these records.
+    from tortoise.projection import (
+        journal_object_established,
+        supersede_object_address,
+    )
+    _journal = [{"type": "ObjectRegistered", "id": "obj-sym", "name": "SYM"}]
+    _est = journal_object_established(_journal)
+    for _rec in ({"name": 123}, {"name": ""}, {"id": ""}, {"id": None}, {}):
+        assert supersede_object_address(_rec, _est) == OBJECT_ADDRESS_NONE, _rec
+    assert SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS not in EXEMPT_SHAPES, (
+        "the no-address case has nothing checkable in it, so 'the journal "
+        "never established it' is unfalsifiable — it must keep refusing")
+
+    # The established case keeps the refusal: exempting the OLD shape would make
     # every object-supersede miss skippable.
     assert classify_terminalizer_miss(
-        "ObjectSuperseded") == SHAPE_OBJECT_SUPERSEDED_MISS
+        "ObjectSuperseded") == SHAPE_OBJECT_SUPERSEDED_MISS, (
+        "the default must stay fail-CLOSED — a caller that forgets the "
+        "address decision refuses")
+    assert classify_terminalizer_miss(
+        "ObjectSuperseded",
+        object_address=OBJECT_ADDRESS_ESTABLISHED,
+    ) == SHAPE_OBJECT_SUPERSEDED_MISS
     assert SHAPE_OBJECT_SUPERSEDED_MISS not in EXEMPT_SHAPES
 
     # The sibling exemption keeps its own bound and is never absorbed.
     assert classify_terminalizer_miss(
-        "ObjectSuperseded", target_deleted=True, name_unregistered=True,
+        "ObjectSuperseded", target_deleted=True,
+        object_address=OBJECT_ADDRESS_UNESTABLISHED,
     ) == SHAPE_SUPERSEDE_TARGET_DELETED
 
-    # A record naming NOTHING is not "never registered" — nothing is
-    # addressable, so the flag is unfalsifiable and the caller must not set it
-    # (see `_supersede_name_unregistered`).
-    from tortoise.projection import JournalObjectEstablished, _supersede_name_unregistered
+    # A record naming NOTHING is not "never established" — nothing is
+    # addressable, so the address decision is NONE and the caller must refuse.
+    from tortoise.projection import (
+        JournalObjectEstablished,
+        supersede_object_address,
+    )
     # ⛔ The NAMED tuple, not a plain 2-tuple (review P2). `journal_object_
     # surviving_keys` returns `(ids, names)` — the opposite order — so only the
-    # named type keeps a wrong-oracle call from silently inverting both limbs.
+    # named type keeps a wrong-oracle call from silently inverting BOTH limbs.
     # These lines are what exercise that contract.
     _none_established = JournalObjectEstablished(frozenset(), frozenset())
-    assert _supersede_name_unregistered(
-        {"name": None}, _none_established) is False
-    assert _supersede_name_unregistered(
-        {"name": ""}, _none_established) is False
-    assert _supersede_name_unregistered({"name": "X"}, None) is False, (
+    assert supersede_object_address(
+        {"name": None}, _none_established) == OBJECT_ADDRESS_NONE
+    assert supersede_object_address(
+        {"name": ""}, _none_established) == OBJECT_ADDRESS_NONE
+    assert supersede_object_address(
+        {"id": ""}, _none_established) == OBJECT_ADDRESS_NONE
+    assert supersede_object_address(
+        {"supersedes_by": "x"}, _none_established) == OBJECT_ADDRESS_NONE
+    assert supersede_object_address({"name": "X"}, None) == (
+        OBJECT_ADDRESS_ESTABLISHED), (
         "the one-record LIVE path supplies no journal and must stay "
         "fail-closed")
+    # `#10204`: an id-only record is the SAME assertion in the other spelling —
+    # unestablished here, so exempt.
+    assert supersede_object_address(
+        {"id": "never-seen"}, _none_established) == (
+        OBJECT_ADDRESS_UNESTABLISHED)
     # The ID limb: an id the journal established blocks the exemption even
     # when the name is one nothing established (review P1).
-    assert _supersede_name_unregistered(
-        {"name": "GHOST", "id": "o-1"},
-        JournalObjectEstablished(frozenset(), frozenset({"o-1"}))) is False
-    assert _supersede_name_unregistered(
-        {"name": "GHOST", "id": "never-seen"},
-        JournalObjectEstablished(frozenset(), frozenset({"o-1"}))) is True
+    _id_established = JournalObjectEstablished(
+        frozenset(), frozenset({"o-1"}))
+    assert supersede_object_address(
+        {"name": "GHOST", "id": "o-1"}, _id_established) == (
+        OBJECT_ADDRESS_ESTABLISHED)
+    assert supersede_object_address(
+        {"name": "GHOST", "id": "never-seen"}, _id_established) == (
+        OBJECT_ADDRESS_UNESTABLISHED)
+    assert supersede_object_address(
+        {"id": "o-1"}, _id_established) == OBJECT_ADDRESS_ESTABLISHED
+    # ⛔ PRESENCE, not WRITABILITY — the boundary this predicate is defined on.
+    # A NUL-bearing or lone-surrogate id is a non-empty `str`, so it IS an
+    # address: a record carrying one is the SAME assertion as any other and
+    # must land on UNESTABLISHED (exempt), not on NONE (refused). Gating this
+    # limb on `_writable_id` instead re-opens #3590 D2 for that spelling and
+    # aborts a rebuild over a record the journal established neither address
+    # of; MEASURED: this limb survived as a mutant until it was pinned.
+    for _unwritable in ("a\x00b", "\ud800"):
+        assert supersede_object_address(
+            {"id": _unwritable}, _none_established) == (
+            OBJECT_ADDRESS_UNESTABLISHED), (
+            f"{_unwritable!r} is PRESENT, which is the whole test — the "
+            "predicate must not consult writability")
+        assert supersede_object_address(
+            {"name": _unwritable}, _none_established) == (
+            OBJECT_ADDRESS_UNESTABLISHED)
+
+
+def test_refusal_remedy_is_empty_for_an_empty_set_and_splits_by_shape():
+    """PIN `#10204` (`refusal_remedy`'s three polarities, unit-level).
+
+    FAILS IF: the empty-set guard is dropped (then a caller that ever reaches
+    it is told to reconcile a journal with no record to reconcile — the same
+    "a remedy the caller cannot perform" defect the split exists to remove),
+    OR the no-address-only set keeps the reconcile sentence, OR the reconcile
+    sentence is narrowed away from a genuine miss, OR a mixed set loses either
+    half.
+
+    ⚠️ The empty-set branch is unreachable from today's two callers (both guard
+    on a non-empty refused set), which is exactly why it needs a unit pin
+    rather than a reachability argument: a future refactor that computes
+    `divergence` from the FULL non-folded set would make an all-exempt journal
+    render `action="… Reconcile the journal"`, and nothing else would notice
+    (MEASURED: unpinned, this limb survived as a mutant).
+    """
+    from tortoise.projection.nonfolded import (
+        SHAPE_OBJECT_SUPERSEDED_MISS,
+        SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS,
+        NonFoldedEvent,
+        refusal_remedy,
+    )
+
+    assert refusal_remedy(()) == "", "an empty set must prescribe NOTHING"
+    assert refusal_remedy([]) == "", "an empty set must prescribe NOTHING"
+
+    _no_addr = [NonFoldedEvent(SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS)]
+    _miss = [NonFoldedEvent(SHAPE_OBJECT_SUPERSEDED_MISS)]
+    _only_no_addr = refusal_remedy(_no_addr)
+    assert "Reconcile the journal" not in _only_no_addr, _only_no_addr
+    assert "supply the target's name or id" in _only_no_addr, _only_no_addr
+    _only_miss = refusal_remedy(_miss)
+    assert "Reconcile the journal" in _only_miss, _only_miss
+    assert "supply the target's name or id" not in _only_miss, _only_miss
+    _mixed = refusal_remedy(_miss + _no_addr)
+    assert "Reconcile the journal" in _mixed, _mixed
+    assert "supply the target's name or id" in _mixed, _mixed
+
+
+def test_miss_remedy_does_not_contradict_the_per_record_hard_deleted_case():
+    """PIN `#10211` review round 8: the run boundary and the per-record receipt
+    must not prescribe OPPOSITE repairs for ONE record.
+
+    The `object-superseded-miss` shape has two causes. Case (3) of
+    `projection.rebuild_all`'s receipt is a NAME-only record over a target the
+    journal HARD-DELETED under an id the record does not carry: nothing is out
+    of order, no creation is missing, and the receipt says so explicitly —
+    "not to reconcile the journal" (`#10224`). `refusal_remedy` emitted the
+    reconcile sentence alone for that same shape, so an operator reading the
+    abort was told to do the one thing the record's own message forbade. That
+    is the class `refusal_remedy` exists as the single home to end.
+
+    FAILS IF: the miss arm drops `_MISS_NAME_ONLY_DELETED_REMEDY` (restoring the
+    contradiction), OR the reconcile sentence is REPLACED by it rather than
+    joined by it (a genuine divergence is still repaired by reconciling, and
+    dropping that limb would prescribe an incomplete remedy for it), OR the
+    sentence stops naming the deleted-target-id repair.
+    """
+    from tortoise.projection.nonfolded import (
+        MISS_NAME_ONLY_DELETED_INSTRUCTION,
+        SHAPE_OBJECT_SUPERSEDED_MISS,
+        NonFoldedEvent,
+        refusal_remedy,
+    )
+
+    _only_miss = refusal_remedy([NonFoldedEvent(SHAPE_OBJECT_SUPERSEDED_MISS)])
+    # BOTH halves: the divergence repair AND the conservative sub-case's repair.
+    assert "Reconcile the journal" in _only_miss, _only_miss
+    assert MISS_NAME_ONLY_DELETED_INSTRUCTION in _only_miss, _only_miss
+    # Scoped to the deleted-target-id repair, not a generic "look harder".
+    assert "deleted target's id" in MISS_NAME_ONLY_DELETED_INSTRUCTION
+    assert "#10224" in MISS_NAME_ONLY_DELETED_INSTRUCTION
+
+    # And the sentence must NOT leak on to a set that has no miss at all.
+    from tortoise.projection.nonfolded import SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS
+
+    _only_no_addr = refusal_remedy(
+        [NonFoldedEvent(SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS)])
+    assert MISS_NAME_ONLY_DELETED_INSTRUCTION not in _only_no_addr, _only_no_addr
+
+
+def test_refusal_remedy_docstring_states_every_limb_it_emits():
+    """PIN `#10211` review round 8 (follow-up): the remedy's OWN HOME must
+    describe every limb it emits, not the subset it emitted first.
+
+    `refusal_remedy` is documented as the single home for the remedy split, so a
+    lane re-deriving the split reads THIS docstring before the body. It framed
+    the split as "TWO epistemically different records" and enumerated exactly
+    two — divergence and no-address — while the function emits a THIRD sentence
+    for the miss shape's conservative sub-case. A home whose prose is NARROWER
+    than its predicate is the defect class this PR already fixed once for
+    `EXEMPT_SHAPES` (commit `12faa006`): the next editor deleting the miss limb
+    as undocumented noise would restore the very contradiction round 8 removed,
+    with nothing but a test name to warn them.
+
+    FAILS IF: the docstring reverts to the two-limb framing ("TWO epistemically
+    different"), OR drops any of the three limbs by name — the reconcile
+    sentence, the SUPPLY-the-address limb, or the miss shape's deleted-target-id
+    limb and its JOINED-not-swapped rule.
+    """
+    from tortoise.projection.nonfolded import refusal_remedy
+
+    doc = refusal_remedy.__doc__ or ""
+    assert "TWO epistemically different" not in doc, (
+        "the docstring is back to a two-limb framing, but the function emits a "
+        "third sentence for the miss shape")
+    assert "THREE limbs" in doc, doc
+    # Limb 1 — the divergence repair, by the phrase the seller of the remedy uses.
+    assert "reconcile the journal" in doc, doc
+    # Limb 2 — the no-address record: supply the address, never reconcile.
+    assert "SUPPLY the address" in doc, doc
+    # Limb 3 — the miss shape's conservative sub-case, and the JOIN rule.
+    assert "HARD-DELETED" in doc, doc
+    assert "deleted-target-id sentence" in doc, doc
+    assert "joined by" in doc, (
+        "the docstring no longer states that the miss sentence is JOINED to the "
+        "reconcile sentence rather than swapped for it — the swap is the "
+        "incomplete-remedy half of the round-8 finding")
+
+
+def test_exempt_shapes_names_every_state_op_that_can_carry_a_name():
+    """PIN `#10211` review round 8: the RECORD of the bound must not be narrower
+    than the bound, in the FAIL-OPEN direction.
+
+    `journal_object_established` counts `state.name` for EVERY op in
+    `_ENTITY_MUTATION_STATE_OPS` (`rename`, `restatus`, `revise`, `supersede`) —
+    pinned by `test_state_op_writing_a_name_other_than_rename_is_covered`. The
+    `EXEMPT_SHAPES` entry and `identity-decision.md` described that source as
+    "a rename", so a lane re-deriving the bound from the record would treat a
+    name carried by `restatus`/`revise`/`supersede` as UNestablished and exempt
+    a supersede that could have landed — the fail-open direction, and the exact
+    narrowing this PR fixed in the code and the `_sup_why` text.
+
+    FAILS IF: either record drifts back to a rename-only illustration.
+    """
+    from pathlib import Path
+
+    from tortoise.projection.nonfolded import EXEMPT_SHAPES, SHAPE_OBJECT_SUPERSEDED_UNREGISTERED
+
+    _entry = EXEMPT_SHAPES[SHAPE_OBJECT_SUPERSEDED_UNREGISTERED]
+    assert "(a rename" not in _entry, (
+        "EXEMPT_SHAPES is back to a rename-only NAME source — the record is then "
+        "narrower than the predicate, which exempts a landable supersede")
+    for _op in ("rename", "restatus", "revise", "supersede"):
+        assert _op in _entry, (
+            f"EXEMPT_SHAPES must name `{_op}`, one of "
+            "_ENTITY_MUTATION_STATE_OPS — all four can SET the merge key")
+
+    _doc = (Path(__file__).resolve().parent.parent
+            / "docs/epics/2026-09-10-2835-capability-registry/identity-decision.md")
+    _text = _doc.read_text(encoding="utf-8")
+    assert "state op (a rename)" not in _text, (
+        "identity-decision.md is back to a rename-only NAME source")
+    assert "`restatus`" in _text, (
+        "identity-decision.md's Name-sources clause must name every state op")
 
 
 def test_journal_object_established_counts_every_address_and_separates_ids():
@@ -2353,7 +2802,7 @@ def test_nested_record_spelling_agrees_on_every_engine(env):
     assert r["divergence"] != "non-folded", r["divergence"]
 
 
-def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env):
+def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env, caplog):
     """#10107 review P1: an id the journal ESTABLISHED is addressable even
     when the name the record also carries is one nothing established.
 
@@ -2376,12 +2825,37 @@ def test_collapsed_away_id_with_an_unestablished_name_still_refuses(env):
     _raw(events, type="ObjectSuperseded", id="obj-p1-a", name="GHOST-OF-COLL2",
          supersedes_by="y", event_id="e-p1-sup")
     proj = sdk._get_proj()
-    with pytest.raises(NonFoldedEventsError) as ei:
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+            pytest.raises(NonFoldedEventsError) as ei:
         proj.rebuild_all(str(events), confirm_destructive=True)
     assert "object-superseded-miss" in str(ei.value), str(ei.value)
     assert "object-superseded-unregistered" not in str(ei.value), (
         "an established id was exempted because its NAME was unestablished — "
         f"the exemption widened past its bound: {ei.value}")
+    # ⛔ THE MISS ARM'S DIAGNOSED CAUSE (#10211 review round 4). This arm used to
+    # say "object not re-created by any journaled event (pre-#2194 journal,
+    # unjournaled capture SDK, legacy unjournaled Object, or delete race)" —
+    # written for the OLD miss population, which still held records the journal
+    # had established NOTHING for. The amendment splits both of those out
+    # (`no-address`, `unregistered`), so a record now reaches this arm ONLY with
+    # an ESTABLISHED address — ⛔ NOT necessarily with a creation the journal
+    # holds (#10211 review round 6): the state-op fixture 18 lines below reaches
+    # this SAME arm with NO `ObjectRegistered` in the journal at all, because a
+    # state op's target id and a mention stub's deterministic id are addresses
+    # the journal holds without creating a node. THIS fixture happens to hold
+    # one (`ObjectRegistered id=obj-p1-a`). The retired
+    # text sent an operator hunting an unjournaled producer that the journal in
+    # their hands disproves. MEASURED: without this pin the arm can regress to
+    # any wording and the file stays green.
+    # ⚠️ Asserted on the SWEEP'S WARNING, which is where `_sup_why` renders —
+    # the raised error carries `refusal_remedy`, not this arm, so an assertion
+    # on `str(ei.value)` can never fail for the right reason.
+    report = " ".join(r.getMessage() for r in caplog.records)
+    assert "not re-created by any journaled event" not in report, (
+        f"the miss arm still describes the retired population: {report}")
+    assert "DID establish this record's address" in report, (
+        f"the miss arm does not name the real cause (an established address "
+        f"with no Object carrying it): {report}")
     r = check_consistency(str(events / "events.jsonl"), proj)
     assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
 
@@ -2414,6 +2888,44 @@ def test_state_op_target_id_with_an_unestablished_name_still_refuses(env):
     assert "object-superseded-unregistered" not in str(ei.value), (
         "a state op's target id was treated as established by nothing: "
         f"{ei.value}")
+
+
+def test_rename_carried_name_with_no_creation_still_refuses(env, caplog):
+    """#10211 review round 6: the miss arm's NON-CREATION limb has TWO
+    spellings, and the NAME one is reachable.
+
+    A rename state op carries a `SET` of the merge key, so the journal
+    establishes that NAME — but if the rename's own target never existed, the
+    journal holds an address from a write that created nothing, and there is NO
+    carrier to collapse or rename. The miss arm therefore cannot illustrate limb
+    (2) with a target id alone.
+
+    FAILS IF: the arm enumerates only "a state op's or a mention stub's target
+    id" (the round-5 wording), which leaves this record in NEITHER limb and
+    sends the operator after a carrier that does not exist — and if nothing
+    pins the message, the id-only illustration can come back unnoticed.
+
+    REACHABLE: a raw/legacy producer that renames into a name and then
+    supersedes by that name, with no `ObjectRegistered` anywhere in the journal.
+    """
+    sdk, events = env
+    _raw(events, type="EntityMutated", op="rename", label="Object",
+         id="obj-mut-9", state={"name": "RENAMED-GHOST"}, event_id="e-mut-9")
+    _raw(events, type="ObjectSuperseded", name="RENAMED-GHOST",
+         supersedes_by="y", event_id="e-mut9-sup")
+    proj = sdk._get_proj()
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"), \
+            pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    assert "object-superseded-miss" in str(ei.value), str(ei.value)
+    assert "object-superseded-unregistered" not in str(ei.value), (
+        "a name the journal established via a rename was exempted as "
+        f"unestablished: {ei.value}")
+    report = " ".join(r.getMessage() for r in caplog.records)
+    assert "DID establish this record's address" in report, report
+    assert "a name it writes" in report, (
+        f"the miss arm's non-creation limb does not name the NAME spelling, so "
+        f"this record falls outside both limbs: {report}")
 
 
 def test_mention_stub_id_with_an_unestablished_name_still_refuses(env):
@@ -2773,3 +3285,421 @@ def test_nested_supersede_of_an_established_name_agrees_on_every_engine(env):
         "the reference fold refused a supersede the graph engine folded — the "
         f"two halves read different spellings: {r['non_folded_events']}")
     assert r["divergence"] != "non-folded", r["divergence"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# #10204 — the D2 exemption keys on ADDRESSES, not on a name.
+#
+# #3590's D2 exemption (comment `6428025133`) required the record to carry a
+# NAME. The owner amended it (comment `6453059051`): the record must carry at
+# least one address — a name, an id, or both — and the journal must have
+# established NONE of the addresses it carries. The deciding reason is
+# `#10183`'s admission test: a refusal must name what the caller can do, and
+# for a target the journal never established there is no creation to add,
+# nothing out of order, and no producer to journal.
+#
+# The pins below are the ones the ADDRESS-keyed bound adds or re-points. The
+# established-name and established-id polarities keep their own homes above
+# (`test_name_only_supersede_of_registered_then_deleted_name_still_refuses`,
+# `test_name_from_a_rename_counts_as_established_both_engines`,
+# `test_collapsed_away_id_with_an_unestablished_name_still_refuses`,
+# `test_state_op_target_id_with_an_unestablished_name_still_refuses`,
+# `test_mention_stub_id_with_an_unestablished_name_still_refuses`) and must
+# stay green: the change only ever WIDENS the exemption to a record no
+# address of which the journal established.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_no_address_supersede_refuses_with_its_own_shape_and_remedy(
+        env, tmp_path, caplog):
+    """PIN `#10204` (4/6): a supersede carrying NO address at all refuses,
+    reporting the NEW distinct shape — and its refusal does not prescribe a
+    repair that does not exist.
+
+    FAILS IF: the no-address record keeps sharing `object-superseded-miss`
+    with a genuine divergence (a caller cannot tell the unrepairable case from
+    the repairable one — the `#9202` defect shape), OR it is exempted (nothing
+    in it is checkable, so "the journal never established it" is
+    unfalsifiable), OR the abort still says "Reconcile the journal" (there is
+    no creation to add, nothing out of order, no producer to journal — the
+    `#10183` third part cannot be written for it).
+
+    REACHABLE: a raw/legacy producer that emits `{supersedes_by}` with no
+    target address — the shape the writer never produces.
+    """
+    sdk, events = env
+    _raw(events, type="ObjectSuperseded", supersedes_by="other",
+         event_id="e-noaddr")
+    proj = sdk._get_proj()
+    with caplog.at_level(logging.WARNING,
+                         logger="tortoise.projection"), \
+            pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    msg = str(ei.value)
+    assert "object-superseded-no-address" in msg, msg
+    assert "object-superseded-miss" not in msg, msg
+    assert "Reconcile the journal" not in msg, (
+        "the no-address refusal prescribed a repair the caller cannot perform "
+        f"(#10183): {msg}")
+    assert "supply the target's name or id" in msg.lower(), msg
+    # ⛔ ...and the REMEDY, not merely the receipt: `__str__` embeds every
+    # refused record's detail, whose no-address receipt carries the same
+    # INSTRUCTION, so only the appended SENTENCE discriminates
+    # `_NO_ADDRESS_REMEDY` (MEASURED: unpinned, that phrase alone survived
+    # deleting the remedy). Pinned by the sentence rather than by its trailing
+    # words — a terminator match passes on any rewording that keeps the ending,
+    # which is exactly how two copies of one instruction drift apart.
+    assert _NO_ADDRESS_REMEDY in msg, (
+        f"the abort did not carry the no-address REMEDY sentence: {msg[-200:]}")
+    # ⛔ The sweep's SECOND message for this record must not name the
+    # genuine-miss causes either (#10183): MEASURED — deleting this shape's
+    # `_sup_why` arm otherwise leaves the file green.
+    report = " ".join(r.getMessage() for r in caplog.records)
+    assert "delete race" not in report, report
+    assert "there is nothing to check it against" in report, report
+    # ⛔ The refusal is a RUN VERDICT, so every engine's own boundary must
+    # reach it — not only `rebuild_all` (whose ACCEPT leg is the pinned one).
+    # The `apply()` call site is shared, so a divergence introduced AT a
+    # boundary would otherwise escape (MEASURED: unpinned, a boundary-only
+    # mutation survives). Each
+    # engine reports its own way: `rebuild` raises, `recover_from_log` returns
+    # `recovered: False` with the record in its reason.
+    # ⚠️ These legs get their OWN projections: `proj` above is the graph
+    # `rebuild_all` produced and the assertions below read it (the receipt, the
+    # reference fold, the health gate), so rebinding it here would run them
+    # against a scratch/closed store — the embedded lane raises a connection
+    # error on that, the docker lane silently reads a different graph.
+    with caplog.at_level(logging.WARNING), \
+            pytest.raises(NonFoldedEventsError,
+                          match="object-superseded-no-address"):
+        _drive("rebuild", tmp_path, events, _fresh(tmp_path, "no-addr-rb"))
+    _rec_proj = _fresh(tmp_path, "no-addr-rec")
+    try:
+        res = recover_from_log(str(events), _rec_proj)
+        assert res["recovered"] is False, res
+        assert "object-superseded-no-address" in res["reason"], res["reason"]
+    finally:
+        _rec_proj.close()
+    # The RECORD's own receipt, not only the aggregate abort text: the two are
+    # separate copies of the same instruction, and only the abort text is
+    # satisfied by `refusal_remedy`'s sentence.
+    detail = ei.value.events[0].detail
+    assert "neither `name` nor `id` is a non-empty string" in detail, detail
+    # ⛔ THE ONE-HOME TIE (#10211 review round 2): the receipt must render the
+    # SAME instruction constant the run-boundary remedy appends. Measured: the
+    # pin below (`NO_ADDRESS_INSTRUCTION in _NO_ADDRESS_REMEDY`) ties the two
+    # module CONSTANTS, so drifting the receipt to its own wording left all 107
+    # tests green while one record got two different repairs on two surfaces —
+    # the defect this change exists to remove. Asserted on the RENDERED detail,
+    # which is the only place the drift is observable.
+    assert NO_ADDRESS_INSTRUCTION in detail, (
+        f"the per-record receipt does not render the one-home instruction "
+        f"constant (two copies have drifted): {detail}")
+    # The reference fold (the third classifying surface) agrees, and it is not
+    # exempt there either.
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+    assert r["divergence"] == "non-folded", r["divergence"]
+    assert any("object-superseded-no-address" in e
+               for e in r["non_folded_events"]), r["non_folded_events"]
+    # The health gate's `action` reads the SAME remedy home as the abort, so a
+    # no-address-only refusal must not be told to reconcile a journal here
+    # either (MEASURED: it still did while the abort did not).
+    assert "Reconcile the journal" not in r["action"], r["action"]
+    assert "supply the target's name or id" in r["action"], r["action"]
+
+
+def test_exempt_receipt_says_the_target_was_never_established(env):
+    """PIN `#10204` (AX receipt, #9202 rule 3 / `#10183`): the exempt record's
+    in-band receipt says the target was never established and makes NO LOSS
+    VERDICT — the loss claim it used to carry is the shape's own DEGRADED
+    GUARANTEE, which `__str__` appends to the same line.
+
+    FAILS IF: the receipt keeps the bare "supersede matched no Object" — which
+    is accurate and useless: it sends a caller hunting a repair that does not
+    exist (the exact AX defect `#10204` exists to close), and it reads
+    identically to the receipt for a genuine, repairable divergence.
+
+    REACHABLE: an id-only supersede no journal event ever established.
+    """
+    sdk, events = env
+    _raw(events, type="ObjectSuperseded", id="obj-never-seen",
+         supersedes_by="other", event_id="e-receipt")
+    proj = sdk._get_proj()
+    proj.rebuild_all(str(events), confirm_destructive=True)  # exempt: no raise
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    receipts = [e for e in r["non_folded_events"]
+                if "object-superseded-unregistered" in e]
+    assert receipts, r["non_folded_events"]
+    receipt = receipts[0]
+    assert "never established" in receipt, receipt
+    assert "applies no supersede here" in receipt, receipt
+    # ⛔ NO "there is no repair" VERDICT (#10211 review round 7): the same
+    # unprovable inference the loss verdict was, one clause over — for the
+    # shape's own RESIDUAL class (an establishing line never written) the
+    # supersede IS lost and the repair (journal the creation) DOES exist.
+    assert "no repair" not in receipt.lower(), receipt
+    # The loss verdict is gone by design (#10211 review round 3): this receipt
+    # shares a line with the shape's DEGRADED GUARANTEE, which says a supersede
+    # IS lost when the establishing line was never written.
+    assert "nothing was lost" not in receipt.lower(), receipt
+
+
+def test_a_nul_bearing_id_counts_as_an_address_end_to_end(env):
+    """PIN `#10204` (the PRESENCE boundary, end to end): a record whose only
+    address is a non-empty but UNWRITABLE string is EXEMPT, not refused.
+
+    FAILS IF: the predicate is gated on `_writable_id`. That flips this record
+    from exempt to `object-superseded-no-address` and aborts a rebuild over a
+    target the journal established neither address of — #3590 D2 re-opened
+    for that spelling, with a remedy that is factually wrong for it. The
+    unit-level pin is in
+    `test_classify_object_supersede_unregistered_is_its_own_exempt_shape`;
+    this is the surface an operator actually meets, measured as a surviving
+    mutation (MEASURED: unpinned, the writability gate survived).
+
+    REACHABLE: an unjournaled/legacy producer that carried a raw id through a
+    JSON escape (a NUL or a lone surrogate from a foreign source), which the
+    journal faithfully records and the graph could not store.
+    """
+    sdk, events = env
+    # ⛔ An unrelated anchor so the journal does not replay to an EMPTY graph
+    # (`recover_from_log` has its own pre-existing empty-replay guard).
+    _raw(events, type="ObjectRegistered", id="obj-nul-anchor",
+         name="NUL-ANCHOR", status="live", event_id="e-nul-anchor")
+    _raw(events, type="ObjectSuperseded", id="a\x00b",
+         supersedes_by="other", event_id="e-nul-sup")
+    proj = sdk._get_proj()
+    proj.rebuild_all(str(events), confirm_destructive=True)  # exempt: no raise
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+    assert any("object-superseded-unregistered" in e
+               for e in r["non_folded_events"]), r["non_folded_events"]
+
+
+def test_hard_deleted_target_keeps_its_own_bound_and_precedence(
+        env, caplog):
+    """PIN `#10204` (5/6): a hard-deleted target still reports
+    `supersede-target-deleted`, and that bound keeps PRECEDENCE over the
+    address exemption.
+
+    FAILS IF: `target_deleted` is consulted after the address decision, or the
+    address exemption absorbs the deletion case — the deleted target's anchor
+    bound is load-bearing (a same-kind delete the fold ACTUALLY applied,
+    verified by the anchor-gated map), and collapsing it into the
+    unregistered shape would drop that verification while still passing.
+
+    The shape is read from the run boundary's own report (`assert_no_non_folded`
+    logs every exempt record) because the reference fold records NOTHING for
+    this shape — its `_object_hard_deleted` arm `pass`es by design — so the
+    graph engine's classification is the surface under test here. What the two
+    surfaces must share is the ACCEPT verdict, asserted below.
+
+    REACHABLE: register an Object, hard-delete it, then supersede it BY ID —
+    the record carries an established id AND a deleted target, so both bounds
+    could claim it.
+    """
+    sdk, events = env
+    _raw(events, type="ObjectRegistered", id="obj-del-1", name="DELOBJ",
+         status="live", event_id="e-del-reg")
+    _raw(events, type="EntityMutated", op="delete", label="Object",
+         id="obj-del-1", event_id="e-del-del")
+    _raw(events, type="ObjectSuperseded", id="obj-del-1",
+         supersedes_by="other", event_id="e-del-sup")
+    proj = sdk._get_proj()
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection.nonfolded"):
+        proj.rebuild_all(str(events), confirm_destructive=True)  # exempt: no raise
+    report = " ".join(r.getMessage() for r in caplog.records)
+    # ⛔ The BRACKETED token: the `object-superseded-unregistered` exemption text
+    # itself names "supersede-target-deleted", so a bare substring match would
+    # be satisfied by the wrong shape's prose.
+    assert "[supersede-target-deleted]" in report, report
+    assert "[object-superseded-unregistered]" not in report, (
+        "the address exemption absorbed the hard-delete bound: " + report)
+    # ⛔ The SECOND message for this record (the sweep's own fold-miss warning)
+    # must not prescribe the genuine-miss causes: a deleted target is a
+    # legitimate absence, and "pre-#2194 journal, unjournaled capture SDK,
+    # legacy unjournaled Object, or delete race" sends the operator hunting a
+    # producer defect that does not exist (MEASURED: the branch covered
+    # only the two unaddressable shapes).
+    assert "delete race" not in report, report
+    assert "hard-deleted the target" in report, report
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] == 0, r["non_folded_events"]
+    assert r["divergence"] != "non-folded", r["divergence"]
+
+
+def test_mention_stub_appearing_later_still_establishes_the_id(env):
+    """PIN `#10204` (6/6) — THE PROPERTY THAT MAKES THE WIDENING FAIL-SAFE:
+    the oracle is JOURNAL-WIDE, so a mention stub appended LATER still
+    contributes its deterministic id and an id-only record carrying it REFUSES.
+
+    FAILS IF: `journal_object_established` is computed with a POSITION filter
+    (or lazily at the record's own seq). Then an id whose only established
+    route is a LATER mention stub reads as "never established", the supersede
+    is EXEMPTED — and at the record's own seq the stub did not exist while the
+    journal's own replay, which folds the stub in pass 1b BEFORE the trailing
+    supersede sweep, could have addressed it: one journal, one verdict decided
+    by position, in the fail-OPEN direction. The id half enumerates every route
+    by which an id reaches a node, computed ONCE over the whole journal with no
+    position filter — that is what makes granting on an unestablished id open
+    no new hole.
+
+    REACHABLE: supersede a stub's deterministic id, and only LATER mention the
+    name (minting the stub) and re-id it with a registration — the late
+    re-id is what makes the sweep's id MATCH miss at journal end (the stub node
+    now carries the registration's id).
+    """
+    sdk, events = env
+    stub_id = _entity_name_id("Object", "LATE-MENTION")
+    _raw(events, type="ObjectSuperseded", id=stub_id, supersedes_by="y",
+         event_id="e-late-sup")
+    _raw(events, type="EventRecorded", id="e-late-1", eventKind="k",
+         object="LATE-MENTION", event_id="e-late-rec")
+    _raw(events, type="ObjectRegistered", id="obj-late-real",
+         name="LATE-MENTION", status="live", event_id="e-late-reg")
+    proj = sdk._get_proj()
+    with pytest.raises(NonFoldedEventsError) as ei:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+    msg = str(ei.value)
+    assert "object-superseded-miss" in msg, msg
+    assert "object-superseded-unregistered" not in msg, (
+        "a LATER mention stub's established id was not counted — the oracle "
+        f"is not journal-wide: {msg}")
+    r = check_consistency(str(events / "events.jsonl"), proj)
+    assert r["non_folded_refused_count"] >= 1, r["non_folded_events"]
+    assert r["divergence"] == "non-folded", r["divergence"]
+
+
+def test_the_repairable_refusal_still_prescribes_reconcile(env):
+    """PIN `#10204` (the POSITIVE polarity of `refusal_remedy`):
+    a genuine, repairable divergence still tells the caller to reconcile the
+    journal.
+
+    FAILS IF: the remedy is narrowed for every shape instead of only for the
+    no-address one. `#10204` retires "Reconcile the journal" for a record
+    carrying NO address — there is no creation to add and nothing out of order
+    — but a target the journal DID establish and the fold missed is exactly the
+    case where all three of those repairs exist. Dropping the prescription
+    there removes the one instruction that names the repair, and (unlike a
+    missing exemption) nothing else in the message replaces it.
+
+    REACHABLE: two registrations of one name (so the id collapses away) plus a
+    supersede of the collapsed id — the #5285 cycle-4 FIX 2 shape.
+    """
+    sdk, events = env
+    _raw(events, type="ObjectRegistered", id="obj-rm-a", name="RM-COLL",
+         status="live", event_id="e-rm-a")
+    _raw(events, type="ObjectRegistered", id="obj-rm-b", name="RM-COLL",
+         status="live", event_id="e-rm-b")
+    _raw(events, type="ObjectSuperseded", id="obj-rm-a",
+         supersedes_by="other", event_id="e-rm-sup")
+    with pytest.raises(NonFoldedEventsError) as ei:
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    msg = str(ei.value)
+    assert "object-superseded-miss" in msg, msg
+    assert "Reconcile the journal" in msg, (
+        "a repairable divergence lost the only instruction that names its "
+        f"repair: {msg}")
+    # ⛔ And the SAME prescription on the health gate, which reads the same
+    # remedy home (`refusal_remedy`). Before #10204 it kept the reconcile
+    # prescription for BOTH records — so fixing only the raised error would
+    # leave one record with two contradictory instructions depending on which
+    # surface you read (MEASURED: the abort was split while this surface was
+    # not).
+    r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert r["divergence"] == "non-folded", r["divergence"]
+    assert "Reconcile the journal" in r["action"], r["action"]
+
+
+def test_a_mixed_abort_carries_both_remedies(env):
+    """PIN `#10204`: when ONE run refuses both a repairable miss and a
+    no-address record, the abort names BOTH repairs.
+
+    FAILS IF: the remedy branch short-circuits to the no-address text whenever
+    such a record is present (the repair for the other, genuinely repairable
+    record then disappears), or the reverse.
+
+    REACHABLE: a journal with a collapsed-carrier miss AND a target-less
+    supersede.
+    """
+    sdk, events = env
+    _raw(events, type="ObjectRegistered", id="obj-mx-a", name="MX-COLL",
+         status="live", event_id="e-mx-a")
+    _raw(events, type="ObjectRegistered", id="obj-mx-b", name="MX-COLL",
+         status="live", event_id="e-mx-b")
+    _raw(events, type="ObjectSuperseded", id="obj-mx-a",
+         supersedes_by="other", event_id="e-mx-miss")
+    _raw(events, type="ObjectSuperseded", supersedes_by="other",
+         event_id="e-mx-noaddr")
+    with pytest.raises(NonFoldedEventsError) as ei:
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    msg = str(ei.value)
+    assert "[object-superseded-miss]" in msg, msg
+    assert "[object-superseded-no-address]" in msg, msg
+    assert "Reconcile the journal" in msg, msg
+    assert "supply the target's name or id" in msg.lower(), msg
+    # The REMEDY sentence itself, not only the receipt's copy of the phrase
+    # (MEASURED: without it the phrase is satisfied by the receipt).
+    assert _NO_ADDRESS_REMEDY in msg, (
+        f"the mixed abort did not carry the no-address remedy sentence: "
+        f"{msg[-200:]}")
+    # ⛔ ONE HOME (#10211 review): the instruction the run-boundary remedy
+    # appends and the instruction the per-record receipt renders are the SAME
+    # constant, so a reword cannot leave two surfaces telling one caller two
+    # different repairs.
+    assert NO_ADDRESS_INSTRUCTION in _NO_ADDRESS_REMEDY, _NO_ADDRESS_REMEDY
+    # Both on the health gate too — the mixed case is where the two remedy
+    # renderers would drift apart silently (MEASURED: one was split, the other
+    # was not).
+    r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert "Reconcile the journal" in r["action"], r["action"]
+    assert "supply the target's name or id" in r["action"], r["action"]
+
+
+_DECISION_DOC = (Path(__file__).resolve().parent.parent
+                 / "docs" / "epics" / "2026-09-10-2835-capability-registry"
+                 / "identity-decision.md")
+
+
+def test_the_decision_row_scopes_the_retired_edge_miss_justification_like_the_code():
+    """The `edge-message-miss` row states the SAME scope the code does.
+
+    FAILS IF: the row states the retirement of the A10 justification
+    unqualified — as it did before this pin (`is **RETIRED**: `#8499` landed
+    that fold, so a miss is no longer explained by a missing creation path and
+    every remaining occurrence is evidence of a real divergence`). That reading
+    is FALSE for the engine it does not name: `#8499` retired the justification
+    for `rebuild_all`, which folds `DirectEdgeCreated` in pass-2b, while the
+    one-record `apply()` engine has no pass-2b and still keeps
+    `DirectEdgeCreated` in `_APPLY_WARN_ONLY_TYPES` (`projection/__init__.py`),
+    so on `rebuild(log)` / `recover_from_log` a plain direct edge is still
+    legitimately absent for a missing-creation-path reason. An unqualified row
+    therefore tells an operator that this doc — the record a lane reads to
+    decide what the gate permits — declares a legitimately-absent edge a
+    divergence, and it contradicts the row BELOW it (`object-superseded-
+    unregistered`), which carves the one-record leg out explicitly.
+
+    REACHABLE: the row is committed prose; the assertion reads it. The premise
+    (that the code's own `EXEMPT_SHAPES` entry carries the two-engine split) is
+    asserted first, so a future edit to the code home reddens here instead of
+    silently retiring this pin.
+    """
+    prose = EXEMPT_SHAPES[SHAPE_EDGE_MESSAGE_MISS]
+    assert "RETIRED **for `rebuild_all`**" in prose, prose
+    assert "NOT retired for the one-record" in prose, prose
+
+    rows = [ln for ln in _DECISION_DOC.read_text(encoding="utf-8").splitlines()
+            if ln.startswith("| `edge-message-miss` |")]
+    assert len(rows) == 1, f"expected exactly one edge-message-miss row: {rows}"
+    row = rows[0]
+    assert "RETIRED for `rebuild_all`" in row, (
+        f"the decision row does not scope the retirement to `rebuild_all`: {row}")
+    assert "NOT retired for the one-record `apply()` engine" in row, (
+        "the decision row omits the one-record `apply()` leg, which still has "
+        f"no pass-2b and keeps `DirectEdgeCreated` unfolded: {row}")
+    assert "every remaining occurrence is evidence of a real divergence" in row, row
+    # The unqualified construction is the defect: a retirement asserted with no
+    # engine named reads as true of every engine.
+    assert "is **RETIRED**:" not in row, (
+        f"the retirement is stated with no engine named: {row}")

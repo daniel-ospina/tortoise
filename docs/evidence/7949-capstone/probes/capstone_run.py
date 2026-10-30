@@ -13,20 +13,31 @@ a stamp for any capstone log (the shipped log is stamped at `027c8c1ab`; see
 ``README.md``). Two of the body's statements are STALE and this probe is built on
 the corrected reading:
 
-1. **A single entry point DOES exist.** The body says *"whether any single
+1. **A single entry point DOES exist.**
+   The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
-   ``TortoiseSDK.capture_session`` (deleted by #4282, and it was the only
-   caller) → ``sdk._extract_session_v2`` (``sdk.py:11161``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8396``) calls
-   ``_edus_from_conversation`` (S0, ``:8507``), ``run_s1`` (S1, ``:8540``),
-   ``run_s2`` (S2.1, ``:8564``), ``_run_vet_pass`` (S2.2, ``:8593``),
+   the SDK's capture door → ``sdk._extract_session_v2`` (``sdk.py:11993``) →
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
+   ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
+   ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
    ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
-   ``:8609``), ``search_graph`` (S3, ``:8625``), ``run_s4`` (the gap filler,
-   ``:8646``), and ``execute_embed`` (S5+S6, ``:8845``). The SYMBOL is
-   authoritative and the line is a convenience — the three FILE-NAMED cites
-   above are resolved against the tree by the bundle's pin (the eight bare step
-   cites are pinned only where the README's step table repeats the same
-   numbers, so tree drift shows up there), and no line here is claimed to be
+   ``:8700``), ``search_graph`` (S3, ``:8717``), ``run_s4`` (the gap filler,
+   ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``).
+   ⚠️ #4282 deleted ``capture_session``, the SDK's ONLY caller of
+   ``_extract_session_v2``, so no ``sdk.py`` call-site cite is printed; the hosted
+   handler still reaches the helper (``tortoise/hosted_api.py:15500``), which is why
+   the claim is scoped to the SDK.
+   The SYMBOL is
+   authoritative and the line is a convenience: the three FILE-NAMED cites
+   above are resolved against the tree by the bundle's pin, and these eight
+   bare step cites are re-read by that same pin file
+   (`tests/test_7949_capstone_verdict_check.py`,
+   `test_the_readmes_line_citations_resolve_to_the_symbols_they_name`). They
+   need that separate leg because a bare `:NNNN` carries no filename, so the
+   bundle's own sweep (`_BUNDLE_CITE`) cannot see them: `#10243` moved
+   `extractor_v2.py` by +88 and all eight went stale while every pin stayed
+   green, which this sentence used to deny by pointing at a README cross-pin
+   `#10211` had already invalidated. No line here is claimed to be
    self-detecting on its own. (No derivation head is named here on purpose: the
    stamps such a sentence used to name re-staled the moment `main` moved, and a
    claim that can only re-stale is not worth keeping.) So the capstone drives
@@ -894,23 +905,6 @@ def main(argv: list[str] | None = None) -> int:
 
     sdk = TortoiseSDK()
     session_id = f"capstone_{uuid.uuid4().hex[:12]}"
-    # ⛔ #4282 (owner ruling 2026-10-27) DELETED the entry point this gate drives:
-    # ``TortoiseSDK.capture_session`` was ``_extract_session_v2``'s ONLY
-    # in-process caller, so no door is left that runs the eight steps in one
-    # pass. The probe REFUSES — a missing instrument is not a product verdict,
-    # the same distinction §4.4 draws for the receipt — and this is the one line
-    # to change when a durable door lands (tracked by the coverage-loss issue the
-    # deleting PR links, #4282).
-    if not hasattr(sdk, "capture_session"):
-        return refuse(
-            "the entry point this capstone drives — `TortoiseSDK.capture_session` "
-            "— was DELETED by #4282 and was the SDK's only caller of "
-            "`_extract_session_v2`, so no SDK door runs the eight steps in one pass "
-            "(the hosted handler reaches the same helper, but it is a server route, "
-            "not an SDK entry point): G4 is "
-            "UNREACHABLE. That is an INSTRUMENT gap, not a verdict on the "
-            "pipeline; re-deriving this table needs a surviving door.",
-            prereg_ok=True, code=4, corpus=corpus)
     try:
         captured = sdk.capture_session(turns, session_id=session_id)
         # The receipt IS the only surface. ``capture_session`` never returns an

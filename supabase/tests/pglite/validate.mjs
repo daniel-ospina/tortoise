@@ -711,6 +711,17 @@ const suites = [
   // named here never runs, and "the suite exists" is then mistaken for "the suite
   // passes". Add the entry in the same commit as the file.
   '20261013000002_oauth_mint_rpcs.sql',  // #3025
+  // #3524 §9 step 1 — the consent token's single-use register. The claim is
+  // decided BY THE PRIMARY KEY (`INSERT … ON CONFLICT DO NOTHING RETURNING`), and
+  // that is unprovable from Python: the fake control plane is single-threaded and
+  // its own comment says a SELECT-then-INSERT implementation would still pass it.
+  // This suite is also the only place the REVOKE/RLS posture is executed — with
+  // the public anon key able to DELETE a spent nonce, a captured consent token
+  // replays into a second authorization code. NOTE: this list is EXPLICIT, not a
+  // glob — a suite file that is not named here never runs, and "the suite exists"
+  // is then mistaken for "the suite passes". Add the entry in the same commit as
+  // the file.
+  '20261030000001_oauth_consent_tickets.sql',  // #3524
   // #10025 — the default graph's stable-id row, and the ONE-live-default-row
   // invariant the singular `rows[0]` readers rely on: the partial unique index
   // is executed (a second live row is rejected, a tombstone beside an active one
@@ -2273,6 +2284,368 @@ try {
     + 'relation endpoint follows, and the abandoned name identity is gone');
 } catch (e) {
   console.error(`✗ #9881 RENAME FAILED:\n  ${e.message.split('\n').slice(0, 20).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #9972 + #9973: a supersede's STRUCTURAL repoint is a MOVE ───────────────
+//
+// `DirectEdgeRepoint` carries two shapes. The 2a DIRECT shape names ids and means
+// "re-create this edge at the successor"; the 2b STRUCTURAL shape names the
+// target by its REPLAY KEY (a `name` for aboutSubject/Object/Event/Point, a `url`
+// for aboutDocument/extractedFrom) and means "MOVE this edge from the superseded
+// point to the successor". The record applied one rule to both — an upsert at the
+// descriptor's own `src`, resolving the target against the label's KEY column —
+// so (#9972) the insert matched `object.id = 'Acme Corp'` and landed ZERO rows in
+// silence, and (#9973) nothing was ever deleted, which left the edge on the
+// superseded point. Both are measured here against a REAL database, because both
+// are row-count facts: the plan-text assertions live in
+// `tests/test_record_projection.py`.
+//
+// The journal order is the PRODUCER's (`sdk.supersede_point`: the
+// `PointSuperseded` patch at sdk.py:16253, the 2b descriptors at sdk.py:16657),
+// not an invented one — the move reads `superseded_by`, which that patch writes.
+try {
+  const modulePath = join(REPO_ROOT, 'tortoise', 'record_projection.py');
+  const run = async (slug, records) => {
+    const tenant = [`${slug}-org`, `${slug}-graph`];
+    await db.exec(`
+      INSERT INTO public.organizations (id, name, graph_name)
+        VALUES ('${tenant[0]}', '${tenant[0]}', 'org_${tenant[0]}');
+      INSERT INTO public.graphs (id, org_id, name, namespace)
+        VALUES ('${tenant[1]}', '${tenant[0]}', '${tenant[1]}', 'org_${tenant[0]}_${tenant[1]}');
+    `);
+    const segment = join(tmpdir(), `${slug}-${process.pid}.jsonl`);
+    writeFileSync(segment, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const emitted = JSON.parse(execFileSync(
+      'python3', ['-c', PROJECTION_PY, modulePath, segment, ...tenant],
+      { encoding: 'utf8' },
+    ));
+    const apply = async () => {
+      await db.exec('BEGIN');
+      for (const statement of emitted.plan) {
+        await db.query(statement.sql, statement.params);
+      }
+      await db.exec('COMMIT');
+    };
+    await apply();
+    const rows = await db.query(
+      `SELECT rel_type, src_label, src_key, tgt_label, tgt_key
+         FROM public.relation WHERE org_id = $1 AND graph_id = $2
+        ORDER BY rel_type, src_key, tgt_key`, tenant);
+    await apply();   // IDEMPOTENCE: a re-replay must not change the rows
+    const again = await db.query(
+      `SELECT rel_type, src_label, src_key, tgt_label, tgt_key
+         FROM public.relation WHERE org_id = $1 AND graph_id = $2
+        ORDER BY rel_type, src_key, tgt_key`, tenant);
+    unlinkSync(segment);
+    if (JSON.stringify(rows.rows) !== JSON.stringify(again.rows)) {
+      throw new Error(`${slug}: a second replay CHANGED the relation rows: `
+        + `${JSON.stringify(rows.rows)} then ${JSON.stringify(again.rows)}`);
+    }
+    return rows.rows;
+  };
+  // The LIVE order: entity registrations, the two Point snapshots, the link
+  // (an edge whose endpoint row does not exist yet legitimately lands nothing —
+  // the fold's own `absent` verdict), the supersede patch, then the descriptor.
+  const supersedeRecords = (oldId, newId, targetKey,
+                            { preamble = [], link, edgeType = 'aboutObject',
+                              targetLabel = 'Object' } = {}) => [
+    ...preamble,
+    { type: 'PointAdded', ts: '2026-10-25T00:00:01Z', id: oldId,
+      point: { id: oldId, content: 'the claim', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:00:02Z', id: newId,
+      point: { id: newId, content: 'the restatement', status: 'live' } },
+    link,
+    // The producer's order: the supersede patch, THEN the descriptor.
+    { type: 'PointSuperseded', ts: '2026-10-25T00:00:03Z', id: oldId,
+      new_id: newId, valid_from: '2026-10-25T00:00:03Z',
+      valid_to: '2026-10-25T00:00:04Z', expired_at: '2026-10-25T00:00:04Z' },
+    { type: 'DirectEdgeRepoint', ts: '2026-10-25T00:00:04Z',
+      id: `${oldId}->${newId}:${edgeType}:${targetKey}`,
+      src: oldId, tgt: targetKey, target_label: targetLabel,
+      edge_type: edgeType },
+  ];
+  const acme = {
+    type: 'ObjectRegistered', ts: '2026-10-25T00:00:00Z', id: 'obj-9972-acme',
+    name: 'Acme Corp', objectKind: 'org',
+  };
+  const linked = {
+    type: 'EntityLinked', ts: '2026-10-25T00:00:01Z', id: 'p1',
+    source_label: 'Point', source_id: 'p1', target_label: 'Object',
+    target_id: 'obj-9972-acme', edge_type: 'aboutObject', confidence: 0.9,
+  };
+
+  // (1) #9972 + #9973 — the row MOVES: one row, at the SUCCESSOR, filed by the
+  //     Object's key (`obj-9972-acme`), never by the name the descriptor carries.
+  const moved = await run('9972-move',
+    supersedeRecords('p1', 'p2', 'Acme Corp',
+      { preamble: [acme], link: { ...linked, source_id: 'p1', id: 'p1' } }));
+  if (moved.length !== 1) {
+    throw new Error('#9972/#9973: expected exactly ONE aboutObject row after the '
+      + `supersede, got ${JSON.stringify(moved)} — 0 rows is the silent drop `
+      + '(the target resolved against a column that can never hold the name); '
+      + '2 rows is a resurrection at the superseded point');
+  }
+  if (moved[0].src_key !== 'p2') {
+    throw new Error('#9973: the edge is filed at '
+      + `src_key=${JSON.stringify(moved[0].src_key)} — the superseded point. The `
+      + 'graph moved it to p2, so a record-sourced rebuild resurrects it at p1');
+  }
+  if (moved[0].tgt_key !== 'obj-9972-acme') {
+    throw new Error('#9972: the edge is filed at tgt_key='
+      + `${JSON.stringify(moved[0].tgt_key)} — the descriptor's NAME, not the `
+      + 'Object row it resolves to');
+  }
+
+  // (2) A 3-LINK chain: A -> B -> C with a descriptor per hop resolves to the
+  //     FINAL successor and to no intermediate point (the record's `_final`).
+  const chainRecords = [
+    { type: 'ObjectRegistered', ts: '2026-10-25T00:01:00Z', id: 'obj-9973-acme',
+      name: 'Acme Corp', objectKind: 'org' },
+    { type: 'PointAdded', ts: '2026-10-25T00:01:01Z', id: 'c1',
+      point: { id: 'c1', content: 'A', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:01:02Z', id: 'c2',
+      point: { id: 'c2', content: 'B', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:01:03Z', id: 'c3',
+      point: { id: 'c3', content: 'C', status: 'live' } },
+    { type: 'EntityLinked', ts: '2026-10-25T00:01:04Z', id: 'c1',
+      source_label: 'Point', source_id: 'c1', target_label: 'Object',
+      target_id: 'obj-9973-acme', edge_type: 'aboutObject' },
+  ];
+  for (const [oldId, newId] of [['c1', 'c2'], ['c2', 'c3']]) {
+    chainRecords.push(
+      { type: 'PointSuperseded', ts: '2026-10-25T00:01:05Z', id: oldId,
+        new_id: newId, valid_from: '2026-10-25T00:01:05Z',
+        valid_to: '2026-10-25T00:01:06Z', expired_at: '2026-10-25T00:01:06Z' },
+      { type: 'DirectEdgeRepoint', ts: '2026-10-25T00:01:06Z',
+        id: `${oldId}->${newId}:aboutObject:Acme Corp`,
+        src: oldId, tgt: 'Acme Corp', target_label: 'Object',
+        edge_type: 'aboutObject' });
+  }
+  const chained = await run('9973-chain', chainRecords);
+  if (chained.length !== 1 || chained[0].src_key !== 'c3') {
+    throw new Error('#9973: a supersede chain must leave the edge on the FINAL '
+      + `successor and on no intermediate point; rows = ${JSON.stringify(chained)}`);
+  }
+
+  // (3) #5509 — a name held by TWO carriers has no target: the record lands NO
+  //     row (the graph refuses the descriptor too), and it never picks one.
+  const twins = [
+    { type: 'ObjectRegistered', ts: '2026-10-25T00:02:00Z', id: 'obj-amb-1',
+      name: 'Twin', objectKind: 'org' },
+    { type: 'ObjectRegistered', ts: '2026-10-25T00:02:00Z', id: 'obj-amb-2',
+      name: 'Twin', objectKind: 'org' },
+  ];
+  const ambiguous = await run('9972-ambiguous',
+    supersedeRecords('p1', 'p2', 'Twin', {
+      preamble: twins,
+      link: { type: 'EntityLinked', ts: '2026-10-25T00:02:02Z', id: 'p1',
+        source_label: 'Point', source_id: 'p1', target_label: 'Object',
+        target_id: 'obj-amb-1', edge_type: 'aboutObject' },
+    }));
+  // The graph's `_refuse_ambiguous_target` skips the WHOLE descriptor (the
+  // delete-leg runs only after a target resolved), so the row legitimately STAYS
+  // at the superseded point: nobody is moved anywhere, and nothing is filed
+  // against an arbitrary carrier.
+  if (ambiguous.length !== 1 || ambiguous[0].src_key !== 'p1'
+      || ambiguous[0].tgt_key !== 'obj-amb-1') {
+    throw new Error('#5509: a NAME held by two carriers must leave the ONE row '
+      + 'untouched at the superseded point — rows = '
+      + `${JSON.stringify(ambiguous)}. [] means the delete-leg ran and dropped an `
+      + 'edge the graph keeps; a row elsewhere means the record guessed a holder '
+      + 'where the graph refuses the descriptor');
+  }
+
+  // (4) `aboutDocument` is RESOLVE-ONLY and DOCUMENT-ONLY: a provenance
+  //     `:Source` (no `document_kind`) is not the kind the fold accepts, so the
+  //     descriptor lands nothing rather than mis-pointing the edge onto it.
+  const provenance = [
+    { type: 'SourceCreated', ts: '2026-10-25T00:03:00Z', id: 'src-prov',
+      url: 'https://example.test/raw', sourceKind: 'web' },
+  ];
+  const provRecords = supersedeRecords('p1', 'p2', 'https://example.test/raw', {
+    preamble: provenance,
+    edgeType: 'aboutDocument',
+    targetLabel: 'Source',
+    link: { type: 'EntityLinked', ts: '2026-10-25T00:03:02Z', id: 'p1',
+      source_label: 'Point', source_id: 'p1', target_label: 'Source',
+      target_id: 'src-prov', edge_type: 'aboutDocument' },
+  });
+  const documents = await run('9972-document', provRecords);
+  // The descriptor resolves NOTHING on this target (the fold's kind test is
+  // load-bearing on the descriptor route), so the edge is not moved — and, as in
+  // the ambiguous case, the graph skips the delete-leg with it. The EntityLinked
+  // row at p1 is the PRECONDITION, not the move; what must be absent is any row
+  // at the successor.
+  if (documents.length !== 1 || documents[0].src_key !== 'p1'
+      || documents[0].tgt_key !== 'https://example.test/raw') {
+    throw new Error('aboutDocument resolved onto a PROVENANCE Source (no '
+      + `document_kind): rows = ${JSON.stringify(documents)} — neither an empty `
+      + 'set (the delete-leg ran on a row the graph keeps) nor a row at the '
+      + 'successor is acceptable: the fold\'s kind test is load-bearing on the '
+      + 'descriptor route and the record must not be looser than the fold');
+  }
+
+  // (5) NO SUPERSEDE ⇒ NO MOVE. A descriptor whose `src` never got a supersede
+  //     patch has no successor, and the graph's `_final(src) == src` /
+  //     `_src_is_terminal` gate makes the whole descriptor a no-op. Measured
+  //     because the ALTERNATIVE was shipped once: a target-only "fix" that
+  //     always upserted erased the row's `confidence` (the conflict path writes
+  //     `EXCLUDED.confidence` = NULL) while moving nothing. A move that has not
+  //     happened must leave the existing row BYTE-IDENTICAL.
+  const noSupersede = await run('9972-no-supersede', [
+    acme,
+    { type: 'PointAdded', ts: '2026-10-25T00:04:01Z', id: 'p1',
+      point: { id: 'p1', content: 'the claim', status: 'live' } },
+    { type: 'EntityLinked', ts: '2026-10-25T00:04:02Z', id: 'p1',
+      source_label: 'Point', source_id: 'p1', target_label: 'Object',
+      target_id: 'obj-9972-acme', edge_type: 'aboutObject', confidence: 0.9 },
+    { type: 'DirectEdgeRepoint', ts: '2026-10-25T00:04:03Z',
+      id: 'p1->p2:aboutObject:Acme Corp', src: 'p1', tgt: 'Acme Corp',
+      target_label: 'Object', edge_type: 'aboutObject' },
+  ]);
+  const kept = await db.query(
+    `SELECT src_key, tgt_key, confidence FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'aboutObject'`,
+    ['9972-no-supersede-org', '9972-no-supersede-graph']);
+  if (noSupersede.length !== 1 || noSupersede[0].src_key !== 'p1') {
+    throw new Error('a descriptor with NO supersede must not move anything: '
+      + `${JSON.stringify(noSupersede)} — the graph gates the whole descriptor on `
+      + '`_final(src) != src` and `_src_is_terminal`, so the record must too');
+  }
+  if (String(kept.rows[0].confidence) !== '0.9') {
+    throw new Error('the un-moved row lost its `confidence` ('
+      + `${JSON.stringify(kept.rows[0])}) — a delete-then-reinsert on a row that `
+      + 'did not move is the churn the gate exists to prevent');
+  }
+
+  // (6) A CYCLIC chain has NO destination (x→y, y→z, z→y — path-guarded), so the
+  //     whole descriptor is a no-op: the graph's `_final(x)` is the first
+  //     REPEATED node, and the record — whose walk is depth-bounded — must not
+  //     delete what it cannot re-create. This is the discriminator for the gate's
+  //     THIRD conjunct: "src is terminal" and "src HAS a successor" are BOTH
+  //     TRUE here, so a DELETE gated on those two alone ran while the INSERT's
+  //     `dest` subquery (the `next_id IS NULL` row) yielded none — and the row
+  //     vanished with no error on `record_write_failures`.
+  const cycle = await run('9972-cycle', [
+    { type: 'ObjectRegistered', ts: '2026-10-25T00:05:00Z', id: 'obj-cyc',
+      name: 'Cycle Target', objectKind: 'org' },
+    { type: 'PointAdded', ts: '2026-10-25T00:05:01Z', id: 'x',
+      point: { id: 'x', content: 'X', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:05:02Z', id: 'y',
+      point: { id: 'y', content: 'Y', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:05:03Z', id: 'z',
+      point: { id: 'z', content: 'Z', status: 'live' } },
+    { type: 'EntityLinked', ts: '2026-10-25T00:05:04Z', id: 'x',
+      source_label: 'Point', source_id: 'x', target_label: 'Object',
+      target_id: 'obj-cyc', edge_type: 'aboutObject', confidence: 0.7 },
+    { type: 'PointSuperseded', ts: '2026-10-25T00:05:05Z', id: 'x',
+      new_id: 'y', valid_from: '2026-10-25T00:05:05Z',
+      valid_to: '2026-10-25T00:05:06Z', expired_at: '2026-10-25T00:05:06Z' },
+    { type: 'PointSuperseded', ts: '2026-10-25T00:05:06Z', id: 'y',
+      new_id: 'z', valid_from: '2026-10-25T00:05:06Z',
+      valid_to: '2026-10-25T00:05:07Z', expired_at: '2026-10-25T00:05:07Z' },
+    { type: 'PointSuperseded', ts: '2026-10-25T00:05:07Z', id: 'z',
+      new_id: 'y', valid_from: '2026-10-25T00:05:07Z',
+      valid_to: '2026-10-25T00:05:08Z', expired_at: '2026-10-25T00:05:08Z' },
+    { type: 'DirectEdgeRepoint', ts: '2026-10-25T00:05:08Z',
+      id: 'x->y:aboutObject:Cycle Target', src: 'x', tgt: 'Cycle Target',
+      target_label: 'Object', edge_type: 'aboutObject' },
+  ]);
+  if (cycle.length !== 1 || cycle[0].src_key !== 'x') {
+    throw new Error('a CYCLIC supersede chain has no destination, so NOTHING '
+      + `must move — rows = ${JSON.stringify(cycle)}. [] is the delete-without-`
+      + 'insert: the DELETE was gated on "src is terminal and has a successor", '
+      + 'which a cycle satisfies, while the INSERT found no `next_id IS NULL` row');
+  }
+
+  // (7) `aboutPoint` — the target is a POINT named through `props ->> 'name'`,
+  //     because `public.point` has no `name` COLUMN while the graph addresses a
+  //     Point PROPERTY (`MATCH (x:Point {name:$key})`). Cases 1-6 all take the
+  //     `aboutObject` default, so without this one the JSON path never reaches
+  //     Postgres — and the operator precedence it depends on
+  //     (`t.props ->> 'name' = $n`, never `t.props ->> ('name' = $n)`) is
+  //     unchecked by the pytest leg, which only substring-matches the SQL.
+  const targetPoint = {
+    type: 'PointAdded', ts: '2026-10-25T00:06:01Z', id: 'tp-9972',
+    point: { id: 'tp-9972', content: 'the target', status: 'live',
+             name: 'Target Point' },
+  };
+  const pointMoved = await run('9972-about-point',
+    supersedeRecords('p1', 'p2', 'Target Point', {
+      preamble: [targetPoint],
+      edgeType: 'aboutPoint',
+      targetLabel: 'Point',
+      link: { type: 'EntityLinked', ts: '2026-10-25T00:06:02Z', id: 'p1',
+        source_label: 'Point', source_id: 'p1', target_label: 'Point',
+        target_id: 'tp-9972', edge_type: 'aboutPoint' },
+    }));
+  if (pointMoved.length !== 1 || pointMoved[0].src_key !== 'p2'
+      || pointMoved[0].tgt_key !== 'tp-9972') {
+    throw new Error('aboutPoint: the descriptor names the target by its PROPS '
+      + `name and the move must resolve it to the point KEY; rows = `
+      + `${JSON.stringify(pointMoved)}. 0 rows is the #9972 failure mode on `
+      + 'this arm — the name was compared against a column that cannot hold it');
+  }
+
+  // (8) `aboutSubject` — `name` IS a primary column on this table, so this is
+  //     the `t.name = %s` branch against Postgres. It also pins that the row is
+  //     filed by the Subject's STABLE id (#9881), never by the mutable name.
+  const subjectMoved = await run('9972-about-subject',
+    supersedeRecords('p1', 'p2', 'Alice', {
+      preamble: [{ type: 'SubjectAdded', ts: '2026-10-25T00:07:01Z',
+        id: 'sub-9972', name: 'Alice', subjectKind: 'person' }],
+      edgeType: 'aboutSubject',
+      targetLabel: 'Subject',
+      link: { type: 'EntityLinked', ts: '2026-10-25T00:07:02Z', id: 'p1',
+        source_label: 'Point', source_id: 'p1', target_label: 'Subject',
+        target_id: 'sub-9972', edge_type: 'aboutSubject' },
+    }));
+  if (subjectMoved.length !== 1 || subjectMoved[0].src_key !== 'p2'
+      || subjectMoved[0].tgt_key !== 'sub-9972') {
+    throw new Error('aboutSubject: rows = ' + JSON.stringify(subjectMoved)
+      + ' — the descriptor names the Subject by `name`; the move must file the '
+      + 'row by its stable id, not by the name it was resolved through');
+  }
+
+  // (9) `extractedFrom` — the SIX-bind arm, and the only case that executes it
+  //     against Postgres at all. The name-keyed arms bind 3 params (`org`,
+  //     `graph`, `key`); this one goes through `_endpoint_resolution`
+  //     (match · prefer · ORDER BY) and binds 6, so a call-shape mistake in this
+  //     branch is a different class from the other four and no other case can
+  //     see it. The descriptor here names a URL VARIANT (`HTTPS://…/`, wrong
+  //     case, trailing slash) while the registered Source carries the CANONICAL
+  //     url, so the case pins the arm's actual semantics: resolve through the
+  //     canonical triple, then file the row by the canonical key — never by the
+  //     spelling the descriptor happened to carry.
+  const canonicalUrl = 'https://example.test/doc/a';
+  const variantUrl = 'HTTPS://Example.test/doc/a/';
+  const extracted = await run('9972-extracted-from',
+    supersedeRecords('p1', 'p2', variantUrl, {
+      preamble: [{ type: 'SourceCreated', ts: '2026-10-25T00:08:01Z',
+        id: canonicalUrl, url: canonicalUrl, sourceKind: 'web' }],
+      edgeType: 'extractedFrom',
+      targetLabel: 'Source',
+      link: { type: 'EntityLinked', ts: '2026-10-25T00:08:02Z', id: 'p1',
+        source_label: 'Point', source_id: 'p1', target_label: 'Source',
+        target_id: canonicalUrl, edge_type: 'extractedFrom' },
+    }));
+  if (extracted.length !== 1 || extracted[0].src_key !== 'p2'
+      || extracted[0].tgt_key !== canonicalUrl) {
+    throw new Error('extractedFrom: rows = ' + JSON.stringify(extracted)
+      + ' — the six-bind canonical-triple arm must resolve the URL VARIANT to '
+      + 'the registered Source and file the row by the CANONICAL key; 0 rows is '
+      + 'the arm resolving by the raw spelling only, and a tgt_key holding the '
+      + 'variant is the record holding an identity the fold does not');
+  }
+
+  console.log('✓ #9972: the FOUR resolution arms resolve — Object and Subject by '
+    + '`name`, Point by `props->>\'name\'`, Source+extractedFrom by the '
+    + 'canonical triple — and a name held by 2+ carriers lands nothing (#5509)');
+  console.log('✓ #9973: a supersede TRANSFERS the edge — the row leaves the '
+    + 'superseded point, lands on the final successor, and re-replays idempotently');
+} catch (e) {
+  console.error(`✗ #9972/#9973 STRUCTURAL REPOINT FAILED:\n  ${e.message.split('\n').slice(0, 30).join('\n  ')}`);
   process.exit(1);
 }
 

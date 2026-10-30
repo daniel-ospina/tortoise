@@ -423,9 +423,19 @@ def _is_loopback(hostname: str) -> bool:
     if hostname.lower() == "localhost":
         return True
     try:
-        return ipaddress.ip_address(hostname).is_loopback
+        ip = ipaddress.ip_address(hostname)
     except ValueError:
         return False
+    # IPv4-MAPPED IPv6 (``::ffff:127.0.0.1``) is loopback iff its embedded IPv4 address is, and
+    # CPython only reports that on 3.11.13+/3.12.7+ (gh-117566) — while ``requires-python`` here is
+    # ``>=3.12``. Normalising FIRST makes the verdict identical on every supported interpreter,
+    # exactly as ``_parse_bind_ip`` does for ``--bind`` (#719). Without it this predicate flips
+    # with the interpreter's PATCH level: on 3.12.0–3.12.6 it refuses a loopback redirect that the
+    # AS accepts. The guard is test_the_loopback_verdict_does_not_depend_on_the_interpreter_patch_level
+    # — the cross-half table only bites on a buggy stdlib.
+    if getattr(ip, "ipv4_mapped", None) is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
 
 
 # Bytes we refuse to reason about in a redirect URI, checked BEFORE any
@@ -2066,6 +2076,20 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     if org is None:
         return None
     org = _quota_fields(cp, org)
+    # #10046: the RECORD tenant for an OAuth credential. This resolver is the
+    # OAuth half of the MCP auth boundary and — like a SESSION/JWT credential —
+    # it never goes through `resolve_api_key`, so nothing put the org's
+    # default-graph row id on the dict and `record_tenant_for` (the one
+    # declaration both transports call) refused every armed write `no_tenant`
+    # for the whole `oat_` class. The row is resolved through the SAME home the
+    # API-key lane uses (`default_graph_id_for_credential`), so the three
+    # credential classes cannot name different defaults; a `None` here stays a
+    # NAMED refusal counted `no_tenant`, never a guess, and the lookup/mint is
+    # contract-bound never to fail this caller.
+    from tortoise.supabase_control import default_graph_id_for_credential
+
+    org["default_graph_id"] = default_graph_id_for_credential(
+        cp, row["org_id"], context="oauth auth self-heal")
     # #2600: the resolved dict carries the RAW actor fields (the token row's
     # user_id/client_id) so consuming seams (mcp_auth middleware / REST DI)
     # can alias the canonical `actor_user_id` — additive, transport-agnostic

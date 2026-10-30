@@ -1057,12 +1057,12 @@ def _s4_delta_enabled() -> bool:
 def _vet_enabled() -> bool:
     """#5005: the call-time S2.2 VET toggle.
 
-    Unset/0 → the gate is entirely off-path: the VET passes do not run, the
-    list is untouched, and the only result delta is the additive ``vet``
-    evidence key — matching the ``TORTOISE_CLASSIFY_LATER`` precedent
-    (``#1695`` Task 5), so the rate effect is measurable before it is trusted.
-    Value matching goes through the declared truthy contract (#4097)."""
-    return is_truthy(os.environ.get("TORTOISE_VET"))
+    Unset/0 (no #5087 seam flag) → THIS toggle is off — and it is one of three
+    terms ``vet_enabled`` ORs (by NAME: a line goes stale), so "off-path" is
+    decided there, not here: ``TORTOISE_VALUE_GATE`` arms the pass too (its
+    ``#4899`` predicate runs inside it). Truthy per #4097. #5087 adds a SECOND
+    contributor: ``TORTOISE_S2_DECISION_SEAM`` arms the arbiter, even vs 0."""
+    return is_truthy(os.environ.get("TORTOISE_VET")) or _s2_seam_armed()
 
 
 def _value_gate_enabled() -> bool:
@@ -1089,8 +1089,8 @@ def _default_kind_classifier(model, installed_namespaces=None):
     ``installed_namespaces`` (#5163) is the graph's installed-pack gate
     threaded into the kind index — ``None`` = no gate (the catalog union)."""
     from tortoise.kind_classifier import KindClassifier
-    return KindClassifier(model=model,
-                          installed_namespaces=installed_namespaces)
+    return KindClassifier(model=model, installed_namespaces=installed_namespaces,
+                          tail_decider=_s2_seam_tail_decider())
 
 
 def _render_master(master: dict, story: str | None = None, *,
@@ -7336,6 +7336,40 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # records, deduped against the UPDATE-fold records below.
     point_supersede_refs: list[dict] = []
     pt_record_pairs: set[tuple[str, str]] = set()
+
+    # #9906: a FOLDED point's ``supersedes`` ref must not die at the fold.
+    # Every non-emitting outcome in the loop below resolves a SURVIVOR graph id
+    # and emits no payload point — NOOP (identical/paraphrase fold), MERGE
+    # (#5006 near-duplicate fusion) and the intra-batch duplicate all used to
+    # ``continue`` straight past the collection site at the bottom of the loop,
+    # so the CORRECTS record the ref carries (a cross-session decision reversal,
+    # ONTOLOGY §3.1/§3.6) was dropped with NO warning line at all. A consumer
+    # could then not tell "no reversal was asserted" from "a reversal was
+    # asserted and lost" — and the #8503 receipt reported a false zero on a run
+    # that dropped a replace record.
+    #
+    # The ref is therefore collected HERE, against the survivor id the fold
+    # already resolved, and flows through the SAME downstream resolver as an
+    # emitted point's ref. Nothing here judges the ref: `_resolve_point_supersede`
+    # keeps its never-guess refusals (unresolvable, ambiguous, not-an-earlier-
+    # session claim) and the resolve loop keeps its self-supersede guard — those
+    # are NOT duplicated here, so a carried ref that cannot resolve is warned
+    # exactly as an emitted point's is.
+    def _carry_fold_supersede(p: dict, survivor_id: str, fold: str) -> None:
+        ref = str(p.get("supersedes") or "").strip()
+        if not ref or ref in ("null", "None"):
+            return
+        if not survivor_id:
+            # The one "cannot carry" outcome: the fold resolved NO graph id, so
+            # a record here would name a point that does not exist. Named, never
+            # silent (the marker is in the receipt classifier's refusal set).
+            warnings.append(
+                f"point supersedes={ref[:60]!r} dropped at {fold} with no "
+                "surviving point id — skipped (fail-open; the reversal is "
+                "NAMED here rather than lost silently)")
+            return
+        point_supersede_refs.append({"point_id": survivor_id, "ref": ref})
+
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
@@ -7349,6 +7383,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         _raw_content = str(p.get("content", "")).strip()
         content = _raw_content[:_MAX_CONTENT]
         if not content:
+            # #9906: an empty-content point is dropped whole (pre-existing, and
+            # NOT this fix's subject) — but if it carried a ``supersedes`` ref,
+            # that ref dies with it, so name it rather than lose it silently.
+            # A ref-carrying point now leaves this loop through one of four
+            # doors and NONE of them is silent: the non-dict door warns above,
+            # this door warns, the three non-emitting fold doors carry the ref
+            # to the survivor, and the emission door collects it below.
+            _carry_fold_supersede(p, "", "an empty-content drop")
             continue
         pkind = str(p.get("pointKind", "")).strip() or "statement"
         if pkind.lower() == UNCLASSIFIED:
@@ -7362,6 +7404,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             pkind = _POINT_FALLBACK["kind"]
         n = _norm(content)
         if n in point_ids:
+            # #9906: an INTRA-BATCH duplicate (the same normalized content
+            # earlier in THIS embed list) — the ref is carried onto the earlier
+            # occurrence, which is what the ``point_ids`` map already makes the
+            # canonical id for this content.
+            #
+            # ⚠️ The #2552 F2 rule is NOT violated by this. F2 bounds the
+            # CORRECTS *TARGET* ("the search index holds only points that
+            # existed BEFORE this capture, so a resolved target is an
+            # EARLIER-session claim by construction; same-session reversals are
+            # state/validity semantics, never a CORRECTS record"). The
+            # ``supersedes_by`` SIDE being a same-session point is the ordinary
+            # shape of every record this channel produces — the reversal is
+            # (earlier-session claim) → (this session's claim). Resolution here
+            # still runs against ``search``, which this capture has not written
+            # to, so the TARGET stays cross-session by construction and no
+            # same-session→same-session record can be minted at this door. And
+            # the duplicate IS the same claim as the survivor (identical
+            # normalized content), so "this claim replaces that earlier
+            # decision" is equally true of the survivor — it is precisely the
+            # lossless-fold premise the dedup already rests on.
+            _carry_fold_supersede(p, point_ids[n], "a same-session duplicate")
             continue
         # E1 (#1533) — the point's `when` slot (used by the E5 later-date
         # guard, CG-2): validate here, once, before the match passes.
@@ -7426,6 +7489,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": True,
                 "note": f"duplicate of existing {pid} ({decision.reason}) — "
                         "folded (duplicates stamp, no new point)"})
+            # #9906: the fold resolved the SURVIVOR (the prior this candidate
+            # duplicates), so a ``supersedes`` ref on the candidate is still
+            # TRUE of that survivor — "this claim replaces that earlier
+            # decision" does not become false because the restatement happened
+            # to duplicate something already in the graph. Carried, not dropped.
+            # ``decision.prior_id`` (not ``pid``): the local ``pid`` falls back
+            # to the candidate's content-addressed id when the prior row carried
+            # no id, and that id names NO graph point — never emit a record onto
+            # it (the fold-carry helper names that outcome instead).
+            _carry_fold_supersede(
+                p, decision.prior_id or "",
+                f"the NOOP fold ({decision.reason})")
             continue
         if decision.decision == "MERGE":
             # #5006 (D12/O4) — the FUSION, executed at S3 after the gate.
@@ -7453,6 +7528,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": True,
                 "note": f"near-duplicate merge into existing {pid} "
                         "(attachments unioned, no new point)"})
+            # #9906: same carry as the NOOP door. The MERGE survivor is the
+            # prior, and the fusion's whole premise is that the pair IS one
+            # claim, so the candidate's reversal assertion transfers to it.
+            _carry_fold_supersede(
+                p, decision.prior_id or "",
+                f"the MERGE fold ({decision.reason})")
             continue
         if decision.decision == "UPDATE":
             reason = "REVISES"  # supersession: new content corrects the old
@@ -7478,9 +7559,16 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # #2552 (op_04): collect an explicit point-level ``supersedes`` ref
         # (the DECISION-REVERSAL channel — a NEW decision/claim replaces a
         # prior-session one). Resolution runs after the loop against the S3
-        # search, so only points actually emitted here (NEW or REVISES —
-        # NOOPs continued above) can carry a record; a self-referential or
-        # unemitted ref never reaches the record builder.
+        # search, so the resolved target is an EARLIER-session claim by
+        # construction (F2) and a self-referential ref never reaches the record
+        # builder.
+        #
+        # #9906: this is the EMITTING door only (NEW / REVISES, the two outcomes
+        # that put a payload point here). The three NON-emitting doors — NOOP,
+        # MERGE (#5006) and the intra-batch duplicate — carry their ref to the
+        # SURVIVOR through ``_carry_fold_supersede`` above, and the two drop
+        # doors (non-dict entry, empty content) warn. Counting only NEW/REVISES
+        # is what made a folded reversal vanish with no line in ``warnings``.
         supersede_ref = str(p.get("supersedes") or "").strip()
         if supersede_ref and supersede_ref not in ("null", "None"):
             point_supersede_refs.append({"point_id": pid, "ref": supersede_ref})
@@ -8374,7 +8462,7 @@ def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
         return embed_list, {}, [], {}
     try:
         out = _vet_gate.vet_candidates(embed_list, narrative=narrative,
-                                       arbiter=arbiter)
+                                       arbiter=_s2_seam_arbiter(arbiter))
         new_list, apply_warnings = _vet_gate.apply_vet(
             embed_list, out["decisions"], prior=prior)
         stats = {
@@ -8404,9 +8492,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 
     ``vet_arbiter`` (#5005) is the injected S2.2 VET arbiter seam — the
     decision-only model that answers *"should this candidate exist at all?"*.
-    None + ``TORTOISE_VET`` unset → VET is entirely off-path. When the flag is
-    on and no arbiter is injected, VET runs its mechanical Level-2 batch checks
-    and keeps every candidate (fail-open). See ``tortoise/vet_gate.py``.
+    Off-path only when ``vet_arbiter`` is ``None`` **and** all three env
+    switches are off: ``TORTOISE_VET``,
+    ``TORTOISE_VALUE_GATE`` (its ``#4899`` predicate runs inside this pass) and
+    ``TORTOISE_S2_DECISION_SEAM`` (seam arbiter even vs ``TORTOISE_VET=0``; can ``DISCARD``).
+    A supplied ``vet_arbiter`` arms both passes on its own (``vet_enabled``'s
+    FIRST term), so with every switch off an injected arbiter still runs them —
+    the state the capstone probes and the seam's armed tests drive.
 
     ``kind_classifier`` (#1695 Task 5) is the injected classify-later seam:
     None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline — the
@@ -10501,3 +10593,77 @@ __all__ = [  # noqa: RUF022
     "SUBJECTS", "EVENTS", "CHAINS",
     "UNCLASSIFIED",
 ]
+
+
+# ── #5087: the S2.2/S2.3 typed-decision seam's two call sites ───────────────
+#
+# Appended at the END of this module on purpose: the capstone evidence bundle
+# (`docs/evidence/7949-capstone/`) cites ~115 LINE NUMBERS in this file, checked
+# by `tests/test_7949_capstone_measure.py`, and an insertion anywhere above them
+# re-stales all of them. A function defined after its caller is fine (calls
+# resolve at run time), so the seam's wiring costs the bundle nothing.
+
+def _s2_seam_armed() -> bool:
+    """Whether `TORTOISE_S2_DECISION_SEAM` is truthy — the seam's ONE arming read.
+
+    ⚠️ **Arming the seam ARMS VET unconditionally.** `_vet_enabled` ORs this in,
+    because the seam *is* S2.2's arbiter: with `TORTOISE_VET` unset and no
+    arbiter injected, `extract_session_v2` would skip the VET passes entirely
+    and the seam would never be consulted — an armed seam that no gate runs is
+    the inert-enforcer failure class (it reports itself as protection and
+    protects nothing). Two consequences, stated because they surprise a reader:
+    this flag **overrides an explicit `TORTOISE_VET=0`** (it is a new contributor
+    to `_vet_enabled`, not a rider on it), and it does **not** by itself arm S2.3
+    — the seam's tail decider is attached in ONE place, `_default_kind_classifier`,
+    so S2.3 is armed only under `TORTOISE_CLASSIFY_LATER=1` with NO classifier
+    injected: an injected classifier is the caller's own and never receives the
+    seam's decider. There is no classify-only arming; arming both halves is one
+    flag, and each half's record names which one answered (`stats["seam"]` for
+    the classify tail, and `stats["stats"]["seam"]` for VET — `_run_vet_pass`
+    nests the gate's stats under its own, so the artifact path is
+    `result["vet"][*]["stats"]["seam"]`).
+
+    ⚠️ **The OFF path stays TOTAL: this read must never raise.** `_vet_enabled`
+    ORs this in, and one of its call sites is outside any `try`, so an exception
+    here would abort a whole capture for code the session never asked for. An
+    unimportable seam module can never ARM the seam (the flag lives in it), so
+    the honest answer is `False` rather than a traceback — an OFF session cannot
+    be broken by a module it does not consult.
+    """
+    try:
+        from tortoise import s2_decision_seam
+    except Exception:  # an unloadable seam can never be armed; see the docstring
+        return False
+
+    return s2_decision_seam.seam_enabled()
+
+
+def _s2_seam_arbiter(injected):
+    """Which S2.2 arbiter a pass uses: **injected > armed > none**.
+
+    An explicitly injected arbiter always wins (tests and the capstone probes drive
+    the real gate that way). With none injected, the seam supplies one only when
+    its flag is armed — so unarmed, the pass falls to the other two switches
+    (``TORTOISE_VET``, and ``TORTOISE_VALUE_GATE``'s ``#4899`` predicate); the
+    write path gains an arbiter only when an operator arms the seam.
+    """
+    if injected is not None:
+        return injected
+    if not _s2_seam_armed():
+        return None
+    from tortoise import s2_decision_seam
+
+    return s2_decision_seam.vet_arbiter()
+
+
+def _s2_seam_tail_decider():
+    """S2.3's decision source for the classify tail, or None (the default).
+
+    ``None`` makes ``KindClassifier``'s constructor call identical to its
+    pre-#5087 form, so the flag's off state changes nothing at all.
+    """
+    if not _s2_seam_armed():
+        return None
+    from tortoise import s2_decision_seam
+
+    return s2_decision_seam.classify_decider()

@@ -393,6 +393,15 @@ _PREREQ_MIGRATION_COUNT_RE = re.compile(r"at this head, (?P<count>\d+) migration
 _INDEX_MIGRATION_COUNT_RE = re.compile(
     r"`pgvector` = 0 occurrences in (?P<count>\d+) migrations"
 )
+#: The SAME row states *which* migration is the newest — the half no pattern
+#: above read, so the count could be right while the attribution was false
+#: (`#3524` review, P2). `(?P<detail>[^)]*)` stops at the clause's own closing
+#: parenthesis; the sentence has no nested parens.
+_INDEX_MIGRATION_ATTRIBUTION_RE = re.compile(
+    r"re-measured at this head; (?P<detail>[^)]*)"
+)
+#: A migration filename as the docs write it: the 14-digit stamp plus `_name.sql`.
+_MIGRATION_FILENAME_RE = re.compile(r"\d{14}_[a-z0-9_]+\.sql")
 #: §A5's *third* restatement of the same denominator — `grep -riE
 #: 'pgvector|vector\(' over all N` / `migrations` — which wraps across a line
 #: break, so the separator is `\s+` and not a literal space. Without this
@@ -807,6 +816,65 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
             f"supabase/migrations matches {matched_lines}. Re-run the command "
             "and state its own number"
         )
+
+
+def test_the_index_row_names_this_heads_newest_migration():
+    """The count and its ATTRIBUTION must both be true at this head.
+
+    The pin above reads the *number* and nothing else, so the sentence could say
+    the right count while naming the WRONG newest migration — and it did. At
+    `97703631c` this lane's row read:
+
+        "…in 77 migrations (re-measured at this head; the newest is #10017's
+         cache-tier migration, `20261029000001_record_point_cache_tier.sql`, so
+         the count moved ahead of it rather than with it)"
+
+    77 was right, and the attribution was false: the 77th is this lane's own
+    `20261030000001_oauth_consent_tickets.sql`, so the count moved WITH that
+    migration, not ahead of it (`#3524` review, P2). A lane that trusts the
+    sentence learns the wrong newest migration — from the docs index, which is
+    read first. The count was pinned; the name was not, which is why it could
+    rot while the test stayed green.
+
+    RED on that pre-fix text: the newest file on disk is not named in the
+    clause. Non-vacuity: the expectation is not a re-typed filename — adding a
+    migration makes `migrations[-1]` a different file, so the sentence has to
+    be re-derived at the same head, in the same direction as the count it sits
+    beside.
+    """
+    migrations = sorted(_MIGRATIONS_DIR.glob("*.sql"))
+    assert migrations, f"no migrations under {_MIGRATIONS_DIR}"
+    newest = migrations[-1].name
+
+    index_row = next(
+        line
+        for line in _INDEX_DOC.read_text(encoding="utf-8").splitlines()
+        if _INDEX_RECORD_ROW_MARKER in line
+    )
+
+    clause = _INDEX_MIGRATION_ATTRIBUTION_RE.search(index_row)
+    assert clause, (
+        "docs/00_index.md's #7879 row no longer states WHICH migration is the "
+        "newest (`re-measured at this head; …`). Restate it rather than "
+        "deleting the phrase: this pin reads it, and an attribution no reader "
+        "can reach is a stale flag waiting to happen"
+    )
+
+    attributed = [m.group(0) for m in _MIGRATION_FILENAME_RE.finditer(clause.group("detail"))]
+    assert attributed, (
+        "the index row's re-measurement clause names no migration file — name "
+        f"the newest ({newest}) so a lane reading the index is told the truth"
+    )
+    assert newest in attributed, (
+        f"docs/00_index.md's #7879 row names {attributed} as the newest "
+        f"migration(s), but `{_MIGRATIONS_DIR.relative_to(REPO_ROOT)}` newest is "
+        f"{newest}. A count that is right while the name is wrong is still the "
+        "wrong answer — re-state the attribution at this head"
+    )
+    unknown = [name for name in attributed if not (_MIGRATIONS_DIR / name).is_file()]
+    assert not unknown, (
+        f"the index row names migration(s) that do not exist on disk: {unknown}"
+    )
 
 
 def test_primary_properties_have_a_column():

@@ -137,6 +137,15 @@ def test_docs_scanning_gates_stay_in_tier1():
         "and a docs-only edit runs only tier1; without this pin a re-staled "
         "`found`-omission claim merges green (#4309 class)"
     )
+    assert "test_10191_record_move_doc_pin.py" in tier1, (
+        "#10244 review (P3): the #10191 record-side MOVE pin must be in tier1 — "
+        "it guards `docs/INGEST_CONTRACT.md`, which is in NON_PYTHON_PREFIXES "
+        "and matches no SOURCE_PATTERNS entry, so an INGEST-only diff selects "
+        "no surface and runs tier1 ONLY. The `core` row and the `durations` row "
+        "both survive a dropped `tier1` row, so nothing would red: the manifest "
+        "stays internally consistent while the pin sleeps on the exact edit it "
+        "exists to catch (#4309/#8474 class, the hole #10244 closed)"
+    )
     assert "test_fly_secret_drift.py" in tier1, (
         "#8614: the runbook's secret-drift guards read docs/infra-runbook.md "
         "(`docs/` is in NON_PYTHON_PREFIXES and the runbook matches no "
@@ -182,6 +191,16 @@ def test_docs_scanning_gates_stay_in_tier1():
         "red on main (#4309/#3616 class, same dual registration as the six "
         "sibling test_extractor_v4_* doc guards)"
     )
+    assert "test_7949_e5_section10_writeback.py" in tier1, (
+        "#10108 review (P1): the E5 write-back pin binds "
+        "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md §10's replicated-run "
+        "table to a fresh run of the registered scorer — `docs/` is in "
+        "NON_PYTHON_PREFIXES and that document matches no SOURCE_PATTERNS "
+        "entry, so a docs-only edit of §10 runs tier1 only; registered in "
+        "`core` alone, retyping one digit or deleting the subsection merged "
+        "green while #7949/#7947 went on citing it (#4309 class, same dual "
+        "registration as the sibling capstone rows above)"
+    )
 
 
 def test_v4_membership_gate_runs_on_both_architecture_docs():
@@ -207,6 +226,35 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+
+def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
+    """#10108 review (P1): pin the SELECTION, not just the manifest string.
+
+    `tests/test_7949_e5_section10_writeback.py` compares §10's published
+    replicated-run figures against a fresh run of the registered scorer. The one
+    change that can red it is a docs-only edit of
+    `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` — the diff class on which
+    `docs/` is filtered out by NON_PYTHON_PREFIXES, the document matches no
+    SOURCE_PATTERNS entry, `changed` empties and `select()` takes the docs-only
+    early return, so tier1 is the ONLY surface that runs.
+
+    Measured before the fix: the document's plan was `surfaces=[]`, the tier-1
+    set (64 files) did not contain this file, and the pin was registered in
+    `core` alone — asleep on the exact change it exists to catch. The manifest
+    assertion in :func:`test_docs_scanning_gates_stay_in_tier1` catches a deleted
+    row; this catches a row that is present but no longer reaches the file
+    (#9778 review P2 made the same point for the declared-mechanism gate).
+    """
+    r = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == [], r["surfaces"]
+    assert "test_7949_e5_section10_writeback.py" in r["test_files"], (
+        "a docs-only edit of §10's replicated-run passage must select the pin "
+        "that binds it to the scorer — otherwise the table can be retyped, "
+        "edited one digit, or deleted and merge green (#10108 review P1, "
+        "#4309 class)"
+    )
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
@@ -680,8 +728,22 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
     Asserted on the SURFACE and the guard FILE, not on non-emptiness: every
     one of these diffs selects its surface without the census entry, so a bare
     `surfaces` check can only pass.
+
+    ⛔ #10194 REVERSED THE SECOND HALF, DELIBERATELY (owner decision A,
+    2026-10-27): `tests/eval/**` is now the NON-GATING lane, so the census no
+    longer runs on any PR — a diff to `tortoise/retrieval.py` selects 158 files
+    and NONE of them is the census. The surface mapping this test was built to
+    prove is still correct and still asserted; what it must now also assert is
+    the CONSEQUENCE, so nobody reads a green PR as "the census ran". The
+    published §2.3 readings can go stale until evals reopen; that is the cost
+    the owner accepted, and it is recorded here rather than left to be
+    rediscovered. Reachable from `eval-suite-manual.yml`, never from a merge.
     """
+    from tools.ci_selection import on_demand_files
     guard = "eval/write_path/test_value_span_census_2684.py"
+    assert guard in on_demand_files(load_manifest()), (
+        f"{guard} must be in the non-gating lane — #10194 took the eval subtree "
+        "out of the merge gate; if it left the lane it is gating again")
     for changed, surface in (
             ("tortoise/extractor_v2.py", "core"),
             ("tortoise/retrieval.py", "sdk"),
@@ -695,10 +757,11 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
             f"{changed} selects {r['surfaces']}, not {surface} — the premise "
             "of this pin changed; re-derive it"
         )
-        assert guard in r["test_files"], (
-            f"{changed} does not select {guard} — the census sleeps on the "
-            "diff that can out-date the numbers it publishes "
-            f"(selected: {r['test_files']})"
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert guard not in selected, (
+            f"{changed} selects {guard} again — a non-gating lane file is back "
+            "on a pre-merge leg, which is the regression #10194 exists to "
+            f"prevent (selected: {sorted(selected)[:8]} ...)"
         )
 
 
@@ -2225,13 +2288,22 @@ def test_tools_longmem_change_selects_eval_not_tier1():
     assert r["full"] is False
     assert r["surfaces"] == ["eval"]
     # #6137 moved `eval/retrieval/test_run.py` out of the fast pool into the
-    # slow legs, so the witness that "eval was selected" is another eval file
-    # that stayed — and the moved one is asserted to still run PRE-MERGE, one
-    # leg over (a relocation that dropped it instead would be a coverage loss,
-    # which is the whole thing #6137 must not do).
-    assert "eval/retrieval/test_1348.py" in r["test_files"]
+    # slow legs, so the witness that "eval was selected" had to be another eval
+    # file that stayed.
+    # #10194 moved BOTH of them into the non-gating lane, so the witness is now
+    # an `eval`-surface file that is NOT under the eval/longmem subtrees —
+    # `test_measure_ask_distilled.py` (registered on `eval`, at the top of
+    # `tests/`). The property under test is unchanged: an eval-harness diff must
+    # select the eval surface's tests and must NOT collapse to tier-1 smoke.
+    # What changed is that the subtree's own files no longer ride along, which
+    # is asserted here rather than merely allowed.
+    assert "test_measure_ask_distilled.py" in r["test_files"], r["test_files"]
+    assert "eval/retrieval/test_1348.py" not in r["test_files"], (
+        "eval/ files are the non-gating lane (#10194) — they must not reach a "
+        "tier-2 fast shard")
     assert "eval/retrieval/test_run.py" not in r["test_files"]
-    assert "eval/retrieval/test_run.py" in r["slow_selected"] and r["slow_run"] is True
+    assert "eval/retrieval/test_run.py" not in r["slow_selected"], (
+        "#10194: a lane file must not ride the tier-2 slow leg either")
     assert set(r["test_files"]) != _tier1()
 
 
@@ -2395,6 +2467,30 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     r = _sel(["tools/inbound_relay_sweep.py"])
     assert "core" in r["surfaces"], r
     assert "test_inbound_relay_sweep.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_worktree_report_tool_change_selects_core_not_tier1():
+    """A change to the lane report must run the rules it pins (#10220).
+
+    `tests/test_worktree_report.py` is registered on the `core` surface and owns the
+    report's anti-fabrication guarantees — the counts are derived from a log that is
+    re-hashed and re-parsed, a red suite exits 3 and never 0, an unfinished suite is
+    refused. That registration is INERT for a tool-only diff: `tools/` is a flat
+    NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/worktree_report.py`, so `select()` returns NO surface, takes the
+    docs-only early return and falls back to the tier-1 smoke set, which does not
+    contain the file. Weakening a rule would then be the one PR that never ran the
+    cases pinning it — and that tool is what the merge path reads as a lane's test
+    evidence (`agent-infra#2977`), so the drop would be invisible where it matters most.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields
+    `full: False` with no pin, so the later asserts pass unexercised.
+    """
+    r = _sel(["tools/worktree_report.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_worktree_report.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
@@ -3022,6 +3118,33 @@ def test_backfill_graph_turns_tool_change_selects_core_not_tier1():
     r = _sel(["tools/backfill_graph_turns.py"])
     assert "core" in r["surfaces"], r
     assert "test_10017_backfill_census.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_backfill_copy_turns_tool_change_selects_core_not_tier1():
+    # #10017 review P1 (the third time this class was measured on this chain):
+    # tools/backfill_copy_turns.py is the COPY phase — the write whose turns the
+    # parity gate then certifies before an IRREVERSIBLE delete — and it owns
+    # tests/test_10017_backfill_copy.py, registered `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a copy-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, so the
+    # file's own suite — and its #5128 interpreter guard, the repo gate that DID
+    # red this tool at 4cdad4be7 — never ran on the PR editing the copy.
+    # Registering the test under `core` does not help: a name in a
+    # surface's test_files only runs when that surface is ALREADY selected.
+    #
+    # Measured before the CORE_ALSO entry: `--changed-files
+    # tools/backfill_copy_turns.py` -> surfaces=[], full=False,
+    # test_10017_backfill_copy.py ABSENT. Same #1349/#3332/#3616 silent-drop
+    # class as tools/backfill_graph_turns.py above. CORE_ALSO (not
+    # TOOL_CARVEOUTS) because the suite is hermetic (a fake graph + a fake
+    # journal, no DB). Mutation check: removing the CORE_ALSO entry fails the
+    # second assert below.
+    r = _sel(["tools/backfill_copy_turns.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_10017_backfill_copy.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
@@ -4320,8 +4443,14 @@ def test_expensive_eval_integration_is_in_the_on_demand_lane():
 def test_slow_files_emitted_on_every_return_path():
     # #1371: the changes job reads slow_files from every selection mode — a
     # missing key would KeyError the nightly/schedule run or empty test-slow.
+    # #10194: the emitted set is the GATING pool (`slow_gating_files()`: slow
+    # minus carve-out minus the non-gating lane), because the changes job feeds
+    # `slow_matrix`/the legs straight out of it. Asserting the raw config list
+    # would pin the pool that the legs deliberately no longer run.
+    from tools.ci_selection import slow_gating_files
     m = load_manifest()
-    expected = set(m["slow_files"])
+    expected = set(slow_gating_files(m))
+    assert expected, "the gating slow pool must not be empty — vacuous otherwise"
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4340,9 +4469,12 @@ def test_diff_gate_keys_emitted_on_every_return_path():
     slow_run / slow_selected / carve_out_run — the changes job echoes them,
     so a missing key would KeyError the echo (or the nightly run) and
     silently mis-gate a leg. slow_selected must always be a subset of
-    slow_files - carve_out (test-slow's committed leg set)."""
+    slow_gating_files() (test-slow's leg set: slow minus carve-out minus the
+    non-gating lane, #10194)."""
+    from tools.ci_selection import slow_gating_files
+
     m = load_manifest()
-    leg_set = set(m["slow_files"]) - set(m["carve_out"])
+    leg_set = set(slow_gating_files(m))
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4355,7 +4487,7 @@ def test_diff_gate_keys_emitted_on_every_return_path():
         for key in ("slow_run", "slow_selected", "carve_out_run"):
             assert key in r, f"missing {key} for {changed}/{event}"
         assert set(r["slow_selected"]) <= leg_set, \
-            f"slow_selected must be subset of slow_files - carve_out ({changed}/{event})"
+            f"slow_selected must be subset of slow_gating_files() ({changed}/{event})"
 
 
 def test_docs_only_skips_slow_and_carve_out():
@@ -4378,10 +4510,21 @@ def test_docs_only_skips_slow_and_carve_out():
 def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
     """#2147/#2148: push/schedule/unknown-path/shared-module -> full:
     test-slow AND test-carve-out run, and slow_selected is the whole
-    committed leg set (slow_files - carve_out) — the trunk + nightly
-    backstop is never weakened by the PR-shape gates."""
+    committed leg set — the trunk + nightly backstop is never weakened by the
+    PR-shape gates.
+
+    #10194: the leg set is `slow_gating_files()` (slow - carve-out - the
+    non-gating lane). The backstop claim survives the membership change — the
+    pool the legs run is still the WHOLE of that pool — but it no longer means
+    "every slow_files entry": five eval files stay declared slow and are
+    subtracted, exactly the way carve-out files already were."""
+    from tools.ci_selection import slow_gating_files
     m = load_manifest()
-    leg_set = sorted(set(m["slow_files"]) - set(m["carve_out"]))
+    leg_set = sorted(slow_gating_files(m))
+    assert leg_set, "the full selection's slow leg must not be empty"
+    assert len(leg_set) < len(m["slow_files"]), (
+        "this test is about the pool the legs actually run; if it equals the "
+        "raw config list the subtraction has stopped happening")
     for changed, event in [
         ([], "push"),
         ([], "schedule"),
@@ -4430,11 +4573,17 @@ def test_tier2_carve_out_run_when_surface_owns_carve_files():
 
 def test_full_mode_selection_unchanged():
     # #1371: push/schedule full mode keeps its exact contract (test_files ALL)
-    # and only gains the slow_files key.
+    # and only gains the slow_files key. #10194: the emitted slow pool is the
+    # GATING pool, so the count is compared against the same accessor the
+    # emitter reads — never the raw config list.
+    from tools.ci_selection import slow_gating_files
     r = _sel([], "push")
     assert r["full"] is True
     assert r["test_files"] == "ALL"
-    assert len(r["slow_files"]) == len(load_manifest()["slow_files"])
+    assert len(r["slow_files"]) == len(slow_gating_files(load_manifest()))
+    assert len(slow_gating_files(load_manifest())) < len(load_manifest()["slow_files"]), (
+        "the gating pool must be a strict subset of the declared slow files, "
+        "or #10194's lane subtraction stopped happening")
 
 # ── #1429: auto-registration of unlisted test files ──────────────────────
 
@@ -4900,7 +5049,9 @@ def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg. Epic
     #1647 Task 9: the carve-out set is its OWN leg (E2E-4) — it is
     excluded from fast AND slow docker legs."""
-    from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
+    from tools.ci_selection import (  # noqa: I001
+        ENV_BROKEN_FILES, on_demand_files, push_legs,
+    )
     m = load_manifest()
     legs = push_legs(m)
     carve = {f.replace(".py", "") for f in m["carve_out"]}
@@ -4912,9 +5063,18 @@ def test_push_legs_partitions_every_classified_file():
     fast = {f.replace(".py", "") for f in classified if f not in m["slow_files"]}
     fast |= {f.replace(".py", "") for f in m.get("push_extra", [])}
     broken = {f.replace(".py", "") for f in ENV_BROKEN_FILES}
+    # #10194: the non-gating lane is a subtraction from the fast pool just like
+    # the carve-out, and it is read from the ONE accessor (a literal list here
+    # would be a second definition of the lane that could drift from the one
+    # `fast_pool()` subtracts — the partition would then fail for the right
+    # reason at the wrong time).
+    lane = {f[:-3] if f.endswith(".py") else f for f in on_demand_files(m)}
+    assert lane, "the lane must be non-empty, or this subtraction proves nothing"
+    assert set().union(*(set(s["files"]) for s in legs["shards"])) & lane == set(), (
+        "a non-gating lane file reached a push shard")
     # #6135: the fast pool is partitioned across N shards, not two halves.
     shards = [set(s["files"]) for s in legs["shards"]]
-    assert set().union(*shards) == fast - broken - carve
+    assert set().union(*shards) == fast - broken - carve - lane
     assert sum(len(s) for s in shards) == len(set().union(*shards)), "leg overlap"
     # carve-out files never ride the docker legs (fast OR slow)
     for shard in shards:
@@ -5001,6 +5161,10 @@ def test_every_file_rides_exactly_one_shard_at_s_greater_than_two():
     assert len({e["half"] for e in inc}) == 5
     assert [e["half"] for e in inc] == ["a", "b", "c", "d", "e"]
     assert sum(len(e["files"].split()) for e in inc) == len(flat)
+    # #6897: every row carries its `runner`, and `fast_matrix_include` must not
+    # silently drop it — the whole lane is that key plus the workflow's `runs-on`.
+    for e in inc:
+        assert "runner" in e, f"the emitted matrix must carry the runner (#6897): {e['half']}"
     # #6145: the emitted headroom is this change's only new OUTPUT — the whole
     # feature is "the margin a leg actually got is visible" — and it had NO
     # assertion: deleting the key from `fast_matrix_include` left all 221 tests
@@ -5258,6 +5422,10 @@ def test_shard_count_is_stable_regardless_of_the_selection_size():
     assert [e["name"] for e in entries] == list("abcdefghi")
     inc = fast_matrix_include(entries)["include"]
     assert [e["half"] for e in inc] == list("abcdefghi")
+    # #6897: the routing is POSITIONAL and derived, so a tiny selection that leaves
+    # most shards EMPTY must still emit a class for every row — an empty shard is
+    # still a JOB, and a row without `runner` makes `runs-on` resolve to null.
+    assert all(e.get("runner") for e in inc), inc
     # every file still rides exactly one shard; the rest are legitimately empty
     flat = [f for e in entries for f in e["files"]]
     assert sorted(flat) == ["test_a", "test_b", "test_c"]
@@ -5308,8 +5476,27 @@ def test_no_required_check_names_a_fast_leg():
     # leg — so adding a leg cannot orphan anything it requires
     assert "test" in gate["needs"]
     assert not [n for n in gate["needs"] if str(n).startswith("test (")], gate["needs"]
-    # the rollup is job-id keyed, not leg-name keyed
-    assert "join(needs.*.result, ' ')" in gate["steps"][0]["run"]
+    # the rollup is job-id keyed, not leg-name keyed. ONE step does the rollup and it
+    # is the sole author of the verdict: `python-ci-gate` still has EXACTLY ONE step
+    # (#9984 kept it that way on purpose — the two checkouts, this repo and the pinned
+    # agent-infra holding the shared predicate, live in the SEPARATE
+    # `ci-introduced-failure` job, because a `uses:`/`with:`/`env:` step added to this
+    # aggregate would widen the shim defence the capstone pin enforces). So the pin
+    # names the property that matters — exactly one step, and exactly one reader of
+    # the join — instead of a positional index. (A previous revision of this comment
+    # claimed the two checkouts sat ahead of the rollup in THIS job; they never did,
+    # and that false premise is what made loosening the positional check look
+    # justified.)
+    assert len(gate.get("steps") or []) == 1, (
+        "python-ci-gate must stay a ONE-step aggregate — an extra step can export "
+        f"BASH_ENV or mask the rollup's exit code (#9984 review); got {[s.get('name') for s in gate.get('steps') or []]}")
+    rollup_steps = [s for s in gate.get("steps", [])
+                    if "join(needs.*.result, ' ')" in (s.get("run") or "")]
+    assert len(rollup_steps) == 1, (
+        "exactly one step must own the `needs.*.result` rollup — two readers means "
+        f"two verdicts; got {len(rollup_steps)}")
+    assert rollup_steps[0]["run"] == gate["steps"][0]["run"], (
+        "the rollup step must BE the aggregate's only step, not a sibling of one")
     # the merge queue's only merge condition is the aggregate. Comments MAY
     # name a leg as history (several do, deliberately) — the ENFORCED lines
     # must not.
@@ -5334,6 +5521,305 @@ def test_no_required_check_names_a_fast_leg():
     assert not [c for c in record["required_contexts"] if c.startswith("test (")], (
         "no required context may be a shard leg — the shard set changes with S, so "
         "keying the required set on a leg name would make the gate unsatisfiable")
+
+
+# ── #6897: the fast matrix CAN route across both runner classes ──────────
+# The capacity decision is #6897's (owner ruling 2026-10-27: use the compute
+# capacity wherever it is; THROUGHPUT over runner class) — but it is delivered
+# as an OPT-IN, because the pool is **fallback-only** by a RECORDED DECISION
+# (`docs/ops/ci-runner-x64.md` -> "Contradiction test",
+# `scripts/ci_runner_gate.sh:1-30`), and making the pool a primary class by
+# default would be an adoption over that decision.
+#
+# So these pin FOUR properties: the DEFAULT is main's behaviour exactly
+# (`hosted-only`, every row on `ubuntu-latest`) — the one #10186's review found
+# violated, with 3 of 4 pool legs failing on its own head — the opt-in actually
+# splits, every row HAS a class (a missing key makes `runs-on` resolve to null
+# and the file is refused — #6253's zero-jobs case), and the canary producer
+# keeps the label it has always used so the streak stays comparable.
+#
+# ⛔ WHAT THESE DO **NOT** CLAIM: that the hosted half is GitHub-hosted. On this
+# repo `ubuntu-latest` is not hosted-only — `scripts/ci_runner_gate.sh` attaches
+# it to the self-hosted pool as a fallback, and #6897 measured it attached while
+# GitHub-hosted was healthy. The class a `ubuntu-latest` row lands on is main's
+# existing ambiguity, carried over unchanged; `SHARD_RUNNER_HOSTED` names the
+# LABEL, which is all this lane decides.
+
+
+def test_the_fast_split_is_off_by_default_so_the_pool_stays_fallback_only(monkeypatch):
+    """#6897/#10186: with no opt-in, EVERY row is main's `ubuntu-latest`.
+
+    This is the assertion the earlier cut of this branch failed: it routed odd
+    shards to `[self-hosted, self-hosted-x64]` unconditionally, which moved 4 of
+    9 gated shards onto a class the recorded `fallback-only` decision says is not
+    primary. It also fails SAFE on junk: an unset variable, an emptied one, a
+    fork with no `vars`, or a typo must all land on main's behaviour rather than
+    discovering the split when a leg dies.
+    """
+    from tools.ci_selection import (
+        SHARD_ROUTING_ENV,
+        SHARD_ROUTING_HOSTED_ONLY,
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_HOSTED,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+        resolve_shard_routing,
+    )
+    monkeypatch.delenv(SHARD_ROUTING_ENV, raising=False)
+    shards = push_legs(load_manifest())["shards"]
+    inc = fast_matrix_include(shards)["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    assert {e["runner"] for e in inc} == {json.dumps(SHARD_RUNNER_HOSTED)}, (
+        "the default must be hosted-only — the pool is fallback-only by recorded "
+        f"decision (#6897): {sorted(e['runner'] for e in inc)}")
+    # …and it must be the DEFAULT, not an accident of an unset environment: the
+    # mode resolver is the single decision point, and every non-opt-in value
+    # resolves to hosted-only, `hosted-only` itself included (the documented safe
+    # setting must stay legal).
+    for value in (None, "", "   ", SHARD_ROUTING_HOSTED_ONLY, "hosted-only ",
+                  "HOSTED-ONLY", "true", "1", "pool", "split", "pool-splits",
+                  "pool_split"):
+        assert resolve_shard_routing(value) == SHARD_ROUTING_HOSTED_ONLY, value
+    assert resolve_shard_routing(SHARD_ROUTING_POOL_SPLIT) == SHARD_ROUTING_POOL_SPLIT
+    assert resolve_shard_routing(" POOL-SPLIT ") == SHARD_ROUTING_POOL_SPLIT
+    # the environment is the operator lever, so it must reach the matrix — and
+    # only for the exact opt-in.
+    for value in ("", SHARD_ROUTING_HOSTED_ONLY, "nonsense"):
+        monkeypatch.setenv(SHARD_ROUTING_ENV, value)
+        got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+        assert got == {json.dumps(SHARD_RUNNER_HOSTED)}, (value, sorted(got))
+    monkeypatch.setenv(SHARD_ROUTING_ENV, SHARD_ROUTING_POOL_SPLIT)
+    got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+    assert len(got) == 2, f"the opt-in must actually split: {sorted(got)}"
+
+
+def test_every_fast_row_names_a_runner_and_the_split_uses_both_classes():
+    """#6897: `runner` is emitted per row, positional, and never degenerates.
+
+    Asserts the OPT-IN mode — the default is pinned by the test above.
+    """
+    from tools.ci_selection import (
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_HOSTED,
+        SHARD_RUNNER_X64,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+    )
+    inc = fast_matrix_include(push_legs(load_manifest())["shards"],
+                              routing=SHARD_ROUTING_POOL_SPLIT)["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    for e in inc:
+        assert "runner" in e, f"missing runner (#6897): {e['half']}"
+        # a JSON ARRAY STRING, not a bare label: `runs-on` needs an array, and a
+        # matrix value is always a string, so the workflow must `fromJSON` it.
+        parsed = json.loads(e["runner"])
+        assert isinstance(parsed, list) and parsed, e
+        assert all(isinstance(x, str) for x in parsed), e
+        assert parsed in (SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64), (
+            f"unexpected runner class on {e['half']}: {parsed}")
+    # THE CANARY PRODUCER STAYS ON THE HOSTED LABEL — the one it has always used,
+    # so the canary streak keeps comparing tests rather than classes. It is the
+    # HOSTED LABEL and not "GitHub-hosted": see this block's header for why that
+    # label's class is not a guarantee on this repo.
+    producer = [e for e in inc if e["canary_producer"]]
+    assert len(producer) == 1, producer
+    assert json.loads(producer[0]["runner"]) == SHARD_RUNNER_HOSTED, (
+        "the canary producer must stay on the hosted label, not the pool (#6897): "
+        f"{producer[0]['half']} -> {producer[0]['runner']}")
+    # BOTH CLASSES, or the routing is a rename of `ubuntu-latest` with extra
+    # failure modes. (The opposite degeneracy — every row on the pool — would
+    # ALSO lose the hosted fallback the ci_runner_gate exists for.)
+    classes = {e["runner"] for e in inc}
+    assert classes == {json.dumps(SHARD_RUNNER_HOSTED), json.dumps(SHARD_RUNNER_X64)}, (
+        f"the fast matrix must split across both classes, got {sorted(classes)}")
+
+
+def test_runner_routing_is_positional_and_the_last_shard_is_always_on_the_hosted_label():
+    """#6897: the routing rule, on SYNTHETIC shard counts.
+
+    The real manifest is S=9, where "alternate by index" and "the last shard
+    keeps the hosted label" happen to agree (index 8 is even) — so pinning the
+    rule only against the real config would let an S=10 change flip the canary
+    producer onto the pool without a red. This asserts the rule for both
+    parities.
+    """
+    from tools.ci_selection import SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64, fast_shard_runner
+    for count in range(2, 13):
+        runners = [fast_shard_runner(i, count) for i in range(count)]
+        assert runners[-1] == SHARD_RUNNER_HOSTED, (
+            f"S={count}: the last shard is the canary producer and must keep the "
+            "hosted label")
+        if count == 2:
+            # DEGENERATE BY CONSTRUCTION, and safe: with two shards, index 0 is
+            # even and index 1 IS the pinned last one, so there is no pool row to
+            # give. It falls back to exactly main's pre-#6897 behaviour (both on
+            # the hosted label) rather than inventing a split the rule does not
+            # describe.
+            assert runners == [SHARD_RUNNER_HOSTED, SHARD_RUNNER_HOSTED], runners
+        else:
+            assert set(map(tuple, runners)) == {
+                tuple(SHARD_RUNNER_HOSTED), tuple(SHARD_RUNNER_X64)
+            }, f"S={count}: a single class is not a split"
+        # positional alternation over every shard that is not the pinned last one
+        for i, got in enumerate(runners[:-1]):
+            want = SHARD_RUNNER_HOSTED if i % 2 == 0 else SHARD_RUNNER_X64
+            assert got == want, (count, i, got, want)
+        # the returned list is a COPY: a caller mutating one row's label array
+        # (json.dumps in `fast_matrix_include` reads it, so a later edit could
+        # plausibly extend it) must not change the class the NEXT row gets. The
+        # assertion compares against an INDEPENDENT literal and checks identity,
+        # because `==` against the module constant is an aliasing tautology —
+        # dropping the `list()` copy survives it (measured).
+        runners[0].append("mutated")
+        assert fast_shard_runner(0, count) == ["ubuntu-latest"], count
+        assert fast_shard_runner(0, count) is not SHARD_RUNNER_HOSTED, (
+            "fast_shard_runner must return a copy, never the module constant")
+        assert fast_shard_runner(1, count) is not SHARD_RUNNER_X64
+        # The hosted LABEL is pinned deliberately, and a change to it must be a
+        # deliberate change: `ubuntu-latest` is what main uses today, so moving to
+        # the hosted-ONLY `ubuntu-24.04` would also drop the outage fallback and
+        # break comparability with the canary streak's history. That is a decision
+        # (#6897), not a tidy-up — so it cannot happen behind a green suite.
+        assert SHARD_RUNNER_HOSTED == ["ubuntu-latest"], SHARD_RUNNER_HOSTED
+
+
+def test_the_test_job_takes_its_runner_from_the_matrix_with_a_variable_rollback():
+    """#6897: the workflow half of the routing.
+
+    Four claims the unit tests above cannot see: `runs-on` reads the selector's
+    per-row class (no literal that would ignore the matrix, and NO second copy of
+    the mode logic to drift from the selector's), the opt-in reaches the selector
+    as the repo VARIABLE rather than a code edit, the emitted value is parsed
+    (the row value is a JSON string; `runs-on` needs the array), and the job is
+    not renamed — branch protection and the merge rail key on `test (a)`….
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test"]
+    runs_on = str(job["runs-on"])
+    assert runs_on == "${{ fromJSON(matrix.runner) }}", (
+        "`test` must take its runner class from the selector's matrix row, and "
+        f"from nowhere else (got {runs_on!r})")
+    assert "self-hosted" not in runs_on and "ubuntu-" not in runs_on, (
+        "a literal runner label in `runs-on` would bypass the selector — and, "
+        "for a pool label, make the split the DEFAULT again (#10186 review)")
+    # THE OPT-IN IS WIRED, in the job that emits the matrix: without this env
+    # the selector never sees `CI_SHARD_ROUTING` and the split can never be
+    # turned on (the fail-safe direction, but a dead lever all the same).
+    emit = [s for s in wf["jobs"]["changes"]["steps"]
+            if s.get("id") == "push-matrix"]
+    assert len(emit) == 1, emit
+    env = _effective_step_env(wf, "changes", emit[0])
+    assert "vars.CI_SHARD_ROUTING" in env.get("CI_SHARD_ROUTING", ""), (
+        "the matrix emitter must pass the CI_SHARD_ROUTING repo variable to the "
+        f"selector (#6897); got env={env!r}")
+    # the job id and its `test (<half>)` name are branch-protection surfaces
+    assert job["name"] == "test (${{ matrix.half }})", job["name"]
+    # ⛔ and the legs that CANNOT run on the pool keep their version pin: a
+    # `self-hosted` here would let a 39.6m leg be killed at its watchdog (the
+    # measurement in the test-slow header).
+    assert wf["jobs"]["test-slow"]["runs-on"] == "ubuntu-24.04", (
+        "test-slow must stay version-pinned to GitHub-hosted (#6897 does not touch it)")
+
+
+def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
+    """#6897/#10186: ONE lever, EVERY emitter — the tier-2 split included.
+
+    `changes` emits `fast_matrix` from TWO steps: `push-matrix`
+    (`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs, and
+    its output OVERRIDES the push matrix — see the job `outputs:` block). The
+    opt-in is read from the ENVIRONMENT (`resolve_shard_routing(
+    os.environ.get("CI_SHARD_ROUTING"))`), so an emitter that does not carry
+    that variable silently resolves to hosted-only whatever the operator set:
+    a dead lever on exactly the event type every PR uses.
+
+    Measured on the pre-fix tree (`3db8f7d78`): the `env:` was attached to the
+    `push-matrix` STEP only, so with `CI_SHARD_ROUTING=pool-split` in the repo
+    variables a tier-2 PR still emitted nine rows on `["ubuntu-latest"]` and the
+    split never happened. Fail-SAFE (that is main's behaviour) but not the
+    documented contract — `docs/ops/ci-runner-x64.md` says `pool-split` opts in,
+    with no event qualification — and the failure mode is the worst kind: the
+    run looks exactly as if nobody had set the variable.
+
+    The env is asserted through `_effective_step_env` (job + step, merged per
+    step) and additionally, at STEP scope alone, by
+    `test_the_changes_job_carries_no_job_scope_env` —
+    job scope is barred by the capstone pin; the emitter set is DISCOVERED from
+    the run commands rather than named, so a THIRD emitter added later cannot
+    silently miss the lever either.
+    """
+    wf = _load_python_ci()
+    emitters = []
+    for step in wf["jobs"]["changes"]["steps"]:
+        run = str(step.get("run") or "")
+        if "--emit-push-matrix" in run or "--split" in run:
+            emitters.append(step)
+    names = [s.get("name") for s in emitters]
+    assert len(emitters) >= 2, (
+        "the `changes` job must still emit the matrix from both the push step "
+        f"and the tier-2 split step; discovered {names}")
+    missing = [s.get("name") for s in emitters
+               if "vars.CI_SHARD_ROUTING"
+               not in _effective_step_env(wf, "changes", s).get("CI_SHARD_ROUTING", "")]
+    assert not missing, (
+        "every step that emits `fast_matrix` must see CI_SHARD_ROUTING, or the "
+        f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
+
+
+def test_the_changes_job_carries_no_job_scope_env():
+    """#10186 review ISSUE 1 (blocking): the lever may NOT live at JOB scope.
+
+    `changes` also owns the capstone pre-registration gate step, and
+    `tests/test_capstone_preregistration_9075.py` refuses ANY `env:` key in a
+    scope above that step — `_SAFE_JOB_ENV` is empty for every job — because a
+    key there can hook the gate's interpreter or shell (`BASH_ENV`, a
+    `PYTHONPATH` `sitecustomize.py`, `LD_PRELOAD`, `PATH`) so `python3` exits 0
+    with the real check never running. A job-scope lever therefore reds a
+    required FAST shard: measured at head `3eaf43fda`, that pin reported 44
+    failures (`ci_ordering_half_violations` returned one violation, and the
+    unmutated-workflow assertion runs once per silencing-idiom parametrization).
+
+    So the rule is DERIVED from the pin instead of restated: whatever
+    `_SAFE_JOB_ENV` permits for `changes` is the entire allowance, and the lever
+    is carried by each emitter STEP's own `env:` instead. A future pin edit that
+    permits a key here loosens this test automatically, which is the point —
+    one rule, two readers.
+
+    Non-vacuous: at `3eaf43fda` the job carried
+    `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
+    assertions below fail on that tree.
+
+    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:448`
+    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1590`)
+    both send an operator here by name, and both advertised
+    `test_the_changes_job_carries_no_job_scope_env` while the function carried a
+    longer, unrelated name — so `pytest -k test_the_changes_job_carries_no_job_scope_env`
+    collected ZERO tests and its green "no tests ran" read as confirmation
+    (#10186 review, FINDING 1). Renamed to the name the documents already
+    advertise; `test_every_test_name_the_runbook_names_exists` in
+    `tests/test_ci_runner_x64_install.py` now keeps the two in sync.
+    """
+    from tests.test_capstone_preregistration_9075 import _SAFE_JOB_ENV
+
+    wf = _load_python_ci()
+    job = wf["jobs"]["changes"]
+    allowed = set(_SAFE_JOB_ENV.get("changes", frozenset()))
+    extra = sorted(set(job.get("env") or {}) - allowed)
+    assert not extra, (
+        "the `changes` job must not carry `env:` keys above the capstone gate "
+        f"step (#10186); only {sorted(allowed)} are permitted, found {extra}")
+    emitters = [s for s in job["steps"]
+                if "--emit-push-matrix" in str(s.get("run") or "")
+                or "--split" in str(s.get("run") or "")]
+    assert len(emitters) >= 2, [s.get("name") for s in emitters]
+    bare = [s.get("name") for s in emitters
+            if "vars.CI_SHARD_ROUTING"
+            not in str((s.get("env") or {}).get("CI_SHARD_ROUTING", ""))]
+    assert not bare, (
+        "each matrix emitter must carry `CI_SHARD_ROUTING` in its OWN `env:` "
+        "(step scope) — inheriting it from the job is what reds the capstone "
+        f"gate pin (#10186): {bare}")
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
@@ -5867,6 +6353,22 @@ def _load_python_ci() -> dict:
     return yaml.safe_load(wf_path.read_text())
 
 
+def _effective_step_env(wf: dict, job_id: str, step: dict) -> dict:
+    """The env a STEP actually sees, as GitHub Actions composes it.
+
+    Workflow -> `jobs.<id>.env` -> `jobs.<id>.steps[*].env`, each scope
+    overriding the one above (`docs.github.com` -> "Store information in
+    variables": "The scope of a custom variable set by this method is limited to
+    the element in which it is defined"). A test that reads only
+    `step["env"]` therefore asserts the narrower thing than it claims: it pins
+    WHERE the variable is written instead of THAT it reaches the step, which is
+    how #10186 shipped a lever wired to one of two emitters.
+    """
+    merged = {k: str(v) for k, v in (wf["jobs"][job_id].get("env") or {}).items()}
+    merged.update({k: str(v) for k, v in (step.get("env") or {}).items()})
+    return merged
+
+
 def test_expect_uri_gated_iff_uri():
     """cycle-7 P2-1 + Task 9 (P3): the docker URI and the E2E-6 tripwire
     signal (TORTOISE_TEST_EXPECT_URI) are set under the SAME gate —
@@ -6138,21 +6640,89 @@ def test_live_required_job_runs_only_declared_live_tests():
 def test_test_slow_job_carries_junitxml_manifest_guard():
     """cycle-7 P2-1 (int-1) + Task 9 Step 5: the test-slow legs flip to
     docker with the fast job's exact wiring — (a) the pytest invocation
-    carries --junitxml=/tmp/junit.xml -o junit_family=xunit1 AND -r fEs
+    carries --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 AND -r fEs
     (never the historical -rfE — pytest 9.1.1 replaces the report set on
     repeated -r flags, so a trailing -rfE would suppress the skip summary
     the guard depends on), (b) a manifest-generation step exists BEFORE the
     pytest step (echoing each leg's ${{ matrix.files }} to
     ${RUNNER_TEMP}/pytest-files + --collect-only -m 'not track_b' ->
-    /tmp/expected-nodeids.txt), and (c) a skip-guard step gated on rc==0 AND
-    non-empty $FILES runs tools/skip-guard.py with --manifest."""
+    $PYTEST_MANIFEST), and (c) a skip-guard step gated on rc==0 AND
+    non-empty $FILES runs tools/skip-guard.py with --manifest.
+
+    #10028: the three artifact paths are the PER-JOB variables resolved in
+    the job's first step, not the host-global `/tmp/...` literals — see
+    `test_test_slow_legs_write_per_job_pytest_artifacts` below for the
+    ratchet that keeps them there.
+
+    ⛔ THE PIN MUST NOT RE-STATE THE OLD LITERALS (#10280). This docstring used
+    to assert `--junitxml=/tmp/junit.xml` and `--manifest
+    /tmp/expected-nodeids.txt`, which RE-PINNED the defect: those three paths
+    are shared by every co-tenant job on one host, which is how run
+    40921262252 read a co-tenant's manifest and redded `test-slow (a)` for
+    `850 expected nodeid(s) absent` while its own pytest exited 0. The
+    no-literal half is pinned once, for every migrated leg, by
+    `tests/test_tmpdir_hygiene.py::test_migrated_legs_read_their_OWN_pytest_log`.
+    """
     wf = _load_python_ci()
     steps = wf["jobs"]["test-slow"]["steps"]
     run = next(s for s in steps
                if s.get("name", "").startswith("Run slow test suite"))
     invocation = run["run"]
-    assert "--junitxml=/tmp/junit.xml" in invocation
+    assert '--junitxml="$PYTEST_JUNIT"' in invocation
     assert "-o junit_family=xunit1" in invocation
+    # (d) the resolve step comes FIRST (it publishes $GITHUB_ENV, which only
+    # reaches SUBSEQUENT steps) and fails CLOSED on a missing RUNNER_TEMP — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
+    resolve = steps[0]
+    assert resolve.get("name", "").startswith("Resolve per-job pytest artifact paths")
+    assert "${RUNNER_TEMP:?" in resolve["run"], \
+        "the resolve step must REFUSE to fall back to the host-global /tmp"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"), ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'echo "{var}=$base/{leaf}"' in resolve["run"]
+    # ... and no part of THIS job may name the host-global artifact again. The
+    # literals are what the collision needs, so their absence is the property —
+    # ACROSS EVERY KEY OF EVERY STEP, not just `run:`. All three literals lived in
+    # the `upload-artifact` step's `with: path:` block before #10028, so a
+    # `run`-only scan is green on exactly the key the collision rides: reverting
+    # that block re-points the upload at the host-global files while the step's
+    # own `if-no-files-found: ignore` + `continue-on-error: true` keep the leg
+    # green on ANOTHER job's `pytest.log`. `json.dumps` carries every YAML value
+    # verbatim (parsed data holds no comments), so the `"# "`-strip still forgives
+    # a shell comment that names a RETIRED path.
+    def host_global_hits(step_list):
+        blob = json.dumps(step_list)
+        return [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                                "/tmp/expected-nodeids.txt")
+                if lit in blob.replace("# " + lit, "")]
+
+    assert host_global_hits(steps) == [], (
+        f"{host_global_hits(steps)} is host-global: two concurrent jobs on a "
+        f"shared runner clobber it and red this leg on the clash (#10028, #7815)")
+    # ⛔ NON-VACUITY, asked of a COPY: reverting ONLY the upload's `path:` block to
+    # the pre-#10028 literals — the one shape a `run`-only scan cannot see — must
+    # red. The real file cannot be both correct and reverted, so the mutation is
+    # the only way to show the guard actually discriminates.
+    upload = next(s for s in steps
+                  if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+    reverted = [
+        {**s, "with": {**s["with"],
+                        "path": "/tmp/pytest.log\n/tmp/junit.xml\n"
+                                "/tmp/expected-nodeids.txt"}}
+        if s is upload else s
+        for s in steps
+    ]
+    assert host_global_hits(reverted) == ["/tmp/pytest.log", "/tmp/junit.xml",
+                                          "/tmp/expected-nodeids.txt"], (
+        "the guard must red on a reverted upload `path:` — that block is where "
+        "all three host-global literals live, and it is not a `run:` key")
+    # ...and this is the fail-open that mutation closes: the retired `run`-only
+    # scan sees NOTHING in those same steps, so it certified a reverting leg green.
+    assert [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                            "/tmp/expected-nodeids.txt")
+            if lit in "\n".join(s.get("run", "") for s in reverted)] == [], (
+        "a `run`-only scan is blind to the upload's `path:` — the blank result is "
+        "the defect this scan's broader key set fixes, not a passing check")
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
     cmdline = next(line for line in invocation.splitlines()
@@ -6169,6 +6739,7 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     mrun = manifest["run"]
     assert "pytest-files" in mrun
     assert "--collect-only" in mrun or "--emit-manifest" in mrun
+    assert '--output "$PYTEST_MANIFEST"' in mrun
     # the slow legs' URI gate matches the fast job (full==true only)
     uri = next(s for s in steps
                if s.get("name", "").startswith("Compute docker URI"))
@@ -6178,7 +6749,7 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                  if s.get("name", "").startswith("Skip-fail guard"))
     grun = guard["run"]
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in grun
-    assert "--manifest /tmp/expected-nodeids.txt" in grun
+    assert '--manifest "$PYTEST_MANIFEST"' in grun
     # the slow legs no longer carry carve-out files (E2E-4 owns them)
     # #9539: read the DERIVED legs — the workflow holds no literal rows.
     leg_files = slow_leg_files(load_manifest())
@@ -6187,6 +6758,96 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                    "test_hosted_backup"):
         assert carved not in leg_files, \
             f"slow carve-out file {carved} must not ride the docker slow legs"
+
+
+def test_test_slow_legs_write_per_job_pytest_artifacts():
+    """#10028 (measured 2026-10-29, run 40808264676): the `test-slow` legs must
+    write their pytest artifacts to the PER-JOB path, never the host-global
+    `/tmp/...` literals.
+
+    WHY (this is a false verdict on a REQUIRED check, not tidiness). Four
+    `test-slow` legs are scheduled concurrently on a self-hosted pool where
+    several runner INSTALLS share one `/tmp`. While the three artifacts were
+    `/tmp` literals, a sibling leg's `> /tmp/pytest.log` truncated this leg's
+    log, so `.github/scripts/pytest-attribution.sh` could not prove ownership
+    of the leg's own summary and fell closed — `STALE session summary` /
+    `INCOMPLETE` — and the job went red on a run that passed every test.
+
+    MEASURED, `test-slow (a)` on that run: its own manifest declared 367
+    expected nodeids, its own run reported `365 passed, 2 skipped` (= 367) in
+    2378.86s, and its own `pytest exit code: 0` banner printed — yet the leg
+    concluded `failure` via `STALE session summary (NOT this leg's verdict)` /
+    `##[error]test leg INCOMPLETE`. The same sharing made legs (b) and (e)
+    print FAILED nodeids for `tests/test_epic903_fixtures.py`,
+    `tests/test_epic903_scheduler.py` and `tests/test_graph_diagnostics.py`,
+    though the only progress line either leg's log carries is
+    `tests/test_ci_selection.py::` — tests they never ran. And leg (b)'s #964
+    heartbeat DECREASED inside a "single" session (444 passed -> 353 passed).
+
+    Non-vacuous on the pre-fix workflow: each assertion below is false of the
+    literals that stood there (`--junitxml=/tmp/junit.xml`, `> /tmp/pytest.log`,
+    `--manifest /tmp/expected-nodeids.txt`, and an upload `path:` naming the
+    three `/tmp` files), so restoring any one of them reds this test.
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test-slow"]
+    steps = job["steps"]
+
+    # (1) the paths are resolved FIRST, from RUNNER_TEMP, and fail closed —
+    # `$GITHUB_ENV` only reaches SUBSEQUENT steps, so a later step would leave
+    # every `$PYTEST_*` empty (an empty `> "$PYTEST_LOG"` is a shell error, but
+    # an empty `--junitxml=` is silently the wrong file).
+    resolve = steps[0]
+    assert resolve.get("name") == "Resolve per-job pytest artifact paths (#10028)", \
+        "the artifact paths must be resolved in the FIRST step of test-slow"
+    rrun = resolve["run"]
+    assert "${RUNNER_TEMP:?" in rrun, \
+        "RUNNER_TEMP must fail closed — a silent /tmp fallback is the bug itself"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"),
+                      ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'{var}=$base/{leaf}' in rrun, f"{var} must resolve under $base"
+
+    # (2) NO executable line of the job may name the host-global literals.
+    # Comments are exempt on purpose: the migration's own rationale quotes them.
+    globals_ = ("/tmp/pytest.log", "/tmp/junit.xml", "/tmp/expected-nodeids.txt")
+    offenders = []
+    for step in steps:
+        body = step.get("run")
+        if not isinstance(body, str):
+            continue
+        for line in body.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            offenders += [f"{step.get('name')}: {line.strip()}"
+                          for lit in globals_ if lit in line]
+    assert not offenders, (
+        "test-slow must not write or read the host-global /tmp pytest artifacts — "
+        "concurrent legs share one /tmp and truncate each other's log "
+        "(a green leg then concludes INCOMPLETE/failure): " + "; ".join(offenders)
+    )
+
+    # (3) the run step routes pytest AND the three readers through the vars.
+    run = next(s for s in steps
+               if s.get("name", "").startswith("Run slow test suite"))
+    cmdline = next(line for line in run["run"].splitlines()
+                   if "python -m pytest" in line)
+    assert '-o junit_family=xunit1 > "$PYTEST_LOG" 2>&1' in cmdline, \
+        "the leg's pytest stdout must land in $PYTEST_LOG"
+    for reader in ('tail -n 300 "$PYTEST_LOG"',
+                   '--log "$PYTEST_LOG"',
+                   "grep -E '^(FAILED|ERROR) ' \"$PYTEST_LOG\""):
+        assert reader in run["run"], f"the run step must read the log via {reader!r}"
+
+    # (4) the uploaded artifact is the per-job file. `steps.<id>.with` DOES
+    # allow the `runner` context (a job-level `env:` does not — #6253), so the
+    # upload names `runner.temp` directly, exactly as the fast job's does.
+    upload = next(s for s in steps
+                  if s.get("name", "").startswith("Upload pytest log"))
+    paths = upload["with"]["path"]
+    for leaf in ("pytest.log", "junit.xml", "expected-nodeids.txt"):
+        assert f"${{{{ runner.temp }}}}/{leaf}" in paths, \
+            f"the upload must name {{{{ runner.temp }}}}/{leaf}, not the /tmp literal"
 
 
 def test_xdist_is_admitted_only_in_the_d3_shape():
@@ -6381,7 +7042,126 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert (job["strategy"]["matrix"]
             == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
         "the carve-out matrix must come from the selector's carve_matrix output"
-    assert "--junitxml=/tmp/junit.xml" in run["run"]
+    # #10280: the junitxml is the PER-SHARD path, not the host-global literal it
+    # used to be (see the job loop in
+    # `test_every_pytest_capture_leg_resolves_its_artifacts_per_job`).
+    assert "--junitxml=\"$PYTEST_JUNIT\"" in run["run"]
+
+
+# ── #10280: no python-ci pytest leg may keep a host-global /tmp artifact ──
+#
+# The class, stated once so a future leg inherits the reasoning: every runner
+# install on this host shares ONE `/tmp`, and one runner runs one job at a time.
+# So a per-RUNNER path (`$RUNNER_TEMP`) is per-JOB, while a `/tmp` literal is
+# SHARED with whatever else the pool is doing. Measured consequences, in both
+# directions:
+#
+#   * FALSE RED (run 40990582554): `test-track-b` wrote `4 expected nodeids ->
+#     /tmp/expected-nodeids.txt`, then a concurrent `test-carve-out (c)` leg
+#     overwrote that file with its own `616 expected nodeids` (11s earlier on a
+#     sibling runner), and the required check reported `616 expected nodeid(s)
+#     absent from the junitxml` with every test in the leg passing.
+#   * FALSE RED (run 40808264676, #10028): a sibling's `> /tmp/pytest.log`
+#     truncated `test-slow (a)`'s log between its `tail` and the reporter's read,
+#     so a green leg concluded `STALE session summary` / `INCOMPLETE`.
+#   * FALSE PASS (the same sharing, inverted): a leg whose own manifest was
+#     replaced by a LARGER one can just as easily be replaced by a smaller set
+#     that its junitxml happens to satisfy — the coverage manifest is the thing
+#     that certifies "these tests ran", so it must not be writable by a peer.
+#
+# The three jobs below were the residue #10028 left (its own comment said the
+# `test-slow` migration was the second of four). They are asserted as a TABLE,
+# not one bespoke test per job, so a leg added to the selector's matrix inherits
+# the check by adding its job id here — and so the assertion cannot drift into
+# "whatever the last migrated job happens to look like".
+_PER_JOB_ARTIFACT_JOBS = (
+    "test",
+    "test-slow",
+    "test-track-b",
+    "test-carve-out",
+    "test-concurrency-falkor",
+)
+#: Every host-global pytest artifact spelling the migration retired. Widened
+#: beyond `/tmp/pytest.log` on purpose: filtering on that one literal is what let
+#: `trackb.log` and `junit.xml` read as "already fine" (#10280's review).
+_HOST_GLOBAL_PYTEST_ARTIFACTS = (
+    "/tmp/pytest.log",
+    "/tmp/junit.xml",
+    "/tmp/expected-nodeids.txt",
+    "/tmp/trackb.log",
+    "/tmp/pytest-d14.log",
+    "/tmp/junit-d14.xml",
+)
+
+
+def test_every_pytest_capture_leg_resolves_its_artifacts_per_job():
+    """#10280: every migrated leg resolves its artifacts under `$RUNNER_TEMP`.
+
+    Non-vacuous on the pre-fix workflow, by the reason that actually holds per leg:
+    NONE of the three newly-migrated legs (`test-track-b`, `test-carve-out`,
+    `test-concurrency-falkor`) had a resolver step — so assertion (1) fails on all
+    three — and EACH named at least one of the literals above from an executable
+    `run:` line — so assertion (2) fails on all three too. Both halves are what this
+    test rests on; how MANY distinct literals a leg had is not (the pre-fix counts
+    were 3, 3 and 1 respectively, and a count is the kind of restated measurement
+    that goes stale in the commit which changes the code). Restoring any one literal
+    (or the `/tmp` upload `path:`) reds it again.
+    """
+    wf = _load_python_ci()
+    for job_id in _PER_JOB_ARTIFACT_JOBS:
+        job = wf["jobs"][job_id]
+        steps = job["steps"]
+
+        # (1) resolved FIRST — `$GITHUB_ENV` reaches only SUBSEQUENT steps, and an
+        # empty `--junitxml=` is silently the wrong (empty) path.
+        first = steps[0]
+        assert first.get("name", "").startswith(
+            "Resolve per-job pytest artifact paths"
+        ), f"{job_id}: the artifact paths must be resolved in the FIRST step"
+        assert "${RUNNER_TEMP:?" in first["run"], (
+            f"{job_id}: RUNNER_TEMP must fail closed — a silent /tmp fallback is "
+            "the bug itself"
+        )
+        assert "$GITHUB_ENV" in first["run"], (
+            f"{job_id}: the resolver must export through $GITHUB_ENV"
+        )
+
+        # (2) no executable line of the job may name a host-global literal.
+        # Comments are exempt on purpose — the migration's rationale quotes them.
+        offenders = []
+        for step in steps:
+            body = step.get("run")
+            if not isinstance(body, str):
+                continue
+            for line in body.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                offenders += [f"{job_id} / {step.get('name')}: {line.strip()}"
+                              for lit in _HOST_GLOBAL_PYTEST_ARTIFACTS
+                              if lit in line]
+        assert not offenders, (
+            "a host-global /tmp pytest artifact is SHARED with every other runner "
+            "install on this host — a co-tenant then rewrites this leg's log, "
+            "manifest or junit (#7815/#10280): " + "; ".join(offenders)
+        )
+
+        # (3) the upload artifacts are the runner's own files, not `/tmp`'s.
+        # `runner` is a valid context in `steps.<id>.with` (see the #6253 note on
+        # test-slow), which is why this is read from the step rather than a
+        # job-level `env:` block.
+        for step in steps:
+            path = (step.get("with") or {}).get("path")
+            if path is None or "upload-artifact" not in str(step.get("uses", "")):
+                continue
+            for line in str(path).splitlines():
+                assert "${{ runner.temp }}" in line, (
+                    f"{job_id}: the uploaded pytest artifact {line.strip()!r} is not "
+                    "under ${{ runner.temp }} — it would upload a co-tenant's file"
+                )
+                assert "/tmp/" not in line, (
+                    f"{job_id}: the uploaded pytest artifact {line.strip()!r} names "
+                    "the host-global shared /tmp (#10280)"
+                )
 
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
@@ -6653,7 +7433,7 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     `durations` map on every run, so a slow file that grows reds THIS instead of
     silently restoring the merge ceiling:
 
-      * coverage — the legs partition `slow_files - carve_out` exactly, once
+      * coverage — the legs partition `slow_gating_files()` exactly, once
         each (no gap, no duplicate);
       * balance — no leg exceeds its fair share by more than the house
         `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
@@ -6679,7 +7459,8 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
         f"a slow file rides more than one leg: "
         f"{sorted({f for f in flat if flat.count(f) > 1})}")
     assert set(flat) == set(slow_leg_files(m)), (
-        "the slow legs must cover slow_files - carve_out exactly: "
+        "the slow legs must cover slow_gating_files() "
+        "(slow_files - carve_out - the non-gating lane, #10194) exactly: "
         f"missing={sorted(set(slow_leg_files(m)) - set(flat))} "
         f"extra={sorted(set(flat) - set(slow_leg_files(m)))}")
     # balance: no leg above its fair share by more than the house band
@@ -6789,12 +7570,15 @@ def test_9017_block_states_the_derived_split_not_the_2_leg_era():
 
     Its per-file table is still a valid measurement (run 39165691659) but the
     SPLIT narrative wrapped around it is not: #9539 replaced the committed pair
-    with legs DERIVED from that same map (`slow_files - carve_out` LPT-packed
+    with legs DERIVED from that same map (`slow_gating_files()` — slow minus
+    carve-out minus the non-gating lane since #10194 — LPT-packed
     into `slow_shards` = 5). In the present tense, "the LPT pack of that map into
     two legs of 18.945m / 18.933m" and "2.11x the heavier leg" both contradict
     the lane the reader is about to configure — including the number the per-leg
-    `matrix.watchdog_minutes` follow-up would size the 40m literal against (the
-    heavier DERIVED leg is 7.58m, 5.3x, not 18.95m at the 2.0x floor). This is
+    `matrix.watchdog_minutes` follow-up would size the 40m literal against (at
+    the time of that review the heavier DERIVED leg was 7.58m, 5.3x, not 18.95m
+    at the 2.0x floor; #10194 has since taken 5.26m out of the pool, so the live
+    figure must be RE-DERIVED, never quoted). This is
     exactly the rotation the durations header asks for, and the same failure this
     block's own history records ("they rot on every re-cut, and this comment has
     now been wrong twice for that reason").
@@ -6953,8 +7737,9 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
     # tolerates the spelling instead of asserting it — but it must still FIND both, or
     # the premise is unreadable and this test must not pass by not looking.
     labels = _gate_pool_labels(gate)
-    assert set(labels) == {"FALLBACK_LABEL", "POOL_LABEL"}, (
-        f"cannot read FALLBACK_LABEL/POOL_LABEL from {CI_RUNNER_GATE} (read "
+    assert "FALLBACK_LABEL" in labels and any(
+        name.startswith("POOL_LABEL") for name in labels), (
+        f"cannot read FALLBACK_LABEL/POOL_LABEL* from {CI_RUNNER_GATE} (read "
         f"{sorted(labels) or 'nothing'}) — the premise of this pin is unverifiable, "
         f"so this test must not pass by not looking. If agent-infra renamed the "
         f"constants, update the matcher here in the same change that renamed them.")
@@ -6978,14 +7763,25 @@ def _gate_pool_labels(gate_text: str) -> dict[str, str]:
     Only the VALUE is contractual; the assignment SHAPE is not, so the matcher accepts
     `export`, either quoting style, none, and leading whitespace. A commented-out
     assignment is not read — prose is not the value the gate will use.
+
+    ⛔ THE NAME IS A FAMILY, NOT ONE CONSTANT (`POOL_LABEL*`). agent-infra split the
+    pool label per architecture — `POOL_LABEL_ARM64="self-hosted-arm64"` and
+    `POOL_LABEL_X64="self-hosted-x64"` — when it started measuring capacity per runner
+    (agent-infra `4d20edd2`, #2904/#2897). Pinning the exact spelling `POOL_LABEL` made
+    the premise UNREADABLE on every host whose agent-infra checkout is current, which
+    reds this guard everywhere except CI (where `scripts/` is absent and the cross-repo
+    half skips) — a pin that only fails where nobody looks. The family accepts both the
+    old single constant and the split pair, and the discriminator below still runs over
+    EVERY label it reads, so a split that reintroduces a version-pinned label still
+    reds.
     """
     found: dict[str, str] = {}
-    for name in ("FALLBACK_LABEL", "POOL_LABEL"):
-        match = re.search(
-            rf'^\s*(?:export\s+)?{name}=["\']?([^"\'\s]+)', gate_text, re.MULTILINE
-        )
-        if match:
-            found[name] = match.group(1)
+    for match in re.finditer(
+        r"^\s*(?:export\s+)?(FALLBACK_LABEL|POOL_LABEL\w*)=[\"']?([^\"'\s]+)",
+        gate_text,
+        re.MULTILINE,
+    ):
+        found[match.group(1)] = match.group(2)
     return found
 
 
@@ -7008,6 +7804,19 @@ def test_the_gate_label_matcher_reads_the_spellings_and_rejects_the_unsafe_one()
     shipped = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-latest"\n'
     expected = {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-latest"}
     assert _gate_pool_labels(shipped) == expected
+    # The SPLIT spelling agent-infra ships today (`POOL_LABEL_ARM64`/`_X64` since it
+    # measures capacity per runner): the family must read BOTH, or a current
+    # agent-infra checkout makes the premise unreadable on the host while CI skips it.
+    split = (
+        'FALLBACK_LABEL="ubuntu-latest"\n'
+        'POOL_LABEL_ARM64="self-hosted-arm64"\n'
+        'POOL_LABEL_X64="self-hosted-x64"\n'
+    )
+    assert _gate_pool_labels(split) == {
+        "FALLBACK_LABEL": "ubuntu-latest",
+        "POOL_LABEL_ARM64": "self-hosted-arm64",
+        "POOL_LABEL_X64": "self-hosted-x64",
+    }, "the split pool label was not read (agent-infra 4d20edd2)"
     for spelling in (
         "export FALLBACK_LABEL='ubuntu-latest'\nexport POOL_LABEL='ubuntu-latest'\n",
         "FALLBACK_LABEL=ubuntu-latest\nPOOL_LABEL=ubuntu-latest\n",
@@ -7263,7 +8072,8 @@ def test_diff_gated_jobs_consume_changes_outputs():
     surfaces' slow files run. test-slow's matrix is the selector's
     `${{ fromJSON(needs.changes.outputs.slow_matrix) }}` — there are NO
     literal rows to keep in sync; the in-workflow drift-guard step pins the
-    union of the EXPANDED legs to slow_files - carve_out (#9539)."""
+    union of the EXPANDED legs to slow_gating_files() (#9539; slow minus
+    carve-out minus the non-gating lane since #10194)."""
     wf = _load_python_ci()
     # job-level gates
     assert wf["jobs"]["test-slow"]["if"] == \
@@ -7321,7 +8131,8 @@ def test_diff_gated_jobs_consume_changes_outputs():
             assert rel not in seen, f"slow leg entry {rel} rides two legs"
             seen.add(rel)
     assert seen == {f + ".py" for f in slow_leg_files(load_manifest())}, (
-        "the legs must cover slow_files - carve_out exactly (no gap, no dup)")
+        "the legs must cover slow_gating_files() exactly (no gap, no dup): slow "
+        "minus carve-out minus the non-gating lane")
 
 
 def test_slow_selected_echo_transform_roundtrips_into_legs():
@@ -8119,7 +8930,18 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         # a given leg is a check that does not observe it (#5219). And every red
         # must NAME its leg — that is #9240's deliverable, and the reason these
         # assertions inspect `out` rather than only the exit code.
-        for red in ("failure", "cancelled"):
+        #
+        # ⛔ SPLIT BY CLASS SINCE #9984, and the split is the contract, not a
+        # concession. `cancelled` (below) still reds on the aggregate's own authority:
+        # a leg that never ran produced NO failure set, so there is nothing to compare
+        # against main and nothing that could make it pre-existing. `failure` does reach
+        # the introduced-failure predicate, which asks the RAIL's question about the
+        # same tree — so its exit code now comes from the predicate, and the assertion
+        # that matters is the FAIL-CLOSED one: with no measurable baseline (the
+        # harness's env renders neither `PR_HEAD` nor `EVENT_NAME`) the predicate
+        # refuses and the check still exits 1. Deleting the delegation would make this
+        # vector exit 0 — which is exactly what the assertion catches.
+        for red in ("cancelled",):
             for leg in job_names:
                 bad = dict(green)
                 bad[leg] = red
@@ -8140,6 +8962,121 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 assert "❌ 1 leg(s) did not pass" in out, (
                     f"the summary must count exactly one red leg, unpadded; got "
                     f"{out!r}")
+
+        # ── THE INTRODUCED-FAILURE PREDICATE (#9984) ──────────────────────
+        # A failed SHARD is now delegated to `ci-introduced-failure` (a separate job,
+        # see the workflow): the aggregate asks whether that verdict job SUCCEEDED.
+        # Everything else about a red leg is unchanged — it is still named, and the
+        # check still cannot go green on a red tree without that verdict.
+        PREDICATE = "ci-introduced-failure"
+        assert PREDICATE in job_names, (
+            "the aggregate must consume the introduced-failure verdict as a need — "
+            "otherwise a failed shard has no adjudicator and #9984's predicate is "
+            "either missing or asked by nothing")
+
+        #: The arms a failed TEST can be excused on. Declared in the aggregate's own
+        #: script (`DEFERRABLE_LEGS`) and pinned against the verdict job's `needs:` by
+        #: tests/test_ci_new_failure_gate.py, so this harness reads it from the script
+        #: instead of restating it.
+        deferrable = re.search(r'^\s*DEFERRABLE_LEGS="([^"]+)"', script, re.M)
+        assert deferrable, (
+            "the aggregate must declare `DEFERRABLE_LEGS` — the arms a failed test can "
+            "be excused on (#9984); without it every failed leg is excusable or none is")
+        DEFERRABLE = set(deferrable.group(1).split())
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            bad = dict(green)
+            bad[leg] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 0, (
+                f"a `failure` for `{leg}` that `{PREDICATE}` certified must PASS the "
+                "required check — an exit 1 here means the delegation was deleted and "
+                f"the old \"does anything fail?\" predicate is back (#9984); got {out!r}")
+            assert "certified every failing id" in out and leg in out, (
+                f"the excused leg must be NAMED, or the operator cannot tell why a red "
+                f"shard merged (#9240/#9984); got {out!r}")
+
+        # (b) the SAME red shard with the verdict job RED: the aggregate fails, and the
+        #     verdict job is the leg it names. This is the case the old predicate got
+        #     right, and it must stay right — a real PR-caused failure still blocks.
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            bad = dict(green)
+            bad[leg] = "failure"
+            bad[PREDICATE] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `failure` for `{leg}` that `{PREDICATE}` did NOT certify must FAIL "
+                f"the required check; got {out!r}")
+            assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, (
+                f"the verdict job must be NAMED as the refusing leg; got {out!r}")
+
+        # (b2) `timed_out` is DELEGATED exactly like `failure` (#9984 review). The
+        #      delegating case is `failure|timed_out`, and the two halves must agree:
+        #      the aggregate delegates a timed-out shard, AND the verdict job's own
+        #      step runs for it (pinned structurally by
+        #      tests/test_ci_new_failure_gate.py::test_the_verdict_step_is_gated_on_
+        #      every_class_the_aggregate_delegates — a `success` from a verdict job
+        #      whose step never ran is not a certification).
+        for leg in job_names:
+            if leg not in DEFERRABLE:
+                continue
+            timed = dict(green)
+            timed[leg] = "timed_out"
+            rc, out = _verdict(timed)
+            assert rc == 0, (
+                f"a `timed_out` for `{leg}` must be delegated exactly like `failure` — "
+                "an exit 1 here means the delegating case lost its `timed_out` half; "
+                f"got {out!r}")
+            assert "certified every failing id" in out and leg in out, out
+        #      ... and, like `failure`, it is NEVER delegable on a non-test arm.
+        for leg in sorted(set(job_names) - DEFERRABLE - {PREDICATE}):
+            timed = dict(green)
+            timed[leg] = "timed_out"
+            rc, out = _verdict(timed)
+            assert rc == 1, (
+                f"a `timed_out` for `{leg}` must never be excused by the test-failure "
+                f"verdict — it is not a test arm (#9984); got {out!r}")
+            assert "not a test arm" in out, out
+
+        # (c) the verdict job is the ONE failure that can never be deferred: deferring
+        #     it would make the verdict ask itself (a red verdict, excused by itself).
+        bad = dict(green)
+        bad[PREDICATE] = "failure"
+        rc, out = _verdict(bad)
+        assert rc == 1, (
+            "a red `ci-introduced-failure` must red the required check even when no "
+            f"other leg failed — it is the refusal itself; got {out!r}")
+        assert f"::error::leg '{PREDICATE}' reported 'failure'" in out, out
+        assert "certified every failing id" not in out, (
+            f"a red verdict must never be reported as a certification; got {out!r}")
+
+        # (c2) a NON-test arm is never delegable: `surface-guard` red is a surface
+        #      expansion, not a trunk red, and a verdict about test ids says nothing
+        #      about it. (This is also what keeps a drift-gate failure a hard block.)
+        assert set(job_names) - DEFERRABLE, "there must be a non-deferrable arm to assert on"
+        for leg in sorted(set(job_names) - DEFERRABLE - {PREDICATE}):
+            bad = dict(green)
+            bad[leg] = "failure"
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `{leg}` failure must NEVER be excused by the test-failure verdict — "
+                f"it is not a test arm (#9984); got {out!r}")
+            assert f"::error::leg '{leg}'" in out and "not a test arm" in out, out
+
+        # (d) and it must be fail-closed about its own absence: a verdict job that was
+        #     CANCELLED or SKIPPED certifies nothing, so a red shard cannot be excused.
+        for verdict_result in ("cancelled", "skipped"):
+            bad = dict(green)
+            bad["test"] = "failure"
+            bad[PREDICATE] = verdict_result
+            rc, out = _verdict(bad)
+            assert rc == 1, (
+                f"a `{verdict_result}` `{PREDICATE}` must not excuse a red shard — an "
+                f"absent verdict is not a clean one (#9984 constraint 1); got {out!r}")
+            assert f"::error::leg '{PREDICATE}'" in out, out
 
         # An always-run leg has NO selector that can decline it, so a `skipped`
         # one is a lost shard. This is the half of "`skipped` is not a pass"
@@ -8203,11 +9140,20 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         two["test-slow"] = "cancelled"
         rc, out = _verdict(two)
         assert rc == 1
-        assert "::error::leg 'test' reported 'failure'" in out, out
+        assert "test: reported 'failure'" in out, out
         assert "::error::leg 'test-slow' was CANCELLED" in out, out
-        assert out.count("::error::leg ") == 2, (
-            f"each red leg gets its own line; got {out!r}")
-        assert "❌ 2 leg(s) did not pass" in out, out
+        assert out.count("::error::leg ") == 1, (
+            "each HARD-red leg gets its own error line, and a delegated one gets a "
+            f"plain line; got {out!r}")
+        # `test` is DELEGATED (#9984) and `test-slow` is a lost shard: the aggregate
+        # names both and refuses on its own authority, because a cancelled leg
+        # certifies nothing and no verdict could excuse it. The delegation is a
+        # plain line, not an `::error::` — an error annotation would claim a refusal
+        # the gate is not making.
+        assert "❌ 1 leg(s) did not pass" in out, out
+        assert "::error::leg 'test-slow'" in out, out
+        assert "test: reported 'failure'" in out and "delegated" in out, (
+            f"a delegated failure must say so plainly; got {out!r}")
 
         # A duplicate row inspected twice is ONE red leg and must be counted
         # once — a copy-paste must not inflate the operator's summary.
@@ -8219,13 +9165,16 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             "could not find the `test` row to duplicate — the fixture is stale")
         dup_src = script.replace(row_line, f"{row_line}\n{row_line}", 1)
         one_red = dict(green)
-        one_red["test"] = "failure"
+        # `cancelled`, not `failure`: a delegated failure is excused by a green
+        # verdict (#9984), so a HARD-red class is what proves the count de-duplicates.
+        one_red["test"] = "cancelled"
         rc, out = _verdict(one_red, src=dup_src)
         assert rc == 1, (
             "a duplicated row must not hide its own red; got "
             f"rc={rc} {out!r}")
         assert "❌ 1 leg(s) did not pass" in out, (
-            f"the summary must count LEGS, not rows; got {out!r}")
+            "the summary must count LEGS, not rows — a duplicated row inspected "
+            f"twice is ONE red leg; got {out!r}")
 
         # The `failure|cancelled` sweep must stay REACHABLE (#9240 review: it
         # was dead code behind the deleted distinct-count guard). A red result
@@ -8238,6 +9187,33 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         assert "no leg row named it" in out, (
             "the unrowed-need red must come from the identity-blind sweep, i.e. "
             f"the sweep must be reachable; got {out!r}")
+
+        # That sweep's `cancelled` half must be reachable even while ANOTHER leg is
+        # delegated (#9984 review). Gating the whole sweep on `RED_LEGS` being empty
+        # disabled the `cancelled` half too — and `cancelled` can never be delegated
+        # (the leg loop reds on it by name), so all the gate did was let a leg that
+        # never ran pass the required check once a deferrable leg was adjudicated.
+        delegated_plus_lost = dict(green)
+        delegated_plus_lost["test"] = "failure"
+        rc, out = _verdict(delegated_plus_lost, extra=("cancelled",))
+        assert rc == 1, (
+            "a `cancelled` need with no leg row must red the required check even while "
+            f"a delegable `failure` is being adjudicated; got {out!r}")
+        assert "no leg row named it" in out, out
+
+        # ... and so must its `failure` half (#9984 review). The gate on that half is a
+        # COUNT (`RESULT_FAILS > ROW_FAILS`), not `RED_LEGS` being empty: emptiness asked
+        # the wrong question, because it holds whenever ANY leg was delegated — so an
+        # un-rowed `failure` need hid behind an unrelated delegated leg and the check
+        # printed "did not introduce it" over a leg the row table never looked at
+        # (measured pre-fix: rc=0). `extra=("failure",)` is a need that reached `needs:`
+        # with no row; `test=failure` is the delegable leg that used to mask it.
+        rc, out = _verdict(delegated_plus_lost, extra=("failure",))
+        assert rc == 1, (
+            "an un-rowed `failure` need must red the required check even while ANOTHER "
+            f"leg is delegated — otherwise the last-resort sweep is blinded in its own "
+            f"case; got {out!r}")
+        assert "no leg row named it" in out, out
 
 
 def test_required_gate_covers_the_long_legs():
@@ -8535,7 +9511,24 @@ def test_write_path_measurement_source_edit_selects_eval():
     Watched RED before the entry existed (`surfaces == ['core']`, neither pin
     in `test_files`), GREEN after — mutation-real, not a tautology: deleting
     the SOURCE_PATTERNS entry reproduces the red.
+
+    ⛔ #10194 SUPERSEDES THE `eval`-HALF ASSERTIONS (owner decision A,
+    2026-10-27). The two `eval`-registered pins are under `tests/eval/**`, i.e. in
+    the NON-GATING lane, so they no longer run on any PR — the very thing this
+    test was written to guarantee. The SOURCE_PATTERNS mapping is unchanged and
+    still asserted (a change to `score_qualifiers.py` still selects `core` +
+    `eval`), and the `core` half still gates. What is asserted instead of the
+    eval pins is that they are ABSENT, so a green PR is never read as "the rule
+    was pinned"; the write-path measurements can therefore drift until evals
+    reopen. Reachable from `eval-suite-manual.yml`.
     """
+    from tools.ci_selection import on_demand_files
+    lane = on_demand_files(load_manifest())
+    for pin in ("eval/write_path/test_score_qualifiers.py",
+                "eval/write_path/test_write_path_corpus.py"):
+        assert pin in lane, (
+            f"{pin} must be in the non-gating lane — its subtree is out of the "
+            "merge gate (#10194)")
     cases = (
         # the rule itself — the decisive one: `evaluate_branches`/`verdict_label`
         "tests/eval/write_path/score_qualifiers.py",
@@ -8554,15 +9547,16 @@ def test_write_path_measurement_source_edit_selects_eval():
             f"`eval` surface that owns its pinning tests (and keep `core`, whose "
             f"tests read the same sources); got {r['surfaces']}")
         selected = set(r["test_files"]) | set(r["slow_selected"])
-        assert "eval/write_path/test_score_qualifiers.py" in selected, (
-            f"the test that pins the pre-registered rule must run on {changed}; "
-            f"selected {sorted(selected)}")
-        assert "eval/write_path/test_write_path_corpus.py" in selected, (
-            f"the corpus counts §10's verdict is computed on must be pinned on "
-            f"{changed}; selected {sorted(selected)}")
+        assert not (selected & lane), (
+            f"a non-gating lane file reached a pre-merge leg on {changed}: "
+            f"{sorted(selected & lane)[:5]}")
         assert "test_extractor_v2.py" in selected, (
             "the core-registered importer of tests.eval.write_path.runner must "
             f"still run on {changed}; selected {sorted(selected)}")
+        # The eval pins no longer run on a PR (see the docstring) — assert the
+        # absence so the loss is a pinned fact, not an inference from a count.
+        assert "eval/write_path/test_score_qualifiers.py" not in selected
+        assert "eval/write_path/test_write_path_corpus.py" not in selected
 
 
 def test_ask_sealed_corpus_source_edit_selects_eval():
@@ -8580,7 +9574,20 @@ def test_ask_sealed_corpus_source_edit_selects_eval():
 
     Watched RED before the entry existed (surfaces == ['core'], neither pin in
     test_files), GREEN after.
+
+    ⛔ #10194 SUPERSEDES THE `eval/ask/` PIN ASSERTION (owner decision A,
+    2026-10-27): `eval/ask/test_ask_corpus.py` is in the NON-GATING lane, so it
+    no longer runs on a PR. The `tests/eval/ask/` SOURCE_PATTERNS mapping is
+    unchanged and still asserted; the exit-bar pin
+    (`test_measure_ask_distilled.py`, registered on `eval` at the top of
+    `tests/`, NOT under the lane) still gates, and is asserted to. The sealed
+    corpus's own contract is now pinned only by the manual eval lane.
     """
+    from tools.ci_selection import on_demand_files
+    lane = on_demand_files(load_manifest())
+    assert "eval/ask/test_ask_corpus.py" in lane, (
+        "the sealed corpus's contract test must be in the non-gating lane "
+        "(#10194) — if it left the lane it is gating again")
     cases = (
         # the hash scope / manifest gate / sealed loaders
         "tests/eval/ask/corpus.py",
@@ -8597,12 +9604,15 @@ def test_ask_sealed_corpus_source_edit_selects_eval():
             "eval surface that owns its pinning tests; got "
             + str(r["surfaces"]))
         selected = set(r["test_files"]) | set(r["slow_selected"])
-        assert "eval/ask/test_ask_corpus.py" in selected, (
-            "the corpus contract tests must run on " + changed + "; selected "
-            + str(sorted(selected)))
+        assert not (selected & lane), (
+            f"a non-gating lane file reached a pre-merge leg on {changed}: "
+            f"{sorted(selected & lane)[:5]}")
         assert "test_measure_ask_distilled.py" in selected, (
             "the exit-bar tests must run on " + changed + "; selected "
             + str(sorted(selected)))
+        assert "eval/ask/test_ask_corpus.py" not in selected, (
+            "the sealed-corpus contract test is in the non-gating lane "
+            "(#10194) — a green PR must not be read as \"the corpus was pinned\"")
 
 
 def test_tortoise_api_change_selects_api_and_core():
@@ -10499,6 +11509,178 @@ def test_orphan_assert_steps_capture_pgrep_status_fail_closed():
         )
 
 
+def test_orphan_assert_steps_hand_the_gate_the_counted_argv():
+    """#1005 (epic #1647 E2E-7): the count is HOST-WIDE; the argv is what makes
+    a server attributable to THIS run.
+
+    `--count` alone cannot tell another job's server (or a sibling `pytest -n`
+    worker's) from this run's, and redding that difference failed PASSING runs
+    (9 counted vs left=8, pytest rc 0). The gate can only make the distinction
+    if the workflow hands it the counted servers' argv, so each step must
+    produce that file from `$PIDS` and pass it — and a `ps` failure must be a
+    FAILED probe, never an empty file that silently reads as "all foreign".
+    """
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, (
+        f"expected the three 'Assert no redislite orphans' steps, found "
+        f"{len(steps)} — this pin must not pass vacuously"
+    )
+    for s in steps:
+        body = "\n".join(
+            line
+            for line in s["run"].splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert ': > "$ARGV"' in body, (
+            f"step {s.get('name')!r} must truncate the argv file before the "
+            f"probe, so a stale file from an earlier attempt cannot attribute "
+            f"this run's count (#1005)"
+        )
+        assert 'ps -ww -o pid=,args= -p "$PIDLIST"' in body, (
+            f"step {s.get('name')!r} must read the counted servers' argv with "
+            f"`ps -ww -o pid=,args= -p` (#1005)"
+        )
+        assert "tr -s '[:space:]' ','" in body, (
+            f"step {s.get('name')!r} must normalise pgrep's newline-separated "
+            f"pids to a comma list: GNU `ps -p` REJECTS a newline list with "
+            f"'process ID list syntax error' (measured on the self-hosted "
+            f"Linux cells) while BSD `ps` tolerates it, so without this the "
+            f"Linux legs write an EMPTY argv file and every server reads as "
+            f"unattributable (#1005)"
+        )
+        assert '[ "$arc" -le 1 ]' in body and "ps failed" in body, (
+            f"step {s.get('name')!r} must fail closed on a `ps` error: an "
+            f"empty argv would attribute every counted server to another "
+            f"process and hide this run's own residue (#1005)"
+        )
+        # #10255 review 1 (P1): `ps -p <list>` exits 1 when NO listed pid
+        # matched (measured on procps-ng 4.0.4: `ps -p 1` → 0, `ps -p 999999`
+        # → 1, `ps -p 1,999999` → 0), and the procps man page publishes no
+        # exit-status contract. `-eq 0` therefore encoded an assumption the
+        # tool never made and failed the job on a benign shutdown race — the
+        # very defect class this PR removes, one layer up. Pin the polarity so
+        # a re-tightening to `-eq 0` (or to any wider `-le N`) reds here:
+        # rc>1 is a probe failure, rc 0/1 are completed measurements.
+        assert '[ "$arc" -eq 0 ]' not in body, (
+            f"step {s.get('name')!r} must NOT require `ps` to exit 0: rc 1 is a "
+            f"COMPLETED measurement of an empty population (every counted "
+            f"server exited in the shutdown window), so `-eq 0` fails a green "
+            f"run (#10255 review 1)"
+        )
+        assert re.search(r'\[\s*"\$arc"\s*-le\s+[2-9]', body) is None, (
+            f"step {s.get('name')!r} must treat only rc>1 as a probe failure — "
+            f"a wider bound would read a real `ps` failure as an empty "
+            f"attribution (#10255 review 1)"
+        )
+        assert '--argv "$ARGV"' in body, (
+            f"step {s.get('name')!r} must pass --argv to the gate — the gate "
+            f"warns rather than reds when the attribution is unavailable, so a "
+            f"dropped flag would silently retire the leak check (#1005)"
+        )
+
+
+def _fake_ps_probe_dir(tmp: Path) -> Path:
+    """A PATH dir whose `pgrep`/`ps` answer from the environment.
+
+    The orphan step's verdict on a `ps` exit status cannot be pinned by reading
+    its text: what matters is that the JOB does not fail. So the real step body
+    is executed against shims — `pgrep` prints ``$FAKE_PIDS``, `ps` prints
+    ``$FAKE_PS_OUT`` and exits ``$FAKE_PS_RC`` — which is how the benign
+    shutdown race is reproduced deterministically.
+    """
+    shims = tmp / "shims"
+    shims.mkdir(parents=True, exist_ok=True)
+    (shims / "pgrep").write_text('#!/bin/sh\nprintf "%s" "$FAKE_PIDS"\n')
+    (shims / "ps").write_text(
+        '#!/bin/sh\nprintf "%s" "$FAKE_PS_OUT"\nexit "$FAKE_PS_RC"\n')
+    for name in ("pgrep", "ps"):
+        (shims / name).chmod(0o755)
+    return shims
+
+
+def _run_orphan_step(body: str, tmp: Path, env_extra: dict) -> \
+        subprocess.CompletedProcess:
+    """Run a real 'Assert no redislite orphans' step body with the shims."""
+    env = dict(os.environ)
+    env["PATH"] = f"{tmp / 'shims'}:{env.get('PATH', '')}"
+    env["RUNNER_TEMP"] = str(tmp)
+    env.update(env_extra)
+    return subprocess.run(
+        ["bash", "-c", body], cwd=str(REPO), env=env,
+        capture_output=True, text=True, timeout=120)
+
+
+def _orphan_step_fixtures(tmp: Path) -> None:
+    """The two files the step reads: pytest's rc and the sweep's report."""
+    (tmp / "pytest-rc").write_text("0")
+    (tmp / "redislite-hygiene-end.json").write_text(json.dumps({
+        "own_roots": ["/tmp/tt_fixture"],
+        "sweep": {"reaped": 0, "exited": 0, "cleared": True, "left": 0,
+                  "before": 0, "own_left": 0},
+    }))
+
+
+def test_orphan_step_survives_ps_exit_1_on_an_empty_match():
+    """#10255 review 1 (P1): a benign `ps` race must not fail the job.
+
+    `ps -p <list>` exits **1** when no listed pid matched (measured on
+    procps-ng 4.0.4; the procps man page documents no exit-status contract).
+    The count and this read sit inside the residue's shutdown window, which the
+    gate's own header documents as normal, so at COUNT 1-2 every counted server
+    exiting in between is ordinary — the pre-fix `[ "$arc" -eq 0 ]` failed the
+    step there, on a run whose pytest passed and which leaked nothing.
+
+    Non-vacuity: with `-eq 0` restored this step exits 1 with
+    `::error::ps failed rc=1`.
+    """
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, f"expected 3 orphan steps, found {len(steps)}"
+    for s in steps:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            _fake_ps_probe_dir(tmp)
+            _orphan_step_fixtures(tmp)
+            done = _run_orphan_step(s["run"], tmp, {
+                "FAKE_PIDS": "4242\n", "FAKE_PS_RC": "1", "FAKE_PS_OUT": ""})
+        assert "::error::ps failed" not in done.stdout, (
+            f"step {s.get('name')!r} failed the job on `ps` rc 1 — a "
+            f"COMPLETED measurement of an empty population, not a failed probe "
+            f"(#10255 review 1): {done.stdout}{done.stderr}"
+        )
+        assert done.returncode == 0, (
+            f"step {s.get('name')!r} must pass when the counted servers exited "
+            f"before the later probe (rc={done.returncode}): "
+            f"{done.stdout}{done.stderr}"
+        )
+
+
+def test_orphan_step_still_fails_closed_on_a_real_ps_error():
+    """#10255 review 1, the other half: rc>1 is still a FAILED probe.
+
+    Relaxing rc 1 must not relax the fail-closed direction — an unreadable
+    attribution would read every counted server as another process's and hide
+    this run's own residue (#1005), so rc 2 (and a missing/timed-out `ps`, \
+    which is not 0/1 either) must still red.
+    """
+    steps = _orphan_assert_steps()
+    assert len(steps) == 3, f"expected 3 orphan steps, found {len(steps)}"
+    for s in steps:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            _fake_ps_probe_dir(tmp)
+            _orphan_step_fixtures(tmp)
+            done = _run_orphan_step(s["run"], tmp, {
+                "FAKE_PIDS": "4242\n", "FAKE_PS_RC": "2", "FAKE_PS_OUT": ""})
+        assert done.returncode == 1, (
+            f"step {s.get('name')!r} must exit 1 on `ps` rc 2 — a real probe "
+            f"failure is not an empty measurement (rc={done.returncode}): "
+            f"{done.stdout}{done.stderr}"
+        )
+        assert "::error::ps failed rc=2" in done.stdout, (
+            f"step {s.get('name')!r} must name the failed probe: {done.stdout}"
+        )
+
+
 def test_orphan_assert_no_pytest_producer_writes_the_gated_path():
     """#4740 review 5: each empty-selection block must WRITE the no-pytest
     report to the very path the orphan gate is handed.
@@ -10609,13 +11791,43 @@ def test_the_on_demand_lane_is_not_silently_empty():
 
 
 def test_a_lane_file_still_on_a_gated_leg_is_reported():
-    # The silent-and-expensive direction: a file in the lane AND in slow_files
-    # is still on the merge path, so the lane saves nothing while reading as if
-    # it did. leg_coverage_issues is the only thing that can see this.
+    """The silent-and-expensive direction: a lane file that is STILL on a gating
+    leg, so the lane saves nothing while reading as if it did.
+
+    #10194 changed what can go wrong here, and the check follows: the lane now
+    legitimately OVERLAPS `slow_files` (five eval files keep their `durations`
+    weight and their classification; the LEG drops them), exactly as slow
+    carve-out files do. So a config-set overlap is no longer a defect — the
+    defect is a lane file appearing in the pool a gating leg is built from,
+    which `slow_gating_files()` is the single definition of.
+
+    The mutation this pins is therefore the DEFINITION regressing, not the
+    config: patch `slow_gating_files` back to `slow_files - carve_out` (drop the
+    lane subtraction — the exact edit a later reader makes when the lane
+    subtraction looks redundant) and the report must name the file. Without this
+    test the check would be vacuous, because with the shipped definition the
+    intersection is empty BY CONSTRUCTION.
+    """
     m = load_manifest()
     still_slow = dict(m, slow_files=[*list(m["slow_files"]), THE_EXPENSIVE_EVAL])
-    hits = [i for i in leg_coverage_issues(still_slow) if "on-demand/slow overlap" in i]
-    assert hits, "a lane file still in slow_files must be reported"
+    # With the shipped definition the lane is subtracted, so no issue is raised.
+    assert not [i for i in leg_coverage_issues(still_slow) if "leaked" in i], (
+        "a lane file in `slow_files` is now legitimate (the LEG subtracts it) — "
+        "reporting it would red a correct manifest and invite deleting the "
+        "lane entry")
+
+    import tools.ci_selection as cs
+    original = cs.slow_gating_files
+    try:
+        cs.slow_gating_files = lambda mf: (  # type: ignore[assignment]
+            set(mf.get("slow_files") or []) - set(mf.get("carve_out") or []))
+        hits = [i for i in leg_coverage_issues(still_slow) if "leaked" in i]
+    finally:
+        cs.slow_gating_files = original  # type: ignore[assignment]
+    assert hits, (
+        "with the lane subtraction REMOVED from slow_gating_files() a lane file "
+        "is back on a gating slow leg, and this check must say so — if it "
+        "passes, the guard cannot fire for the regression it names")
     assert THE_EXPENSIVE_EVAL in hits[0]
 
 

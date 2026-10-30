@@ -193,7 +193,16 @@ def test_search_wire_session_id_carries_the_captured_session():
     hits = sdk.tortoise_fts_query("gym schedule", limit=40,
                                   include_terminal=True)
 
-    assert [h["id"] for h in hits] == [turn_id, f"{SID_A}_t1"]
+    # Membership, not ORDER (#10121). The seeded turns carry no timestamps, so
+    # they tie on score AND on recency; the tie then falls to the determinism
+    # key, which #10121 made ``<id> DESC`` on every label — so the pairs come
+    # back ``t1, t0`` where the old ``<id> ASC`` clause returned ``t0, t1``.
+    # That direction is pinned behaviourally in
+    # ``tests/test_10121_recency_tie.py``; asserting it here as well would make
+    # this file red on any future tie-policy change, and this test's subject is
+    # the session IDENTITY, not the order.
+    assert sorted(h["id"] for h in hits) == sorted(
+        [turn_id, f"{SID_A}_t1"])
     for h in hits:
         assert h["sessionId"] == SID_A, h
 
@@ -622,7 +631,9 @@ def test_search_handler_carries_the_captured_session(mcp_surface, monkeypatch):
     hits = mcp_surface.tortoise_search("gym schedule", limit=40)
 
     assert isinstance(hits, list), hits
-    assert [h["id"] for h in hits] == [turn_id, f"{SID_A}_t1"], (
+    # Membership, not order — see the seam note in
+    # ``test_search_wire_session_id_carries_the_captured_session`` (#10121).
+    assert sorted(h["id"] for h in hits) == sorted([turn_id, f"{SID_A}_t1"]), (
         "precondition: the handler must return both captured turns — got "
         f"{[h.get('id') for h in hits]!r}")
     for h in hits:
@@ -646,7 +657,10 @@ def test_recall_handler_carries_the_captured_session(mcp_surface, monkeypatch):
     assert out.get("mode") == "state", out
     results = out["results"]
     points = [r for r in results if r.get("entity_type") == "point"]
-    assert [r["id"] for r in points] == [turn_id, f"{SID_A}_t1"], (
+    # Membership, not order — see the seam note in
+    # ``test_search_wire_session_id_carries_the_captured_session`` (#10121).
+    assert sorted(r["id"] for r in points) == sorted(
+        [turn_id, f"{SID_A}_t1"]), (
         "precondition: recall must surface both captured turns — got "
         f"{[r.get('id') for r in results]!r}")
     for r in points:
@@ -670,7 +684,10 @@ def test_handler_identity_is_derived_from_the_contains_edge(mcp_surface,
     monkeypatch.setattr(mcp_surface, "sdk", sdk)
 
     green = mcp_surface.tortoise_search("gym schedule", limit=40)
-    assert [h["id"] for h in green] == [turn_id, f"{SID_A}_t1"], green
+    # Membership, not order — see the seam note in
+    # ``test_search_wire_session_id_carries_the_captured_session`` (#10121).
+    assert sorted(h["id"] for h in green) == sorted(
+        [turn_id, f"{SID_A}_t1"]), green
     assert [h["sessionId"] for h in green] == [SID_A, SID_A], green
 
     # MUTATION — drop the ONLY derivation source (the CONTAINS edge).
@@ -680,7 +697,8 @@ def test_handler_identity_is_derived_from_the_contains_edge(mcp_surface,
     )
 
     mutated = mcp_surface.tortoise_search("gym schedule", limit=40)
-    assert [h["id"] for h in mutated] == [turn_id, f"{SID_A}_t1"], (
+    assert sorted(h["id"] for h in mutated) == sorted(
+        [turn_id, f"{SID_A}_t1"]), (
         "precondition: the turns must survive the edge delete — got "
         f"{[h.get('id') for h in mutated]!r}")
     assert [h["sessionId"] for h in mutated] == ["", ""], (

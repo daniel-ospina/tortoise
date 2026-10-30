@@ -1039,6 +1039,37 @@ def _e2e_function(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     raise AssertionError(f"{name} not found in {_E2E_ONBOARDING}")
 
 
+def _e2e_code(name: str) -> str:
+    """The `name` function's CODE lines — docstring and whole-line comments
+    removed.
+
+    The pins below have to distinguish code from prose: `_wait_until`'s own
+    docstring names `time.sleep()` as the thing never to use and
+    `page.wait_for_timeout()` as the fix, so a raw text search over the
+    function's span reads the warning as the defect and the defect as the fix
+    (the same class as #3514's raw-string regex, whose pattern matched nothing).
+    """
+    fn = _e2e_function(name)
+    lines = _E2E_ONBOARDING.read_text(encoding="utf-8").splitlines()
+    start = fn.lineno
+    first = fn.body[0] if fn.body else None
+    if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)):
+        start = first.end_lineno or start
+    out = []
+    for line in lines[start:fn.end_lineno]:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            out.append(line)
+    return "\n".join(out)
+
+
+def _e2e_signature(name: str) -> str:
+    """The single `def …:` line of `name` (its parameters, as written)."""
+    fn = _e2e_function(name)
+    return _E2E_ONBOARDING.read_text(encoding="utf-8").splitlines()[fn.lineno - 1]
+
+
 def test_the_e2e_harness_docstring_agrees_with_the_browser_hold() -> None:
     """#8975 review P3: `_wire` must name the mechanism the file actually uses.
 
@@ -1091,3 +1122,61 @@ def test_the_e2e_harness_docstring_agrees_with_the_browser_hold() -> None:
     assert "getAttribute('aria-busy')" in segment, (
         "the spec must SAMPLE the in-flight state in the browser — the "
         "expression, not merely the word, which its own docstring also carries")
+
+
+def test_the_e2e_poll_pumps_the_dispatcher_and_never_sleeps() -> None:
+    """`dashboard-e2e` red at `2963b8a44`: `_wait_until` polled a HOST-side
+    counter with `time.sleep`, which can never observe the value it waits for.
+
+    Playwright's SYNC api dispatches route handlers — which run on the CALLER's
+    greenlet — only while a Playwright call is in flight (`SyncBase._sync` →
+    `wait_for_future(loop, self._dispatcher_fiber, task)`). `time.sleep` holds
+    that greenlet, so the fork card's `GET /v1/capabilities` was never handled
+    during the poll and the assertion span its whole budget reporting `False`
+    (`test_first_timer_wizard_build_fork_records_no_catalog_presented`). No
+    timeout value fixes that, which is why the fix is the PUMP, not the budget.
+
+    Read, not imported: the module's `RUN_DASHBOARD_E2E` guard raises
+    `pytest.skip(..., allow_module_level=True)`, and a guard that imported would
+    stop guarding without ever failing. The behavioural half lives in the e2e
+    file itself
+    (`test_wait_until_pumps_the_dispatcher_so_a_late_route_handler_is_observed`);
+    this pin is the ALWAYS-ON lane's copy, so a revert reds here even when no
+    dashboard file changed.
+    """
+    src = _E2E_ONBOARDING.read_text(encoding="utf-8")
+    code = _e2e_code("_wait_until")
+    # The CODE, not the prose: `_wait_until`'s own docstring names both
+    # "`time.sleep()`" (as the thing never to use) and "`page.wait_for_timeout()`"
+    # (as the fix), so a raw text search over the function would read the
+    # warning as the defect and the defect as the fix.
+    assert "page.wait_for_timeout(" in code, (
+        "the poll must PUMP the dispatcher — `page.wait_for_timeout()`, not "
+        "`time.sleep()`, or a handler that fires mid-wait is never dispatched")
+    assert "time.sleep(" not in code, (
+        "`time.sleep` holds the caller's greenlet for the whole budget, so a "
+        "host-side counter advanced by a route handler can never be observed "
+        "(the 2963b8a44 false red)")
+    signature = _e2e_signature("_wait_until")
+    assert "page: Page" in signature and "*," in signature, (
+        "`page` must be a REQUIRED keyword parameter so the unsafe spelling is "
+        f"unrepresentable at every call site — got `{signature}`")
+    # EVERY call site passes `page` — a new poll that omits it would be the dead
+    # shape again, and a file-wide text search cannot tell a call from a mention.
+    calls = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "_wait_until"]
+    assert calls, "no `_wait_until` call site found — this pin would be vacuous"
+    for call in calls:
+        assert any(kw.arg == "page" for kw in call.keywords), (
+            f"the call at line {call.lineno} must pass `page=`")
+    # The capabilities poll must WAIT for the handler (>=1) and let the plain
+    # assert own "exactly once", so a double fetch still reds with the count.
+    spec = _e2e_code("test_first_timer_wizard_build_fork_records_no_catalog_presented")
+    assert 'cap["capabilities"] > 0' in spec, (
+        "the capabilities wait must poll for the handler arriving, not for the "
+        "exactly-once count — a two-fetch race would otherwise spin the budget")
+    assert 'assert cap["capabilities"] == 1' in spec, (
+        "the exactly-once pin must survive as an ASSERT, with the observed count "
+        "in its message (the pre-fix message read `False`, which named neither "
+        "0 nor 2)")

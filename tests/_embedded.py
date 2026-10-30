@@ -335,6 +335,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # shipped read's own fusion), so it is exempt from the docker redirect and
     # routed to the URI-unset carve-out job.
     "test_bm25_lexical_8488",
+    # #10122: the Point `name` advisory + the FTS-gap evidence — module-level
+    # ``pytest.mark.embedded_only`` (the lane the defect was measured on), so it
+    # is exempt from the docker redirect and routed to the URI-unset carve-out
+    # job. Mirrors the ``carve_out:`` row in ``config/ci-surfaces.yml``; a stem
+    # in only one of the two is the silent hole
+    # ``test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems``
+    # catches.
+    "test_10122_point_name_not_indexed",
     # #5140: the behavioural `ingestedAt` file constructs its own embedded
     # `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`), so the
     # construction IS the under-test input — a URI-set run would discard the
@@ -544,6 +552,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
     # tests/test_markers.py::test_no_redirect_stems_registry_exact.
     "test_cli_extraction",
+    # #10121: the recency-tie pins build per-test embedded `TortoiseSDK(<tmpfile>)`
+    # stores and read the tie ORDER back off them (the sweep, the id-less
+    # `:Object`/legacy-id regressions), so the module is `embedded_only` and a
+    # URI-set lane would either skip every case or redirect the construction to
+    # the shared server — the #4047/#4524 shape. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact.
+    "test_10121_recency_tie",
 )
 
 _HAS_FALKOR: bool | None = None

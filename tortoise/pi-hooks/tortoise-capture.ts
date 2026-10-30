@@ -1,4 +1,4 @@
-// tortoise-hook-version: 14
+// tortoise-hook-version: 15
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -1790,16 +1790,39 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
 }
 
 /**
- * Enforce the spool's COUNT and BYTE ceilings, evicting the oldest entries.
+ * Enforce the spool's COUNT and BYTE ceilings, evicting the SAFEST loss first.
  * Excludes `keepSessionId` (the entry just written) so a write can never evict
- * itself. Returns one DiscardRecord per eviction, with the ceiling named.
+ * itself. Returns one DiscardRecord per eviction, with the ceiling named and
+ * the CLASS of loss recorded.
+ *
+ * #6388: the spool is a DELIVERY QUEUE, not an age-ordered cache, so the two
+ * classes are ranked BEFORE age — a **filed** entry's content is already on the
+ * wire (and Pi's own session log still holds it locally), while an **unfiled**
+ * entry is the only copy of a conversation the user never got into the graph.
+ * Age alone inverts that priority whenever a MIXED spool holds a backlog older
+ * than its successes, which is the shape any partial drain leaves behind: a
+ * drain that files the newer sessions while older ones stay deferred (saturated
+ * backoff; a keyless window whose entries are only retried once a key appears)
+ * appends the successes ABOVE the backlog, and the cap then reaps the backlog it
+ * exists to deliver. Within a class the order is UNCHANGED (oldest first), so a
+ * spool with nothing filed behaves exactly as before — and the cap still bounds
+ * the disk either way: when every candidate is undelivered, the oldest
+ * undelivered entry is reaped and the record says so. Mirrors
+ * `capture_spool.py::prune_spool` (the two legs share one directory).
  *
  * A quarantined turn log (`quarantineLog`) has no meta, so it is absent from the
  * meta scan and from `spoolEntryBytes`: its bytes are counted HERE and it is
- * evicted (oldest first, by mtime) before any live entry. Without this, the byte
- * ceiling stopped applying the moment a meta was quarantined and the spool could
- * grow past it without bound (#8531 review). The eviction is a real loss and is
- * recorded like any other bound eviction.
+ * evicted (oldest first, by mtime) before any live entry, filed or not. Without
+ * this, the byte ceiling stopped applying the moment a meta was quarantined and
+ * the spool could grow past it without bound (#8531 review). An orphan goes first
+ * because it is the SAFEST loss of the three: a corrupt meta moved it out of
+ * every scan, so no drain can file it and no reader can list it, while a live
+ * entry — filed or not — still has a surface that can deliver it. The eviction
+ * is still a real loss, and its record names that class in the same `loss`
+ * vocabulary the live entries use (#6388) — but it must not claim MORE than
+ * survives the quarantine: `quarantineLog` removes the corrupt meta, which was
+ * the only copy of `filed_key`, so whether the bytes ever reached the wire is
+ * unknowable and the record says `unknown` rather than inventing the answer.
  */
 export function pruneSpool(
   dir: string,
@@ -1812,14 +1835,26 @@ export function pruneSpool(
   const ranked = metas
     .filter((m) => m.session_id !== keepSessionId)
     .map((m) => ({ meta: m, bytes: spoolEntryBytes(dir, m.session_id) }))
-    .sort((a, b) => compareAge(a.meta, b.meta));
+    .sort((a, b) => {
+      // #6388: the SAFE loss goes first — `entryFiled` is the SAME predicate the
+      // drain's skip clause uses, so "already on the wire" here means exactly
+      // what it means there. Within a class, oldest first (unchanged).
+      const aFiled = entryFiled(a.meta) ? 0 : 1;
+      const bFiled = entryFiled(b.meta) ? 0 : 1;
+      if (aFiled !== bFiled) return aFiled - bFiled;
+      return compareAge(a.meta, b.meta);
+    });
 
   let count = metas.length;
   let total =
     metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
     orphans.reduce((sum, path) => sum + fileSize(path), 0);
-  // Quarantined logs go FIRST: they are already unreachable to every surface,
-  // while an entry can still be filed by the next drain.
+  // Quarantined logs go FIRST, ahead of even the class ordering below: an orphan
+  // is already unreachable to every surface (a corrupt meta moved it aside, so
+  // no drain can file it and no reader can list it), while a live entry — filed
+  // or not — still has a surface that can deliver it. It is therefore the SAFEST
+  // loss of all, and the record says so in the same `loss` vocabulary the live
+  // entries use (#6388).
   for (const orphan of orphans) {
     if (total <= bounds.maxTotalBytes) break;
     const size = fileSize(orphan);
@@ -1827,7 +1862,10 @@ export function pruneSpool(
       recordDiscard(dir, {
         session_id: `orphan:${basename(orphan)}`,
         reason: DISCARD_BYTES_EXCEEDED,
-        detail: `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}`,
+        detail:
+          `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}` +
+          "; evicted a quarantined log (UNREACHABLE: its meta is gone, so" +
+          " whether it was ever filed is unknown)",
       }),
     );
     try {
@@ -1841,10 +1879,17 @@ export function pruneSpool(
     if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) break;
     const reason =
       total > bounds.maxTotalBytes ? DISCARD_BYTES_EXCEEDED : DISCARD_COUNT_EXCEEDED;
+    // #6388: name the CLASS of loss. The discard line is the only surface a cap
+    // eviction has, and "spool has 1001 entries" alone read (fairly, from that
+    // text) as "something was dropped", with no way to tell the safe eviction
+    // from the irreversible one.
+    const loss = entryFiled(meta)
+      ? "; evicted an already filed entry (its content is on the wire)"
+      : "; evicted an UNDELIVERED entry (never filed)";
     const detail =
       reason === DISCARD_BYTES_EXCEEDED
-        ? `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}`
-        : `spool has ${count} entries > maxEntries=${bounds.maxEntries}`;
+        ? `spool is ${total} bytes > maxTotalBytes=${bounds.maxTotalBytes}${loss}`
+        : `spool has ${count} entries > maxEntries=${bounds.maxEntries}${loss}`;
     discards.push(discardEntry(dir, meta, reason, detail));
     count -= 1;
     total -= bytes;

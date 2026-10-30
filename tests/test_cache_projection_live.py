@@ -26,6 +26,11 @@ import pytest
 
 from tests._live_utils import _skip_unless_live_uri
 from tortoise import cache_projection as cp
+from tortoise.entity_identity import (
+    all_name_holder_ids,
+    live_name_holder_ids,
+    resolve_entity_id,
+)
 from tortoise.projection import FalkorProjection
 from tortoise.residency import (
     COVERAGE_COMPLETE,
@@ -148,11 +153,11 @@ def test_a_record_sourced_node_carries_the_discriminator_the_fold_supplies():
     builds each node BOTH ways and compares the properties the fold owns.
 
     ⚠️ The comparison is restricted to the fold's `ON CREATE` properties: a
-    record-sourced rebuild deliberately does NOT carry the projection-owned
-    `status` cache (§2.6) nor the `$now`-defaulted `createdAt`, both of which
-    the fold writes and the record does not own — that divergence is declared
-    in `cache_projection.FOLD_ON_CREATE_DEFAULTS`'s docstring, not asserted away
-    here.
+    record-sourced rebuild does NOT carry the projection-owned `status` cache
+    (§2.6) unless the record CARRIES its lifecycle signal — `supersededBy`
+    derives `'superseded'`, `cache_projection.DERIVED_FROM_RECORD`, #9974 — and
+    the `$now`-defaulted `createdAt` stays divergent too; both are declared in
+    their table's docstring, not asserted away here.
     """
     fold_owned = {"subjectKind", "objectKind", "title"}
 
@@ -297,3 +302,178 @@ def test_rebuild_from_record_refuses_without_the_destructive_token():
     view = _view()
     with pytest.raises(RuntimeError, match="Graph guard: rebuild_from_record performs"):
         proj.rebuild_from_record(view, confirm_destructive=False)
+
+
+def test_a_record_sourced_rebuild_keeps_a_superseded_entity_terminal():
+    """#9974 — the rebuilt cache must not resurrect a TERMINAL entity as LIVE.
+
+    The measured defect, end to end on a real engine. `Object.status` /
+    `Subject.status` are §2.6's **projection-owned cache**: the record correctly
+    refuses to store the name, and NOTHING computed it, so a record-sourced
+    rebuild materialized every superseded entity with no `status`. `live.
+    _terminal_excluded` reads an ABSENT status as LIVE *by design* (its own rule
+    for legacy nodes), so after the rebuild:
+
+    * `MATCH (o:Object) RETURN o.status` was `null`, not `'superseded'`;
+    * `live_name_holder_ids` counted the superseded Object as a live holder, and
+      `resolve_entity_id` RESOLVED its name — the exact D2 shape
+      `tortoise/entity_identity.py` exists to refuse (*"a TERMINAL-only holder
+      … is never resolved to a terminal id"*), and the twin of #9962 on the
+      record→cache route.
+
+    The carrier is the record's own PRIMARY columns: both supersession folds
+    write `status` alongside them, so the cache derives the lifecycle value from
+    the columns it does hold (`cache_projection.DERIVED_FROM_RECORD`). The
+    assertion is on the READ consequence, not just the property: a value written
+    but not honoured by the identity read would leave the defect in place.
+
+    ⚠️ TWO carriers, because the record emits each ALONE. `o-idonly` below is
+    the id-only (legacy §6b) shape: `ObjectSuperseded` with no `supersedes_by`,
+    which the record writes as `superseded_at` only — and which the fold replays
+    as `status='superseded'` with `supersededBy=''`. A `supersededBy`-only
+    derivation derives nothing for it, so it comes back LIVE: #9974 itself, on
+    the shape `test_status_projection.py::…_legacy_6b_id_only_shape_supersedes`
+    pins as still reachable.
+    """
+    proj = _projection()
+    view = cp.RecordView(nodes=(
+        cp.node_from_row("Object", {"id": "o-alpha", "name": "alpha",
+                                    "object_kind": "core:org",
+                                    "superseded_by": "alpha-v2", "props": {}}),
+        cp.node_from_row("Object", {"id": "o-alpha-v2", "name": "alpha-v2",
+                                    "object_kind": "core:org", "props": {}}),
+        cp.node_from_row("Subject", {"id": "s-role", "name": "role",
+                                     "subject_kind": "team",
+                                     "superseded_by": "role-v2", "props": {}}),
+        cp.node_from_row("Subject", {"id": "s-role-v2", "name": "role-v2",
+                                     "subject_kind": "team", "props": {}}),
+        # id-only legacy supersession: `superseded_at` ONLY, `supersededBy` ''
+        cp.node_from_row("Object", {"id": "o-idonly", "name": "beta",
+                                    "object_kind": "core:org",
+                                    "superseded_at": "2026-01-01T00:00:00Z",
+                                    "props": {}}),
+    ))
+    proj.rebuild_from_record(view, confirm_destructive=True)
+
+    # ── the property the live fold would have written ──────────────────────
+    assert _props(proj, "Object", "id", "o-alpha").get("status") == "superseded", (
+        "the rebuilt :Object lost its lifecycle status — a superseded entity "
+        "comes back LIVE to every _terminal_excluded reader (#9974)"
+    )
+    assert _props(proj, "Subject", "id", "s-role").get("status") == "superseded", (
+        "the rebuilt :Subject lost its lifecycle status (#1423's half of the "
+        "same §2.6 cache)"
+    )
+    assert _props(proj, "Object", "id", "o-idonly").get("status") == "superseded", (
+        "an id-only supersession (superseded_at, blank superseded_by) came "
+        "back with no status — the record's OTHER PRIMARY carrier was not read"
+    )
+    # …and the LIVE successor is untouched by the derivation.
+    assert "status" not in _props(proj, "Object", "id", "o-alpha-v2"), (
+        "the derivation invented a status on a row the record is silent about"
+    )
+
+    # ── the READ consequence the defect is about ───────────────────────────
+    assert live_name_holder_ids(proj.g, "Object", "alpha") == [], (
+        "the superseded Object is counted as a LIVE name holder after the "
+        "rebuild — the rebuild route resurrected it"
+    )
+    assert all_name_holder_ids(proj.g, "Object", "alpha") == ["o-alpha"], (
+        "the terminal holder must still exist as a holder, or 'refused' is "
+        "indistinguishable from 'absent name' (#3633 §B.1)"
+    )
+    assert resolve_entity_id(proj.g, "Object", "alpha") is None, (
+        "resolve_entity_id resolved a name to a SUPERSEDED id — the D2 "
+        "refusal entity_identity.py exists to make"
+    )
+    # The id-only shape's read consequence, which is the whole point of
+    # covering the second carrier: without it the name resolves to the
+    # superseded id again.
+    assert live_name_holder_ids(proj.g, "Object", "beta") == [], (
+        "the id-only superseded Object is a LIVE name holder after the rebuild "
+        "— #9974 unfixed on the shape the record writes with superseded_at"
+    )
+    assert all_name_holder_ids(proj.g, "Object", "beta") == ["o-idonly"]
+    assert resolve_entity_id(proj.g, "Object", "beta") is None, (
+        "resolve_entity_id resolved an id-only superseded name — the D2 "
+        "refusal is bypassed on the second carrier"
+    )
+
+
+def test_a_connector_tracked_object_rebuilds_to_the_status_the_live_fold_wrote():
+    """#10198's verification, measured on ONE engine against the LIVE writer.
+
+    The live writer is the real `_fold_object_status` (not a fixture constant),
+    so this compares the record-side fold with the fold it claims to reproduce:
+
+        live:   github.issue.open -> github.issue.closed -> status='completed'
+        rebuild from the record's event stream -> the SAME status
+
+    MEASURED before this change: the live node held `status='completed'` and the
+    rebuilt node carried NO `status` at all — which `live._terminal_excluded`
+    reads as LIVE (its documented legacy-node rule), so a closed work item came
+    back as CURRENT state and `reconciliation` reported a permanent
+    `field_mismatches` on `status`.
+    """
+    proj = _projection()
+    proj.g.query(
+        "MERGE (o:Object {id:$id}) SET o.name=$n, o.objectKind='issue'",
+        params={"id": "o-issue", "n": "issue-1"})
+    proj._fold_object_status("issue-1", "github.issue.open")
+    proj._fold_object_status("issue-1", "github.issue.closed")
+    live = _props(proj, "Object", "id", "o-issue")
+    assert live.get("status") == "completed", (
+        "the live fold did not write `completed` — the comparison below would "
+        "be vacuous")
+
+    view = cp.RecordView(
+        nodes=(cp.node_from_row("Object", {
+            "id": "o-issue", "name": "issue-1", "object_kind": "issue",
+            "props": {}}),),
+        lifecycle_events=(
+            cp.LifecycleEvent(seq=1, event_kind="github.issue.open",
+                              object_name="issue-1"),
+            cp.LifecycleEvent(seq=2, event_kind="github.issue.closed",
+                              object_name="issue-1"),
+        ),
+    )
+    # ── destroy the cache, then rebuild from the RECORD alone ──────────────
+    proj._wipe_all_nodes(confirm_destructive=True, operation="test-destroy")
+    proj.rebuild_from_record(view, confirm_destructive=True)
+    rebuilt = _props(proj, "Object", "id", "o-issue")
+    assert rebuilt.get("status") == live["status"] == "completed", (
+        "the rebuilt :Object does not carry the connector lifecycle status the "
+        "live graph held (#10198)")
+
+    # ── the same events WITHOUT the stream: the defect this closes ─────────
+    proj._wipe_all_nodes(confirm_destructive=True, operation="test-destroy")
+    proj.rebuild_from_record(
+        cp.RecordView(nodes=view.nodes), confirm_destructive=True)
+    assert "status" not in _props(proj, "Object", "id", "o-issue"), (
+        "this is the pre-#10198 shape and it must stay measurable: with no event "
+        "stream the record has no lifecycle signal and the cache must not "
+        "fabricate one — the row-level derivation only covers supersession")
+
+
+def test_a_superseded_work_item_is_not_resurrected_by_a_connector_event():
+    """The terminal guard, end to end on the rebuild path.
+
+    A dual-tracked work item superseded conversationally and later closed on
+    GitHub comes back `completed` without the guard — visible in
+    `recall_state`'s default view, which is the #2164/#3309 defect re-opened on
+    the record path.
+    """
+    proj = _projection()
+    view = cp.RecordView(
+        nodes=(cp.node_from_row("Object", {
+            "id": "o-dup", "name": "issue-9", "object_kind": "issue",
+            "superseded_by": "o-dup-v2", "props": {}}),),
+        lifecycle_events=(
+            cp.LifecycleEvent(seq=1, event_kind="github.issue.closed",
+                              object_name="issue-9"),
+        ),
+    )
+    proj.rebuild_from_record(view, confirm_destructive=True)
+    assert _props(proj, "Object", "id", "o-dup").get("status") == "superseded"
+    assert resolve_entity_id(proj.g, "Object", "issue-9") is None, (
+        "the rebuild resurrected a superseded Object as a live name holder")

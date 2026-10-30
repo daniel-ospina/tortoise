@@ -729,10 +729,15 @@ def test_run_note_never_claims_zero_drops_when_drops_exist():
 
     both_zero = notes_for(0, 0)
     assert "logged no operator drop and no supersede refusal" in both_zero
-    # the blind-spot enumeration is part of the claim: three seams, named
-    assert "three seams" in both_zero
+    # the blind-spot enumeration is part of the claim: two seams, named.
+    # (#9906 closed the third this assertion used to see — a point-level
+    # `supersedes` ref on a folding point is now carried to the survivor, so it
+    # reaches the resolver and its refusals ARE counted; naming it as a blind
+    # spot would now be the false claim.)
+    assert "two seams" in both_zero
+    assert "three seams" not in both_zero
     assert "commit layer" in both_zero and "snapshot failed to read" in both_zero
-    assert "NOOP" in both_zero
+    assert "NOOP" in both_zero    # the CLOSED seam is named as closed
     # drops only: THE note must exist and name the drops (an empty string would
     # satisfy a bare "not in" assertion — the vacuous pin review round 6 caught)
     drops_only = notes_for(2, 0)
@@ -775,12 +780,14 @@ def test_the_zero_drop_note_does_not_claim_a_clean_bill_on_the_m2_lane():
         "the m2 lane cannot support the inference: its operator pass never runs")
     assert "three seams" not in m2_zero, (
         "the llm-lane blind spots do not bound a lane that never ran the pass")
+    assert "two seams" not in m2_zero, (
+        "the llm-lane blind spots do not bound a lane that never ran the pass")
     # two-sided: the llm lane still makes the claim it can make, and the four
     # count combinations are unchanged there.
     llm_zero = notes_for(0, 0, "llm")
     assert "not an EXTRACTOR-side drop" in llm_zero
     assert "NOT MEASURED" not in llm_zero
-    assert "three seams" in llm_zero
+    assert "two seams" in llm_zero
 
 
 def test_recall_leg_success_warning_is_not_a_refusal():

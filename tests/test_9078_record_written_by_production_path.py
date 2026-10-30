@@ -1047,9 +1047,20 @@ def test_the_sdk_forwarding_hop_requires_the_ordinal(wiring):
         "`_write_record_projection(seq=...)` regained a default — a caller that "
         "omits it then writes no position row, silently (#9190)")
     source = (REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
-    with_default = source.replace("seq: int | None) -> None:",
-                                 "seq: int | None = None) -> None:", 1)
-    assert with_default != source, "the signature spelling changed — re-point this leg"
+    # The mutation targets the PARAMETER spelling and STOPS before the return
+    # annotation: the pin is about `seq` having no default, and a return type
+    # that changes (it is `-> Any` since #10000, so the write's outcome can travel
+    # back to the capture writer and decide a store) must not make the leg miss
+    # its own subject. The count assertion is what keeps the pin about the ONE
+    # forwarding hop that owns the ordinal — a second `seq: int | None)` spelling
+    # in sdk.py reddens here instead of being mutated silently at some other site
+    # (#10024's re-point, absorbed per #10021's reconciliation comment).
+    target = "seq: int | None) ->"
+    assert source.count(target) == 1, (
+        "`_write_record_projection`'s `seq` spelling moved or was copied — "
+        "re-point this leg, it must mutate the ONE forwarding hop that owns the "
+        f"ordinal (found {source.count(target)})")
+    with_default = source.replace(target, "seq: int | None = None) ->", 1)
     fired = module.ordinal_argument_problems(
         ast.parse(with_default, filename="tortoise/sdk.py"), "tortoise/sdk.py")
     assert fired and "WITH A DEFAULT" in fired[0], fired
@@ -2396,7 +2407,12 @@ def test_the_seam_refuses_a_malformed_carried_tenant(monkeypatch):
         _refused = record_writer.write_live_record(
             {"type": "PointAdded", "id": "p1"}, seq=1, tenant=bad)
         assert _refused is not None and _refused.applied is False, (_refused, bad)
-        assert _refused.refusal == "no_tenant", (_refused, bad)
+        # The token names WHICH tenant silence it was (#10000 review): a CARRIED
+        # pair that was malformed is `no_tenant_carried`, told apart from
+        # `no_tenant` (a tenant nobody named) so the WARNING can say which. Both
+        # are counted on the SAME `no_tenant` counter — the metric gained no
+        # term, which the `after - before` assertion below still pins.
+        assert _refused.refusal == "no_tenant_carried", (_refused, bad)
     assert calls == [], calls
     after = dict(monitoring.record_write_failure_counts()).get("no_tenant", 0)
     assert after - before == len(malformed), (

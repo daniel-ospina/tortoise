@@ -1596,17 +1596,27 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     # sentence: `sdk.py` was scanned, the tree was not, and the hosted handler's
     # `sdk._extract_session_v2(` call site — the reason the claim needs a scope at
     # all — was unread.
-    assert "hosted_api.py:15288" in readme, (
+    # ⛔ The number is RESOLVED from the README and checked against `hosted_api.py`,
+    # never hardcoded: `15288` was itself a stale literal that `main` moved to 15500
+    # while this branch was open, so the pin red-ed on a cite that was CORRECT and a
+    # re-derivation could not make it green. A cite is a pointer — pin the resolution,
+    # not the digits (the same rule `tools/sdk_surface.py --check` follows).
+    hosted_cite = re.search(r"hosted_api\.py:(\d+)", readme)
+    assert hosted_cite, (
         "the README no longer names the surviving call site of _extract_session_v2 "
-        "(`tortoise/hosted_api.py:15288`) — re-derive it from the tree, do not drop "
-        "the note: without it 'the SDK's ONLY caller' reads as 'the only caller'")
+        "— do not drop the note: without it 'the SDK's ONLY caller' reads as 'the "
+        "only caller'")
     hosted = sources.get("hosted_api") or []
+    hosted_line = int(hosted_cite.group(1))
+    assert "sdk._extract_session_v2" in hosted[hosted_line - 1], (
+        f"the README cites the surviving caller at hosted_api.py:{hosted_line}, which "
+        f"is {hosted[hosted_line - 1].strip()!r} — re-derive the cite from the tree")
     hosted_callers = [n for n, line in enumerate(hosted, 1)
                       if "sdk._extract_session_v2" in line]
     assert hosted_callers, (
         "the hosted capture handler no longer calls sdk._extract_session_v2 — the "
-        "README's 'the hosted handler still reaches it' note and the cite at "
-        "hosted_api.py:15288 must be re-derived together")
+        "README's 'the hosted handler still reaches it' note and the cite must be "
+        "re-derived together")
     # Anchored on the entry-point SENTENCE, not on the first backticked
     # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
     # dozens of lines in that file (the flag reads, the gates, the surfaces),
@@ -1631,6 +1641,60 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         assert symbol.split(".")[-1] in text, (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not")
+    # (c) The probe's eight bare step cites (#10211). They name a SYMBOL and a
+    # bare `:NNNN` with no filename, so rule (b) cannot see them (it reads the
+    # README) and the bundle's own sweep cannot either (`_BUNDLE_CITE` requires
+    # `file.py:line`). Nothing watched them: `#10243` moved `extractor_v2.py` by
+    # +88 and all eight went stale while both pin files stayed green. Same rule
+    # as (b), applied to the file that carries them.
+    probe = re.sub(r"`{2}", "`", PROBE.read_text())
+    step_pairs = re.findall(
+        r"`([A-Za-z_][\w.]*)`(?:\s*/\s*`([A-Za-z_][\w.]*)`)?"
+        r"\s*\((?:S[\d.]+(?:\+S\d+)?|the gap filler),[^`]*`:(\d+)`",
+        probe)
+    assert len(step_pairs) >= 8, (
+        f"the probe's step list is gone or was reformatted: {step_pairs}")
+    for first, second, lineno in step_pairs:
+        text = sources["extractor_v2"][int(lineno) - 1]
+        named = [s.split(".")[-1] for s in (first, second) if s]
+        assert any(sym in text for sym in named), (
+            f"the probe cites `{first}`"
+            + (f" / `{second}`" if second else "")
+            + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
+            "the line moved and the cite did not")
+    # (d) The probe's ENTRY-POINT sentence, the same (def, call) pair rule (a)
+    # pins in the README (#10021 review). Rule (c) covers only the probe's eight
+    # bare STEP cites, so this sentence — the one that names the entry point a
+    # reader reproduces from — was the ONLY cite in the bundle that nothing
+    # re-checked. It rotted exactly as rule (a)'s README twin did: the
+    # re-derivation moved the `def` half to 13236 and left `called at :11682`
+    # untouched, so `capstone_run.py:19` and `README.md:615` stated two
+    # different, both-wrong call sites for one fact, and both pin files stayed
+    # green. Two documents stating one fact is a claim that can only be pinned
+    # where each one states it.
+    #
+    # #4282 RETIRED the call-site half here: `capture_session` was the SDK's only
+    # caller of the helper and it is deleted, so the probe's sentence is the def
+    # alone. The pin is therefore (i) the def cite still resolves, (ii) no SDK call
+    # site exists, (iii) the probe still SAYS so — the three assertions together are
+    # strictly stronger than the pair was, because a re-added call-site cite now
+    # needs a call site that does not exist to be green.
+    probe_entry = re.search(r"`sdk\.py:(\d+)`", probe)
+    assert probe_entry, (
+        "the probe's entry-point cite moved or was reformatted; re-derive it, "
+        "do not drop the pin")
+    p_def = int(probe_entry.group(1))
+    assert sources["sdk"][p_def - 1].lstrip().startswith("def _extract_session_v2("), (
+        f"the probe cites the _extract_session_v2 def at sdk.py:{p_def}, which "
+        f"is {sources['sdk'][p_def - 1].strip()!r} — the line moved and the "
+        "cite did not")
+    assert not re.search(r"`sdk\.py:\d+`, called at `:\d+`", probe), (
+        "the probe cites a CALL SITE for _extract_session_v2 again; #4282 deleted "
+        "its only SDK caller (`capture_session`)")
+    assert not [n for n, line in enumerate(sources["sdk"], 1)
+                if "self._extract_session_v2(" in line], (
+        "_extract_session_v2 has an SDK call site again, so the probe's "
+        "call-site cite can and must be restored")
 
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():

@@ -2474,23 +2474,40 @@ def test_resolver_docker_fts_survives_retracted_crowd(_docker_sdk):
     from tortoise.sdk import _entity_name_id
 
     live_name = "widget variant zz"
-    variant_ids = [_entity_name_id("Object", f"widget variant {i}")
-                   for i in range(10)]
-    # Non-vacuity premise: with the live Object sorting BEHIND the crowd
-    # under the ``id ASC`` tie-break, a post-truncation filter (the pre-#4061
-    # shape) would return nothing — so this test cannot pass against the
-    # regression it guards.
-    assert _entity_name_id("Object", live_name) > max(variant_ids), (
-        "the fixture's premise: the live Object must sort BEHIND the crowd "
-        "under the id tie-break, or the crowd no longer fills the bound")
+    # Non-vacuity premise: the live Object must sort BEHIND the crowd. #10121's
+    # tie is recency-then-id DESC, so "behind" is decided by TIMESTAMP first —
+    # the live Object is therefore minted FIRST (oldest createdAt), and the ten
+    # crowd Objects after it. A previous draft kept the old id-only reasoning
+    # (searching for a name whose id sorted low) and was false: `create_entity`
+    # stamps `createdAt` (projection/entities.py), the live Object was created
+    # LAST, and so it ranked FIRST no matter what the id key said.
+    _docker_sdk.create_entity("object", live_name, objectKind="core:other",
+                              lme_question_id=qid, is_episodic=True)
     for i in range(10):
         name = f"widget variant {i}"
         _docker_sdk.create_entity("object", name, objectKind="core:other",
                                   lme_question_id=qid, is_episodic=True)
         proj.g.query("MATCH (o:Object {name:$n}) SET o.status='retracted'",
                      params={"n": name})
-    _docker_sdk.create_entity("object", live_name, objectKind="core:other",
-                              lme_question_id=qid, is_episodic=True)
+    # Assert the premise BEHAVIOURALLY — not by re-checking the filter that
+    # built the fixture: the crowd must fill the resolver's own bound ahead of
+    # the live Object, so a post-truncation filter would drop it.
+    from tortoise.search_engine import run_fts_query
+    # The probe query must TIE every candidate name ("widget variant" is in all
+    # eleven), otherwise the lexical SCORE decides and the tie never engages —
+    # querying the live name itself ranks it first on score alone, which is the
+    # trap the previous draft fell into.
+    crowd = run_fts_query(
+        proj.g, "widget variant", entity_type="object", limit=8,
+        excluded_statuses=())
+    crowd_ids = [oid for oid, _ in crowd]
+    assert len(crowd_ids) == 8, (
+        f"FIXTURE NOT REACHED: expected the bound to be filled, got {crowd}")
+    assert _entity_name_id("Object", live_name) not in [
+        str(oid) for oid in crowd_ids], (
+        "the fixture's premise: the live Object must sort BEHIND the crowd "
+        f"under the #10121 tie (recency-then-id DESC), or the crowd no longer "
+        f"fills the bound: {crowd_ids}")
     from tortoise.assembly import docker_resolver_port
     port = docker_resolver_port(_docker_sdk)
     got = port.fts_objects("widget", 8)

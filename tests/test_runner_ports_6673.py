@@ -530,14 +530,47 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
 }
 
 
+def _quoted_program(value: str) -> bool:
+    """True when `value` is SOURCE CODE, not a connection target (#10218).
+
+    A test can carry a url literal for a file it only PARSES: `test_derived_names`
+    builds a `("def test_x():\n" "    proj = _FP.from_uri(\"bolt://…6379\")\n")`
+    block, writes it to a tmp_path, and hands it to a census. The file never
+    dials it — the port is the thing under test. Looking for the port alone
+    cannot separate that from a real dial site, so ask the narrower question:
+    does the WHOLE constant parse as a python module that DEFINES something?
+
+    A dial site cannot answer yes by mistake: a URI carries `://`, which is not
+    a python expression, so `ast.parse` raises. This is deliberately not a
+    substring test (`"def" in value`) — a quoted program is required to DEFINE
+    a function, class or import, which an identifier merely spelling "def"
+    does not.
+
+    ⛔ SCOPE, stated so this predicate is not trusted further than it goes
+    (#10150 round-10 review): a fixture that WRITES such a program and then
+    EXECUTES it is out of scope — this predicate cannot tell that from a
+    fixture the census merely parses, and it answers "quoted program" for
+    both. No site in the tree does it today (the guard's own 18-entry allow
+    list was re-run: none goes inert); closing it needs the write/exec edge,
+    not a better string test.
+    """
+    try:
+        parsed = ast.parse(value)
+    except (SyntaxError, ValueError):
+        return False
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                          ast.Import, ast.ImportFrom))
+        for node in ast.walk(parsed)
+    )
+
+
 def _port_literals_in_code(path: Path) -> list[tuple[int, str]]:
     """Every port literal that is a CODE constant in `path`.
 
     Docstrings are documentation, and comments have no AST node at all, so
     neither counts — only a string or int constant the code actually uses.
     """
-    import ast
-
     src = path.read_text()
     tree = ast.parse(src)
     docstrings = set()
@@ -560,6 +593,8 @@ def _port_literals_in_code(path: Path) -> list[tuple[int, str]]:
                or (isinstance(val, int) and val in (6379, 16379)))
         if not has or id(node) in docstrings:
             continue
+        if isinstance(val, str) and _quoted_program(val):
+            continue  # a fixture that QUOTES source is not a file that dials
         line = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
         hits.append((node.lineno, line))
     return hits
@@ -599,6 +634,38 @@ def test_no_migrated_file_still_hardcodes_a_lane_port():
         + "\n".join(f"  {k}:\n    " + "\n    ".join(v)
                     for k, v in sorted(offenders.items()))
     )
+
+
+def test_a_quoted_program_is_not_a_dial_site(tmp_path):
+    """#10218: the fix, both directions — a false positive removed, and the
+    true positive it exists for still detected.
+
+    `test_derived_names.py` quotes test source (a small module whose text carries
+    a `bolt://…:6379` call) and writes it to a tmp file for a census to PARSE.
+    The guard read that as "this file dials the lane" and reded `test (i)` on
+    `main` for every PR. The mutation half is the point: the same literal as a
+    real constant must still red, or this fix would have bought green by
+    blinding the guard.
+    """
+    quoting = tmp_path / "test_quotes_source.py"
+    quoting.write_text(
+        'import _live_utils  # noqa: F401\n'
+        'QUOTED = (\n'
+        '    "def test_inner():\\n"\n'
+        '    "    proj = _FP.from_uri(\\"bolt://localhost:6379\\")\\n"\n'
+        ')\n',
+        encoding="utf-8")
+    assert _port_literals_in_code(quoting) == [], (
+        "a fixture that quotes a program must not count as code that dials")
+
+    dialling = tmp_path / "test_dials.py"
+    dialling.write_text(
+        'import _live_utils  # noqa: F401\n'
+        'PROJ = _FP.from_uri(\'bolt://localhost:6379\')\n',
+        encoding="utf-8")
+    hits = _port_literals_in_code(dialling)
+    assert [ln for ln, _ in hits] == [2], (
+        f"the same literal as a REAL constant must still red, got {hits}")
 
 
 def test_action_inputs_are_declared():

@@ -45,12 +45,26 @@ name: ci-queue-health
 # has NOT made the queue healthy, and a green run for a held queue is exactly the
 # silence this workflow exists to break. A flood this invocation CLEARED exits 0
 # and prints `was CI: FLOOD(...) -> cleared N of M`. `PR-STARVED` (no PR run
-# executing, a queued PR run past the age floor, and no trim-safe offender to
-# blame) is an `::warning` at exit 0: the state is real, and there is nothing the
-# governor may cancel. `PR-UNWITNESSED` (the feed was cut at its page cap, so the
-# oldest queued runs — the end the age clause needs — were never read) is also an
-# `::warning` at exit 0: it names what was NOT measured instead of inferring
-# health. Neither can block a merge, because a `schedule`-event run is
+# executing, a queued PR run past the age floor, and the dominance clause
+# declined — the queue's largest non-PR share is below the dominance floor, or
+# below the PR share) is an `::warning` at exit 0: the state is real, and the
+# reading reaches no trim. A trim-safe offender CAN be present when the queue is
+# merely PR-dominated, so its absence is NOT the bound.
+# `PR-BACKLOGGED` (PR CI IS executing, and a queued PR run has
+# waited past the wait budget — the shape that used to print `CI: OK`, measured
+# 2026-10-28 on #10237) is an `::warning` at exit 0 for the same reason, and the
+# bound there is the CLAUSE ORDER, not the trim scope: the governor's block runs
+# BELOW the `pr_running != 0` clause, so it is unreachable while any PR run is
+# executing (a trim-safe OFFENDER leading that same queue does license trims once
+# no PR run is executing — a queued PR run is never a candidate in any case).
+# That no-action statement is about the READING, never the invocation: the tool
+# cancels the pre-action flood and then reports a post-action re-read, so the arm
+# below reads `cancelled` from the payload and says which case it is.
+# `PR-UNWITNESSED` (the feed was cut at its page cap, so the
+# oldest queued runs — the end the age clause needs — were never read; or the
+# queued PR runs carry no readable `created_at`, so the wait cannot be measured at
+# all) is also an `::warning` at exit 0: it names what was NOT measured instead of
+# inferring health. Neither can block a merge, because a `schedule`-event run is
 # a NON-CODE event: the merge rail's own `NON_CODE_EVENTS` set excludes
 # `schedule|issues|issue_comment` from the merge decision, so a red scheduled run
 # never gates a PR.
@@ -88,7 +102,60 @@ jobs:
   # NOT a branch-protection required context, and a non-code event, so a red here
   # cannot block a merge — see the header.
   queue-health:
-    runs-on: ubuntu-latest
+    # ── HOSTED-ONLY PIN (deliberate, measured 2026-10-27) ─────────────
+    # `ubuntu-latest` is served by BOTH GitHub-hosted runners AND this repo's
+    # self-hosted pool — the pool advertises it WHILE the fallback is engaged
+    # (`scripts/ci_runner_gate.sh`; docs/ops/ci-runner-x64.md:25), so that is a
+    # CONDITIONAL property, not a standing one: measured again on 2026-10-27 with
+    # the fallback disengaged, none of the nine runners carried it. Measured over
+    # these four workflows' own SCHEDULED runs on 2026-10-27 (115 runs, 00:00-12:00
+    # UTC, jobs classified by `runner_name`): 83 created a job - 72 served by a
+    # GitHub-hosted runner, 11 by this repo's self-hosted runners (10 of them
+    # `pi-runner-*`, 1 `cmux`) - and 32 never got a runner at all.
+    # So the pin is not "escape a queue that is always the pool"; it removes
+    # the arm that FAILS.
+    #
+    # The pool arm does not starve — it HANGS, and it also fails fast. Of those
+    # 11 self-hosted jobs, TWO hung in `actions/checkout` and were killed at the
+    # job's OWN `timeout-minutes`, with the measuring step SKIPPED, which reads
+    # as a finished run that measured nothing; TWO failed in 9s/36s with the
+    # payload step actually run; SEVEN completed normally (10-46s). So the pin
+    # does not say "the pool never works" — it says the pool cannot be relied on
+    # to MEASURE. Both cited runs are `ci-queue-health`'s, whose timeout is
+    # `10`; this block is shared by four workflows with different timeouts
+    # (`repair` is `15`), so it names no single job's number as its own:
+    #     run 40456347720 → pi-runner-vm-2: checkout 8m40s, then cancelled
+    #     run 40451686065 → pi-runner-vm-4: checkout 4m41s, then cancelled
+    # (same day: 9/9 runners busy, 78 runs queued, and `ci-queue-health`
+    # completed 1 of its last 8 scheduled runs — 6 cancelled, 1 pending.)
+    #
+    # ⛔ THE PIN IS NOT A COMPLETE FIX, and this comment must not read as one.
+    # Hosted is queued too: 18 jobs were waiting on `ubuntu-24.04` with a max
+    # wait of 56m, and one `ci-queue-health` job waited 65 minutes for a hosted
+    # runner and then ran 15 seconds. GitHub keeps only ONE pending run per
+    # concurrency group, so while a wait exceeds this workflow's cadence each
+    # tick still cancels the previous PENDING tick. The pin removes the arm that
+    # hangs and usually serves in minutes; the cadence/concurrency question stays
+    # open and is tracked separately.
+    #
+    # `ubuntu-24.04` is HOSTED-ONLY **as measured 2026-10-27 with the fallback
+    # engaged**: all nine runners advertised `ubuntu-latest` and none advertised
+    # `ubuntu-24.04` (with the fallback disengaged, none carries either). The
+    # rule is recorded (docs/ops/ci-runner-x64.md:25-26) and honoured by the
+    # installer — `resolve_labels()` can emit only `self-hosted-x64` or
+    # `self-hosted-x64,ubuntu-latest` (tools/install-ci-runner-x64.sh), asserted
+    # at `tests/test_ci_runner_x64_install.py:181`, and the re-registration path
+    # strips a version-pinned hosted label (`_preserve_labels`,
+    # tools/runner_autoscale.py).
+    # ⛔ BUT the pin is OBSERVED, NOT GUARANTEED: no test in this repo reads the
+    # LIVE label set, and the pool HAS served this very label — 2026-10-24's
+    # `finding-provenance` jobs ran on `pi-runner-vm-*` carrying `ubuntu-24.04`
+    # (tests/test_runner_tool_contract.py:5-12), drift the gate's text-reading arm
+    # could not see. Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a
+    # runner's labels are re-cut: if the pool ever claims it again, this pin
+    # silently stops pinning and the failure mode is exactly the one it removes.
+    # Public repo, so hosted minutes are free: this spends nothing.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -152,8 +219,8 @@ jobs:
           # only inside a summary nobody opens. The tool's exit code already follows
           # its REPORTED verdict (1 = a FLOOD still stands, 2 = could not measure),
           # so `rc` is a payload-derived alarm; the verdict is read as well for the
-          # PR-STARVED / PR-UNWITNESSED warnings, which are real states with no
-          # action available.
+          # PR-STARVED / PR-BACKLOGGED / PR-UNWITNESSED warnings, which are real
+          # states with no action available.
           #
           # ⛔ THE STATE LINE GOES IN THE MESSAGE, NEVER IN A `title=` PROPERTY.
           # GitHub parses a workflow command's property section as `key=value`
@@ -165,14 +232,73 @@ jobs:
           # `::error::<message>`; do not try to escape the commas (P2-1 of the
           # #9118 review).
           verdict="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('verdict','UNKNOWN'))" 2>/dev/null || echo UNKNOWN)"
+          cancelled_count="$(python3 -c "import json; print(len(json.load(open('/tmp/ci-queue-health.json')).get('cancelled') or []))" 2>/dev/null || echo 0)"
+          cancelled_count="${cancelled_count:-0}"
+          # "Nothing was cancelled" is a claim about THIS INVOCATION, and a reading
+          # cannot support it: `classify_queue` is pure, and the tool cancels the
+          # PRE-action FLOOD candidates and then reports a POST-action re-read — so
+          # `cancelled` can be non-empty beside a no-action verdict in the very same
+          # payload (#10264 review P3). Read it, and say what happened.
+          #
+          # BOTH no-action arms need this, not just `PR-BACKLOGGED` (#10264 review
+          # P2): `PR-STARVED` is a legal POST-action verdict too. The runs this
+          # invocation TRIMMED leave the queued feed while the ones it KEPT remain,
+          # so the offender drops to the kept share — which can sit BELOW the PR
+          # share, letting the `offender_queued < global_max` clause decline — and
+          # the re-read is `PR-STARVED` while `cancelled` still names the trimmed
+          # runs. The same run page then prints `cleared N of M` above a line
+          # claiming nothing was cancelled.
+          if [ "$cancelled_count" -gt 0 ]; then
+            cancel_lead="This reading came AFTER this run cancelled ${cancelled_count} pre-action FLOOD candidate(s) (see the transition line above)"
+          else
+            cancel_lead="This run cancelled nothing"
+          fi
           if [ "$rc" -eq 1 ]; then
             echo "::error::${state} — PR CI is NOT slow, it is NOT RUNNING, and it still is after this run's cancellations. See the step summary."
           elif [ "$rc" -eq 2 ]; then
             echo "::warning::CI: UNKNOWN — the queue could not be measured, so nothing was changed and nothing is certified healthy."
           elif [ "$verdict" = "PR-STARVED" ]; then
-            echo "::warning::${state} — PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. No trim-safe offender can be blamed, so there is nothing the governor may cancel."
+            # The retired wording blamed the ABSENCE of a trim-safe offender and
+            # claimed the governor had nothing it could cancel. Both were wrong on
+            # a REACHABLE reading: the payload can carry trims this run made, and
+            # PR-STARVED is also reached through `offender_queued < global_max`,
+            # where a trim-safe offender IS present and blameable in principle (the
+            # queue is merely PR-dominated). Name what the payload says; the reason
+            # line inside the tool names the clause that actually declined.
+            echo "::warning::${state} — PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. ${cancel_lead}, and this state reaches no trim — its reason line names the clause that declined to act. The lever is capacity."
+          elif [ "$verdict" = "PR-BACKLOGGED" ]; then
+            # #10237 ask 3 — "the job must fail loudly rather than hang". A queue
+            # that IS serving PR work while the backlog behind it waits past the
+            # measured budget is the shape that used to read `CI: OK` (measured
+            # 2026-10-28T17:47Z: pr_running=2, pr_queued=32, oldest 527 min).
+            # Nothing here is cancellable — and the bound is the CLAUSE ORDER, not
+            # the trim scope: this state requires `pr_running > 0`, and the
+            # governor's block sits BELOW the `pr_running != 0` clause, so it is
+            # unreachable from here. (Quoting the trim scope as the bound would be
+            # wrong: a trim-safe offender leading this same queue DOES license
+            # trims once no PR run is executing.) The alarm is this annotation.
+            # ... and the cancelled/none clause is read off the PAYLOAD, never
+            # asserted: `cancelled` non-empty in a PR-BACKLOGGED reading means this
+            # run trimmed the pre-action flood, so claiming nothing was cancelled
+            # here would contradict the transition line printed three steps above.
+            # `cancel_lead` is that payload-derived clause, shared with the
+            # PR-STARVED arm for the same reason.
+            # ⛔ THE BACKTICKS ARE ESCAPED, and that is load-bearing: this string is
+            # DOUBLE-QUOTED, where a BARE backtick pair is still COMMAND
+            # SUBSTITUTION — bash runs the text between them and substitutes its
+            # stdout (bash manual §3.5.4: "the first backquote not preceded by a
+            # backslash terminates the command substitution"). Written unescaped,
+            # `pr_running > 0` rendered as "it requires , and the governor's block
+            # sits below that clause" — the bound this arm exists to name, gone from
+            # the alarm — executed a non-existent command into the step log, and
+            # created a stray file named `0` from the `> 0` redirect. `set -e` does
+            # not catch it (the substitution's status never reaches `echo`), so the
+            # step stays green (#10264 review P1, measured; the repo's own
+            # `::error::` diagnostics in ci-timing.yml escape the same way, and
+            # tests/test_ci_queue_health.py pins the class over EVERY annotation).
+            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires \`pr_running > 0\`, and the governor's block sits below that clause, so THIS READING does not reach the governor. The lever is capacity, not the governor."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
-            echo "::warning::${state} — the queued feed was cut at the page cap while no PR-event run is executing, so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; raise --max-pages to read further back."
+            echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
           fi
-          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED or PR-UNWITNESSED (warned); 1 = FLOOD stands; 2 = could not measure)"
+          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED, PR-BACKLOGGED or PR-UNWITNESSED (five exit-0 shapes, all but OK and cleared warned); 1 = FLOOD stands; 2 = could not measure)"
           exit "$rc"

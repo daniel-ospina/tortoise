@@ -230,6 +230,22 @@ _PRESENT_QUERY = "what production database do we use for the billing ledger now?
 _FUTURE_OUTRANKING = (
     "the production database billing ledger we use now is Postgres 17")
 
+#: The ended claim's OWN text, in the same short form that wins the BM25
+#: comparison — so the ended claim leads the OFF baseline **on SCORE**.
+#:
+#: Why this exists (#10121). These tests need a baseline where the ENDED claim
+#: is served ahead of the current one; that used to be a side effect of the
+#: relevance TIE plus #3019's ``id ASC`` (creation order: ended, current,
+#: future). #10121 replaced that tie with recency-then-id DESC, so on the
+#: created-in-order fixture the rule itself now puts the ended claim LAST and
+#: every "the selection demoted it below the current claim" assertion goes
+#: vacuous — measured at that head: ``off == [future, current, ended]`` and
+#: ``off.index(ended) == on.index(ended) == 2``. Leading on SCORE instead makes
+#: the premise independent of the tie policy, so this file cannot silently lose
+#: its subject again when the tie changes.
+_ENDED_OUTRANKING = (
+    "the production database billing ledger we use now is Postgres 14")
+
 
 @contextmanager
 def _ku_sdk(future_text: str = _FUTURE):
@@ -238,6 +254,10 @@ def _ku_sdk(future_text: str = _FUTURE):
     Windows are stamped with the SAME properties the real writers write
     (`supersede_point`/`invalidate_point` stamp `validFrom`/`validTo`), so the
     read path sees a production-shaped row — not a test-only field.
+
+    The ENDED claim is written in the short form that outranks the others on
+    SCORE (``_ENDED_OUTRANKING``) so that relevance — not the tie policy —
+    decides that it leads the OFF baseline; see that constant's note.
     """
     uri = (os.environ.get(
         "TORTOISE_DB_URI",  # empty-uri-default-ok: #2815 skip declared
@@ -248,7 +268,8 @@ def _ku_sdk(future_text: str = _FUTURE):
     sdk = TortoiseSDK(namespace="test_ku8487_" + uuid.uuid4().hex[:8])
     try:
         ids = {}
-        for name, text in (("ended", _ENDED), ("current", _CURRENT),
+        for name, text in (("ended", _ENDED_OUTRANKING),
+                           ("current", _CURRENT),
                            ("future", future_text)):
             ids[name] = sdk.create_point("statement", text, status="live")["id"]
         g = sdk._get_proj().g

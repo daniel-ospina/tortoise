@@ -135,6 +135,8 @@ def _run_step(
     gh_stdout: str = "",
     gh_rc: int = 0,
     watch_rc: int = 0,
+    api_stdout: str = "",
+    api_rc: int = 0,
     env_extra: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Execute the named step's run block with a stubbed ``gh`` on PATH.
@@ -145,6 +147,14 @@ def _run_step(
     ``watch_rc`` is the exit status of ``gh run watch`` specifically, so a test
     can hold the dispatch SUCCEEDING while the flip FAILS — the #3627 P0 state,
     where the POST is accepted and the run is cancelled before the app flips.
+
+    ``api_stdout`` / ``api_rc`` answer the step's READ of the run's own state
+    (``gh api repos/<slug>/actions/runs/<id> --jq '[.status, (.conclusion //
+    "-")] | @tsv'``). That read exists because `gh run watch` exits non-zero for
+    a failed POLL as well as for a failed run, so the two arms must be
+    distinguishable here: a test that could not answer the read would pin the
+    old behaviour whatever the code did. ``api_rc`` non-zero models the API
+    being unreadable.
     """
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
@@ -155,6 +165,14 @@ def _run_step(
         f"printf '%s\\n' \"$@\" >> {shlex.quote(str(argv_log))}\n"
         'if [ "$1" = "run" ]; then\n'
         f"  exit {watch_rc}\n"
+        "fi\n"
+        'if [ "$1" = "api" ]; then\n'
+        '  case " $* " in\n'
+        '    *"/actions/runs/"*)\n'
+        f"      printf '%s\\n' {shlex.quote(api_stdout)}\n"
+        f"      exit {api_rc}\n"
+        "      ;;\n"
+        "  esac\n"
         "fi\n"
         f"printf '%s\\n' {shlex.quote(gh_stdout)}\n"
         f"exit {gh_rc}\n",
@@ -449,20 +467,174 @@ def test_a_dispatch_whose_flip_fails_is_refused(tmp_path: Path) -> None:
     State that fails it: the POST is ACCEPTED (`gh` exits 0 with a run id in the
     body) but the dispatched run does not reach success. That is reachable, not
     hypothetical — `deploy-hosted.yml` triggers on `push: branches: [main]` for
-    `tortoise/**` with `concurrency.cancel-in-progress: true`, so an ordinary
-    merge cancels an in-flight co-move flip. Without the watch the step reported
-    a closed window on an accepted POST, leaving the schema applied and the app
-    stale.
+    `tortoise/**` and serialises EVERY run in one constant `concurrency` group,
+    so a merge landing while the co-move flip is still PENDING supersedes it (a
+    shared group holds one pending run; `cancel-in-progress` is `false` there
+    now, which stops a RUNNING deploy being cancelled but cannot save a pending
+    one). Without the watch the step reported a closed window on an accepted
+    POST, leaving the schema applied and the app stale.
     """
     proc = _run_step(
         _DISPATCH_STEP, tmp_path,
         gh_stdout='{"workflow_run_id": 4242}', gh_rc=0, watch_rc=1,
+        # A REAL failure: the run reached a terminal state and did not succeed.
+        # The step reads this before claiming anything, because the same non-zero
+        # exit also covers a failed poll (see the two tests below).
+        api_stdout="completed\tfailure",
     )
     assert proc.returncode != 0, (
         "a dispatch whose run never succeeded exited 0 — the schema is applied "
         f"and the app is stale while the window reads closed (#3627)\n{proc.stdout}"
     )
     assert "did NOT flip" in proc.stdout, proc.stdout
+
+
+def test_a_watch_that_exhausts_its_bound_reports_unknown(tmp_path: Path) -> None:
+    """Exhausting the wait is NOT evidence the flip failed (#10155).
+
+    The wait is runner-QUEUE-dominated and queue latency is not ours to bound —
+    measured on a SUCCESSFUL deploy-hosted run (40458809781): 167.3 min wall
+    clock against 16.8 min of job execution. So the step has TWO non-zero arms,
+    and only one of them may claim a failure:
+
+      * `timeout` expired (124) → the run may still be queued or mid-deploy.
+        Saying "did NOT flip" here is a false claim, and its remediation
+        (re-dispatch / flip by hand) is now actively wrong: both queue behind
+        the run being given up on and supersede its pending slot.
+      * any other non-zero → a terminal run that did not succeed.
+
+    This test exists because deleting the 124 arm — the whole distinction — kept
+    every other test green: the sibling above asserts only a non-zero exit. So
+    the assertions below pin the arm's OWN text and, just as importantly, assert
+    the FALL-THROUGH message is absent: without that, deleting the arm would
+    stay green, because the non-terminal arm of the `-ne 0` branch also exits
+    non-zero, also says UNKNOWN, also says "Do NOT re-dispatch", and also omits
+    "did not reach success". The two messages are told apart by their own
+    sentences, and they must not be confused: the fall-through blames "the watch
+    most likely lost the API on one of its polls", which would send an operator
+    whose 330-minute window expired hunting a network error instead of learning
+    that the bound expired.
+    """
+    proc = _run_step(
+        _DISPATCH_STEP, tmp_path,
+        gh_stdout='{"workflow_run_id": 4242}', gh_rc=0, watch_rc=124,
+    )
+    assert proc.returncode != 0, (
+        "an exhausted watch exited 0 — that claims a closed window the RUN has "
+        f"not closed (#3627)\n{proc.stdout}"
+    )
+    assert "UNKNOWN" in proc.stdout, (
+        "an exhausted wait did not say the outcome is UNKNOWN — the operator is "
+        f"left to infer a failure that was never observed\n{proc.stdout}"
+    )
+    assert "did not reach success" not in proc.stdout, (
+        "an exhausted wait claimed the run 'did not reach success' — it never "
+        f"reached a terminal state, so nothing about the flip is known\n{proc.stdout}"
+    )
+    assert "Do NOT re-dispatch" in proc.stdout, (
+        "the exhaustion message must forbid the remediations that are wrong for "
+        f"a merely-queued run\n{proc.stdout}"
+    )
+    # The arm's own text — the whole point of the arm, and nothing else produces
+    # it. Deleting the `watch_rc -eq 124` branch previously left this test GREEN
+    # because every assertion above is also satisfied by the non-terminal arm of
+    # the `-ne 0` branch; these two are what tell the exhaustion verdict apart
+    # from a suspected poll error (verified by mutation: delete the arm and this
+    # test reds).
+    assert "did not FINISH within the 330-minute wait" in proc.stdout, (
+        "an exhausted wait must say the WAIT BOUND expired — the message an "
+        "operator reads to know the run may still be queued, not broken\n"
+        f"{proc.stdout}"
+    )
+    assert "lost the API" not in proc.stdout, (
+        "an exhausted wait was reported as a suspected poll/API error — with the "
+        "124 arm deleted a 124 falls through to the non-terminal arm, so this "
+        "assertion is what makes its removal fail instead of pass\n"
+        f"{proc.stdout}"
+    )
+
+
+def test_a_failed_poll_is_not_reported_as_a_failed_flip(tmp_path: Path) -> None:
+    """A non-zero `gh run watch` is not evidence the flip failed (#10155 review).
+
+    The CLI returns the same non-zero exit in two unrelated cases: the run
+    reached a non-success CONCLUSION, or ANY poll failed — it calls `GetRun`
+    every 3 s and returns `failed to get run: %w` on a transport/5xx/auth error.
+    Over a 330-minute window that is ~6,600 polls, so a transient error is a
+    realistic event, and before this fix the step asserted a definite product
+    conclusion on it ("the app did NOT flip") plus the two remediations the 124
+    arm exists to forbid (re-dispatch / flip by hand), both of which queue behind
+    the run and supersede its pending slot.
+
+    State that fails it: the step claims a failure without reading the run's own
+    `status`/`conclusion`. This test models the poll-failure shape — the watch
+    exits non-zero while the API says the run is still running.
+    """
+    proc = _run_step(
+        _DISPATCH_STEP, tmp_path,
+        gh_stdout='{"workflow_run_id": 4242}', gh_rc=0, watch_rc=1,
+        api_stdout="in_progress\t-",
+    )
+    assert proc.returncode != 0, (
+        "a non-terminal run exited 0 — an unobserved flip must fail closed\n"
+        f"{proc.stdout}"
+    )
+    assert "did NOT flip" not in proc.stdout, (
+        "the step claimed the app did NOT flip while the run was still running — "
+        f"the exit code it read was a poll error, not a conclusion\n{proc.stdout}"
+    )
+    assert "UNKNOWN" in proc.stdout, (
+        f"the non-terminal case must name the outcome as UNKNOWN\n{proc.stdout}"
+    )
+    assert "Do NOT re-dispatch" in proc.stdout, (
+        "the non-terminal case must forbid the remediations that are wrong while "
+        f"the run may still be live\n{proc.stdout}"
+    )
+
+
+def test_an_unreadable_run_state_is_not_reported_as_a_failed_flip(
+    tmp_path: Path,
+) -> None:
+    """The API read itself can fail — that is `I do not know`, never `it failed`.
+
+    A 5xx/rate-limit/auth error on the state read leaves nothing observed. The
+    step must fail closed with the UNKNOWN arm rather than falling through to
+    "the app did NOT flip", which is a conclusion it has no evidence for.
+    """
+    proc = _run_step(
+        _DISPATCH_STEP, tmp_path,
+        gh_stdout='{"workflow_run_id": 4242}', gh_rc=0, watch_rc=1,
+        api_stdout="", api_rc=1,
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert "did NOT flip" not in proc.stdout, (
+        "an unreadable run state was reported as a failed flip — that is a "
+        f"conclusion the step never observed\n{proc.stdout}"
+    )
+    assert "UNKNOWN" in proc.stdout, proc.stdout
+
+
+def test_a_transient_watch_error_on_a_successful_run_is_not_a_failure(
+    tmp_path: Path,
+) -> None:
+    """A poll error AFTER the run succeeded must not send an operator to re-deploy.
+
+    The run's own conclusion is what `--exit-status` reads, so it is the stronger
+    signal: `completed` + `success` with a non-zero watch exit is a watch that
+    lost the API, not a failed flip. Reporting failure here would queue (or
+    hand-flip) a deploy that already landed.
+    """
+    proc = _run_step(
+        _DISPATCH_STEP, tmp_path,
+        gh_stdout='{"workflow_run_id": 4242}', gh_rc=0, watch_rc=1,
+        api_stdout="completed\tsuccess",
+    )
+    assert proc.returncode == 0, (
+        "a run the API reports as completed/success was failed on a watch poll "
+        f"error — the flip DID complete\n{proc.stdout}"
+    )
+    assert "did NOT flip" not in proc.stdout, proc.stdout
+    assert "app flip completed" in proc.stdout, proc.stdout
 
 
 def test_the_flip_is_awaited_and_the_request_asks_for_the_run_id(

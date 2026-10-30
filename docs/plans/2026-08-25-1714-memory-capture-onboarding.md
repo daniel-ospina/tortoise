@@ -826,3 +826,29 @@ summarised in `docs/ONTOLOGY.md` §4.8:
 explicitly (`--db`, or `--uri` with `TORTOISE_DB_URI`); without a graph it REFUSES TO RUN (non-zero
 exit, nothing on stdout) rather than printing a zero that reads like a clean graph. Each verdict's
 `where_recorded` field points at §4.8 and at this amendment.
+
+### Amendment to the amendment (`#10000`, 2026-10-29) — a fourth verdict, because the graph may not be the turns' store
+
+The three verdicts above all assume the graph **holds** the turns it compares against. Since `#10011`
+it may not: `_write_capture_turns` stores a turn's text and vector in the **record** and writes **no
+turn node** whenever the record can hold them (`#10000`'s §9.1/D1 placement). On an armed
+deployment `s.turn_count` is truth about Postgres, so a session with **zero** turn nodes is
+**ambiguous** — a correctly-stored armed capture, or a genuine loss — and no graph query separates
+the two.
+
+**Decision: `turns_record_held`, `retro_quantifiable: False`.** The audit reports those sessions in
+their own bucket (ids included, so the record can be asked) and keeps only the **partial** shortfall
+(`0 < stored turns < turn_count`, which the graph *does* witness) in class (a). Counting them as
+short would put every armed capture into the class a retrofit/backfill acts on, which reads as a
+mandate to write the transcript back into the graph — the placement D1 forbids. **Falsification:** a
+per-session store marker on `:Session` (the per-row `cache_tier` the record already carries,
+`#10070`/`#10017` step 7) would separate the arms graph-side and let this bucket split into its true
+shortfall and its record-held half.
+
+**Why a `turns_in_record` input rather than an assumption.** The bucket is gated on the capability
+predicate the capture writer itself decides, read from the process configuration when the caller
+does not supply it, and accepted explicitly so a deployment (and every test) states the store rather
+than inheriting an environment variable. The proxy may answer `True` slightly too eagerly; the
+consequence is that the audit *declines to print a finding it could not measure*, which is this
+report's documented posture. The opposite error is the one that prints a false shortfall for every
+armed capture.

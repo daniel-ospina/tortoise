@@ -61,7 +61,8 @@
 #   threshold) and keep recording every CONSECUTIVE failure of the SAME STEP.
 #   A key that embedded `${{ github.run_id }}` would file a new issue per run
 #   (the #2706 defect: 59 near-identical issues); a key that held a counter
-#   would be reset by `concurrency: cancel-in-progress: true`, and a cancelled
+#   would be reset by a `concurrency` that cancels in progress (`deploy-hosted`
+#   did until #10155, which set `cancel-in-progress: false`), and a cancelled
 #   run produces no failure to report. So the key names the (workflow, job,
 #   step) and nothing that varies per occurrence: the issue thread IS the
 #   ledger, and its `Recurrence #N` count is the escalation signal.

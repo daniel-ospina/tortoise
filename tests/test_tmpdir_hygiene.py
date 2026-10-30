@@ -13,6 +13,7 @@ import re
 import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -395,6 +396,171 @@ def test_sweep_reclaims_a_dead_marked_root_and_keeps_a_live_one():
         shutil.rmtree(live, ignore_errors=True)
 
 
+# ── #1005 (epic #1647 E2E-7): the RUN-scoped root registry ─────────────────
+# The CI orphan gate may only call a residue a leak if it can attribute the
+# server to THIS run, and the attribution key is the run's session temp roots.
+# Under `pytest -n` a run owns one root per worker process, and the hygiene
+# report is written by whichever worker exits last — so every process appends
+# its root to a run-keyed registry at install time, before it can spawn a
+# server. These tests pin that contract; without it the last writer would see
+# only its own root and a sibling worker's leak would read as foreign.
+
+
+def test_run_roots_records_the_installed_root_under_the_run_uid():
+    from tests._tmpdir_hygiene import (
+        run_registry_path,
+        run_roots,
+        run_uid,
+    )
+
+    assert run_uid(), "a run id is always defined (never an empty key)"
+    path = run_registry_path()
+    assert path.endswith(run_uid())
+    root = session_tmpdir()
+    assert root is not None
+    # #10255 review (P3): read the REGISTRY, not `run_roots()`. `run_roots()`
+    # appends the in-memory `_SESSION_TMPDIR` unconditionally (`if current and
+    # current not in roots`), so `root in run_roots()` passes even if
+    # `record_run_root` were a no-op — the assertion did not test the write path
+    # it names. The write path is what makes a SIBLING worker's root visible to
+    # whichever process exits last and writes the report.
+    recorded = [
+        line.strip()
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert os.path.realpath(root) in recorded, (
+        "install time must RECORD the session root in the run registry — it is "
+        "the attribution key the orphan gate binds to, and a sibling worker's "
+        "root reaches the last process to exit only through this file (#1005)"
+    )
+    assert root in run_roots(), (
+        "the installed session root must also be readable as one of this run's "
+        "roots, which is how the sweep consumes the registry (#1005)"
+    )
+
+
+def test_record_run_root_actually_writes_the_registry(tmp_path, monkeypatch):
+    """#10255 review (P3): the WRITE path, proven discriminating.
+
+    `run_roots()` appends the in-memory `_SESSION_TMPDIR` unconditionally, so
+    any assertion of the shape `root in run_roots()` holds even when nothing was
+    ever written. This drives `record_run_root` against a registry path of its
+    own and reads the FILE, so making the write a no-op reds here — which is the
+    failure mode that would silently de-attributed every sibling worker's root
+    (a sibling's root reaches the process that writes the report ONLY through
+    this file).
+    """
+    from tests import _tmpdir_hygiene as h
+
+    registry = tmp_path / "run-registry.txt"
+    monkeypatch.setattr(h, "run_registry_path", lambda: str(registry))
+    fresh = tmp_path / "session-root"
+    fresh.mkdir()
+    h.record_run_root(str(fresh))
+    lines = [ln.strip() for ln in registry.read_text(encoding="utf-8").splitlines()
+             if ln.strip()]
+    assert os.path.realpath(str(fresh)) in lines, (
+        "record_run_root must APPEND the realpath of the root to the run "
+        "registry — this is the sibling-worker attribution key (#1005)"
+    )
+
+
+def test_run_roots_is_run_scoped_not_a_shared_pile(tmp_path, monkeypatch):
+    """A root recorded by ANOTHER run must never be attributed to this one.
+
+    Two concurrent pytest runs on one host each own their roots; if the
+    registry were global, the gate would attribute a neighbour's server to us
+    and red a green run — the exact defect the registry exists to prevent.
+    """
+    import tests._tmpdir_hygiene as hygiene
+
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR", str(tmp_path))
+    mine = str(tmp_path / "tt_mine")
+    theirs = str(tmp_path / "tt_theirs")
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-aaa")
+    hygiene.record_run_root(mine)
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-bbb")
+    hygiene.record_run_root(theirs)
+
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-aaa")
+    as_aaa = hygiene.run_roots()
+    assert mine in as_aaa, "run-aaa's own root must be visible to it"
+    assert theirs not in as_aaa, (
+        "another run's root is NOT ours to attribute — it is the population "
+        "the gate must read as foreign (#1005)"
+    )
+    assert session_tmpdir() in as_aaa, (
+        "the live session root is always included, by design: a failed "
+        "registry write must not make this run unable to attribute its OWN "
+        "servers (that would silently loosen the gate)"
+    )
+
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-bbb")
+    as_bbb = hygiene.run_roots()
+    assert theirs in as_bbb and mine not in as_bbb, (
+        "the registry is keyed per run in BOTH directions — neither run may "
+        "see the other's roots"
+    )
+
+
+def test_record_run_root_is_additive_and_never_raises(tmp_path, monkeypatch,
+                                                      caplog):
+    """Every worker's root lands in one file; concurrent appends must not lose
+    a sibling's root (the O_APPEND contract), and a write failure must not fail
+    the suite.
+
+    #10255 review B: a write failure does NOT "degrade to the gate's
+    unattributable path" — that was this test's claim and it was false.
+    `run_roots()` re-appends the in-memory root unconditionally, so `own_roots`
+    in the report is never empty from this cause and the gate takes the
+    ATTRIBUTED path with a PARTIAL root set. The assertions below pin the TRUE
+    contract: the failure is swallowed, it is recorded where it happened, and
+    the process's own root is still reported.
+    """
+    import logging
+
+    import tests._tmpdir_hygiene as hygiene
+
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR", str(tmp_path))
+    monkeypatch.setenv("PYTEST_XDIST_TESTRUNUID", "run-ccc")
+    hygiene.record_run_root(str(tmp_path / "tt_gw0"))
+    hygiene.record_run_root(str(tmp_path / "tt_gw1"))
+    roots = hygiene.run_roots()
+    assert str(tmp_path / "tt_gw0") in roots
+    assert str(tmp_path / "tt_gw1") in roots, (
+        "the second worker's append must not clobber the first's — both roots "
+        "are needed to attribute the whole run"
+    )
+
+    # A directory that cannot be created is an OSError, not a suite failure.
+    monkeypatch.setattr(hygiene, "_RUN_REGISTRY_DIR",
+                        str(tmp_path / "tt_blocker" / "sub"))
+    (tmp_path / "tt_blocker").write_text("not a directory")
+    with caplog.at_level(logging.WARNING, logger=hygiene.logger.name):
+        hygiene.record_run_root(str(tmp_path / "tt_gw2"))  # must not raise
+    assert any("could not record" in rec.getMessage()
+               for rec in caplog.records), (
+        "a swallowed registry write must be RECORDED where it happened — it "
+        "is the only trace, because nothing in the report or the gate can see "
+        "it (#10255 review B)"
+    )
+
+    # The corrected claim, pinned: a failed append does not empty `own_roots`.
+    monkeypatch.setattr(hygiene, "_SESSION_TMPDIR", str(tmp_path / "tt_gw3"))
+    roots = hygiene.run_roots()
+    assert str(tmp_path / "tt_gw3") in roots, (
+        "a failed append does NOT make `own_roots` empty: the in-memory root "
+        "is re-appended, so the gate takes the ATTRIBUTED path with a PARTIAL "
+        "root set and never reports `unattributable` from this cause — making "
+        "this test's earlier claim true would require changing the GATE too"
+    )
+    assert str(tmp_path / "tt_gw2") not in roots, (
+        "the failed append really did not land — otherwise the assertion above "
+        "would be vacuous"
+    )
+
+
 def test_host_coordination_is_host_scoped_and_lock_is_sweep_scoped():
     """The two surfaces #3752 must keep distinct.
 
@@ -517,18 +683,56 @@ def _boom_with(err: int):
     return _boom
 
 
+@contextmanager
+def _patch_rmtree(err: int):
+    """Make the rmtree `TemporaryDirectory.cleanup` ACTUALLY calls raise `err`.
+
+    `tempfile` resolves rmtree ONE OF TWO WAYS, and which one depends on the
+    interpreter PATCH level — so patching `shutil.rmtree` alone is a mutation that
+    reaches the cleanup path on some stdlibs and not on others. Read from the primary
+    source on both:
+
+    * CPython **3.12.7+ / 3.12.15** — `_rmtree` calls `_shutil.rmtree(name, onexc=…)`, a
+      MODULE-ATTRIBUTE lookup at call time, so a `shutil.rmtree` patch reaches it
+      (verified against `Lib/tempfile.py` at tag `v3.12.15`).
+    * CPython **3.12.0–3.12.6** (measured on this host's 3.12.3) — the same method calls
+      the module-level `_rmtree(name, …)`, which `tempfile` bound as
+      `_rmtree = _shutil.rmtree` at IMPORT. A `shutil.rmtree` patch never reaches it:
+      the real rmtree runs, the directory is really deleted, and these tests report a
+      false red on a supported interpreter (measured: the stub was never called and
+      `assert os.path.isdir(victim)` failed with "the directory is left for the
+      reaper").
+
+    Patching BOTH makes the mutation reach on every supported 3.12.x, so the pins below
+    assert the product's behaviour rather than the host's stdlib vintage. Restores every
+    attribute it replaced, and only where the stub is still installed.
+    """
+    boom = _boom_with(err)
+    originals: list[tuple[str, object]] = []
+    for attr in ("rmtree", "_rmtree"):
+        for owner in (shutil, tempfile):
+            if hasattr(owner, attr):
+                originals.append((attr, getattr(owner, attr)))
+                setattr(owner, attr, boom)
+    try:
+        yield boom
+    finally:
+        for attr, original in reversed(originals):
+            for owner in (shutil, tempfile):
+                if getattr(owner, attr, None) is boom:
+                    setattr(owner, attr, original)
+
+
 def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
     #7735: a live server re-creates an entry during rmtree's final rmdir.
-    # `shutil.rmtree` is patched GLOBALLY, so it is restored in a `finally`
-    # BEFORE the test returns — otherwise pytest's own `tmp_path` teardown would
-    # hit the stub and ERROR the test that just passed.
+    # The stub is patched GLOBALLY — through both spellings the stdlib uses to reach it
+    # (`_patch_rmtree`) — so it is restored BEFORE the test returns; otherwise pytest's
+    # own `tmp_path` teardown would hit the stub and ERROR the test that just passed.
     import json
     import tempfile
 
     victim = None
-    real = shutil.rmtree
-    shutil.rmtree = _boom_with(errno.ENOTEMPTY)
-    try:
+    with _patch_rmtree(errno.ENOTEMPTY):
         d = tempfile.TemporaryDirectory(dir=str(tmp_path))
         victim = d.name
         with caplog.at_level(logging.WARNING):  # must NOT raise
@@ -547,12 +751,10 @@ def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
         assert victim in [
             e["path"] for e in payload["tolerated_cleanup_leaks"]], (
             "the CI-visible artifact must name the tolerated directory")
-    finally:
-        shutil.rmtree = real
-        if victim is not None:
-            # This test is a deliberate probe; keep it out of the session
-            # artifact, or every CI run would report a synthetic leak.
-            _discard_tolerated_leaks([victim])
+    if victim is not None:
+        # This test is a deliberate probe; keep it out of the session
+        # artifact, or every CI run would report a synthetic leak.
+        _discard_tolerated_leaks([victim])
 
 
 def test_write_tolerated_cleanup_report_is_silent_when_nothing_leaked(tmp_path):
@@ -792,21 +994,228 @@ def test_suite_jobs_surface_the_tolerated_leak():
         f"(#7735 review F1): {missing}")
 
 
+# The pytest legs whose log is resolved PER JOB from `$RUNNER_TEMP`.
+#
+# `#10028` migrated `test`; `#10280` names this leg (and five others) as still
+# writing the host-global `/tmp/pytest.log`, which a co-tenant job on the same
+# self-hosted host truncates mid-run. It bit `test-concurrency-falkor` on run
+# 40884374618 (job 123539933295): its own `tail` and `pytest-attribution.sh` read
+# `tests/test_backfill_sources.py` / `tests/test_billing.py` — files that leg
+# never runs — and it reported "test leg INCOMPLETE — no pytest summary; failure
+# set unobservable".
+#
+# `test-slow` is the second of those legs (this PR). Its own measured red is the
+# VERDICT-ARTIFACT shape rather than the log shape: run 40921262252, job
+# 123636659746 exited pytest with **0** (`814 passed, 3 skipped`) and still
+# redded in `Skip-fail guard` with `850 expected nodeid(s) absent from the
+# junitxml testcases`, because `/tmp/expected-nodeids.txt` held a co-tenant's
+# manifest (its `… and 800 more` list is `tests/test_capture_session.py` and
+# `tests/test_3311_multilabel_status_vocab.py`, which this leg never runs) while
+# `/tmp/junit.xml` held this leg's. Both runner installs are registrations on
+# ONE host, and the leg's uploaded log carries the same sharing independently: a
+# foreign session header (`-- /opt/gh-runner-x64/…`) in its first 5 KB against
+# this job's own `pythonLocation: /opt/gh-runner-x64-2/…`, and a 62 KB NUL hole
+# where its progress lines used to be.
+#
+# FROZEN LIST, not a repo-wide scan, for the reason `_LEAK_SURFACED_JOBS` gives:
+# "every pytest job" is a claim about process that a text scan cannot certify.
+# The legs #10280 still owns are NOT here — this pin asserts only what is
+# actually migrated, so it cannot go green on a leg that was not fixed.
+_PYTEST_LOG_MIGRATED_JOBS = (
+    "python-ci.yml::test",
+    "python-ci.yml::test-concurrency-falkor",
+    "python-ci.yml::test-slow",
+)
+
+# A host-global artifact path: `/tmp/pytest.log`, or any other bare `/tmp/...`
+# spelling. The runner's per-job temp dir is `$RUNNER_TEMP` / `${{ runner.temp }}`.
+#
+# ⛔ THE PREFIX IS ONE CHARACTER CLASS — `[\s=>'"]` — not a class followed by
+# three literals. It was written `[\s=]>'\"`, where the `]` closes the class
+# after `\s` and `=`, so the prefix demanded the literal four-character run
+# `<space-or-=> > ' "` before every `/tmp/…`. Nothing in any workflow contains
+# that run, so `findall` returned `[]` for all 50 `/tmp/<path>` occurrences on
+# the NON-COMMENT lines of `origin/main:.github/workflows/python-ci.yml` (67 over
+# all lines; the corpus is the one this pin builds) — half 2 of
+# `test_migrated_legs_read_their_OWN_pytest_log` could never fail, which is the
+# `#10280` mixed-state regression it exists to catch (resolver step still
+# published, one reader reverted to a host-global path).
+# `test_the_host_tmp_prefix_matches_every_measured_reader_shape` below pins the
+# class form against those measured shapes, so a re-broken prefix reds there.
+_HOST_TMP_PATH_RE = re.compile(r"(?:^|[\s=>'\"])(/tmp/[A-Za-z0-9._-]+)")
+
+
+def _code_lines(text: str) -> list[str]:
+    """Non-comment lines — a `#` mention of a path is prose, not a path.
+
+    Round 3 of the #7735 reviews showed a bare substring check certified a
+    comment that merely NAMED the artifact, so both pins here read code only.
+    """
+    return [ln for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def _migrated_leg_problems(entry: str, job: dict | None) -> list[str]:
+    """The three checks `test_migrated_legs_read_their_OWN_pytest_log` applies.
+
+    Factored out so a SYNTHETIC job can be put through the same code the real
+    pin runs — the only way `test_a_migrated_leg_whose_reader_is_reverted_to_
+    host_tmp_reds` can prove the pin is non-vacuous without editing the workflow.
+    """
+    problems: list[str] = []
+    if job is None:
+        return [f"{entry} (no such job in {entry.split('::', 1)[0]})"]
+    steps = job.get("steps") or []
+    # One step must both bound the path to `$RUNNER_TEMP`, failing closed on
+    # a missing one (`${RUNNER_TEMP:?...}`), and publish `PYTEST_LOG` from
+    # it. Checked per STEP, not per line — the delivered shape assigns
+    # `base="${RUNNER_TEMP:?…}"` on one line and `echo "PYTEST_LOG=$base/…"`
+    # on the next, so a same-line rule would false-reject it.
+    resolves = any(
+        "${RUNNER_TEMP:?" in body and "PYTEST_LOG=" in body
+        for body in (s.get("run") or "" for s in steps))
+    if not resolves:
+        problems.append(
+            f"{entry} (no step resolves PYTEST_LOG from $RUNNER_TEMP, failing "
+            "closed on a missing one)")
+    for s in steps:
+        body = s.get("run") or ""
+        named = sorted(set(_HOST_TMP_PATH_RE.findall("\n".join(_code_lines(body)))))
+        if named:
+            problems.append(
+                f"{entry} step {s.get('name')!r} names host-global {named}")
+        path = ((s.get("with") or {}).get("path"))
+        if isinstance(path, str) and path.startswith("/tmp/"):
+            problems.append(
+                f"{entry} step {s.get('name')!r} uploads from host-global {path}")
+    return problems
+
+
+def test_migrated_legs_read_their_OWN_pytest_log():
+    """#10280: a migrated leg must not touch the host-global `/tmp/pytest.log`.
+
+    Two halves, because either alone is satisfiable without fixing anything:
+
+    1. some step RESOLVES `PYTEST_LOG` from `$RUNNER_TEMP` and FAILS CLOSED on a
+       missing one (`${RUNNER_TEMP:?...}`) — a silent `/tmp` fallback is
+       indistinguishable from the bug;
+    2. no step's CODE names a host-global `/tmp/...` path at all.
+
+    Read by parsing the workflow, not by trusting the comment that describes it,
+    and it reds on the pre-#10280 text (half 2: five `/tmp/pytest.log` lines in
+    `test-concurrency-falkor`'s pytest step alone).
+
+    ⛔ Half 2 is only load-bearing because `_HOST_TMP_PATH_RE` can MATCH: it read
+    `[\\s=]>'\"` until the #10280 review (the `]` closed the class early), so it
+    found 0 of the 50 `/tmp/<path>` occurrences on this workflow's non-comment
+    lines — the corpus this test builds — and this pin went green on the mixed
+    state below. Both non-vacuity probes are the two tests that follow it.
+    """
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent
+    problems: list[str] = []
+    for entry in _PYTEST_LOG_MIGRATED_JOBS:
+        wf_name, job_name = entry.split("::", 1)
+        wf = yaml.load(
+            (root / ".github" / "workflows" / wf_name).read_text(),
+            Loader=_actions_yaml())
+        problems.extend(_migrated_leg_problems(
+            entry, (wf.get("jobs") or {}).get(job_name)))
+    assert problems == [], (
+        "these legs still read or write the host-shared /tmp pytest artifact, so "
+        f"their verdict can be another job's (#10280): {problems}")
+
+
+# The five reader shapes measured against `origin/main:.github/workflows/python-ci.yml`
+# during the #10280 review — every one of them is a real line of that workflow. The
+# shipped `[\s=]>'\"` prefix matched NONE of them (all `[]`); the class form matches
+# each. Keep the shapes verbatim: they are the evidence, not an illustration.
+_MEASURED_HOST_TMP_SHAPES = {
+    "> /tmp/pytest.log 2>&1": "/tmp/pytest.log",
+    "p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)": "/tmp/pytest.log",
+    "tail -n 120 /tmp/pytest.log": "/tmp/pytest.log",
+    'bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"':
+        "/tmp/pytest.log",
+    "tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml "
+    "--manifest /tmp/expected-nodeids.txt":
+        "/tmp/expected-nodeids.txt",
+}
+
+
+def test_the_host_tmp_prefix_matches_every_measured_reader_shape():
+    """#10280 review: the prefix is ONE character class, and it MATCHES.
+
+    Non-vacuity for half 2 of the pin above. The shipped regex
+    `(?:^|[\\s=]>'\")(/tmp/...)` let the `]` close the class after `\\s` and `=`,
+    so its prefix demanded the literal run `<space-or-=> > ' "` — a shape no
+    workflow contains. Measured over the NON-COMMENT lines of
+    `origin/main:.github/workflows/python-ci.yml` (the corpus this pin builds):
+    50 `/tmp/<path>` occurrences, `findall` = `[]` as shipped, 50 with the class
+    form, and no occurrence in that corpus is left unmatched by the class form.
+    This asserts the MATCH, per measured shape, so a prefix that closes its
+    class early reds here by name instead of silently disarming the pin.
+    """
+    for line, expected in _MEASURED_HOST_TMP_SHAPES.items():
+        found = _HOST_TMP_PATH_RE.findall(line)
+        assert expected in found, (
+            f"_HOST_TMP_PATH_RE does not match {expected!r} in the measured reader "
+            f"shape {line!r} — got {found}. The prefix class must be "
+            "`[\\s=>'\"]`, one class: with the class closed early it demands the "
+            "literal run `<space>= > ' \"` and matches nothing (#10280 review)."
+        )
+
+
+def test_a_migrated_leg_whose_reader_is_reverted_to_host_tmp_reds():
+    """#10280 review: the REALISTIC regression must be RED, not green.
+
+    The mixed state this pin exists to catch is half-migrated, not un-migrated:
+    the resolver step survives (so half 1 sees `PYTEST_LOG` published from
+    `$RUNNER_TEMP`) while ONE reader is reverted to the host-global literal.
+    That is exactly what produced `test-slow (a)`'s `850 expected nodeid(s)
+    absent` from a co-tenant's manifest.
+
+    Runs through `_migrated_leg_problems`, i.e. the same code the live pin runs,
+    so this cannot pass while the live pin is vacuous: with the pre-fix prefix
+    the problems list is empty here and this test fails.
+    """
+    resolver = {
+        "name": "Resolve per-job pytest artifact paths",
+        "run": (
+            'base="${RUNNER_TEMP:?RUNNER_TEMP is not set}"\n'
+            'echo "PYTEST_LOG=$base/pytest.log" >> "$GITHUB_ENV"\n'
+        ),
+    }
+    migrated = _migrated_leg_problems(
+        "synthetic.yml::leg",
+        {"steps": [resolver,
+                   {"name": "Skip-fail guard", "run": 'guard "$PYTEST_LOG"'}]},
+    )
+    assert migrated == [], f"the control case must be clean, got {migrated}"
+    reverted = _migrated_leg_problems(
+        "synthetic.yml::leg",
+        {"steps": [resolver,
+                   {"name": "Skip-fail guard", "run": "tail -n 120 /tmp/pytest.log"}]},
+    )
+    assert reverted, (
+        "a half-migrated leg (resolver present, one reader back on the host-global "
+        "`/tmp/pytest.log`) must RED — an empty list means the no-literal half is "
+        "inert (#10280 review)"
+    )
+    assert "/tmp/pytest.log" in reverted[0], reverted
+
+
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.EBUSY, errno.EROFS])
 def test_a_non_enotempty_cleanup_failure_still_raises(tmp_path, err):
     #7735: the tolerance is scoped to the ONE race, not to rmtree in general.
     # A blanket `ignore_cleanup_errors=True` would swallow these too.
     import tempfile
 
-    real = shutil.rmtree
-    shutil.rmtree = _boom_with(err)
-    try:
+    with _patch_rmtree(err):
         d = tempfile.TemporaryDirectory(dir=str(tmp_path))
         with pytest.raises(OSError) as excinfo:
             d.cleanup()
         assert excinfo.value.errno == err
-    finally:
-        shutil.rmtree = real
 
 
 def test_tolerant_cleanup_install_is_idempotent_and_restorable():

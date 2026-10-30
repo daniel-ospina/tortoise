@@ -158,7 +158,7 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 76
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 77
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
 appears in prose only — e.g. this document, §12.1c's open question, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
@@ -499,15 +499,19 @@ shape: everything agrees live↔rebuild except the residuals below.
 
 - **journal route, `wasDerivedFrom`/`aboutAction`** — MOVED live by 2b but not derivable, so 2b journals no
   repoint: live has the edge at the successor, the journal rebuild has it nowhere.
-- **record route, EVERY moved structural rel** — a 2b repoint descriptor carries `src=old_id` and the record's
-  `DirectEdgeRepoint` is a plain upsert (`record_projection.py`), so `relation` keeps the row at the PRE-supersede
-  point and never writes the successor: a record-sourced rebuild attaches those edges to the terminal point. ⚠️
-  This pre-dates #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried — for those
-  the row was already at the old point; what this producer changed is that the remaining structural rels now have
-  a row there too (previously they had none).
+- **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191**:
+  the record applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the terminal of the
+  `superseded_by` chain, `ON CONFLICT … DO NOTHING`), so `relation` follows the edge to the successor too. What
+  remains open in **#9836** is the *non-derivable* family (`wasDerivedFrom`/`aboutAction`): 2b journals no
+  descriptor for them at all, so nothing moves the row and the record keeps the row at the pre-supersede point
+  (live moved it to the successor). A shape the producer DECLINES at the mint (`_record_addressable`) holds
+  nothing at all, and the `:Source`-targeted shape is one of those rather than the only one: the same gate also
+  declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`).
+  ⚠️ The retired claim here read *the record's `DirectEdgeRepoint` is a plain upsert* — true before #10191, and
+  it pre-dated #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried.
 
-Closing both needs the supersede move journaled for non-derivable rels AND the record taught to model a move
-(delete-old + write-successor): **#9836**, whose scope covers all eight moved rels.
+Closing what remains needs the supersede move journaled for non-derivable rels AND the record taught to model a
+move for them too (delete-old + write-successor): **#9836**, whose scope covers all eight moved rels.
 
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item
@@ -567,7 +571,7 @@ exactly this question and the tree cannot answer it today.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 76 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+65 migrations returned **0** (at this head, 77 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
 tenant policy for that very table), 36 in `20261023000001_record_session_narrative.sql` and 19 in
 `20261024000001_record_session_narrative_carrier.sql` — the table this
 item's DECIDED block adds);
@@ -997,9 +1001,18 @@ The block's `grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/ → 0
 pre-R6 reading. R6's tenancy boundary now ships the GUC, so the same grep returns
 **2 lines at `ff6379eb2`** — `tortoise/record_projection.py:227` (`TENANT_GUC =
 "app.current_org_id"`) and its docstring at `:3269`, the offsets `c5cbcbb4f` (R6's tenancy boundary)
-introduced — and **8 lines at this head**: `54a3e7abe` (R9's backup role must BYPASS RLS) added three
-`tortoise/record_backup.py` mentions, and #9555 (R7's narrative fetch) added three more —
-`tortoise/record_text.py` ×2 and `tortoise/__main__.py` ×1. ⛔ The sites are named by CONTENT and
+introduced — and **12 lines at this head**: `54a3e7abe` (R9's backup role must BYPASS RLS) added three
+`tortoise/record_backup.py` mentions, #9555 (R7's narrative fetch) added three more —
+`tortoise/record_text.py` ×2 and `tortoise/__main__.py` ×1 — and #10017's copy added the ninth,
+in `tools/backfill_copy_turns.py`: the comment on its floor read that states why the read must go
+through `scope_connection` at all (a `tools/` mention is in this grep's scope, so a new tool that
+names the GUC moves this count too — that is the tripwire working, not a flake), plus the two
+the copy's `cache_tier` statement added (the `_RECORD_ONLY_TIER_SQL` comment, and the refusal
+message that names the GUC as the reason a wrong tenant's UPDATE matches zero rows instead of
+erroring) — 9 → 11 when that statement landed, and #10000's turn read added the twelfth,
+`tortoise/record_read.py` (`session_turns`' docstring, recording WHY the tenant scope is installed
+by the turn read itself: an unscoped connection reads ZERO rows under this policy, so the scope
+cannot be the opener's caller's job) — 11 → 12. ⛔ The sites are named by CONTENT and
 NOT by offset: the projection's two have moved on every change that touched that file (this note
 listed `:227`/`:3269`, then `:228`/`:3296`, then `:230`/`:3359`, and #9555's own registry entry moved
 them again) — a third offset in a note whose next sentence says the offsets are unusable is how a

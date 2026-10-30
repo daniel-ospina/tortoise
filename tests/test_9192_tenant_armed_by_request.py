@@ -44,16 +44,23 @@ WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 * The REST/hosted lane's installer is `hosted_api._data_sdk` →
   `_bind_record_tenant` (#9188 / #10025), not this file. It cannot be a
   one-line wrap on THIS lane: an org-wide/session-authenticated request carries
-  no `graph_id` (`hosted_api._session_user_org` resolves `org_id` + tier only).
-  The org-wide **MCP** credential IS named on this lane since #10025 —
+  no `graph_id` — it names the org's DEFAULT tenant through `default_graph_id`
+  (see the next sentence), not through a per-graph id.
+  `hosted_api._session_user_org` carries the org's `default_graph_id` through
+  the same `supabase_control.default_graph_id_for_credential` home the key lane
+  uses: #10025 named it for an org-wide `tt_`/`tk_` **API KEY**, #10046 for a
+  **SESSION/JWT** credential and an OAuth `oat_` token. The org-wide **MCP**
+  credential IS named on this lane since #10025 —
   `resolve_api_key` puts the org's active `kind='default'` row id on the
   credential as `default_graph_id`, and the pinned legs below assert BOTH
   directions: named when the control plane resolved the row
   (`test_an_org_wide_control_plane_key_is_named_by_its_default_graph`), and
-  REFUSED when it did not. What remains #10046's is the SESSION/OAuth credential
-  class (the REST/middleware installer for a credential that carries no
-  `default_graph_id`); the default-graph question cannot be closed by guessing a
-  tenant id anywhere.
+  REFUSED when it did not. What genuinely remains #10047's is
+  `mcp_auth`'s DEFAULT-plan branch
+  (`record_tenant_for_graph({"kind": "default"})`) — the SEED/INDEX runner that
+  builds its own SDK is wired since #10047
+  (`hosted_api._bind_default_graph_record_tenant`); the default-graph question
+  cannot be closed by guessing a tenant id anywhere.
 * The cross-tenant pin at the FOLD (`tests/test_record_projection.py`) is
   #9214's and stays; this file adds the caller-level leg above it.
 """

@@ -64,10 +64,18 @@ from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
     set_embedding_clause,
 )
 from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
+    OBJECT_ADDRESS_ESTABLISHED,
+    OBJECT_ADDRESS_NONE,
+    OBJECT_ADDRESS_UNESTABLISHED,
     SHAPE_DELETE_MISS,
     SHAPE_EDGE_MESSAGE_MISS,
+    NO_ADDRESS_INSTRUCTION,
+    SHAPE_OBJECT_SUPERSEDED_MISS,
+    SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS,
+    SHAPE_OBJECT_SUPERSEDED_UNREGISTERED,
     SHAPE_POINT_BELIEF_MISS,
     SHAPE_STATE_OP_MISS,
+    SHAPE_SUPERSEDE_TARGET_DELETED,
     SHAPE_UNIMPLEMENTED_OP,
     SHAPE_UNKNOWN_EVENT_TYPE,
     SHAPE_UNKNOWN_OP,
@@ -9108,35 +9116,46 @@ def journal_object_established(events) -> JournalObjectEstablished:
     return JournalObjectEstablished(frozenset(names), frozenset(ids))
 
 
-def _supersede_name_unregistered(ev: dict, established) -> bool:
-    """True ONLY when the journal cannot ADDRESS this supersede (#3590 D2).
+def supersede_object_address(ev: dict, established) -> str:
+    """Which of the three ADDRESS states the JOURNAL gives this supersede
+    (#3590 D2 as amended on #10204) — the caller decision
+    :func:`classify_terminalizer_miss` takes as ``object_address``.
 
-    Both limbs must say "no":
+    The amended bound is about ADDRESSES, not about a name: the record must
+    carry **at least one address** (a ``name``, an ``id``, or both) and the
+    journal must have established **none** of the addresses it carries.
 
-    * the NAME is one nothing established (not registered, not carried by a
-      state op, not mentioned) — an unestablished name is not addressable;
-    * the record's ``id``, when it carries one, is NOT an id the journal
-      established. An established id IS a real target: the fold missed because
-      the carrier was collapsed away or renamed, not because it never existed,
-      so exempting on the name alone would hide a genuine divergence (the
-      #5285 cycle-4 FIX 2 fail-open, #10107 review P1).
+    * :data:`OBJECT_ADDRESS_NONE` — no ``name`` and no ``id`` that is a
+      non-empty ``str``. Returns this so the caller REFUSES it under
+      ``SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS``: nothing in such a record is
+      checkable, so "the journal never established it" is unfalsifiable, and
+      the fail-closed default stands. ⚠️ PRESENCE, not writability
+      (``_writable_id`` is a separate question), so a NUL-bearing id IS an
+      address here and this is not "an address the graph could not store".
+    * :data:`OBJECT_ADDRESS_UNESTABLISHED` — carries ≥1 address and the journal
+      established none of them → the EXEMPT shape. The AX reason this limb was
+      widened to ids (#10183, the deciding reason on #3590): a refusal must
+      name what the caller can DO, and for a target nothing established there
+      is no creation to add, nothing out of order, and no producer to journal.
+      No remedy ⇒ no refusal.
+    * :data:`OBJECT_ADDRESS_ESTABLISHED` — carries an address the journal DID
+      establish → a genuine miss that keeps refusing (the #5285 cycle-4 FIX 2
+      collapsed-carrier shape). ⚠️ Also the answer when ``established`` is
+      ``None``: the one-record LIVE path has no journal to consult, and
+      fail-closed is the only safe reading.
 
-    A record carrying NO name is not this exemption: nothing in it is
-    addressable, "the journal never established it" is unfalsifiable, and the
-    fail-closed default must stand.
-
-    ⚠️ The name is read through ``_norm`` so all three classifying surfaces see
-    the SAME spelling: the two graph engines already normalise, while
+    ⚠️ The record is read through ``_norm`` so all three classifying surfaces
+    see the SAME spelling: the two graph engines already normalise, while
     ``consistency``'s reference fold iterates the raw journal, and a nested
     record let those two halves disagree (the #3585 asymmetry; #10107 review
     P2). ``_norm`` is idempotent, so normalising twice changes nothing.
     """
     if established is None:
-        return False
+        return OBJECT_ADDRESS_ESTABLISHED
     # ⛔ ATTRIBUTE access, never a positional unpack (review P2). The sibling
     # oracle `journal_object_surviving_keys` returns ``(ids, names)`` — the
     # OPPOSITE order — so `names, ids = established` silently inverts BOTH
-    # limbs the moment a caller passes the wrong oracle: the exemption would
+    # limbs the moment a caller passes the wrong oracle: the verdict would
     # narrow to unestablished IDS while widening to unestablished NAMES, an
     # unguarded fail-open. `JournalObjectEstablished` is a NamedTuple precisely
     # so the two halves cannot be mixed, and that guarantee only exists if
@@ -9144,10 +9163,66 @@ def _supersede_name_unregistered(ev: dict, established) -> bool:
     names, ids = established.names, established.ids
     ev = _norm(ev) if isinstance(ev, dict) else {}
     name = ev.get("name")
-    if not (isinstance(name, str) and name) or name in names:
-        return False
+    has_name = isinstance(name, str) and bool(name)
     oid = ev.get("id")
-    return not (isinstance(oid, str) and oid and oid in ids)
+    has_id = isinstance(oid, str) and bool(oid)
+    if not (has_name or has_id):
+        return OBJECT_ADDRESS_NONE
+    if has_name and name in names:
+        return OBJECT_ADDRESS_ESTABLISHED
+    if has_id and oid in ids:
+        return OBJECT_ADDRESS_ESTABLISHED
+    return OBJECT_ADDRESS_UNESTABLISHED
+
+
+def _object_supersede_miss_detail(shape: str, *, prefix: str = "") -> str:
+    """The AX receipt for an ``ObjectSuperseded`` that folded no rows (#10204).
+
+    Placement is #9202's third rule: the SEMANTICS live on #3590/#10204 and in
+    ``identity-decision.md``, while the WORDING a caller reads lives here, at
+    the decision site. Three surfaces classify the same miss (`rebuild_all`'s
+    sweep, `apply()`, and `check_consistency`'s reference fold), so the receipt
+    is built in ONE place — three hand-written strings drift, and the exempt
+    case has to say something none of them used to (#10183).
+
+    ``prefix`` names the surface ("graph fold: ", "reference fold: ", or "").
+    """
+    if shape == SHAPE_OBJECT_SUPERSEDED_UNREGISTERED:
+        # The caller must not go hunting for a repair that does not exist —
+        # but the receipt must not overclaim either (#10211 review round 3):
+        # "nothing was lost" is NOT provable from the journal. The predicate
+        # cannot tell "never established" from "the establishing line is not in
+        # the journal", and the same shape's `EXEMPT_SHAPES` entry carries a
+        # DEGRADED GUARANTEE naming exactly what IS lost (the supersede a
+        # journal could not address). Appending that prose to this receipt put
+        # both claims in ONE line, so the receipt states what it establishes
+        # and stops there.
+        return (f"{prefix}supersede matched no Object — the journal never "
+                "established the target this record addresses, so this replay "
+                "applies no supersede here (recorded, not hidden: #3590 D2 "
+                "exempt)")
+    if shape == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS:
+        # ⛔ "NO address" alone would be false for a record that CARRIES one
+        # that cannot be an address (`{"id": ""}`, `{"name": 123}`,
+        # `{"id": null}`), so the receipt names the PREDICATE that fires: an
+        # address is a NON-EMPTY STRING `name`/`id`
+        # (`supersede_object_address`). ⚠️ That is PRESENCE, not WRITABILITY —
+        # `_writable_id` is a separate question, and a NUL-bearing id counts as
+        # an address here — so this shape must not be read as "the graph could
+        # not have stored it".
+        # ⛔ SYMMETRIC, not "no `name`" (#10211 review round 5): the predicate
+        # is "NEITHER is a non-empty string", and `{"name": 123}` / `{"name": ""}`
+        # CARRY a name — so the asymmetric phrasing was false for exactly the
+        # records this comment exists to describe.
+        return (f"{prefix}supersede carries NO address it could be looked up "
+                "by — neither `name` nor `id` is a non-empty string — so "
+                "there is nothing the journal can be checked against; "
+                # ⛔ ONE home for the instruction: the run-boundary remedy
+                # (`nonfolded._NO_ADDRESS_REMEDY`) interpolates this same
+                # constant, so the per-record receipt and the abort cannot give
+                # one record two different repairs.
+                f"{NO_ADDRESS_INSTRUCTION}")
+    return f"{prefix}supersede matched no Object"
 
 
 def journal_object_hard_deleted_ids(events) -> frozenset[str]:
@@ -12234,19 +12309,31 @@ class FalkorProjection(
                             and journal_object_deleted is not None
                             and _oid in journal_object_deleted)
                 if not _survives and not _deleted:
+                    # #3590 D2 as amended on #10204: the exemption is granted on
+                    # ADDRESSES — the record carries at least one, and the
+                    # journal established NONE it carries. `None` (the
+                    # one-record LIVE path, which has no journal to consult)
+                    # stays fail-closed: it reads OBJECT_ADDRESS_ESTABLISHED.
+                    _sup_shape = classify_terminalizer_miss(
+                        "ObjectSuperseded", target_deleted=False,
+                        object_address=supersede_object_address(
+                            ev, journal_object_established))
                     record_non_folded(
-                        classify_terminalizer_miss(
-                            "ObjectSuperseded", target_deleted=False,
-                            # #3590 D2: exempt ONLY the never-registered case.
-                            # `None` (the one-record LIVE path, which has no
-                            # journal to consult) stays fail-closed.
-                            name_unregistered=_supersede_name_unregistered(
-                                ev, journal_object_established)),
+                        _sup_shape,
                         event_id=ev.get("event_id"),
                         event_type="ObjectSuperseded", id=_oid,
                         candidates=((_oname,) if isinstance(_oname, str)
                                     and _oname else (_oid,)),
-                        detail="graph fold: supersede matched no Object",
+                        # #10204 / #10183: the exempt record's receipt says the
+                        # journal never established the target's address and
+                        # that this replay applies no supersede, so a caller does
+                        # not go hunting a journal repair. It makes NO loss
+                        # verdict and NO "there is no repair" verdict — the
+                        # DEGRADED GUARANTEE on this shape is the class where
+                        # the supersede IS lost and the repair (journal the
+                        # missing creation) does exist.
+                        detail=_object_supersede_miss_detail(
+                            _sup_shape, prefix="graph fold: "),
                     )
             return
         elif t == "ObjectRegistered":
@@ -12638,10 +12725,16 @@ class FalkorProjection(
         # whose target the journal never leaves in place while NOT refusing a
         # forward reference (which ``rebuild_all``'s deferred sweep folds).
         journal_object_surviving = journal_object_surviving_keys(events)
-        # #3590 D2: the journal's own addressability oracle, the sibling of the
-        # pair above — `apply()` exempts a supersede only when NEITHER limb of
-        # its identity is established (the name by registration / rename /
-        # mention, AND the id), and refuses one where either was.
+        # #3590 D2 as amended on #10204: the journal's own addressability
+        # oracle, the sibling of the pair above, and the answer is keyed on
+        # ADDRESSES — the record's `name` and/or `id` — never on a name alone.
+        # `apply()` exempts a supersede only when the record carries at least
+        # one address and the journal established NONE of the addresses it
+        # carries; it refuses one carrying an address the journal DID
+        # establish, and refuses a record carrying NO address under its own
+        # `object-superseded-no-address` shape (nothing in it is checkable).
+        # The oracle is whole-journal, so this engine and `rebuild_all`'s sweep
+        # cannot reach different verdicts about one record.
         object_established = journal_object_established(events)
         # #7719: the object-delete set is derived from the GATED map, judged by
         # the shared ``_hard_deleted_any``: an anchor-suppressed delete does not
@@ -14500,9 +14593,12 @@ class FalkorProjection(
         # nothing) for a forward reference, while a target that was created and
         # then HARD-DELETED (first <= seq) still attempts the fold and refuses.
         first_materialized = journal_first_materialization(events)
-        # #3590 D2: the journal's OWN addressability oracle for a supersede
-        # (see `journal_object_established`) — BOTH limbs, name and id.
-        # Computed once for the whole journal, like the other maps above.
+        # #3590 D2 (as amended on #10204): the journal's OWN addressability
+        # oracle for a supersede (see `journal_object_established`) — every
+        # ADDRESS it carries, name and id. Computed once for the whole journal,
+        # like the other maps above, and deliberately JOURNAL-WIDE: a mention
+        # stub appended LATER still contributes its deterministic id, which is
+        # what makes the address-based exemption fail-safe.
         object_established = journal_object_established(events)
         # #7936 review: the ORDERED creation/hard-delete boundary for the
         # BELIEF gate. Pass 1a hoists every Point/Operator creation, so a
@@ -15185,18 +15281,21 @@ class FalkorProjection(
                 logger.warning("unrecognized event type %r — not folded (no fold arm for this type)", t)
 
         # ── Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
-        # creation events (see the branch above). Warn on 0-row folds — a
-        # fold that matched nothing during rebuild means the journal claims
-        # a supersession whose Object never re-existed. Since #2194,
-        # capture-created Objects ARE journaled as ObjectRegistered when the
-        # capture SDK is built with an event_log_path, so the residual
-        # 0-row sources are: pre-#2194 journals (no backfill), an
-        # unjournaled capture SDK / legacy raw producers (they apply without
-        # journaling), and delete races (a deleted Object's registration
-        # line — deletes leave no tombstone). The fold is idempotent — a
-        # superseded Object that is later re-created by a future event is
-        # caught on the NEXT rebuild, but this rebuild's graph is honest
-        # about what it could not fold.
+        # creation events (see the branch above). A 0-row fold is CLASSIFIED
+        # here, never assumed to be a miss (#10204): a record carrying an
+        # address the journal established NONE of is the EXEMPT `unregistered`
+        # shape, and one carrying no address at all is the REFUSED
+        # (fail-closed) `no-address` shape. The miss arm below is therefore
+        # reached only by a record carrying an address the journal DID
+        # establish, and its causes are enumerated AT that arm, which is their
+        # one home (#10211 review rounds 4-5). ⚠️ They are NOT this comment's
+        # former list — "pre-#2194 journal / unjournaled capture SDK / delete
+        # race" described the OLD miss population, which now classifies as
+        # `unregistered` and never reaches the arm; a lane reading top-down
+        # must not take the retired population as the arm's direction. The fold
+        # is idempotent — a superseded Object later re-created by a future
+        # event is caught on the NEXT rebuild, but this rebuild's graph is
+        # honest about what it could not fold.
         for seq, ev in supersede_folds:
             # #2242: replay folds run under the DEFAULT cas=False (blind) —
             # byte-identical to pre-CAS. The live-path CAS must not leak
@@ -15207,28 +15306,126 @@ class FalkorProjection(
             folded, _ = self._fold_object_superseded(ev)
             if folded == 0:
                 # #3585 (R8): a supersede whose target the journal HARD-DELETED
-                # is the named exemption (the fold is deferred past the delete);
-                # any other 0-row miss is refused and fails the run.
+                # is ONE named exemption (the fold is deferred past the delete);
+                # #10204 adds the second — `unregistered`, a record whose
+                # carried addresses the journal established none of. Every
+                # OTHER shape reaching here (`no-address`, and a genuine `miss`)
+                # is refused and fails the run (#10211 review round 7: this
+                # comment still described the pre-amendment, deletion-only
+                # exemption set).
                 _sup_shape = classify_terminalizer_miss(
                     "ObjectSuperseded",
                     target_deleted=_hard_deleted_any(
                         hard_deleted_seq, "Object", ev.get("id")),
-                    name_unregistered=_supersede_name_unregistered(
+                    # #10204: ADDRESSES, not a name — see
+                    # `supersede_object_address`.
+                    object_address=supersede_object_address(
                         ev, object_established))
                 record_non_folded(
                     _sup_shape, event_id=ev.get("event_id"),
                     event_type="ObjectSuperseded", seq=seq,
                     id=ev.get("id") if isinstance(ev.get("id"), str) else None,
                     candidates=(ev.get("supersedes_by"),),
-                    detail="supersede matched no Object",
+                    detail=_object_supersede_miss_detail(_sup_shape),
                 )
+                # #10204 / #10183: this log line is a SECOND message for the
+                # same record, so it must not prescribe a cause the in-band
+                # receipt denies. EVERY shape this sweep can record now names
+                # its own diagnosed cause, the miss included; the `else` is an
+                # UNREACHABLE fail-safe for a shape added without an arm, so it
+                # is loud rather than silent (#10211 review round 8: this
+                # comment still described the pre-split arrangement).
+                # ⚠️ The diagnosed cause is NOT the same as what the
+                # predicate can PROVE: for the unregistered shape it cannot
+                # tell "never established" from "never journaled" (an
+                # unjournaled/legacy producer — see the RESIDUAL in
+                # `EXEMPT_SHAPES`), so the message names what was observed and
+                # makes no loss verdict at all (#10211 review round 3: "nothing
+                # was lost" contradicted that shape's own DEGRADED GUARANTEE).
+                if _sup_shape == SHAPE_OBJECT_SUPERSEDED_UNREGISTERED:
+                    _sup_why = ("the journal establishes no address for the "
+                                "target this record ADDRESSES — the supersede "
+                                "is skipped here and recorded")
+                elif _sup_shape == SHAPE_OBJECT_SUPERSEDED_NO_ADDRESS:
+                    _sup_why = ("neither `name` nor `id` on the record is a "
+                                "non-empty string, so there is nothing to "
+                                "check it against")
+                elif _sup_shape == SHAPE_SUPERSEDE_TARGET_DELETED:
+                    _sup_why = ("the journal hard-deleted the target before "
+                                "the deferred sweep ran, so live and replay "
+                                "both end with it absent — nothing was lost")
+                elif _sup_shape == SHAPE_OBJECT_SUPERSEDED_MISS:
+                    # ⛔ THIS ARM'S TEXT WAS RETIRED BY THE AMENDMENT (#10211
+                    # review rounds 4-5): it used to say "object not re-created by
+                    # any journaled event (pre-#2194 journal, unjournaled capture
+                    # SDK, legacy unjournaled Object, or delete race)", which was
+                    # true of the OLD miss population — records the journal had
+                    # established NOTHING for. Both of those now classify
+                    # separately (`no-address`, `unregistered`), so a record can
+                    # only reach THIS arm with `OBJECT_ADDRESS_ESTABLISHED`.
+                    # ⚠️ But ESTABLISHED does NOT imply a creation: two of the
+                    # oracle's address sources produce an address and no node —
+                    # a state op's TARGET id (`journal_object_established`, the
+                    # "addressable BY ID" source) and a mention stub's
+                    # deterministic id (a later registration re-ids that node).
+                    # MEASURED on the state-op fixture below: the run ALSO logs
+                    # "the journal claims a mutation whose entity never
+                    # re-existed on this replay", i.e. the cause is a missing
+                    # creation. So the cause clause is a DISJUNCTION — naming
+                    # only the collapse/rename sent an operator after a merge
+                    # that does not exist while the abort's own remedy named the
+                    # right repair for the same record.
+                    # ⛔ BOTH SPELLINGS, not just the id (#10211 review round
+                    # 6): a record whose established address is a NAME a rename
+                    # state op carries, where that rename's target never
+                    # existed, is limb (2) — there is no carrier to collapse or
+                    # rename — so an id-only illustration left it in neither
+                    # limb. MEASURED: journal = [EntityMutated op=rename
+                    # {name: RENAMED-GHOST}, ObjectSuperseded {name:
+                    # RENAMED-GHOST}] establishes that name and no id, holds no
+                    # `ObjectRegistered`, and lands here.
+                    # ⛔ NO VERDICT WORD (#10211 review round 8). Successive
+                    # rounds appended limbs to a sentence whose HEAD still
+                    # verdicted the whole population ("a genuine divergence"),
+                    # so the hard-deleted limb below was asserted to be
+                    # something it is not. It is an ENUMERATION of causes, with
+                    # the conservative case stated as such.
+                    #
+                    # ⚠️ A mention stub's deterministic id is in the
+                    # CARRIER limb, not the created-nothing limb: the stub is
+                    # MERGEd `ON CREATE SET s.id=$id`, so it DOES create a node
+                    # carrying that id — the miss comes from a later
+                    # registration re-iding it (the "renamed" half).
+                    _sup_why = ("the journal DID establish this record's "
+                                "address, but no Object carries it on this "
+                                "replay. Cause is one of: (1) the carrier was "
+                                "collapsed onto one merge key or renamed — "
+                                "including a mention stub's deterministic id "
+                                "that a later registration re-ided; (2) the "
+                                "journal holds the address from a write that "
+                                "created nothing — a state op's `SET`, whether "
+                                "that is its TARGET id or a name it writes, "
+                                "when the target it names never existed; "
+                                "(3) the target was HARD-DELETED under an `id` "
+                                "this record DOES NOT CARRY — it carries none, "
+                                "or an `id` of some other node — so the "
+                                "anchored delete bound, which reads only the "
+                                "record's own `id`, could not recognise it. "
+                                "Case (3) is a CONSERVATIVE refusal, not a "
+                                "divergence: live folded nothing either, and "
+                                "its repair is to carry the DELETED target's "
+                                "`id`, not to reconcile the journal (see "
+                                "#10224)")
+                else:
+                    # Unreachable fail-safe: every shape this sweep can record
+                    # has an arm above. Named so an added shape is LOUD here
+                    # rather than silently described as a miss.
+                    _sup_why = (f"object-superseded fold matched no Object "
+                                f"(unclassified shape {_sup_shape!r})")
                 logger.warning(
                     "rebuild: ObjectSuperseded fold matched no Object "
-                    "(event_id=%s supersedes_by=%r) — object not "
-                    "re-created by any journaled event (pre-#2194 journal, "
-                    "unjournaled capture SDK, legacy unjournaled Object, or "
-                    "delete race)",
-                    ev.get("event_id"), ev.get("supersedes_by"))
+                    "(event_id=%s supersedes_by=%r) — %s",
+                    ev.get("event_id"), ev.get("supersedes_by"), _sup_why)
 
         # #4743 review P1: undo the deferral's clobber, in journal order. The
         # inline state folds above were overwritten by `ObjectSuperseded` folds
@@ -17511,11 +17708,21 @@ class FalkorProjection(
         """
         from tortoise.cache_projection import (
             NODE_TABLES,
+            apply_event_stream_folds,
             project_records,
             record_plan,
         )
 
-        nodes = tuple(view.nodes)
+        # #10198: the record's EVENT STREAM derives the connector/pack lifecycle
+        # onto the Objects it names. `read_record_view` already applied it, and
+        # the application is idempotent (a pure replay of the stream in `seq`
+        # order, with the live fold's per-event terminal guard); it runs here as
+        # well because a caller may hand this method a view it assembled from
+        # rows WITHOUT a connection, and such a view must fold by the events it
+        # carries rather than materialize a connector-tracked Object with no
+        # `status` (which `live._terminal_excluded` then reads as LIVE).
+        nodes = apply_event_stream_folds(
+            view.nodes, getattr(view, "lifecycle_events", ()) or ())
         # #9599: `rebuild_from_record` is a GRAPH write, so it obeys the GRAPH's
         # rule even though the RECORD layer deliberately keeps the row (see
         # `record_projection`'s `SessionRecorded` note — the record is the
