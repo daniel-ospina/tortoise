@@ -21,8 +21,10 @@ because the property was inherited, not re-derived.
 
 Properties 1–3 are the BFF's (`website/apps/dashboard/functions/_shared/auth/`),
 landed by #3522/#4054; this file proves them. Property 4's decision is new here
-(`consent-flow.ts`) and is NOT yet routed — see that module's header and the PR
-body for the recorded gap.
+(`consent-flow.ts`) and IS routed: `functions/api/consent/start.ts` calls
+`decideConsentAdvance` and mints the `consent_retry=1` carrier (see that module's
+`✅ WIRED` header). What is still MISSING is §9 step 4 — the PAGE that consumes
+the route still holds the inline supabase-js client the decision replaces.
 
 TOOLCHAIN
 ---------
@@ -44,11 +46,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -61,6 +63,28 @@ AUTH_DIR = REPO / "website/apps/dashboard/functions/_shared/auth"
 TOKEN_TS = AUTH_DIR / "token.ts"
 CONSENT_FLOW_TS = AUTH_DIR / "consent-flow.ts"
 TEST_FILE = "tests/test_oauth_session_flow_properties.py"
+
+# The mutation proof runs against a COPY of `AUTH_DIR` (see
+# `test_each_property_test_goes_red_when_its_property_is_mutated`), so the child
+# processes it spawns must be told which copy to import. Carried by env rather
+# than argv so `_run`'s scenario opts — which ARE argv, and are handed to the
+# driver as JSON — stay free of harness plumbing.
+_AUTH_DIR_ENV = "TORTOISE_SESSION_FLOW_AUTH_DIR"
+
+
+def _resolve_auth_dir(override: Path | None = None) -> Path:
+    """Auth module dir to import: an explicit copy, an env-supplied copy, or the real one."""
+    if override is not None:
+        return override
+    from_env = os.environ.get(_AUTH_DIR_ENV)
+    return Path(from_env) if from_env else AUTH_DIR
+
+
+def _child_env(auth_dir: Path | None) -> dict[str, str]:
+    """Env for a child pytest, pinned to the same module copy the parent is using."""
+    env = dict(os.environ)
+    env[_AUTH_DIR_ENV] = str(_resolve_auth_dir(auth_dir))
+    return env
 
 # Resolve `./x` to `./x.ts`: `token.ts` imports `./session` / `./supabase`
 # extensionlessly (the Pages runtime resolves it; Node ESM does not), so the
@@ -306,16 +330,19 @@ console.log("RESULT " + JSON.stringify(out));
 """
 
 
-def _run(scenario: str, **opts) -> dict:
+def _run(scenario: str, *, auth_dir: Path | None = None, **opts) -> dict:
     _require_node()
-    assert TOKEN_TS.is_file(), f"the server-side token module is gone: {TOKEN_TS}"
-    assert CONSENT_FLOW_TS.is_file(), f"the consent-flow module is gone: {CONSENT_FLOW_TS}"
+    auth = _resolve_auth_dir(auth_dir)
+    assert (auth / "token.ts").is_file(), f"the server-side token module is gone: {auth}/token.ts"
+    assert (auth / "consent-flow.ts").is_file(), (
+        f"the consent-flow module is gone: {auth}/consent-flow.ts"
+    )
     with tempfile.TemporaryDirectory(prefix="3524-props-") as td:
         tdp = Path(td)
         (tdp / "hooks.mjs").write_text(_HOOKS_MJS)
         (tdp / "driver.mjs").write_text(_DRIVER_MJS)
         proc = subprocess.run(
-            ["node", str(tdp / "driver.mjs"), str(AUTH_DIR), scenario, json.dumps(opts)],
+            ["node", str(tdp / "driver.mjs"), str(auth), scenario, json.dumps(opts)],
             capture_output=True, text=True, timeout=120, cwd=str(tdp),
         )
     if proc.returncode != 0:
@@ -388,7 +415,7 @@ def test_property_1_a_shared_failure_is_delivered_to_every_waiter_and_cleared() 
     Removing the `finally` (or clearing only on success) leaves the shared rejected
     envelope in `inFlightRefreshes`, so the follow-up call reuses it and
     `afterFetchCount` stays 1 instead of 2 — this test goes red on that assertion.
-    Verified by mutation (see the PR body).
+    Mutation-proven by the `single-flight-failure` leg of `PROPERTY_MUTATIONS`.
     """
     for responses, expected_reason in (
         ([{"status": 500, "body": {"error": "boom"}}], "unavailable"),
@@ -474,7 +501,8 @@ def test_property_2_refresh_once_is_bounded_by_skew_and_cooldown() -> None:
 
     Removing either half changes an observable here: the skew inside its band, and
     the cooldown by an invalidation matching a row it must not (and, outside the
-    window, by one that must match). Verified by mutation (see the PR body).
+    window, by one that must match). Both halves are mutation-proven — the
+    `refresh-once` and `refresh-once-cooldown` legs of `PROPERTY_MUTATIONS`.
     """
     cooldown = _run("refresh_once_cooldown")
     # The clock is injected, so these outcomes do not depend on wall time: t0,
@@ -651,23 +679,35 @@ def test_property_4_auto_advance_without_a_manual_click() -> None:
         f"{_CALLING_ROUTE}) is the self-redirect loop this property exists to exclude"
     )
 
-    # The `attempted` carrier is a NAMED param, distinct from `stale=1`. The sign-in
-    # target is read from the PRODUCT's output (not the `_AUTH` fixture) so the two
-    # assertions below are about what the decision emits: the module declares
-    # `CONSENT_RETRY_PARAM`, and the URL it returns must carry that name. The route
-    # that mints the hop is §9 step 3 and is not built here — this pins the
-    # decision's contract, not a producer that does not exist.
-    assert out["consentRetryParam"] == "consent_retry"
-    sign_in_target = out["results"][2]["to"]
-    return_to = parse_qs(urlparse(sign_in_target).query)["next"][0]
-    assert f"{out['consentRetryParam']}=1" in return_to, (
-        "the sign-in target the decision returns does not carry the already-attempted "
-        f"marker named by CONSENT_RETRY_PARAM ({out['consentRetryParam']!r}) — the loop "
-        "guard's `attempted` input has no producer"
+    # The `attempted` carrier is a NAMED param, distinct from `stale=1` — the constant
+    # itself is the contract, and pinning it HERE is what makes "one flag cannot answer
+    # two questions" a checkable claim rather than a comment.
+    #
+    # ⛔ NOT asserted from `out["results"][2]["to"]`: the decision is a PASS-THROUGH for
+    # `auth_url` (proved by the sentinel run above), so that URL IS the `_AUTH` fixture
+    # and asserting `consent_retry=1` on it re-reads the fixture. A correct producer and a
+    # broken one both pass it — it can never fail from the module's behaviour.
+    #
+    # The carrier's actual PRODUCER is the calling route (§9 step 3, built:
+    # `api/consent/start.ts`), so that is what is pinned — statically, in the same style
+    # as `tests/test_oauth_consent_bridge.py`, because the route is TypeScript with no
+    # executable harness here. Both halves must hold or the loop guard has no loop:
+    # the route must MINT the marker, and it must READ IT BACK into `attempted`.
+    assert out["consentRetryParam"] == "consent_retry", (
+        "CONSENT_RETRY_PARAM must stay `consent_retry`: `stale` marks an out-of-date "
+        "snapshot, and one flag cannot answer two questions"
     )
-    assert "stale" not in return_to, (
-        "the return target reuses `stale=1`, which marks an out-of-date snapshot and means "
-        "something different — one flag cannot answer two questions"
+    start_ts = (
+        REPO / "website/apps/dashboard/functions/api/consent/start.ts"
+    ).read_text()
+    assert 'selfParams.set(CONSENT_RETRY_PARAM, "1")' in start_ts, (
+        "the route that mints the sign-in hop no longer sets CONSENT_RETRY_PARAM=1 on the "
+        "return target — a flow that bounced once to sign-in would have no marker for "
+        "itself and would bounce forever"
+    )
+    assert 'params.get(CONSENT_RETRY_PARAM) === "1"' in start_ts, (
+        "the route no longer DERIVES `attempted` from CONSENT_RETRY_PARAM, so the marker "
+        "it mints is never read back and property 4's terminal state is unreachable"
     )
 
 
@@ -787,6 +827,16 @@ PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str, str], ...] = (
         "the in-flight guard is gone",
     ),
     (
+        "single-flight-failure",
+        TOKEN_TS,
+        "  const refresh = refreshAndPersist(env, handle, row).finally(() => {\n"
+        "    inFlightRefreshes.delete(handle);\n"
+        "  });\n",
+        "  const refresh = refreshAndPersist(env, handle, row);\n",
+        "test_property_1_a_shared_failure_is_delivered_to_every_waiter_and_cleared",
+        "the failed in-flight entry was not cleared",
+    ),
+    (
         "refresh-once",
         TOKEN_TS,
         "  if (row.access_token && row.access_token_expires_at"
@@ -794,6 +844,14 @@ PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str, str], ...] = (
         "  if (false) {\n",
         "test_property_2_refresh_once_is_bounded_by_skew_and_cooldown",
         "the skew no longer holds",
+    ),
+    (
+        "refresh-once-cooldown",
+        TOKEN_TS,
+        '"WHERE handle = ?1 AND (token_rejected_at IS NULL OR token_rejected_at < ?3)"',
+        '"WHERE handle = ?1 AND (?3 = ?3)"',
+        "test_property_2_refresh_once_is_bounded_by_skew_and_cooldown",
+        "the WHERE clause is not bounding by cooldown",
     ),
     (
         "never-sign-out",
@@ -899,7 +957,7 @@ _HARNESS_FAILURE = "harness scenario"
 _PROPERTY_RUN_TIMEOUT_S = 200
 
 
-def _assert_baseline_green() -> None:
+def _assert_baseline_green(auth_dir: Path | None = None) -> None:
     """Every property test must be GREEN before anything is mutated.
 
     A kill is RELATIVE TO A BASELINE or it is not evidence. A property test that
@@ -925,7 +983,7 @@ def _assert_baseline_green() -> None:
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=_PROPERTY_RUN_TIMEOUT_S,
-            cwd=str(REPO),
+            cwd=str(REPO), env=_child_env(auth_dir),
         )
     except subprocess.TimeoutExpired:
         pytest.fail(
@@ -945,7 +1003,7 @@ def _assert_baseline_green() -> None:
     )
 
 
-def _property_test_fails(node: str, expected: str) -> bool:
+def _property_test_fails(node: str, expected: str, auth_dir: Path | None = None) -> bool:
     """Run ONE property test in a fresh process; True only when it goes RED.
 
     "Red" means a NAMED test failed — and failed on the property's own assertion.
@@ -958,7 +1016,7 @@ def _property_test_fails(node: str, expected: str) -> bool:
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=_PROPERTY_RUN_TIMEOUT_S,
-            cwd=str(REPO),
+            cwd=str(REPO), env=_child_env(auth_dir),
         )
     except subprocess.TimeoutExpired:
         pytest.fail(
@@ -1013,44 +1071,59 @@ def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
     """Break each property in the real source; its own test must fail.
 
     The four nodes are proved GREEN unmutated first, so every kill below is
-    relative to a baseline this artifact established itself. The restore is
-    byte-identical and ASSERTED by sha256 — and the assertion runs in the
-    `finally`, on the error path too, because the paths that skip the loop body
-    are exactly the ones a mutated tracked file could survive: an unexpected
+    relative to a baseline this artifact established itself. Everything runs
+    against a COPY of the auth module, never the working tree — see the body. The
+    restore is byte-identical and ASSERTED by sha256, and the assertion runs in
+    the `finally`, on the error path too, because the paths that skip the loop
+    body are exactly the ones a mutated file could survive: an unexpected
     mutation, a harness error, a budget red. The MUTATION WRITE is inside that
     `try` as well, so the restore covers the write it is meant to undo rather
     than only the run after it. The write is bytes-to-bytes, so the comparison is
     bytes-to-bytes too. The previous version of this proof ran by hand, where no
     restore was asserted at all.
     """
-    _assert_baseline_green()
-    for label, path, span, replacement, node, expected in PROPERTY_MUTATIONS:
-        original_bytes = path.read_bytes()
-        original = original_bytes.decode("utf-8")
-        before = hashlib.sha256(original_bytes).hexdigest()
-        assert original.count(span) == 1, f"{label}: span is no longer unique"
-        # The MUTATION WRITE is inside the `try` on purpose: `write_bytes` truncates
-        # on open, so a raise from it (ENOSPC/EIO mid-write, KeyboardInterrupt, this
-        # item's own SIGALRM) would otherwise be the one path that leaves a tracked
-        # source truncated with no restore attempted and no sha256 to say so.
-        try:
-            path.write_bytes(
-                original_bytes.replace(span.encode("utf-8"), replacement.encode("utf-8"))
+    # THE MUTATIONS RUN AGAINST A COPY, and that is not tidiness. `finally` covers
+    # every Python exception path, but it does NOT cover PROCESS-LEVEL termination:
+    # SIGTERM (a cancelled CI job, `timeout`, the fleet's wedged-lane kill) and
+    # SIGKILL (which cannot be caught at all) skip it, and `write_bytes` truncates
+    # before it writes. Run against the real tree, a kill in that window leaves a
+    # TRUNCATED tracked source file — read by other suites (`test_oauth_consent_bridge`
+    # static anchors) and committable by any later `git add` in this worktree. A copy
+    # removes the class instead of guarding it: the working tree is never written to,
+    # so there is nothing for a kill to leave behind.
+    with tempfile.TemporaryDirectory(prefix="3524-mutation-") as td:
+        auth = Path(td) / "auth"
+        shutil.copytree(AUTH_DIR, auth)
+        _assert_baseline_green(auth)
+        for label, path, span, replacement, node, expected in PROPERTY_MUTATIONS:
+            target = auth / path.name
+            original_bytes = target.read_bytes()
+            original = original_bytes.decode("utf-8")
+            before = hashlib.sha256(original_bytes).hexdigest()
+            assert original.count(span) == 1, f"{label}: span is no longer unique"
+            # The MUTATION WRITE is inside the `try` on purpose: `write_bytes` truncates
+            # on open, so a raise from it (ENOSPC/EIO mid-write, KeyboardInterrupt, this
+            # item's own SIGALRM) would otherwise be the one path that leaves the copy
+            # truncated with no restore attempted and no sha256 to say so — and the next
+            # leg would then run against the previous leg's mutant.
+            try:
+                target.write_bytes(
+                    original_bytes.replace(span.encode("utf-8"), replacement.encode("utf-8"))
+                )
+                went_red = _property_test_fails(node, expected, auth_dir=auth)
+            finally:
+                target.write_bytes(original_bytes)
+                after = hashlib.sha256(target.read_bytes()).hexdigest()
+                assert before == after, (
+                    f"{label}: restore is NOT byte-identical ({before[:16]}… → {after[:16]}…) — "
+                    f"the copy is still carrying the mutation, so every later leg is invalid. "
+                    f"This is a COPY ({target}), not a tracked file; delete it and re-run."
+                )
+            assert went_red, (
+                f"{label}: {node} stayed GREEN with the property removed — the test does "
+                "not test the property it is named for"
             )
-            went_red = _property_test_fails(node, expected)
-        finally:
-            path.write_bytes(original_bytes)
-            after = hashlib.sha256(path.read_bytes()).hexdigest()
-            assert before == after, (
-                f"{label}: restore is NOT byte-identical ({before[:16]}… → {after[:16]}…) — "
-                f"{path.name} is still carrying the mutation. `git checkout -- {path}` "
-                "before doing anything else."
-            )
-        assert went_red, (
-            f"{label}: {node} stayed GREEN with the property removed — the test does "
-            "not test the property it is named for"
-        )
-        # Printed so the evidence is visible in the run, not only in a green tick:
-        # run with `-s` and this is the pasteable proof (`TORTOISE_MUTATION_PROOF=1`).
-        print(f"  {label}: {node} RED with the property removed; restore byte-identical "
-              f"({before[:16]}…)")
+            # Printed so the evidence is visible in the run, not only in a green tick:
+            # run with `-s` and this is the pasteable proof (`TORTOISE_MUTATION_PROOF=1`).
+            print(f"  {label}: {node} RED with the property removed; restore byte-identical "
+                  f"({before[:16]}…)")
