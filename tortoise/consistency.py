@@ -90,15 +90,18 @@ from .projection import (
 from .projection.entities import (
     BELIEF_BOOL_PROPS,
     BELIEF_PROPS,
+    _derive_point_identifier_aliases,
     _EntityHandlers,
     _is_persistable_prop_value,
     _storable_bound,
     _store_holds_prop_value,
     _usable_instant,
     _writable_journalled_vector,
+    append_identifier_aliases,
     flatten_search_keys_prop,
     is_non_operator_payload,
     promote_status_applies,
+    strip_identifier_aliases,
 )
 from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_POINT_SUPERSEDED_NO_NEW_ID,
@@ -464,7 +467,62 @@ def _values_equal(a, b) -> bool:
     return False
 
 
-def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
+def _retracted_identifier_aliases(prev_content, prev_keys) -> set[str]:
+    """#10203 P1 — the alias tokens a CONTENT EDIT retracts from a Point.
+
+    A revision is not a capture: ``revise_identifier_aliases`` recomputes the
+    derived half of ``search_keys``, and its base is the node's own value MINUS
+    the aliases its PREVIOUS content derived (those are the stale ones — an
+    edit that drops an identifier must stop matching the old code). The
+    JOURNAL records no ``search_keys`` for that edit (the recomputed value is
+    derived, so it is stripped from ``PointRevised``), which means the
+    reference view kept the creation's tokens while the node lost them: the two
+    halves disagree on exactly this token set.
+
+    This returns that set, from the journal's OWN content history, so
+    ``strip_identifier_aliases`` can take it out of BOTH views. It is the
+    second half of ONE canonical rule — "an alias token is not independent
+    evidence, at the current content or at any content the point HELD" — and
+    without it the same token was invisible while derivable and decisive once
+    stale (#10203 review, P1: ``create(search_keys="err4032 release")`` over
+    ``content="error ERR-4032 on deploy"``, then ``update_point(content="deploy
+    failed")`` → node ``release``, journal ``err4032 release``,
+    ``check_consistency`` reports ``fields=['search_keys']`` on a faithful
+    graph and its advice reproduces the same red).
+
+    ``prev_keys`` is the RECORD's value (the create payload), while the writer
+    saw the NODE's, which is normally that value PLUS the aliases the ADD door
+    appended (``_upsert_point_props``). The node's stale set is therefore a
+    superset of the payload's on the ordinary path, so the emulation runs the
+    writer's own two helpers (:func:`flatten_search_keys_prop` +
+    :func:`append_identifier_aliases`) before deriving — re-spelling either rule
+    here is how a checker starts disagreeing with its writer.
+
+    ⚠️ ONE shape breaks that superset relation, and it is PRE-EXISTING rather
+    than this function's: a bare same-id ``PointAdded`` re-emit whose payload
+    states no ``search_keys`` leaves the node's keys intact
+    (``_upsert_point_props`` appends) while ``_apply_one``'s PointAdded arm
+    rebuilds the fold entry from the payload and drops them, so that shape
+    already reports a ``search_keys`` divergence on a faithful graph without
+    any retraction involved. Widening the emulation to guess at it would be a
+    second model of the ADD door; the gap is the fold's carry-forward to close.
+
+    ⛔ UNGATED (``_derive_point_identifier_aliases``, never
+    ``point_identifier_aliases``): whether the stale token is still on the node
+    is a function of the WRITER's ``TORTOISE_IDENTIFIER_TOKENS`` at edit time,
+    not of the graph's faithfulness, so the canonical form must not depend on
+    the CHECKER's env (#10203 round 7, F2).
+    """
+    node_view = {"content": prev_content, "search_keys": prev_keys}
+    flatten_search_keys_prop(node_view)
+    append_identifier_aliases(
+        node_view, _derive_point_identifier_aliases(node_view))
+    return set(_derive_point_identifier_aliases(node_view))
+
+
+def _canonical_point_fields(props: dict, skip: frozenset = frozenset(),
+                            retracted=None,
+                            ) -> dict:
     """The projection's declared content view of ONE point (side-agnostic).
 
     Applied to both the journal fold and the graph read, so the two views are
@@ -500,6 +558,26 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
     compared: a journal list with NO graph value reports the key, which is the
     coverage the pre-#8006 ``uncarried`` classification did not have.
 
+    #8933 Stage 2: the derived IDENTIFIER ALIASES the writer appends to
+    ``search_keys`` (``_upsert_point_props``). The alias is a PURE function of
+    the view's own ``content``/``search_keys`` and is never recorded in the
+    journal, so it states nothing the comparison does not already have —
+    ``strip_identifier_aliases`` therefore takes it OUT of both sides. The
+    asymmetry that preceded it (derive on the journal side only) is recorded at
+    that call site as a measured P0: the revise door never derives, so every
+    content edit introducing an identifier produced an unclearable false red.
+
+    Skipped when the fold declared ``search_keys`` uncarried (the key is not in
+    the view at all), so this cannot resurrect an exclusion.
+
+    ``retracted`` (#10203 review, P1) is the STALE half of the same rule: the
+    alias tokens the point's PREVIOUS content derived, which a content edit
+    retracts from the node while the record keeps them. They come from the
+    journal's own history (``_retracted_identifier_aliases``) because no view
+    can state them — the graph has no history and the record's ``PointRevised``
+    deliberately carries no derived value. Both sides lose them, so a caller
+    that happened to author the token its own content derives compares clean.
+
     Operator ``content``/``pointKind`` are NOT dropped here: `_compare_views`
     decides them (compared when both sides carry them, reported when one-sided),
     so the exclusion stays visible instead of becoming a silent hole.
@@ -511,8 +589,50 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset()) -> dict:
         if k not in _NOT_COMPARED and k not in skip and v is not None
     }
     # The writer's OWN normalization, so the checker's view of a point matches
-    # what the writer makes of it (#8006).
+    # what the writer makes of it (#8006, #8933). Applied to the flattened copy
+    # exactly as ``_upsert_point_props`` applies it. Skipped when the fold
+    # declared ``search_keys`` uncarried for this point, so the normalisation
+    # cannot re-add a key the uncarried classification deliberately excluded.
     flatten_search_keys_prop(out)
+    # #8933 Stage 2, #10203 review round 6 (measured P0): the derived IDENTIFIER
+    # ALIASES come OUT of the comparison, on BOTH sides. The alias is a pure
+    # function of the view's own `content`/`search_keys`, so it is not
+    # independent evidence — two views that agree on `content` and on the
+    # payload-owned keys are the same point whether or not the node's
+    # `search_keys` happens to carry the derived token.
+    #
+    # The FIRST shape of this change derived it on the JOURNAL side only, and
+    # that is a false red, not a proof: the revise door never derives (a content
+    # edit writes `n.content` and leaves `search_keys` alone — the ruling writes
+    # the alias AT CAPTURE), so any `PointRevised` introducing an identifier made
+    # the reference view mint an alias the node could never hold. Measured: a
+    # create + `PointRevised(new_content="error ERR-4032 on deploy")` reported
+    # `ok=False`, `divergence="content"`, `fields=['search_keys']`, with the
+    # action "reconcile by replaying the journal" — which reproduces the same red.
+    # An unclearable red on a faithful graph is the #5048/#8006/#8317 class this
+    # checker exists to refuse, and `TORTOISE_IDENTIFIER_TOKENS=0` on the same
+    # journal+graph returns `ok=True`, i.e. the red was this change's alone.
+    #
+    # Stripping also keeps `db_hash` alias-INVARIANT (this function feeds
+    # `_graph_fingerprint`), which is what makes the backfill safe: a rebuild
+    # that only ADDS aliases cannot move a recorded baseline into
+    # `unrecorded-mutation`. (The REMOVAL direction does move one — see the two
+    # paragraphs below and the v3 → v4 entry in `_PROJECTION_STATE_FORMAT_HISTORY`.)
+    #
+    # ⚠️ THE REMOVAL DIRECTION IS NOT FREE, and `retracted` below is the second
+    # half of it (#10203 review round 2, P2). Both halves can REMOVE a token a
+    # graph really holds when that token was authored by the CALLER (the
+    # ambiguity `tests/test_consistency_divergence_5011.py`
+    # `::test_the_graph_fingerprint_is_alias_invariant` pins as desired): the
+    # current-content half removes it while the content still derives it, the
+    # stale half removes it after an edit stopped deriving it. Neither is a
+    # released behaviour — the alias mechanism itself ships in this change — so
+    # a baseline recorded by RELEASED code can hold such a token, moves once on
+    # upgrade, and (because `record_projection_state` is gated on `ok`) would
+    # keep repeating `unrecorded-mutation`. That is why v3 → v4 is appended to
+    # `_PROJECTION_STATE_FORMAT_HISTORY` above: the predecessor migrates instead
+    # of reding. See that history entry for the measured shape.
+    strip_identifier_aliases(out, retracted)
     prov = props.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id"):
         out["provenanceSource"] = prov["source_id"]
@@ -618,7 +738,9 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
 
 def _compare_views(journal_by_id: dict, graph_by_id: dict,
                    uncarried: dict | None = None,
-                   projection=None) -> tuple[list[dict], int, int, dict, dict]:
+                   projection=None,
+                   retracted: dict | None = None,
+                   ) -> tuple[list[dict], int, int, dict, dict]:
     """The field-aware verdict, the per-id/field diagnosis, and what was excluded.
 
     Presence is compared for EVERY id (a ghost, or a lost write, is a
@@ -665,8 +787,14 @@ def _compare_views(journal_by_id: dict, graph_by_id: dict,
             if k in _EXCLUSION_REASONS:
                 excluded_seen.setdefault(k, _EXCLUSION_REASONS[k])
         skip = frozenset(uncarried.get(pid, {}))
-        jf = _canonical_point_fields(jprops, skip)
-        gf = _canonical_point_fields(gprops, skip)
+        # Both sides are the SAME canonical view now (the #8933 alias is
+        # stripped symmetrically — see `_canonical_point_fields`), so neither
+        # carries a writer-only derivation the other cannot. `retracted` is the
+        # STALE half of the same strip: the tokens a content edit retracted from
+        # the node while the record kept them (#10203 review, P1).
+        stale = retracted.get(pid) if retracted else None
+        jf = _canonical_point_fields(jprops, skip, stale)
+        gf = _canonical_point_fields(gprops, skip, stale)
         is_operator = bool(jf.get("is_operator") or gf.get("is_operator"))
         fields: list[str] = []
         for k in sorted(set(jf) | set(gf)):
@@ -814,7 +942,8 @@ def _entity_node_view(props: dict) -> dict:
 
 
 def _graph_fingerprint(graph_view: dict,
-                      uncarried: dict | None = None) -> dict:
+                      uncarried: dict | None = None,
+                      retracted: dict | None = None) -> dict:
     """Pure GRAPH-only canonical view — the baseline a later run compares to.
 
     ``graph_view`` is the ONE ``(label, id)`` graph index (:func:`_graph_view`),
@@ -843,8 +972,13 @@ def _graph_fingerprint(graph_view: dict,
     It reads ONLY the graph, but it is NOT independent of the journal: one skip
     set below (`uncarried`) is journal-derived, deliberately — a digest that
     ignored it would move on every legitimate repair of an uncarried list prop
-    and report that repair as an unrecorded mutation. The journal dependence is
-    therefore narrow and declared, not absent.
+    and report that repair as an unrecorded mutation. `retracted` (#10203
+    review, P1) is the second, for the same reason: the STALE identifier aliases
+    a content edit retracts are present or absent depending on the WRITER's
+    ``TORTOISE_IDENTIFIER_TOKENS`` gate and on whether the caller happened to
+    author the same token, so a digest that kept them would re-baseline on a
+    bisect flip. The journal dependence is therefore narrow and declared, not
+    absent.
 
     The keys the COMPARISON declares undecidable are dropped here too, because a
     DECLARED asymmetry must not move the baseline and be read as an unrecorded
@@ -868,6 +1002,7 @@ def _graph_fingerprint(graph_view: dict,
     attributed to the journal delta) is filed separately.
     """
     uncarried = uncarried or {}
+    retracted = retracted or {}
     out: dict = {}
     for (label, nid), props in graph_view.items():
         props = props if isinstance(props, dict) else {}
@@ -876,7 +1011,8 @@ def _graph_fingerprint(graph_view: dict,
             continue
         skip = set(_ONE_SIDED_REASONS) | set(_GRAPH_DEFAULTED_PROPS)
         skip |= set(uncarried.get(nid, {}))
-        view = _canonical_point_fields(props, frozenset(skip))
+        view = _canonical_point_fields(props, frozenset(skip),
+                                       retracted.get(nid))
         if props.get("is_operator"):
             for k in _OPERATOR_ABSENT_PROPS:
                 view.pop(k, None)
@@ -945,7 +1081,23 @@ _PROJECTION_STATE_SUFFIX = ".projection-state.json"
 # healthy graph as `journal_moved=False, graph_moved=True` — an
 # `unrecorded-mutation` whose `action` sends the operator hunting an
 # unjournalled writer that does not exist.
-_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2, 3)
+# v3 → v4 (#10203): the identifier-ALIAS canonical form
+# (`strip_identifier_aliases`, BOTH halves). Each half REMOVES a token a graph
+# really holds when the CALLER named the alias themselves — the current-content
+# half while the content still derives it, the STALE half (#10203 review P1)
+# after an edit stopped deriving it. Released code has neither half, so a
+# baseline recorded on such a graph moves once, and `record_projection_state` is
+# gated on `ok`, which makes the red STICKY: every later run repeats
+# `unrecorded-mutation` and its action sends the operator hunting an unjournalled
+# writer that does not exist. Measured (review round 2, docker lane): the
+# released shape `create(search_keys="err4032 release")` over
+# `content="error ERR-4032 on deploy"` then `update(content="deploy failed")`
+# leaves the token on the graph; its fingerprint is `782470cd…` without the stale
+# half and `7a15bb6f…` with it. Same consequence and same answer as v1 → v2
+# (`tags`) and v2 → v3 (the `(label, id)` re-key): append the format, so a v3
+# sidecar is a KNOWN predecessor that migrates on the next healthy recording
+# run.
+_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2, 3, 4)
 _PROJECTION_STATE_FORMAT: int = _PROJECTION_STATE_FORMAT_HISTORY[-1]
 _PROJECTION_STATE_SUPERSEDED_FORMATS: frozenset[int] = frozenset(
     _PROJECTION_STATE_FORMAT_HISTORY[:-1])
@@ -1163,7 +1315,7 @@ class _RestampSignatureError(TypeError):
     """
 
 
-def _fold_journal(events: list[dict]) -> dict:
+def _fold_journal(events: list[dict], retracted_out: dict | None = None) -> dict:
     """The journal side of the comparison: the writer's own fold, PLUS the
     lifecycle arms `fold` does not have.
 
@@ -1238,6 +1390,12 @@ def _fold_journal(events: list[dict]) -> dict:
     """
     # `journal_hard_delete_seqs` normalises internally, and stays on the RAW
     # list (the anchor boundary is an envelope property).
+    # #10203 P1: per point, the alias tokens each APPLIED content edit
+    # RETRACTS from the node (`_retracted_identifier_aliases`). Collected on the
+    # ordered pass — the same walk that knows which edit actually applied — into
+    # the caller's dict when it asks for them (`retracted_out`), so
+    # `_compare_views`/`_graph_fingerprint` can canonicalise that edge away on
+    # BOTH sides.
     anchors = journal_hard_delete_seqs(events)
     # #7719: the anchor-gated MEMBERSHIP map, hoisted ONCE beside ``anchors`` —
     # never rebuilt inside the per-event loop (that is the O(N²) class this
@@ -1457,6 +1615,39 @@ def _fold_journal(events: list[dict]) -> dict:
                 if ev.get("expired_at"):
                     entry["expiredAt"] = ev["expired_at"]
             continue
+        pre_edit = None
+        if retracted_out is not None and seq in _recreate_seqs:
+            # #10203 P1 (review round 2, measured): a RE-CREATED incarnation is a
+            # FRESH record. The retractions of the incarnation that was hard
+            # deleted say nothing about it, and carrying them over would strip a
+            # token the live node really HOLDS — measured before this reset: the
+            # journal `create(search_keys="err4032 release")` → content edit →
+            # hard delete → `create(content="deploy failed",
+            # search_keys="release")`, then an UNJOURNALLED
+            # `SET n.search_keys='release err4032'`, read `ok=True`: a real
+            # unjournalled write made invisible by a dead incarnation's set, the
+            # one thing this checker exists to catch. The boundary is the fold's
+            # OWN (`journal_recreate_seqs`, the same gate `_apply_one` reads), so
+            # a bare same-id re-emit KEEPS the set — which is what a node that
+            # retained the token across that re-emit needs.
+            retracted_out.pop(ev.get("id"), None)
+        if retracted_out is not None and t == "PointRevised":
+            # #10203 P1: the view the write path will compare its recomputed
+            # `search_keys` against — the PRE-edit content and keys. Read BEFORE
+            # `_apply_one` mutates the entry (the #4208 arm below runs after and
+            # therefore cannot see it), and only when the record owns no
+            # `search_keys`: a caller-supplied list REPLACES rather than merges
+            # (`revise_identifier_aliases(caller_search_keys=...)`), so nothing
+            # is retracted from it.
+            _rev = _norm(ev)
+            _rid0 = _rev.get("id")
+            _entry0 = by_id.get(_rid0) if _writable_id(_rid0) else None
+            if (isinstance(_entry0, dict)
+                    and _rev.get("new_content") is not None
+                    and _annotator_value_ok(_rev.get("new_content"))
+                    and "search_keys" not in _rev):
+                pre_edit = (_rid0, _entry0.get("content"),
+                            _entry0.get("search_keys"))
         _apply_one(by_id, ev,
                    journal_first_materialized=_first_materialized,
                    journal_seq=seq,
@@ -1507,6 +1698,21 @@ def _fold_journal(events: list[dict]) -> dict:
                 _entry = by_id.get(_rid) if _writable_id(_rid) else None
                 if isinstance(_entry, dict):
                     _entry.pop("embedding", None)
+            # #10203 P1: did the SAME edit APPLY? (`_apply_one` drops a
+            # `new_content` the store cannot take, and drops a revision for an
+            # id it cannot resolve or has not materialised yet.) Only an applied
+            # edit retracted anything on the node, so only then does this point
+            # own a stale-alias set. The test is the entry's own post-apply
+            # content, not a re-spelling of `_apply_one`'s gates.
+            if pre_edit is not None and retracted_out is not None:
+                _pid0, _prev_content, _prev_keys = pre_edit
+                _after = by_id.get(_pid0)
+                if (isinstance(_after, dict)
+                        and _after.get("content") == _nc):
+                    stale = _retracted_identifier_aliases(
+                        _prev_content, _prev_keys)
+                    if stale:
+                        retracted_out.setdefault(_pid0, set()).update(stale)
     return by_id
 
 
@@ -2614,7 +2820,13 @@ def check_consistency(log_path: str, projection, *,
     # comparison equally incomplete, so the comparison alone would pass
     # vacuously — the collected set is what makes that a failure.
     with collect_non_folded() as _nf_entries:
-        journal_by_id = _fold_journal(events)
+        # #10203 P1: the fold also reports, per point, the alias tokens each
+        # applied content edit RETRACTS from the node while the record keeps
+        # them (the record journals no derived `search_keys`). Both sides of the
+        # comparison then canonicalise them away — see
+        # `strip_identifier_aliases(extra=…)`.
+        retracted: dict[str, set[str]] = {}
+        journal_by_id = _fold_journal(events, retracted_out=retracted)
         # #3585 review: the ENTITY reference fold belongs inside the collector
         # too — a fold that cannot resolve an entity is the same class of event,
         # and outside the block its `record_non_folded` calls would be no-ops.
@@ -2700,7 +2912,7 @@ def check_consistency(log_path: str, projection, *,
     uncarried = _uncarried(journal_by_id)
     (mismatches, divergent_count, compared_embeddings, excluded_seen,
      one_sided_seen) = _compare_views(journal_by_id, graph_by_id, uncarried,
-                                      projection)
+                                      projection, retracted)
     counts_ok = log_count == db_count
     hash_ok = not mismatches
     # #3585: the non-Point leg. `_fold_journal`/`_compare_views` above are
@@ -2716,7 +2928,7 @@ def check_consistency(log_path: str, projection, *,
     # graph still moves the baseline (and so cannot hide under `hash_match`).
     # Being graph-only, it is storable and comparable across runs; the verdict
     # itself is the field-aware comparison above, never a digest equality.
-    db_hash = _digest(_graph_fingerprint(graph_view, uncarried))
+    db_hash = _digest(_graph_fingerprint(graph_view, uncarried, retracted))
 
     stored, state_error, state_superseded_format = (
         read_projection_state_detail(log_path))
