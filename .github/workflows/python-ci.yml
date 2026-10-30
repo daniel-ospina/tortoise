@@ -2434,6 +2434,7 @@ jobs:
     # the health gate moved with it. The probe family is unchanged; the port is
     # now $TORTOISE_TEST_DOCKER_PORT, read by tests/_live_utils.py.
     steps:
+<<<<<<< HEAD
       # ⛔ FIRST STEP ON PURPOSE, and the reason is a MEASURED false red (#10280).
       # `RUNNER_TEMP` is `<runner_install>/_work/_temp`, and a runner executes ONE
       # job at a time — so it is per-JOB unique even though several runner installs
@@ -2479,6 +2480,21 @@ jobs:
             echo "PYTEST_LOG=$base/pytest.log"
           } >> "$GITHUB_ENV"
           echo "pytest artifact for this leg is under $base (per-job, not the host /tmp)"
+=======
+      # #10280: this leg's log is PER-JOB. `/tmp` is ONE namespace across every
+      # runner install on a shared self-hosted host, so a `/tmp/pytest.log`
+      # literal is truncated and interleaved by whatever else the pool is running;
+      # the counts, the tail and the reporter's ownership proof then describe a
+      # co-tenant's session. `RUNNER_TEMP` is per-runner, and a runner runs one job
+      # at a time, so it is per-job. Same resolver shape as the `test` job's
+      # (#10028); it fails closed rather than falling back to the host `/tmp`.
+      - name: Resolve per-job pytest artifact paths (#10280)
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
+          echo "PYTEST_LOG=$base/pytest.log" >> "$GITHUB_ENV"
+          echo "pytest artifacts for this job are under $base (per-job, not the host /tmp)"
+>>>>>>> origin/main
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -2635,6 +2651,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}
+<<<<<<< HEAD
+=======
+          # #10280: `runner.temp` (not /tmp) — the runner context IS allowed in
+          # `steps.<id>.with`, which is why the upload reads the path here rather
+          # than from a job-level `env:` block (see the #6253 note on test-slow).
+>>>>>>> origin/main
           path: ${{ runner.temp }}/pytest.log
           if-no-files-found: ignore
       - name: Validate docker-compose.yml (ports + header edits)
@@ -2745,6 +2767,26 @@ jobs:
     # the health gate moved with it. The probe family is unchanged; the port is
     # now $TORTOISE_TEST_DOCKER_PORT, read by tests/_live_utils.py.
     steps:
+      # #10280: this leg's three pytest artifacts are PER-JOB. `/tmp` is ONE
+      # namespace across every runner install on a shared self-hosted host, so a
+      # `/tmp/expected-nodeids.txt` written by a concurrent leg IS this job's
+      # manifest — which is how this required check reds with no test failing:
+      # run 40990582554 wrote `4 expected nodeids -> /tmp/expected-nodeids.txt`
+      # and then reconciled its 4 testcases against a `test-carve-out` leg's
+      # register `616 expected nodeid(s) absent` (the leg's 616-nodeid emit landed
+      # on the same host 11s earlier). `RUNNER_TEMP` is per-runner, and a runner
+      # runs one job at a time, so it is per-job. Same resolver shape as the
+      # `test` job's (#10028); it fails closed rather than falling back to `/tmp`.
+      - name: Resolve per-job pytest artifact paths (#10280)
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
+          {
+            echo "PYTEST_LOG=$base/pytest.log"
+            echo "PYTEST_JUNIT=$base/junit.xml"
+            echo "PYTEST_MANIFEST=$base/expected-nodeids.txt"
+          } >> "$GITHUB_ENV"
+          echo "pytest artifacts for this job are under $base (per-job, not the host /tmp)"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -2771,7 +2813,7 @@ jobs:
         run: |
           FILES="tests/test_ingest_safety.py"
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "track_b" --output "$PYTEST_MANIFEST"
       - name: Run Track B tests (explicit marker)
         # §7: non-blocking UNTIL the sentinels flip, then MUST-PASS — both
         # Track B sentinels (_TRACK_B_FULL, SENTINEL_A9) have shipped, so
@@ -2783,8 +2825,8 @@ jobs:
           # in-step kill must stay BELOW the job's 10m outer cap (#798).
           timeout -s INT -k 10 5m stdbuf -oL python -m pytest \
             tests/test_ingest_safety.py -m track_b -v --timeout=300 \
-            -p no:cacheprovider --maxfail=20 -r fEs --junitxml=/tmp/junit.xml \
-            -o junit_family=xunit1 > /tmp/trackb.log 2>&1
+            -p no:cacheprovider --maxfail=20 -r fEs --junitxml="$PYTEST_JUNIT" \
+            -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           # #3470: a BLIND `tail -25` is a LINE-COUNT window, not a result —
@@ -2795,8 +2837,8 @@ jobs:
           # FAILED/ERROR nodeid grep, so the tail was its ONLY attribution
           # channel. Read the summary from the FULL log instead, and name the
           # INCOMPLETE case out loud. One definition: pytest-attribution.sh.
-          tail -25 /tmp/trackb.log
-          bash .github/scripts/pytest-attribution.sh --log /tmp/trackb.log --rc "$rc"
+          tail -25 "$PYTEST_LOG"
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
           echo "track-b rc=$rc (must-pass — gate member)"
           exit $rc
       - name: Skip-fail guard (track-b, epic #1647 Task 9)
@@ -2808,7 +2850,7 @@ jobs:
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
-            python3 tools/skip-guard.py /tmp/trackb.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+            python3 tools/skip-guard.py "$PYTEST_LOG" --junitxml="$PYTEST_JUNIT" --manifest "$PYTEST_MANIFEST"
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
@@ -2834,17 +2876,20 @@ jobs:
             echo "no tolerated tempdir-cleanup leak recorded at $LOG"
           fi
       - name: Upload track-b log (measurement artifact, #1477)
-        # #1477: non-gating upload — track-b writes /tmp/trackb.log (no
+        # #1477: non-gating upload — track-b writes $PYTEST_LOG (no
         # --durations, but the PASSED/FAILED lines feed the flake signal).
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}
+          # #10280: `runner.temp`, not the host `/tmp` — the second half of the
+          # same migration (the paths above are per-job; naming the old literals
+          # here would upload whatever a co-tenant left behind).
           path: |
-            /tmp/trackb.log
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
+            ${{ runner.temp }}/pytest.log
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
           if-no-files-found: ignore
 
       - name: Stop FalkorDB services (#6673)
@@ -2925,6 +2970,7 @@ jobs:
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
+<<<<<<< HEAD
       # ⛔ FIRST STEP ON PURPOSE — the migration #10028 gave `test` and `test-slow`,
       # and the last leg of #10280's MATRIX half. `RUNNER_TEMP` is
       # `<runner_install>/_work/_temp`, and a runner executes ONE job at a time, so
@@ -2949,6 +2995,18 @@ jobs:
       # `${{ runner.temp }}` directly because `steps.<id>.with` DOES allow the
       # context.
       - name: Resolve per-job pytest artifact paths (#10028)
+=======
+      # #10280: this shard's three pytest artifacts are PER-JOB. The legs of this
+      # matrix run CONCURRENTLY, and on a shared self-hosted host `/tmp` is ONE
+      # namespace across every runner install — so the literals here let a sibling
+      # SHARD of this very job truncate this shard's log and overwrite its
+      # manifest/junit (`test-slow`'s measured false reds, #10028; `test-track-b`'s
+      # false red was this job's own manifest being read, run 40990582554).
+      # `RUNNER_TEMP` is per-runner, and a runner runs one job at a time, so it is
+      # per-job. Same resolver shape as the `test` job's (#10028); it fails closed
+      # rather than falling back to the host `/tmp`.
+      - name: Resolve per-job pytest artifact paths (#10280)
+>>>>>>> origin/main
         run: |
           set -euo pipefail
           base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
@@ -3352,6 +3410,8 @@ jobs:
           # step is continue-on-error, so the logs disappear silently).
           # NOT `matrix.suffix` — it carries a leading space and parentheses.
           name: pytest-log-${{ github.job }}-${{ matrix.label }}
+          # #10280: `runner.temp`, not the host `/tmp` — naming the literals here
+          # would upload whatever a co-tenant shard left behind.
           path: |
             ${{ runner.temp }}/pytest.log
             ${{ runner.temp }}/junit.xml

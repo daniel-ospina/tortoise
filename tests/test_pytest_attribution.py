@@ -1105,13 +1105,7 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 #: 2, inside the very function the next `/tmp` migrator reads. These two numbers are
 #: asserted against the workflows by `test_the_stated_inventory_matches_the_workflows`,
 #: so a further migration reds the guard instead of silently falsifying its map.
-#:
-#: 3/2 → 4/1 when `test-concurrency-falkor` migrated (#10280's first leg to go, forced
-#: by a measured false red on PR #10214 rather than by tidiness), and 4/1 → 5/0 when
-#: `test-carve-out` followed it — that one is the MATRIX leg, so its literal was not
-#: merely shared with a sibling job but with its OWN shards, which run concurrently
-#: (`test_no_two_legs_capture_the_same_host_global_log`'s matrix arm).
-_STATED_PER_RUNNER_PYTEST_LOG_SITES = 5
+_STATED_PER_RUNNER_PYTEST_LOG_SITES = 6
 _STATED_LITERAL_PYTEST_LOG_SITES = 0
 
 #: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
@@ -1175,16 +1169,17 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log`-named tails in python-ci.yml (4 of them the per-runner
-    `"$PYTEST_LOG"`, not a `/tmp` literal — see the DERIVED split pinned by
-    `test_the_stated_inventory_matches_the_workflows`), 1 `trackb.log` (the must-pass
-    Track B member, whose log name does not contain "pytest" — it was the coverage
-    gap a first cut missed), 1 `pmv-pytest.log` in post-merge-validation.yml, and 1
-    `pytest-d14.log`, written through `| tee` rather than a tail (this file counts
-    both shapes; the `tee` site is the one a tail-only counter missed). The filter is
-    deliberately the LOG CAPTURE, not the file name: a leg's log name is not a
-    contract, and the rail's capture is `gh run view --log-failed` across every job,
-    so any of these legs can omit its own failure set.
+    #9300): 6 `pytest.log`-named tails in python-ci.yml — 6 of them the per-runner
+    `"$PYTEST_LOG"`, not a `/tmp` literal, see the DERIVED split pinned by
+    `test_the_stated_inventory_matches_the_workflows` — plus `pmv-pytest.log` in
+    post-merge-validation.yml, plus `pytest-d14.log`, written through `| tee` rather
+    than a tail (this file counts both shapes; the `tee` site is the one a tail-only
+    counter missed). `test-track-b`'s tail was the `trackb.log` site in an earlier
+    inventory; #10280 migrated that leg onto `"$PYTEST_LOG"`, so its log no longer
+    carries a distinct name and it is counted in the six. The filter is deliberately
+    the LOG CAPTURE, not the file name: a leg's log name is not a contract, and the
+    rail's capture is `gh run view --log-failed` across every job, so any of these legs
+    can omit its own failure set.
     """
     tails = 0
     for workflow in ATTRIBUTION_WORKFLOWS:
@@ -1199,16 +1194,14 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 f"{workflow.name}:{i + 1}: the `{target}` capture is not followed by the "
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
-    # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
-    # `test`'s last-failed pre-phase (200), `test` (300) and `test-slow` (300) through
-    # the per-runner `"$PYTEST_LOG"` (the fast job since #10028, `test-slow` since the
-    # #10028 residue that PR closed), `test-concurrency-falkor` (120) since #10280's
-    # first leg, and `test-carve-out` (200) since #10280's second — plus `trackb.log`,
-    # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
-    # through `| tee`. ALL FIVE `pytest.log`-named legs are now on the per-runner path;
-    # there is no `/tmp/pytest.log` literal left in either workflow, which is what the
-    # derived split `_STATED_LITERAL_PYTEST_LOG_SITES = 0` states and asserts. The floor
-    # used to be 6 against the 7 sites main's tail-only
+    # The measured inventory is 8: six `pytest.log`-named tails in python-ci.yml, ALL
+    # through the per-runner `"$PYTEST_LOG"` — `test`'s last-failed pre-phase (200),
+    # `test` (300), `test-slow` (300) (the fast job since #10028, `test-slow` since the
+    # #10028 residue that PR closed), `test-concurrency-falkor` (120),
+    # `test-carve-out` (200) and `test-track-b` (25) (those three since #10280, which
+    # also renamed the leg's log from the host-global `/tmp/trackb.log`) — plus
+    # `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
+    # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
     # under this check while it stayed green (it took two losses to red it). Counting
     # the `tee` site as well makes the inventory 8, so this floor has zero slack NOW,
@@ -1240,9 +1233,12 @@ def test_the_stated_inventory_matches_the_workflows() -> None:
             target = capture_site(line)
             if target is None:
                 continue
-            # The `pytest.log`-named tails, and ONLY those: `trackb.log`,
-            # `pmv-pytest.log` and the `pytest-d14.log` tee site are the other three
-            # sites in the inventory and are named separately above the floor.
+            # The `pytest.log`-named captures, and ONLY those: `pmv-pytest.log` and
+            # the `pytest-d14.log` tee site are the other TWO sites in the inventory
+            # (8 = these 6 + 2), named separately above the floor. `trackb.log` left the
+            # inventory when #10280 moved that leg onto `"$PYTEST_LOG"` — this line
+            # said "other three" for one head after that, which is the same
+            # restated-inventory class the derived split above exists to stop.
             if target != _RUNNER_TEMP_LOG and not target.endswith("/pytest.log"):
                 continue
             if target == _RUNNER_TEMP_LOG:
@@ -1260,10 +1256,10 @@ def test_the_stated_inventory_matches_the_workflows() -> None:
         f"legs, the workflows have {literal} — update BOTH the stated count and the "
         "comment block above the floor"
     )
-    # The five `pytest.log`-named tails the inventory enumerates. Asserting the total as
+    # The six `pytest.log`-named tails the inventory enumerates. Asserting the total as
     # well means a migration that changes BOTH sides cannot pass by swapping them.
-    assert per_runner + literal == 5, (
-        f"{per_runner + literal} `pytest.log`-named tails, the inventory enumerates 5"
+    assert per_runner + literal == 6, (
+        f"{per_runner + literal} `pytest.log`-named tails, the inventory enumerates 6"
     )
 
 
@@ -1436,7 +1432,6 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
     # host-global file, so it could not stay a residual of a `.log`-only migration.
     assert residual == [
         "test-d14-hosted-api",
-        "test-track-b",
         "validate",
     ], (
         "the legs still writing a host-global /tmp/*.log changed — update the "
@@ -1480,6 +1475,36 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
     assert not stale, (
         "pytest-attribution.sh: the NAMED RESIDUAL header still names legs that HAVE "
         f"migrated to a per-runner path — drop {stale} from the residual scope (#10280)"
+    )
+
+
+def test_the_docstrings_inventory_split_is_derived_not_restated() -> None:
+    """PR #10264 review P3 (F1): the split said "2 of them the per-runner" — one leg stale.
+
+    The relocation that made `test-slow` write through `"$PYTEST_LOG"` is the SAME
+    commit that made this paragraph wrong, and nothing noticed: the sentence and the
+    closing floor comment in one docstring then stated two different inventories of
+    one file. Deriving the split from `capture_site` (the counter the floor uses)
+    means the prose cannot be true of an older head — an edit that changes either
+    shape reds HERE, with the number to write.
+
+    This pins the DOCSTRING's sentence; `test_the_stated_inventory_matches_the_workflows`
+    pins the stated CONSTANTS. They are two different artifacts of the same number, and
+    the defect this closes was in the prose — a constants-only pin would have stayed
+    green through it.
+    """
+    sites = [s for s in (capture_site(ln) for ln in WORKFLOW.read_text().splitlines())
+             if s is not None]
+    per_runner = [s for s in sites if s == _RUNNER_TEMP_LOG]
+    literal = [s for s in sites if s == "/tmp/pytest.log"]
+    # the total this sentence states, and the split it got wrong
+    assert len(per_runner) + len(literal) == 6, sites
+    flat = " ".join(
+        (test_every_pytest_log_tail_is_followed_by_the_reporter.__doc__ or "").split()
+    )
+    assert f"{len(per_runner)} of them the per-runner" in flat, (
+        f"{WORKFLOW.name} has {len(per_runner)} per-runner and {len(literal)} literal "
+        f"`/tmp/pytest.log` sites; the docstring's parenthetical must say so"
     )
 
 

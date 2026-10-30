@@ -137,7 +137,8 @@ fi
 # signals below are a backstop rather than the load-bearing defence.
 #
 # ⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS (2026-10-29, #10028) AND TO
-# `test-concurrency-falkor` + `test-carve-out` (2026-10-30, #10280's first TWO legs).
+# `test-concurrency-falkor` + `test-track-b` + `test-carve-out` (2026-10-30, #10280's
+# remaining legs) — i.e. to EVERY `python-ci.yml` leg that writes a `> ...` capture.
 # `python-ci.yml`'s `test` job — the fast matrix, NINE legs, and the largest share of
 # this failure — passes `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`,
 # per-runner and therefore per-job, since a runner runs one job at a time), and
@@ -154,15 +155,33 @@ fi
 # never ran. `test-carve-out` — the leg the inventory named as that co-tenant — is the
 # fourth, and the sharpest: it is a MATRIX, so its three shards run CONCURRENTLY and its
 # `/tmp/pytest.log` was shared with ITSELF, a collision no job-name-keyed check can see.
-# For those four jobs signals (1)-(3) are a backstop against a test that shells out to
+# `test-track-b` is the fifth: its shared `/tmp/expected-nodeids.txt` + `/tmp/junit.xml`
+# produced `4 expected nodeids -> 640 absent` (run 40990582554), i.e. the false PASS a
+# shared manifest makes reachable on a required check.
+# For those five jobs signals (1)-(3) are a backstop against a test that shells out to
 # pytest, not the load-bearing defence against a co-tenant.
 #
 # The legs that still write `/tmp/...` literals, and still need the same change, are
 # the deliberate residual named on #10280, which carries the rest of the migration:
 #
-#   `test-track-b`              (`/tmp/trackb.log`)      — `python-ci.yml`
 #   `test-d14-hosted-api`       (`/tmp/pytest-d14.log`)  — `python-ci.yml`
 #   `validate`                  (`/tmp/pmv-pytest.log`)  — `post-merge-validation.yml`
+#
+# The two legs are residual for DIFFERENT reasons, and the shapes must not be conflated
+# (PR #10264 review, verified against `capture_site`):
+#
+#   `test-d14-hosted-api` captures through `| tee /tmp/pytest-d14.log`, and the tee
+#   branch is `\|\s*tee\s+(/tmp/[^\s|]+\.log)` — a `/tmp/...` LITERAL only. A migrated
+#   `tee "$PYTEST_LOG"` would therefore not be counted at all, so THIS leg owes the
+#   counter a widening (a guard whose subject is this drift must not be
+#   spelling-dependent).
+#
+#   `validate` WRITES its log with `> /tmp/pmv-pytest.log 2>&1` and is COUNTED at the
+#   separate `tail -n 300 /tmp/pmv-pytest.log` site, whose branch
+#   (`^tail\s+-n?\s*\d+\s+(\S+)$`) accepts ANY single token — so migrating it would be
+#   counted without a widening. `capture_site` has NO `>` branch at all: the `>` write is
+#   not a shape it reads, which is why this leg is residual for its LITERAL, not its
+#   redirect.
 #
 # ⛔ THIS LIST IS DERIVED, NOT REMEMBERED — do not edit it from memory. It is
 # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
@@ -172,12 +191,9 @@ fi
 # change — and naming a leg that HAS migrated is a red too, because an over-wide residual
 # sends the next lane to migrate work that is already done.
 #
-# `test-track-b` is the sharpest of the three: it is #10280's own ROOT measurement (its
-# shared `/tmp/expected-nodeids.txt` + `/tmp/junit.xml` produced `4 expected nodeids ->
-# 640 absent`), i.e. the leg where a shared manifest/JUnit makes a false PASS on a
-# required check reachable. `validate` is the warn-only job, so for it the consequence is
-# a misleading artifact rather than a false red on a required check — named anyway, so
-# the residual reads as one scope instead of a list that stops where the gate impact does.
+# `validate` is the warn-only job, so for it the consequence is a misleading artifact
+# rather than a false red on a required check — named anyway, so the residual reads as
+# one scope instead of a list that stops where the gate impact does.
 #
 # For THOSE legs the three signals below stay load-bearing, and they keep the KILL path —
 # the one that produced the "timeout flakes" — from being fooled until they get it.
