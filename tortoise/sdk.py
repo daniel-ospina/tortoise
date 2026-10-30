@@ -15979,6 +15979,13 @@ class TortoiseSDK:
         # DESTROYED the edge live, and the replay (which received the same
         # endpoint contract) dropped it too. ``labels(t)`` rides the same
         # traversal, so no extra round trip is spent resolving the far node.
+        # #10139: ONE vocabulary for the carried attributes — the two 2a-DIRECT
+        # legs below, the 2b emission further down and the pass-2b replay that
+        # re-applies them all read `DIRECT_EDGE_ATTR_KEYS` (`projection/edges.py`).
+        # Spelling the same five keys out at each site is the drift that left the
+        # REBUILD half bare while the live half carried the value.
+        from .projection.edges import DIRECT_EDGE_ATTR_KEYS
+
         def _epistemic_label(node_id: str) -> str | None:
             """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
             for _label in EPISTEMIC_LABELS:
@@ -16044,8 +16051,7 @@ class TortoiseSDK:
                     transferred += 1
                     continue
                 _attrs = {k: v for k, v in rdict.items()
-                          if k in ("direction", "confidence", "weight",
-                                   "label", "batch_id")}
+                          if k in DIRECT_EDGE_ATTR_KEYS}
                 # EMIT-BEFORE-TRANSFER: the REPOINT descriptor (plan §4.4 —
                 # A10's pass-2b repoint apply consumes it post-rebuild).
                 # Flat descriptor shape (REVIEW-FIX P2: match
@@ -16090,8 +16096,7 @@ class TortoiseSDK:
                               f"MERGE (t)-[nr:{rtype}]->(new)")
                     proj.g.query(mq, params={"new_id": new_id, "tid": tid})
                     _keep = {k: v for k, v in rdict.items()
-                             if k in ("direction", "confidence", "weight",
-                                      "label", "batch_id")}
+                             if k in DIRECT_EDGE_ATTR_KEYS}
                     if direction == "out":
                         _a_label, _b_label = new_label, tid_label
                     else:
@@ -16131,13 +16136,19 @@ class TortoiseSDK:
         # §4.4 — same crash discipline as 2a-DIRECT). Rebuild pass-2 resurrects
         # these edges at OLD from the point's immutable snapshot (extractedFrom
         # prop / aboutEntities list), so the pass-2b replay must move them to the
-        # final successor AND delete the resurrection at old. Non-derivable rels
+        # successor THAT SUPERSEDE NAMED (`succ[src]`, ONE HOP per descriptor —
+        # NOT the terminal `_final(src)`, which is only the skip guard) AND
+        # delete the resurrection at old. Non-derivable rels
         # (aboutAction — Action dissolved in Ontology v3.0; wasDerivedFrom — A10
         # raw family) are NEVER snapshot-recreated: no descriptor (do NOT half-
         # own the A10 raw-edge family). The journal carries the target's LOGICAL
         # identity only (tgt=<key> or, for the delete-only guard, tgt=new_id) —
         # never the FalkorDB internal ID (internal ids die at rebuild).
-        from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
+        from .projection.edges import (
+            DERIVABLE_STRUCTURAL_RELS,
+            STRUCTURAL_REL_LABELS,
+            stub_key,
+        )
         structural_rels = SUPERSEDE_STRUCTURAL_RELS
         # Successor internal node ids — runtime-only (never journaled). The 2b
         # no-self-edge guard compares the structural target's NODE IDENTITY to
@@ -16204,13 +16215,17 @@ class TortoiseSDK:
                 # record contract forbids re-applying on a re-link ("a re-link must
                 # not ADVANCE a recorded version", `record_projection.py:2061-2068`).
                 # ⚠️ SCOPE: `extractedFrom`'s `sourceVersion` anchor is therefore
-                # STILL dropped on transfer. That is the pre-existing loss #10139
-                # owns (the rebuild half is bare there too); stating it here rather
-                # than letting the word "never" above imply otherwise.
+                # STILL dropped on transfer — a separate, pre-existing loss this
+                # vocabulary does not own. Stated here rather than letting the
+                # word "never" above imply otherwise.
+                # ⛔ ONE vocabulary, imported: `DIRECT_EDGE_ATTR_KEYS`
+                # (`projection/edges.py`) is the SAME tuple the pass-2b replay
+                # branch reads a descriptor's payload through (#10139), so the
+                # live carry and the rebuilt carry cannot disagree about which
+                # keys a supersede moves.
                 edge_props = {
                     k: v for k, v in (row[4] or {}).items()
-                    if k in ("direction", "confidence", "weight", "label",
-                             "batch_id")
+                    if k in DIRECT_EDGE_ATTR_KEYS
                 }
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
@@ -16258,12 +16273,30 @@ class TortoiseSDK:
                         # gets a target-key suffix — multi-target same-rel id
                         # hygiene (2a-DIRECT's id base is
                         # f"{old_id}->{new_id}:{rtype}").
+                        # #10139: the descriptor carries the edge's
+                        # ATTRIBUTES too, not only its topology. Without them the
+                        # replay can only re-MERGE a BARE edge, so the property
+                        # #9417's live transfer carries (`confidence` from the
+                        # subject binder) survived a supersede and was dropped by
+                        # the next `rebuild_all` — a `live != rebuild` divergence
+                        # on a data-bearing property. FLAT keys, exactly as the
+                        # 2a-DIRECT descriptor above spreads them and exactly as
+                        # `record_projection._relation_coordinates`' consumer reads
+                        # an attribute payload (`{k: payload[k] for k in
+                        # rel.attrs}` — flat, by NAME); a nested `attrs` map would
+                        # be a third shape nothing in the tree reads.
+                        # ⛔ Emitted ONLY when the old edge actually had one of the
+                        # vocabulary's keys: the replay must be able to tell "no
+                        # attributes to carry" from "carry an empty map", and an
+                        # empty map is not writable by FalkorDB (the projection
+                        # degrades it to null with a `#7369` warning).
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:{target_key}",
                             src=old_id, tgt=target_key,
                             target_label=target_label,
                             edge_type=rel,
+                            **edge_props,
                         )
                 # Create new edge: new point → same target (MERGE = idempotent,
                 # no dupes).
@@ -16279,9 +16312,11 @@ class TortoiseSDK:
                 # restated claim about the same subject is bound to the same
                 # Subject by `bind_point_subjects` and both edges exist. In a chain
                 # (X→Y→Z) each transfer would re-stamp the newest successor with the
-                # oldest ancestor's value, and the descriptor below carries no
-                # `attrs`, so the overwritten value is journaled NOWHERE and cannot
-                # be rebuilt.
+                # oldest ancestor's value, and at the time the descriptor carried no
+                # `attrs`, so the overwritten value was journaled NOWHERE and could
+                # not be rebuilt. ⛔ That is fixed since #10139 (the descriptor
+                # carries the values flat) — the wording above is the HISTORY of why
+                # `ON CREATE` is the form, not a live claim about the descriptor.
                 # ⛔ PRECEDENCE, stated: the successor's own live value WINS. That is
                 # what the pre-#9417 code did (a bare MERGE left a pre-existing edge
                 # untouched), so this preserves it while still refusing to leave a
