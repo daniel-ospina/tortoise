@@ -204,6 +204,105 @@ def _text_hits(proj, needle: str) -> list[tuple[str, str]]:
             proj.g.query(_TEXT_SCAN, params={"needle": needle}).result_set]
 
 
+class _RecordSeam:
+    """A `write_live_record` stand-in that KEEPS what the capture handed it.
+
+    ⛔ A RECORD-ARMED TEST MUST INJECT THIS, OR IT MEASURES THE DOOR'S REAL
+    CONNECT INSTEAD OF THE LANE IT CLAIMS TO PIN. `TORTOISE_RECORD_DSN`
+    (`postgresql://unused/record`) is not a database: the live write fails,
+    `_landed` is then False for every turn, and #10000's post-write fallback puts
+    them in the GRAPH by design — so a leg that asserts the graph holds no turn
+    node on "the record-only lane" is asserting the opposite of what an
+    unreachable record produces (#10000's
+    `test_a_refused_record_write_falls_back_to_the_graph` pins that direction on
+    purpose). It is also environment-dependent: where `psycopg2` IS importable
+    the connect raises `RecordConnectError` and TRIPS THE 60 s BREAKER, which
+    flips `_record_first` for every LATER capture in the same process — so the
+    same file was green on a `.[test]` venv and red on `--all-extras`.
+
+    Injecting the seam removes both: the write is reported APPLIED with
+    statements, so the record really is the store, and nothing connects anywhere.
+    The two READ doors `sdk._write_capture_turns` consults are answered from the
+    SAME record this seam holds — `_record_prior_vectors` (the values the record
+    already stores for these ids) and `_record_turn_residue` (the ids at or above
+    the new window's end) — so neither a driver nor a breaker is involved, and
+    the sweep is driven by rows the record genuinely received.
+    """
+
+    def __init__(self) -> None:
+        from tortoise.record_writer import RecordWrite, RecordWriteOutcome
+
+        self.outcome = RecordWrite(outcome=RecordWriteOutcome.APPLIED, events=1,
+                                   statements=2, first_seq=1, last_seq=1)
+        self.records: list[dict] = []
+
+    def __call__(self, record, **_kwargs):
+        self.records.append(record)
+        return self.outcome
+
+    def turn_snapshots(self) -> list[dict]:
+        snapshots: list[dict] = []
+        for record in self.records:
+            if record.get("type") == rp.TURNS_RECORD_TYPE:
+                snapshots.extend(record.get("turns") or [])
+            elif record.get("type") == "PointAdded" and isinstance(
+                    record.get("point"), dict):
+                snapshots.append(record["point"])
+        return snapshots
+
+    def prior_vectors(self, session_id: str, turn_ids) -> dict:
+        """What `record_read.turn_prior_vectors` would answer, off this record."""
+        from tortoise import record_read
+
+        held = {snap.get("id"): snap for snap in self.turn_snapshots()}
+        out = {}
+        for turn_id in turn_ids:
+            snap = held.get(turn_id)
+            if snap is None:
+                continue
+            out[turn_id] = record_read.PriorTurn(
+                content=snap.get("content"),
+                embedding=snap.get("embedding"),
+                created_at=snap.get("createdAt"),
+                status=snap.get("status"))
+        return out
+
+    def residue(self, session_id: str, first_index: int) -> list[str]:
+        """The ids at or above *first_index* — `turn_keys_at_or_above`, exactly."""
+        out = []
+        for snap in self.turn_snapshots():
+            turn_id = str(snap.get("id") or "")
+            index = _turn_index(turn_id, session_id)
+            if index is not None and index >= first_index:
+                out.append(turn_id)
+        return sorted(out)
+
+
+def _turn_index(turn_id: str, session_id: str) -> int | None:
+    """The `{session}_t{i}` index, or None when the id carries none."""
+    prefix = f"{session_id}_t"
+    if not turn_id.startswith(prefix):
+        return None
+    try:
+        return int(turn_id[len(prefix):])
+    except ValueError:
+        return None
+
+
+def _install_record_seam(monkeypatch, seam: _RecordSeam) -> _RecordSeam:
+    """Wire *seam* into the write door AND both read doors it stands in for."""
+    import tortoise.sdk as sdk_mod
+
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(sdk_mod, "_record_prior_vectors",
+                        lambda _sdk, sid, turn_ids=None, **kw:
+                        seam.prior_vectors(sid, turn_ids or []))
+    monkeypatch.setattr(sdk_mod, "_record_turn_residue",
+                        lambda _sdk, sid, first_live: seam.residue(
+                            sid, first_live))
+    return seam
+
+
 # ── §1 the declaration, in every registry that declares a journal type ─────
 
 
@@ -407,6 +506,11 @@ def test_the_stale_sweep_keeps_the_feed_PAIR_and_records_the_removal_once(
     monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
     monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-10067")
     monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "graph-10067")
+    # ⛔ THE RECORD IS MADE THE LANE UNDER TEST (see `_RecordSeam`): without this
+    # the DSN's real connect fails, #10000's fallback writes the turns to the
+    # GRAPH, and the `turn_node_ids` assertion below asserts the opposite of what
+    # the code does on a lane whose record is unreachable.
+    _install_record_seam(monkeypatch, _RecordSeam())
     from tortoise.sdk import TortoiseSDK
 
     path = tmp_path / "cap" / "events.jsonl"
@@ -587,6 +691,13 @@ def test_the_CARRIER_branch_stamps_its_encoded_vector_too(tmp_path, monkeypatch)
     monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
     monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-10067")
     monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "graph-10067")
+    # ⛔ ONE CARRIER PER CAPTURE IS THE ASSERTION, so the count cannot be decided
+    # by whether a real connect failed: where `psycopg2` is importable the first
+    # capture's connect raises `RecordConnectError`, trips the 60 s breaker, and
+    # the SECOND capture then reads `_record_first` False and emits no carrier at
+    # all (`len(carriers) == 1`). The seam is what makes this leg measure the
+    # carrier branch rather than the environment.
+    _install_record_seam(monkeypatch, _RecordSeam())
     from tortoise.sdk import TortoiseSDK, _write_capture_turns
 
     path = tmp_path / "cap" / "events.jsonl"
