@@ -272,6 +272,25 @@ def _unlink_source(path: Path) -> bool:
     return True
 
 
+def _read_archive(path: Path) -> bytes | None:
+    """Decompress an archive, or None when it is absent/empty/unreadable.
+
+    An EMPTY file is not a sealed day: ``gzip.decompress(b"")`` returns ``b""``
+    without raising, so a zero-length archive (killed mid-create, torn copy,
+    interrupted restore) would otherwise "prove" that records exist somewhere.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        return gzip.decompress(raw)
+    except (OSError, EOFError, zlib.error):
+        return None
+
+
 def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
     """The source is gone; answer with what the ARCHIVE proves, never with hope.
 
@@ -285,12 +304,11 @@ def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
     must be proved by reading an archive (#6388 review, P0/P1).
     """
     target = archive_path(root, day)
-    try:
-        gzip.decompress(target.read_bytes())
-    except (OSError, EOFError, zlib.error) as e:
+    if _read_archive(target) is None:
         return Sealed(day, "verify-failed", plain_bytes, _size_or_zero(target),
                       "the source is gone and no readable archive proves the "
-                      f"day was sealed ({e}) — the records exist nowhere")
+                      f"day was sealed ({target.name}) — the records exist "
+                      "nowhere")
     return Sealed(day, "already-sealed", plain_bytes, _size_or_zero(target),
                   "the source was already gone (a concurrent run sealed it "
                   "first)")
@@ -314,13 +332,14 @@ def _remove_if_same(path: Path, mine: os.stat_result) -> bool:
     return False
 
 
-def _remove_held(path: Path, held: int) -> None:
+def _remove_held(path: Path, held: int) -> bool:
     """Remove ``path`` only while ``held`` still proves it is our inode."""
     with contextlib.suppress(OSError):
         mine = os.fstat(held)
         if mine.st_nlink == 0:      # our name was already replaced: never unlink
-            return
-        _remove_if_same(path, mine)
+            return False
+        return _remove_if_same(path, mine)
+    return False
 
 
 def _create_exclusive(target: Path, plain: bytes) -> None:
@@ -341,11 +360,13 @@ def _create_exclusive(target: Path, plain: bytes) -> None:
             out.flush()
             os.fsync(out.fileno())
     except BaseException:
+        if held is not None:
+            _remove_held(target, held)
+        elif fd >= 0:
+            _remove_held(target, fd)   # fd still pins it: ownership provable
         if fd >= 0:
             with contextlib.suppress(OSError):
                 os.close(fd)
-        if held is not None:
-            _remove_held(target, held)
         raise
     finally:
         if held is not None:
@@ -371,14 +392,15 @@ def _publish_bytes(tmp: Path, target: Path, plain: bytes) -> None:
     _create_exclusive(target, plain)
 
 
-def _preserve_aside(src: Path, aside: Path) -> os.stat_result:
+def _preserve_aside(src: Path, aside: Path) -> tuple[os.stat_result, int]:
     """Keep the peer's archive under a NEW name, never over one.
 
-    Returns the identity of the preserved copy, so the caller can remove the
-    original name only while it still refers to THOSE bytes. A hard link keeps
-    both names on one inode for free; a filesystem with no links gets an
-    exclusive copy (``O_EXCL``), fsynced — file AND directory — before the
-    original name is dropped, so a power loss cannot take the only archive.
+    Returns ``(identity, held_fd)``. ``held_fd`` is -1 on the hard-link branch,
+    where the aside NAME pins the inode; on the copy branch it is the descriptor
+    the caller must hold until it has proved which inode ``src`` still refers to
+    — an unpinned ``stat_result`` is a number that a peer's replacement file can
+    reuse (measured 40/40), which is how a "verified" unlink deletes a peer's
+    archive. The caller closes it.
     """
     try:
         os.link(src, aside)
@@ -388,7 +410,7 @@ def _preserve_aside(src: Path, aside: Path) -> os.stat_result:
         if e.errno not in _NO_HARD_LINK_ERRNOS:
             raise
     else:
-        return os.stat(aside)
+        return os.stat(aside), -1     # the NAME pins that inode
     fd = os.open(src, os.O_RDONLY)
     out_fd: int | None = None
     held: int | None = None
@@ -404,7 +426,8 @@ def _preserve_aside(src: Path, aside: Path) -> os.stat_result:
             view = view[os.write(out_fd, view):]
         os.fsync(out_fd)
         _fsync_dir(aside.parent)
-        return staged
+        keep, fd = fd, -1        # the CALLER now holds the pin
+        return staged, keep
     except BaseException:
         if held is not None:
             _remove_held(aside, held)
@@ -457,9 +480,10 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str,
         aside = target.with_name(f"{target.name}.superseded-{stale_sha}")
         attempt = 0
         staged: os.stat_result | None = None
+        hold = -1
         while True:
             try:
-                staged = _preserve_aside(target, aside)
+                staged, hold = _preserve_aside(target, aside)
                 break
             except FileExistsError:
                 attempt += 1
@@ -468,7 +492,26 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes, digest: str,
             except OSError as e:
                 return "disagree", (f"could not preserve the stale archive ({e}) "
                                     "— left it and the source in place")
-        if not _remove_if_same(target, staged):
+        try:
+            # The aside must hold the archive we decided to supersede — not
+            # whatever a peer published between the read and the preserve.
+            staged_bytes = gzip.decompress(aside.read_bytes())
+        except (OSError, EOFError, zlib.error) as e:
+            return "disagree", (f"could not re-read the staged archive {aside}: "
+                                f"{e}")
+        if _sha256(staged_bytes) != _sha256(raced):
+            return "disagree", (f"a peer published a different archive at "
+                                f"{target} while it was being preserved (kept at "
+                                f"{aside}) — left it; this run's bytes are in "
+                                "the source")
+        try:
+            gone = (_remove_held(target, hold) if hold >= 0
+                    else _remove_if_same(target, staged))
+        finally:
+            if hold >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(hold)
+        if not gone:
             # A peer published between the aside link and this unlink. Its
             # archive is NEWER than the bytes we staged, so publishing over it
             # would destroy records this run never read.
@@ -727,16 +770,26 @@ def restore(root: Path, day: date) -> str:
         return (f"{dst} appeared while restoring — refusing to overwrite it")
     except OSError as e:
         return f"restore failed: {e}"
+    held: int | None = None
     try:
+        held = os.dup(fd)      # pins the inode we created: only it may be removed
         with os.fdopen(fd, "wb") as out:
+            fd = -1
             out.write(plain)
             out.flush()
             os.fsync(out.fileno())
         _fsync_dir(root)
     except OSError as e:
-        with contextlib.suppress(OSError):
-            dst.unlink()
+        if held is not None:
+            _remove_held(dst, held)
         return f"restore failed: {e}"
+    finally:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if held is not None:
+            with contextlib.suppress(OSError):
+                os.close(held)
     return ""
 
 
@@ -756,9 +809,10 @@ def _unreadable_archives(root: Path) -> list[Path]:
     candidates = sorted(Path(e.path) for e in entries
                         if e.name.endswith(".jsonl.gz"))
     for path in candidates:
-        try:
-            gzip.decompress(path.read_bytes())
-        except (OSError, EOFError, zlib.error):
+        # `_read_archive` treats a ZERO-LENGTH file as unreadable: gzip returns
+        # b"" for it without raising, so a torn create would otherwise pass as
+        # clean (an empty gzip of empty content is never 0 bytes).
+        if _read_archive(path) is None:
             out.append(path)
     return out
 

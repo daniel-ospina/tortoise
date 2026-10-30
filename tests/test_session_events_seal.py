@@ -749,6 +749,77 @@ def test_the_source_present_publish_cannot_clobber_a_peer_archive(tmp_path, monk
     assert result.ok, result
 
 
+def test_the_copy_branch_pins_the_inode_it_compares(tmp_path):
+    """On a filesystem with no hard links the aside is a COPY, so the staged
+    `st` is not pinned by any name: a peer's replacement file can reuse the freed
+    inode number and a "verified" unlink then deletes the peer's archive. The
+    caller now holds the descriptor while it compares.
+
+    REGRESSION PIN, not a mutation proof: the collision needs the kernel to hand
+    the peer's replacement the freed inode number, which this test cannot
+    force deterministically — the mutation (`_preserve_aside` returning
+    `(staged, -1)` on the copy branch) was measured to stay green here. It pins
+    the intended behaviour (a peer's archive survives, the verdict is a
+    conflict); the pinning itself is verified by reading the code and by
+    `test_a_failed_create_never_deletes_a_peers_archive`, whose mutation does
+    RED.
+    """
+    day = TODAY - timedelta(days=9)
+    full = b'{"n": 1}\n{"n": 2}\n'
+    path = _write(tmp_path, day, full)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(b'{"n": 1}\n', mtime=0))
+    peer = gzip.compress(b'{"peer": 9}\n', mtime=0)
+
+    real_link, real_fsync = seal.os.link, seal.os.fsync
+
+    def no_links(*a, **k):
+        raise OSError(errno.ENOTSUP, "no hard links here")
+
+    calls = []
+
+    def peer_after_the_copy(fd):
+        calls.append(fd)
+        if len(calls) == 1:            # the temp file created by seal_one
+            return
+        if len(calls) == 2:            # the aside copy is now durable
+            target.unlink()
+            target.write_bytes(peer)
+        return
+
+    seal.os.link, seal.os.fsync = no_links, peer_after_the_copy
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        seal.os.link, seal.os.fsync = real_link, real_fsync
+
+    assert result.status == "conflict", result
+    assert gzip.decompress(target.read_bytes()) == b'{"peer": 9}\n'
+
+
+def test_an_empty_archive_is_never_proof_that_a_day_was_sealed(tmp_path):
+    """`gzip.decompress(b"")` returns b"" without raising, so a zero-length
+    archive must not count as "the records are somewhere".
+
+    Mutation: `_read_archive` losing its `if not raw: return None` REDs here
+    (`--check` exits 0 and the day reads as already sealed) — verified.
+    """
+    day = TODAY - timedelta(days=3)
+    path = _write(tmp_path, day, b'{"n": 1}\n')
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"")
+    path.unlink()                       # the source is gone; only the archive remains
+
+    result = seal.seal_one(tmp_path, path)
+
+    assert result.status == "verify-failed", result
+    assert "exist nowhere" in result.detail
+    assert seal._read_archive(target) is None
+    assert target in seal._unreadable_archives(tmp_path)
+
+
 def test_an_unpublished_name_taken_says_the_bytes_exist_only_in_the_source(tmp_path):
     """When even `.unpublished-<sha8>` is taken, the verdict must not name a file
     that holds nothing — it must say where the bytes actually are.
