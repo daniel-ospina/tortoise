@@ -202,8 +202,8 @@ falls back.
 - **⚠️ TWO NAMED CARVE-OUTS from that union, and neither is the fallback label** (`:290-306`).
   `foreign-arch` is ALWAYS dropped; the version pin only under `CI_RUNNER_OS_LABEL=off`/unset, so
   under `on|auto` it JOINS the union (printed `version-pinned, kept=[…]`, see sub-bullet 1). Both are
-  PRINTED, never silently skipped — keeping either makes a false PASS permanent — and both are what
-  `_preserve_labels` drops both, reads NO flag: ONE reader here (this repair), no writer (#10275).
+  PRINTED, never silently skipped — keeping either makes a false PASS permanent — and `_preserve_labels`
+  drops both on re-registration, reading NO flag: ONE reader here (the repair), no writer (#10275).
   1. **`ubuntu-<version>`** (`ubuntu-24.04`, `ubuntu-22.04-arm`, …): the label a leg pins to ESCAPE
      this pool. Preserving it would un-pin `test-slow` / `workflow-lint` / `finding-provenance` /
      `mirror-images` onto a bare box whose `PATH` lacks their tools — the measured 2026-10-24

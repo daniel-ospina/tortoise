@@ -2029,3 +2029,55 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
                 "writers in this tree (the install-side emitter is open PR #10275), and that is the "
                 "fact an operator needs before running the repair"
             )
+
+
+# ── 8g. the carve-out lead-in promises the writer roles instead of trailing off ───────────────
+def test_the_carveout_lead_in_names_the_writer_roles_instead_of_trailing_off():
+    """⛔ THE LEAD-IN ENDED AT A DANGLING COLON, AT THE EXACT POINT IT PROMISED TWO WRITERS AGREE.
+
+    Review of `4cfdb8a72` (P3-2). `docs/ops/ci-runner-x64.md`'s carve-out bullet read:
+
+        … and both are what `_preserve_labels` drops on re-registration, except that it reads NO
+        flag yet: **ONE writer here:**
+
+    The clause stops at a colon with nothing after it, and the numbered list that follows is NOT
+    its continuation (it starts with `1. **\`ubuntu-<version>\`**`), so a reader of the carve-out
+    contract is left with a dangling referent exactly where the two writers are being promised to
+    agree. The installer header carries the complete sentence
+    (`tools/install-ci-runner-x64.sh:58`), so this is leftover text from the `c725ab7f5` rewrite,
+    not a deliberate omission.
+
+    WHAT IS PINNED, and why it is not another phrase blacklist. Three properties of the LEAD-IN
+    PARAGRAPH itself (from the "TWO NAMED CARVE-OUTS" bullet to the first numbered item):
+      1. it is not TRUNCATED — a lead-in whose last character is `:` promises a continuation the
+         numbered list does not carry;
+      2. it still states the ROLE (`reads`/`reading` NO flag) — the fact an operator needs, and
+         the one a "fix" that simply deletes the dangling clause would silently drop;
+      3. it NAMES the missing writer (`#10275`) — the dangling clause promised a writer and named
+         none, which is how it survived a pin that only checked the flag's reader count.
+
+    Non-vacuity (measured at 9dc9d727f, each mutation restored afterwards): with the pre-fix lead-in
+    restored the truncation check reds on its own; deleting `#10275` reds on its own; deleting the
+    `reading NO flag` clause reds on its own.
+    """
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+
+    starts = [i for i, line in enumerate(doc) if line.startswith("- **⚠️ TWO NAMED CARVE-OUTS")]
+    assert len(starts) == 1, f"expected exactly one carve-out bullet, found {len(starts)} — re-anchor this pin"
+    start = starts[0]
+    numbered = [i for i in range(start, len(doc)) if re.match(r"^\s+1\. ", doc[i])]
+    assert numbered, "the carve-out bullet no longer carries a numbered list — re-anchor this pin"
+    lead_in = re.sub(r"\s+", " ", " ".join(doc[start:numbered[0]])).strip()
+
+    assert not lead_in.endswith(":"), (
+        "the carve-out lead-in ends at a colon with nothing after it — the numbered list below is "
+        f"not its continuation, so the clause is truncated: {lead_in[-120:]!r}"
+    )
+    assert re.search(r"read(?:s|ing)? NO flag", lead_in), (
+        "the carve-out lead-in no longer states that `_preserve_labels` reads NO flag — that role "
+        f"statement is the operator-visible fact the clause carried: {lead_in[-160:]!r}"
+    )
+    assert "#10275" in lead_in, (
+        "the carve-out lead-in no longer NAMES the missing writer (#10275) — a clause that promises "
+        f"a writer and names none is what dangled in the first place: {lead_in[-160:]!r}"
+    )
