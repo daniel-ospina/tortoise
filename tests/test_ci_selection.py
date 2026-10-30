@@ -5523,14 +5523,20 @@ def test_no_required_check_names_a_fast_leg():
         "keying the required set on a leg name would make the gate unsatisfiable")
 
 
-# ── #6897: the fast matrix routes across BOTH runner classes ──────────────
+# ── #6897: the fast matrix CAN route across both runner classes ──────────
 # The capacity decision is #6897's (owner ruling 2026-10-27: use the compute
-# capacity wherever it is; THROUGHPUT over runner class). These pin the three
-# properties that decision turns on: every row HAS a class (a missing key makes
-# `runs-on` resolve to null and the file is refused — #6253's zero-jobs case),
-# the canary producer stays on the label it has always used so the streak is
-# comparable run over run, and the split actually uses both classes instead of
-# degenerating to one and buying nothing but a new failure mode.
+# capacity wherever it is; THROUGHPUT over runner class) — but it is delivered
+# as an OPT-IN, because the pool is **fallback-only** by a RECORDED DECISION
+# (`docs/ops/ci-runner-x64.md` -> "Contradiction test",
+# `scripts/ci_runner_gate.sh:1-30`), and making the pool a primary class by
+# default would be an adoption over that decision.
+#
+# So these pin FOUR properties: the DEFAULT is main's behaviour exactly
+# (`hosted-only`, every row on `ubuntu-latest`) — the one #10186's review found
+# violated, with 3 of 4 pool legs failing on its own head — the opt-in actually
+# splits, every row HAS a class (a missing key makes `runs-on` resolve to null
+# and the file is refused — #6253's zero-jobs case), and the canary producer
+# keeps the label it has always used so the streak stays comparable.
 #
 # ⛔ WHAT THESE DO **NOT** CLAIM: that the hosted half is GitHub-hosted. On this
 # repo `ubuntu-latest` is not hosted-only — `scripts/ci_runner_gate.sh` attaches
@@ -5540,16 +5546,69 @@ def test_no_required_check_names_a_fast_leg():
 # LABEL, which is all this lane decides.
 
 
-def test_every_fast_row_names_a_runner_and_the_split_uses_both_classes():
-    """#6897: `runner` is emitted per row, positional, and never degenerates."""
+def test_the_fast_split_is_off_by_default_so_the_pool_stays_fallback_only(monkeypatch):
+    """#6897/#10186: with no opt-in, EVERY row is main's `ubuntu-latest`.
+
+    This is the assertion the earlier cut of this branch failed: it routed odd
+    shards to `[self-hosted, self-hosted-x64]` unconditionally, which moved 4 of
+    9 gated shards onto a class the recorded `fallback-only` decision says is not
+    primary. It also fails SAFE on junk: an unset variable, an emptied one, a
+    fork with no `vars`, or a typo must all land on main's behaviour rather than
+    discovering the split when a leg dies.
+    """
     from tools.ci_selection import (
+        SHARD_ROUTING_ENV,
+        SHARD_ROUTING_HOSTED_ONLY,
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_HOSTED,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+        resolve_shard_routing,
+    )
+    monkeypatch.delenv(SHARD_ROUTING_ENV, raising=False)
+    shards = push_legs(load_manifest())["shards"]
+    inc = fast_matrix_include(shards)["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    assert {e["runner"] for e in inc} == {json.dumps(SHARD_RUNNER_HOSTED)}, (
+        "the default must be hosted-only — the pool is fallback-only by recorded "
+        f"decision (#6897): {sorted(e['runner'] for e in inc)}")
+    # …and it must be the DEFAULT, not an accident of an unset environment: the
+    # mode resolver is the single decision point, and every non-opt-in value
+    # resolves to hosted-only, `hosted-only` itself included (the documented safe
+    # setting must stay legal).
+    for value in (None, "", "   ", SHARD_ROUTING_HOSTED_ONLY, "hosted-only ",
+                  "HOSTED-ONLY", "true", "1", "pool", "split", "pool-splits",
+                  "pool_split"):
+        assert resolve_shard_routing(value) == SHARD_ROUTING_HOSTED_ONLY, value
+    assert resolve_shard_routing(SHARD_ROUTING_POOL_SPLIT) == SHARD_ROUTING_POOL_SPLIT
+    assert resolve_shard_routing(" POOL-SPLIT ") == SHARD_ROUTING_POOL_SPLIT
+    # the environment is the operator lever, so it must reach the matrix — and
+    # only for the exact opt-in.
+    for value in ("", SHARD_ROUTING_HOSTED_ONLY, "nonsense"):
+        monkeypatch.setenv(SHARD_ROUTING_ENV, value)
+        got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+        assert got == {json.dumps(SHARD_RUNNER_HOSTED)}, (value, sorted(got))
+    monkeypatch.setenv(SHARD_ROUTING_ENV, SHARD_ROUTING_POOL_SPLIT)
+    got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+    assert len(got) == 2, f"the opt-in must actually split: {sorted(got)}"
+
+
+def test_every_fast_row_names_a_runner_and_the_split_uses_both_classes():
+    """#6897: `runner` is emitted per row, positional, and never degenerates.
+
+    Asserts the OPT-IN mode — the default is pinned by the test above.
+    """
+    from tools.ci_selection import (
+        SHARD_ROUTING_POOL_SPLIT,
         SHARD_RUNNER_HOSTED,
         SHARD_RUNNER_X64,
         fast_matrix_include,
         load_manifest,
         push_legs,
     )
-    inc = fast_matrix_include(push_legs(load_manifest())["shards"])["include"]
+    inc = fast_matrix_include(push_legs(load_manifest())["shards"],
+                              routing=SHARD_ROUTING_POOL_SPLIT)["include"]
     assert inc, "the real config emits no shards — nothing to route"
     for e in inc:
         assert "runner" in e, f"missing runner (#6897): {e['half']}"
@@ -5629,20 +5688,32 @@ def test_runner_routing_is_positional_and_the_last_shard_is_always_on_the_hosted
 def test_the_test_job_takes_its_runner_from_the_matrix_with_a_variable_rollback():
     """#6897: the workflow half of the routing.
 
-    Three claims the unit tests above cannot see: `runs-on` reads the selector's
-    per-row class (no literal that would ignore the matrix), the operator
-    rollback is the repo VARIABLE rather than a code edit, and the job is not
-    renamed — branch protection and the merge rail key on `test (a)`….
+    Four claims the unit tests above cannot see: `runs-on` reads the selector's
+    per-row class (no literal that would ignore the matrix, and NO second copy of
+    the mode logic to drift from the selector's), the opt-in reaches the selector
+    as the repo VARIABLE rather than a code edit, the emitted value is parsed
+    (the row value is a JSON string; `runs-on` needs the array), and the job is
+    not renamed — branch protection and the merge rail key on `test (a)`….
     """
     wf = _load_python_ci()
     job = wf["jobs"]["test"]
     runs_on = str(job["runs-on"])
-    assert "matrix.runner" in runs_on, (
-        "`test` must take its runner class from the selector's matrix row")
-    assert "fromJSON" in runs_on, (
-        "the row value is a JSON string; `runs-on` needs the parsed array")
-    assert "CI_SHARD_ROUTING" in runs_on and "hosted-only" in runs_on, (
-        "the rollback must be the CI_SHARD_ROUTING repo variable, not a code change")
+    assert runs_on == "${{ fromJSON(matrix.runner) }}", (
+        "`test` must take its runner class from the selector's matrix row, and "
+        f"from nowhere else (got {runs_on!r})")
+    assert "self-hosted" not in runs_on and "ubuntu-" not in runs_on, (
+        "a literal runner label in `runs-on` would bypass the selector — and, "
+        "for a pool label, make the split the DEFAULT again (#10186 review)")
+    # THE OPT-IN IS WIRED, in the job that emits the matrix: without this env
+    # the selector never sees `CI_SHARD_ROUTING` and the split can never be
+    # turned on (the fail-safe direction, but a dead lever all the same).
+    emit = [s for s in wf["jobs"]["changes"]["steps"]
+            if s.get("id") == "push-matrix"]
+    assert len(emit) == 1, emit
+    env = {k: str(v) for k, v in (emit[0].get("env") or {}).items()}
+    assert "vars.CI_SHARD_ROUTING" in env.get("CI_SHARD_ROUTING", ""), (
+        "the matrix emitter must pass the CI_SHARD_ROUTING repo variable to the "
+        f"selector (#6897); got env={env!r}")
     # the job id and its `test (<half>)` name are branch-protection surfaces
     assert job["name"] == "test (${{ matrix.half }})", job["name"]
     # ⛔ and the legs that CANNOT run on the pool keep their version pin: a

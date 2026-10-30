@@ -4034,17 +4034,40 @@ def non_gating_report(manifest: dict) -> str:
 
 # #6897 (owner ruling 2026-10-27: use the compute capacity wherever it is,
 # prioritise THROUGHPUT over runner class): the two runner classes the fast
-# matrix splits across, as the LABEL ARRAYS `runs-on` wants. Emitted as a JSON
-# ARRAY STRING because a matrix value is always a string, and `runs-on` needs an
-# array — the workflow `fromJSON`s it back (`python-ci.yml`, `test:` job).
+# matrix can split across, as the LABEL ARRAYS `runs-on` wants. Emitted as a
+# JSON ARRAY STRING because a matrix value is always a string, and `runs-on`
+# needs an array — the workflow `fromJSON`s it back (`python-ci.yml`, `test:`).
 #
 # x64 CELLS ONLY for the pool half, never the ARM64 VMs: measured per-test cost
 # on the SAME nodeids splits by class — arm64 legs are 4.46x hosted, x64 cells
-# only 1.16x (654 common testcases, run 40238275534 vs hosted 40249711042; the
-# figures live in the `test` job's "WHICH RUNNER CLASS CARRIES THIS LEG" header).
-# Routing a fast shard onto ARM64 would buy queue time and pay it back in test
-# time — and naming `self-hosted-x64` EXPLICITLY, rather than inheriting a
-# generic label, is what makes that guarantee hold.
+# cheaper than that (654 common testcases, run 40238275534 vs hosted
+# 40249711042; the figures live in the `test` job's "WHICH RUNNER CLASS CARRIES
+# THIS LEG" header). Routing a fast shard onto ARM64 would buy queue time and
+# pay it back in test time — and naming `self-hosted-x64` EXPLICITLY, rather
+# than inheriting a generic label, is what makes that guarantee hold.
+#
+# ⛔ THE SPLIT IS **OFF BY DEFAULT**, AND THAT IS A RECORDED DECISION, NOT A
+# PREFERENCE. `docs/ops/ci-runner-x64.md` -> "Contradiction test" and
+# `scripts/ci_runner_gate.sh:1-30` record the local pool as **fallback-only**:
+# jobs landing on local hardware compete with the agent fleet and the Tortoise
+# graph (a local pytest run crashed FalkorDB, 178 restarts, 2026-10-12). An
+# earlier cut of this lane made the pool a PRIMARY class for 4 of 9 gated shards
+# BY DEFAULT, which is an adoption over that decision — not a lane's to take.
+# #6897's "use the capacity wherever it is" is therefore served by making the
+# split AVAILABLE (an explicit opt-in), never by making it the default; the
+# route to change the default is to reopen `fallback-only` in its own home
+# (#6897) with the measurement below attached.
+#
+# THE MEASUREMENT THAT KEEPS IT OFF (PR #10186 review, 2026-10-30, and this
+# branch's own head): on run 40981781885 (main, plain `ubuntu-latest`) the pool
+# won 5 of 9 legs by the fallback race and **5 of 5 died at their watchdog**
+# while 4 of 4 hosted legs passed in 10-12 m of a 20 m budget — x64 cells
+# measured ~2.7x hosted at job level, not the 1.16x an older run suggested. On
+# head 5a2ae6aa1 (run 40986603502) 3 of 4 pool legs failed, and two of those
+# were not budget kills at all: `redis.exceptions.ConnectionError: Error 111
+# ... localhost:6379` — the pool host was not serving the FalkorDB every docker
+# -lane shard needs. A class that cannot complete the work is not capacity, so
+# the default stays exactly where main is.
 #
 # ⛔ The hosted half is `ubuntu-latest` — MAIN'S CURRENT LABEL, and deliberately
 # NOT described here as "GitHub-hosted". On this repo that label is not
@@ -4064,9 +4087,37 @@ def non_gating_report(manifest: dict) -> str:
 SHARD_RUNNER_HOSTED = ["ubuntu-latest"]
 SHARD_RUNNER_X64 = ["self-hosted", "self-hosted-x64"]
 
+# THE OPERATOR LEVER, and the mode is resolved in ONE place (Python, not a
+# workflow expression) so it is testable. Anything that is not the explicit
+# opt-in resolves to hosted-only: an unset variable, a typo, an emptied value,
+# or a fork where `vars` are unavailable all land on MAIN'S behaviour instead of
+# routing a required check onto a contended class. Fail-safe, never fail-open —
+# an operator should never discover the split because a leg died.
+SHARD_ROUTING_ENV = "CI_SHARD_ROUTING"
+SHARD_ROUTING_HOSTED_ONLY = "hosted-only"
+SHARD_ROUTING_POOL_SPLIT = "pool-split"
+
+
+def resolve_shard_routing(value: str | None) -> str:
+    """#6897: map a `CI_SHARD_ROUTING` value to a routing mode.
+
+    `pool-split` is the ONLY value that enables the split (exact match, case and
+    surrounding space ignored — a hand-typed Settings value should not need to
+    be byte-exact). Everything else, INCLUDING the documented `hosted-only`, is
+    hosted-only: that value is the explicit safe setting, and being the default
+    must not make it illegal.
+    """
+    if (value or "").strip().lower() == SHARD_ROUTING_POOL_SPLIT:
+        return SHARD_ROUTING_POOL_SPLIT
+    return SHARD_ROUTING_HOSTED_ONLY
+
 
 def fast_shard_runner(index: int, count: int) -> list[str]:
-    """#6897: which runner class carries shard `index` of `count`.
+    """#6897: which runner class carries shard `index` of `count` IN POOL-SPLIT MODE.
+
+    ⛔ This is the OPT-IN rule only: under the default (`hosted-only`)
+    `fast_matrix_include()` never calls it, and every row keeps
+    `SHARD_RUNNER_HOSTED` — main's label, main's behaviour.
 
     Two rules, in this order:
 
@@ -4093,7 +4144,7 @@ def fast_shard_runner(index: int, count: int) -> list[str]:
     return list(SHARD_RUNNER_HOSTED if index % 2 == 0 else SHARD_RUNNER_X64)
 
 
-def fast_matrix_include(shards: list[dict]) -> dict:
+def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
     """#6135: the GitHub Actions matrix the `test` job expands.
 
     Emitted COMPLETE (the workflow does no shell composition), because the
@@ -4102,11 +4153,16 @@ def fast_matrix_include(shards: list[dict]) -> dict:
     chosen positionally so the marker never has to name a half (`half == 'b'`
     stopped existing the moment S rose — the exact coupling #6135 removes).
 
-    #6897: `runner` carries the label array (as a JSON string) for `runs-on`,
-    assigned by POSITION via `fast_shard_runner()`. The workflow's `runs-on`
-    is its only consumer, and the operator rollback is the
-    `CI_SHARD_ROUTING=hosted-only` repo variable, never an edit here.
+    #6897: `runner` carries the label array (as a JSON string) for `runs-on` —
+    the workflow's ONLY consumer of it, so the routing is decided HERE and not
+    in a shell expression. `routing` is the mode: `pool-split` opts into the
+    positional split via `fast_shard_runner()`, anything else (the default,
+    including `routing=None`, which reads `CI_SHARD_ROUTING` from the
+    environment) gives EVERY row `SHARD_RUNNER_HOSTED` — main's label, main's
+    behaviour. See the block above the constants for why the default is off.
     """
+    mode = resolve_shard_routing(
+        os.environ.get(SHARD_ROUTING_ENV) if routing is None else routing)
     include = []
     for i, s in enumerate(shards):
         # #6145: carry the headroom alongside the budget so the margin a leg was
@@ -4123,7 +4179,9 @@ def fast_matrix_include(shards: list[dict]) -> dict:
             "watchdog_minutes": s["watchdog_minutes"],
             "watchdog_headroom": round(float(headroom), 2),
             "canary_producer": i == len(shards) - 1,
-            "runner": json.dumps(fast_shard_runner(i, len(shards))),
+            "runner": json.dumps(
+                fast_shard_runner(i, len(shards))
+                if mode == SHARD_ROUTING_POOL_SPLIT else SHARD_RUNNER_HOSTED),
         })
     return {"include": include}
 
@@ -5722,7 +5780,10 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
     ap.add_argument("--emit-push-matrix", action="store_true",
                     help="#1472/#6135: print the derived push fast_matrix + shards "
-                         "(and the derived slow_matrix, #9539)")
+                         "(and the derived slow_matrix, #9539). #6897: the fast "
+                         f"rows' `runner` follows ${SHARD_ROUTING_ENV} — "
+                         f"`{SHARD_ROUTING_POOL_SPLIT}` splits across the x64 "
+                         "pool, anything else (the default) is hosted-only")
     ap.add_argument("--split", action="store_true",
                     help="#1473/#6135: LPT-pack the stdin JSON test-file list "
                          "into the configured number of shards")
