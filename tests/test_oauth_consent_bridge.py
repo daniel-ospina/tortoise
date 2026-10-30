@@ -2250,8 +2250,10 @@ def test_a_secret_that_reuses_a_service_key_is_not_a_provisioned_arm(monkeypatch
     """§2.3 — the secret must be DEDICATED. A reused key is treated as unprovisioned.
 
     Without this, `CONSENT_TOKEN_SECRET=<anon key>` makes the verifier a forgery oracle for anyone
-    holding that key — it is public by construct, and it ships to every browser that loads the app
-    (§9 step 4 removed the one page that used to embed it, which never made it secret) — and `sub`
+    holding that key — it is public by construct (Supabase designs it to be shipped to browsers, so
+    it is assumed held by anyone, and it is in this process's environment, which is what makes the
+    collision observable; §9 step 4 removed the one page that used to embed it, which never made it
+    secret) — and `sub`
     is the only identity input on the token arm, so that is every account. Unit-level on purpose: the arm's
     unavailability already has an end-to-end test, and the operator signal here is the REASON the
     503 carries, which is what distinguishes "unset" from "set to something you must not reuse".
@@ -2267,11 +2269,14 @@ def test_a_secret_that_reuses_a_service_key_is_not_a_provisioned_arm(monkeypatch
     problem = consent_token_secret_problem()
     assert problem and "DEDICATED" in problem and "SUPABASE_SERVICE_ROLE_KEY" in problem, problem
 
-    # ⛔ …and the ANON key, which is the WORSE half (§2.3): it is public by construction, because the
-    # consent page embeds it — `hosted_api.py` reads `SUPABASE_ANON_KEY` into the page's
-    # `__SUPABASE_ANON_KEY__` placeholder, so it IS in this process's environment. An earlier
-    # version of this guard claimed it was not, and so left exactly this case unguarded (measured,
-    # review round 3).
+    # ⛔ …and the ANON key, which is the WORSE half (§2.3): it is public by construct, because
+    # Supabase designs it to be shipped to browsers, so it must be assumed held by anyone — and it
+    # IS in this process's environment: the API reads `SUPABASE_ANON_KEY` for its own server-side
+    # proxy calls (`hosted_api.py`, the `/api/sb` leg), NOT for the consent page. §9 step 4 deleted
+    # the page's inline client and the `__SUPABASE_ANON_KEY__` placeholder with it
+    # (`grep -c SUPABASE_ANON_KEY tortoise/oauth.py` at this head: 0), so no page is evidence
+    # either way. An earlier version of this guard claimed the key was NOT in the API's env at all
+    # and so left exactly this case unguarded (measured, review round 3).
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY")
     monkeypatch.setenv("SUPABASE_ANON_KEY", _TEST_SECRET)
     assert consent_token_secret() is None, "the PUBLIC anon key must never sign assertions"

@@ -458,11 +458,15 @@ Authorize inert and offers the retry.
       service-role key and NOT the anon key (§2.3). The length is an implementation floor, not a
       §2.3 requirement: HMAC-SHA256 with a guessable key is the same forgery oracle as a reused one
       (measured with a 1-character secret), so the hosted API refuses a short one with a typed 503
-      that names the reason. The hosted API refuses a value equal to any of them that it can see (typed 503 whose
-      description names the collision; it reads `SUPABASE_ANON_KEY` itself, for the consent page).
+      that names the reason. The hosted API refuses a value equal to any of them that it can see (typed 503
+      whose description names the collision): the anon key is public by construct — Supabase designs it
+      to be shipped to browsers, so it must be assumed held by anyone — and it is in the API's own
+      environment, which is what makes the collision observable here. **Not** because this deployment
+      ships it: #4054 / #4178 / #3501 kept it out of every browser-delivered artefact on purpose, and
+      §9 step 4 deleted the consent page's inline client, so no page is evidence either way.
       This box is still the operator's for the case the API cannot see — a Pages project whose env
       carries a value the API's env does not. Skipping it turns the verifier into a forgery oracle
-      for anyone who loaded the page.
+      for anyone who holds that key.
 - [ ] `docs/ops/auth-email-flows.md` §3's table is complete against the live allowlist (it claims to be the
       required set).
 
@@ -480,7 +484,7 @@ is **DELIVERED** by this diff (`functions/api/consent/start.ts`, `functions/api/
 | 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261030000001_oauth_consent_tickets.sql`; the accepted-`kid` allowlist is deliberately NOT BUILT (ONE `CONSENT_TOKEN_SECRET` is configured, so an allowlist of one is vacuous and §2.3’s two-`kid` rotation window does not exist yet — a key rotation is a VALUE SWAP that invalidates in-flight tokens, and the verifier accepts any non-empty `kid` for presence only, so treat that promise in §2.3/`§5` as IMPLEMENTATION WORK, not as a property)) | infrastructure; the mechanism choice is §2.3 |
 | 2. ~~`POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params)~~ — **DELIVERED**, see the paragraph after this table | the AS half; testable in Python (`tests/test_oauth_*`), and it had to land **before** any page change so the bearer path stays live meanwhile |
 | 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED** (evidence: `tests/test_oauth_consent_bff_routes.py`, incl. the TS→Python token round trip, the per-attempt key that closes the ownerless window, and the startup pin `tests/test_oauth_consent_bridge.py::test_startup_installs_the_SHARED_register`) | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
-| 4. ~~The page rewrite~~ — **DELIVERED** (#3524 §9 step 4). The page authenticates nobody: no provider buttons, no password form, no cookie write, no inline client, no bearer. It reads the per-attempt key from its own URL, mints the bound assertion from the session origin, and redeems it at `POST /oauth/consent`. Unauthenticated `GET /oauth/authorize` now 302s to `{app}/auth?next=/api/consent/start?{query}`. Evidence: `tests/test_oauth_consent_page_step4.py` (55 cases / 39 test functions: the bounce, the REAL `signup.html` return-to allowlist executed over the emitted URL, the page's inline script run under node, byte-exact `state`, a bound token redeeming to a live code, and the org chooser — sole-team, multi-team with the pick posted, and an unresolvable preview leaving Authorize inert) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
+| 4. ~~The page rewrite~~ — **DELIVERED** (#3524 §9 step 4). The page authenticates nobody: no provider buttons, no password form, no cookie write, no inline client, no bearer. It reads the per-attempt key from its own URL, mints the bound assertion from the session origin, and redeems it at `POST /oauth/consent`. Unauthenticated `GET /oauth/authorize` now 302s to `{app}/auth?next=/api/consent/start?{query}`. Evidence: `tests/test_oauth_consent_page_step4.py` (56 cases / 40 test functions — re-derived at each head, never copied; the scope the page DISPLAYS is compared with the `scope` the TOKEN carries, end to end: the bounce, the REAL `signup.html` return-to allowlist executed over the emitted URL, the page's inline script run under node, byte-exact `state`, a bound token redeeming to a live code, and the org chooser — sole-team, multi-team with the pick posted, and an unresolvable preview leaving Authorize inert) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
 | 5. `SCOPE.md` §9 class 4(i) — attested client identity | a product decision (which clients are attested, and what an unattested one may claim), filed separately |
 
 **What the "together" rule binds, and what it does not.** Steps 2→4 were scoped to land together because
@@ -506,7 +510,10 @@ and qualified here, where the rule is read. Nothing reverses the decision that s
 - the arm is live only where **`CONSENT_TOKEN_SECRET`** is set on the hosted API **and is a dedicated
   value of at least 32 UTF-8 bytes** (§2.3; a value equal to a service-role key or to
   `SUPABASE_ANON_KEY` — both are in this process's environment, and the anon key is public by
-  construct (it ships to every browser that loads the app, not because this page publishes it) — is
+  construct — Supabase designs it to be shipped to browsers, so it is assumed held by anyone, and
+  it is in this process's environment, which is what makes a collision observable; **not** because
+  this app ships it, since #4054/#4178 kept it out of every browser-delivered artefact and §9 step 4
+  deleted the one page that embedded it — is
   treated as unprovisioned, and so is a key too short to be one). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
   and the bearer path is untouched — never a 500, and never a silent fall-through to the bearer;
 - single-use holds ACROSS MACHINES: §2.3's shared `jti` store (step 1) is DELIVERED and installed at
