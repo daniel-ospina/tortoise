@@ -618,8 +618,8 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(),
     # Stripping also keeps `db_hash` alias-INVARIANT (this function feeds
     # `_graph_fingerprint`), which is what makes the backfill safe: a rebuild
     # that only ADDS aliases cannot move a recorded baseline into
-    # `unrecorded-mutation`, so no `_PROJECTION_STATE_FORMAT` bump is owed for
-    # the ADD direction.
+    # `unrecorded-mutation`. (The REMOVAL direction does move one — see the two
+    # paragraphs below and the v3 → v4 entry in `_PROJECTION_STATE_FORMAT_HISTORY`.)
     #
     # ⚠️ THE REMOVAL DIRECTION IS NOT FREE, and `retracted` below is the second
     # half of it (#10203 review round 2, P2). Both halves can REMOVE a token a
@@ -627,15 +627,13 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(),
     # ambiguity `tests/test_consistency_divergence_5011.py`
     # `::test_the_graph_fingerprint_is_alias_invariant` pins as desired): the
     # current-content half removes it while the content still derives it, the
-    # stale half removes it after an edit stopped deriving it. So a baseline
-    # recorded by an older reader on such a graph moves once and reads back as
-    # `unrecorded-mutation`, whose own action is the deliberate re-baseline.
-    # That exposure is NOT new here and is not doubled by this half: the
-    # current-content strip already carried it, on the same population (a caller
-    # who named the alias) and the same reasoning, which is why this branch
-    # declined a format bump — the alias mechanism itself ships in it, so no
-    # RELEASED baseline can hold a derived alias, and a caller-authored one is
-    # canonicalised away by the strip that was already here.
+    # stale half removes it after an edit stopped deriving it. Neither is a
+    # released behaviour — the alias mechanism itself ships in this change — so
+    # a baseline recorded by RELEASED code can hold such a token, moves once on
+    # upgrade, and (because `record_projection_state` is gated on `ok`) would
+    # keep repeating `unrecorded-mutation`. That is why v3 → v4 is appended to
+    # `_PROJECTION_STATE_FORMAT_HISTORY` above: the predecessor migrates instead
+    # of reding. See that history entry for the measured shape.
     strip_identifier_aliases(out, retracted)
     prov = props.get("provenance")
     if isinstance(prov, dict) and prov.get("source_id"):
@@ -1085,7 +1083,23 @@ _PROJECTION_STATE_SUFFIX = ".projection-state.json"
 # healthy graph as `journal_moved=False, graph_moved=True` — an
 # `unrecorded-mutation` whose `action` sends the operator hunting an
 # unjournalled writer that does not exist.
-_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2, 3)
+# v3 → v4 (#10203): the identifier-ALIAS canonical form
+# (`strip_identifier_aliases`, BOTH halves). Each half REMOVES a token a graph
+# really holds when the CALLER named the alias themselves — the current-content
+# half while the content still derives it, the STALE half (#10203 review P1)
+# after an edit stopped deriving it. Released code has neither half, so a
+# baseline recorded on such a graph moves once, and `record_projection_state` is
+# gated on `ok`, which makes the red STICKY: every later run repeats
+# `unrecorded-mutation` and its action sends the operator hunting an unjournalled
+# writer that does not exist. Measured (review round 2, docker lane): the
+# released shape `create(search_keys="err4032 release")` over
+# `content="error ERR-4032 on deploy"` then `update(content="deploy failed")`
+# leaves the token on the graph; its fingerprint is `782470cd…` without the stale
+# half and `7a15bb6f…` with it. Same consequence and same answer as v1 → v2
+# (`tags`) and v2 → v3 (the `(label, id)` re-key): append the format, so a v3
+# sidecar is a KNOWN predecessor that migrates on the next healthy recording
+# run.
+_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2, 3, 4)
 _PROJECTION_STATE_FORMAT: int = _PROJECTION_STATE_FORMAT_HISTORY[-1]
 _PROJECTION_STATE_SUPERSEDED_FORMATS: frozenset[int] = frozenset(
     _PROJECTION_STATE_FORMAT_HISTORY[:-1])
