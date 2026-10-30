@@ -92,7 +92,7 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    resolve_document_target_id, resolve_entity_id)
+    entity_create_lock, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -36617,6 +36617,15 @@ class TortoiseSDK:
         F1): ``live_name_holder_ids`` is row-per-holder and contributes ``None``
         for an id-less legacy / raw row, which is a live competitor all the same
         — see the filter's own comment below for what filtering it away did.
+
+        ⛔ THE CALLER MUST HOLD ``entity_create_lock(label, new_name)`` ACROSS
+        THIS PROBE AND THE WRITE IT AUTHORISES (#9876 review). The probe is
+        check-then-act: the write that makes the new holder visible happens in
+        ``_update_entity``'s label loop, so without the lock a create can mint
+        and write a carrier between the probe and the write, leaving two LIVE
+        holders of one name — the exact state this guard exists to prevent.
+        ``_update_entity`` takes both identity labels' locks (fixed order) around
+        both.
         """
         from .entity_identity import live_name_holder_ids
         from .exceptions import NameAlreadyHeld
@@ -37104,180 +37113,203 @@ class TortoiseSDK:
         #    name makes every later by-name create/read refuse, and there is no
         #    by-name repair path. Refused with `NameAlreadyHeld` BEFORE the loop,
         #    so a refusal leaves the graph untouched.
+        # ⛔ THE GUARD AND THE WRITE IT AUTHORISES ARE ONE CRITICAL SECTION
+        # (#9876 review). `_refuse_ambiguous_rename` reads the live holder
+        # set and then the label loop below writes `SET n += $props`, which is
+        # what makes the NEW holder visible — two graph round trips with no lock
+        # between them (check-then-act). Interleaved with a create, it left two
+        # LIVE carriers of one name, which create-poisons the name and makes
+        # `rebuild_all` stop over it (the same harm the create door's lock was
+        # added for, `entity_identity.entity_create_lock`).
+        #
+        # Both identity labels' locks are taken, in a FIXED order, rather than
+        # asking the guard which one the target carries: a `:Subject` can also
+        # carry `:Object`, a fixed order cannot deadlock, and the keys are
+        # `(label, name)`-scoped so an unrelated rename never contends. Taken
+        # ONLY for a name-bearing write (a rename), so the ordinary
+        # `update_entity(status=…)` path pays nothing.
+        _rename_locks: tuple[tuple[str, str], ...] = ()
         if isinstance(props.get("name"), str) and props["name"].strip():
-            self._refuse_ambiguous_rename(id_val, props["name"])
-        for label, prop in _CANONICAL_ENTITY_ID_PROPS:
-            # #4649: a canonical label's identity is an OR-SET, not one key.
-            # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
-            # carry a secondary one (`Source` by `url` — url-only stubs minted
-            # by `_link_source` have no `id`, so the primary MATCH below used to
-            # miss and this surface returned the UNCHANGED node as success).
-            # The primary key is ALWAYS tried first (byte-identical MATCH text
-            # and #327 index plan), the secondary only on a miss.
-            id_keys = (prop, *secondary_entity_id_props(label))
-            if label == "Point":
-                # #9287: this IS the ``:Point`` update door (``commit_schema``
-                # lists the pair ``update_point`` / ``_update_entity``), and it
-                # writes caller props with a live ``SET n += $p``. The refusal
-                # itself is fired in the match loop below, where a hit proves
-                # the node IS a Point: an unconditional refusal here (or at the
-                # top of this method) failed an unrelated write, because this
-                # surface reaches EVERY label — measured:
-                # ``update_entity(object_id, point_kind='statement\u200b')``
-                # raised while ``create_object(..., props={'point_kind':
-                # padded})`` is allowed by ``_create_entity``'s sibling
-                # exemption, and no calibration gate reads a non-Point label's
-                # ``pointKind`` (``_CALIBRATION_GATED_LABELS == ("Point",)``).
-                # The door that matters stays closed; the others stay inert.
-                # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
-                # discipline on this generic surface too. `_sanitize_props`
-                # deliberately ACCEPTS a caller `embedding` (the recorded
-                # PR #3018 decision: stored verbatim), and this branch writes
-                # it RAW through `SET n += $p` — but it never set the
-                # `embedding_verbatim` marker. Without the marker a LATER
-                # re-emit still narved the vector: `promote_point` journals
-                # `get_point(pid)`, whose snapshot now carries the raw vector
-                # and no marker, so `_upsert_point_props` took its `vecf32`
-                # arm — live `0.3` vs replay `0.30000001192092896`, the exact
-                # "same journal, different graph" class #5004 removes. The
-                # same store-width guard as `update_point` applies for the
-                # same reason (a wrong-width vector is written live but
-                # REFUSED on replay). Gated on the KEY, so an unrelated
-                # mutation leaves the marker alone; `_sanitize_props` has
-                # already rejected a caller-supplied marker, so this cannot
-                # be forged. NOTE this does NOT widen the #4094 exemption:
-                # `_update_entity` still journals no embedding line of its
-                # own — it only makes the marker ride a re-emit that some
-                # OTHER record journals.
-                if "embedding" in props:
-                    # A LOCAL copy: `_CANONICAL_ENTITY_ID_PROPS` visits every
-                    # label with this SAME dict (`SET n += $props`, and the
-                    # non-Point branch journals it as `state`), so mutating
-                    # `props` here would stamp the Point-only marker onto
-                    # Subject/Object/Document/Source/Event — a round-11
-                    # reviewer reproduced exactly that via
-                    # `update_entity(<subject_id>, embedding=…)`.
-                    point_props = dict(props)
-                    if point_props.get("embedding") is not None:
-                        _dim = proj.required_embedding_dim
-                        if _dim is not None:
-                            try:
-                                _w = len(point_props["embedding"])
-                            except TypeError:
-                                _w = None
-                            if _w != _dim:
-                                _logger.warning(
-                                    "update_entity: a caller-supplied "
-                                    "embedding of width %s does not match "
-                                    "this store's %d — clearing it rather "
-                                    "than storing one the index cannot hold "
-                                    "or the replay would refuse (#5004)",
-                                    _w if _w is not None else "?", _dim)
-                                point_props["embedding"] = None
-                    # `None` (not `False`): `SET n += {k: null}` REMOVES the
-                    # property, matching `update_point`'s clear and keeping
-                    # "absent" meaning "server-vectored" on both sides.
-                    # NOTE the marker is LIVE-ONLY on this path: the branch
-                    # emits no embedding record of its own (#4094), so a
-                    # rebuild does not reproduce it. That residual is pinned
-                    # in `test_update_entity_point_branch_is_a_declared_
-                    # exemption`; the alternative (leaving the vector unmarked)
-                    # re-opens the `vecf32` narrowing on the LATER, JOURNALED
-                    # `promote_point` re-emit, which is the class #5004 exists
-                    # to remove.
-                    point_props["embedding_verbatim"] = (
-                        True if point_props.get("embedding") is not None
-                        else None)
-                else:
-                    point_props = props
-                for match_prop in id_keys:
-                    res = proj.g.query(
-                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
-                        "RETURN count(n)",
-                        params={"id": id_val, "p": point_props},
-                    )
+            _rename_locks = (("Object", props["name"]),
+                             ("Subject", props["name"]))
+        with contextlib.ExitStack() as _rename_lock_stack:
+            for _lock_key in _rename_locks:
+                _rename_lock_stack.enter_context(
+                    entity_create_lock(*_lock_key))
+            if _rename_locks:
+                self._refuse_ambiguous_rename(id_val, props["name"])
+            for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+                # #4649: a canonical label's identity is an OR-SET, not one key.
+                # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
+                # carry a secondary one (`Source` by `url` — url-only stubs minted
+                # by `_link_source` have no `id`, so the primary MATCH below used to
+                # miss and this surface returned the UNCHANGED node as success).
+                # The primary key is ALWAYS tried first (byte-identical MATCH text
+                # and #327 index plan), the secondary only on a miss.
+                id_keys = (prop, *secondary_entity_id_props(label))
+                if label == "Point":
+                    # #9287: this IS the ``:Point`` update door (``commit_schema``
+                    # lists the pair ``update_point`` / ``_update_entity``), and it
+                    # writes caller props with a live ``SET n += $p``. The refusal
+                    # itself is fired in the match loop below, where a hit proves
+                    # the node IS a Point: an unconditional refusal here (or at the
+                    # top of this method) failed an unrelated write, because this
+                    # surface reaches EVERY label — measured:
+                    # ``update_entity(object_id, point_kind='statement\u200b')``
+                    # raised while ``create_object(..., props={'point_kind':
+                    # padded})`` is allowed by ``_create_entity``'s sibling
+                    # exemption, and no calibration gate reads a non-Point label's
+                    # ``pointKind`` (``_CALIBRATION_GATED_LABELS == ("Point",)``).
+                    # The door that matters stays closed; the others stay inert.
+                    # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
+                    # discipline on this generic surface too. `_sanitize_props`
+                    # deliberately ACCEPTS a caller `embedding` (the recorded
+                    # PR #3018 decision: stored verbatim), and this branch writes
+                    # it RAW through `SET n += $p` — but it never set the
+                    # `embedding_verbatim` marker. Without the marker a LATER
+                    # re-emit still narved the vector: `promote_point` journals
+                    # `get_point(pid)`, whose snapshot now carries the raw vector
+                    # and no marker, so `_upsert_point_props` took its `vecf32`
+                    # arm — live `0.3` vs replay `0.30000001192092896`, the exact
+                    # "same journal, different graph" class #5004 removes. The
+                    # same store-width guard as `update_point` applies for the
+                    # same reason (a wrong-width vector is written live but
+                    # REFUSED on replay). Gated on the KEY, so an unrelated
+                    # mutation leaves the marker alone; `_sanitize_props` has
+                    # already rejected a caller-supplied marker, so this cannot
+                    # be forged. NOTE this does NOT widen the #4094 exemption:
+                    # `_update_entity` still journals no embedding line of its
+                    # own — it only makes the marker ride a re-emit that some
+                    # OTHER record journals.
+                    if "embedding" in props:
+                        # A LOCAL copy: `_CANONICAL_ENTITY_ID_PROPS` visits every
+                        # label with this SAME dict (`SET n += $props`, and the
+                        # non-Point branch journals it as `state`), so mutating
+                        # `props` here would stamp the Point-only marker onto
+                        # Subject/Object/Document/Source/Event — a round-11
+                        # reviewer reproduced exactly that via
+                        # `update_entity(<subject_id>, embedding=…)`.
+                        point_props = dict(props)
+                        if point_props.get("embedding") is not None:
+                            _dim = proj.required_embedding_dim
+                            if _dim is not None:
+                                try:
+                                    _w = len(point_props["embedding"])
+                                except TypeError:
+                                    _w = None
+                                if _w != _dim:
+                                    _logger.warning(
+                                        "update_entity: a caller-supplied "
+                                        "embedding of width %s does not match "
+                                        "this store's %d — clearing it rather "
+                                        "than storing one the index cannot hold "
+                                        "or the replay would refuse (#5004)",
+                                        _w if _w is not None else "?", _dim)
+                                    point_props["embedding"] = None
+                        # `None` (not `False`): `SET n += {k: null}` REMOVES the
+                        # property, matching `update_point`'s clear and keeping
+                        # "absent" meaning "server-vectored" on both sides.
+                        # NOTE the marker is LIVE-ONLY on this path: the branch
+                        # emits no embedding record of its own (#4094), so a
+                        # rebuild does not reproduce it. That residual is pinned
+                        # in `test_update_entity_point_branch_is_a_declared_
+                        # exemption`; the alternative (leaving the vector unmarked)
+                        # re-opens the `vecf32` narrowing on the LATER, JOURNALED
+                        # `promote_point` re-emit, which is the class #5004 exists
+                        # to remove.
+                        point_props["embedding_verbatim"] = (
+                            True if point_props.get("embedding") is not None
+                            else None)
+                    else:
+                        point_props = props
+                    for match_prop in id_keys:
+                        res = proj.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
+                            "RETURN count(n)",
+                            params={"id": id_val, "p": point_props},
+                        )
+                        if res.result_set and res.result_set[0][0]:
+                            break
+                    # #10122: POINT-gated, and only once the write LANDED. This
+                    # surface reaches every label, and `name` IS indexed on
+                    # Subject/Object/Event — warning before the match would both
+                    # inflate the count for sibling labels and cry wolf on a miss
+                    # (`update_entity("no-such-id", name=...)`), the two things the
+                    # #3377 arm below is careful about. The advisory is the same one
+                    # `create_point`/`update_point` call: this live `SET n += $p` is
+                    # a THIRD Point write seam and it does not pass through
+                    # `_upsert_point_props` (which is why it is not covered from
+                    # there).
                     if res.result_set and res.result_set[0][0]:
-                        break
-                # #10122: POINT-gated, and only once the write LANDED. This
-                # surface reaches every label, and `name` IS indexed on
-                # Subject/Object/Event — warning before the match would both
-                # inflate the count for sibling labels and cry wolf on a miss
-                # (`update_entity("no-such-id", name=...)`), the two things the
-                # #3377 arm below is careful about. The advisory is the same one
-                # `create_point`/`update_point` call: this live `SET n += $p` is
-                # a THIRD Point write seam and it does not pass through
-                # `_upsert_point_props` (which is why it is not covered from
-                # there).
-                if res.result_set and res.result_set[0][0]:
-                    _warn_point_name_not_lexically_indexed(
-                        point_props, door="update_entity")
-                # Post-apply, per matched label — the `_delete_entity`
-                # emitter's ordering contract (a failed/no-op write never
-                # leaves a phantom record).
-                if (annotator_updates and res.result_set
-                        and res.result_set[0][0]):
-                    self._emit_event("PointRevised", id=id_val,
-                                     **annotator_updates)
-            else:
-                # C1 (#3312 statuses, #3377 rename): this branch used to apply
-                # caller props with a live `SET n += $p` and emit NOTHING — so
-                # `rebuild_all` replayed the entity from its creation snapshot
-                # (status / name / objectKind / confidence reverted). Journal
-                # the mutation at the surface that performs it.
-                #
-                # `state` = the WRITE'S OWN KEYS carrying the GRAPH'S STORED
-                # values (the same statement applies and reads back):
-                #   * a key set to None is REMOVED live, so `properties(n)`
-                #     omits it -> `state[k] is None` -> the fold's identical
-                #     `SET n += {k: null}` removes it too. A full
-                #     `properties(n)` SNAPSHOT would omit the key and RESURRECT
-                #     it from the creation record;
-                #   * a coerced value (Decimal/numpy -> native) is journalled as
-                #     the stored primitive, so the append cannot silently drop
-                #     the record (#4647: only an exactly-representable
-                #     Decimal/numpy reaches this point — the write guard refuses
-                #     the rest);
-                #   * keys the write did NOT apply are absent, so replay never
-                #     overwrites the typed Vectorf32 the upsert created
-                #     (`properties(n)` returns a vector as a plain list;
-                #     re-applying it would demote it and break the vector leg).
-                keys = list(props)
-                res = None
-                # #4649: OR-SET — primary identity key first, then the label's
-                # secondary key(s) only if the primary matched nothing.
-                for match_prop in id_keys:
-                    res = proj.g.query(
-                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props "
-                        "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                        params={"id": id_val, "props": props, "keys": keys},
+                        _warn_point_name_not_lexically_indexed(
+                            point_props, door="update_entity")
+                    # Post-apply, per matched label — the `_delete_entity`
+                    # emitter's ordering contract (a failed/no-op write never
+                    # leaves a phantom record).
+                    if (annotator_updates and res.result_set
+                            and res.result_set[0][0]):
+                        self._emit_event("PointRevised", id=id_val,
+                                         **annotator_updates)
+                else:
+                    # C1 (#3312 statuses, #3377 rename): this branch used to apply
+                    # caller props with a live `SET n += $p` and emit NOTHING — so
+                    # `rebuild_all` replayed the entity from its creation snapshot
+                    # (status / name / objectKind / confidence reverted). Journal
+                    # the mutation at the surface that performs it.
+                    #
+                    # `state` = the WRITE'S OWN KEYS carrying the GRAPH'S STORED
+                    # values (the same statement applies and reads back):
+                    #   * a key set to None is REMOVED live, so `properties(n)`
+                    #     omits it -> `state[k] is None` -> the fold's identical
+                    #     `SET n += {k: null}` removes it too. A full
+                    #     `properties(n)` SNAPSHOT would omit the key and RESURRECT
+                    #     it from the creation record;
+                    #   * a coerced value (Decimal/numpy -> native) is journalled as
+                    #     the stored primitive, so the append cannot silently drop
+                    #     the record (#4647: only an exactly-representable
+                    #     Decimal/numpy reaches this point — the write guard refuses
+                    #     the rest);
+                    #   * keys the write did NOT apply are absent, so replay never
+                    #     overwrites the typed Vectorf32 the upsert created
+                    #     (`properties(n)` returns a vector as a plain list;
+                    #     re-applying it would demote it and break the vector leg).
+                    keys = list(props)
+                    res = None
+                    # #4649: OR-SET — primary identity key first, then the label's
+                    # secondary key(s) only if the primary matched nothing.
+                    for match_prop in id_keys:
+                        res = proj.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props "
+                            "RETURN [k IN $keys | properties(n)[k]] AS vals",
+                            params={"id": id_val, "props": props, "keys": keys},
+                        )
+                        # No match => [] for THIS form. Do NOT add `count(n)`: beside
+                        # `properties(n)` it becomes a grouping key, so a miss yields
+                        # no row and a duplicate-id match yields one row PER GROUP.
+                        # A non-empty `keys` with a result row means the write
+                        # landed on THIS branch's node.
+                        if res.result_set:
+                            break
+                    if not keys or not res.result_set:
+                        continue
+                    if isinstance(props.get(match_prop), str):
+                        # Same re-key case as the `id`-addressed branch above: the
+                        # matched key is one this write rewrote.
+                        post_write_id = props[match_prop]
+                    vals = list(res.result_set[0][0])
+                    if len(vals) != len(keys):
+                        # Impossible by construction — `[k IN $keys | ...]` is
+                        # length-preserving — so this is an engine contract breach.
+                        # LOUD (the append is already best-effort; a silent
+                        # truncation would journal a state that never existed).
+                        _logger.error(
+                            "state arity mismatch for %s %r: %d keys vs %d values "
+                            "— journalling the shorter of the two",
+                            label, id_val, len(keys), len(vals))
+                    self._journal_entity_mutation(
+                        label, id_val, classify_entity_mutation_op(props),
+                        state=dict(zip(keys, vals, strict=False)),
                     )
-                    # No match => [] for THIS form. Do NOT add `count(n)`: beside
-                    # `properties(n)` it becomes a grouping key, so a miss yields
-                    # no row and a duplicate-id match yields one row PER GROUP.
-                    # A non-empty `keys` with a result row means the write
-                    # landed on THIS branch's node.
-                    if res.result_set:
-                        break
-                if not keys or not res.result_set:
-                    continue
-                if isinstance(props.get(match_prop), str):
-                    # Same re-key case as the `id`-addressed branch above: the
-                    # matched key is one this write rewrote.
-                    post_write_id = props[match_prop]
-                vals = list(res.result_set[0][0])
-                if len(vals) != len(keys):
-                    # Impossible by construction — `[k IN $keys | ...]` is
-                    # length-preserving — so this is an engine contract breach.
-                    # LOUD (the append is already best-effort; a silent
-                    # truncation would journal a state that never existed).
-                    _logger.error(
-                        "state arity mismatch for %s %r: %d keys vs %d values "
-                        "— journalling the shorter of the two",
-                        label, id_val, len(keys), len(vals))
-                self._journal_entity_mutation(
-                    label, id_val, classify_entity_mutation_op(props),
-                    state=dict(zip(keys, vals, strict=False)),
-                )
         return self._get_entity(post_write_id)
 
     @_declares_apply_first_write_lane("_delete_entity")

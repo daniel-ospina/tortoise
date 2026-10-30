@@ -153,15 +153,33 @@ def _mint_subject_stub(g, name: str) -> None:
     #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
     after the wipe. Skip rather than raise.
     """
+    from tortoise.entity_identity import entity_create_lock
     from tortoise.projection import _log_identity_skip, _writable_id
     if not _writable_id(name):
         _log_identity_skip("Subject stub", name, "name (MERGE key)")
         return
-    g.query(
-        "MERGE (s:Subject {name:$name}) "
-        "ON CREATE SET s.id=$name, s.subjectKind='other'",
-        params={"name": name},
-    )
+    # ⛔ THE SAME ``(label, name)`` LOCK THE CREATE DOOR TAKES (#9876 review).
+    # This is the last name-keyed WRITE left in the tree, and the create door is
+    # id-keyed (`entity_identity.resolve_or_mint` mints an opaque id and MERGEs
+    # on it), so the two constructions no longer converge on one node by
+    # themselves — the name-keyed MERGE and the id-keyed MERGE simply address
+    # different keys. Interleaved (stub mint between the create's resolve and
+    # its write) they leave a name with TWO live carriers: one ``:Subject
+    # {name:"X"}`` with ``id="X"`` (this stub) and one with the minted id.
+    # Every later by-name create then refuses `ambiguous-entity-name`, which is
+    # NON-exempt, so `rebuild_all` stops over a name this door split.
+    #
+    # Under the shared lock the two orderings both converge: stub first -> the
+    # create's resolve finds the stub as the single live holder and ADOPTS it;
+    # create first -> this MERGE matches that node by name and creates nothing.
+    # Reentrant, and the replay callers (`replay_about_links`, create_event's
+    # fold) take it harmlessly.
+    with entity_create_lock("Subject", name):
+        g.query(
+            "MERGE (s:Subject {name:$name}) "
+            "ON CREATE SET s.id=$name, s.subjectKind='other'",
+            params={"name": name},
+        )
 
 
 def _mint_source_stub(

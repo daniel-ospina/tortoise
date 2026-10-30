@@ -259,6 +259,16 @@ def _adopt_idless_holder(g, label: str, name: str, node_id: str) -> None:
 #: issue and is bounded by the pre-beta premise (no production Object/Subject
 #: graph).
 #:
+#: ⛔ Every door that can make a name held takes it, not just the create: a door
+#: that writes a holder is a door the create's resolve must not pass, or the two
+#: interleave and leave two LIVE carriers of one name (create-poisoning it, with
+#: a NON-exempt ``ambiguous-entity-name`` fold record, so ``rebuild_all`` stops).
+#: The doors are ``sdk.create_entity``, ``sdk._update_entity``'s rename
+#: (``_refuse_ambiguous_rename`` + its write) and
+#: ``projection.edges._mint_subject_stub`` — the last name-keyed WRITE in the
+#: tree, whose two orderings against a create both converge once locked (#9876
+#: review).
+#:
 #: ⛔ It is an ``RLock`` because the critical section is **resolve AND write**, not
 #: the resolve alone (#3590 review, finding 1): ``sdk.create_entity`` holds
 #: :func:`entity_create_lock` across ``resolve_or_mint`` and the ``MERGE`` that

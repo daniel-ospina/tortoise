@@ -1695,3 +1695,115 @@ def test_the_node_id_helper_counts_holders_not_truthy_ids(sdk):
     #    still resolves, so the fix narrows the helper by the failure cases.
     solo = client.create_entity("object", "Solo", is_episodic=False)["node"]["id"]
     assert node_id(proj, "Object", "Solo") == solo
+
+
+def test_the_rename_door_locks_the_guard_and_the_write_together(sdk, monkeypatch):
+    """#9876 review (P2): the rename door is check-then-act unless it takes the
+    create lock.
+
+    ``_refuse_ambiguous_rename`` reads the live holder set, and the label loop
+    that follows it writes ``SET n += $props`` — the write that makes the NEW
+    holder visible. Two graph round trips, no lock between them. Interleaved with
+    a create (which DOES hold ``entity_create_lock``) a rename lands a second
+    live carrier of one name: the name is then create-poisoned, every by-name
+    resolve refuses ``AmbiguousEntityName``, and ``resolve_fold_name`` records
+    the NON-exempt ``ambiguous-entity-name`` shape — so ``rebuild_all`` stops
+    over a name this door split.
+
+    Pinned structurally because the race itself is not reproducible on demand:
+    the door must (a) acquire the same ``(label, name)`` lock the create takes,
+    for both identity labels, and (b) still hold it at the probe AND at the
+    journaling that follows the write.
+
+    FAILS IF the lock is dropped from ``_update_entity`` (assert (a)), or is
+    taken and released around the guard instead of around guard+write (assert
+    (b) at the ``journal`` site).
+    """
+    from tortoise import entity_identity
+
+    client, _ = sdk
+    proj = client._get_proj()
+    oid = client.create_entity("object", "Old Name", objectKind="core:strategy",
+                               is_episodic=False)["node"]["id"]
+
+    real_holder_lock = entity_identity._holder_lock
+    taken: list[tuple[str, str]] = []
+
+    def recording_holder_lock(label, name):
+        taken.append((label, name))
+        return real_holder_lock(label, name)
+
+    monkeypatch.setattr(entity_identity, "_holder_lock", recording_holder_lock)
+
+    owned_at: dict[str, bool] = {}
+    real_holders = entity_identity.live_name_holder_ids
+
+    def probing(g, label, name):
+        owned_at[f"probe:{label}"] = real_holder_lock(label, name)._is_owned()
+        return real_holders(g, label, name)
+
+    monkeypatch.setattr(entity_identity, "live_name_holder_ids", probing)
+
+    real_journal = TortoiseSDK._journal_entity_mutation
+
+    def journaling(self, *args, **kwargs):
+        # The journal append is the statement immediately AFTER the label loop's
+        # `SET n += $props`, so "lock still owned here" is "the write happened
+        # inside the critical section".
+        owned_at["journal"] = real_holder_lock("Object", "New Name")._is_owned()
+        return real_journal(self, *args, **kwargs)
+
+    monkeypatch.setattr(TortoiseSDK, "_journal_entity_mutation", journaling)
+
+    client.update_entity(oid, name="New Name")
+
+    assert ("Object", "New Name") in taken and ("Subject", "New Name") in taken, (
+        "the rename door took no create lock — a create can mint and write a "
+        f"carrier of 'New Name' between the guard and the write: {taken}")
+    assert owned_at.get("probe:Object") is True, (
+        "the ambiguity probe ran OUTSIDE the (label, name) lock")
+    assert owned_at.get("journal") is True, (
+        "the lock was released before the rename's write — the guard-then-write "
+        "window is still open")
+    # the rename actually happened, so the pin is not vacuous
+    assert _name_ids(proj, "Object", "New Name") == [oid]
+
+
+def test_the_fold_side_subject_stub_takes_the_create_lock(sdk, monkeypatch):
+    """#9876 review, second instance: ``_mint_subject_stub`` is the last
+    name-keyed WRITE, and it must take the create lock too.
+
+    The create door is id-keyed now: ``resolve_or_mint`` mints an opaque id and
+    the write MERGEs on ``{id}``. The stub MERGEs on ``{name}`` and, ON CREATE,
+    stamps ``id = name``. The two no longer converge by construction, so a stub
+    landing between a create's resolve and its write leaves two LIVE carriers of
+    one name — the ambiguity class above. Under the shared lock both orderings
+    converge instead: stub first ⇒ the create's resolve finds the stub as the
+    single live holder and adopts it; create first ⇒ the stub's name-keyed MERGE
+    matches that node and creates nothing.
+
+    FAILS IF the ``entity_create_lock("Subject", name)`` is removed from
+    ``projection/edges.py::_mint_subject_stub`` (no acquisition is recorded).
+    """
+    from tortoise import entity_identity
+    from tortoise.projection.edges import _mint_subject_stub
+
+    client, _ = sdk
+    proj = client._get_proj()
+
+    real_holder_lock = entity_identity._holder_lock
+    taken: list[tuple[str, str]] = []
+
+    def recording_holder_lock(label, name):
+        taken.append((label, name))
+        return real_holder_lock(label, name)
+
+    monkeypatch.setattr(entity_identity, "_holder_lock", recording_holder_lock)
+
+    _mint_subject_stub(proj.g, "Unregistered Mention")
+
+    assert ("Subject", "Unregistered Mention") in taken, (
+        "the fold-side Subject stub minted a name-keyed node with no create "
+        f"lock — a concurrent create can mint beside it: {taken}")
+    assert _name_ids(proj, "Subject", "Unregistered Mention") == [
+        "Unregistered Mention"], "the stub mint did not happen — pin is vacuous"
