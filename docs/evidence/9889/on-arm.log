@@ -1,0 +1,369 @@
+# extractor-v4 capstone MEASUREMENT — S0 -> S6 on the pre-registered corpus (#9080)
+# generated: 2026-10-30T16:48:36Z
+# probe: docs/evidence/7949-capstone/probes/capstone_measure.py
+# head: 54922a800f96858935b58ef250da569a4896df44
+# pre-registration: 54922a800f96858935b58ef250da569a4896df44 (read from the COMMIT with `git show`)
+# corpus: tests/eval/write_path fixtures_hash=sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc (7 sessions) — G1 compared it with the frozen pin
+# graph: capstone_on_54922a800_1793378318 (fresh, disposable; every node in it was written by this run)
+# arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=<unset> TORTOISE_S2_DECISION_SEAM=<unset> (set/pinned IN-PROCESS for this pass and read back from os.environ after setting; the deployed config leaves both passes OFF)
+
+## the run — one pass over the pre-registered corpus
+session wp01_quarry_debug ok=True extraction_mode=llm:deepseek-direct extracted=31 errors=[] turns=26 edus=26 chunks=1 entities=11 events=4 points=31 operators=7 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=33.4
+session wp02_lumen_refactor ok=True extraction_mode=llm:deepseek-direct extracted=28 errors=[] turns=22 edus=22 chunks=1 entities=13 events=9 points=28 operators=5 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=27.4
+session wp03_ember_design ok=True extraction_mode=llm:deepseek-direct extracted=14 errors=[] turns=24 edus=24 chunks=1 entities=13 events=3 points=14 operators=6 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=24.4
+session wp04_aurora_perf ok=True extraction_mode=llm:deepseek-direct extracted=23 errors=[] turns=20 edus=20 chunks=1 entities=12 events=3 points=23 operators=13 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=32.9
+session wp05_retro_writeup ok=True extraction_mode=llm:deepseek-direct extracted=23 errors=[] turns=23 edus=23 chunks=1 entities=17 events=9 points=23 operators=8 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=66.2
+session wp06_quarry_rollout ok=True extraction_mode=llm:deepseek-direct extracted=16 errors=[] turns=22 edus=22 chunks=1 entities=10 events=4 points=16 operators=5 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=117.1
+session wp07_bluepeak_followup ok=True extraction_mode=llm:deepseek-direct extracted=21 errors=[] turns=22 edus=22 chunks=1 entities=10 events=5 points=21 operators=9 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=28.1
+
+## the eight steps — witnessed, or unobserved with its cause
+step S0 WITNESSED the reader segmented the corpus: stats.edus=159 stats.chunks=7 over 7 sessions
+step S1 WITNESSED the first LLM stage ran: stats.llm.by_stage.s1 calls=7
+step S2.1 WITNESSED the S2 map ran: stats.llm.by_stage.s2 calls=7; entities=86 events=37 points=156
+step S2.2 UNOBSERVED UNOBSERVED — the arm forced TORTOISE_VET=1 in-process and read it back from os.environ (the `arm:` line above is that read-back), so the pass was ENABLED for this run — and whether it then DID any work is NOT observable through this surface, which is exactly why the surface is missing: a flag-on block that idles (an empty list, or a failed fail-open pass) is indistinguishable from this one, so this run does not claim the pass ran. Its surface EXISTS one layer down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at tortoise/extractor_v2.py:8975-8979. It is DROPPED one layer up, at the meta fold tortoise/sdk.py:14117 ("stats": out.get("stats") or {} inside _extract_session_v2 — the sibling key is not copied). Measured on this run: inspected 148 stats key(s) across 7 receipt(s) [chain_notes, chunks, deletions, edus, elapsed_s, entities, events, failed_chunks, llm, merges, noops, operator_endpoints_minted, operators, points, recovery, s4_delta, s4_delta_empty, s4_merge, search_degraded, search_queries, supersessions, tier_a_points] and 18 receipt top-level key(s) [capture_redactions, diagnostics, error, errors, extracted, extraction_mode, extraction_provider, graph_ops, ok, points, protocol_version, provenance, session_id, stats, status, surfaced, turns, warnings]; 'vet' is in neither. #9116 is the seam, and tortoise/sdk.py:14117 is the line its fix must target; reading a wrapper instead is the instrumentation E4's row forbids
+step S2.3 UNOBSERVED UNOBSERVED — the arm forced TORTOISE_CLASSIFY_LATER=1 in-process and read it back from os.environ (the `arm:` line above is that read-back), so the pass was ENABLED for this run — and whether it then DID any work is NOT observable through this surface, which is exactly why the surface is missing: a flag-on block that idles (no classify items, or a failed fail-open pass) is indistinguishable from this one, so this run does not claim the pass ran. Its surface EXISTS one layer down: extract_session_v2 emits result['classify_later'] UNCONDITIONALLY at tortoise/extractor_v2.py:8965-8971. It is DROPPED at the same meta fold, tortoise/sdk.py:14117 ("stats": out.get("stats") inside _extract_session_v2). Measured on this run: the same 148 stats key(s) and 18 receipt top-level key(s) inspected above carry no 'classify_later'. #9116 is the seam; tortoise/sdk.py:14117 is the line its fix must target
+step S3 WITNESSED the graph was searched on the real backend: stats.search_queries=105 > 0, stats.search_degraded=false on every session
+step S5 WITNESSED the graph write landed: 458 derived node(s) written by the run [Point 353 (156 anchored), Object 61 (0 anchored), Event 44 (7 anchored)]; stats.operator_endpoints_minted=0; operator-shaped relationships written [IMPL=43, INPUT=58, NAND=24]
+step S6 WITNESSED the commit persisted: 353 :Point node(s) in the run's graph, 185 of them carrying the commit's eventId provenance stamp; 388 :GraphEvent(s)
+steps witnessed: 6/8 (unwitnessed: S2.2, S2.3)
+
+## E3 census — derived nodes and their version anchor
+e3 rule: a derived node (Point/Object/Event) carries a version anchor iff it is the SOURCE of at least one extractedFrom relationship whose sourceVersion is a non-empty string, OR the TARGET of at least one references relationship whose sourceVersion is a non-empty string. The two directions are NOT interchangeable: extractedFrom points FROM the derived node at its source ((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT the derived node ((Source)-[:references]->(Event|Document) — tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from the capture path at tortoise/sdk.py:14398 (proj.link_source_to_event(source_key, event_id))). The anchor is a property of the DERIVATION LINK (tortoise/projection/edges.py:502-510 _anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels are _DERIVATION_REFERENCES_LABELS (edges.py:475: Event, Document). A Source->Object link is identity/mention and carries none BY DESIGN (owner option A, #5199; #9736)
+e3 label=Point nodes=353 anchored=156 unanchored=197 anchored_out=156 anchored_in=0
+e3 label=Object nodes=61 anchored=0 unanchored=61 anchored_out=0 anchored_in=0
+e3 label=Event nodes=44 anchored=7 unanchored=37 anchored_out=0 anchored_in=7
+e3 numerator=163 denominator=458 below_floor=no outcome=FAIL bar=share = 1.0 (zero unanchored), floor 30 derived nodes
+e3 relationship anchors: CONTAINS=0/315, IMPL=0/43, INPUT=0/58, NAND=0/24, aboutObject=0/246, aboutSubject=0/25, extractedFrom=156/156, mitigated_by=0/9, references=7/7
+e3 point composition: turn_rows=159 (anchored 0) extraction_claims=156 (anchored 156) operator_points=29 (anchored 0) other=9 (anchored 0) (total=353 Point nodes) — each class read off the property its WRITER stamps (is_episodic for turn rows, is_operator for operator Points, an extractedFrom edge for extraction claims). 'other' = Points with NO extractedFrom edge that are neither turn rows nor operator Points (9 of them, 0 anchored) — the class where a LOST derivation link lands, so it is INSIDE the derivation figure's denominator and an unanchored node in it is visible there. The denominator is the class the writers stamp as supposed-to-derive (non-episodic, non-operator Points = 156 extraction claims + 9 other = 165); it is NOT defined by the extractedFrom link itself, because a denominator filtered on the link cannot move when the link is lost (measured on the superseded `8a8bbcba` run: the earlier reading of this figure was 132/132 = 1.000000 while 9 Points sat in 'other' — and that run's log is retained in HISTORY, not in the tree: superseding DELETES the TREE entry it replaces, never the history, so `git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8bbcba.log` yields it WHILE this branch's ref exists — and that ref is temporary. After the squash-merge a branch-only commit is unresolvable BY DESIGN (V11), and the route is the PR ref: `git fetch origin refs/pull/9823/head`, then that same `git show <sha>:<path>`. This bundle's README carries the figure too, so it does not depend on the retrieval. What the deletion does cost is citability as a row's `evidence`, which V4 resolves against the TREE: the figure is provenance you can CHECK from the commit, not a file this bundle can hand you). TWO classes are STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT in the denominator, with their anchored counts stated: turn rows carry none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, tortoise/sdk.py:2377, t.is_episodic=true, wired only by CONTAINS), and operator Points are written by create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT operator writer), which never writes extractedFrom (measured: 0 of 29 anchored). Whether an unanchored node in 'other' LOST a link or was minted by a writer that never derives is the attribution #9736 still owns; the figure counts it, the line does not excuse it. derivation figure (anchored / expected-to-derive): 156/165 = 0.945455. The frozen 'all derived nodes' reading above is unchanged
+e3 note: Source->Object identity/mention links are unanchored BY DESIGN (owner option A, #5199; #9736) — aboutObject=246 edge(s), 0 anchored
+e1-aux objects_in_graph=61 bare_definite=13 share=0.21311475409836064 note=AFTER arm only — this run has no before arm, so E1 is NOT scoreable from it; 61 Objects CLEARS the frozen floor of 30, but one arm cannot decide `after <= 0.5 x before` — the before arm is the missing half, and two independent captures would confound the gate with LLM non-determinism
+
+## E1 / E1b / E2a / E2b — parsed out of the landed e1-e2.log
+e1 parsed: before_share=0.600000 after_share=0.600000 objects=15/25 sha=c2544f54f143e53ff5489b137ce1e9a52d3ed370 corpus=e1e2_corpus.json corpus_sha256=e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b declared prereg=UNPREREGISTERED declared result=UNPREREGISTERED
+e1 outcome=REFUSED before=0.600000 after=0.600000 objects=25 bound=0.300000 bar=after_share <= 0.5 x before_share (Objects floor 30)
+e1 note: the artifact's denominator is the 25-name owner-labelled audit population, NOT 'all :Object nodes written by the run', and its corpus_sha256 is not the frozen fixtures_hash — so the arithmetic (0.600000 vs a 0.300000 bound) would FAIL the bar, but the record's own floor (30 Objects) makes it REFUSED: neither a pass nor a fail
+e1b outcome=PASS real_facts=90 bar=90 of 90
+e1b note: the artifact reports real_facts=90 on both arms; no committed artifact carries grading.strict_survival_counts over the m2 lane, so this is a no-loss CONTROL, not the frozen metric
+e2a outcome=BLOCKED values=42 (the frozen 14-unit denominator is not carried by any committed artifact) bar=13 of 14
+e2a note: the artifact carries state_value_points values=42 on both arms (a no-loss control); the frozen denominator is the 14 value-bearing PLANTED UNITS, which no committed artifact counts
+e2b outcome=PASS fused=1/114 = 0.008772 bar=fused share <= 0.05 (floor 30 surviving units)
+e2b note: fused=1 of atomic=114 Points on the scored arm — the artifact's atomicity control, whose denominator is atomic POINTS rather than surviving planted units
+
+## E4 — the committed operator receipt, read verbatim
+e4 receipt=tests/eval/write_path/receipts/w2b-operator-2026-10-19.json run_id=w2b-cef50160a1e2 date=2026-10-19T01:39:26Z commit=6164c683c corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324 judge_pin=w2-write-path-mechanical-v2 verdict=regression failure_origin=gate_regression
+e4 operator_audit planted=15 edge_correct=2 content_ok=8 operators_total=27 operators_provenanced=27
+e4 outcome=FAIL edge_correct=2 planted=15 bar=15 of 15
+e4 provenance: the FILE postdates the pre-registration but the MEASUREMENT does not — its own date=2026-10-19T01:39:26Z and its corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324 are not the frozen corpus (sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc). This row is therefore scored as a NON-GREEN measurement on ITS OWN corpus revision, and the gate requires that digest to appear in the artifact itself (V7)
+
+## E5 — a fresh re-score of the #7947 arms against this corpus's gold
+e5 arms_dir=tests/eval/write_path/receipts/7947-arms-2026-10-18 artifact=/tmp/9889/e5-rescore.json
+e5 raw loss=13/25 loss_rate=0.520000 recovery=0.480000 recall=71/90
+e5 narrative loss=12/25 loss_rate=0.480000 recovery=0.520000 recall=73/90
+e5 ratio=1.0833 (bar 0.9, OK) raw_absolute=0.4800 (bar 0.8, FAIL) sentences=25 (floor 10)
+e5 outcome=FAIL bar=ratio >= 0.9 AND raw >= 0.8 (floor 10 sentences)
+e5 warning: ⛔ INCOMPLETE RECEIPTS IN THE HOLDOUT: wp07_bluepeak_followup:raw
+e5 warning: wp07_bluepeak_followup:raw: partial=True truncated=False s2_error=None s1_error=False s1_truncated=False
+e5 incomplete receipts (disclosed, not silently averaged): wp07_bluepeak_followup:raw partial=True truncated=False s2_error=None s1_error=False s1_truncated=False
+
+## verdict table
+criterion | verdict | measured | evidence | blocked_by
+E1 | BLOCKED | unmeasured | docs/evidence/7949-capstone/e1-e2.log | #5333
+E2 | BLOCKED | unmeasured | docs/evidence/7949-capstone/e1-e2.log | #9775
+E3 | RED | 163/458 | /tmp/9889/capstone-measured-54922a800.log | #9736
+E4 | RED | 2/15 | tests/eval/write_path/receipts/w2b-operator-2026-10-19.json | #8503
+E5 | RED | 12/25 | docs/evidence/7949-capstone/e5-rescore.json | #9738
+
+## why each non-green row is not green
+row E1 note: the only E1 artifact is docs/evidence/7949-capstone/e1-e2.log: before=0.600000 after=0.600000 objects=25 bound=0.300000 vs bar after_share <= 0.5 x before_share (Objects floor 30) — after_share is NOT <= 0.5 x before_share, so the arithmetic would FAIL — but the row is NOT RED, because the record's own floor makes it REFUSED: the artifact's denominator is 25 Objects (under the frozen floor of 30) and is the 25-name owner-labelled audit population rather than 'all :Object nodes written by the run'. Its corpus (e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b) is not the frozen corpus (sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc), and the artifact declares prereg=UNPREREGISTERED result=UNPREREGISTERED. No before/after pair on the pre-registered corpus exists, and the mechanism that must move the share is an owner ruling on removal/relocation (#5333) — so no scored E1 measurement exists to be red
+row E2 note: E2a: BLOCKED — values=42 (the frozen 14-unit denominator is not carried by any committed artifact) vs bar 13 of 14. E2b: PASS — fused=1/114 = 0.008772 vs bar fused share <= 0.05 (floor 30 surviving units) (a proxy: the artifact counts atomic POINTS, not surviving planted units). The E2 row is BLOCKED because the composite criterion needs BOTH halves and E2a's frozen 14-value-bearing-unit denominator is carried by no committed artifact; the artifact's no-loss control (values 42 before and after, real_facts 90) is consistent with E2a but does not compute it. Same corpus caveat as E1: e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b is not sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc, and #9775 records that the state-value carve-out is absent on one render path
+row E3 note: anchored=163 derived=458 share=0.355895; bar share = 1.0 (zero unanchored), floor 30 derived nodes; measured on THIS run's own graph (capstone_on_54922a800_1793378318, fixtures_hash sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc). The Source->Object identity link carries no sourceVersion BY DESIGN (owner option A, #5199), so ':Object mention links' can never anchor — and the frozen denominator counts them anyway, so the = 1.000 bar is unreachable as registered (#9736: either the metric is re-registered or the model is reopened; a lane cannot pick). COMPOSITION of the 353 Point nodes the denominator also counts: 159 mechanical turn rows + 156 extraction claims (156 anchored) + 29 operator Points (0 anchored) + 9 other (0 anchored), each class read off the property its writer stamps. TWO of those classes cannot carry a derivation link AT ALL and are named rather than folded into the figure: the turn rows carry none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, tortoise/sdk.py:2377, t.is_episodic=true, wired only by CONTAINS), and the operator Points are written by create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT operator writer), which never writes extractedFrom. So counting them under 'all derived nodes' is defensible but they can never anchor and are not a provenance shortfall, and a denominator summing them would report a shortfall nothing could close. The DERIVATION figure is anchored / expected-to-derive over the WRITER class (non-episodic, non-operator Points = the extraction claims PLUS the 'other' Points, which are the class where a LOST derivation link lands — Points with no extractedFrom that are neither turn rows nor operator Points): 156/165 = 0.945455. It is computed over that class and NOT over the claims alone, because a denominator defined by the extractedFrom link itself cannot move when that link is lost: the earlier reading divided by the extraction claims ALONE — the class that link defines — so it read nothing but 1.000000 BY CONSTRUCTION, with the 'other' Points sitting outside it. Whether an unanchored 'other' Point lost a link or was minted by a writer that never derives is the attribution #9736 still owns. #9736 must choose between re-registering the metric and reopening the model, and this row reports BOTH readings so neither choice is made on a denominator whose composition was hidden
+row E4 note: edge_correct=2 planted=15; bar 15 of 15; content_ok=8 operators_total=27 on the SAME receipt. Its own date=2026-10-19T01:39:26Z, commit=6164c683c and corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324 differ from the frozen corpus (sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc), and its verdict=regression failure_origin=gate_regression: the planted edges are not formed at all (#8503), and the receipt's retrievability rate is UNMEASURED (#9596)
+row E5 note: ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND raw >= 0.8 (floor 10 sentences); raw recovery = 1 - 0.52 = 0.4800 FAILS the 0.80 absolute floor while the 1.0833 ratio passes 0.90 — the record's own note says the ratio alone is degenerate, which is why the absolute floor exists. The re-score grades the 2026-10-18 arm receipts against THIS commit's gold (the gold is part of fixtures_hash) and warns INCOMPLETE RECEIPTS: wp07_bluepeak_followup:raw partial=True truncated=False s2_error=None s1_error=False s1_truncated=False — its holdout delta cannot be certified. #9738 also records that §10's prior measurement was visible when the record claimed it was not, and that the 25-bound vs 29-marker populations must be reconciled before either number is called final
+
+=== CAPSTONE-VERDICT-BEGIN ===
+{
+  "schema": "capstone-verdict-v1",
+  "issue": 9080,
+  "epic": 7949,
+  "head": "54922a800f96858935b58ef250da569a4896df44",
+  "prereg": {
+    "sha": "54922a800f96858935b58ef250da569a4896df44",
+    "status": "OK",
+    "artifact": "docs/evidence/7949-capstone/preregistration.json",
+    "read_from": "git show 54922a800f96858935b58ef250da569a4896df44:docs/evidence/7949-capstone/preregistration.json"
+  },
+  "corpus": {
+    "path": "tests/eval/write_path",
+    "sha256": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
+    "fixtures_hash": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
+    "sessions": 7,
+    "session_ids": [
+      "wp01_quarry_debug",
+      "wp02_lumen_refactor",
+      "wp03_ember_design",
+      "wp04_aurora_perf",
+      "wp05_retro_writeup",
+      "wp06_quarry_rollout",
+      "wp07_bluepeak_followup"
+    ]
+  },
+  "run": {
+    "status": "COMPLETED",
+    "kind": "capstone-measure",
+    "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
+    "graph": "capstone_on_54922a800_1793378318",
+    "arm": {
+      "TORTOISE_VET": "1",
+      "TORTOISE_CLASSIFY_LATER": "1",
+      "TORTOISE_VALUE_GATE": null,
+      "TORTOISE_S2_DECISION_SEAM": null,
+      "source": "os.environ read-back after measured_arm() forced it"
+    },
+    "steps_observed": [
+      "S0",
+      "S1",
+      "S2.1",
+      "S3",
+      "S5",
+      "S6"
+    ],
+    "steps_unobserved": {
+      "S2.2": "UNOBSERVED \u2014 the arm forced TORTOISE_VET=1 in-process and read it back from os.environ (the `arm:` line above is that read-back), so the pass was ENABLED for this run \u2014 and whether it then DID any work is NOT observable through this surface, which is exactly why the surface is missing: a flag-on block that idles (an empty list, or a failed fail-open pass) is indistinguishable from this one, so this run does not claim the pass ran. Its surface EXISTS one layer down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at tortoise/extractor_v2.py:8975-8979. It is DROPPED one layer up, at the meta fold tortoise/sdk.py:14117 (\"stats\": out.get(\"stats\") or {} inside _extract_session_v2 \u2014 the sibling key is not copied). Measured on this run: inspected 148 stats key(s) across 7 receipt(s) [chain_notes, chunks, deletions, edus, elapsed_s, entities, events, failed_chunks, llm, merges, noops, operator_endpoints_minted, operators, points, recovery, s4_delta, s4_delta_empty, s4_merge, search_degraded, search_queries, supersessions, tier_a_points] and 18 receipt top-level key(s) [capture_redactions, diagnostics, error, errors, extracted, extraction_mode, extraction_provider, graph_ops, ok, points, protocol_version, provenance, session_id, stats, status, surfaced, turns, warnings]; 'vet' is in neither. #9116 is the seam, and tortoise/sdk.py:14117 is the line its fix must target; reading a wrapper instead is the instrumentation E4's row forbids",
+      "S2.3": "UNOBSERVED \u2014 the arm forced TORTOISE_CLASSIFY_LATER=1 in-process and read it back from os.environ (the `arm:` line above is that read-back), so the pass was ENABLED for this run \u2014 and whether it then DID any work is NOT observable through this surface, which is exactly why the surface is missing: a flag-on block that idles (no classify items, or a failed fail-open pass) is indistinguishable from this one, so this run does not claim the pass ran. Its surface EXISTS one layer down: extract_session_v2 emits result['classify_later'] UNCONDITIONALLY at tortoise/extractor_v2.py:8965-8971. It is DROPPED at the same meta fold, tortoise/sdk.py:14117 (\"stats\": out.get(\"stats\") inside _extract_session_v2). Measured on this run: the same 148 stats key(s) and 18 receipt top-level key(s) inspected above carry no 'classify_later'. #9116 is the seam; tortoise/sdk.py:14117 is the line its fix must target"
+    },
+    "step_witnesses": {
+      "S0": "the reader segmented the corpus: stats.edus=159 stats.chunks=7 over 7 sessions",
+      "S1": "the first LLM stage ran: stats.llm.by_stage.s1 calls=7",
+      "S2.1": "the S2 map ran: stats.llm.by_stage.s2 calls=7; entities=86 events=37 points=156",
+      "S3": "the graph was searched on the real backend: stats.search_queries=105 > 0, stats.search_degraded=false on every session",
+      "S5": "the graph write landed: 458 derived node(s) written by the run [Point 353 (156 anchored), Object 61 (0 anchored), Event 44 (7 anchored)]; stats.operator_endpoints_minted=0; operator-shaped relationships written [IMPL=43, INPUT=58, NAND=24]",
+      "S6": "the commit persisted: 353 :Point node(s) in the run's graph, 185 of them carrying the commit's eventId provenance stamp; 388 :GraphEvent(s)"
+    },
+    "sessions": [
+      {
+        "session_id": "wp01_quarry_debug",
+        "ok": true,
+        "extraction_mode": "llm:deepseek-direct",
+        "extracted": 31,
+        "errors": [],
+        "elapsed_s": 83.7
+      },
+      {
+        "session_id": "wp02_lumen_refactor",
+        "ok": true,
+        "extraction_mode": "llm:deepseek-direct",
+        "extracted": 28,
+        "errors": [],
+        "elapsed_s": 35.0
+      },
+      {
+        "session_id": "wp03_ember_design",
+        "ok": true,
+        "extraction_mode": "llm:deepseek-direct",
+        "extracted": 14,
+        "errors": [],
+        "elapsed_s": 28.9
+      },
+      {
+        "session_id": "wp04_aurora_perf",
+        "ok": true,
+        "extraction_mode": "llm:deepseek-direct",
+        "extracted": 23,
+        "errors": [],
+        "elapsed_s": 38.3
+      },
+      {
+        "session_id": "wp05_retro_writeup",
+        "ok": true,
+        "extraction_mode": "llm:deepseek-direct",
+        "extracted": 23,
+        "errors": [],
+        "elapsed_s": 72.8
+      },
+      {
+        "session_id": "wp06_quarry_rollout",
+        "ok": true,
+        "extraction_mode": "llm:deepseek-direct",
+        "extracted": 16,
+        "errors": [],
+        "elapsed_s": 123.2
+      },
+      {
+        "session_id": "wp07_bluepeak_followup",
+        "ok": true,
+        "extraction_mode": "llm:deepseek-direct",
+        "extracted": 21,
+        "errors": [],
+        "elapsed_s": 34.2
+      }
+    ],
+    "e3_census": {
+      "rule": "a derived node (Point/Object/Event) carries a version anchor iff it is the SOURCE of at least one extractedFrom relationship whose sourceVersion is a non-empty string, OR the TARGET of at least one references relationship whose sourceVersion is a non-empty string. The two directions are NOT interchangeable: extractedFrom points FROM the derived node at its source ((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT the derived node ((Source)-[:references]->(Event|Document) \u2014 tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from the capture path at tortoise/sdk.py:14398 (proj.link_source_to_event(source_key, event_id))). The anchor is a property of the DERIVATION LINK (tortoise/projection/edges.py:502-510 _anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels are _DERIVATION_REFERENCES_LABELS (edges.py:475: Event, Document). A Source->Object link is identity/mention and carries none BY DESIGN (owner option A, #5199; #9736)",
+      "per_label": {
+        "Point": {
+          "nodes": 353,
+          "anchored": 156,
+          "anchored_out": 156,
+          "anchored_in": 0
+        },
+        "Object": {
+          "nodes": 61,
+          "anchored": 0,
+          "anchored_out": 0,
+          "anchored_in": 0
+        },
+        "Event": {
+          "nodes": 44,
+          "anchored": 7,
+          "anchored_out": 0,
+          "anchored_in": 7
+        }
+      },
+      "label_counts": {
+        "EpMeta": 1,
+        "Event": 44,
+        "GraphEvent": 388,
+        "GraphEventMeta": 1,
+        "Meta": 1,
+        "Object": 61,
+        "Point": 353,
+        "Session": 7,
+        "Source": 7,
+        "Subject": 15
+      },
+      "point_composition": {
+        "points": 353,
+        "turn_rows": 159,
+        "operator_points": 29,
+        "extraction_claims": 156,
+        "other_points": 9,
+        "extraction_claims_anchored": 156,
+        "turn_rows_anchored": 0,
+        "operator_points_anchored": 0,
+        "other_points_anchored": 0
+      },
+      "relationship_anchored": {
+        "CONTAINS": 0,
+        "IMPL": 0,
+        "INPUT": 0,
+        "NAND": 0,
+        "aboutObject": 0,
+        "aboutSubject": 0,
+        "extractedFrom": 156,
+        "mitigated_by": 0,
+        "references": 7
+      },
+      "relationship_counts": {
+        "CONTAINS": 315,
+        "IMPL": 43,
+        "INPUT": 58,
+        "NAND": 24,
+        "aboutObject": 246,
+        "aboutSubject": 25,
+        "extractedFrom": 156,
+        "mitigated_by": 9,
+        "references": 7
+      }
+    },
+    "e4_receipt": {
+      "numerator": 2,
+      "denominator": 15,
+      "planted": 15,
+      "edge_correct": 2,
+      "content_ok": 8,
+      "operators_total": 27,
+      "measured_commit": "6164c683c",
+      "source": "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
+    },
+    "e5_rescore": {
+      "raw_loss_rate": 0.52,
+      "narrative_loss_rate": 0.48,
+      "raw_n": 25,
+      "ratio": 1.083333,
+      "raw_recovery": 0.48,
+      "partial_receipts": [
+        "wp07_bluepeak_followup:raw partial=True truncated=False s2_error=None s1_error=False s1_truncated=False"
+      ],
+      "source": "/tmp/9889/e5-rescore.json"
+    },
+    "e1_e2_artifact": {
+      "before_share": 0.6,
+      "after_share": 0.6,
+      "objects": 25,
+      "corpus_sha256": "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
+      "declared_prereg": "UNPREREGISTERED",
+      "declared_result": "UNPREREGISTERED"
+    }
+  },
+  "rows": [
+    {
+      "criterion": "E1",
+      "verdict": "BLOCKED",
+      "evidence_kind": "measurement",
+      "evidence": "docs/evidence/7949-capstone/e1-e2.log",
+      "sha": "c2544f54f143e53ff5489b137ce1e9a52d3ed370",
+      "numerator": null,
+      "denominator": null,
+      "corpus_sha256": "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
+      "sibling": "E2",
+      "blocked_by": "#5333",
+      "note": "the only E1 artifact is docs/evidence/7949-capstone/e1-e2.log: before=0.600000 after=0.600000 objects=25 bound=0.300000 vs bar after_share <= 0.5 x before_share (Objects floor 30) \u2014 after_share is NOT <= 0.5 x before_share, so the arithmetic would FAIL \u2014 but the row is NOT RED, because the record's own floor makes it REFUSED: the artifact's denominator is 25 Objects (under the frozen floor of 30) and is the 25-name owner-labelled audit population rather than 'all :Object nodes written by the run'. Its corpus (e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b) is not the frozen corpus (sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc), and the artifact declares prereg=UNPREREGISTERED result=UNPREREGISTERED. No before/after pair on the pre-registered corpus exists, and the mechanism that must move the share is an owner ruling on removal/relocation (#5333) \u2014 so no scored E1 measurement exists to be red",
+      "artifact_corpus_sha256": "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b"
+    },
+    {
+      "criterion": "E2",
+      "verdict": "BLOCKED",
+      "evidence_kind": "measurement",
+      "evidence": "docs/evidence/7949-capstone/e1-e2.log",
+      "sha": "c2544f54f143e53ff5489b137ce1e9a52d3ed370",
+      "numerator": null,
+      "denominator": null,
+      "corpus_sha256": "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
+      "sibling": "E1",
+      "blocked_by": "#9775",
+      "note": "E2a: BLOCKED \u2014 values=42 (the frozen 14-unit denominator is not carried by any committed artifact) vs bar 13 of 14. E2b: PASS \u2014 fused=1/114 = 0.008772 vs bar fused share <= 0.05 (floor 30 surviving units) (a proxy: the artifact counts atomic POINTS, not surviving planted units). The E2 row is BLOCKED because the composite criterion needs BOTH halves and E2a's frozen 14-value-bearing-unit denominator is carried by no committed artifact; the artifact's no-loss control (values 42 before and after, real_facts 90) is consistent with E2a but does not compute it. Same corpus caveat as E1: e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b is not sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc, and #9775 records that the state-value carve-out is absent on one render path",
+      "artifact_corpus_sha256": "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b"
+    },
+    {
+      "criterion": "E3",
+      "verdict": "RED",
+      "evidence_kind": "measurement",
+      "evidence": "/tmp/9889/capstone-measured-54922a800.log",
+      "sha": "54922a800f96858935b58ef250da569a4896df44",
+      "numerator": 163,
+      "denominator": 458,
+      "corpus_sha256": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
+      "sibling": null,
+      "blocked_by": "#9736",
+      "note": "anchored=163 derived=458 share=0.355895; bar share = 1.0 (zero unanchored), floor 30 derived nodes; measured on THIS run's own graph (capstone_on_54922a800_1793378318, fixtures_hash sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc). The Source->Object identity link carries no sourceVersion BY DESIGN (owner option A, #5199), so ':Object mention links' can never anchor \u2014 and the frozen denominator counts them anyway, so the = 1.000 bar is unreachable as registered (#9736: either the metric is re-registered or the model is reopened; a lane cannot pick). COMPOSITION of the 353 Point nodes the denominator also counts: 159 mechanical turn rows + 156 extraction claims (156 anchored) + 29 operator Points (0 anchored) + 9 other (0 anchored), each class read off the property its writer stamps. TWO of those classes cannot carry a derivation link AT ALL and are named rather than folded into the figure: the turn rows carry none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, tortoise/sdk.py:2377, t.is_episodic=true, wired only by CONTAINS), and the operator Points are written by create_operator (tortoise/sdk.py \u2014 the IMPL/NAND/INPUT operator writer), which never writes extractedFrom. So counting them under 'all derived nodes' is defensible but they can never anchor and are not a provenance shortfall, and a denominator summing them would report a shortfall nothing could close. The DERIVATION figure is anchored / expected-to-derive over the WRITER class (non-episodic, non-operator Points = the extraction claims PLUS the 'other' Points, which are the class where a LOST derivation link lands \u2014 Points with no extractedFrom that are neither turn rows nor operator Points): 156/165 = 0.945455. It is computed over that class and NOT over the claims alone, because a denominator defined by the extractedFrom link itself cannot move when that link is lost: the earlier reading divided by the extraction claims ALONE \u2014 the class that link defines \u2014 so it read nothing but 1.000000 BY CONSTRUCTION, with the 'other' Points sitting outside it. Whether an unanchored 'other' Point lost a link or was minted by a writer that never derives is the attribution #9736 still owns. #9736 must choose between re-registering the metric and reopening the model, and this row reports BOTH readings so neither choice is made on a denominator whose composition was hidden"
+    },
+    {
+      "criterion": "E4",
+      "verdict": "RED",
+      "evidence_kind": "measurement",
+      "evidence": "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json",
+      "sha": "6164c683c",
+      "numerator": 2,
+      "denominator": 15,
+      "corpus_sha256": "sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324",
+      "sibling": null,
+      "blocked_by": "#8503",
+      "note": "edge_correct=2 planted=15; bar 15 of 15; content_ok=8 operators_total=27 on the SAME receipt. Its own date=2026-10-19T01:39:26Z, commit=6164c683c and corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324 differ from the frozen corpus (sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc), and its verdict=regression failure_origin=gate_regression: the planted edges are not formed at all (#8503), and the receipt's retrievability rate is UNMEASURED (#9596)",
+      "artifact_corpus_sha256": "sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324"
+    },
+    {
+      "criterion": "E5",
+      "verdict": "RED",
+      "evidence_kind": "measurement",
+      "evidence": "docs/evidence/7949-capstone/e5-rescore.json",
+      "sha": "54922a800f96858935b58ef250da569a4896df44",
+      "numerator": 12,
+      "denominator": 25,
+      "corpus_sha256": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
+      "sibling": null,
+      "blocked_by": "#9738",
+      "note": "ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND raw >= 0.8 (floor 10 sentences); raw recovery = 1 - 0.52 = 0.4800 FAILS the 0.80 absolute floor while the 1.0833 ratio passes 0.90 \u2014 the record's own note says the ratio alone is degenerate, which is why the absolute floor exists. The re-score grades the 2026-10-18 arm receipts against THIS commit's gold (the gold is part of fixtures_hash) and warns INCOMPLETE RECEIPTS: wp07_bluepeak_followup:raw partial=True truncated=False s2_error=None s1_error=False s1_truncated=False \u2014 its holdout delta cannot be certified. #9738 also records that \u00a710's prior measurement was visible when the record claimed it was not, and that the 25-bound vs 29-marker populations must be reconciled before either number is called final"
+    }
+  ]
+}
+=== CAPSTONE-VERDICT-END ===

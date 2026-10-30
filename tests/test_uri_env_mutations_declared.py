@@ -697,6 +697,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # function-scoped `monkeypatch`, auto-undone at teardown (no lane leak).
     "test_7949_capstone_verdict_check.py": [
         r'monkeypatch\.(?:setenv|delenv)\(\s*"TORTOISE_DB_URI"'],
+    # #9889: the three capstone probes read `TORTOISE_DB_URI` for the graph URI
+    # they census, so `main()` cannot run without one — the `setenv` sites point it
+    # at the deliberately-UNREACHABLE `docker://:@127.0.0.1:1/tortoise_test`
+    # (DELIBERATE_URI: nothing connects, every graph read is stubbed at the seam
+    # the probe calls, and the URI is the test input that the probe's own
+    # refusal/measurement branch depends on) — and `test_the_e2a_probe_refuses_a_
+    # run_with_no_backend` `delenv`s it (DELIBERATE_EMBEDDED_LANE: the absent-URI
+    # fallback IS what the refusal must catch). Both function-scoped, auto-undone
+    # at teardown.
+    "test_9889_capstone_probes.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # ⛔ NO second `test_9079_event_writers_journal.py` row here. This branch had
     # added the BROAD form (`r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'`) at
     # this anchor, while `main` carries the NARROW one above and deliberately
