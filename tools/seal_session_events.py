@@ -296,6 +296,20 @@ def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
                   "first)")
 
 
+def _remove_if_ours(path: Path, mine: os.stat_result) -> None:
+    """Unlink ``path`` only if it is still the inode this run created.
+
+    A create-then-cleanup is not atomic: a peer can replace the canonical path
+    between our ``O_EXCL`` open and our failure, and an unqualified unlink would
+    then delete the PEER's verified archive — the one loss this tool may not
+    cause. Identity is the only sound test, so it is the one used.
+    """
+    with contextlib.suppress(OSError):
+        now = os.stat(path)
+        if now.st_dev == mine.st_dev and now.st_ino == mine.st_ino:
+            os.unlink(path)
+
+
 def _create_exclusive(target: Path, plain: bytes) -> None:
     """Write the archive with ``O_EXCL``; a torn/failed write is removed.
 
@@ -305,14 +319,20 @@ def _create_exclusive(target: Path, plain: bytes) -> None:
     removed before the error propagates, and the plain source was never touched.
     """
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    mine: os.stat_result | None = None
     try:
+        mine = os.fstat(fd)
         with os.fdopen(fd, "wb") as out:
+            fd = -1                      # fdopen owns the descriptor now
             out.write(gzip.compress(plain, mtime=0))
             out.flush()
             os.fsync(out.fileno())
     except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(target)
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if mine is not None:
+            _remove_if_ours(target, mine)
         raise
 
 
@@ -349,10 +369,23 @@ def _preserve_aside(src: Path, aside: Path) -> None:
     except OSError as e:
         if e.errno not in _NO_HARD_LINK_ERRNOS:
             raise
-    with open(aside, "xb") as out:
-        out.write(src.read_bytes())
-        out.flush()
-        os.fsync(out.fileno())
+    fd = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    mine: os.stat_result | None = None
+    try:
+        mine = os.fstat(fd)
+        with os.fdopen(fd, "wb") as out:
+            fd = -1
+            data = src.read_bytes()
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if mine is not None:
+            _remove_if_ours(aside, mine)   # a torn aside is not a preserved one
+        raise
 
 
 def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
@@ -415,16 +448,25 @@ def _publish_no_clobber(tmp: Path, target: Path, plain: bytes,
             _publish_bytes(tmp, target, plain)
         except FileExistsError:
             lost = target.with_name(f"{target.name}.unpublished-{digest[:8]}")
-            with contextlib.suppress(OSError):
-                os.link(tmp, lost)
+            try:
+                _publish_bytes(tmp, lost, plain)   # link, else exclusive create
+                kept = f"this run's bytes are kept at {lost}"
+            except OSError as e:
+                kept = (f"this run's bytes could NOT be kept ({e}) — they exist "
+                        "nowhere" if source_absent else
+                        f"this run's bytes could NOT be kept ({e}); they exist "
+                        "only in the plain source")
             return "disagree", (f"a third run published {target} while this run "
-                                f"superseded {aside}; this run's bytes are kept "
-                                f"at {lost}")
+                                f"superseded {aside}; {kept}")
         except OSError as e:
-            with contextlib.suppress(OSError):
-                os.link(aside, target)   # put theirs back
-            return "unreadable", (f"the stale archive is kept at {aside} but "
-                                  f"{target} could not be written: {e}")
+            try:   # put theirs back, through the same no-clobber helper
+                _publish_bytes(aside, target, gzip.decompress(aside.read_bytes()))
+                restored = f"{target} was restored from {aside}"
+            except OSError as e2:
+                restored = (f"{target} could NOT be restored ({e2}); the archive "
+                            f"is kept at {aside}")
+            return "unreadable", (f"publishing after the supersede failed: {e} — "
+                                  f"{restored}")
         return "published", ("superseded a stale prefix; the previous archive is "
                              f"kept at {aside}")
     if raced.startswith(plain):

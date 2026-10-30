@@ -8,6 +8,7 @@ seals a file a live hook is still appending to, fails these rows.
 from __future__ import annotations
 
 import gzip
+import contextlib
 import errno
 import importlib.util
 import os
@@ -746,6 +747,124 @@ def test_the_source_present_publish_cannot_clobber_a_peer_archive(tmp_path, monk
 
     assert gzip.decompress(target.read_bytes()) == full, "the peer's tail survives"
     assert result.ok, result
+
+
+def test_a_failed_create_never_deletes_a_peers_archive(tmp_path):
+    """The cleanup after a failed exclusive create must remove OUR inode only:
+    a peer can replace the canonical path inside that window, and an unqualified
+    unlink would delete the peer's verified archive.
+
+    Mutation: `_remove_if_ours` replaced by a bare `os.unlink` REDs here.
+    """
+    day = TODAY - timedelta(days=3)
+    path = _write(tmp_path, day, b'{"n": 1}\n')
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    peer = gzip.compress(b'{"peer": 2}\n', mtime=0)
+
+    real_link, real_fsync = seal.os.link, seal.os.fsync
+
+    def no_links(*a, **k):
+        raise OSError(errno.ENOTSUP, "no hard links here")
+
+    calls = []
+
+    def peer_takes_over(fd):
+        calls.append(fd)
+        if len(calls) == 1:
+            return                      # the temp file: let it through
+        # Inside the create window: the peer replaces the path with its archive.
+        with contextlib.suppress(OSError):
+            os.unlink(target)
+        target.write_bytes(peer)
+        raise OSError(errno.ENOSPC, "no space left")
+
+    seal.os.link, seal.os.fsync = no_links, peer_takes_over
+    try:
+        seal.seal_one(tmp_path, path)
+    finally:
+        seal.os.link, seal.os.fsync = real_link, real_fsync
+
+    assert target.exists(), "the peer's archive must never be deleted"
+    assert gzip.decompress(target.read_bytes()) == b'{"peer": 2}\n'
+
+
+def test_a_run_that_loses_the_gap_keeps_its_bytes_on_a_no_link_filesystem(tmp_path):
+    """The `.unpublished-<sha8>` copy is the ONLY place a gap loser's bytes land,
+    so it must use the same no-hard-link fallback and the verdict must not claim
+    a copy that does not exist.
+
+    Mutation: the `_publish_bytes` call replaced by a bare, suppressed `os.link`
+    REDs the `lost.exists()` assertion.
+    """
+    day = TODAY - timedelta(days=9)
+    stale = b'{"n": 1}\n'
+    full = b'{"n": 1}\n{"n": 2}\n'
+    path = _write(tmp_path, day, full)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(stale, mtime=0))
+
+    real_link, real_unlink = seal.os.link, seal.os.unlink
+
+    def no_links(*a, **k):
+        raise OSError(errno.ENOTSUP, "no hard links here")
+
+    def third_run_wins(p, *a, **k):
+        result = real_unlink(p, *a, **k)
+        if Path(p) == target:            # the peer publishes the instant we move aside
+            target.write_bytes(gzip.compress(b'{"third": 3}\n', mtime=0))
+        return result
+
+    seal.os.link, seal.os.unlink = no_links, third_run_wins
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        seal.os.link, seal.os.unlink = real_link, real_unlink
+
+    assert result.status == "conflict", result
+    lost = [p for p in target.parent.iterdir() if ".unpublished-" in p.name]
+    assert lost, result.detail
+    assert gzip.decompress(lost[0].read_bytes()) == full
+    assert str(lost[0].name) in result.detail
+
+
+def test_a_torn_aside_is_removed_not_left_as_a_preserved_archive(tmp_path):
+    """A half-copied `.superseded-*` file is indistinguishable from a preserved
+    archive and `--check` cannot see it (its name does not end in `.jsonl.gz`),
+    so the copy removes its own partial before the error propagates.
+
+    Mutation: the `_remove_if_ours(aside, mine)` in `_preserve_aside` removed
+    REDs here.
+    """
+    day = TODAY - timedelta(days=9)
+    path = _write(tmp_path, day, b'{"n": 1}\n{"n": 2}\n')
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(b'{"n": 1}\n', mtime=0))
+
+    real_link, real_fsync = seal.os.link, seal.os.fsync
+
+    def no_links(*a, **k):
+        raise OSError(errno.ENOTSUP, "no hard links here")
+
+    calls = []
+
+    def dies_mid_copy(fd):
+        calls.append(fd)
+        if len(calls) >= 2:             # 1 = temp file, 2 = the aside copy
+            raise OSError(errno.ENOSPC, "no space left")
+
+    seal.os.link, seal.os.fsync = no_links, dies_mid_copy
+    try:
+        result = seal.seal_one(tmp_path, path)
+    finally:
+        seal.os.link, seal.os.fsync = real_link, real_fsync
+
+    assert result.status == "conflict", result
+    assert not [p for p in target.parent.iterdir() if ".superseded-" in p.name]
+    assert target.exists() and gzip.decompress(target.read_bytes()) == b'{"n": 1}\n'
+    assert path.exists(), "the source is never touched on a failed seal"
 
 
 def test_a_no_hard_link_filesystem_still_supersedes_a_stale_prefix(tmp_path):
