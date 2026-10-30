@@ -126,8 +126,23 @@ _LEG_DEADLINE_S = 60.0
 
 
 def _fts_rows(graph, query, *, limit, entity_type="point",
-              excluded_statuses=(), deadline_s: float = _LEG_DEADLINE_S):
+              excluded_statuses=None, deadline_s: float = _LEG_DEADLINE_S):
     """The FTS leg's rows — or a REFUSAL that names why there are none.
+
+    ⛔ ``excluded_statuses`` DEFAULTS TO ``None`` — ``run_fts_query``'s OWN
+    default — and that is load-bearing, not stylistic. The two values are not
+    near-synonyms: ``None`` applies ``TERMINAL_EXCLUDED_STATUSES``, while ``()``
+    emits NO status predicate at all (``search_engine.run_fts_query`` gates every
+    one of its status clauses on ``excluded_statuses == ()`` — ``:1589`` for the
+    operator leg, ``:1681`` for the point/object FTS leg — and otherwise falls
+    back to ``excluded_statuses or TERMINAL_EXCLUDED_STATUSES``), so ``()`` ranks
+    over a WIDER pool than ``None``. Six call sites in this file
+    (``limit=10``/``limit=25``/``limit=n + 5`` on ``QUERY``) reached the leg
+    through that default before this file grew a helper; a helper defaulting to
+    ``()`` would have widened their pool to include terminal-status rows and
+    silently changed what those legs measure — a fixture-semantics drift with no
+    assertion pointing at it. Pass ``()`` EXPLICITLY where no status predicate is
+    wanted (the Object fixtures below do, exactly as they did before).
 
     Every test in this file measures a RANKING, so a leg that did not answer is
     not a weak version of the measurement, it is none of it: `run_fts_query`
@@ -762,3 +777,31 @@ def test_an_open_breaker_from_an_EARLIER_test_does_not_decide_this_one():
     graph = _LegScript([("p1", 2.0)])
     assert _fts_rows(graph, "obj dated", limit=10, deadline_s=0.0) == [("p1", 2.0)]
     assert graph.calls == 1, "an OPEN breaker short-circuited the leg"
+
+
+def test_the_helper_ranks_the_SAME_pool_the_engine_does_by_default():
+    """The port must not widen the pool it ranks over (#10121 review cycle, P2).
+
+    ⛔ `run_fts_query`'s default is ``None`` — ``TERMINAL_EXCLUDED_STATUSES`` is
+    applied — while ``()`` means NO status predicate at all, so the two rank over
+    different pools. Six legs in this file reached the engine through that default
+    before the helper existed (``limit=10`` / ``limit=25`` / ``limit=n + 5`` on
+    ``QUERY``); a helper defaulting to ``()`` silently ranked them over
+    terminal-status rows as well, and no assertion in the file pointed at it.
+
+    FAIL VALUE: default ``_fts_rows`` to ``()`` — this reds. Deriving the two
+    defaults from the two signatures (rather than comparing to a typed ``None``)
+    also catches the day the ENGINE's default moves, which is the half a reader
+    of this file cannot see.
+    """
+    import inspect
+
+    from tortoise import search_engine
+
+    helper = inspect.signature(_fts_rows).parameters["excluded_statuses"].default
+    engine = inspect.signature(
+        search_engine.run_fts_query).parameters["excluded_statuses"].default
+    assert helper == engine, (
+        "the fixture helper's status pool drifted from run_fts_query's default: "
+        f"helper={helper!r} engine={engine!r} — None applies "
+        "TERMINAL_EXCLUDED_STATUSES, () applies NO status predicate at all")
