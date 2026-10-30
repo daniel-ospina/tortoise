@@ -429,67 +429,56 @@ _STUB_THEN_ADOPT_JOURNAL = [
 ]
 
 
-def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path):
-    """The pre-wipe/adoption half: a stub the journal then ADOPTS is faithful.
+def test_an_unjournalled_mention_mints_no_node_and_the_rebuild_is_not_a_mutation(
+        tmp_path):
+    """D1 at replay: an unregistered mention mints NO node — and the rebuild of
+    the journal carrying it is still not a mutation.
 
-    ``EventRecorded`` mints an ``:Object`` name stub first (a node NO record
-    creates by its canonical id), then the ``ObjectRegistered`` adopts it
-    (``ON MATCH o.id=coalesce($id, o.id)``, ``o._stub=NULL``). The node's
-    presence and identity are therefore journal-derived, so replaying the same
-    journal must reproduce the same digest. FAILS IF: the index keys a node by
-    something the adoption legitimately changes — ``_stub`` (cleared by the
-    adoption) is deliberately NOT covered, and
-    ``test_the_fingerprint_ignores_the_stub_discriminator`` pins that exclusion
-    directly.
+    ``_STUB_THEN_ADOPT_JOURNAL`` is the shape the RETIRED fold-side mint used to
+    serve: an ``EventRecorded`` whose ``subject``/``object`` name a node no
+    record registers **yet**. Pre-#3590 the fold minted an ``:Object`` name stub
+    (``_stub=true``, id derived from the name) and the later ``ObjectRegistered``
+    ADOPTED it via ``_upsert_object``'s ``ON MATCH``. **D1** (owner, RULED
+    2026-10-26: *"a bare mention does not create an entity … an unresolvable
+    mention drops its link, records the miss, and mints nothing"*) and **D9**
+    (*the projection is not the minter*) retired that mint: the mention resolves
+    to nothing and the registration CREATES the node.
 
-    The verdict is NOT asserted ``ok``: this journal order hits a SEPARATE,
-    PRE-EXISTING false ``content`` divergence on the adopted node's ``status``
-    (``_upsert_object`` writes ``status`` ON CREATE only — the #1350 clobber
-    guard — so adoption leaves it absent while the reference fold applies the
-    ``live`` creation default). Measured identically on ``459f22912`` with the
-    re-key absent; filed as #8872 rather than absorbed here.
+    Both halves are pinned, because either alone can pass for the wrong reason:
 
-    The ADOPTION ITSELF is asserted on both sides of the event, so this pin
-    cannot silently degrade into "the registration created the Object
-    directly" (which is what the pre-#8859 fixture actually exercised): a graph
-    built from the event-only PREFIX must show the marked stub under an id that
-    is NOT the registered one, and the full journal must then show ONE node
-    carrying the registered id with the marker cleared.
+    * **PREFIX** — the ``EventRecorded`` ALONE mints no ``:Object`` and no
+      ``:Subject``. This is the assertion that REDS on the pre-#3590 tree (whose
+      fold minted both); without it "the registration adopted a stub" and "the
+      registration created the node" are indistinguishable, so a lane that
+      re-added the mint would keep this test green.
+    * **FULL** — exactly ONE node carries the registered id, so a stub
+      reintroduced BESIDE it (two carriers of one name) cannot satisfy the
+      verdict by luck of row order.
 
-    That divergence is pinned EXACTLY (``{"content", {("Object",
-    "status")}}``), not as "anything but ``unrecorded-mutation``" (review): an
-    inequality against one class ABSORBS any NEW divergence the widening could
-    introduce on this node, so the old assertion stayed green through exactly
-    the regression this test exists for.
-
-    Because the #8872 divergence makes the first verdict ``ok=False``,
-    ``check_consistency`` cannot record a baseline for this fixture — so the
-    baseline is SEEDED BY HAND before the rebuild. Without that, ``stored``
-    stays ``None``, ``graph_moved`` is ``False`` by construction, and "the
-    BASELINE must not be what complains" is unfalsifiable (it passed on the
-    pre-fix tree too). The test then PROVES the baseline is live rather than
-    inert: one graph-only belief write on the same adopted node must read
-    ``unrecorded-mutation``.
+    The #8872 ``status`` divergence the pre-#3590 fixture hit is gone with the
+    adoption it came from (``_upsert_object`` writes ``status`` ON CREATE only,
+    so an ADOPTED node kept it absent while the reference fold applied the
+    ``live`` default). With the registration creating the node, both sides agree
+    and the verdict is ``ok`` — which is why this test no longer seeds a
+    baseline by hand: ``check_consistency`` records a real one, and the
+    falsifiability half below (a graph-only belief write on the SAME node reads
+    ``unrecorded-mutation``) proves that baseline is live rather than inert.
     """
-    # Pre-adoption state, observed on a graph built from the Event alone: the
-    # reference really minted a MARKED stub, under an id that is NOT the one the
-    # later registration writes. Without this, the post-adoption assertions
-    # below are also satisfied by a direct creation.
-    stub_proj, _stub_log, _stub_events = _built(
-        tmp_path, tag="stub", records=_STUB_THEN_ADOPT_JOURNAL[:1])
+    # ── PREFIX: a mention is not a creation (D1) ──────────────────────────
+    prefix_proj, _prefix_log, _prefix_events = _built(
+        tmp_path, tag="prefix", records=_STUB_THEN_ADOPT_JOURNAL[:1])
     try:
-        stub_rows = stub_proj.g.query(
-            "MATCH (o:Object {name:'rekey-object'}) RETURN o.id, o._stub"
-        ).result_set
+        minted = prefix_proj.g.query(
+            "MATCH (n) WHERE n.name IN ['rekey-object', 'rekey-subject'] "
+            "RETURN labels(n), n.name, n.id, n._stub").result_set
     finally:
-        stub_proj.close()
-    assert stub_rows, "the EventRecorded reference minted no Object stub"
-    assert stub_rows[0][1] is True, (
-        f"the minted stub is not marked `_stub=true` — adoption is not "
-        f"observable, so the digest equality below cannot discriminate "
-        f"(#7936): {stub_rows}")
-    assert stub_rows[0][0] != _OBJECT_ID, stub_rows
+        prefix_proj.close()
+    assert minted == [], (
+        "the EventRecorded mention MINTED a node — D1 rules that a bare mention "
+        "does not create an entity (the fold-side stub mint is retired; if it "
+        f"is returning, re-derive this pin deliberately): {minted}")
 
+    # ── FULL: the registration creates exactly ONE carrier ────────────────
     events = _journal_dir(tmp_path, _STUB_THEN_ADOPT_JOURNAL)
     proj = FalkorProjection(path=str(tmp_path / "adopt.db"),
                             skip_health_check=True)
@@ -499,37 +488,26 @@ def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path)
         rows = proj.g.query(
             "MATCH (o:Object {name:'rekey-object'}) RETURN o.id, o._stub"
         ).result_set
-        # The stub WAS minted and WAS adopted: the canonical id landed and the
-        # discriminator was cleared.
-        assert rows and rows[0][0] == _OBJECT_ID, rows
-        # EXACTLY ONE node may carry the registered id (the docstring's "ONE
-        # node"): if the registration CREATED a second `:Object` instead of
-        # adopting the stub, `rows` holds two and inspecting `rows[0]` alone
-        # would make this verdict depend on store row order rather than pin it.
-        assert len(rows) == 1, rows
+        assert len(rows) == 1, (
+            f"expected exactly ONE :Object named 'rekey-object' (the "
+            f"registration creates it; nothing else may mint a second "
+            f"carrier), got {rows}")
+        assert rows[0][0] == _OBJECT_ID, rows
+        # No stub was ever minted, so nothing was adopted — the discriminator is
+        # absent because the node was CREATED, not because adoption cleared it.
         assert rows[0][1] is None, rows
         first = _verdict(log_path, proj, record_state=True)
-        assert first["ok"] is False, first
-        assert first["divergence"] == "content", first["divergence"]
-        assert first["state_recorded"] is False, (
-            "the #8872 divergence is expected to keep the baseline UNRECORDED — "
-            f"if it recorded, re-derive this test: {first}")
-        assert {(d["label"], d["field"])
-                for d in first["divergent_entities"]} == {("Object", "status")}, (
-                    "expected ONLY the pre-existing #8872 status divergence, "
-                    f"got {first['divergent_entities']}")
-        # Seed the baseline the #8872 divergence prevents `check_consistency`
-        # from writing, so the SECOND verdict really has one to compare against.
-        assert record_projection_state(
-            log_path, last_applied_seq=len(_STUB_THEN_ADOPT_JOURNAL),
-            content_hash=first["db_hash"]), "could not seed the baseline"
+        assert first["ok"] is True, first
+        assert first["state_recorded"] is True, first
         proj.rebuild_all(str(events), confirm_destructive=True)
         second = _verdict(log_path, proj, record_state=False)
-        # Falsifiability proof for the baseline half: with THAT baseline in
-        # place, one genuinely unjournalled write on the very node the stub
-        # adoption built DOES read `unrecorded-mutation`. So the assertions
-        # above are not passing because the baseline is absent — they are
-        # passing because adoption did not move it.
+        assert second["db_hash"] == first["db_hash"], (
+            "replaying ONE journal moved the baseline digest — the entity view "
+            "is not a function of the journal (#7936)")
+        assert second["ok"] is True, second
+        # Falsifiability proof that the baseline is LIVE, not inert: one
+        # genuinely unjournalled belief write on the very node this journal
+        # built DOES read `unrecorded-mutation`.
         proj.g.query(
             "MATCH (o:Object {id:$oid}) SET o.confidence=0.42",
             params={"oid": _OBJECT_ID})
@@ -537,46 +515,62 @@ def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path)
     finally:
         proj.close()
     assert third["divergence"] == "unrecorded-mutation", (
-        "a graph-only belief write on the adopted node did not read "
-        "unrecorded-mutation, so the seeded baseline is inert and the "
-        f"assertions below are vacuous: {third}")
-    assert first["db_hash"] == second["db_hash"], (
-        "adoption of a name stub moved the baseline digest (#7936)")
-    # Falsifiable now that a baseline EXISTS: a digest that moved under a still
-    # journal is `unrecorded-mutation`, which is the false RED this rules out.
-    assert second["divergence"] != "unrecorded-mutation", second
-    assert second["ok"] is False and second["divergence"] == "content", (
-        f"only the pre-existing #8872 divergence may remain, got {second}")
-    assert {(d["label"], d["field"])
-            for d in second["divergent_entities"]} == {("Object", "status")}, (
-                f"got {second['divergent_entities']}")
+        "a graph-only belief write on the journal-built node did not read "
+        "unrecorded-mutation, so the recorded baseline is inert and the "
+        f"equality assertions above are vacuous: {third}")
 
 
 def test_the_fingerprint_ignores_the_stub_discriminator(tmp_path):
-    """``_stub`` is cleared by adoption, so it must not be in the digest.
+    """``_stub`` is a MARKER, never identity, so it must not be in the digest.
 
     Pinned on the FINGERPRINT VIEW rather than through a rebuild: two builds of
     one journal clear the flag identically, so a rebuild comparison cannot
     discriminate whether ``_stub`` is covered — only the view can.
-    The key the assertion fires on is the SUBJECT stub: nothing in
-    ``_STUB_THEN_ADOPT_JOURNAL`` adopts it (the OBJECT stub is the adopted one,
-    and it is the one whose ``_stub`` this fixture clears).
-    FAILS IF: ``_entity_node_view`` starts copying an undeclared prop.
+
+    ⛔ The flag is SEEDED onto the built graph, not produced by the fixture. It
+    used to arrive from the fold-side name-stub mint, which #3590 D1/D9 retired
+    (an ``EventRecorded``'s ``subject``/``object`` is a mention and mints
+    nothing — see
+    ``test_an_unjournalled_mention_mints_no_node_and_the_rebuild_is_not_a_mutation``).
+    Keeping the seed local to this test is what keeps the pin honest: the claim
+    is about ``_entity_node_view``'s exclusion list, and that claim is
+    independent of WHY a node happens to carry the marker. The surviving
+    producer is ``_mint_subject_stub`` (the recorded bounded D8/D1 exception),
+    so both labels are seeded — an exclusion that held for one label only would
+    be exactly the drift this catches.
+
+    FAILS IF: ``_entity_node_view`` starts copying an undeclared prop (the
+    marker is undeclared, so it would enter the digest and move it on any graph
+    that carries a stub).
     """
     from tortoise.consistency import _graph_fingerprint, _graph_view
 
     proj, _log_path, _events = _built(tmp_path, records=_STUB_THEN_ADOPT_JOURNAL)
     try:
+        # Both entity labels carry the marker in a real graph: `_mint_subject_stub`
+        # still mints a marked-ish Subject stub (the bounded exception), and any
+        # legacy/raw writer may mark an Object. `_stub` is NOT a declared prop,
+        # so this is the exact class the exclusion list must cover.
+        proj.g.query("MATCH (o:Object {id:$oid}) SET o._stub=true",
+                     params={"oid": _OBJECT_ID})
+        proj.g.query("CREATE (s:Subject {id:'sub-7936-stub', "
+                     "name:'rekey-subject', _stub:true})")
         view = _graph_view(proj)
         stub_keys = [k for k, p in view.items()
                      if k[0] in ("Object", "Subject") and p.get("_stub")]
-        assert stub_keys, (
-            "the fixture minted no stub — the exclusion pin would be vacuous")
+        assert {k[0] for k in stub_keys} == {"Object", "Subject"}, (
+            "the seeded stub marker did not reach the view for BOTH entity "
+            f"labels — the exclusion pin would be vacuous or one-sided: "
+            f"{stub_keys}")
         finger = _graph_fingerprint(view)
     finally:
         proj.close()
     for label, nid in stub_keys:
-        assert "_stub" not in finger[label][nid], finger[label][nid]
+        assert "_stub" not in finger[label][nid], (
+            f"`_stub` entered the digest for {label}/{nid} — it is a marker "
+            f"(cleared by adoption), not identity, and a graph carrying a stub "
+            f"would then read `unrecorded-mutation` on every rebuild: "
+            f"{finger[label][nid]}")
 
 
 def test_a_live_graph_and_its_rebuild_share_a_digest(tmp_path):
