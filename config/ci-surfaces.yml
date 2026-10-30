@@ -1937,6 +1937,13 @@ surfaces:
   # matches no named surface, so it falls back to `core` — but registering the
   # guard HERE is what makes the file selected for the guard's OWN later edits.
   - test_8864_shared_name_merge_key.py
+  # #3590: the minted-identity acceptance pins — the four issue-level promises
+  # (id not derived from a name, re-mention idempotent, rename journaled on the
+  # stable id and replay-stable, delete+re-create is two ids). The change
+  # re-keys `Object`/`Subject` in `tortoise/projection/entities.py`, which
+  # matches no named surface and falls back to `core`; registering the file HERE
+  # is what selects it for the guard's own later edits (the #1349/#2938 class).
+  - test_3590_minted_identity_acceptance.py
   # #4643: the served-skill mirror's parity gate. The pin
   # (`config/served-skills-upstream.yml`) is a config/ path, and config/ falls
   # through to `core` — without this registration a pin-only change ran no
@@ -7347,6 +7354,26 @@ carve_out:
 # `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
 # DECLARED in `tests/test_markers.py::test_no_redirect_stems_registry_exact`.
 - test_cli_extraction.py
+# #3590 round-5 review F3: the minted-identity acceptance pins. The `sdk`
+# fixture builds `TortoiseSDK(<tmp_path>/t.db, event_log_path=…)` BY DB PATH and
+# its tests drive `rebuild_all(...)` against that store, so the load-bearing
+# reason is the REDIRECT, not a skip: under a URI-set lane
+# `tortoise/projection/__init__.py::_caller_test_stem` resolves the nearest
+# `test_*` frame to this module, finds it exemption-free, and DISCARDS the path
+# — connecting the construction to the server, where the `rebuild == live`
+# property this file exists to prove is not the property being measured (and
+# #5084's cross-lane pollution class applies). Same shape and same disposition
+# as the #9451/#9350/#3644 rows above. ⛔ NO test count is stated here on purpose
+# (#9876 review P3): the file is re-derived at every revision — an earlier
+# revision of this sentence quoted "four of its nine" while the file held 32
+# tests. `pytest --collect-only` is the authority; a comment is not. (The
+# sibling registration in `tests/_embedded.TEST_NO_REDIRECT_STEMS` carries the
+# same policy; a count in either home drifts.) Registered in all three homes —
+# `carve_out:` here, `tests/_embedded.TEST_NO_REDIRECT_STEMS`, and the
+# declaration in `tests/test_markers.py::test_no_redirect_stems_registry_exact`
+# — because a stem in only one or two of them is the silent hole those pins
+# exist to catch.
+- test_3590_minted_identity_acceptance.py
 # #10121: the recency-tie pins (the acceptance sweep at N ∈ {10, 50, 119, 130,
 # 200}, the id-less `:Object` and legacy-id regressions, the `updatedAt`-beats-
 # `createdAt` ordering). The module is `pytestmark = pytest.mark.embedded_only`
@@ -7694,6 +7721,7 @@ durations:
   test_7405_remaining_writes.py: 45.0  # #7405/#8698: so the read-me-from-junit half of this note is dropped with it (see the provenance rule above the block). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it — merging origin/main is where the fast pool crossed the DURATION_COVERAGE_MIN floor, which is how this row was found. NO pool figure or percentage is restated here on purpose (each base merge re-stales it; see the #4387 row above). Do NOT drop the row without re-deriving the floor at that head — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.2
   test_7405_update_point_writes.py: 33.7  # #7405/#8737: same #3400 flat default as the row above and for the same reason; Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0
   test_5509_name_keyed_identity_reads.py: 1.7  # #5509: and WITHOUT this row the durations map drops to 89.98% coverage (799/888), below the 90% floor, which is how #8874's merge of main 46185aba9 first surfaced it. MEASURED on this host 2026-10-17 in the #8874 worktree on a private tools/test_lane.py docker container reached via TORTOISE_DB_URI: pytest session total, 16 tests, "16 passed in 138.63s". WHAT THE NUMBER IS: the session total, NOT what the refresher computes (it sums the textual `--durations=15` block from a CI log, a LOWER bound). Refresh from the first post-merge push run that includes it — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 138.6
+  test_3590_minted_identity_acceptance.py: 2.0  # unmeasured — #3590 (#3400 trap); the file is ALSO routed to the URI-unset carve-out lane (`carve_out:` row + the two registries) — #3590 round-5 review F3: a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so the weight is the header's flat `DEFAULT_FAST_WEIGHT` rather than a dev-box reading (a weight is a SHARD-LAYOUT input; the #2818/#3419 convention). MEASURED this turn: the surface entry alone does NOT cover it — `tools/ci_selection.py --integrity` reds `manifest drift: ['test_3590_minted_identity_acceptance.py']` without this row (#4348 trap). Each pin builds one embedded journal-backed SDK and several call `rebuild_all`, so its cost is SDK build + rebuild, the once-per-leg cost the #3400 method attributes to no file. NO test count is stated here on purpose (#3590 round-5 review P3): the file's count is re-derived at every revision and this row quoted 5 while the file already held 19 — `pytest --collect-only` is the authority. Refresh from the first post-merge run that includes it.
   test_8864_shared_name_merge_key.py: 2.0  # #8864: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Local reading on this host (embedded carve-out lane, 8 tests): "8 passed in 5.82s" — the session total, which is conftest/DB setup the #3400 method attributes to no file; NOT substituted for a CI weight. Refresh from the first post-merge run that includes it. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (1.6s) is a LOWER bound; kept 2.0
   test_8098_webhook_retry_sweep.py: 8.8  # #8098 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-18 at the PR head AFTER the LAST review fixes (embedded carve-out lane, **56 tests**, `--junitxml`): sum of testcase/@time ranged **7.25s** on a quiet host to **24.65s** with the fleet loading this box, max single test 1.65-6.90s (`test_every_test_the_plan_cites_exists`, which rglobs `tests/`). The reading is re-derived with the COUNT at every revision, never carried forward (the neighbouring #3429 row states the same convention): earlier revisions of this row read 39, 48, 49, 51, 53 and 55 tests as the file grew. The 8.8 WEIGHT is deliberately left alone: it is the shard packer's input, and keeping the higher of the readings means a file whose per-test sum is dominated by one cold-lane test is never under-weighted, so do not "correct" it down without a CI junit measurement. Required for the durations half as well as the surface half (#4348 trap): MEASURED this turn, WITHOUT this row `tools/ci_selection.py --integrity` reds the durations coverage floor (the file is in the fast pool, so an absent row also packs it at the flat 2.0s default). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (5.1s) is a LOWER bound; kept 8.8
   test_9256_lane_probe_attribution.py: 0.3  # #9256: MEASURED on this host at the review-fix head, re-derived together with the COUNT (the convention the neighbouring rows state — the count is re-derived at every revision, never carried forward): embedded carve-out lane, **7 tests**, `--junitxml` sum of `testcase/@time` 6.47 s cold over all 7 (6.03 s warm), whole-file wall 6.72 s cold then 6.29 s warm, max single test 3.83 s. ⚠️ Earlier revisions of this row read 4.01 s over the **4** tests the file held when it was written and 6.53 s over 6; the pins added since (`test_the_census_helper_reds_…`, `test_the_classifier_reads_the_raw_statement_…`, and this round's `test_the_census_does_not_red_on_an_unarmed_peer_…`) are the +3, and ALL THREE take the two-SDK `two_journal_backed_sdks` fixture — 6 of the 7 tests do — which is the dominant per-test cost (a real `_ensure_indexes` burst plus the double close). WEIGHT raised 4.2 -> 6.8 to the coldest reading ever taken and never corrected downward, on the same rule the row above states, so a cold shard leg cannot under-pack: the 7-test wall (6.72 s) is BELOW the 6.8 weight, so it is left alone rather than trimmed to it; do NOT drop the row without re-deriving the `duration_coverage_issues()` floor at that head — with it the fast pool is 866/961 weighted = 90.11%, 0.11 pp above the floor — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.8
