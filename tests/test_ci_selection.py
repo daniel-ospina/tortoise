@@ -7243,8 +7243,9 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
     # tolerates the spelling instead of asserting it — but it must still FIND both, or
     # the premise is unreadable and this test must not pass by not looking.
     labels = _gate_pool_labels(gate)
-    assert set(labels) == {"FALLBACK_LABEL", "POOL_LABEL"}, (
-        f"cannot read FALLBACK_LABEL/POOL_LABEL from {CI_RUNNER_GATE} (read "
+    assert "FALLBACK_LABEL" in labels and any(
+        name.startswith("POOL_LABEL") for name in labels), (
+        f"cannot read FALLBACK_LABEL/POOL_LABEL* from {CI_RUNNER_GATE} (read "
         f"{sorted(labels) or 'nothing'}) — the premise of this pin is unverifiable, "
         f"so this test must not pass by not looking. If agent-infra renamed the "
         f"constants, update the matcher here in the same change that renamed them.")
@@ -7268,14 +7269,25 @@ def _gate_pool_labels(gate_text: str) -> dict[str, str]:
     Only the VALUE is contractual; the assignment SHAPE is not, so the matcher accepts
     `export`, either quoting style, none, and leading whitespace. A commented-out
     assignment is not read — prose is not the value the gate will use.
+
+    ⛔ THE NAME IS A FAMILY, NOT ONE CONSTANT (`POOL_LABEL*`). agent-infra split the
+    pool label per architecture — `POOL_LABEL_ARM64="self-hosted-arm64"` and
+    `POOL_LABEL_X64="self-hosted-x64"` — when it started measuring capacity per runner
+    (agent-infra `4d20edd2`, #2904/#2897). Pinning the exact spelling `POOL_LABEL` made
+    the premise UNREADABLE on every host whose agent-infra checkout is current, which
+    reds this guard everywhere except CI (where `scripts/` is absent and the cross-repo
+    half skips) — a pin that only fails where nobody looks. The family accepts both the
+    old single constant and the split pair, and the discriminator below still runs over
+    EVERY label it reads, so a split that reintroduces a version-pinned label still
+    reds.
     """
     found: dict[str, str] = {}
-    for name in ("FALLBACK_LABEL", "POOL_LABEL"):
-        match = re.search(
-            rf'^\s*(?:export\s+)?{name}=["\']?([^"\'\s]+)', gate_text, re.MULTILINE
-        )
-        if match:
-            found[name] = match.group(1)
+    for match in re.finditer(
+        r"^\s*(?:export\s+)?(FALLBACK_LABEL|POOL_LABEL\w*)=[\"']?([^\"'\s]+)",
+        gate_text,
+        re.MULTILINE,
+    ):
+        found[match.group(1)] = match.group(2)
     return found
 
 
@@ -7298,6 +7310,19 @@ def test_the_gate_label_matcher_reads_the_spellings_and_rejects_the_unsafe_one()
     shipped = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-latest"\n'
     expected = {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-latest"}
     assert _gate_pool_labels(shipped) == expected
+    # The SPLIT spelling agent-infra ships today (`POOL_LABEL_ARM64`/`_X64` since it
+    # measures capacity per runner): the family must read BOTH, or a current
+    # agent-infra checkout makes the premise unreadable on the host while CI skips it.
+    split = (
+        'FALLBACK_LABEL="ubuntu-latest"\n'
+        'POOL_LABEL_ARM64="self-hosted-arm64"\n'
+        'POOL_LABEL_X64="self-hosted-x64"\n'
+    )
+    assert _gate_pool_labels(split) == {
+        "FALLBACK_LABEL": "ubuntu-latest",
+        "POOL_LABEL_ARM64": "self-hosted-arm64",
+        "POOL_LABEL_X64": "self-hosted-x64",
+    }, "the split pool label was not read (agent-infra 4d20edd2)"
     for spelling in (
         "export FALLBACK_LABEL='ubuntu-latest'\nexport POOL_LABEL='ubuntu-latest'\n",
         "FALLBACK_LABEL=ubuntu-latest\nPOOL_LABEL=ubuntu-latest\n",
