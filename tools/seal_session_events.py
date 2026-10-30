@@ -993,9 +993,6 @@ def main(argv: list[str] | None = None) -> int:
         # Do not assert "no old day file exists" when `eligible` skipped entries
         # it could not stat: that sentence would be false over a candidate still
         # sitting on disk (#6388 review cycle 5).
-        if unreadable:
-            print(f"nothing sealable — but {len(unreadable)} day file(s) could "
-                  f"not be stat'd (run --check)", file=sys.stderr)
         if deferred:
             print(f"nothing sealable — {len(deferred)} day file(s) are inside "
                   f"the {SETTLE_GRACE_SECONDS} s settle grace", file=sys.stderr)
@@ -1009,6 +1006,20 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         print(f"{len(bad)} day file(s) could NOT be sealed; their plain copies "
               "are untouched", file=sys.stderr)
+        return EXIT_ERROR
+    if unreadable:
+        # "Could not look" is not "clean" — the rule `--check` already applies
+        # (`:930-938`).  Printing the warning and falling through to EXIT_OK made
+        # `--apply` answer SUCCESS over a candidate still sitting on disk, which
+        # is the false success that matters the moment the action half is wired
+        # into a cron or session path (#6388 review, 10daca609 P3).  The failure
+        # is additive: the readable candidates above were already sealed, so the
+        # error reports the unread one, it does not abort the work.
+        print(f"UNREADABLE: {len(unreadable)} day file(s) under {root} could "
+              "not be stat'd — cannot tell whether they are past the window:",
+              file=sys.stderr)
+        for path in unreadable:
+            print(f"  {path.name}", file=sys.stderr)
         return EXIT_ERROR
     return EXIT_OK
 

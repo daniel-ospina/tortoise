@@ -1274,3 +1274,34 @@ def test_a_name_that_is_not_a_real_day_is_not_ours(tmp_path, name):
     path.write_text("foreign\n")
     assert seal._day_of(path) is None
     assert seal.eligible(tmp_path, keep_days=1, today=TODAY) == []
+
+
+def test_apply_is_an_error_where_it_cannot_see(tmp_path, capsys):
+    """`--apply` must not answer SUCCESS over a candidate it could not stat.
+
+    `--check` already fails closed on an unstat-able day file
+    (`test_an_unstattable_day_file_is_an_error_not_ok`), but `--apply` printed a
+    warning and then fell through to `EXIT_OK`: a caller running only the action
+    half reads a success while the candidate is still sitting on disk — the
+    inverse of this file's own "could not look is not clean" rule, and the false
+    success that matters the moment `--apply` reaches cron (#6388 review,
+    10daca609 P3).
+
+    The failure is ADDITIVE: the unreadable candidate must not abort the work, so
+    the readable day is still sealed in the same run.
+
+    Mutation: returning EXIT_OK from the `unreadable` arm (its pre-fix value)
+    REDs the first assertion; dropping the seal of the readable day REDs the
+    last two.
+    """
+    day = TODAY - timedelta(days=30)
+    good = _write(tmp_path, day, b'{"session_id": "ok"}\n')
+    (tmp_path / "2026-01-05.jsonl").symlink_to(tmp_path / "gone.jsonl")
+
+    assert seal.main(["--root", str(tmp_path), "--today", TODAY.isoformat(),
+                      "--keep-days", "7", "--apply"]) == seal.EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "UNREADABLE" in err, err
+    assert "2026-01-05.jsonl" in err, err
+    assert not good.exists(), "the readable candidate was skipped by the failure"
+    assert seal.archive_path(tmp_path, day).exists()
