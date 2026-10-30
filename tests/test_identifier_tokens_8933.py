@@ -48,6 +48,7 @@ from tortoise.sparse import (
     IDENTIFIER_ENV,
     MAX_IDENTIFIER_LEN,
     build_or_query,
+    expansion_tokens,
     identifier_alias,
     identifier_aliases,
     identifier_phrase_terms,
@@ -585,6 +586,86 @@ class TestDocumentSideLexicalLeg:
                                     ("code", self.CODE)])]
         assert order[:1] == ["code"], order
         assert "prose" in order, order
+
+
+class TestExpansionSideSearchKeys:
+    """The A4 PRF expansion (`tortoise.sparse.expansion_tokens`) tokenises the
+    retrieved pool's harvested `search_keys` — text that ALREADY SITS IN THE
+    INDEX — so it takes the WRITE half of the asymmetry too.
+
+    The defect these pin (#10203 CI, shard `test (c)`): `expansion_tokens`
+    tokenised each harvested chunk through the READ-side default, so the base
+    graph's `couch ikea 800 dollars` alias minted `ikea800` into the SECOND
+    FTS pass. That is a QUERY shape the ruling widened for what a person types
+    ("matches however the person typed it"), never for text already indexed —
+    and because the expansion tail is sorted longest-first into a BOUNDED slot
+    budget (`DEFAULT_MAX_EXPANSION_TERMS`), the spurious 7-char composite
+    displaced a legitimate term and a golden row fell out of the top-k. The
+    flag-OFF golden (`tests/test_assembly_sdk.py::test_flag_off_golden_byte
+    _identity`) is where that surfaced; these are the unit-level pins, on the
+    embedded lane, so the surface cannot re-open without a live FalkorDB.
+
+    Non-vacuity is proven inside each test: the read-side list is asserted
+    PRESENT on the same input (the failing condition is reachable), and the
+    ask lane's numeric policy is asserted UNCHANGED, so a blanket "stop
+    emitting tokens" regression cannot pass here either.
+    """
+
+    PROSE = "couch ikea 800 dollars"
+    IDENT = "failure ERR-4032"
+
+    def test_a_prose_pair_never_mints_an_expansion_token(self):
+        """Mutation: drop ``space_separated_identifiers=False`` at the
+        ``expansion_tokens`` call site → RED."""
+        assert "ikea800" in identifier_aliases(self.PROSE), (
+            "the read side must still mint it — otherwise this test is "
+            "vacuous rather than discriminating")
+        exp = expansion_tokens(self.PROSE)
+        assert "ikea800" not in exp, exp
+        # The plain tokens survive the tightening, and `keep_numeric=True`
+        # (the A4 numeric policy) is untouched — this flag only removes the
+        # alias, it does not silence the call site.
+        assert {"couch", "ikea", "dollars", "800"} <= set(exp), exp
+
+    def test_no_expansion_alias_is_one_the_write_path_refuses(self):
+        """The invariant, stated as an equality rather than a blacklist: the
+        aliases the expansion carries are exactly the ones the Point writer
+        stored for that chunk."""
+        for text in (self.PROSE, self.IDENT, "sprint 2024 planning",
+                     "INV-2024-0091 broke", "meeting 27:12 covers rollout",
+                     "spent 27.5 hours"):
+            read_side = set(identifier_aliases(text))
+            carried = {t for t in expansion_tokens(text, max_terms=64)
+                       if t in read_side}
+            stored = set(point_identifier_aliases({"content": text}))
+            assert carried == stored, (text, carried, stored)
+            assert carried <= read_side, text
+
+    def test_an_identifier_shaped_chunk_still_contributes_its_alias(self):
+        """The fix must not cost #8933 anything: an indexed `ERR-4032` chunk
+        still expands to the write-side alias the index really holds."""
+        exp = expansion_tokens(self.IDENT)
+        assert "err4032" in exp, exp
+        assert exp == ["failure", "err4032", "4032", "err"], exp
+        # Array-valued `search_keys` (the extractor writes a flat string after
+        # `_flatten_search_keys_prop`, but raw graph values may be arrays).
+        assert "err4032" in expansion_tokens([self.IDENT, self.PROSE])
+
+    def test_the_spurious_alias_cannot_displace_a_bounded_slot(self):
+        """The HARM, made mechanical: the expansion tail is capped and sorted
+        longest-first, so a READ-side composite outranks the real 4-char term
+        `ikea` and takes its slot. Pre-fix with a 4-slot budget the output was
+        `['dollars', 'ikea800', 'couch', 'ikea']` — `800` already gone and a
+        token no document carries holding a slot."""
+        bounded = expansion_tokens(self.PROSE, max_terms=4)
+        assert "ikea800" not in bounded, bounded
+        assert bounded == ["dollars", "couch", "ikea", "800"], bounded
+        # Reachability of the displacement itself, so the assertion above is
+        # not merely "the list is short".
+        read_side_tail = sorted(
+            identifier_aliases(self.PROSE) + ["couch", "ikea", "800"],
+            key=len, reverse=True)[:4]
+        assert "ikea800" in read_side_tail, read_side_tail
 
 
 # ── criterion 2 (write side): the shared writer door ───────────────────────
