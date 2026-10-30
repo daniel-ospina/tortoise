@@ -205,6 +205,51 @@ R8 above requires that a shape genuinely exempt from the fail-the-run assertion 
 
 **Everything else fails the run.** A shape not listed in this table (or in `EXEMPT_SHAPES` in `tortoise/projection/nonfolded.py`) is fail-closed by default: a new fold-miss site that forgets to classify itself still fails, and the two classifiers — the graph replay engines and `check_consistency`'s reference fold — must yield the **same** disposition for the same journal, or `check_consistency` passes a journal `rebuild_all` refuses (the asymmetry #3585's re-review closed).
 
+### A retirement that is NOT an exemption — the `#2164 ISSUE B` id→name fold fallback (`#3590`)
+
+`#3590` made the fold **id-keyed only**: `_fold_object_superseded` issues
+`MATCH (o:Object {id:$id})` and nothing else, so the **`#2164 ISSUE B` id→name
+fallback is RETIRED** (`tortoise/projection/entities.py`,
+`tortoise/commit_ops.py:1284-1293`). ⛔ It is retiring, **not** exempting: a
+record whose carried address the journal DID establish now **ABORTS the rebuild**
+and the live write **refuses** — it is not added to the table above.
+
+The class that moves, stated concretely because it is the one a previous release
+actually WROTE and pinned (the retired
+`tests/test_status_projection.py::test_rebuild_all_legacy_idless_object_fold_survives`
+built it): an `ObjectSuperseded` carrying the **synthesised** `obj-<sha26(name)>`
+id **and** a `name` that an earlier `ObjectRegistered` established. `main` folded
+it by name; at this release it classifies as `SHAPE_OBJECT_SUPERSEDED_MISS` — the
+**name limb** of `journal_object_established` answers `OBJECT_ADDRESS_ESTABLISHED`,
+fail-closed — so `rebuild_all` raises `NonFoldedEventsError`. That is deliberate:
+under same-name coexistence a name-keyed fold can supersede a **different
+incarnation** (`#3573`'s burial class), which is why the fallback also forced
+`_update_entity` to **withhold** rename records (`#3377`/`#4769`).
+
+**OVERRIDES:** the log-and-continue replay default (skip an un-replayable legacy
+record and continue, as Kafka Streams' `LogAndContinueExceptionHandler` does) — for
+this class the replay **aborts**, because a supersede is a state change on an
+entity and a skipped one is silent burial, not a dropped attribution link.
+
+**The ruling this rests on, and the one it does NOT discharge.** It rests on D2
+**as amended** (`#3590` comment `6453059051`), whose bound reads *"… or carries an
+address the journal DID establish → `object-superseded-miss` (still refuses)"* — the
+name is such an address. It does **not** discharge D2 case **(i)** (`#3590` comment
+`6425220686`), which ruled the opposite way for the same records — *"a journal that
+replays on `main` must keep replaying and the record must keep landing — that is a
+regression to repair"* — and sequenced that repair (restore the fallback **with**
+`#4769`'s ordering fix, or resolve the name through the R2 name→id index). Those two
+owner rulings were never reconciled; the code follows the **later** one (the
+amendment). ⛔ The unreconciled obligation is **open and tracked on `#10345`**, not
+settled by this note — `#4769` was consolidated into `#5048` and both are CLOSED, so
+this pointer is the obligation's only live home. A lane that reads this row as the
+final word on case (i) will foreclose an owner ruling.
+
+Pinned by `tests/test_3590_minted_identity_acceptance.py::
+test_a_legacy_journal_with_a_synthesized_id_aborts_the_rebuild` (the abort, at the
+current head) and `tests/test_status_projection.py::
+test_fold_id_miss_does_not_fall_back_to_name` (the fold itself, both `cas` modes).
+
 ---
 
 ## Migration path

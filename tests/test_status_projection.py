@@ -675,13 +675,20 @@ class TestProjectionFold:
             sdk.close()
 
     def test_fold_cas_terminal_id_no_name_fallback_to_other_live_node(self):
-        """#2242 review round-1 P2 pin: the id->name fallback (#2164 ISSUE B)
-        fires ONLY on genuine absence ((0,0)) — a present-but-TERMINAL id
-        node ((0,1)) must never fall back, even when the event name resolves
-        to a DIFFERENT live node (a dup-name carrier). A buggy
-        folded==0-only guard would fold the wrong live node under a name
-        mismatch yet pass every terminal-refold test (which name the SAME
-        terminal node)."""
+        """#2242 review round-1 P2 pin, kept across #3590's retirement of the
+        fallback it was written against: a present-but-TERMINAL id node
+        ((0,1)) must never reach a DIFFERENT live node, even when the event
+        name resolves to one (a dup-name carrier). A buggy folded==0-only
+        guard would fold the wrong live node under a name mismatch yet pass
+        every terminal-refold test (which name the SAME terminal node).
+
+        ⚠️ The mechanism this pin originally described is GONE: ``#3590``
+        RETIRED the ``#2164 ISSUE B`` id→name fallback outright
+        (``_fold_object_superseded`` is id-keyed only — see
+        ``test_fold_id_miss_does_not_fall_back_to_name``), so there is no
+        fallback left for a ``(0,1)`` result to wrongly take. The INVARIANT
+        still holds and is still worth pinning: restoring any "id missed, try
+        the name" branch reds this, because that branch folds the impostor."""
         sdk = _fresh_sdk()
         try:
             proj = sdk._get_proj()

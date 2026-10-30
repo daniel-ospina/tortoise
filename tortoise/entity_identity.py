@@ -15,8 +15,10 @@ result sets **folds two identities into one value**, and a bare ``LIMIT 1``
 **silently picks** one carrier (``result_set[0]`` is backend-order-dependent).
 
 This module is the ONE place that answers that question. It applies the
-governing plan's §B.1 disposition, *route then refuse*
-(``docs/plans/2026-09-15-3590-minted-identity.md``):
+governing decision record's disposition, *route then refuse*
+(``docs/epics/2026-09-10-2835-capability-registry/identity-decision.md`` —
+R1 (an id is minted once, never derived), R2 (the name is a mutable natural
+key, held in an index) and R8 (the projection never guesses)):
 
 1. **route** — resolve the coordinate to **exactly one id**. An exact id match
    wins outright (an id is an unambiguous identity; a name that happens to equal

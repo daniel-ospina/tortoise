@@ -540,6 +540,63 @@ def test_an_unregistered_mention_is_exempt_but_an_identity_miss_is_not(
         client2.close()
 
 
+def test_a_legacy_journal_with_a_synthesized_id_aborts_the_rebuild(
+        sdk, tmp_path: Path):
+    """A journal a PREVIOUS release wrote is no longer rebuildable — pinned.
+
+    The retired ``#2164 ISSUE B`` id→name fallback let ``main`` fold an
+    ``ObjectSuperseded`` that carried the **synthesised** ``obj-<sha26(name)>``
+    id plus a ``name`` an earlier ``ObjectRegistered`` established. That is
+    exactly what ``main``'s own ``apply_supersessions`` journaled (the pin it
+    wrote here, ``test_rebuild_all_legacy_idless_object_fold_survives``, is
+    rewritten in ``tests/test_status_projection.py`` to pin the refusal).
+
+    ⛔ This is the class the retirement is EASY to get wrong in prose: the
+    record carries TWO addresses, and only the **name** is established. The
+    name limb answers ``OBJECT_ADDRESS_ESTABLISHED``, so the record is an
+    IDENTITY miss (``SHAPE_OBJECT_SUPERSEDED_MISS``, non-exempt) and the run
+    REFUSES — it is NOT the D2 ``…_UNREGISTERED`` exemption, which requires the
+    journal to have established **none** of the addresses it carries.
+
+    The decision this pins, and its unreconciled sibling, are recorded at
+    ``docs/epics/2026-09-10-2835-capability-registry/identity-decision.md``
+    ("A retirement that is NOT an exemption"); D2 case (i) — *"a journal that
+    replays on ``main`` must keep replaying"* — is a live obligation tracked on
+    ``#10345``, NOT discharged here.
+
+    RED-capability: on ``origin/main`` this journal rebuilds CLEAN (the name
+    fallback folds it), so ``pytest.raises`` reds there. Exempting the
+    established-name miss, or re-growing the name branch, also reds it.
+    """
+    from tortoise.projection.nonfolded import (
+        EXEMPT_SHAPES,
+        SHAPE_OBJECT_SUPERSEDED_MISS,
+        NonFoldedEventsError,
+    )
+
+    client, events = sdk
+    name = "legacy-R"
+    # The registration establishes the NAME. Its id is the pre-canonical
+    # github-style shape, so it is NOT the id the retired fold synthesised —
+    # the record below carries an id nothing ever created.
+    _raw(events, type="ObjectRegistered", id=f"github-issue-{name}-7",
+         name=name, objectKind="core:strategy", status="live",
+         event_id="e-legacy-reg")
+    # The retired release's own journal line: the SYNTHESISED canonical id.
+    _raw(events, type="ObjectSuperseded", id=_derived("Object", name),
+         name=name, supersedes_by="successor-S", event_id="e-legacy-sup")
+
+    with pytest.raises(NonFoldedEventsError) as exc:
+        client._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    refused = [e.shape for e in exc.value.refused]
+    assert SHAPE_OBJECT_SUPERSEDED_MISS in refused, (
+        "a supersede whose NAME the journal established was not refused — the "
+        f"identity miss took the attribution exemption: {refused}")
+    assert SHAPE_OBJECT_SUPERSEDED_MISS not in EXEMPT_SHAPES, (
+        "the identity shape became exempt — a legacy supersede that must MOVE "
+        "an entity can be skipped behind a green run")
+
+
 def test_an_unresolvable_about_target_keeps_the_mention_exemption_and_replays(
         sdk, tmp_path: Path):
     """#3590 review F2: ``about_entities`` is the LOOSE list — a miss is EXEMPT.
