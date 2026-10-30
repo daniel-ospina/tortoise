@@ -1033,7 +1033,9 @@ question's `instructions` — the vendor evaluates the questions independently a
 one clause cannot cover the rest. ⚠️ **One baseline, and it is the one measured above.** The figures
 this entry carried before — `vet-v1` 39,484 B ≈ 9,265 tok and `classify-v1` 23,292 B ≈ 6,112 tok —
 do **not** reproduce as a second pre-framing measurement: a re-count of the same request is the
-39,544 B ≈ 9,103 tok / 23,332 B ≈ 6,594 tok quoted above (bytes agree to 0.15%, the token cells are
+39,544 B ≈ 9,103 tok / 23,332 B ≈ 6,594 tok quoted above (bytes agree to **0.15%** and **0.17%**
+— one figure per cell, which round 8 of PR #10302's review caught: this entry carried one figure
+for both cells and the classify cell exceeds it — the token cells are
 1.8% and 7.3% off, which a 60 B / 40 B difference cannot account for). So that row is **superseded,
 not comparable**, and every percentage here is derived from the re-measured pair only — quoting
 +23%/+16% against the old token cells instead would read +21%/+26% off a baseline that was never
@@ -1134,7 +1136,8 @@ stable version makes every stamped record lie about the question it answered.
 **50,004 B ≈ 11,223 tok ⇒ $0.00047/call ($0.0000118/item)**; `classify-v2` 40 tail items ⇒
 **28,562 B ≈ 7,674 tok ⇒ $0.00032 ($0.0000081/item)**. The clause is **+23%** on VET and **+16%** on
 classify against the identical construction without it (39,544 B ≈ 9,103 tok and 23,332 B ≈ 6,594
-tok — the `B` cells reproducing the previously recorded 39,484 B / 23,292 B to within 0.15%, which
+tok — the `B` cells reproducing the previously recorded 39,484 B / 23,292 B to within **0.15%**
+and **0.17%**, which
 is what makes the new figures comparable rather than merely newer; ⚠️ that earlier row's **token**
 cells, 9,265 / 6,112, do NOT reproduce at 9,103 / 6,594 and are superseded, not a second baseline —
 a 60 B / 40 B difference cannot move a count by 162 / 482 tokens, so no delta here is derived from
@@ -1188,3 +1191,40 @@ untrusted block cannot certify itself" had nothing proving it bites. The positio
 predicate (`_position_gaps`), used by the real payload assertion and by a rebuilt mutant that leaves
 every question framed and appends the clause to a `state` element: the wording guard reports nothing
 and only position reds. Measured both ways, restored `diff`-identically.
+## 2026-10-30 (round 8) — the reproduction tolerance covered one cell, not both, and a guard comment overstated its reach (`#10077`)
+
+Three claim-accuracy defects from the next fresh-context review of PR #10302, all in the §7 pass the
+2026-10-30 entry above added. No code changed; the arithmetic was already right, the prose around it
+was not — and two of the three were claim classes nothing measured.
+
+**The tolerance was stated for one cell and applied to both.** §7 justified treating the re-measured
+clause-removed request as the same construction as the superseded row by saying the `B` cells agree
+"within" a single percentage. On its own operands no single figure covers both: `60 / 39,484 =
+0.152%` and `40 / 23,292 = 0.172%`, so the published one was false for the classify cell — in the
+sentence the headline `+23%` / `+16%` rests on, which is the "a stable-looking claim over a number
+that moved" shape this PR exists to close. §7 and both changelog sites now state **0.15%** and
+**0.17%**, one figure per cell. (The retracted figure is described here rather than reprinted, for
+the reason the entry above gives: reprinting trips the guard the same pass added.)
+
+**The per-call delta was mis-rounded and based on the row §7 disqualifies.** The sentence multiplied
+`\$0.00039` by `+23%` and printed `~\$0.00008` — the product is `\$0.00009`, and its base is the
+superseded `\$0.00039` cell the same section declares is "never … a comparison". It now reads
+`\$0.00047` framed against `\$0.00038` clause-removed — a delta of `~\$0.00009`, derived from the
+measured pair.
+
+**A guard comment claimed coverage the pattern did not have.** `_V1_FIGURE`'s comment said its "unit
+alternation" covered the CHANGELOG's `50,004 B ≈ 11,223` / `input
+tokens` wrap. There was no alternation: the pattern was `\s+tok(?:en)?s?\b`, that pair did not
+match, and it sat outside the legacy-figure guard where a hand-edited token shipped green. The unit
+group is now `\s+(?:input\s+)?tok(?:en)?s?\b`, and the test asserts the widened form both matches
+that wrap and flags an edit under it — a comment that overstates its reach is the failure this guard
+file exists to refuse.
+
+**What pins them now.** Neither the `%` claim nor the `$` claim was reachable by
+`_unmarked_legacy_figures` (it matches `B ≈ tok` pairs only), which is the inert-enforcer shape round
+7 fixed for §7's `tok` column. A tenth case in `tests/test_s2_decision_record_5087.py` re-derives both
+from the artifacts' own operands — the superseded `B` cells §7 names, the measured clause-removed
+bytes, the recorded token proxy either side of the framing — and requires every VET-cell tolerance
+figure published for this reproduction to carry the classify cell's **0.17%** within one paragraph.
+The pre-fix sentences are replayed in-test, so the predicates are shown to reject them rather than
+merely to accept the corrected text.

@@ -763,10 +763,18 @@ def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
 #: A published figure pair: ``39,544 B ≈ 9,103 tok``. Whitespace-tolerant, because the
 #: artifacts are hard-wrapped at ~95 columns and a figure that wraps mid-pair is exactly
 #: the one a line-anchored regex would silently stop watching (the pre-fix row wrapped:
-#: ``39,484 B ≈ 9,265`` / ``tok``). The unit alternation covers the OTHER wrap the CHANGELOG
-#: actually uses — ``50,004 B ≈ 11,223`` / ``input tokens`` — because `\s+tok` cannot match
-#: `input tokens`, so that pair sat outside this guard as well (PR #10302 review round 7).
-_V1_FIGURE = re.compile(r"(?P<b>[\d,]+)\s*B\s*≈\s*(?P<t>[\d,]+)\s+tok(?:en)?s?\b")
+#: ``39,484 B ≈ 9,265`` / ``tok``). The unit group also takes the OTHER wrap the CHANGELOG
+#: actually uses — ``50,004 B ≈ 11,223`` / ``input tokens`` — because `\s+tok` has no way to
+#: match a unit whose first word is `input`.
+#:
+#: ⚠️ Round 8 of PR #10302's review caught the comment that used to sit here: it claimed a
+#: "unit alternation" covered that `input tokens` wrap, and there was no alternation at all —
+#: the pattern was ``\s+tok(?:en)?s?\b``, so `"50,004 B ≈ 11,223\ninput tokens"` did not match
+#: and the very pair the comment named as covered sat OUTSIDE this guard, where a hand-edited
+#: token shipped green. A guard comment that overstates its reach is the failure this file
+#: exists to refuse, so the group is now ``\s+(?:input\s+)?tok(?:en)?s?\b`` and the test below
+#: proves the widened form both matches and flags.
+_V1_FIGURE = re.compile(r"(?P<b>[\d,]+)\s*B\s*≈\s*(?P<t>[\d,]+)\s+(?:input\s+)?tok(?:en)?s?\b")
 
 #: What makes a legacy pair readable as HISTORY rather than as a usable baseline.
 #: Round 5 of PR #10302's review (P2) found two different pre-framing figures in these
@@ -871,6 +879,19 @@ def test_the_pre_framing_baseline_is_a_measurement_and_a_superseded_row_is_marke
         f"marked superseded: {unmarked} — its `#5087` row must carry the measured pair, "
         "not a transcription of it")
 
+    # The `input tokens` wrap, which round 8 of PR #10302's review found OUTSIDE this guard:
+    # the CHANGELOG publishes the framed VET pair as ``50,004 B ≈ 11,223`` / ``input tokens``
+    # (it wraps mid-pair), so a `\s+tok` unit could not match it and a hand-edited token there
+    # shipped green. The widened group must SEE that form — and must flag an edit under it.
+    wrapped = "`vet-v2` **50,004 B ≈ 11,223\ninput tokens**"
+    assert _V1_FIGURE.search(wrapped) is not None, (
+        "the `B ≈ tok` matcher cannot see the `input tokens` wrap the CHANGELOG actually "
+        f"uses, so that pair is unguarded: {wrapped!r}")
+    edited = wrapped.replace("11,223", "9,999")
+    assert _unmarked_legacy_figures(edited, measured, framed), (
+        "a token-only edit to the `input tokens` wrap passes the legacy-figure guard — the "
+        f"widened unit group is inert: {edited!r}")
+
     # Non-vacuity, in-test: the PRE-FIX sentence (verbatim from the changelog at
     # `952640ecab`, kept as a fixture rather than a checkout) must be flagged by the very
     # predicate the real artifacts pass.
@@ -884,6 +905,113 @@ def test_the_pre_framing_baseline_is_a_measurement_and_a_superseded_row_is_marke
         "the guard cannot see the defect it exists for — two pre-framing figures labelled "
         "as the same request, neither reproduced: "
         f"{_unmarked_legacy_figures(pre_fix, measured)}")
+
+
+#: §7's reproduction claim as one sentence: the two `B` deltas, the two percentages they are
+#: published as, and the superseded `B` cells they are stated against —
+#: ``**60 B** and **40 B**, i.e. **0.15%** and **0.17%**, above the 39,484 B / 23,292 B``.
+_S7_TOLERANCE_CLAIM = re.compile(
+    r"\*\*(?P<vet_b>[\d,]+) B\*\* and\s+\*\*(?P<cls_b>[\d,]+) B\*\*, i\.e\.\s+"
+    r"\*\*(?P<vet_pct>[\d.]+)%\*\* and\s+\*\*(?P<cls_pct>[\d.]+)%\*\*,\s*above the\s+"
+    r"(?P<sup_vet>[\d,]+) B /\s*(?P<sup_cls>[\d,]+) B")
+
+#: §7's per-call delta as money: ``a delta of **~\$0.00009**``.
+_S7_DOLLAR_DELTA = re.compile(r"a delta of \*\*~\\?\$(?P<delta>[\d.]+)\*\*")
+
+#: `0.15%` is the VET cell's reproduction figure and the classify cell's is `0.17%`, so a
+#: publication of the first must carry the second within this many characters (one paragraph).
+_TOLERANCE_WINDOW = 200
+
+
+def _single_cell_tolerance_claims(text: str) -> list[str]:
+    """Reproduction figures published for one cell as if they carried both."""
+    return [text[m.start():m.start() + _TOLERANCE_WINDOW]
+            for m in re.finditer(re.escape("0.15%"), text)
+            if "0.17%" not in text[m.start():m.start() + _TOLERANCE_WINDOW]]
+
+
+def test_section_7_s_reproduction_figures_re_derive_from_the_measured_pair():
+    r"""§7's "how close is the re-measurement" numbers must be DERIVED, not typed.
+
+    THE DEFECT THIS PINS (PR #10302 review round 8, P2 + P3 — `S2-DECISION-SEAM.md` §7 and two
+    sites in the CHANGELOG): the section justified treating the re-measured clause-removed
+    request as the SAME construction as the superseded row by saying the `B` cells agree
+    "within **0.15%**" — and on its own numbers they do not: 60 B of 39,484 B is 0.152% and
+    40 B of 23,292 B is 0.172%, so the single figure was false for the classify cell, in the
+    sentence the headline +23% / +16% rests on. Nine lines below, the per-call delta was
+    `+23% of \$0.00039` → `~\$0.00008`: mis-rounded (`0.23 × 0.00039 = \$0.00009`) AND derived
+    from `\$0.00039`, the superseded cell the same section declares is "never … a comparison".
+
+    Neither was pinned, and that is the shape: `_unmarked_legacy_figures` matches `B ≈ tok`
+    pairs only, so a `%` claim and a `$` claim drift free — the same inert-guard shape round 7
+    fixed for §7's `tok` column. So both are re-derived here from the artifacts' own operands:
+    the superseded `B` cells §7 names, the measured clause-removed bytes (exact and hermetic —
+    `_s7_payloads`), and the recorded token proxy either side of the framing.
+
+    Non-vacuity: the pre-fix sentences are replayed below through the same predicates — the
+    single `0.15%` and the `~\$0.00008` both red what the corrected artifacts pass.
+    """
+    doc_text = DOC.read_text(encoding="utf-8")
+    clause_removed = _s7_payloads(framed=False)
+
+    # ── the reproduction percentages, against the cells they are stated against ──
+    claim = _S7_TOLERANCE_CLAIM.search(doc_text)
+    assert claim is not None, (
+        "§7 no longer states the reproduction as `<n> B and <n> B, i.e. <x>% and <y>%, above "
+        "the <n> B / <n> B the row carried before` — re-anchor this guard rather than "
+        "dropping it: the +23% / +16% headline rests on that claim")
+    zipped = (("vet-v2", "vet_b", "vet_pct", "sup_vet"),
+              ("classify-v2", "cls_b", "cls_pct", "sup_cls"))
+    for version, b_key, pct_key, sup_key in zipped:
+        superseded = int(claim.group(sup_key).replace(",", ""))
+        want_b = clause_removed[version] - superseded
+        assert int(claim.group(b_key).replace(",", "")) == want_b, (
+            f"§7 states a {claim.group(b_key)} B reproduction delta for `{version}`, but the "
+            f"clause-removed request it names measures {clause_removed[version]:,} B against "
+            f"{superseded:,} B = {want_b} B — re-measure, or correct the delta")
+        want_pct = round(want_b / superseded * 100, 2)
+        assert float(claim.group(pct_key)) == want_pct, (
+            f"§7 publishes {claim.group(pct_key)}% for `{version}` where its own operands give "
+            f"{want_pct}% ({want_b} B of {superseded:,} B) — a reproduction claim has to bound "
+            "what was measured, or it is the 'within 0.15%' falsehood again")
+
+    for artifact in (DOC, CHANGELOG):
+        text = artifact.read_text(encoding="utf-8")
+        offenders = _single_cell_tolerance_claims(text)
+        assert not offenders, (
+            f"{artifact.name} publishes the VET cell's `0.15%` as the reproduction figure "
+            f"without the classify cell's `0.17%` beside it: {offenders[0]!r} — the two "
+            "deltas are 0.152% and 0.172%, so one figure cannot carry both")
+
+    # ── the per-call delta as money, derived from the measured pair ──────
+    published = _S7_DOLLAR_DELTA.search(doc_text)
+    assert published is not None, (
+        "§7 no longer states the framing's per-call cost as `a delta of **~$<n>**` — "
+        "re-anchor this guard rather than dropping it: it is the sentence that says what "
+        "arming the seam costs on a call that removes memory")
+    want_delta = round((_S7_TOKEN_CELLS["vet-v2"] - _S7_TOKEN_CELLS_UNFRAMED["vet-v2"])
+                       * _S7_USD_PER_INPUT_TOKEN, 5)
+    assert float(published.group("delta")) == want_delta, (
+        f"§7 publishes a per-call delta of ${published.group('delta')} where the measured "
+        f"pair gives ({_S7_TOKEN_CELLS['vet-v2']:,} − "
+        f"{_S7_TOKEN_CELLS_UNFRAMED['vet-v2']:,}) tok × {_S7_USD_PER_INPUT_TOKEN:g} $/token "
+        f"= ${want_delta} — derive it from the measured cells, not from the superseded "
+        "$0.00039 row this section disqualifies")
+
+    # ── non-vacuity, in-test: the two pre-fix sentences, verbatim ─────────
+    pre_fix_tolerance = (
+        "(`classify-v1`) with the clause removed — the `B` cells within **0.15%** of the "
+        "39,484 B the row carried before, which is what makes the two comparable rather "
+        "than merely newer."
+    )
+    assert _single_cell_tolerance_claims(pre_fix_tolerance), (
+        "the tolerance predicate cannot see the defect it exists for — a single `0.15%` "
+        "stated for both cells passes it")
+    as_published_shape = "a delta of **~\\$0.00008**"
+    pre_fix_delta = _S7_DOLLAR_DELTA.search(as_published_shape)
+    assert pre_fix_delta is not None and float(pre_fix_delta.group("delta")) != want_delta, (
+        "the dollar-delta equality accepts the pre-fix figure (~$0.00008) — it is not "
+        "pinning the derivation")
 
 
 # ── the framing's PROVENANCE must name a page that exists ─────────────────

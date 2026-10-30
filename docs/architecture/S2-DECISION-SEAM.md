@@ -351,9 +351,12 @@ request, top-5 kinds offered with **no** kind descriptions, measured on
 
 **What the framing (`#10077` / `#10117`) costs.** On that identical construction the
 same requests measure **39,544 B ≈ 9,103 tok** (`vet-v1`) and **23,332 B ≈ 6,594 tok**
-(`classify-v1`) with the clause removed — the `B` cells within **0.15%** of the 39,484 B
-the row carried before, which is what makes the two comparable rather than merely
-newer. ⚠️ The **token** cells of that earlier row (`9,265` / `6,112`) are NOT reproducible
+(`classify-v1`) with the clause removed — **60 B** and **40 B**, i.e. **0.15%** and **0.17%**,
+above the 39,484 B / 23,292 B the row carried before, which is what makes the two
+comparable rather than merely newer. ⚠️ The single figure this sentence carried until round 8 of
+PR #10302's review was the VET cell's and false for the classify cell — a reproduction claim has to
+bound what was measured, cell by cell. ⚠️ The **token** cells of that earlier row
+(`9,265` / `6,112`) are NOT reproducible
 and are not a baseline: a re-count of the same request gives `9,103` / `6,594`, and the
 byte difference (60 B / 40 B) is an order of magnitude too small to explain the gap, so
 those two cells are superseded — every percentage below is derived from the measured
@@ -366,7 +369,10 @@ and +22.4% — the percentages are quoted on tokens because the price is per inp
 questions **independently** against one `state`, so one clause in one question cannot
 cover the other 79. ⚠️ A clause placed **once** in a `state` element would cost ~130 B
 in total and is the option §4 refuses — a rule inside the untrusted block is one that
-block can countermand. On a call that removes memory, +23% of \$0.00039 is ~\$0.00008.
+block can countermand. On a call that removes memory the same pair prices at **\$0.00047**
+framed against **\$0.00038** clause-removed — a delta of **~\$0.00009** per call, derived from the
+measured pair above and not from the superseded `\$0.00039` cell this sentence used until round 8 of
+PR #10302's review (that row is the one declared *not a comparison* nine lines up).
 
 Derivation, so it can be re-checked rather than believed:
 
