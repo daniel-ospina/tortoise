@@ -1229,3 +1229,34 @@ bytes, the recorded token proxy either side of the framing — and requires ever
 figure published for this reproduction to carry the classify cell's **0.17%** within one paragraph.
 The pre-fix sentences are replayed in-test, so the predicates are shown to reject them rather than
 merely to accept the corrected text.
+
+## 2026-10-30 (round 9) — the paraphrase marker could not see the spelling the fleet actually uses (`#10077`)
+
+One claim-accuracy defect from the next fresh-context review of PR #10302, inside the guard the
+2026-10-30 entry above widened, plus the tracker the same review found still carrying the retracted
+attribution. No runtime code changed; the seam's wording, its placement and the `-v2` stamps are
+untouched.
+
+**The marker refused two spellings of the retracted attribution and not the third.** The guard's own
+comment states the standard it must meet — a marker that cannot match the phrasing it exists to
+refuse is a guard whose green means nothing — and round 4 replaced a plain substring with a regex to
+meet it. That regex absorbed the bare and the backticked form and no emphasis form at all, and
+emphasis is how prose in these artifacts marks a word it wants read. A re-introduction written that
+way therefore passed the provenance guard green on every corpus member: the same class of failure,
+one spelling over, in the file that exists because the sentence survived one file over. The pattern
+now absorbs an emphasis run on both sides of the word (`*`, `**`, `***`, `_`, a mixed pair, and a run
+around both words), and the case's non-vacuity half pins each of those spellings — asserted in-test,
+so the widening cannot be quietly undone while the file passes. Measured, not asserted: with the
+pre-fix marker restored the case reds on the emphasized spelling and the predicate reports no
+paraphrase gap at all; restored `diff`-identically, the record suite is green.
+
+**`#10117` was the artifact the retraction never reached, and it was written in the spelling above.**
+Its scoping comment put the gloss in the vendor's mouth *and* marked `OVERRIDES: nothing`, which is
+the second half of the defect: the page says **"be explicit in the criteria"**, this seam puts the
+clause in `instructions` instead, and that is a **disclosed departure** — so the departure carries an
+`OVERRIDES:` line naming the vendor practice it goes against, on the issue, which is where
+`AGENTS.md` requires it and where a lane reads it before moving the clause. The cost of leaving it
+open is concrete: `criteria` is structural on this request shape — a `choice`'s closed option map,
+a `score`'s level list the request is refused without — so a rule sentence there would enter the set
+the answer is validated against. Since this file is a corpus member of that guard, the retracted
+spelling is described here rather than reprinted, for the reason the entry above gives.
