@@ -166,11 +166,21 @@ fi
 #   `test-d14-hosted-api`       (`/tmp/pytest-d14.log`)  — `python-ci.yml`
 #   `validate`                  (`/tmp/pmv-pytest.log`)  — `post-merge-validation.yml`
 #
-# Both remaining legs write their log through `| tee`, not `>`, which is why they are
-# the residue of the #10280 pass: `capture_site` in `tests/test_pytest_attribution.py`
-# matches a per-runner token only on the `tail`/`>` shape, so migrating a `tee` leg owes
-# that counter the same widening (a guard whose subject is this drift must not be
-# spelling-dependent).
+# The two legs are residual for DIFFERENT reasons, and the shapes must not be conflated
+# (PR #10264 review, verified against `capture_site`):
+#
+#   `test-d14-hosted-api` captures through `| tee /tmp/pytest-d14.log`, and the tee
+#   branch is `\|\s*tee\s+(/tmp/[^\s|]+\.log)` — a `/tmp/...` LITERAL only. A migrated
+#   `tee "$PYTEST_LOG"` would therefore not be counted at all, so THIS leg owes the
+#   counter a widening (a guard whose subject is this drift must not be
+#   spelling-dependent).
+#
+#   `validate` WRITES its log with `> /tmp/pmv-pytest.log 2>&1` and is COUNTED at the
+#   separate `tail -n 300 /tmp/pmv-pytest.log` site, whose branch
+#   (`^tail\s+-n?\s*\d+\s+(\S+)$`) accepts ANY single token — so migrating it would be
+#   counted without a widening. `capture_site` has NO `>` branch at all: the `>` write is
+#   not a shape it reads, which is why this leg is residual for its LITERAL, not its
+#   redirect.
 #
 # ⛔ THIS LIST IS DERIVED, NOT REMEMBERED — do not edit it from memory. It is
 # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,

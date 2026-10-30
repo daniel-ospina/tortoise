@@ -1233,9 +1233,12 @@ def test_the_stated_inventory_matches_the_workflows() -> None:
             target = capture_site(line)
             if target is None:
                 continue
-            # The `pytest.log`-named tails, and ONLY those: `trackb.log`,
-            # `pmv-pytest.log` and the `pytest-d14.log` tee site are the other three
-            # sites in the inventory and are named separately above the floor.
+            # The `pytest.log`-named captures, and ONLY those: `pmv-pytest.log` and
+            # the `pytest-d14.log` tee site are the other TWO sites in the inventory
+            # (8 = these 6 + 2), named separately above the floor. `trackb.log` left the
+            # inventory when #10280 moved that leg onto `"$PYTEST_LOG"` — this line
+            # said "other three" for one head after that, which is the same
+            # restated-inventory class the derived split above exists to stop.
             if target != _RUNNER_TEMP_LOG and not target.endswith("/pytest.log"):
                 continue
             if target == _RUNNER_TEMP_LOG:
