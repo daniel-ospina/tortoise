@@ -126,9 +126,21 @@ def test_a_glob_is_not_a_family_path() -> None:
     Reachable: the hotspot section legitimately says `tests/*.py`, and an
     existence check over a glob would report a permanent false drift — a guard
     that reds on a correct document is the failure mode this asserts against.
+
+    ⚠️ The substitution is only meaningful if its anchor is IN a section
+    `check_lane_families` reads: a `== []` over a substitution that landed
+    nowhere passes silently. So the anchor is asserted first (#5086 review P1
+    cycle 1, closing the one vacuity the reviewer flagged).
     """
-    doc = _doc().replace("`config/ci-surfaces.yml`", "`tests/*.py`", 1)
-    assert smc.check_lane_families(doc) == []
+    doc = _doc()
+    substituted = doc.replace("`config/ci-surfaces.yml`", "`tests/*.py`", 1)
+    assert substituted != doc, "the §4 anchor `config/ci-surfaces.yml` is gone"
+    in_tables = smc._section(doc, "## 3.") + smc._section(doc, "## 4.")
+    assert "`config/ci-surfaces.yml`" in in_tables, (
+        "the anchor must sit inside §3/§4, or this control substitutes nothing "
+        "the checker reads and its `== []` proves nothing"
+    )
+    assert smc.check_lane_families(substituted) == []
 
 
 def test_an_interface_symbol_missing_from_its_file_is_drift(
