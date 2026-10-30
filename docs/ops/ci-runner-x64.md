@@ -28,7 +28,7 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 Counts are JOBS (not files), re-measured 2026-10-30 at this head (`yaml.safe_load` each workflow,
 count each job's `runs-on`): **76 / 9** — the label classes `--status`'s `label-coverage` block
 measures, though that block reports RUNNER counts per label, not job counts: measured on the live
-pool it prints `ubuntu-24.04 = 7 of 7
+pool on 2026-10-29 it printed `ubuntu-24.04 = 7 of 7
 online runner(s)` (a bare version pin is measured against the x64 sub-pool, its own denominator,
 and only ONLINE runners are counted — an offline runner cannot be handed a job) and
 `ubuntu-latest = 0 of 12 online runner(s)` (a report — the gate is simply not routing that label
