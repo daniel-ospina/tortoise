@@ -56,6 +56,18 @@ from tortoise.projection.nonfolded import (
     record_non_folded,
 )
 from tortoise.source_identity import normalize_source_url, resolve_source_key
+
+# #8933: the identifier ALIAS derivation shares ONE implementation with the
+# query path (`tortoise/sparse.py` is stdlib-only + env_truthy, so this cannot
+# cycle). Deriving the write-side alias from anywhere else is how the two
+# halves of the mechanism drift and every identifier query silently returns
+# nothing — the ruling's load-bearing invariant.
+from tortoise.sparse import (
+    MAX_ALIASES_PER_POINT,
+    identifier_aliases,
+    identifier_tokens_enabled,
+    index_text,
+)
 from tortoise.vector_write import (
     clear_embedding,
     clear_then_set_prefix,
@@ -1126,6 +1138,346 @@ def flatten_search_keys_prop(props: dict) -> None:
                 props.pop(key, None)
 
 
+def point_identifier_aliases(props: dict) -> list[str]:
+    """#8933 Stage 2 — the identifier aliases this Point's INDEXED TEXT implies.
+
+    Derived from ``content`` ∪ ``search_keys`` — the exact text the ``Point``
+    fulltext index already holds (``("Point", ["content", "search_keys"])``,
+    ``projection/__init__.py``) — and written into ``search_keys``, which is
+    already one of its fields. So the alias needs **no schema change, no new
+    indexed property and no DDL**: it is additive text in a channel that is
+    already indexed.
+
+    Two properties this function deliberately has, both from the ruling:
+
+    * **The write side is the PRECISE half.** ``space_separated=False``, so a
+      document's prose cannot mint an alias ("sprint 2024" must not spend
+      index space on ``sprint2024``). The read side accepts the space form
+      because a person typed it, and its noise is bounded to one query.
+    * **It is derived, never recorded.** The journal keeps E3's ``search_keys``
+      list unchanged; a replay re-derives the same aliases from ``content``,
+      so the backfill for records written before this change is the EXISTING
+      rebuild path (pass 1a → ``_upsert_point_props``), not new code — and it
+      is idempotent by construction.
+
+    Returns ``[]`` when the mechanism is switched off
+    (``TORTOISE_IDENTIFIER_TOKENS``) or nothing identifier-shaped is present —
+    in which case the writer takes no copy and writes byte-identically to
+    before. Redaction is not re-litigated here: the capture path scrubs BEFORE
+    the payload reaches the projection (``sdk._redact_turn_contents``), and a
+    scrub REPLACES the whole matched value (``security._REDACTION_VALUE``), so
+    no secret bytes survive into the source text.
+    """
+    if not identifier_tokens_enabled():
+        return []
+    return _derive_point_identifier_aliases(props)
+
+
+def _derive_point_identifier_aliases(props: dict) -> list[str]:
+    """The alias derivation WITHOUT the ``TORTOISE_IDENTIFIER_TOKENS`` gate.
+
+    Split out for the CANONICALISER only (:func:`strip_identifier_aliases`),
+    and the split is load-bearing rather than tidiness (#10203 review round 7,
+    F2). The switch is the ruling's fail-safe BISECT lever: an operator flips
+    it to measure the feature off. A verifier whose verdict depends on the
+    verifier's own environment is not a verifier — with the gate in the strip,
+    `check_consistency` run under ``TORTOISE_IDENTIFIER_TOKENS=0`` against a
+    graph written with it ON (the shipped default) compared the alias
+    un-stripped, reported `divergence="content"` on a faithful graph, and moved
+    `db_hash` (`_graph_fingerprint` reads the same canonical view), so a stored
+    baseline read back as `unrecorded-mutation`. Both answers were a function of
+    the process env on an unchanged journal+graph pair.
+
+    The alias's SHAPE does not depend on whether the writer was enabled — it is
+    a pure function of the view's own ``content``/``search_keys`` — so the
+    canonical form must be computed unconditionally. Never call this from a
+    write path; the gate belongs there.
+    """
+    keys = props.get("search_keys")
+    if isinstance(keys, (list, tuple)):
+        keys = " ".join(str(s) for s in keys)
+    return identifier_aliases(
+        index_text(props.get("content"), keys), space_separated=False)
+
+
+def append_identifier_aliases(props: dict, aliases: list[str]) -> bool:
+    """#8933 Stage 2 — write the aliases into ``search_keys`` (already FLAT).
+
+    ``search_keys`` must already be in its canonical flat STRING form — every
+    caller runs :func:`flatten_search_keys_prop` first, on the same copy. The
+    append is a set difference against the tokens already present, so applying
+    it twice (a replay, a re-derivation, a caller that pre-computed the alias)
+    is a NO-OP rather than a growth loop, and it is capped at
+    ``MAX_ALIASES_PER_POINT`` so a pathological input cannot mint an unbounded
+    index value.
+
+    Returns ``True`` when a write happened (the caller uses it only for
+    diagnostics; the copy it must take is decided BEFORE this is called).
+    """
+    if not aliases:
+        return False
+    current = props.get("search_keys")
+    current = current if isinstance(current, str) else ""
+    present = set(current.split())
+    fresh = [a for a in aliases if a and a not in present]
+    if not fresh:
+        return False
+    if len(fresh) > MAX_ALIASES_PER_POINT:
+        fresh = fresh[:MAX_ALIASES_PER_POINT]
+    props["search_keys"] = " ".join([current, *fresh]).strip()
+    return True
+
+
+def strip_identifier_aliases(view: dict, extra=None) -> bool:
+    """#8933 Stage 2 — remove the DERIVED aliases from a canonical view.
+
+    The alias is a PURE function of the view's own ``content``/``search_keys``
+    (:func:`point_identifier_aliases`), so it states nothing the view does not
+    already state. Two views that agree on ``content`` and on the payload-owned
+    keys are the same point whether or not the node's ``search_keys`` carries
+    the derived token — which makes REMOVING it the canonical form that is
+    exact on BOTH sides of a journal-replay comparison.
+
+    Deriving it on the JOURNAL side instead (the first shape of this change,
+    ``_canonical_point_fields(..., derive_identifier_aliases=True)``) measured
+    as a P0 at #10203 review round 6: the revise door never derives. A content
+    edit (``PointRevised`` / ``update_point``) writes ``n.content`` and does not
+    touch ``search_keys`` — the ruling writes the alias AT CAPTURE — so the node
+    kept the creation's tokens while the reference view minted the alias of the
+    NEW content and reported ``divergence="content"`` on ``search_keys``, with
+    an action ("reconcile by replaying the journal") that reproduces the same
+    red. An unclearable false red on a faithful graph is the #5048/#8006/#8317
+    class this checker exists to refuse. Under the strip both directions are
+    clean: a MISSING alias is not a divergence (it is derived, not independent
+    evidence) and neither is a stale one — the last clause is what ``extra``
+    below carries, because round 9's revise door DOES retract the stale half
+    from the node while the record keeps it.
+
+    The same reasoning removes the need for a ``_PROJECTION_STATE_FORMAT``
+    bump: ``db_hash`` is computed from a view this function has already
+    canonicalised, so a rebuild or backfill that only ADDS aliases cannot move
+    a recorded baseline into ``unrecorded-mutation``.
+
+    ⛔ The derivation here is UNCONDITIONAL — it deliberately does NOT go
+    through :func:`point_identifier_aliases`, whose ``TORTOISE_IDENTIFIER_TOKENS``
+    gate is a WRITE-side switch. A canonical form that honoured the checker's own
+    env would make ``check_consistency`` and ``db_hash`` answer differently about
+    an unchanged journal+graph pair when an operator flips the bisect lever
+    (#10203 review round 7, F2).
+
+    ⛔ ``extra`` is the OTHER half of the same canonical form, and it is
+    required for the write path to be comparable at all (#10203 review, P1).
+    The strip above removes the alias of the view's CURRENT content, but a
+    CONTENT EDIT also RETRACTS the aliases the PREVIOUS content derived
+    (:func:`revise_identifier_aliases`), and a token the caller happened to
+    supply itself is in both sets — ``create(search_keys="err4032 release")``
+    over ``content="error ERR-4032 on deploy"``, then an edit to
+    ``"deploy failed"``: the node keeps ``release`` while the journal side (the
+    create payload, which owns the caller's keys) keeps ``err4032 release``.
+    The token was invisible while it was derivable and became DECISIVE the
+    moment it went stale, so ``check_consistency`` reported
+    ``fields=['search_keys']`` on a FAITHFUL graph and its advice ("replay the
+    journal") reproduced exactly that graph — the unclearable false red of
+    #5048/#8006/#8317, reintroduced on the previous-content edge of the same
+    ambiguity the current-content strip already resolves.
+
+    The caller passes the tokens the write path retracted for THAT point,
+    derived from the journal's own content history (``consistency``), so this
+    stays a pure function and stays env-invariant: whether a stale alias is
+    still on the node is a fact about the WRITER's ``TORTOISE_IDENTIFIER_TOKENS``
+    gate at edit time, not about the graph's faithfulness — an operator
+    bisecting with the switch flipped must not move the verdict.
+
+    Returns ``True`` when the view changed.
+    """
+    keys = view.get("search_keys")
+    if not isinstance(keys, str) or not keys:
+        return False
+    derived = set(_derive_point_identifier_aliases(view))
+    if extra:
+        derived |= set(extra)
+    if not derived:
+        return False
+    tokens = keys.split()
+    kept = [t for t in tokens if t not in derived]
+    if len(kept) == len(tokens):
+        return False
+    if kept:
+        view["search_keys"] = " ".join(kept)
+    else:
+        view.pop("search_keys", None)
+    return True
+
+
+#: The node's ``search_keys`` seen as the FLAT STRING the fulltext index needs,
+#: without ever handing a LIST to a string operator.
+#:
+#: ``NULL`` views as the empty string (the ordinary "no vocabulary yet"
+#: case). ``String`` passes through untouched, so the emitted clause is
+#: byte-identical to the pre-guard one for every node this repo writes today.
+#: ``List`` is flattened with the rule :func:`flatten_search_keys_prop` applies
+#: to a payload, so the vocabulary it holds survives instead of being dropped:
+#: ``['a','b']`` views as ``' a b'``, which ``trim(...)`` normalises in the ELSE
+#: arm. Any OTHER scalar views as its own text (``7`` -> ``' 7'``), so a shape
+#: no writer produces is still not silently discarded.
+#:
+#: ⛔ The inner ``CASE`` around the ``reduce`` source is NOT decoration. Both
+#: engines evaluate/type-check a ``CASE`` arm for EVERY row, so the moment the
+#: reduce's ``IN`` source is the raw property, a STRING row raises
+#: ``Type mismatch: expected List or Null but was String`` even though its
+#: ``WHEN`` is false (measured on the embedded lane — the naive
+#: ``THEN reduce(_sk = '', _v IN n.search_keys | …)`` reds every string node).
+#: Feeding ``IN`` a list-typed expression in every branch is what makes the
+#: guard safe. ``typeof``/``reduce``/``toString`` and ``IS NULL`` in a searched
+#: ``CASE`` were verified on the embedded lane (FalkorDBLite 4.18.3) against
+#: array-, empty-array-, string-, absent- and integer-valued nodes, and
+#: ``typeof(n.search_keys) = 'List'`` is already load-bearing here on BOTH
+#: engines (``_array_valued_search_keys_exist``). Idempotence re-checked by
+#: applying each clause twice (#10203 review round 8, F3).
+_NODE_SEARCH_KEYS_VIEW = (
+    "CASE WHEN n.search_keys IS NULL THEN '' "
+    "WHEN typeof(n.search_keys) = 'String' THEN n.search_keys "
+    "ELSE reduce(_sk = '', _v IN (CASE WHEN typeof(n.search_keys) = 'List' "
+    "THEN n.search_keys ELSE [n.search_keys] END) "
+    "| _sk + ' ' + toString(_v)) END"
+)
+
+
+def identifier_alias_append_clauses(aliases: list[str]) -> tuple[list[str], dict]:
+    """#10203 — Cypher `SET` clauses that APPEND ``search_keys``, never replace it.
+
+    ``SET n += $extra`` can only ASSIGN, and a payload that does not carry its
+    own ``search_keys`` list used to materialise the derived alias as the WHOLE
+    value. Measured (review round 6, P1): `PointAdded{content: "error
+    ERR-4032…", search_keys: []}` — the E3 ``PointPayload`` default spelling —
+    replaced a node's stored ``"release deploy rollout"`` with ``"err4032"``,
+    silently destroying the retrieval vocabulary the A4/#2070 expansion leg
+    reads. The pre-#8933 writer popped the blank list and wrote NOTHING, so the
+    node kept its value; this restores that outcome while still landing the
+    alias.
+
+    Each clause is the same set difference :func:`append_identifier_aliases`
+    does in Python, evaluated against the NODE's own value, so it is idempotent
+    (a replay, a re-derivation, a repeated emit) and needs no read. The
+    containment test pads with spaces: a bare ``CONTAINS`` would treat
+    ``err4032`` as present inside ``xerr40321``.
+
+    ⛔ The NODE side is TYPE-GUARDED (:data:`_NODE_SEARCH_KEYS_VIEW`), because
+    ``search_keys`` can be an ARRAY in a graph this repo maintains and
+    ``' ' + <list>`` is not a string expression (#10203 review round 8, F3).
+    Measured on the embedded lane at the previous head: the whole
+    ``_persist_extra_props`` statement raised ``Type mismatch: expected String
+    or Null but was List``, so a write whose only job was to add one alias
+    ABORTED. :func:`flatten_search_keys_prop` flattens the PAYLOAD, never a node
+    value that predates the flatten rule, and
+    ``_array_valued_search_keys_exist``/``_array_search_keys_rows`` exist
+    precisely because such rows can be present at any time.
+
+    Returns ``(clauses, params)`` for ``_persist_extra_props``.
+    """
+    clauses: list[str] = []
+    params: dict = {}
+    for i, token in enumerate(aliases):
+        if not token:
+            continue
+        name = f"alias{i}"
+        params[name] = token
+        clauses.append(
+            "SET n.search_keys = CASE "
+            f"WHEN (' ' + {_NODE_SEARCH_KEYS_VIEW} + ' ') "
+            f"CONTAINS (' ' + ${name} + ' ') "
+            "THEN n.search_keys "
+            f"ELSE trim({_NODE_SEARCH_KEYS_VIEW} + ' ' + ${name}) "
+            "END")
+    return clauses, params
+
+
+def _flat_search_keys_value(value) -> str:
+    """#10203 — ANY ``search_keys`` value a NODE can hand back, as one string.
+
+    A node's value crosses the driver boundary as a ``list`` whenever the array
+    shape is present, and that state is reachable at any time —
+    :data:`_NODE_SEARCH_KEYS_VIEW` and ``_array_valued_search_keys_exist`` exist
+    for exactly that reason (a later ``update_entity``'s ``SET n += $props`` has
+    no flatten, #5482; a RESTORE/DR graph carries them). ``str(value)`` on a list
+    is NOT the value — it is ``"['alpha', 'beta']"`` — so joining it directly
+    silently REPLACED the whole stored vocabulary with the new alias, which is
+    the loss ``revise_identifier_aliases``'s own docstring forbids (#10203
+    review round 9, F1).
+
+    ``None``/absent flattens to ``""``; a string is returned as-is; a sequence
+    is space-joined token-wise (the same rule
+    :func:`_derive_point_identifier_aliases` applies to the node value for the
+    ``stale`` half), and any other scalar contributes its own text rather than
+    disappearing.
+
+    This is the read-side counterpart of :func:`flatten_search_keys_prop`, which
+    applies the same rule to a PAYLOAD: an array is never a legal stored form,
+    so flattening it on the way in loses nothing.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
+
+
+def revise_identifier_aliases(*, new_content, old_content, old_search_keys,
+                              caller_search_keys=None) -> str | None:
+    """#10203 — the ``search_keys`` value a CONTENT EDIT must store.
+
+    A content edit is not a capture: the ruling writes the alias AT CAPTURE, so
+    a revision has to RECOMPUTE the derived part rather than leave the creation's
+    token on the node. Without this, an edit that introduces an identifier never
+    indexes it, and an edit that REMOVES one leaves a stale alias behind that
+    still matches the old code — measured both ways at review round 6.
+
+    The rule, in the same shape the SDK already applies to the OTHER derived
+    fields on a content edit (``content_hash`` #1904, the vector #4208):
+
+      * ``base`` = what the caller supplied now, else the node's own value
+        MINUS the aliases its PREVIOUS content derived (those are the stale
+        ones; a non-alias key is never touched, so the retrieval vocabulary an
+        earlier write established survives);
+      * ...plus the aliases THIS content derives (``space_separated=False`` —
+        the write side stays precise, per ``point_identifier_aliases``).
+
+    Returns the flat value, or ``None`` when nothing is left — the caller must
+    REMOVE the property (``SET n.search_keys = null``), never store ``""``.
+
+    One read is owed: the node's previous ``content``/``search_keys`` is what
+    says which tokens are stale, and it is not in the event. The caller passes
+    it in, so this stays a pure function (the ``_revise_point``/``update_point``
+    doors read it in the SAME round trip as the write).
+
+    ⛔ ``old_search_keys`` is a NODE VALUE, so it can be a LIST (see
+    :func:`_flat_search_keys_value`). Both callers pass the raw column —
+    ``MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys`` — and FalkorDB
+    hands an array property back as a Python ``list``. Treating a non-``str`` as
+    empty discarded every stored token and returned the new content's alias
+    alone (or ``None``, which both doors write as ``SET n.search_keys = null``),
+    destroying the retrieval vocabulary the A4/#2070 expansion leg reads — the
+    same loss the ADD door's append-vs-assign fix prevents, through the door it
+    did not cover (#10203 review round 9, F1).
+    """
+    if caller_search_keys is not None:
+        # The caller OWNS the list in this call: replace rather than merge, so a
+        # removed key really goes away. The old aliases cannot leak into it.
+        base = _flat_search_keys_value(caller_search_keys)
+    else:
+        stale = set(point_identifier_aliases(
+            {"content": old_content, "search_keys": old_search_keys}))
+        current = _flat_search_keys_value(old_search_keys)
+        base = " ".join(t for t in current.split() if t not in stale)
+    base = " ".join(base.split())
+    tokens = base.split()
+    for alias in identifier_aliases(
+            index_text(new_content, base), space_separated=False):
+        if alias and alias not in tokens:
+            tokens.append(alias)
+    return " ".join(tokens) or None
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
@@ -1792,7 +2144,9 @@ class _EntityHandlers:
     def _persist_extra_props(self, match_clause: str, match_params: dict,
                               ev: dict, handled_keys: frozenset,
                               list_props: frozenset | None = None,
-                              allow_keys: frozenset | None = None) -> dict:
+                              allow_keys: frozenset | None = None,
+                              extra_set_clauses: list[str] | None = None,
+                              extra_params: dict | None = None) -> dict:
         """Persist arbitrary caller-supplied props not explicitly handled.
 
         Computes the set difference between event dict keys and the union of
@@ -1817,6 +2171,12 @@ class _EntityHandlers:
 
         Returns the dict of props actually persisted (empty when none) so the
         caller can report unrecognised keys (#2795 drift warning).
+
+        ``extra_set_clauses`` are extra ``SET`` statements spliced into the SAME
+        query (with ``extra_params``), for a value the map-assign form cannot
+        express — #10203's ``search_keys`` alias APPEND, which must read the
+        node's own value rather than replace it. A query is issued when either
+        the map or the clauses carry work, so a clause-only call still runs.
         """
         skip = self._META_KEYS | handled_keys
         extra = {}
@@ -1832,10 +2192,11 @@ class _EntityHandlers:
                     and k not in list_props:
                 continue
             extra[k] = v
-        if extra:
+        if extra or extra_set_clauses:
             self.g.query(
-                match_clause + " SET n += $extra",
-                params={**match_params, "extra": extra},
+                match_clause + " SET n += $extra"
+                + "".join(" " + c for c in (extra_set_clauses or [])),
+                params={**match_params, "extra": extra, **(extra_params or {})},
             )
         return extra
 
@@ -1934,10 +2295,40 @@ class _EntityHandlers:
         # blank-list pop is visible to the drop-report loop below, which would
         # otherwise log a false "list prop dropped" for a key that was
         # deliberately normalized away.
-        if any(isinstance(p.get(k), (list, tuple))
-               for k in _POINT_FLATTEN_LIST_PROPS):
+        #
+        # #8933 Stage 2: the SAME copy carries the derived IDENTIFIER ALIASES —
+        # `ERR-4032` -> `err4032` in `search_keys`, the alias channel already in
+        # the Point fulltext field set. Derived from the payload's own
+        # `content`/`search_keys` on every write (live, replay, promote), so the
+        # value is a pure function of the journal record and a rebuild
+        # re-derives it identically. The alias list is computed ONCE, before the
+        # copy, because that is also the condition that decides whether a copy
+        # is needed at all: a point with no identifier takes the pre-#8933 path
+        # and writes byte-identically.
+        alias_tokens = point_identifier_aliases(p)
+        # #10203 review round 6 (measured P1): whether the payload OWNS
+        # `search_keys` decides REPLACE vs APPEND. It owns it only when it
+        # carries a non-blank list of its own; the pre-#8933 writer popped a
+        # blank list and wrote NOTHING (the node kept what it held), so
+        # materialising the alias alone would be a silent DOWNGRADE of the
+        # stored vocabulary — the E3 `PointPayload` default spelling
+        # (`search_keys: []`) turned `"release deploy rollout"` into
+        # `"err4032"`. Owned: the whole value is rewritten from the payload, so
+        # an earlier content's aliases go with it. Not owned: the alias is
+        # APPENDED to the node's own value below (`identifier_alias_append_
+        # clauses`), which is also why a repeat stays a no-op.
+        _pk = p.get("search_keys")
+        if isinstance(_pk, (list, tuple)):
+            owns_search_keys = any(str(_s).strip() for _s in _pk)
+        elif isinstance(_pk, str):
+            owns_search_keys = bool(_pk.strip())
+        else:
+            owns_search_keys = False
+        if alias_tokens or any(isinstance(p.get(k), (list, tuple))
+                               for k in _POINT_FLATTEN_LIST_PROPS):
             p = dict(p)
             flatten_search_keys_prop(p)
+            append_identifier_aliases(p, alias_tokens)
         op = p.get("operator")
         if not isinstance(op, dict):
             # #331 (review r5): parity with _create_edges' r4 guard — a
@@ -2237,10 +2628,23 @@ class _EntityHandlers:
         # are excluded (precedence: the fixed clauses above already wrote
         # updatedAt/embedding/content_hash), and only persistable values
         # survive the shared type filter (#2894).
+        # #10203 (P1): the alias is APPENDED when the payload did not own
+        # `search_keys` — see the ownership note at `alias_tokens` above. The
+        # key is dropped from the map (`SET n += $extra` can only assign) and
+        # re-stated as a guarded append in the same query.
+        alias_append_clauses: list[str] = []
+        alias_append_params: dict = {}
+        if alias_tokens and not owns_search_keys:
+            p = dict(p)
+            p.pop("search_keys", None)
+            alias_append_clauses, alias_append_params = \
+                identifier_alias_append_clauses(alias_tokens)
         extras = self._persist_extra_props(
             "MATCH (n:Point {id:$id})", {"id": p["id"]}, p,
             self._POINT_HANDLED | self._POINT_DENY,
             list_props=self._POINT_LIST_PROPS,
+            extra_set_clauses=alias_append_clauses,
+            extra_params=alias_append_params,
         )
         for key in extras:
             if key not in self._POINT_DECLARED_PROPS:
