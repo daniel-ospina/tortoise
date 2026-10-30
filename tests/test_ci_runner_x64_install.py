@@ -118,24 +118,44 @@ if not INSTALLER.exists():  # pragma: no cover - a broken checkout must not read
 # Every headroom leg EXCEPT the one under test, satisfied. The guards run forks → disk → cpu, so
 # without this the disk bound can refuse first and the cpu assertion fails on a message that never
 # mentions cpu (that is what a GitHub-hosted ubuntu-latest does: ~14G free on `/`, where /opt is).
-# ⛔ EVERY DOCUMENTED `runs-on` FORM THAT CAN CARRY A STATIC LABEL SET, or the counter-guard over
-# the runbook's accepted-cost inventory is blind to one form again each round. Keys are NODES, not
-# spellings — plain, single- and double-quoted all resolve to the key `runs-on` (measured with
-# PyYAML for every form below; spec 1.2.2 makes two spellings that resolve equal a DUPLICATE key,
-# which is the same statement) — and the VALUE has four documented forms, all of which the shipped
-# `--status` extractor reads: scalar, explicit key (`? runs-on` / `: value`), block sequence, and a
-# `{group: …, labels: […]}` mapping. A pin added in any of them makes its file pool-eligible, so a
-# count that sees only the plain scalar spelling silently omits that file from the inventory.
+# ⛔ EVERY `runs-on` FORM THE SHIPPED EXTRACTOR READS, or the counter-guard over the runbook's
+# accepted-cost inventory is blind to one form again each round. TWO kinds of spelling matter:
+#
+#   • the KEY. Keys are NODES, not spellings — plain, single- and double-quoted all resolve to the
+#     key `runs-on` (measured with PyYAML for every form below; spec 1.2.2 makes two spellings that
+#     resolve equal a DUPLICATE key, which is the same statement). The same rule governs the
+#     `labels:` key INSIDE a mapping, which is where the single-spelling bug survived a round
+#     longer: the extractor's `keyis()` accepts `labels`, `'labels'`, `"labels"` and a space before
+#     the colon, so `{group: x, "labels": [ubuntu-24.04]}` is verdict-able at rc 5 while a guard
+#     matching only `\blabels:` kept the inventory green — one spelling over from the `"runs-on":`
+#     half that was already fixed.
+#   • the VALUE. The extractor reads FIVE forms, so a pin in any of them makes its file
+#     pool-eligible: scalar, explicit key (`? runs-on` / `: value`), block sequence, block MAPPING
+#     (`group:` / `labels:` keys on deeper-indented lines), and a flow `{group: …, labels: […]}`.
+#     A count that sees only the plain scalar silently omits that file from the inventory.
 _QUOTED_RUNS_ON = r'(?:"runs-on"|\'runs-on\'|runs-on)'
+# The `labels:` key, spelled any way the extractor's `keyis(k, "labels")` accepts — including the
+# space-before-colon form (`labels :`), which is valid YAML and which `keyis` reads.
+_LABELS_KEY = r'(?:["\']?labels["\']?[ \t]*:[ \t]*)'
+# The pin itself, and NOT its `-arm` sibling: `ubuntu-24.04-arm` is an ARM64 hosted label the
+# autoscaler keeps dropping, so counting it would inflate the inventory with a leg the mitigation
+# does not serve (measured: the old flow-mapping arm's `\bubuntu-24\.04\b` matched it).
+_PIN_2404 = r'["\']?ubuntu-24\.04["\']?(?![-\w.])'
 RUNS_ON_UBUNTU_2404_RE = (
+    r'^    (?:'
     # scalar value, and the explicit-key form (a two-line construct: `? runs-on` then `: value`)
-    r'^    (?:' + _QUOTED_RUNS_ON + r'[ \t]*:[ \t]+ubuntu-24\.04'
-    r'|\?[ \t]*' + _QUOTED_RUNS_ON + r'[ \t]*\r?\n[ \t]*:[ \t]+ubuntu-24\.04'
+    + _QUOTED_RUNS_ON + r'[ \t]*:[ \t]+' + _PIN_2404 + r'[ \t]*$'
+    + r'|\?[ \t]*' + _QUOTED_RUNS_ON + r'[ \t]*\r?\n[ \t]*:[ \t]+' + _PIN_2404 + r'[ \t]*$'
     # block sequence: the runs-on key, then one or more `- label` items (stops at the next key)
-    r'|' + _QUOTED_RUNS_ON + r'[ \t]*:\r?\n(?:[ \t]+-[^\n]*\r?\n)*?[ \t]+-[ \t]*["\']?ubuntu-24\.04["\']?'
+    + r'|' + _QUOTED_RUNS_ON + r'[ \t]*:\r?\n(?:[ \t]+-[^\n]*\r?\n)*?[ \t]+-[ \t]*' + _PIN_2404 + r'[ \t]*$'
+    # block MAPPING: `runs-on:` then a `group:`/`labels:` key on a deeper-indented line. The repeat
+    # may cross sibling lines but never another `runs-on`, so one job cannot absorb the next one's.
+    + r'|' + _QUOTED_RUNS_ON + r'[ \t]*:\r?\n(?:[ \t]+(?!' + _QUOTED_RUNS_ON + r')[^\n]*\r?\n)*?'
+    + r'[ \t]+' + _LABELS_KEY + r'[^\n]*' + _PIN_2404
     # flow mapping: `{group: …, labels: [ubuntu-24.04]}` (the group: prefix is consumed)
-    r'|' + _QUOTED_RUNS_ON + r'[ \t]*:[ \t]*\{[^\n}]*\blabels:[ \t]*\[[^\]]*\bubuntu-24\.04\b[^\n}]*\}'
-    r')[ \t]*\r?$'
+    + r'|' + _QUOTED_RUNS_ON + r'[ \t]*:[ \t]*\{[^\n}]*' + _LABELS_KEY + r'\[[^\]]*' + _PIN_2404
+    + r'[^\n}]*\}[ \t]*$'
+    + r')'
 )
 
 _NEUTRAL_HEADROOM = {
@@ -3112,8 +3132,17 @@ def test_the_inventory_pattern_carries_every_documented_runs_on_form():
     count that sees only the plain scalar omits that file from the accepted-cost list just as
     silently.
 
+    The `labels:` KEY inside a mapping is the same rule one level in, and it outlived the `runs-on:`
+    half by a round: the extractor's `keyis()` reads `"labels":` / `'labels':` / `labels :`, so a
+    pin written `{group: x, "labels": [ubuntu-24.04]}` was verdict-able at rc 5 while a guard
+    matching only `\blabels:` counted nothing and left the inventory green. The block-MAPPING value
+    form (`runs-on:` then `group:` / `labels:` on deeper-indented lines) was the same shape: read by
+    the extractor, invisible to the count. Both are positive arms below.
+
     Mutation: restore the pre-fix pattern (`^    ["\']?runs-on[\']?[ \t]*:[ \t]*ubuntu-24\.04$`) ->
-    the double-quoted and explicit-key arms RED, and the block/mapping arms RED too.
+    the double-quoted and explicit-key arms RED, and the block/mapping arms RED too. Narrow the
+    `labels:` key back to `\blabels:` -> the quoted-key and spaced-colon arms RED. Restore
+    `\bubuntu-24\.04\b` in the flow-mapping arm -> the arm64-in-a-mapping arm RED.
     """
     positive = {
         "plain scalar": "    runs-on: ubuntu-24.04\n",
@@ -3122,6 +3151,17 @@ def test_the_inventory_pattern_carries_every_documented_runs_on_form():
         "explicit key": "    ? runs-on\n    : ubuntu-24.04\n",
         "block sequence": "    runs-on:\n      - self-hosted-x64\n      - ubuntu-24.04\n",
         "labels mapping": "    runs-on: {group: pi-runner, labels: [self-hosted-x64, ubuntu-24.04]}\n",
+        # The same mapping with the `labels:` KEY spelled the other two ways `keyis()` reads. A
+        # mapping is what a formatted workflow produces, and the runtime verdicts all three — so a
+        # guard that sees only the plain spelling under-counts the very files the mitigation serves.
+        "double-quoted labels key": '    runs-on: {group: pi-runner, "labels": [self-hosted-x64, ubuntu-24.04]}\n',
+        "single-quoted labels key": "    runs-on: {group: pi-runner, 'labels': [ubuntu-24.04]}\n",
+        "spaced labels colon": "    runs-on: {group: pi-runner, labels : [ubuntu-24.04]}\n",
+        # The FIFTH value form: a block mapping under `runs-on:`. The extractor reads it (its
+        # `keyis(line, "labels")` arm), so the file is pool-eligible and the inventory must see it.
+        "block mapping": "    runs-on:\n      group: pi-runner\n      labels: [self-hosted-x64, ubuntu-24.04]\n",
+        "block mapping, quoted labels key": '    runs-on:\n      group: pi-runner\n      "labels": [ubuntu-24.04]\n',
+        "block mapping, scalar value": "    runs-on:\n      group: pi-runner\n      labels: ubuntu-24.04\n",
     }
     for name, text in positive.items():
         assert re.search(RUNS_ON_UBUNTU_2404_RE, text, re.MULTILINE), (
@@ -3138,12 +3178,52 @@ def test_the_inventory_pattern_carries_every_documented_runs_on_form():
         "a step-level key (indent 8)": "        runs-on: ubuntu-24.04\n",
         "a mapping without the label": "    runs-on: {group: pi-runner, labels: [self-hosted-x64]}\n",
         "a block without the label": "    runs-on:\n      - self-hosted-x64\n      - ubuntu-latest\n",
+        # The `-arm` sibling INSIDE a mapping. `\b` alone matched it (measured), which is the
+        # wrong direction of error for an inventory: it invents a leg the mitigation does not serve
+        # and the runbook then has to explain a job it never named.
+        "the arm64 pin inside a flow mapping": "    runs-on: {group: pi-runner, labels: [ubuntu-24.04-arm]}\n",
+        "the arm64 pin inside a block mapping": "    runs-on:\n      group: pi-runner\n      labels: [ubuntu-24.04-arm]\n",
+        "a block mapping without the label": "    runs-on:\n      group: pi-runner\n      labels: [self-hosted-x64]\n",
+        "an expression in a block mapping": "    runs-on:\n      group: pi-runner\n      labels: ${{ matrix.labels }}\n",
     }
     for name, text in negative.items():
         assert not re.search(RUNS_ON_UBUNTU_2404_RE, text, re.MULTILINE), (
             f"the counter-guard counts {name}, which is not a `ubuntu-24.04` job pin — the inventory "
             f"number would then be wrong in the direction nobody re-checks: {text!r}"
         )
+
+    # ⛔ AND ONE JOB MUST NOT ABSORB THE NEXT ONE'S PIN. The block-mapping arm scans forward to the
+    # `labels:` key, so a `runs-on:` block that never names the pin could walk into the FOLLOWING
+    # job's block and count it twice — the count is `len(re.findall(...))`, so a double count is a
+    # wrong number in the inventory, not a red. Exactly one job here is pinned.
+    two_jobs = (
+        "    runs-on:\n"
+        "      group: pi-runner\n"
+        "      labels: [self-hosted-x64]\n"
+        "    steps: []\n"
+        "  second:\n"
+        "    runs-on:\n"
+        "      group: pi-runner\n"
+        "      labels: [ubuntu-24.04]\n"
+    )
+    assert len(re.findall(RUNS_ON_UBUNTU_2404_RE, two_jobs, re.MULTILINE)) == 1, (
+        "the block-mapping arm counted a nested `runs-on` block more than once (or followed it into "
+        "the next job) — the inventory total would then be inflated: "
+        f"{re.findall(RUNS_ON_UBUNTU_2404_RE, two_jobs, re.MULTILINE)!r}"
+    )
+    pinned_then_next = (
+        "    runs-on:\n"
+        "      group: pi-runner\n"
+        "      labels: [ubuntu-24.04]\n"
+        "  second:\n"
+        "    runs-on: ubuntu-latest\n"
+        "  third:\n"
+        "    runs-on: {group: pi-runner, labels: [ubuntu-latest]}\n"
+    )
+    assert len(re.findall(RUNS_ON_UBUNTU_2404_RE, pinned_then_next, re.MULTILINE)) == 1, (
+        "the arms double-count a file whose unpinned siblings follow a pinned block mapping: "
+        f"{re.findall(RUNS_ON_UBUNTU_2404_RE, pinned_then_next, re.MULTILINE)!r}"
+    )
 
 
 def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
