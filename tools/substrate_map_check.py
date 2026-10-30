@@ -58,7 +58,9 @@ Usage:
 Exit codes: 0 clean · 1 drifted · 2 the document, a measurement input, or the
 object a claim names is unreadable/ABSENT here (a state error, NOT a pass).
 2 therefore means "this checkout cannot answer the question" — a shallow clone
-excuses nothing, it just moves the proof to the job that has the history.
+excuses nothing, it just moves the proof to the job that has the history. A
+pre-3.12 interpreter is that same case and exits 2 as well (never 1, which is
+reserved for drift).
 
 Pinned by `tests/test_substrate_map.py`.
 """
@@ -69,12 +71,23 @@ import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — a module-level
 # 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+#
+# ⛔ `print` + `SystemExit(2)`, not `raise SystemExit(<message>)`: CPython exits
+# **1** for a string argument, and 1 is this tool's DRIFT code — on the Apple CLT
+# `python3` (3.9.6) that #5128 was filed from, `--check` would report *the
+# document and the tree disagree* about a document it never read. An old
+# interpreter is the same class as a missing object: this checkout cannot answer
+# the question, so it is exit 2. The #5128 test explicitly accepts this shape
+# for a guard whose exit code is itself meaningful (`SystemExit(<int>)` carries
+# no message, so the message is printed; the refusal is still attributable).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/substrate_map_check.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/substrate_map_check.py`"
+        f"`uv run python tools/substrate_map_check.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import ast
 import json

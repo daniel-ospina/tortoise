@@ -386,6 +386,10 @@ the tree disagree:
 or could not *answer* one of the claims — the case that matters here is the
 ancestry claim in a shallow clone, which is reported as `UNVERIFIED` with the
 cause named, never as drift (the document is not wrong; the clone is shallow).
+A **pre-3.12 interpreter** is that same case and exits `2` as well — the guard
+prints its refusal and raises `SystemExit(2)` rather than `SystemExit(<message>)`,
+because the latter exits `1`, which this tool reserves for `drifted` and would
+report *"the document and the tree disagree"* about a document never read.
 
 The ancestry probe is **bounded at 10 s**, and the bound is classified with the
 status arm rather than against it: a locally-present sha answers in 7 ms, an

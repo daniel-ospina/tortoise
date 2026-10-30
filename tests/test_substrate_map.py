@@ -19,6 +19,7 @@ unregistered test file).
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -102,12 +103,28 @@ def _label_hits() -> tuple[int, int, int]:
     for path in _tracked_files_under(_TRACKED_DIR):
         try:
             text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            # A tracked path that is unreadable or not text cannot carry prose
-            # about a node label; it also cannot be silently *counted* as zero
-            # matches in a way that shifts the figure, so it is simply not part
-            # of a prose population.
-            continue
+        except UnicodeDecodeError as exc:
+            # NOT a silent skip: a tracked non-text file under `tortoise/` may
+            # carry the literal bytes `:Document`, so excluding it would narrow
+            # the population the figure is stated in — the false-CLEAN this
+            # function was fixed to close. There are zero such files at this
+            # head, so this is a bound that cannot fire today; if one appears,
+            # the honest answer is a decision about it, not a quiet subtraction.
+            raise smc._state_error(
+                f"{path.relative_to(REPO)} is a tracked file under {_TRACKED_DIR}/ "
+                f"that is not UTF-8 text, so the `:Document` prose count cannot "
+                f"include it — decide whether to count or explicitly exclude it "
+                f"({exc})"
+            ) from exc
+        except OSError as exc:
+            # A tracked file that cannot be READ is a state error, exactly as in
+            # `_tracked_files_under`: dropping it would shrink the population and
+            # red the §5 claim against a correct document with a confusing
+            # "the tree has fewer lines" message.
+            raise smc._state_error(
+                f"cannot read {path.relative_to(REPO)}, a tracked file under "
+                f"{_TRACKED_DIR}/ ({exc})"
+            ) from exc
         hits = [line for line in text.splitlines() if ":Document" in line]
         if not hits:
             continue
@@ -485,7 +502,7 @@ def test_the_json_manifest_names_what_it_does_not_check() -> None:
     assert "unverified" in result, result
 
 
-def test_the_label_population_is_every_tracked_file_not_just_py() -> None:
+def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> None:
     """Fails if the `:Document` count is measured over a NARROWER set than §5 claims.
 
     Reachable — and it WAS the shipped state: `_label_hits()` walked
@@ -498,21 +515,37 @@ def test_the_label_population_is_every_tracked_file_not_just_py() -> None:
     document that says 55 and PASSES, leaving the stale number in place. That is
     the false-CLEAN class this file exists to close.
 
-    The control asserts on the POPULATION (which files were read), not on the
-    count, so it stays reachable at any re-cut: whatever the numbers are, the set
-    must contain a non-`.py` tracked file.
+    The control asserts on the POPULATION `_label_hits` ITSELF reads — recorded
+    by spying on `Path.read_text` — not on the helper it happens to call. That
+    distinction is load-bearing: the first cut of this fix asserted only that
+    `_tracked_files_under()` returns a non-`.py` file, which stayed green with
+    `_label_hits`'s own loop reverted to `rglob("*.py")` — the two populations
+    are numerically identical today (all 55 hits are in `.py` files), so the
+    count matches either way and the latent false CLEAN survives behind a green
+    suite. A control on the helper is not a control on the count (#5086 review
+    P2, cycle 5).
     """
-    scanned = _tracked_files_under(_TRACKED_DIR)
-    assert scanned, "the tracked-file population collapsed to nothing"
-    non_py = [p for p in scanned if p.suffix != ".py"]
+    read: list[Path] = []
+    real_read_text = Path.read_text
+
+    def _spy(self, *args, **kwargs):
+        read.append(self)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _spy)
+    _label_hits()
+
+    assert read, "`_label_hits` read no files at all"
+    non_py = [p for p in read if p.suffix != ".py"]
     assert non_py, (
-        "the `:Document` population is `.py`-only again, so a label minted in a "
-        "tracked SKILL.md / config *.yaml / *.ts raises the true figure while this "
-        "check keeps reporting the old number"
+        "`_label_hits` read only `.py` files, so a `:Document` minted in a "
+        "tracked SKILL.md / config *.yaml / *.ts under tortoise/ raises the true "
+        "figure while this check keeps reporting the old number and PASSES — "
+        "exactly the latent false CLEAN the index-derived population closed"
     )
-    assert all(p.is_file() for p in scanned), (
-        "a tracked path under tortoise/ is not a file here — the index and the "
-        "working tree disagree"
+    assert set(read) <= set(_tracked_files_under(_TRACKED_DIR)), (
+        "`_label_hits` read a file that is not tracked under tortoise/ — the "
+        "population drifted off the one §5's `git grep` sentence is stated in"
     )
 
 
@@ -577,6 +610,99 @@ def test_a_leaf_row_that_imports_internally_is_drift() -> None:
     assert any("no `*leaf*` depends-on row" in p for p in problems), (
         "a document with no `*leaf*` row must report that the check is measuring "
         f"nothing, not pass over an empty set; got: {problems}"
+    )
+
+
+def test_an_unreadable_tracked_file_is_a_state_error_not_a_narrower_count(
+    monkeypatch,
+) -> None:
+    """Fails if a tracked file that cannot be READ silently shrinks the count.
+
+    Reachable: a tracked file deleted from the working tree, or one blocked by
+    permissions. Dropping it narrows the population, so §5's figure is then
+    compared against a smaller tree — a *false red* ("the tree has 34 lines")
+    against a correct document, with the cause invisible. A measurement input
+    that cannot be read is the state error this tool already defines for the
+    ancestry probe, so it must exit 2 instead (#5086 review P3, cycle 5).
+    """
+    target = _tracked_files_under(_TRACKED_DIR)[0]
+    real_read_text = Path.read_text
+
+    def _deny(self, *args, **kwargs):
+        if self == target:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _deny)
+    with pytest.raises(SystemExit) as excinfo:
+        _label_hits()
+    assert excinfo.value.code == 2, (
+        f"an unreadable measurement input is a state error (2), never a quietly "
+        f"narrower population; got {excinfo.value.code!r}"
+    )
+
+
+def test_a_tracked_non_text_file_under_tortoise_is_a_stated_state_error(
+    monkeypatch,
+) -> None:
+    """Fails if a non-text tracked file is silently EXCLUDED from the population.
+
+    Reachable: a `.pyc` or any binary checked in under `tortoise/`. It may carry
+    the literal bytes `:Document`, so excluding it narrows the population the
+    figure is stated in — the same false-CLEAN class as the `.py`-only walk,
+    arriving by a different door. There are zero such files at this head (all
+    287 tracked paths under `tortoise/` decode as UTF-8), so the arm cannot fire
+    today; it exists so that adding one is a decision, not a silent subtraction.
+    """
+    target = _tracked_files_under(_TRACKED_DIR)[0]
+    real_read_text = Path.read_text
+
+    def _binary(self, *args, **kwargs):
+        if self == target:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _binary)
+    with pytest.raises(SystemExit) as excinfo:
+        _label_hits()
+    assert excinfo.value.code == 2, (
+        f"a non-text tracked file must be a stated state error (2), not a silent "
+        f"exclusion; got {excinfo.value.code!r}"
+    )
+
+
+def test_the_shipped_guard_refuses_with_the_STATE_ERROR_code_not_drift() -> None:
+    """Fails if the #5128 refusal exits 1 — this tool's DRIFT code.
+
+    Reachable: the Apple CLT `python3` (3.9.6) that #5128 was filed from. With
+    `raise SystemExit(<message>)` CPython exits **1**, so `--check` on an old
+    interpreter reports *the document and the tree disagree* about a document it
+    never read — a wrong instruction, and the collision is invisible because the
+    stderr text is still attributable. An old interpreter is the same class as a
+    missing object: this checkout cannot answer the question, so it is 2.
+    """
+    source = (REPO / "tools" / "substrate_map_check.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    guards = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and "version_info" in ast.unparse(node.test)
+    ]
+    assert len(guards) == 1, f"expected exactly one interpreter guard, found {len(guards)}"
+    guard = guards[0]
+    exits = [
+        node
+        for node in ast.walk(guard)
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+    ]
+    assert len(exits) == 1, f"the guard must raise exactly once, found {len(exits)}"
+    code = exits[0].exc.args[0]
+    assert isinstance(code, ast.Constant) and code.value == 2, (
+        "the interpreter guard must exit 2 (state error) — exiting 1 collides "
+        "with this tool's `drifted` code; got "
+        f"{ast.unparse(exits[0].exc) if exits else 'nothing'}"
     )
 
 
