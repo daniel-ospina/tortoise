@@ -1466,7 +1466,26 @@ def assert_seam_target(harness: str,
                 f"{loaded} → {e.__class__.__name__}: {e}. Fix the path, then "
                 f"re-run `tortoise install {harness}`.")
     resolved = loaded.resolve()
-    if not resolved.is_file():
+    # This stat needs its own `except`: `Path.is_file()` RE-RAISES every
+    # `OSError` outside pathlib's ignored set (ENOENT/ENOTDIR/EBADF/ELOOP), so
+    # an EACCES arrives as a `PermissionError` — measured on this repo's 3.12
+    # pin, where `is_file()` under a mode-000 directory raises even though the
+    # `resolve()` one line above hands back a path for it (non-strict
+    # `realpath` swallows what the predicate re-raises).  The predicates'
+    # error handling has changed across releases; an explicit errno-
+    # discriminating stat is the only version-stable answer, which is why
+    # `hook_install._read_hook_version` guards its `is_file()` the same way
+    # (`test_read_hook_version_returns_none_for_a_non_searchable_parent`).
+    # The reachable window is a TOCTOU race — the `os.stat(loaded)` above
+    # already followed this path — but a caller (`doctor`, the startup check)
+    # must get a verdict, never a traceback.
+    try:
+        regular = resolved.is_file()
+    except OSError as e:
+        return (f"the capture extension {harness} loads cannot be inspected: "
+                f"{resolved} → {e.__class__.__name__}: {e}. Fix that path, "
+                f"then re-run `tortoise install {harness}`.")
+    if not regular:
         # A directory / FIFO / socket is not divisible into bytes, and READING
         # a FIFO would block — report it without hashing, exactly as
         # `detect_artifact_install` does for the same path.
