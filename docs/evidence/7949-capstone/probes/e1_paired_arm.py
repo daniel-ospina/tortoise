@@ -27,18 +27,29 @@ Usage::
         --graph capstone_off_<head8>_<epoch> --out /tmp/off-arm.json
 
 Exit status: **0** when the arm was measured and every session ran; **1** when
-the arm was measured but a session failed; **2** when the run wrote fewer
-`:Object` nodes than the frozen `denominator_floors.e1_objects` — the pre-
-registration calls a reading below that floor `REFUSED, which is neither a pass
-nor a fail`, so a share over it is not a before-share (and a zero denominator is
-the same refusal at its limit: issue #9889 acceptance item 2). A refusal writes
-**no record**, because an artifact is what a later reader scores and a refused
-number is not one.
+the arm was measured but a session failed, AND when the run was refused before
+it measured anything — a switch that arms the passes is already set, the backend
+cannot extract, or this checkout's corpus is not the one the pre-registration
+froze. The two are told apart by the RECORD's presence, not by the code: a
+refusal writes **no record**, so an exit 1 with a record on disk is a failed
+session and an exit 1 without one measured nothing.
 
-Exits non-zero, and measures nothing, if the shell already holds any of the
-three flags — a mislabelled arm is worse than no arm — and before any model call
-if the backend cannot extract at all (`backend_ready`: a keyless capture
-extracts nothing, so it would be a measurement of the ABSENCE of a key, #3892).
+**2** when the run's own population is refused after the census: a zero
+denominator, fewer `:Object` nodes than the frozen
+`denominator_floors.e1_objects`, or a before-share under the frozen
+`denominator_floors.e1_min_before_share`. The pre-registration calls such a
+reading `REFUSED, which is neither a pass nor a fail` — so a share over it is
+not a before-share (issue #9889 acceptance item 2 is the zero case). A refusal
+writes **no record**, because an artifact is what a later reader scores and a
+refused number is not one.
+
+Two preconditions run BEFORE any model call, because both make the run a
+measurement of something other than the frozen corpus: `backend_ready` (a
+keyless capture extracts nothing — a measurement of the ABSENCE of a key, #3892)
+and `corpus_pin` (G1: a run over a corpus that is not the frozen one measures a
+population its bar never saw — "a bar is a threshold AND its corpus", #9076).
+The record then carries the `fixtures_hash` this run's corpus actually had and
+the `head` it was taken at, so neither has to be taken on trust.
 """
 from __future__ import annotations
 
@@ -61,6 +72,7 @@ from capstone_measure import (  # noqa: E402
     _is_bare_definite,
     backend_ready,
     census,
+    check_corpus,
     graph_uri,
     parse_bars,
     read_preregistration,
@@ -93,7 +105,12 @@ def off_arm_readback() -> dict[str, str | None]:
     return held
 
 
-def object_floor() -> int:
+def _frozen_record(prereg: dict | None) -> dict:
+    """The frozen record: the caller's, or read out of the COMMIT (G0)."""
+    return read_preregistration(resolve_head()) if prereg is None else prereg
+
+
+def object_floor(prereg: dict | None = None) -> int:
     """E1's frozen Objects floor, read out of the pre-registration — never typed.
 
     E1 scores a SHARE, and the frozen record puts a floor under that share's
@@ -106,8 +123,64 @@ def object_floor() -> int:
     number that bar is written over, so it reads the same floor out of the same
     artifact — a floor typed into this file would be a floor nobody froze.
     """
-    return parse_bars(read_preregistration(resolve_head()))["floors"][
-        "e1_objects"]
+    return parse_bars(_frozen_record(prereg))["floors"]["e1_objects"]
+
+
+def min_before_share(prereg: dict | None = None) -> float:
+    """E1's OTHER frozen floor: the control arm's share must clear this one.
+
+    The criterion is stored as two halves, and only one of them is a floor under
+    the DENOMINATOR. `PRE-REGISTRATION.md:278-280` pairs E1's relative bar with an
+    absolute refusal — "if the **control arm's** share is `< 0.20`, the corpus
+    cannot measure E1 (a share metric needs a non-trivial base) and the criterion
+    is **REFUSED**" — frozen as `denominator_floors.e1_min_before_share: 0.20`.
+    This driver is the producer of precisely that number, so it applies that floor
+    too: a before-share under it is a reading the record itself calls REFUSED, and
+    a reader who took it as a before-share would compute `after <= 0.50 x before`
+    over a corpus the record says cannot measure E1.
+
+    Read straight off the record, not through `parse_bars`: that map exposes the
+    four integer floors and not this one, and a floor re-typed here would be a
+    floor nobody froze (#9513's `floor_unconsumed` rule, one map over). Absent and
+    unreadable are DIFFERENT states and both are refused — a probe that silently
+    drops a floor it declared it would honour emits a number its own record
+    refuses.
+    """
+    floors = _frozen_record(prereg).get("denominator_floors")
+    value = floors.get("e1_min_before_share") if isinstance(floors, dict) else None
+    # `bool` is an `int` in Python; `true` is not a floor.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SystemExit(
+            "REFUSED: the pre-registration declares no readable "
+            f"denominator_floors.e1_min_before_share (got {value!r}) — E1's own "
+            "floor on the before-share cannot be applied, and a probe that emits "
+            "the number while dropping its floor emits a share the record "
+            "refuses (#9513)")
+    return float(value)
+
+
+def corpus_pin(prereg: dict) -> str:
+    """G1, the shipped gate: does THIS checkout hold the corpus the record froze?
+
+    `capstone_measure.check_corpus` is the same comparison its own `main()` runs
+    before scoring (`:1922`), and it raises on a mismatch. Reused rather than
+    re-implemented: this driver's whole claim is that the only difference from
+    `capstone_measure.py` is the arm, and a private copy of the corpus check would
+    make that claim false the first time the two drifted. Returns the hash this
+    run's corpus actually has, which the record then carries.
+    """
+    return check_corpus(prereg)
+
+
+def share_refusal(share: float | None, floor: float) -> str | None:
+    """The refusal for a before-share E1's own record refuses — message or None."""
+    if share is None or share >= floor:
+        return None
+    return (f"REFUSED: the before-share {share:.6f} is under the frozen "
+            f"denominator_floors.e1_min_before_share = {floor} — E1's record "
+            f"says a control arm under that share cannot measure E1 (a share "
+            f"metric needs a non-trivial base) and refuses the criterion, so "
+            f"this number is not a before-share")
 
 
 def denominator_refusal(objects: int, floor: int) -> str | None:
@@ -142,7 +215,12 @@ def main(argv: list[str] | None = None) -> int:
     if not ready:
         raise SystemExit(f"REFUSED: {why}")
 
-    floor = object_floor()
+    head = resolve_head()
+    prereg = read_preregistration(head)
+    corpus_sha = corpus_pin(prereg)
+    floor = object_floor(prereg)
+    share_floor = min_before_share(prereg)
+    print(f"corpus fixtures_hash={corpus_sha} head={head}", flush=True)
     base = os.environ["TORTOISE_DB_URI"]
 
     sessions = session_ids()
@@ -157,16 +235,25 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     bare = [name for name in names if _is_bare_definite(name)]
+    share = (len(bare) / len(names)) if names else None
+    refusal = share_refusal(share, share_floor)
+    if refusal:
+        print(refusal, flush=True)
+        return 2
+
     record = {
         "arm": arm,
+        "head": head,
+        "fixtures_hash": corpus_sha,
         "object_floor": floor,
+        "min_before_share": share_floor,
         "graph": args.graph,
         "sessions": [{k: run[k] for k in
                       ("session_id", "ok", "extracted", "elapsed_s")}
                      for run in runs],
         "objects": len(names),
         "bare_definite": len(bare),
-        "share": (len(bare) / len(names)) if names else None,
+        "share": share,
         "object_names": names,
         "label_counts": data["label_counts"],
         "elapsed_s": round(time.time() - started, 1),

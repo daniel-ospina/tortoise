@@ -32,11 +32,31 @@ counter that observes the anchor moves to 14/14. It exists so "1 of 14" can be
 shown to be a measurement rather than a broken instrument — so when the injection
 fails to recover the lost units the driver REFUSES (exit 2) instead of printing a
 small number as if it were an observation.
+
+Two preconditions are refused BEFORE any number is emitted, because an absent
+population and a losing pipeline read IDENTICALLY through this counter:
+
+* **no searchable backend** — with no `TORTOISE_DB_URI` the SDK falls back to an
+  empty EMBEDDED graph ("Raises nothing — falls through to the default on
+  empty/whitespace env values", `tortoise/config.py`), so `python
+  e2a_value_units.py --graph <g>` in a shell that forgot the export reports a
+  confident `0 of 14` about nothing.
+* **an empty population** — a graph name that was never written (a typo, a reaped
+  graph) is an empty READ, not an error (a FalkorDB graph IS a key in the
+  keyspace; a missing key yields an empty result set), so
+  `sum(per_session[*].memory_points) == 0` is REFUSED rather than scored. That is
+  #9889 acceptance item 2's rule applied to E2a's population: a zero denominator
+  must never print as a result.
+
+Without them the probe's own falsifier CERTIFIES the failure: on an empty graph
+`before` is `0/14` and the injection recovers all 14 synthetic anchors, so
+`recovered 14 of lost 14` prints green beside a number that measured nothing.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -129,6 +149,51 @@ def grade(graph: str, *, inject_anchor: bool) -> dict:
     }
 
 
+def backend_refusal() -> str | None:
+    """No searchable backend = a reading of an EMPTY graph, not of the pipeline.
+
+    `TortoiseSDK(graph_name=...)` with no URI resolves the EMBEDDED path, and
+    `resolve_db_path()` "raises nothing — falls through to the default on
+    empty/whitespace env values" (`tortoise/config.py`), so a shell that forgot
+    the export opens a brand-new empty graph. Every session then reads zero
+    Points and this probe would print `0 of 14` — the same RED a real E2a
+    regression produces, which is how a real regression gets dismissed. The
+    sibling probe refuses the same way (`e1_gate_drops.py`).
+    """
+    if not (os.environ.get("TORTOISE_DB_URI") or "").strip():
+        return ("REFUSED: TORTOISE_DB_URI is not set — the SDK would silently "
+                "fall back to an EMPTY embedded graph, so every session would "
+                "read 0 Points and '0 of 14' would measure the absence of a "
+                "backend (#3892), not the pipeline")
+    return None
+
+
+def population_refusal(record: dict) -> str | None:
+    """The run wrote no memory-level Points = an absent population (#9889).
+
+    E2a's population analogue of `e1_gate_drops`' zero denominator. `grade`
+    records `per_session[*].memory_points` from `runner.snapshot_session`'s own
+    snapshot, which guards every read with `if eids:`/`if seen:` and returns an
+    empty list for a graph that does not exist — so a mistyped or reaped graph
+    name is indistinguishable from a pipeline that lost everything UNLESS the
+    population is asserted. A reading with no census at all (`per_session`
+    absent) is refused too: an unobserved population is not a measured one.
+    """
+    sessions = record.get("per_session")
+    if not isinstance(sessions, dict) or not sessions:
+        return ("REFUSED: the reading carries no per-session census — the "
+                "population this number would be scored over was never "
+                "observed, so it is not a measurement")
+    points = sum(int(row.get("memory_points") or 0)
+                 for row in sessions.values() if isinstance(row, dict))
+    if points == 0:
+        return ("REFUSED: the graph holds no memory-level Points for any "
+                "session — '0 of 14' over an ABSENT population is a "
+                "zero-denominator reading, not a result (a keyless or mistyped "
+                "backend reads exactly this way; #9889 acceptance item 2)")
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--graph", required=True)
@@ -143,12 +208,20 @@ def main(argv: list[str] | None = None) -> int:
         total = frozen_denominator()
         print(f"frozen value-bearing denominator: {total}")
         return 0 if total == 14 else 2
+    refusal = backend_refusal()
+    if refusal:
+        print(refusal)
+        return 2
     if args.inject_anchor:
         # The falsifier is scored AGAINST the as-written run, so both readings
         # come from the same graph in one process — a lost unit that the
         # injection cannot recover means the counter is inert, not that the
         # pipeline lost the value.
         before = grade(args.graph, inject_anchor=False)
+        refusal = population_refusal(before)
+        if refusal:
+            print(refusal)
+            return 2
         after = grade(args.graph, inject_anchor=True)
         record = {"as_written": before, "with_anchor": after}
         Path(args.out).write_text(json.dumps(record, indent=1))
@@ -164,6 +237,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
     record = grade(args.graph, inject_anchor=False)
+    refusal = population_refusal(record)
+    if refusal:
+        print(refusal)
+        return 2
     Path(args.out).write_text(json.dumps(record, indent=1))
     print(f"E2a: value units {record['value_survived']}/{record['value_units']} "
           f"(injected={record['injected_anchor']}) -> {args.out}")
