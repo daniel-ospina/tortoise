@@ -968,11 +968,16 @@ def _sentence_around(text: str, at: int) -> str:
     port, i.e. a parent-domain cookie shared across all subdomains"` reddened as a live claim
     because the `Legacy cohort:` label before `i.e.` fell out of the window — a false positive on
     a correctly marked line (proved during review, #4239).
+
+    A sentence can also end INSIDE an emphasis span and the next one begin immediately after it:
+    `- **Legacy cohort — CLOSED.** The page still accepts it.` has no space after its dot, so a
+    `". "`-only scan misses the boundary and the LABEL's `CLOSED` then excuses the live claim that
+    follows it. `.**` / `.*` / `._` are boundaries for exactly that reason (measured on #10346).
     """
 
     def _prev(limit: int) -> int:
         best = -1
-        for needle in (". ", "; ", "\n"):
+        for needle in (". ", "; ", "\n", ".**", ".*", "._"):
             i = text.rfind(needle, 0, limit)
             while needle == ". " and i != -1 and _is_abbrev(text, i):
                 i = text.rfind(needle, 0, i)
@@ -982,7 +987,7 @@ def _sentence_around(text: str, at: int) -> str:
 
     def _next(start: int) -> int:
         best = -1
-        for needle in (". ", "; ", "\n"):
+        for needle in (". ", "; ", "\n", ".**", ".*", "._"):
             i = text.find(needle, start)
             while needle == ". " and i != -1 and _is_abbrev(text, i):
                 i = text.find(needle, i + 1)
@@ -1727,10 +1732,25 @@ _CONSENT_PAGE_STILL_ACCEPTS = re.compile(
 # the label as the excuse let exactly that reversion through (proved by mutation here).
 # The words below are past-tense or explicit-disposition markers, so the sentence has to
 # SAY the page is gone.
+#
+# ⛔ A BARE PAST TENSE IS NOT A DISPOSITION. `"was "` was a member and it excused
+# `The legacy cookie was never revoked, and the consent page still accepts it as its own
+# session.` — a live claim laundered by the auxiliary in front of it (measured on #10346's
+# review). A retirement marker must name a DISPOSITION (deleted / removed / formerly / no
+# longer / inert / retired…), never merely a tense.
 _RETIRED_MARKERS = (
-    "deleted", "removed", "formerly", "former", "was ", "used to", "no longer",
+    "deleted", "removed", "formerly", "former", "used to", "no longer",
     "inert", "closed", "retired", "superseded", "historical", "gone", "pre-step-4",
 )
+
+#: The closure sentence has to be ABOUT this cookie. Without a scope word, ANY sentence
+#: carrying a denial satisfied the POSITIVE half: `- Password sign-in is not accepted on the
+#: API host.` stood in for "no surface accepts the legacy cookie any more" (measured on
+#: #10346's review). The pronoun arm is required, not decoration — `docs/auth-architecture.md`
+#: says `nothing on our side writes it, nothing reads it, and no Tortoise surface accepts it`,
+#: which names the cookie as `it` in the same sentence.
+_COOKIE_REF = re.compile(
+    r"\bcookies?\b|sb-tortoise-auth-token|\bit\b", re.IGNORECASE)
 
 
 def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
@@ -1745,13 +1765,21 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
     scanned = "\n".join(ln for _, ln in pairs)
 
     violations: list[str] = []
-    if not _NO_SURFACE_ACCEPTS.search(scanned):
+    closure_sentence = None
+    for m in _NO_SURFACE_ACCEPTS.finditer(scanned):
+        candidate = _sentence_around(scanned, m.start())
+        if _COOKIE_REF.search(candidate):
+            closure_sentence = candidate
+            break
+    if closure_sentence is None:
         violations.append(
             f"{rel} does not state, in its CURRENT-architecture region, that NO surface "
             "accepts the legacy `sb-tortoise-auth-token` cookie any more. Since #3524 §9 "
             "step 4 DELETED the consent page that used to accept it, that sentence is the "
             "shipped claim — and its absence is what a reversion to the pre-step-4 "
-            "'the consent page still re-reads it' wording looks like."
+            "'the consent page still re-reads it' wording looks like. The sentence must be "
+            "ABOUT this cookie (name it, or refer to it as 'it'): a denial about something "
+            "else is not the closure."
         )
 
     live: list[tuple[int, str]] = []
@@ -1828,6 +1856,34 @@ def test_the_acceptance_claim_DISCRIMINATES_on_the_shipped_state():
         "legacy cookie back as its session until #3524 §9 step 4 REMOVED it.\n"
     )
     assert _consent_page_acceptance_violations(rel, record) == []
+
+    # (e) a LABEL's disposition must not excuse the sentence AFTER it. A sentence can end inside
+    #     a bold close (`**… CLOSED.**`), and a `". "`-only splitter merged the two, so the label
+    #     laundered the live claim (measured on #10346's review).
+    bold_label = good + (
+        "- **Legacy cohort — CLOSED.** The consent page still accepts the legacy cookie as its "
+        "own session.\n"
+    )
+    assert _consent_page_acceptance_violations(rel, bold_label), (
+        "a bold retirement LABEL excused the live acceptance claim that follows it")
+
+    # (f) a bare past tense is not a disposition: `was never revoked` must not excuse
+    #     `still accepts it`. Only an explicit retirement word does.
+    bare_past = good + (
+        "- **Legacy cohort.** The legacy cookie was never revoked, and the consent page still "
+        "accepts it as its own session.\n"
+    )
+    assert _consent_page_acceptance_violations(rel, bare_past), (
+        "a bare 'was' (an auxiliary, not a disposition) excused a live acceptance claim")
+
+    # (g) the POSITIVE half must be ABOUT this cookie: a denial about something else cannot stand
+    #     in for the closure statement.
+    unrelated_denial = head + (
+        "- **Legacy cohort — CLOSED (see the bridge doc).**\n"
+        "- Password sign-in is not accepted on the API host.\n"
+    )
+    assert _consent_page_acceptance_violations(rel, unrelated_denial), (
+        "an unrelated 'not accepted' sentence satisfied the closure requirement")
 
 
 def test_auth_architecture_doc_keeps_the_rendered_welcome_case():
