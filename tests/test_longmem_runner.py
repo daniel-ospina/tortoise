@@ -5020,6 +5020,73 @@ def test_sweep_granularity_requires_dense_leg_by_default(monkeypatch, capsys):
     assert cells == [], "a cell ran despite the failed gate"
 
 
+# ── #4821 review P2 (cycle 3): the SEAM's refusals are the mechanism ──────
+#
+# `run_measured_evaluation` is the durable half of this PR: it is what makes
+# a FUTURE entry point — one nobody has written yet — unable to reach a
+# measurement by forgetting the gate (`gate_dense_leg`'s docstring advertises
+# exactly that, `run.py`: "an entry point **cannot forget the gate**"), and it
+# is what the description reports as asserted. It was not: `rg` found ZERO
+# references to `run_measured_evaluation` outside `run.py` except two
+# `monkeypatch.setattr` sites that REPLACE the seam — so its body was
+# unreachable from the suite, and both `ValueError` branches could be deleted
+# with every test still green (PIT's `Remove Conditionals`/`Empty returns`
+# class: a deleted validation branch that no test reds on is unpinned, however
+# correct it reads).
+
+
+def test_run_measured_evaluation_refuses_a_forgotten_gate(monkeypatch):
+    """#4821 review P2 — the seam refuses a forgotten gate, and still permits
+    a real gate answer.
+
+    RED when either `ValueError` branch in `run_measured_evaluation` is
+    deleted: the refusal becomes `run_evaluation(...,
+    embedder_status=None)`, which is R3 #1542 D5's *programmatic*
+    `reason="not_checked"` default — i.e. #4821's exact posture (a
+    keyword-only run with no gate) restored silently for every entry point
+    that does not exist yet. RED-as-`DID-NOT-RAISE` for the branch under test.
+
+    Hermetic: `run_evaluation` is replaced with a recorder, so this exercises
+    the seam's own validation only — no dataset, DB, embedder or network.
+    """
+    import tools.longmem_eval.run as runner
+
+    calls: list[dict] = []
+
+    def _recording_run_evaluation(instances, **kwargs):
+        calls.append(kwargs)
+        return [], {}
+
+    monkeypatch.setattr(runner, "run_evaluation", _recording_run_evaluation)
+
+    # (1) THE omission #4821 is about: the gate never ran, so there is no
+    #     status to hand on. `None` must not fall through to D5's default.
+    with pytest.raises(ValueError, match="requires the status dict returned by"):
+        runner.run_measured_evaluation([], embedder_status=None)
+
+    # (2) a status that was not produced by the gate is refused for its SHAPE,
+    #     not crashed on via `.get()` — `reason` is the key the D5 arm reads.
+    with pytest.raises(ValueError, match="requires the status dict returned by"):
+        runner.run_measured_evaluation([], embedder_status={"available": True})
+    with pytest.raises(ValueError, match="requires the status dict returned by"):
+        runner.run_measured_evaluation([], embedder_status="available")
+
+    # (3) R3 #1542 D5's `not_checked` marker is the PROGRAMMATIC posture, not
+    #     a measurement posture — the seam refuses it by name.
+    with pytest.raises(ValueError, match="not_checked"):
+        runner.run_measured_evaluation(
+            [], embedder_status={"available": False, "reason": "not_checked"})
+
+    assert calls == [], "a refused status still reached run_evaluation"
+
+    # (4) … and the seam is not a blanket refusal: a real gate answer reaches
+    #     the runner, threaded as `embedder_status`. Without this arm, a seam
+    #     mutated to always raise would satisfy every assertion above.
+    status = {"available": True, "reason": None, "model": "pinned"}
+    assert runner.run_measured_evaluation([], embedder_status=status) == ([], {})
+    assert calls == [{"embedder_status": status}]
+
+
 def test_sweep_granularity_waiver_labels_but_never_selects(
         monkeypatch, tmp_path, capsys):
     """#4821 (b)+(c): the ``--skip-preflight`` waiver still lets the sweep
