@@ -7966,6 +7966,70 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
         f"this work is exactly the defect #3239 reports")
 
 
+def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
+    """#10182/#5219: the carve-out job must be RESTORE-ONLY on the pip cache.
+
+    `actions/cache` saves in a POST step, and (#10182) that post step is charged
+    against the job's `timeout-minutes` like any other step. This job cannot
+    amortize such a save, and no cap it is allowed to carry can: the cap above
+    is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
+    at the ceiling), while ONE shard already spends its 19m floor-clamped
+    watchdog plus ~1.5m of setup/provision — and the SAVE has no timeout of its
+    own, so a slow one is unbounded, not merely large. Headroom amortizes a
+    bounded cost; it cannot amortize an unbounded one.
+
+    MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008): the
+    restore was a PARTIAL hit, so the post step reserved the exact key and began
+    a ~3.6 GB save. Every WORK step passed — pytest finished at 18:10:55, the
+    orphan gate said 'no orphans' at 18:10:53 — and then `Post Cache pip
+    dependency caches` ran 18:12:33 → 18:29:46 against a 17:59:19 start, when
+    `The job has exceeded the maximum execution time of 30m0s`. GitHub reported
+    `cancelled`, which `python-ci-gate` reads as red BY DESIGN (#5219: a
+    cancelled leg certifies nothing) — so a GREEN shard reddened a REQUIRED
+    check on a diff that never touched this job.
+
+    Nothing is lost by not saving here: the key is SHARED
+    (`pip-<os>-<hash uv.lock>`) and is still written on EVERY run by
+    `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`, so this
+    job only ever READ it. The ~90 MB HF embedding cache in the same job is
+    deliberately left alone (measured 1m38s to save, and it is the leg's
+    provisioning path — an uncached load skip-reds the dense assertion #4387);
+    the pip cache is the ~3.6 GB term that does not fit.
+
+    Non-vacuous in both directions: the pre-fix step is a bare `actions/cache@v4`
+    on this path, which reds the first assertion; and the presence + shape of
+    the restore is asserted too, so DELETING the cache step cannot pass.
+    """
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+
+    def _path_of(step: dict) -> object:
+        return (step.get("with") or {}).get("path")
+
+    pip_caches = [s for s in job.get("steps", []) if _path_of(s) == "~/.cache/pip"]
+    assert pip_caches, (
+        "the carve-out job no longer restores the shared pip cache at all — every "
+        "shard would then download torch (140 wheels, ~3.2 GB) cold")
+    saving = [s.get("uses") for s in pip_caches
+              if str(s.get("uses") or "").startswith("actions/cache@")]
+    assert not saving, (
+        f"the carve-out job carries an implicit post-step cache SAVE {saving} on "
+        "~/.cache/pip — that save is charged against the job's `timeout-minutes` "
+        "(#10182) and this job's cap is pinned at <= 3x its measured pytest step, "
+        "so the save can never be amortized. Use `actions/cache/restore@` here "
+        "(#5219: the cancel it causes reds a REQUIRED check on a green shard).")
+    restores = [s for s in pip_caches
+                if s.get("uses") == "actions/cache/restore@v4"]
+    assert len(restores) == 1, (
+        "the carve-out's pip cache step must be exactly one "
+        f"`actions/cache/restore@v4` (found {len(restores)} of {len(pip_caches)} "
+        "pip-cache steps in that shape)")
+    assert restores[0].get("continue-on-error") is True, (
+        "the carve-out's pip-cache restore must be `continue-on-error: true` — a "
+        "cache-SERVICE error (transport/503) must never red the leg; a miss is "
+        "the fail-open case and install-cpu-torch downloads the pinned CPU "
+        "wheel either way")
+
+
 def _carve_matrix() -> dict:
     """W37: the carve-out matrix the workflow ACTUALLY expands.
 
