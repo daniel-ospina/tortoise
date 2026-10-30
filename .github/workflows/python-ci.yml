@@ -837,13 +837,25 @@ jobs:
           # pre-warmed env (same result, tolerant of the stale dir).
           rm -rf .venv
           uv sync --frozen
-      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
-        # Leaky shared runners accumulate redislite tempdirs from every
-        # failed embedded-redis run — discover() then skips its stale-socket
-        # walk (>5000 entries), so the reaper chaos tests fail with
-        # "orphan not cleaned". Reap strays before the suite. Best-effort.
+      - name: Reap ABANDONED redislite litter (#1005 / #3653)
+        # #1005: leaky runners accumulate redislite tempdirs from every failed
+        # embedded-redis run — discover() then skips its stale-socket walk
+        # (>5000 entries), so the reaper chaos tests fail with "orphan not
+        # cleaned". Reap strays before the suite.
+        # #3653: it used to be `pkill -f "redis-server unixsocket"`, which
+        # matches EVERY redislite on the box. This matrix runs up to four such
+        # legs per workflow and its own orphan gate has measured ten other live
+        # suites on one host (`other_suites=10`), so a leg that started later
+        # killed a concurrent leg's live instance — redislite unlinks its socket
+        # on that SIGTERM, and the victim then reddened with "redis.socket … No
+        # such file or directory" on a diff it never touched. The replacement
+        # reaps only on a PROOF that no running leg can own the server (its
+        # socket dir is gone, or it is older than the widest leg watchdog) and
+        # KEEPS every case it cannot measure.
+        # Best-effort like the find below: a cleanup that cannot run must not red
+        # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
-          pkill -f "redis-server unixsocket" || true
+          python3 .github/scripts/reap-redislite-orphans.py --apply || true
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
@@ -1944,13 +1956,25 @@ jobs:
         # sdist-rebuild gate uses `python -m build` as its primary builder —
         # the [test] extra does not pull it, and a missing builder would
         # pytest.skip the wheel gate out of CI with a green run.
-      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
-        # Leaky shared runners accumulate redislite tempdirs from every
-        # failed embedded-redis run — discover() then skips its stale-socket
-        # walk (>5000 entries), so the reaper chaos tests fail with
-        # "orphan not cleaned". Reap strays before the suite. Best-effort.
+      - name: Reap ABANDONED redislite litter (#1005 / #3653)
+        # #1005: leaky runners accumulate redislite tempdirs from every failed
+        # embedded-redis run — discover() then skips its stale-socket walk
+        # (>5000 entries), so the reaper chaos tests fail with "orphan not
+        # cleaned". Reap strays before the suite.
+        # #3653: it used to be `pkill -f "redis-server unixsocket"`, which
+        # matches EVERY redislite on the box. This matrix runs up to four such
+        # legs per workflow and its own orphan gate has measured ten other live
+        # suites on one host (`other_suites=10`), so a leg that started later
+        # killed a concurrent leg's live instance — redislite unlinks its socket
+        # on that SIGTERM, and the victim then reddened with "redis.socket … No
+        # such file or directory" on a diff it never touched. The replacement
+        # reaps only on a PROOF that no running leg can own the server (its
+        # socket dir is gone, or it is older than the widest leg watchdog) and
+        # KEEPS every case it cannot measure.
+        # Best-effort like the find below: a cleanup that cannot run must not red
+        # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
-          pkill -f "redis-server unixsocket" || true
+          python3 .github/scripts/reap-redislite-orphans.py --apply || true
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
@@ -2432,13 +2456,25 @@ jobs:
         # sentence_transformers (embeddings extra), and create_point calls
         # compute_embedding. Matches the sibling jobs exactly.
         run: pip install -e '.[test,embeddings]'
-      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
-        # Leaky shared runners accumulate redislite tempdirs from every
-        # failed embedded-redis run — discover() then skips its stale-socket
-        # walk (>5000 entries), so the reaper chaos tests fail with
-        # "orphan not cleaned". Reap strays before the suite. Best-effort.
+      - name: Reap ABANDONED redislite litter (#1005 / #3653)
+        # #1005: leaky runners accumulate redislite tempdirs from every failed
+        # embedded-redis run — discover() then skips its stale-socket walk
+        # (>5000 entries), so the reaper chaos tests fail with "orphan not
+        # cleaned". Reap strays before the suite.
+        # #3653: it used to be `pkill -f "redis-server unixsocket"`, which
+        # matches EVERY redislite on the box. This matrix runs up to four such
+        # legs per workflow and its own orphan gate has measured ten other live
+        # suites on one host (`other_suites=10`), so a leg that started later
+        # killed a concurrent leg's live instance — redislite unlinks its socket
+        # on that SIGTERM, and the victim then reddened with "redis.socket … No
+        # such file or directory" on a diff it never touched. The replacement
+        # reaps only on a PROOF that no running leg can own the server (its
+        # socket dir is gone, or it is older than the widest leg watchdog) and
+        # KEEPS every case it cannot measure.
+        # Best-effort like the find below: a cleanup that cannot run must not red
+        # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
-          pkill -f "redis-server unixsocket" || true
+          python3 .github/scripts/reap-redislite-orphans.py --apply || true
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
@@ -2860,9 +2896,25 @@ jobs:
       - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
-      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
+      - name: Reap ABANDONED redislite litter (#1005 / #3653)
+        # #1005: leaky runners accumulate redislite tempdirs from every failed
+        # embedded-redis run — discover() then skips its stale-socket walk
+        # (>5000 entries), so the reaper chaos tests fail with "orphan not
+        # cleaned". Reap strays before the suite.
+        # #3653: it used to be `pkill -f "redis-server unixsocket"`, which
+        # matches EVERY redislite on the box. This matrix runs up to four such
+        # legs per workflow and its own orphan gate has measured ten other live
+        # suites on one host (`other_suites=10`), so a leg that started later
+        # killed a concurrent leg's live instance — redislite unlinks its socket
+        # on that SIGTERM, and the victim then reddened with "redis.socket … No
+        # such file or directory" on a diff it never touched. The replacement
+        # reaps only on a PROOF that no running leg can own the server (its
+        # socket dir is gone, or it is older than the widest leg watchdog) and
+        # KEEPS every case it cannot measure.
+        # Best-effort like the find below: a cleanup that cannot run must not red
+        # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
-          pkill -f "redis-server unixsocket" || true
+          python3 .github/scripts/reap-redislite-orphans.py --apply || true
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
