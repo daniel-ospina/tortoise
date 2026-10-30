@@ -505,17 +505,6 @@ _S7_NARRATIVE_WORDS = 500
 _S7_BYTES_CELL = re.compile(r"^\| `(?P<version>vet-v2|classify-v2)`.*?\| ([\d,]+) B \|",
                             re.MULTILINE)
 
-#: §7's **clause-removed** baseline, numbers-then-version:
-#: ``**39,544 B ≈ 9,103 tok** (`vet-v1`)``.
-_S7_BASELINE_CELL = re.compile(
-    r"[\s*]*(?P<bytes>[\d,]+) B ≈ (?P<tok>[\d,]+) tok\**[\s`]+\(`(?P<version>vet-v\d|classify-v\d)`\)",
-    re.DOTALL)
-
-#: The changelog's baseline, version-then-numbers:
-#: ``(`vet-v1` 39,544 B ≈ 9,103 tok; `classify-v1` 23,332 B ≈ 6,594 tok)``.
-_CL_BASELINE_CELL = re.compile(
-    r"`(?P<version>vet-v\d|classify-v\d)` (?P<bytes>[\d,]+) B ≈ (?P<tok>[\d,]+) tok")
-
 
 def _s7_text(chars: int, seed: int = 1) -> str:
     words, i = [], seed
