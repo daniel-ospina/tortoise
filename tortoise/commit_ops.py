@@ -540,8 +540,9 @@ def _supersession_fold_order(proj, records):
     pre-fix per-record semantics. Id-less nodes can never be a VISIBLE
     successor (the fold-time gate requires an id), so chains through them as
     a middle/tail link are order-insensitive — but an id-less TARGET still
-    participates as a needer of its own successor and sorts normally (pinned
-    by test_apply_supersessions_chain_idless_target_converges). The main
+    participates as a needer of its own successor and sorts normally (its
+    refusal is the MAIN LOOP's, not an ordering artifact — pinned by
+    test_apply_supersessions_chain_idless_target_is_refused). The main
     loop re-probes per record at fold time (its gates are STATUS-dependent —
     the pre-pass resolves structure only, so no TOCTOU: the Object graph is
     write-static inside apply_supersessions, entities precede every call).

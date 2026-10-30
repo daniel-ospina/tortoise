@@ -4478,8 +4478,8 @@ def _landing_entity_label(etype: str, props: dict) -> str | None:
 
     ``etype`` is what the item DECLARED; the entity door re-labels the write by
     the KIND it names (#9964: ``create_object(objectKind='core:team')`` writes a
-    ``:Subject``), and identity is label-scoped (``ids.py``:
-    ``sha256(f"{label}:{name}")``) — so anything predicting the node the write
+    ``:Subject``), and identity is label-scoped by the MINTED ``id``, not the
+    retired ``sha256(f"{label}:{name}")`` — so anything predicting the node the write
     touches must ask the DOOR's own authority (``_door_relayed_props`` →
     ``_kind_layer_note``) rather than the type→label map.
 
@@ -4508,8 +4508,8 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
 
     ``etype`` is what the ITEM declared; the entity door re-labels the write by
     the KIND it names (#9964: ``create_object(objectKind='core:team')`` writes a
-    ``:Subject``), and identity is label-scoped (``ids.py``:
-    ``sha256(f"{label}:{name}")``) — so probing ``etype``'s label can measure a
+    ``:Subject``), and identity is label-scoped by the MINTED ``id``, not the
+    retired ``sha256(f"{label}:{name}")`` — so probing ``etype``'s label can measure a
     DIFFERENT node than the write touches. Measured at the review head:
     re-ingesting ``{"type": "object", "objectKind": "core:team"}`` reported
     ``created`` while the write MERGED, forever, because the ``:Object`` probe
