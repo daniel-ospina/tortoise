@@ -4719,6 +4719,14 @@ surfaces:
   - test_ship_test_onboarding.py   # #3806: the ship-test probe's guard (classifier + page-wide claim sweep + DOM/server readers + RED/GREEN mutation evidence); the browser half is tests/e2e/test_ship_test_onboarding.py, run by the dashboard-e2e job
   - test_skip_guard.py
   - test_slack_connector.py
+  # #8933: the identifier-preservation mechanism (`tortoise/sparse.py` +
+  # `tortoise/projection/entities.py`). Both are `core` subjects already, but the
+  # file must be REGISTERED or the manifest-integrity job reds and no leg runs it
+  # at all (#9190/#2938). It is NOT in `carve_out`: its live cases target the
+  # docker lane's FTS index and skip gracefully when no live URI is reachable
+  # (`tests/test_search_engine.py`'s #6673 probe pattern), so the carve-out job
+  # does not need it and a docker lane MUST run it.
+  - test_identifier_tokens_8933.py
   - test_sparse.py
   - test_status_projection.py
   # #2729: pack-declared per-kind Object status folds — manifest validation
