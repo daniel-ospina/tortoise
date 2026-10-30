@@ -734,25 +734,29 @@ and `systemctl show -p Environment runner-autoscale.service` is what says which 
 
 - **Why the repair has to read it.** #6897's `OVERRIDES:` marker suspends the version-pin invariant
   and records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. The repair honours
-  that switch, and the honest consequence is that an UNSET flag IS `off`: nothing in this tree exports
-  it yet (#10275), so the next manual heal on the live pool — measured 2026-10-29, 7 of 7 x64 runners
-  carrying `ubuntu-24.04` — performs that revert unless the operator exports
-  `CI_RUNNER_OS_LABEL=on` first. It is a PRINTED removal (`version-pinned, not kept=[…]`,
+  that switch, and the honest consequence is that an UNSET flag IS `off` — which is what a hand-run
+  command has, since the only WRITER is the SCHEDULE (`tools/install-runner-autoscale-schedule.sh`,
+  which renders the value into the timer; a manual invocation inherits no such environment). So the
+  next manual heal on the live pool — measured 2026-10-29, 7 of 7 x64 runners carrying
+  `ubuntu-24.04` — performs that revert unless the operator exports `CI_RUNNER_OS_LABEL=on` first. It is a PRINTED removal (`version-pinned, not kept=[…]`,
   `removed=[…]`, both before the PUT), never a silent one; and a repair that ignored the flag would
   make the recorded revert path unreachable instead.
-- **What it does not do.** It does not ADD the pin: the computed set never carries an `ubuntu-<version>`
-  at this head, so `on` can only PRESERVE one that is already attached (and, once #10275 lands, the
-  computed set carries it and the union keeps it — the two agree either way). Restoring a pin that
-  was already removed is the install path's job, never a repair's.
-- **What this page still does NOT restate.** The label table above still lists `ubuntu-24.04` as
-  "GitHub-hosted only", and `tools/runner_autoscale.py::_preserve_labels` still drops a version pin
-  on re-registration (`docs/ops/ci-runner-x64.md:25-26` is its citation). Both belong to #10275,
-  which changes the installer's DEFAULT and that preservation rule; correcting them here would put
-  two lanes' edits on the same paragraphs for no behavioural gain. What THIS page changes is only
-  the repair path's half of the same flag.
+- **What the UNION does with it.** `resolve_labels` appends `$OS_LABELS` on EVERY arm, after its
+  `case` (`LABELS="$LABELS$OS_LABELS"` — the one append point), so
+  under `on|auto` the computed set CARRIES `ubuntu-24.04`: the repair therefore ADDS it to a runner
+  that lacks it, not merely preserves an attached one. Under `off`/unset the same carve-out removes
+  it. The `kept=` / `not kept=` lines say which half ran, and `--print-labels` prints the set before
+  anything is PUT.
+- **The one place this rests on the repair.** `tools/runner_autoscale.py::_preserve_labels` DROPS
+  every `ubuntu-<version>`, including the bare spelling, so a runner RE-registered by the scheduled
+  pass loses a pin it legitimately carried (`docs/ops/ci-runner-x64.md:25-26` is the invariant it
+  restores). That is a NAMED residual, not an oversight: the function's docstring records it, and
+  nothing there re-attaches the label — `--repair-labels` does. `--status`' `label-coverage` exit 5
+  is what makes the gap visible instead of silent, and it is why a pin you meant to KEEP is removed
+  with `CI_RUNNER_OS_LABEL=off --repair-labels`, never by a bare repair.
 - **Re-measure, never assume.** The state is per-box and the fleet has moved twice in two days:
-  `grep -n CI_RUNNER_OS_LABEL /etc/systemd/system/runner-autoscale.service` (the systemd path — an
-  empty answer is the expected one today, since nothing in this tree writes the flag), then
+  `systemctl show -p Environment runner-autoscale.service` (the systemd path — an empty answer means
+  the schedule was installed with the flag unset, i.e. the `off` row), then
   `gh api repos/<owner>/<repo>/actions/runners --jq '.runners[]|select(.name|startswith("pi-runner-x64"))|{name,labels:[.labels[].name]}'`.
 
 ## The fast-matrix split is OPT-IN (`CI_SHARD_ROUTING=pool-split`)

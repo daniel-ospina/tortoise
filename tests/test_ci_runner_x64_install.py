@@ -3435,6 +3435,24 @@ def test_the_os_label_flag_describes_its_writers_without_asserting_the_live_box(
             "runner-autoscale.service` is the measurement, so the page may only say what the TREE "
             "exports"
         ),
+        "nothing in this tree exports it yet": (
+            "the schedule writer renders the value into the timer, so `off` on a hand-run command is "
+            "the ABSENCE of that writer's environment, not the absence of a writer"
+        ),
+        "the computed set never carries an `ubuntu-<version>`": (
+            "`resolve_labels` appends `$OS_LABELS` on every arm after its `case`, so under "
+            "`on|auto` the computed set DOES carry `ubuntu-24.04` and the repair ADDS it — the "
+            "sentence denies the one path that re-applies the #6897 mitigation"
+        ),
+        "Both belong to #10275": (
+            "that framing made the page defer its own subject to a PR that IS this branch; the "
+            "`_preserve_labels` drop is a NAMED residual here, and the re-attach path is "
+            "`--repair-labels`"
+        ),
+        "an empty answer is the expected one today, since nothing in this tree writes the flag": (
+            "the schedule writes it and `systemctl show -p Environment` is the read, so an empty "
+            "answer is the `off` row rather than the expected state"
+        ),
         "every row below that says": (
             "which row is LIVE is per-box state, so the page may only say which row an unexported "
             "repair takes — the fleet is read back through `gh api …/actions/runners` (I took this "
@@ -3464,9 +3482,28 @@ def test_the_os_label_flag_describes_its_writers_without_asserting_the_live_box(
                 "Both sides now live in this tree",
                 "resolve_os_label",
                 "not a fact this page holds",
+                # the writer the page must name, and the read that replaces guessing
+                "the only WRITER is the SCHEDULE",
+                "systemctl show -p Environment runner-autoscale.service",
+                # the UNION half: `on|auto` ADDS the pin, it is not only a preservation
+                "ADDS it to a runner that lacks it",
+                # the residual is named, not deferred to a PR
+                "NAMED residual",
             ),
         ),
     }
+    # ⛔ THE RUNBOOK'S "ADDS it" IS BACKED BY THE INSTALLER'S OWN APPEND POINT, not by prose: the
+    # OS label rides on EVERY `resolve_labels` arm, after its `case`, which is what makes the union
+    # carry it under `on|auto`. Without this pair the runbook could keep the sentence while the code
+    # stopped honouring it.
+    assert 'LABELS="$LABELS$OS_LABELS"' in installer, (
+        "`resolve_labels` no longer has its single unconditional append point "
+        "(`LABELS=\"$LABELS$OS_LABELS\"`) — then the runbook's \"the repair ADDS it\" is false and "
+        "the #6897 mitigation has no re-apply path outside a fresh install"
+    )
+    for arm in ("LABELS=\"$ARCH_LABEL,$FALLBACK_LABEL\"", "LABELS=\"$ARCH_LABEL\""):
+        assert arm in installer, f"`resolve_labels` lost the arm {arm!r} the append point completes"
+
     for artifact, (text, fragments) in required.items():
         for fragment in fragments:
             assert fragment in text, (
