@@ -5120,6 +5120,93 @@ def test_sweep_granularity_cli_waiver_is_the_only_way_through(
     assert all(r["embedding_coverage"] == 0.0 for r in payload["results"])
 
 
+# ── #4821 review P2: the PERMITTING direction must be proven too ──────────
+#
+# The contract has two directions and only the refusing one was pinned: every
+# assertion on `_dense_leg_verified` was `is False`, the `SELECTED granularity`
+# line was only ever asserted ABSENT, `_print_table` was called by no test at
+# all, and `main`'s v2 branch was unreachable from the suite (every `main()`
+# call passed `--mock`, which forces deterministic ingest). A suite that
+# EXECUTES a branch without discriminating its outcomes still lets the branch
+# be rewritten — a surviving mutant is a test gap, not an opinion:
+#   M-A `_dense_leg_verified` → `return False` — every legitimate hybrid sweep
+#       falsely blocked. Killed by the positive controls in
+#       `test_dense_leg_verified_consumes_the_write_time_witness` and by this
+#       test's exit-0 arm.
+#   M-B `main`: drop `or not measured` from the step-2 gate — killed by
+#       `test_sweep_granularity_v2_waived_sweep_never_exits_zero`.
+#   M-C `_print_winner`: `if not measured:` → `if True:` — NOT discriminated by
+#       either: every other assertion on the winner line is an ABSENCE, and
+#       the exit code does not depend on that print. That is what the test
+#       below pins, together with `_print_table`'s `MEASURED` label (only the
+#       `NOT MEASURED` side was asserted) and the measured receipt + exit code
+#       end-to-end through `main`.
+
+_ENABLED_STATUS = {"available": True, "reason": None, "model": "pinned",
+                   "sentence_transformers_version": "x"}
+
+
+def test_sweep_main_selects_and_exits_zero_when_measured(
+        monkeypatch, tmp_path, capsys):
+    """#4821 review P2 — the direction that PERMITS a sweep (M-A + M-C).
+
+    A v2 sweep whose cells recorded ``vector_strategy=enabled`` with real
+    coverage IS a measurement: the table says ``MEASURED``, the winner line
+    says ``SELECTED granularity``, the receipt says ``measured: true``, and
+    ``main`` exits 0. RED when ``_dense_leg_verified`` is `return False` (M-A:
+    the whole legitimate hybrid path is falsely blocked — the PR's own claimed
+    behaviour "(b) the legitimate path still works") and RED when
+    ``_print_winner`` prints the unmeasured vocabulary unconditionally (M-C);
+    both were green before this test existed.
+
+    Hermetic — no DB, embedder, network or model. The gate, the reader/judge,
+    the extractor builder and the sweep are supplied; the measured
+    derivation, the table's label, the winner vocabulary, the receipt and the
+    exit code are the real code.
+    """
+    import tests.model_adapters as _ma
+    import tools.longmem_eval.sweep_granularity as sg
+
+    winner = {"chunk_turns": 1, "evidence_recall@10": 0.9,
+              "context_tokens_mean": 100.0}
+    results = [_sweep_cell()]  # enabled, coverage 1.0, 40/40 points embedded
+    gate_calls: dict = {}
+
+    def _gate(*, dense_leg_required):
+        gate_calls["required"] = dense_leg_required
+        return _ENABLED_STATUS
+
+    # The gate is patched rather than `run_sweep`'s `dense_leg_required`
+    # driven, because a supplied `embedder_status` silently WINS over
+    # `dense_leg_required` in `run_sweep` — a test that drove the requirement
+    # alone would prove nothing.
+    monkeypatch.setattr(sg, "gate_dense_leg", _gate)
+    monkeypatch.setattr(sg, "build_reader", lambda *a, **k: MockReader())
+    monkeypatch.setattr(sg, "build_judge", lambda *a, **k: MockJudge())
+    # `main` imports the extractor builder locally; a real v2 run would put a
+    # provider on the wire, and nothing downstream of the build is under test.
+    monkeypatch.setattr(_ma, "build_extractor_model", lambda *a, **k: object())
+    monkeypatch.setattr(sg, "run_sweep", lambda *a, **k: (results, winner))
+
+    out = tmp_path / "measured-v2.json"
+    rc = sg.main(["--data", str(MINI), "--ingest-mode", "v2", "--limit", "1",
+                  "--chunk-turns", "1", "--output", str(out)])
+    printed = capsys.readouterr()
+    assert gate_calls["required"] is True, (
+        "a sweep without --skip-preflight must ask the gate for a REQUIRED leg")
+    assert rc == 0, "a MEASURED v2 sweep exited non-zero (M-A)"
+    assert "dense leg: vector_strategy=enabled" in printed.out
+    assert "(MEASURED)" in printed.out, (
+        "_print_table mislabelled a measured leg")
+    assert "SELECTED granularity" in printed.out, (
+        "a measured sweep never printed the SELECTED vocabulary (M-C)")
+    assert "NOT A MEASUREMENT" not in printed.err
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["dense_leg"]["measured"] is True
+    assert payload["dense_leg"]["required"] is True
+    assert payload["dense_leg"]["waived"] is False
+
+
 # ── #4821 review P1: the coverage witness must actually testify ───────────
 
 def _cell_report(*, points_total, points_embedded, per_q):

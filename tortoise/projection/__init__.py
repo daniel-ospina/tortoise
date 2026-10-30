@@ -6822,7 +6822,9 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _store_holds_prop_value,
     _usable_instant,
     gated_promote_payload,
+    identifier_tokens_enabled,
     promote_status_applies,
+    revise_identifier_aliases,
 )
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
@@ -19696,6 +19698,31 @@ class FalkorProjection(
         if not skip_content:
             params["c"] = new_content
             set_clauses.append("n.content = coalesce($c, n.content)")
+        # #10203 (measured P0): a content edit RECOMPUTES the derived identifier
+        # aliases, exactly as `update_point` recomputes `content_hash` (#1904)
+        # and the vector (#4208) in the same write. Leaving `search_keys` alone
+        # made the live node hold the CREATION's alias while the checker's
+        # reference view derived the new content's — an unclearable
+        # `divergence="content"` on a faithful graph (the #5048/#8006/#8317
+        # class), and an edit that REMOVED an identifier left a stale alias that
+        # still matched the old code. The node's previous value is read HERE,
+        # because it is what says which tokens are stale and the event does not
+        # carry it; the write then uses that value in the same round trip.
+        if (not skip_content and new_content is not None
+                and identifier_tokens_enabled()):
+            rows = self.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys",
+                params={"id": pid},
+            ).result_set
+            old_content, old_keys = rows[0] if rows else (None, None)
+            params["sk"] = revise_identifier_aliases(
+                new_content=new_content,
+                old_content=old_content,
+                old_search_keys=old_keys,
+            )
+            # `None` REMOVES the property (measured: a `SET` of null drops it),
+            # which is the correct end state when nothing is left to index.
+            set_clauses.append("n.search_keys = $sk")
         # #5048: fold a REVISED mitigation strength. The idempotent
         # re-mitigation branch of ``mitigate_operator`` calls
         # ``update_point(mid, mitigation_strength=…)`` and the PointRevised
