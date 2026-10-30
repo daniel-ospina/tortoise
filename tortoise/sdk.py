@@ -5168,6 +5168,46 @@ def _coerce_props(props: dict) -> dict:
     return props
 
 
+def _distinct_preserving_order(items) -> list:
+    """``items`` with repeated entries dropped, the FIRST occurrence kept (#9750).
+
+    The operator write path's input list is a SET, not a bag. `create_operator`
+    writes its typed edges and their ``INPUT`` mirrors BY LIST POSITION (``idx``
+    positions the EP source slot at 0 and the targets after it), so one edge per
+    DISTINCT endpoint is the invariant the graph has to hold — a caller that
+    repeats a target must not be given two weighted edges over the same claim.
+    `ep.py` builds the factor from the EDGE list, so a repeat appends the same
+    claim twice to the input list: it double-counts that claim's EP
+    contribution and defeats the "<2 inputs" unary path (measured on this head:
+    ``to: ["p2", "p2"]`` → 3 IMPL + 3 INPUT edges for a one-target operator).
+
+    ⛔ Do NOT reach for ``set()`` directly. Order is load-bearing: ``idx`` is
+    positional, so re-ordering the list would re-index the factor. First
+    occurrence wins, which is the set-union answer without the re-ordering.
+
+    ⛔ Do NOT widen this to the SOURCE slot. ``create_operator(op, a, [a])`` is
+    a DELIBERATE shape (the self-support operator, ``idx: 0`` + ``idx: 1`` over
+    one id — pinned behaviourally by ``tests/test_6871_operator_input_set.py``),
+    so the caller collapses ``target_ids`` among THEMSELVES and never against
+    ``source_id``.
+
+    An unhashable entry (a malformed target that another guard owns and names)
+    is kept verbatim: this helper decides MULTIPLICITY, never shape, and must
+    not turn a later, better-worded refusal into a ``TypeError`` raised here.
+    """
+    seen: set = set()
+    out: list = []
+    for item in items:
+        try:
+            if item in seen:
+                continue
+            seen.add(item)
+        except TypeError:
+            pass  # unhashable: kept verbatim for the shape guard to refuse
+        out.append(item)
+    return out
+
+
 def _item_dedup_key(item: dict) -> str | None:
     """The effective dedup ``key`` of an ingest bundle item — the SAME value
     ``create_point`` sees after ``_coerce_props`` flattens the item (#6110,
@@ -18097,6 +18137,17 @@ class TortoiseSDK:
                         semantics: str | None = None) -> dict:
         """Create an operator Point with optional semantic label.
 
+        ``target_ids`` is a SET, not a bag (#9750): the typed edges and their
+        ``INPUT`` mirrors are written by list POSITION (``idx: 0`` is the
+        source slot ``ep.py`` reads the forward message from, ``idx >= 1`` the
+        targets), so a repeated id would be written as two edges over one
+        claim and `ep.py`'s factor — built from the edge list — would count
+        that claim twice. A repeated entry is therefore collapsed here, first
+        occurrence winning, and the ``OperatorAdded`` payload carries the
+        collapsed list so a rebuild reproduces the same graph. A target that
+        repeats the SOURCE is NOT collapsed: ``create_operator(op, a, [a])``
+        is the deliberate self-support shape (``idx`` 0 and 1 over one id).
+
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism). ⛔ ``MITIGATES`` is
             NOT an operator kind (#4937 — the F1 ruling recorded on #2552):
@@ -18421,6 +18472,27 @@ class TortoiseSDK:
                 f"{', '.join(sorted(ACCEPTED_DIRECTION_VALUES))}, got {direction!r}"
             )
         pid = ulid()
+        # ── #9750: the operator's input set is a SET ────────────────────────
+        # Every edge BELOW is written per list position (idx 0 = the source,
+        # idx >= 1 = the targets, the slot `ep.py` reads the forward message's
+        # belief from), so a repeated id in `target_ids` was written TWICE —
+        # `CREATE (o)-[:IMPL {idx:i}]->(s)` AND `CREATE (s)-[:INPUT {idx:i}]->(o)`
+        # per list ENTRY, not per distinct target. `ep.py` builds the factor
+        # from the edge list, so that repeat appended the same claim twice: a
+        # one-target operator acquired a 3-input factor, double-counting the
+        # target's EP contribution with no diagnostic. Measured before this
+        # fix: `to: ["p2", "p2"]` → 3 IMPL + 3 INPUT edges; `to: ["p2"]` → 2/2.
+        #
+        # Collapse the list HERE, in the writer that owns endpoint identity, and
+        # NOT in Cypher: the operator route cannot use a MERGE (idx positions
+        # the EP source and the CREATE gives replay parity with
+        # `projection/edges.py::_create_edges`), so the dedup has to happen in
+        # the input list — which is what makes the PRIMITIVE incapable of
+        # double-writing, and therefore fixes every door at once (ingest,
+        # `decide`, extraction, MCP, direct API) rather than the ingest spelling.
+        # `OperatorAdded` below carries this same list, so a rebuild reproduces
+        # the deduped graph (replay parity, not a live-only repair).
+        target_ids = _distinct_preserving_order(target_ids)
         inputs = [source_id] + list(target_ids)  # noqa: RUF005
         proj = self._get_proj()
 
@@ -20177,8 +20249,21 @@ class TortoiseSDK:
             # committed (the #8623 residual arm).
             write_route = (route if effective_route is None
                            else effective_route)
+            # (#9750) judge the DISTINCT ref list, not the raw one: the rule
+            # exists because `create_direct_edge` takes ONE target, and two
+            # identical spellings are ONE target — the write below reads
+            # `dsts[0]` either way. Refusing `["o2", "o2"]` while accepting
+            # `"o2"` refused a caller over a spelling the write path already
+            # collapses (the same collapse the operator route gets from
+            # `create_operator`'s input set), which is indicator 1's
+            # "identical graphs, not one accepted and one refused".
+            # Non-string entries are excluded here: their SHAPE violation is
+            # reported above, and this arm must not raise on an unhashable one.
+            _distinct_tos = ([t for t in _distinct_preserving_order(tos)
+                              if isinstance(t, str)]
+                             if isinstance(tos, list) else [])
             if write_route == "direct" and isinstance(tos, list) \
-                    and len(tos) > 1:
+                    and len(_distinct_tos) > 1:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] multi-item 'to' "
@@ -22256,9 +22341,10 @@ class TortoiseSDK:
         created = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         deduped = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         results = [] if granularity == "granular" else None
-        # A3 warnings contract (cycle-23): the TWELVE-key enumeration lives in
-        # INGEST_CONTRACT §3.2 (extended from eleven by #8499 — the set is
-        # CLOSED, so a new key is a contract amendment, not a drive-by list)
+        # A3 warnings contract (cycle-23): the THIRTEEN-key enumeration lives
+        # in INGEST_CONTRACT §3.2 (extended from eleven by #8499, and from
+        # twelve by #9750's `duplicate_target_deduped` — the set is CLOSED, so
+        # a new key is a contract amendment, not a drive-by list)
         # E2E-6.2; this accumulator carries the operator-absorb / residue /
         # drift warnings appended during the connection loop.
         warnings: list[str] = []
@@ -22609,6 +22695,42 @@ class TortoiseSDK:
             to_list = conn["to"] if isinstance(conn["to"], list) else [conn["to"]]
             dsts = [refs.get(x, x) for x in to_list]
             if "operator" in conn:
+                # ── #9750: de-duplicate the RESOLVED targets, by id ─────────
+                # Two different spellings can name ONE node (a bundle-local ref
+                # and the id it minted, or two items `create_point`'s content
+                # dedup folded onto one id), so this cannot be a Phase-1
+                # ref-level comparison — Phase 1 has no ids (`_check_connection`
+                # says so itself). The dedup therefore belongs HERE, at the seam
+                # that has just turned the caller's spellings into identities,
+                # and it must run BEFORE `_find_operator` below: that query's
+                # dedup key is `size(targets) = size($inputs)`, so handing it
+                # the caller's multiplicity computes the key over a list the
+                # graph no longer holds — and a re-ingest would stop matching
+                # its own run-1 operator and mint a duplicate.
+                #
+                # ⛔ Scoped to the OPERATOR route on purpose. The relation route
+                # fans out over `dsts` (`extractedFrom`) and its response
+                # `to` shape is a stable contract field; de-duplicating there
+                # would change a documented shape, which this issue is not.
+                _distinct_dsts = _distinct_preserving_order(dsts)
+                if len(_distinct_dsts) != len(dsts):
+                    # Warn-not-block (#1934's ruling, this issue's §3.2 key 13):
+                    # the caller asked for N list entries and the graph holds one
+                    # edge per DISTINCT target, so name what collapsed rather
+                    # than silently answering a different question.
+                    _collapsed = [
+                        str(d) for d in _distinct_dsts if dsts.count(d) > 1]
+                    self._append_warning(
+                        "duplicate_target_deduped:"
+                        + ",".join(_collapsed)
+                        + f":{conn['operator']} — the connection's 'to' list "
+                        f"named the same target more than once; one connection "
+                        f"writes ONE typed edge and ONE INPUT edge per "
+                        f"DISTINCT target (the operator's input set is a set, "
+                        f"#9750). The repeated spelling was collapsed (order "
+                        f"preserved, so the positional idx is unchanged)."
+                    )
+                    dsts = _distinct_dsts
                 op_type = conn["operator"]
                 label = conn.get("label")
                 direction = conn.get("direction")
@@ -23483,11 +23605,22 @@ class TortoiseSDK:
             # `unidirectional` re-ingest (a silent duplicate).
             conds.append("o.direction IN $directions")
             params["directions"] = sorted(direction_spellings(canonical_dir))
+        # ── #9750: DISTINCT, because the KEY is a set ─────────────────────
+        # `targets` is the LEFT side of `size(targets) = size($inputs)`, and
+        # `$inputs` is now de-duplicated by the caller (both ingest's resolved
+        # `dsts` and `create_operator`'s own target list). A graph written
+        # BEFORE #9750 can still carry the duplicate edges the old writer
+        # produced (`idx` 1 and 2 over one id), whose `collect(t.id)` yields
+        # the same id twice — reading that as TWO targets made the exact-hit
+        # miss on a request that IS the operator's input set, and the retry
+        # MINTED A SECOND OPERATOR: the very duplicate this issue is about,
+        # on every legacy graph. Counting DISTINCT endpoints makes the key
+        # compare SETS on both sides, which is what "same input set" means.
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
             f"WHERE {epistemic_disjunction('t')} "
-            f"WITH o, collect(t.id) AS targets, collect(r) AS _ "
+            f"WITH o, collect(DISTINCT t.id) AS targets, collect(r) AS _ "
             f"WHERE {' AND '.join(conds)} "
             f"RETURN o.id, o.status LIMIT 1",
             params=params,
@@ -23532,7 +23665,7 @@ class TortoiseSDK:
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
             f"WHERE {epistemic_disjunction('t')} "
-            f"WITH o, collect(t.id) AS targets "
+            f"WITH o, collect(DISTINCT t.id) AS targets "
             f"WHERE {' AND '.join(pcond)} "
             f"RETURN o.id, o.status, targets",
             params=params,

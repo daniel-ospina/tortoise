@@ -616,7 +616,7 @@ and terminal statuses too). The sanctioned promotion routes:
 - `promotion_policy="auto"` opts into #131 parity (source auto-promotion on
   first edge write) — the migration path from the old default.
 
-The response carries `warnings` (never fatal) — see the TWELVE-key table.
+The response carries `warnings` (never fatal) — see the THIRTEEN-key table.
 
 ## Idempotent resubmission
 
@@ -672,7 +672,7 @@ mitigation (the operator route) or split into singular connections.
   rejections — migrate via `reify:true` ×2 (the operator route preserves
   both labels).
 
-## Warnings — the TWELVE keys (closed set)
+## Warnings — the THIRTEEN keys (closed set)
 
 `warnings` entries are key-prefixed strings. A key outside this table is a
 divergence — report it:
@@ -682,7 +682,7 @@ divergence — report it:
 `mitigation_strength_change` · `partial_operator_residue` ·
 `operator_absorb_completed` · `label_dropped_resubmit` ·
 `direction_dropped_resubmit` · `direction_changed_resubmit` ·
-`point_mediated_route`
+`point_mediated_route` · `duplicate_target_deduped`
 
 ## Query-back verification (J8 exit state)
 

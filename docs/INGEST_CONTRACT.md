@@ -131,12 +131,12 @@ Rules that hold regardless of granularity or policy:
   predicate — a mitigation Point plus `(op:Point)-[:mitigated_by]->(m:Point)` —
   and stamped with the bundle's `batch_id` ([§16](#16-batch_id--audit)).
   Re-submission updates it **in place** (never a duplicate) and reports
-  `mitigation_strength_change` ([§3.2](#32-warnings--the-twelve-keys) key 6).
+  `mitigation_strength_change` ([§3.2](#32-warnings--the-thirteen-keys) key 6).
   ⛔ **A WITHDRAWN mitigation is not reinstated by a re-submission** (#9962):
   if every mitigation the operator carries is terminal (`retracted` /
   `superseded` / `outdated` / `archived`), the submission is decided on its
   **assertion** — the `(reason, strength)` pair, which is what a mitigation
-  records ([§3.2](#32-warnings--the-twelve-keys) key 6). The SAME pair the
+  records ([§3.2](#32-warnings--the-thirteen-keys) key 6). The SAME pair the
   withdrawn Point already records is a **redelivery** (crash-retry, redelivery,
   re-extraction): it writes **nothing** — the withdrawn Point already records
   this bundle's mitigation, no duplicate is minted, and the silence is the same
@@ -214,9 +214,9 @@ Key points:
   common case), where no such weighting is claimed. Pass `reify: true`
   to state the operator route explicitly; a plain spelling that gets re-routed
   is reported as the `point_mediated_route` warning
-  ([§3.2](#32-warnings--the-twelve-keys)).
+  ([§3.2](#32-warnings--the-thirteen-keys)).
 - `nudges` is advisory, never enforced; `warnings` names divergences the
-  engine noticed (see [§3.2](#32-warnings--the-twelve-keys)).
+  engine noticed (see [§3.2](#32-warnings--the-thirteen-keys)).
 
 ### 2.3 Both granularities
 
@@ -291,7 +291,7 @@ policy):
 | Operator | bare operator-id string (identical across created / dedup-hit / absorb) |
 | Relation | `{"relation": pred, "from": id, "to": id, "deduped": bool}` |
 
-### 3.2 Warnings — the TWELVE keys
+### 3.2 Warnings — the THIRTEEN keys
 
 `warnings` entries carry a `key` (the table below), the affected ids, and any
 context (old/new values, candidate lists). The key set is a **closed
@@ -311,11 +311,13 @@ enumeration** — a warning key outside this table is a divergence; report it.
 | 10 | `direction_dropped_resubmit` | A resubmission omitted a direction its run-1 operator carried; strict matching created a second operator (naming both). | Re-add the direction, or accept the extraction default (see [§12](#12-authoring-guidance-cycle-25)). |
 | 11 | `direction_changed_resubmit` | The declared direction changed vs the stored operator on the same pair — a distinct semantic, committed as separate. | Confirm intent; supersede the stale direction variant if not wanted. |
 | 12 | `point_mediated_route` | A plain `IMPL`/`NAND` connection whose endpoints include a plain `:Point` was **reified into an operator** rather than written as an operator-less direct edge (#8499, owner ruling 2026-10-13: Point↔Point relations are operator-mediated; the direct shape is reserved for non-Point pairs — `Object↔Object` is the common case, not the only one, since only `:Point` triggers the gate). Names both endpoints and the operator type. | None if you wanted the contracted route. To say it explicitly, write `reify: true`. ⚠️ If you read `ids["connections"]` positionally, the entry is now the **operator-id string**, not the `{direct_edge, from, to}` descriptor — that descriptor is still what an `Object↔Object` direct edge returns. |
+| 13 | `duplicate_target_deduped` | The connection's `to` list named the same **target** more than once (the same spelling twice, or two spellings that resolved to ONE node — a bundle-local ref and the id it minted, or two items the point writer's content dedup folded), so the repeated entry was **collapsed** before the write (#9750). Names the ids that collapsed and the operator type. An operator's input set is a SET: its typed and `INPUT` edges are positional (`idx` 0 = the source slot `ep.py` reads the forward message from, `idx >= 1` = the targets), so a repeated target used to be written as two edges over one claim — `ep.py` builds the factor from the edge list, so it counted that claim twice and defeated the "<2 inputs" unary path (measured before the fix: `to: ["p2", "p2"]` → 3 `IMPL` + 3 `INPUT` edges for a one-target operator, vs `to: ["p2"]` → 2/2). Modern graphs write ONE edge per DISTINCT target, order preserved. | None — `to: ["x", "x"]` and `to: ["x"]` now produce identical graphs (same edge counts, same factor arity). If you meant TWO assertions about one target, that is two connections, not two list entries. |
 
 > A12 note: this table is the conformance anchor for the warning contract —
 > every key in the closed set must appear here, and no key outside it is
 > emitted. The set was extended from ELEVEN to TWELVE keys by #8499 (the
-> `point_mediated_route` row above); that amendment is deliberate, and is
+> `point_mediated_route` row above) and to THIRTEEN by #9750 (the
+> `duplicate_target_deduped` row above); both amendments are deliberate, and are
 > recorded here and pinned in `tests/test_ingest_conformance.py`.
 >
 > **Which keys are emitted today.** Row 6 (`mitigation_strength_change`) is
@@ -700,7 +702,7 @@ not schema — no version bump.
 | 5 | **Mitigation-reason conflict** | same-pair same-label IMPL+mitigation with differing reasons committed with an order-dependent survivor | Phase-1 violation | Unify the reason, or use label-differing pairs (legal) |
 | 6 | **Label-absent strict matching** | a no-label request was a wildcard matching labeled operators (order-dependent commit) | absent ≠ present; Phase-1 conflict for same-pair {labeled + absent}; a label-dropped resubmit creates a second operator + `label_dropped_resubmit` warning | Re-add the label, or use `reify` ×2 under auto |
 | 7 | **Direction-absent strict matching (per-op-type)** | a direction-absent lookup was a wildcard | absent ≡ op-type default for dedup (IMPL→`bidirectional`, NAND→`unidirectional`); {IMPL absent, `unidirectional`} and {NAND absent, `bidirectional`} are conflicts; a direction-dropped resubmit creates a second operator + `direction_dropped_resubmit` warning | Declare the direction, or accept the extraction default — **NAND=unidirectional, IMPL=bidirectional** |
-| 8 | **A connection's `mitigation` is applied** (#5244) | the field was validated and then DISCARDED: the operator was written, no mitigation Point, no `mitigated_by` edge, no warning | the operator is created/deduped/absorbed, then the mitigation Point + `(op)-[:mitigated_by]->(m)` edge are written and `batch_id`-stamped; a re-submission updates in place and reports `mitigation_strength_change` (row 6). #9962: a re-submission whose mitigation has been WITHDRAWN is decided on its assertion — the same `(reason, strength)` writes nothing (no revive, no duplicate), a different one mints a live mitigation | None — this is what [§3.2](#32-warnings--the-twelve-keys) already promised. Expect one extra Point in the graph and in `list_batch` counts for a mitigation-bearing bundle |
+| 8 | **A connection's `mitigation` is applied** (#5244) | the field was validated and then DISCARDED: the operator was written, no mitigation Point, no `mitigated_by` edge, no warning | the operator is created/deduped/absorbed, then the mitigation Point + `(op)-[:mitigated_by]->(m)` edge are written and `batch_id`-stamped; a re-submission updates in place and reports `mitigation_strength_change` (row 6). #9962: a re-submission whose mitigation has been WITHDRAWN is decided on its assertion — the same `(reason, strength)` writes nothing (no revive, no duplicate), a different one mints a live mitigation | None — this is what [§3.2](#32-warnings--the-thirteen-keys) already promised. Expect one extra Point in the graph and in `list_batch` counts for a mitigation-bearing bundle |
 
 ---
 
