@@ -1079,10 +1079,26 @@ def test_seam_target_assertion_calls_a_newer_install_newer_not_stale(home):
     DOWNGRADE of a healthy seam, which is a wrong outcome for the read-side
     callers this function is exported for.
 
+    #10241 review (cycle 5): the fixture's generation is DERIVED from the
+    shipped seam, never a literal. `16` is only "newer" while the shipped
+    generation is 15, and the seam's own header mandates a bump on ANY
+    behavioural edit — so on the bump to 16 `found == expected`, the NEWER
+    branch stops firing, and both assertions below go RED for a reason that
+    has nothing to do with the mutation this test guards (and it stays RED for
+    every later generation). The sibling fifty lines down derives its
+    generation the same way; the pre-existing ahead-artifact test uses an
+    unreachable 9999.
+
     Mutation: always emit the "older or locally edited" sentence."""
     ext_dir = home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
-    newer = b"// tortoise-hook-version: 16\n// from a newer CLI\n"
+    # The generation the shipped seam declares, +1: "a much newer CLI" with no
+    # constant to drift.
+    expected = hook_install.read_hook_version(
+        hook_install.ARTIFACT_CONTRACTS["pi"].source)
+    newer_gen = (expected + 1) if expected else 9999
+    newer = (f"// tortoise-hook-version: {newer_gen}\n"
+             "// from a newer CLI\n").encode()
     (ext_dir / capture_install.PI_EXTENSION_NAME).write_bytes(newer)
 
     msg = capture_install.assert_seam_target("pi", home=home)
