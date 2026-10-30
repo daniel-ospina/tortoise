@@ -977,3 +977,98 @@ stop reproducing) is still open; the substrate half is done and should not be re
 ## 2026-10-26 — §4.3's *G5's destructive half* now carries the DESIGN decision (`#5333`)
 
 A pass may only add (plus an evidence-preserving D12 MERGE), a physical delete is foreclosed to everything but GDPR/retention, and removal-from-recall is a journaled lifecycle fold alone — the fold's event stream stays the reconstruction source. The AUTHORISATION to ever run a relocation (task 1) remains the owner's; nothing is authorised. The gaps table's G5 row no longer reports the design question open, and the two capstone figures are cited to their record (`#5333`; probe `#9889`'s to land) instead of standing uncited. Pinned by `test_definite_description_backfill_5059.py::test_the_design_decision_is_recorded_add_only_never_delete`.
+
+## 2026-10-26 — the S2.2/S2.3 typed-decision seam EXISTS, and the "seam does not exist" passages are stamped (#5087)
+
+**What changed in the design document.** Two statements that the seam does not exist are now
+historical, and both say so where a reader meets them: §4.2's "`llm_tail` is not the seam"
+subsection carries a **STATUS** stamp at its head, §S2.3's table row records that the adapter is
+built, and the `#5333` G5 subsection's *"the bar is not buildable today"* paragraph now names what
+authorising that pass would still buy (the evidence bar and the relocation — not the seam). §8's
+*Reuse these* table carried a **third** such passage in a frame that reads as present tense ("Jev
+does NOT slot into its LLM tail … the swap needs an adapter, a prompt, and a parser") — that row is
+now stamped too, because §8 is the section a reader consults to answer "where does Jev go?" and a
+stale "it cannot go there" is exactly how the next lane rebuilds what this landed (`#10072` review). **No
+decision was reversed:** O4's admissible set, `SPLIT`'s absence, the `MERGE`/`MERGE-INTO-EXISTING`
+split, S2.3's vocabulary (`documentKind` genres and pack kinds, never `sourceKind`) and S2.2's
+fail-open direction are all served by the seam as recorded.
+
+**What was built.** `tortoise/s2_decision_seam.py` — the adapter (one round trip: `state` + a
+**map** of typed questions, shape copied from a working caller per `#7866`; §2 of the record owns the
+per-primitive evidence ledger, and this entry states it the same way rather than for "the caller", so
+that no artifact in this PR can understate or overstate what has been sent), the two versioned
+prompts (`vet-v1`: `noul` + `score` per candidate; `classify-v1`: a `choice` over the kinds the kNN
+offered), and the validating parser (`type` echo, `[0,1]`, the declared 0–3 scale, membership of
+the offered set — a violation names its question and yields **no verdict**). Consumers are the
+seams that already existed and had no production caller: `vet_gate.vet_candidates(arbiter=…)` and
+`KindClassifier(tail_decider=…)`. Armed only by `TORTOISE_S2_DECISION_SEAM`; **OFF by default**, so
+no rate effect is measurable until an operator arms it. Design record and measured cost:
+`docs/architecture/S2-DECISION-SEAM.md`.
+
+**Which of those shapes is corroborated live, per primitive** (the ledger §2 owns; the split is
+stated rather than lumped, because a lumped claim is how review round 18's `noul`/`score` finding
+arose). `noul` and `choice` each have a live caller of ours: `agent-infra/scripts/ask-owner.py`
+posts five `noul` questions to the vendor endpoint on the alias, and
+`agent-infra/scripts/turn-classify.py` sends one `choice` carrying a `criteria` **map** and reads the
+envelope's `model` on every call — so both the `choice` criteria map and the `model` field are
+**corroborated**, not taken from a reference page. `score` is **documented only**: the vendor
+publishes it (`docs.typesafe.ai/primitives/score`) and no caller of ours has ever sent one, so its
+2–10 level `criteria` array — the dominant term in `vet-v1`'s request — is unmeasured here rather
+than corroborated. The `model` echo is a **receipt, never an assertion**: it records which version
+answered and is never compared to `MODEL`, because asserting it would make an armed seam inert on
+the vendor's next release.
+
+**What it does NOT do (each a recorded decision, not an omission).** No `SPLIT` (absent from O4),
+no `RENARRATE`/coverage verdict (batch-level, and §S2.2 bounds that loop), no `MERGE` (`#5006`'s
+ladder, and §16.4's different evidence bar), nothing at S3 or S5 (S3 is the sole authority on
+new-vs-existing), no retry ladder and no cache.
+
+**Cost, measured rather than quoted.** The seam's own `vet-v1` batch of 40 items / 80 questions
+serializes to 39,484 B ≈ 9,265 input tokens ⇒ **$0.00039 per round trip (~$0.0000097/item)**;
+`classify-v1` at 40 tail items ⇒ 23,292 B ≈ 6,112 tokens ⇒ **$0.00026 (~$0.0000064/item)**. The price
+per token is the **vendor's** documented rate — `$42 / $0.042` per Btok / Mtok for `jev-1.13.0`,
+input-only (output tokens are free), i.e. `4.2e-8 $/token` — read from `docs.typesafe.ai/models` on
+2026-10-27. ⚠️ An earlier version of this entry used `4.19e-7 $/token` (10× the vendor's rate)
+derived from "the vendor's documented example: `$0.000026 / 62 tokens`", which does not exist in the
+vendor's documentation; the 100-row usage ledger it was cross-checked against fits `4.20e-7` because
+it was billed by the LOOKALIKE host, and it is evidence of that overcharge, not of the vendor's price. ⚠️ **No live call was made**: the box that wrote this
+had only a `jv_live_…` key — the LOOKALIKE host's shape, refused by the vendor (`403`, measured
+2026-10-27) — so the token counts are a `cl100k` proxy (read them ±15%). The seam posts to the
+VENDOR endpoint (`https://api.typesafe.ai/v1/systemone`; `tortoise#7864` / `#10095`), whose `usage`
+reports TOKENS rather than money, so the receipt an armed run produces is a token count in
+`stats["seam"]["input_tokens"]` — `cost_usd` is added only when a response carries one, and it is
+the VET gate's `stats` and the classify `stats` that both nest the seam's own record under that key. ⚠️ It lands in
+`result["vet"][*]["stats"]`, **not** in `stats["llm"]`, so the A/B cost gate does not add it to
+the LLM tail's spend — the two providers are counted separately on purpose, and an armed run's true
+tail cost is their sum.
+
+**Two things review found, both fixed here rather than documented.** (1) A degraded VET used to emit
+a `NOOP` **verdict** per candidate; since `vet_gate` applies arbiter verdicts over the mechanical
+pass, that **rescinded the `#4899` identifier-only `DISCARD`** on a key outage — an outage silently
+keeping what a working predicate had dropped, and erasing the rule id that explains it. A degraded
+item now emits **no verdict** and the failure is recorded by name in `stats["seam"]["degraded"]` /
+`["schema_rejects"]`; the composition is pinned by an assertion. (2) The VET half accumulated
+`cost_usd` and threw it away (`vet_arbiter` discarded its stats) — the receipt the flag exists for
+was unreadable for the half that spends more. `vet_candidates` now folds the arbiter's own record
+into its `stats["seam"]` (additive; its counters stay its own), so the spend, the bands and the
+degraded items reach `result["vet"][*]["stats"]["seam"]`.
+
+**Tests:** each is mutation-checked (`tests/test_s2_decision_seam_5087.py`), and no count is stated —
+the number moves every review cycle and a stale count has itself been a finding: a valid typed
+answer decides through the REAL `vet_gate` and the REAL `KindClassifier`; an out-of-schema answer
+(wrong primitive / `9.0` on a 0–3 scale / a choice outside the offered set) produces no verdict and
+names its question; the seam's own record (`prompt`/`model`/`bands`/`cost_usd`) reaches the gate's
+stats; an injected decider's unrepresentable spend cannot abort the fail-open classify pass; and
+further tests supply the inputs the guards documented in this module exist to refuse — `_noul`'s
+bound on both sides (and on a JSON `true`), the atomicity veto on a fused candidate, `Bands`'
+threshold ordering, a negative reported spend, and an item with nothing offered — plus the arming
+flag reaching the two PRODUCTION call sites (not merely a callable at the helper), the batch clamp /
+response-body cap / generator-`offered` guards, and the `NOOP` precedence against a mechanical
+`DISCARD` (with a standalone `KEEP` still keeping its own attribution). Every mutant reddens
+at least one of them and restores byte-identically — including
+`_noul`'s coercion of a missing probability to `0.0` (a JSON `true` then reads as a probability of
+`1.0`, because the coercion bypasses `_finite`'s `bool` rejection, reddening
+`test_the_two_numeric_bounds_and_the_fused_veto_redden_when_removed` — ⚠️ **not** `1.5`, which the
+intact `[0, 1]` band still refuses, and not the out-of-schema test either, because `_answer`'s
+echoed-`type` gate refuses that fixture before the coercion can read a value), the rejected
+`NOOP`-on-degradation shape, and `vet_arbiter` dropping its stats again.

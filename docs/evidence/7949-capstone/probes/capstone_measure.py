@@ -55,10 +55,14 @@ literal — a run that cannot read a flag back as set REFUSES rather than printi
 claim nothing supports. They are still UNWITNESSABLE through
 ``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` DOES build the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8961-8967`` and
-``result["vet"]`` at ``:8971-8975``); they are dropped at the meta fold,
-``tortoise/sdk.py:13611`` (``"stats": out.get("stats") or {}`` inside
-``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
+``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold in
+``tortoise/sdk.py`` — the line carrying ``"stats": out.get("stats") or {}``
+inside ``_extract_session_v2``, whose sibling key is never copied. That cite is
+NOT typed in this file: it is resolved from the tree at import as
+``META_FOLD_CITE`` (and a cite that will not resolve to exactly one line makes
+the probe REFUSE), because it is the one number no reader can keep true by hand
+and a stale one sends #9116's fixer to the wrong line. That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
 forbids.
@@ -135,17 +139,17 @@ CORPUS_DIR = "tests/eval/write_path"
 #: A line cite is the one number in this bundle no reader can keep true by hand:
 #: any commit that inserts a line above the fold moves it, and this branch alone
 #: has now moved it twice (its own docstring insert in `sdk.py`, and `main`'s
-#: `#9964`). Typed here, the cause re-stales SILENTLY — the shipped cause named
-#: `:13593` for a fold that had moved to `:13611`, and
-#: `tests/test_7949_capstone_measure.py::test_the_unobserved_cause_counts_the_keys_it_
-#: actually_inspected` compares it against a line it READS from the tree, so the
-#: pair reds CI on a merge that touched nothing either side owns. Measured on this
-#: branch: `#7949` red at `7cc798216` for exactly this. The symbol is authoritative
-#: and the line is a convenience (the bundle's own cite convention), so deriving it
-#: is the same answer Sphinx gives (`py:obj` resolves to a symbol, not a line).
+#: `#9964`). Typed here, the CAUSE re-stales SILENTLY — the shipped cause named
+#: `:13593` for a fold that had moved to `:13611`, and the only thing that caught
+#: it was `tests/test_7949_capstone_measure.py`, which derives the line in the
+#: PIN and compares. Deriving it here too means the cause a reader (and #9116's
+#: fixer) actually reads cannot re-stale on a merge that touched nothing this
+#: bundle owns. The symbol is authoritative and the line is a convenience (the
+#: bundle's own cite convention), so deriving it is the same answer Sphinx gives
+#: (`py:obj` resolves to a symbol, not a line).
 #:
-#: ⛔ It REFUSES rather than printing a claim nothing supports: a cite that cannot be
-#: resolved to exactly ONE line is not a number this run may print (the `arm:`
+#: ⛔ It REFUSES rather than printing a claim nothing supports: a cite that cannot
+#: be resolved to exactly ONE line is not a number this run may print (the `arm:`
 #: read-back rule, applied to a cite).
 META_FOLD_CODE = '"stats": out.get("stats")'
 
@@ -163,7 +167,7 @@ def _meta_fold_cite() -> str:
         raise RuntimeError(
             f"the meta fold's cite is ambiguous: {META_FOLD_CODE!r} is on {len(hits)} "
             f"lines of sdk.py {hits} — the cause names ONE line, so this run refuses "
-            "rather than pick (#9116)")
+            f"rather than pick (#9116)")
     return f"tortoise/sdk.py:{hits[0]}"
 
 
@@ -223,8 +227,11 @@ ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 #: A flag the arm PINS OFF so the measured population is a function of THIS file,
 #: not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
 #: switches S2.2 on (``extractor_v2._value_gate_enabled``), so an ambient value
-#: would silently change the arm between two runs of the same probe.
-ARM_OFF = ("TORTOISE_VALUE_GATE",)
+#: would silently change the arm between two runs of the same probe — and
+#: ``TORTOISE_S2_DECISION_SEAM`` (#5087) is a THIRD switch for S2.2 (it arms the
+#: arbiter, so ``_vet_enabled`` is True), which would arm a network call and a
+#: spend inside an arm this file declares OFF.
+ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
@@ -818,10 +825,10 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8592, the "
-        "flag; :8596, the early return; :8612, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:8680), "
-        "`if vet_enabled and complete_list:` (:8802) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596, the "
+        "flag; :8600, the early return; :8616, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:8684), "
+        "`if vet_enabled and complete_list:` (:8806) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
         "returns {} on its fail-open path, :8478-8481)."
@@ -829,16 +836,16 @@ _IDLE_CITES: dict[str, str] = {
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:8561 (and set False when its classifier cannot "
-        "be constructed, :8586), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:8565 (and set False when its classifier cannot "
+        "be constructed, :8590), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:8608-8611), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:8612-8615), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:8692) around `if items:` "
-        "(:8695), `if classify_later and complete_list:` (:8817) around "
-        "`if items:` (:8827) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:8696) around `if items:` "
+        "(:8699), `if classify_later and complete_list:` (:8821) around "
+        "`if items:` (:8831) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :8708 / :8838)."
+        "empty stats (its fail-open `except` at :8712 / :8842)."
     ),
 }
 
@@ -850,26 +857,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:8608-8612, :8961-8975) — so an acceptance test of "a non-empty dict"
+    {}}`` (:8612-8616, :8965-8979) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8592`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:8595``, whose
-    ``if not edus:`` early return (``:8596``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:8612``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8596`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:8599``, whose
+    ``if not edus:`` early return (``:8600``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:8616``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:8680``) and ``if vet_enabled and complete_list:``
-    (``:8802``). So a session whose conversation produced no list emits
+    embed_list:`` (``:8684``) and ``if vet_enabled and complete_list:``
+    (``:8806``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:8478-8481``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at ``:8561``, its own early-return
+    is different code (``classify_later`` at ``:8565``, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -1330,7 +1337,7 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"or a failed fail-open pass) is indistinguishable from this one, so "
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8971-8975. It is DROPPED one layer up, at "
+            f"tortoise/extractor_v2.py:8975-8979. It is DROPPED one layer up, at "
             f"the meta fold {META_FOLD_CITE} (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
@@ -1365,7 +1372,7 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"from this one, so this run does not claim the pass ran. Its "
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8961-8967. It "
+            f"tortoise/extractor_v2.py:8965-8971. It "
             f"is DROPPED at the same meta fold, {META_FOLD_CITE} "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "

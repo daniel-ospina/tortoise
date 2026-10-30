@@ -889,6 +889,37 @@ class TestEvalBits:
         assert result["sentinel_rate"] == 0.0
         assert result["bare_confusions"] == 0
 
+    def test_evaluate_bits_names_the_seam_lane_beside_the_llm_lane(self):
+        """#5087: an armed tail must be readable as the SEAM's, not inferred from
+        a counter that belongs to the LLM.
+
+        ``adjudication_calls`` is the LLM tail's call counter and is 0 on a seam
+        run, so a census carrying only that reads an armed arm as INERT
+        (non-zero ``adjudication_tail_rate`` beside ``adjudication_calls: 0``).
+        The seam lane is reported additively — ``mode_breakdown["assigned_seam"]``
+        and the seam block (assignments / calls / spend / prompt) — and stays
+        separate from the LLM's, so the two providers' spend is never blended.
+        This evaluator builds an UNARMED classifier (`llm_tail=False`), so the
+        keys must be present and zero rather than absent.
+
+        Mutant that reddens it: drop ``assigned_seam`` from the census's
+        ``mode_breakdown`` key list, or the seam block from the returned dict.
+        """
+        gold = [{
+            "id": "b1",
+            "content": "the ticket fix",
+            "type": "entity",
+            "gold_kind": "dev:issue",
+            "split": "calibrate",
+            "provenance": {"source": "t", "author": "a"},
+        }]
+        result = evaluate_bits(gold, arm="compact", encoder=KeywordEncoder())
+        assert result["mode_breakdown"]["assigned_seam"] == 0
+        assert "assigned_seam" in result["mode_breakdown"]
+        assert result["seam"] == {"assignments": 0, "calls": 0,
+                                 "cost_usd": 0.0, "prompt": ""}
+        assert result["adjudication_calls"] == 0
+
     def test_evaluate_bits_bare_name_confusion_not_exact(self):
         """FIX H: a same-bare-different-namespace match (dev:issue vs
         pm:issue) is a CONFUSION, not a hit — counting it in `exact` would

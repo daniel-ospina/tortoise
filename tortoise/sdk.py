@@ -2699,8 +2699,8 @@ def _write_capture_turns(
         # delete, and the removal is the `EntityMutated` op=delete emitted below
         # (⛔ TIER-LESS on purpose — `record_read._turns` has NO tier predicate, so a
         # DEMOTE would go on serving it (`_journal_turn_removal` demotes). `PointRetracted`
-        # is emitted ONLY on the graph-held lane: it is in `_GRAPH_EVENT_TYPES`,
-        # and on the record-held lane the turn was never announced there either.
+        # is emitted ONLY on the graph-held lane: it is in `_GRAPH_EVENT_TYPES`, while a
+        # record-held turn's CREATION is the CARRIER (NOT in that set) — see below.
         if stale and not _record_holds_turns:
             sdk._graph_write_with_retry(
                 lambda: proj.g.query(
@@ -2760,11 +2760,11 @@ def _write_capture_turns(
         # `_GRAPH_EVENT_TYPES`, so it writes a `:GraphEvent` subscriber row —
         # and on this lane the turn's CREATION record is the carrier, which is
         # deliberately NOT in that set (turns leave `poll_events` with step 7;
-        # see `record_projection.TURNS_RECORD_TYPE`). Announcing the deletion of
-        # an entity the feed never saw created is the asymmetry this gate
-        # removes; the JSONL half below still removes the record ROW, so a
-        # shorter re-capture is still durable. Pinned by
-        # `tests/test_10017_turn_carrier_replay.py`.
+        # see `record_projection.TURNS_RECORD_TYPE`). A pre-change turn's `PointAdded`
+        # keeps a creation in the feed with no matching retraction — the asymmetry
+        # accepted here rather than repaired by re-announcing turns; the JSONL half
+        # below still removes the record ROW, so a shorter re-capture is durable. Decided on #10325,
+        # pinned by `tests/test_10017_turn_carrier_replay.py`.
         if not _record_holds_turns:
             sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
         sdk._journal_entity_mutation("Point", tid, "delete")

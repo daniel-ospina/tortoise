@@ -2202,6 +2202,11 @@ def test_direct_edge_repoint_delete_only_deletes_rather_than_upserts():
 # ════════════════════════════════════════════════════════════════════════════
 # §4.4 pass-2b — a STRUCTURAL `DirectEdgeRepoint` is a MOVE (#9972 + #9973)
 # ════════════════════════════════════════════════════════════════════════════
+# The DOC half of this pin (ONTOLOGY §3.1 + the INGEST supersede row vs this
+# plan) lives in `tests/test_10191_record_move_doc_pin.py`: a
+# `docs/INGEST_CONTRACT.md`-only diff selects no surface and runs `tier1` only,
+# which does not include this file, so a pin inside this docker-lane module
+# would sleep on the exact edit it guards (#8474's shape).
 
 
 def _structural_repoint(src="p1", tgt="Acme Corp", edge_type="aboutObject",

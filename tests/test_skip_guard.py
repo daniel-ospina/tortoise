@@ -204,7 +204,16 @@ class TestGuardAcceptsCleanLog:
         80 cols (drops test_ep_directional's reason, guard would fail open), and
         pytest 9.1.1 REPLACES the report set on repeated -r flags — so a
         trailing -rfE would suppress the skip summary the guard depends on.
-        -r fEs is the order-independent superset (f=FAILED, E=ERROR, s=SKIPPED)."""
+        -r fEs is the order-independent superset (f=FAILED, E=ERROR, s=SKIPPED).
+
+        The SELECTION is the fragile half: EIGHT watchdog-wrapped `python -m
+        pytest` command lines in this file match the duration prefix, and TWO of
+        them write `--junitxml="$PYTEST_JUNIT"` — the fast gating run and, since
+        #10028, the single-process `test-slow` leg. So the selector carries one
+        exclusion term per leg it must NOT read (the `$PYTEST_JUNIT_LF`
+        pre-phase, and the slow leg). A term that stops discriminating does not
+        error — it silently compares another leg's command line — which is why
+        the count floor below is load-bearing."""
         workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" \
             / "python-ci.yml"
         text = workflow.read_text()
@@ -233,8 +242,27 @@ class TestGuardAcceptsCleanLog:
             # `"$PYTEST_JUNIT_LF"`, so the pre-phase is excluded by the same
             # token that selects the gating run.
             and '--junitxml="$PYTEST_JUNIT"' in l
+            # ⛔ ...and THAT TOKEN IS NO LONGER UNIQUE TO THIS JOB: with the
+            # #10028 migration finished for `test-slow`, the slow leg writes the
+            # same `--junitxml="$PYTEST_JUNIT"`, so the token selects TWO
+            # invocations and the pin compared the SLOW leg's command line —
+            # exactly the same wrong-job shape it was written to catch (measured
+            # on the required `test-slow (d)` check: `assert 2 == 1` over the
+            # sharded fast gating run and the slow leg). The fast gating run's
+            # own discriminator is the xdist expansion
+            # (`-n "$XDIST_WORKERS" --dist loadscope`); the slow leg runs
+            # single-process (`-p no:cacheprovider`, no `-n`), so this keeps the
+            # selection at exactly one.
+            #
+            # ⛔ Both legs are named by their DISCRIMINATORS, never by a line
+            # number: this note used to cite the slow run's offset, the workflow
+            # grew, and the cite silently sent a reader to a comment line about a
+            # committed weight (#10244 review note). The two predicates below are
+            # what locate each leg, so a reader re-locates it the same way this
+            # test does — with nothing re-typed to drift.
+            and '-n "$XDIST_WORKERS"' in l
         ]
-        # A retarget here is INVISIBLE without these two floors: every pytest
+        # A retarget here is INVISIBLE without these floors: every pytest
         # invocation in this file carries `-r fEs`, and the retired literal still
         # matched the `test-slow` leg, so reading the WRONG job passed silently
         # (measured: the old filter matched exactly one line, and it was
@@ -244,7 +272,18 @@ class TestGuardAcceptsCleanLog:
             "the pinned invocation does not expand $FILES — it is not the "
             f"fast-suite gating run: {fast_run[0]}"
         )
-        assert fast_run, "fast-suite pytest invocation not found"
+        # The third floor names the leg this pin must NOT read. `-n` is what
+        # makes the fast job the SHARDED, xdist run; `-p no:cacheprovider` is
+        # what makes `test-slow`'s single-process run recognisable. If a future
+        # edit gives the slow leg `-n` too, this reds by NAME instead of the
+        # count floor reding with a two-line diff a reader has to decode.
+        assert '-p no:cacheprovider' not in fast_run[0], (
+            "the pinned invocation is the single-process `test-slow` leg, not "
+            f"the sharded fast-suite gating run: {fast_run[0]}"
+        )
+        # (No `assert fast_run` here: `assert len(fast_run) == 1` above and the
+        # two `fast_run[0]` reads already fail first, so an emptiness guard on
+        # this line could never be the message a reader sees.)
         assert "-r fEs" in fast_run[0], (
             "fast-suite pytest must report skips in the summary (-r fEs): -v "
             "truncates skip reasons at 80 cols and a trailing -rfE replaces the "

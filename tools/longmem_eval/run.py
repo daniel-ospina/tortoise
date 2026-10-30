@@ -3033,9 +3033,14 @@ INGEST_CACHE_MARKER_LABEL = "lme_ingest_cache"
 #: Files whose content IS the v2 extractor pipeline (the "extractor code
 #: version" dimension of the ingest fingerprint): ingest_v2.py (the
 #: eval-side pipeline + payload writer), tortoise/extractor_v2.py (the
-#: production 5-stage extractor), and tortoise/vet_gate.py (its S2.2 gate).
+#: production 5-stage extractor), tortoise/vet_gate.py (its S2.2 gate), and
+#: tortoise/s2_decision_seam.py (the typed-decision seam that gate is told
+#: by — it decides DISCARD/KEEP, so its BANDS and prompts are pipeline too).
 #: A content change to any of these invalidates every cached per-question
-#: graph automatically — no manual cache-bust.
+#: graph automatically — no manual cache-bust. ⛔ Name every file here that
+#: the tuple below carries: the count in this prose went stale twice (#10072
+#: review rounds), so a missing name is a claim mismatch, not a shorthand.
+#: ``tests/test_eval_ingest_cache.py`` pins that correspondence.
 INGEST_CACHE_CODE_FILES = (
     Path(__file__).resolve().parent / "ingest_v2.py",
     Path(__file__).resolve().parent.parent.parent
@@ -3046,13 +3051,23 @@ INGEST_CACHE_CODE_FILES = (
     # (``git_sha`` only covers committed HEAD).
     Path(__file__).resolve().parent.parent.parent
     / "tortoise" / "vet_gate.py",
+    # #5087/#10072: the S2.2/S2.3 seam is imported by the extractor and its
+    # BANDS, prompt text and atomicity ladder decide DISCARD/KEEP, so the SAME
+    # argument as vet_gate.py applies: an uncommitted tuning of it changes
+    # extraction output while leaving the code files above untouched, and
+    # ``git_sha`` only covers committed HEAD. Listing ``vet_gate.py`` but not
+    # the module that decides what vet_gate is told was an asymmetry, not a
+    # scope decision.
+    Path(__file__).resolve().parent.parent.parent
+    / "tortoise" / "s2_decision_seam.py",
 )
 
 #: Env knobs whose values change the EXTRACTION OUTPUT while leaving code
 #: + model untouched (P1 #2607-review-style gap on the seam): the prompt
 #: mode toggle, the S2/S4 label-order shuffle + its seed, the classify-
-#: later pipeline switch, the S2.2 VET gate, and the stage token caps/
-#: truncation. ANY of them
+#: later pipeline switch, the S2.2 VET gate, the #4899 value gate, the
+#: typed-decision seam (which arms BOTH S2.2 and the S2.3 tail), and the
+#: stage token caps/truncation. ANY of them
 #: toggled between QA cycles must invalidate cached ingests — a silent
 #: reuse across modes would corrupt the very A/B this seam exists for.
 INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
@@ -3061,6 +3076,9 @@ INGEST_CACHE_PROMPT_ENVS: tuple[str, ...] = (
     "TORTOISE_LABEL_ORDER_SEED",       # the shuffle seed (with the above)
     "TORTOISE_CLASSIFY_LATER",         # classify-now ↔ classify-later pipeline
     "TORTOISE_VET",                    # S2.2 VET gate (#5005) — DISCARDs items
+    "TORTOISE_VALUE_GATE",            # #4899 mechanical identifier-only DISCARDs
+    "TORTOISE_S2_DECISION_SEAM",       # #5087 the typed-decision seam — arms S2.2
+                                       # (it is the arbiter) AND the S2.3 tail
     "TORTOISE_EXTRACTOR_MAX_TOKENS",   # stage output caps / truncation
     "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",  # escalation cap
 )
@@ -3070,18 +3088,18 @@ def ingest_code_fingerprint(paths: tuple[Path, ...] | None = None) -> str:
     """sha256 (full hex) over the extractor pipeline module contents — the
     ``extractor code version`` dimension of the ingest fingerprint.
 
-    Reads the files at run start (cheap: three small modules); the digest is
-    stable within a process and identical across processes on the same
-    checkout. ``paths`` is injectable for hermetic tests (fake files). An
+    Reads the files at run start (cheap: the small modules listed above); the
+    digest is stable within a process and identical across processes on the
+    same checkout. ``paths`` is injectable for hermetic tests (fake files). An
     unreadable file hashes as empty content (never aborts a run — a
     missing module would fail the ingest itself long before). P1 (#2607-
-    review class): the three modules' IMPORT CLOSURE (chain_enforcer,
+    review class): those modules' IMPORT CLOSURE (chain_enforcer,
     kind_classifier, commit_ops, model_adapters, embeddings …) also shapes
     extraction output but is not in ``paths`` — so the repo ``git_sha``
     rides as a second dimension: ANY repo code change (in or out of the
     closure) invalidates cached ingests automatically. ``git_sha`` is the
-    conservative net; ``paths`` keeps the digest sensitive to the three
-    hot files even across an uncommitted local edit (dirty-tree runs)."""
+    conservative net; ``paths`` keeps the digest sensitive to those hot
+    files even across an uncommitted local edit (dirty-tree runs)."""
     files = list(INGEST_CACHE_CODE_FILES) if paths is None else list(paths)
     h = hashlib.sha256()
     for p in files:

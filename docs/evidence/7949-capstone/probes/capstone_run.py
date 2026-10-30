@@ -18,11 +18,11 @@ the corrected reading:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:12783``, called at ``:11820``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
-   ``_edus_from_conversation`` (S0, ``:8595``), ``run_s1`` (S1, ``:8628``),
-   ``run_s2`` (S2.1, ``:8652``), ``_run_vet_pass`` (S2.2, ``:8681``),
+   ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
+   ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
    ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
-   ``:8697``), ``search_graph`` (S3, ``:8713``), ``run_s4`` (the gap filler,
-   ``:8734``), and ``execute_embed`` (S5+S6, ``:8933``). The SYMBOL is
+   ``:8701``), ``search_graph`` (S3, ``:8717``), ``run_s4`` (the gap filler,
+   ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``). The SYMBOL is
    authoritative and the line is a convenience — the three FILE-NAMED cites
    above are resolved against the tree by the bundle's pin, and these eight
    bare step cites are re-read by that same pin file

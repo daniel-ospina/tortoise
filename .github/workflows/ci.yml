@@ -1036,13 +1036,20 @@ jobs:
           # (fatal) are indistinguishable here. The differ decides from the report
           # — `Linting: N` must equal the changed-set count, and the findings
           # parsed must equal the Summary count.
-          set +e
-          xargs -0 -a "$RUNNER_TEMP/pr-md.nul" npx --yes markdownlint-cli2@0.23.3 \
-            > "$RUNNER_TEMP/mdlint-pr.txt" 2>&1
-          md_rc=$?
-          set -e
-          cat "$RUNNER_TEMP/mdlint-pr.txt"
-          echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
+          #
+          # #10265: the invocation is a script we own, NOT `npx` — see its header
+          # for the measured `sh: 1: markdownlint-cli2: not found` on two
+          # different runner pools, where npx execs a shared `_npx` cache's bin
+          # through `sh` and a partial link there reds this REQUIRED check. The
+          # script installs the PINNED linter into a private prefix, invokes it by
+          # ABSOLUTE path, and refuses to publish a report the pinned banner did
+          # not produce — so an absent linter fails HERE, naming the linter,
+          # instead of surfacing in the differ as a finding about the diff.
+          bash .github/scripts/docs-markdownlint.sh \
+            --label "Markdownlint (changed files)" \
+            --cli2 markdownlint-cli2@0.23.3 \
+            --files-from "$RUNNER_TEMP/pr-md.nul" \
+            --output "$RUNNER_TEMP/mdlint-pr.txt"
       - name: Link check (changed files)
         if: ${{ !inputs.main_health && steps.changed.outputs.count != '0' }}
         run: |
@@ -1170,13 +1177,14 @@ jobs:
           # NUL-delimited ARGV via xargs — a filename is data, never shell text.
           # #7435: captured, not adjudicated — the differ below decides. The exit
           # code is not the verdict (xargs rewrites it).
-          set +e
-          xargs -0 -a "$RUNNER_TEMP/changed-md.nul" \
-            npx --yes markdownlint-cli2@0.23.3 > "$RUNNER_TEMP/mdlint-mh.txt" 2>&1
-          md_rc=$?
-          set -e
-          cat "$RUNNER_TEMP/mdlint-mh.txt"
-          echo "markdownlint exit=$md_rc (informational — xargs rewrites it; the differ reads the report)"
+          # #10265: the same producer as the PR path, same reasons — see the script
+          # header for the measured `npx` failure that reds this required check on
+          # a runner whose shared npm cache cannot exec its own bin.
+          bash .github/scripts/docs-markdownlint.sh \
+            --label "Markdownlint (main health, changed files)" \
+            --cli2 markdownlint-cli2@0.23.3 \
+            --files-from "$RUNNER_TEMP/changed-md.nul" \
+            --output "$RUNNER_TEMP/mdlint-mh.txt"
       - name: Link check (main health, changed files)
         if: ${{ inputs.main_health && steps.changed_mh.outputs.count != '0' }}
         run: |
