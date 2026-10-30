@@ -274,17 +274,13 @@ metric's own precision.
 | `e2a-value-units.json` | `e2a_value_units.py` record, as written (per-session ids, survived and lost) |
 | `e2a-value-units-falsifier.json` | the same with `--inject-anchor` — both readings in one record. Predates the `strict_all` label fix: its `with_anchor.strict_all` carries the as-written reading |
 
-⚠️ **Provenance of the two OFF records.** They were measured with the probe as it
-stood before the review rounds added the two floors and the corpus pin, so their
-keys are `[arm, bare_definite, elapsed_s, graph, label_counts, object_names,
-objects, sessions, share]` — no `object_floor`, `min_before_share`,
-`fixtures_hash` or `head`. The shipped probe always writes all four, and re-running
-it is what would bring the archived records into that shape (it needs a FalkorDB
-lane plus a model key). **No published number moves:** both shares clear both
-floors (0.3590 and 0.5652 against `e1_min_before_share` 0.20; 78 and 69 Objects
-against `e1_objects` 30), and the corpus the runs used is the one §"The tree these
-numbers belong to" pins. What a reader cannot check on the archived records is the
-population and commit directly — which is why the shipped record now carries them.
+⚠️ **Provenance of these records is stated once**, in §"Which probe revision
+produced each artifact" above: the probe revision that produced the two OFF
+records, the four pin fields that postdate them, the same caveat for the
+falsifier record's `strict_all` label, why they were not re-recorded (the
+disposable lane and its graphs are gone, and a re-run is a new realization — it
+would need a fresh FalkorDB lane plus a model key, and it would not reproduce
+these numbers), and why no published number moves.
 
 The probes themselves live beside the instruments they reuse, in
 `docs/evidence/7949-capstone/probes/`; their falsifiers are pinned in
