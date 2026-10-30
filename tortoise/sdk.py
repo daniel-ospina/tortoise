@@ -24627,7 +24627,13 @@ class TortoiseSDK:
         stored "unidirectional" — the extraction default) so a
         direction-omitting retry dedups its own run-1 operator (exactly-once);
         label-absent appends `o.label IS NULL` (no-label requests match only
-        unlabeled operators).
+        unlabeled operators). When SEVERAL operators satisfy the key, the
+        binding is an ORDER, never a filter: the operator whose SOURCE-slot
+        multiplicity matches the request's wins first (#10305 — two shapes can
+        share one endpoint set and one arity), then the one whose edge count
+        equals its distinct endpoint count (the clean twin of a legacy
+        duplicate), then the lowest id — so the answer never depends on row
+        order.
 
         Partial-absorb: on an exact miss, a PARTIAL operator
         (`status IS NULL`, `'draft'`, or `'live'` — the promoting posture writes
@@ -24742,10 +24748,12 @@ class TortoiseSDK:
         # asserted it twice — the same "a model the caller never asserted" class
         # this PR exists to close, one shape over.
         # The two shapes differ in exactly one observable: how many slots carry
-        # the REQUEST's source id (`$src` — the operator's `idx` 0 endpoint, so
-        # it is always a member of `slot_ids`). `src_slots` counts them on the
-        # graph side, `$src_count` on the request side, and the ORDER preference
-        # is their distance. ⛔ This is an ORDER, never a CONDITION: nothing that
+        # the REQUEST's source id (`$src` = `inputs[0]`, the caller's `from`).
+        # The exact arm's set conditions already guarantee `$src` is one of the
+        # operator's `targets`, so it is always a member of `slot_ids` —
+        # `src_slots` counts those slots on the graph side, `$src_count` counts
+        # them on the request side, and the ORDER preference is their distance.
+        # ⛔ This is an ORDER, never a CONDITION: nothing that
         # matches today stops matching, so it cannot resurrect #9750's hazard (a
         # miss would MINT the duplicate operator). `n_edges ASC, o.id` still
         # break every remaining tie, so the binding stays deterministic.
