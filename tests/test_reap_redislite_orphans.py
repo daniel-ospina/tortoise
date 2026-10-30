@@ -138,11 +138,11 @@ def test_undeterminable_ownership_is_kept(reaper):
 
 # Jobs that set the embedded opt-in for a suite that owns NO server. Both run
 # `tests/e2e/…` request-only suites (no redislite import anywhere under
-# `tests/e2e/` outside `tests/e2e/hosted`, whose own job caps at 15) and say so
-# in the workflow (`deploy-pages.yml`: "this suite is requests-only (no embedded
-# DB server)"). Exempted BY NAME, with the reason here: a new job cannot be
-# exempt silently, and an exemption that later grows a server reds only if it
-# drops this list — which is why the names, not a pattern, are what is written.
+# `tests/e2e/` outside `tests/e2e/hosted`, which runs in its own 15-minute job)
+# and say so in the workflow (`deploy-pages.yml`: "this suite is requests-only
+# (no embedded DB server)"). Exempted BY NAME, not by a pattern: the exemption
+# is a CLAIM, so it is written where a reviewer can check it, and a job that
+# later grows an embedded server has to be taken off this list by hand.
 _NO_EMBEDDED_SERVER_JOBS = frozenset(
     {
         "deploy-pages.yml:verify-legal",
@@ -161,7 +161,12 @@ _CARVE_OUT = "TORTOISE_TEST_CARVE_OUT"
 
 
 def _truthy(value: object) -> bool:
-    """The `is_truthy` spellings `tests/_embedded.py` accepts (#4097)."""
+    """The `is_truthy` spellings `tests/_embedded.py` accepts (#4097).
+
+    Kept local rather than imported from `tests._embedded`: that module starts
+    the redislite hygiene machinery on import, and this pin must stay a pure
+    text/reasoning test.
+    """
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
