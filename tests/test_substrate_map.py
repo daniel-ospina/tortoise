@@ -238,15 +238,56 @@ def test_a_family_outside_the_five_prefixes_is_checked_not_skipped() -> None:
     assert any("battery/does_not_exist.py" in p for p in problems), problems
 
 
+def test_a_lane_row_with_a_prose_only_family_is_reported() -> None:
+    """Fails if a §3 lane row can declare its family in prose and go unmeasured.
+
+    Reachable: L6's shipped cell reads `tortoise/consistency.py` ·
+    `tortoise/backup.py` · *"the provenance read paths"* and L7's used to read
+    *"the three compile seams + pack templates"* — a lane row whose family cell
+    carries no backticked path is invisible to `_BACKTICK_PATH`, and the
+    document-wide `seen` floor is satisfied by the OTHER rows, so the guard
+    reported CLEAN over a family nobody checked (the same narrower-population
+    class, one door along). The two-state control is what makes this
+    discriminating: a row that keeps a path, or that declares itself prose with
+    the marker, must stay clean (#5086 review P3, cycle 8).
+    """
+    doc = _doc()
+    #: The WHOLE cell, not one path in it: a row that keeps any backticked path
+    #: is still measured, so substituting a single path would leave this control
+    #: proving nothing (the first draft did exactly that and stayed green).
+    anchor = (
+        "`tortoise/assembly.py` · `tortoise/subgraph.py` · "
+        "`tortoise/fanout.py` · `tortoise/search_engine.py`"
+    )
+    assert anchor in smc._section(doc, "## 3."), (
+        "the L4 family cell is gone — this control would substitute nothing the "
+        "row checker reads"
+    )
+
+    problems = smc.check_lane_families(doc.replace(anchor, "the retrieval seams", 1))
+    assert any("declares no backticked file family" in p for p in problems), problems
+
+    declared = smc.check_lane_families(
+        doc.replace(anchor, f"the retrieval seams {smc.PROSE_FAMILY_MARKER}", 1)
+    )
+    assert declared == [], (
+        "a prose family that SAYS it is prose must be accepted — the marker is "
+        "the document's admission, not a reason to red it"
+    )
+
+    named = smc.check_lane_families(doc.replace(anchor, "`tortoise/api.py`", 1))
+    assert named == [], named
+
+
 def test_the_lane_table_is_actually_enumerated() -> None:
     """Fails if §3's families stop being parsed, leaving only §4's checked.
 
     Reachable: §3 originally wrote its families WITHOUT the `tortoise/` prefix
     (`fanout.py`), so the checker silently saw zero of that table's paths and
     this guard would have gone green over an entirely unchecked lane table. The
-    floor below is the measured count at the tree this was written against (20
-    distinct cited paths, 18 of them code), so a table-shape change reds here
-    rather than passing quietly.
+    floor below is the measured count at the tree of THIS head (22 distinct cited
+    paths, 20 of them code — re-derived after L7's family was named, #5086 review
+    P3, cycle 8), so a table-shape change reds here rather than passing quietly.
     """
     doc = _doc()
     section = smc._section(doc, "## 3.") + smc._section(doc, "## 4.")
@@ -256,13 +297,15 @@ def test_the_lane_table_is_actually_enumerated() -> None:
         for p in cited
         if not p.endswith((".md", ".yml")) and "*" not in p and (REPO / p).exists()
     }
-    assert len(code) >= 19, sorted(code)
+    assert len(code) >= 20, sorted(code)
     assert "tortoise/fanout.py" in code
-    #: `tools/` is a bare directory cell, and it is the one path the OLD
-    #: five-prefix allowlist still matched only because `tools` was in it. Its
-    #: presence pins the widening: a family outside `tortoise/ tools/ config/
-    #: tests/ docs/` is now enumerated instead of silently skipped (#5086 review
-    #: P3, cycle 7).
+    #: `tools/` is a bare directory cell with an EMPTY tail. It pins one half of
+    #: the widening and only that half: the OLD pattern's tail quantifier was
+    #: `+`, so `` `tools/` `` matched neither the old nor a prefix-narrowed
+    #: pattern — the empty-tail case was simply never matched. (The cycle-7
+    #: review said exactly that, so the first version of this comment had it
+    #: backwards; #5086 review P3, cycle 8.) The PREFIX half is pinned by
+    #: `test_a_family_outside_the_five_prefixes_is_checked_not_skipped`.
     assert "tools" in code
 
 

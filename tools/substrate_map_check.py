@@ -11,7 +11,10 @@ This tool is the half of the map that CAN be checked offline. It re-measures the
 machine-checkable claims the document makes and fails when the document and the
 tree disagree:
 
-  1. every **file family** a lane row declares resolves on disk;
+  1. every **file family** a lane row declares resolves on disk — a row that
+     declares its family only in prose must say so in the cell
+     (`*(prose — not measured)*`); a row that does neither is reported, because a
+     silently unmeasured row is a CLEAN over nothing;
   2. every **symbol** the interface map places is still declared in the file it
      names — AND the document still names that symbol (so the two cannot drift
      apart in either direction);
@@ -137,6 +140,13 @@ _FRONTMATTER_SHA = re.compile(r"^measured_at_commit:\s*([0-9a-f]{7,40})\s*$", re
 _BACKTICK_PATH = re.compile(r"`((?:[\w.-]+/)[^`\s]*)`")
 
 
+#: A §3 lane row may declare its family in PROSE instead of a backticked path.
+#: That is allowed, but it must SAY so (`_lane_rows_without_a_family`), because a
+#: silently unmeasured row is a CLEAN over nothing. The marker is the document's
+#: own admission, not a code-side allowlist of row names.
+PROSE_FAMILY_MARKER = "*(prose — not measured)*"
+
+
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -173,15 +183,22 @@ def _declaration_re(symbol: str) -> re.Pattern[str]:
 
 
 def check_lane_families(doc: str) -> list[str]:
-    """§3/§4/: every backticked path under the lane and hotspot tables resolves.
+    """§3/§4: every backticked path under the lane and hotspot tables resolves.
 
     Scoped to the two tables that declare families (`## 3.` and `## 4.`) — the
     rest of the document names paths in prose, and a prose path is not a
     contract about a file's existence.
+
+    A §3 LANE ROW is a per-row claim, so it is measured per row: a row that
+    declares its family only in prose (`L6`'s *"the provenance read paths"*) is
+    invisible to the path match, and the document-wide `seen` floor below cannot
+    tell that row apart from one that was checked. Such a row must therefore
+    either name a backticked path or carry `PROSE_FAMILY_MARKER`; a row that does
+    neither is reported as measuring nothing (#5086 review P3, cycle 8).
     """
     problems: list[str] = []
-    section = _section(doc, "## 3.")
-    section += _section(doc, "## 4.")
+    lanes = _section(doc, "## 3.")
+    section = lanes + _section(doc, "## 4.")
     if not section:
         return ["§3/§4 (lane + hotspot tables) not found in the document"]
 
@@ -208,6 +225,35 @@ def check_lane_families(doc: str) -> list[str]:
             problems.append(f"lane/hotspot family does not resolve: {path}")
     if not seen:
         problems.append("§3/§4 declare no code file families — the table shape changed")
+    problems += _lane_rows_without_a_family(lanes)
+    return problems
+
+
+def _lane_rows_without_a_family(lanes: str) -> list[str]:
+    """Per §3 LANE row: it must name a backticked path, or say it is prose.
+
+    The document-wide floor above is satisfied by ANY row, so one row written in
+    prose was silently unmeasured while the guard reported CLEAN — the same
+    "narrower population read as a pass" class the widest family regex closed for
+    prefixes (#5086 review P3, cycle 8). The exemption is explicit and in the
+    document, so the skip is declared where it happens instead of being
+    invisible.
+    """
+    problems: list[str] = []
+    for line in lanes.splitlines():
+        if not line.startswith("| **L"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 4:
+            problems.append(f"lane row is not a 5-cell table row: {line[:60]}")
+            continue
+        lane, family = cells[0], cells[3]
+        if _BACKTICK_PATH.search(family) or PROSE_FAMILY_MARKER in family:
+            continue
+        problems.append(
+            f"{lane} declares no backticked file family — this row is measuring "
+            f"nothing; name the paths, or write `{PROSE_FAMILY_MARKER}` in the cell"
+        )
     return problems
 
 
@@ -242,7 +288,7 @@ _IMPORT_TIME_BLOCKS: tuple[type, ...] = (ast.Try, ast.TryStar, ast.With)
 #: iteration/case at a time. A `for:`/`while:`/`match:` body is executed when the
 #: module is imported, so an internal import inside it creates the same cycle a
 #: column-0 import does (#5086 review P3, cycle 7).
-_IMPORT_TIME_LOOP_BLOCKS: tuple[type, ...] = (ast.For, ast.AsyncFor, ast.While)
+_IMPORT_TIME_LOOP_BLOCKS: tuple[type, ...] = (ast.For, ast.While)
 
 
 def _is_type_checking_guard(test: ast.expr) -> bool:
