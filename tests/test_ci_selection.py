@@ -311,6 +311,13 @@ def test_substrate_map_guard_runs_on_the_diffs_it_guards():
 
     tool = _sel(["tools/substrate_map_check.py"])
     assert tool["full"] is False
+    # Asserted on the SURFACE, not merely on the test-file list — the same rule
+    # this file states for the onboarding gate (#3673): `test_substrate_map.py`
+    # is ALSO in `tier1`, so the docs-only early return puts it in `test_files`
+    # with the `CORE_ALSO` entry deleted and a test-file-only assertion passes
+    # with the wiring ABSENT (#5086 review P2, cycle 10). Watched RED by
+    # deleting the entry: `surfaces` goes `['core']` -> `[]`.
+    assert tool["surfaces"] == ["core"], tool["surfaces"]
     assert "test_substrate_map.py" in tool["test_files"], (
         "a tool-only edit must run the tool's own negative controls — `tools/` "
         "is swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing "

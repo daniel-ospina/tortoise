@@ -2312,12 +2312,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # arms a filter can swallow, and this entry closes the tool half.
              # `tools/` is a flat NON_PYTHON_PREFIXES entry and nothing in
              # SOURCE_PATTERNS matches the tool, so a `tools/substrate_map_check.py`
-             # -only diff came back `changed == []`, took the docs-only early
-             # return and fell to tier-1 smoke — the tool's own test would not run
-             # on the PR editing the tool. MEASURED before this entry
-             # (`select()` in-process): `select(["tools/substrate_map_check.py"])`
-             # → surfaces=[], full=False, and the pin ABSENT from test_files.
-             # After: surfaces=['core'], pin present. The DOC half
+             # -only diff comes back `changed == []` and takes the docs-only early
+             # return, which emits the `tier1` set — so the tool's own test DOES
+             # run without this entry, but only at tier-1 BREADTH, and nothing in
+             # the `core` set does. MEASURED at the cycle-10 head (`select()`
+             # in-process, entry deleted): surfaces=[], full=False, and the pin
+             # PRESENT from the `tier1` row. ⛔ An earlier wording here claimed the
+             # pin went ABSENT; that was measured in the same pass that ADDED the
+             # `tier1` row, so it described a state the row had already retired
+             # (#5086 review P3, cycle 10 — a past state carried as a current one).
+             # So this entry buys the `core` surface on a tool-only diff, not the
+             # pin. After it: surfaces=['core'], pin present. The DOC half
              # (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`) is deliberately NOT
              # claimed here: a docs-only diff must stay on the tier-1 path, which is
              # why the file is dual-registered there — see the `tier1` row's comment

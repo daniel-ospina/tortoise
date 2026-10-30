@@ -496,6 +496,22 @@ def test_an_interface_symbol_dropped_from_the_document_is_drift() -> None:
     assert any("compile_value_brief" in p and "dropped" in p for p in problems), problems
 
 
+def test_the_interface_symbol_population_cannot_be_empty_report_clean(monkeypatch) -> None:
+    """Fails if the widest claim in the tool can measure NOTHING and pass.
+
+    Reachable: `INTERFACE_SYMBOLS = ()` — what an over-eager deletion of a stale
+    row, or a refactor that moves the population behind a loader, leaves behind.
+    Every sibling claim fails closed on an empty population (`check_lane_families`
+    on an empty body, `check_leaf_rows` on `leaves == 0`); this one reported
+    CLEAN, and it is the claim §5 relies on in place of the `:Document` regex
+    (#5086 review P3, cycle 10 — CLEAN over nothing is the same defect the lane
+    row check exists to prevent).
+    """
+    monkeypatch.setattr(smc, "INTERFACE_SYMBOLS", ())
+    problems = smc.check_interface_symbols(_doc())
+    assert any("measuring nothing" in p for p in problems), problems
+
+
 def test_the_d10_retirement_mechanism_is_checked(monkeypatch) -> None:
     """Fails if the retired-key allowlist / relabel migration stops being measured.
 

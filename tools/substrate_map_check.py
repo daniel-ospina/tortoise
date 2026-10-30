@@ -126,6 +126,13 @@ INTERFACE_SYMBOLS: tuple[tuple[str, str], ...] = (
     ("def build_master_list", "tortoise/extractor_v2.py"),
     ("def compile_vocab", "tortoise/commit_schema.py"),
     ("def compile_value_brief", "tortoise/value_extractor.py"),
+    # The doc places it and this tuple had no row for it (#5086 review P3,
+    # cycle 10): §5's `projection/__init__.py` row names *"the replay entrypoint
+    # + `_ensure_indexes`"*, so renaming the method read CLEAN — a §5 placement
+    # nobody measured, in a claim whose stated scope is "every symbol the
+    # interface map places". The `def ` form matches the INDENTED method and
+    # rejects `_ensure_indexes_declared` (`\b` after the name).
+    ("def _ensure_indexes", "tortoise/projection/__init__.py"),
 )
 
 _FRONTMATTER_SHA = re.compile(r"^measured_at_commit:\s*([0-9a-f]{7,40})\s*$", re.M)
@@ -332,6 +339,16 @@ def _lane_rows_without_a_family(lanes: str) -> list[str]:
 def check_interface_symbols(doc: str) -> list[str]:
     """§5: each placed symbol is declared in its file, and still named in the doc."""
     problems: list[str] = []
+    # The population floor every sibling claim has and this one did not (#5086
+    # review P3, cycle 10). `INTERFACE_SYMBOLS = ()` reported CLEAN, so the
+    # LARGEST claim in the tool — the mechanism §5 relies on in place of the
+    # `:Document` regex — was the one that could measure nothing and still pass.
+    # Same class the lane-row check already fails closed on: CLEAN over nothing.
+    if not INTERFACE_SYMBOLS:
+        return [
+            "no interface symbols are declared — the interface-map claim is "
+            "measuring nothing"
+        ]
     for symbol, rel in INTERFACE_SYMBOLS:
         name = symbol.removeprefix("def ")
         if name not in doc:
