@@ -17869,7 +17869,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for _eid, _name in _deferred_about_objects:
         _resolved = resolve_fold_name(proj.g, "Object", _name,
                                       context="session-commit aboutObject",
-                                      mention=True)
+                                      mention=False)
         if _resolved:
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
