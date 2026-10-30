@@ -40,9 +40,12 @@ are the real modules, so the classification under test (`isRefreshTokenDead`, th
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -57,6 +60,7 @@ REPO = Path(__file__).resolve().parent.parent
 AUTH_DIR = REPO / "website/apps/dashboard/functions/_shared/auth"
 TOKEN_TS = AUTH_DIR / "token.ts"
 CONSENT_FLOW_TS = AUTH_DIR / "consent-flow.ts"
+TEST_FILE = "tests/test_oauth_session_flow_properties.py"
 
 # Resolve `./x` to `./x.ts`: `token.ts` imports `./session` / `./supabase`
 # extensionlessly (the Pages runtime resolves it; Node ESM does not), so the
@@ -749,3 +753,116 @@ def test_the_purity_guard_cannot_be_bypassed_by_an_inline_comment_in_a_string() 
     )
     with pytest.raises(AssertionError, match="fetch"):
         _assert_consent_flow_is_pure(adversarial)
+
+
+# ── the mutation proof, kept executable ──────────────────────────────────────
+#
+# #8448 proved these four properties by MUTATION — each implementation was
+# deliberately broken and the matching test went red — but the proof was a
+# one-time manual act recorded in a PR body. That is the shape the #8438 defect
+# came back through: a test named `single-flight` once asserted `changeCounts ==
+# [1, 0]`, a result a real guard cannot produce, so it would have FAILED had the
+# property been implemented, and it was green the whole time. A green test is
+# not evidence that it tests anything; only "break the property and watch THIS
+# test go red" is, and that evidence rots the moment nobody re-runs it.
+#
+# So the proof is a test. Each entry below is ONE mutation that removes ONE
+# property, the exact source span it rewrites, and the node that must then FAIL.
+# `TORTOISE_MUTATION_PROOF=1` runs them (≈2 min: four subprocess pytest runs);
+# the default lane runs only the structural pin, which is what keeps the table
+# honest for free.
+
+#: (property, file, exact source span, replacement, the test that must go RED)
+PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str], ...] = (
+    (
+        "single-flight",
+        TOKEN_TS,
+        "  const running = inFlightRefreshes.get(handle);\n  if (running) return running;\n",
+        "  // MUTATION: the in-flight map is no longer consulted\n",
+        "test_property_1_single_flight_issues_exactly_one_refresh",
+    ),
+    (
+        "refresh-once",
+        TOKEN_TS,
+        "  if (row.access_token && row.access_token_expires_at"
+        " && row.access_token_expires_at - REFRESH_SKEW_MS > now) {\n",
+        "  if (false) {\n",
+        "test_property_2_refresh_once_is_bounded_by_skew_and_cooldown",
+    ),
+    (
+        "never-sign-out",
+        TOKEN_TS,
+        '    if (refreshed.retryable) return { ok: false, reason: "unavailable" };\n',
+        '    if (refreshed.retryable) return { ok: false, reason: "no_session" };\n',
+        "test_property_3_never_sign_out_a_transient_failure_is_not_a_dead_session",
+    ),
+    (
+        "auto-advance",
+        CONSENT_FLOW_TS,
+        '  if (input.session === "usable") {\n'
+        '    return { action: "advance", status: 302, to: input.authorize_url };\n'
+        "  }\n",
+        "  // MUTATION: a usable session no longer advances on its own\n",
+        "test_property_4_auto_advance_without_a_manual_click",
+    ),
+)
+
+
+def test_every_property_mutation_still_targets_exactly_one_span() -> None:
+    """The mutation table must still point at the live implementation.
+
+    A mutation whose span has MOVED silently proves nothing — it rewrites
+    nothing, the test stays green, and "all four mutated and went red" becomes a
+    claim about a file that no longer exists in that shape. So the cheap check
+    runs every lane, and it FAILS with a re-pointing instruction rather than
+    quietly passing.
+    """
+    for label, path, span, _replacement, node in PROPERTY_MUTATIONS:
+        assert path.is_file(), f"{label}: {path} is gone — re-point the mutation"
+        hits = path.read_text().count(span)
+        assert hits == 1, (
+            f"{label}: the mutated span occurs {hits} time(s) in {path.name} — the "
+            "implementation moved. Re-point `PROPERTY_MUTATIONS` at the line that now "
+            f"carries {label!r}; do not delete the leg (see {node})."
+        )
+
+
+def _property_test_fails(node: str) -> bool:
+    """Run ONE property test in a fresh process; True when it goes RED."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", f"{TEST_FILE}::{node}", "-q", "--no-header"],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO),
+    )
+    return proc.returncode != 0
+
+
+@pytest.mark.skipif(
+    os.environ.get("TORTOISE_MUTATION_PROOF") != "1",
+    reason="opt-in (~2 min, four subprocess runs): TORTOISE_MUTATION_PROOF=1",
+)
+def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
+    """Break each property in the real source; its own test must fail.
+
+    The restore is byte-identical and ASSERTED by sha256, so a failure mid-loop
+    cannot leave the tree carrying a mutation — the previous version of this
+    proof ran by hand, where it could.
+    """
+    for label, path, span, replacement, node in PROPERTY_MUTATIONS:
+        original = path.read_text()
+        before = hashlib.sha256(original.encode()).hexdigest()
+        assert original.count(span) == 1, f"{label}: span is no longer unique"
+        path.write_text(original.replace(span, replacement))
+        try:
+            went_red = _property_test_fails(node)
+        finally:
+            path.write_text(original)
+        after = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert before == after, f"{label}: restore is NOT byte-identical ({before} → {after})"
+        assert went_red, (
+            f"{label}: {node} stayed GREEN with the property removed — the test does "
+            "not test the property it is named for"
+        )
+        # Printed so the evidence is visible in the run, not only in a green tick:
+        # run with `-s` and this is the pasteable proof (`TORTOISE_MUTATION_PROOF=1`).
+        print(f"  {label}: {node} RED with the property removed; restore byte-identical "
+              f"({before[:16]}…)")
