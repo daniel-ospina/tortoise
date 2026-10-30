@@ -968,7 +968,7 @@ def test_cron_entry_exports_the_pins_it_renders(tmp_path):
         stdin=subprocess.DEVNULL,
     )
     assert out.returncode == 0, (command, out.stdout, out.stderr)
-    assert f"CI_RUNNER_OS_LABEL=on" in out.stdout, (
+    assert "CI_RUNNER_OS_LABEL=on" in out.stdout, (
         "the entry's `CI_RUNNER_OS_LABEL=on` never reached the process the schedule starts — it is "
         f"a shell variable of cron's `/bin/sh`, not an export. output: {out.stdout!r} line: {rendered[0]}"
     )
