@@ -368,9 +368,11 @@ a typo or an extra label is accepted there and refused everywhere else; it claim
 the flag **unset**, so no `--status` read can tell that runner apart from one an operator opted in;
 and it writes `ubuntu-latest` in **permanently**, when the fallback label is the gate's to attach and
 detach. That day is reproducible from this paragraph and is not a recipe for the next one. It is
-stickier than it looks, too: `_preserve_labels` now PRESERVES the bare `ubuntu-24.04`, so anything
-written by hand survives every subsequent repair and autoscale pass — a mistake made there is
-permanent as well.
+stickier than it looks, too: a hand-written `ubuntu-latest` is a label GitHub has no record of
+detaching for you, `--repair-labels` only ever ADDS (its two named carve-outs are the only removals
+it performs), and a runner nobody re-registers keeps whatever it was given — so a mistake made there
+outlives every pass that is supposed to correct it. `_preserve_labels` is the one path that re-derives
+a set, and it DROPS the whole `ubuntu-<version>` class on the way through.
 
 ⛔ **If a runner directory is ever copied by hand** (the shape the dismissed recipe used),
 `.runner_migrated` counts as "already configured": a copied directory that keeps it (or `.runner`)
