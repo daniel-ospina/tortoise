@@ -505,6 +505,17 @@ _S7_NARRATIVE_WORDS = 500
 _S7_BYTES_CELL = re.compile(r"^\| `(?P<version>vet-v2|classify-v2)`.*?\| ([\d,]+) B \|",
                             re.MULTILINE)
 
+#: §7's **clause-removed** baseline, numbers-then-version:
+#: ``**39,544 B ≈ 9,103 tok** (`vet-v1`)``.
+_S7_BASELINE_CELL = re.compile(
+    r"[\s*]*(?P<bytes>[\d,]+) B ≈ (?P<tok>[\d,]+) tok\**[\s`]+\(`(?P<version>vet-v\d|classify-v\d)`\)",
+    re.DOTALL)
+
+#: The changelog's baseline, version-then-numbers:
+#: ``(`vet-v1` 39,544 B ≈ 9,103 tok; `classify-v1` 23,332 B ≈ 6,594 tok)``.
+_CL_BASELINE_CELL = re.compile(
+    r"`(?P<version>vet-v\d|classify-v\d)` (?P<bytes>[\d,]+) B ≈ (?P<tok>[\d,]+) tok")
+
 
 def _s7_text(chars: int, seed: int = 1) -> str:
     words, i = [], seed
@@ -514,9 +525,16 @@ def _s7_text(chars: int, seed: int = 1) -> str:
     return " ".join(words)[:chars]
 
 
-def _s7_payloads() -> dict[str, int]:
-    """The two requests §7 tabulates, serialized the way ``_decide`` sends them."""
-    import json
+def _s7_requests(*, framed: bool = True) -> list[dict]:
+    """The two requests §7 tabulates, as the dicts the transport receives.
+
+    ``framed=False`` rebuilds the PRE-framing request (`#10077` / `#10117`): ``_framed``
+    is the only splice of :data:`UNTRUSTED_STATE_FRAMING` — a pure ``question +
+    framing`` concatenation called at every question site — so replacing it here is the
+    same edit removing the clause by hand would make, and the rest of the payload is
+    untouched. That is the construction §7's *clause removed* comparison quotes, so it is
+    measured here rather than trusted.
+    """
     import sys
 
     sys.path.insert(0, str(ROOT))
@@ -528,15 +546,26 @@ def _s7_payloads() -> dict[str, int]:
         seen.append(payload)
         return {"model": "jev-1.14.0", "answers": {}, "usage": {"input_tokens": 1}}
 
-    candidates = [{"id": f"i{i}", "section": "s",
-                   "text": _s7_text(_S7_VET_ITEM_CHARS, i), "kind": "k"} for i in range(40)]
-    narrative = " ".join(_S7_FILLER[i % len(_S7_FILLER)]
-                         for i in range(_S7_NARRATIVE_WORDS))
-    seam.vet_verdicts(candidates, narrative, transport=call, batch_size=seam.BATCH_MAX)
-    offered = [f"core:kind{i}" for i in range(5)]
-    seam.classify_tail([(f"t{i}", _s7_text(_S7_CLASSIFY_ITEM_CHARS, i), offered)
-                        for i in range(40)],
-                       descriptions={}, transport=call, batch_size=seam.BATCH_MAX)
+    def measure() -> None:
+        candidates = [{"id": f"i{i}", "section": "s",
+                       "text": _s7_text(_S7_VET_ITEM_CHARS, i), "kind": "k"} for i in range(40)]
+        narrative = " ".join(_S7_FILLER[i % len(_S7_FILLER)]
+                             for i in range(_S7_NARRATIVE_WORDS))
+        seam.vet_verdicts(candidates, narrative, transport=call, batch_size=seam.BATCH_MAX)
+        offered = [f"core:kind{i}" for i in range(5)]
+        seam.classify_tail([(f"t{i}", _s7_text(_S7_CLASSIFY_ITEM_CHARS, i), offered)
+                            for i in range(40)],
+                           descriptions={}, transport=call, batch_size=seam.BATCH_MAX)
+
+    if framed:
+        measure()
+    else:
+        original = seam._framed
+        seam._framed = lambda question, ref: question.format(ref=ref)
+        try:
+            measure()
+        finally:
+            seam._framed = original
     # One request per seam, named — a bare `zip(..., strict=True)` raises `ValueError`
     # ("zip() argument 2 is longer/shorter") if `BATCH_MAX` ever drops below 40, which is a
     # failure that would blame the wrong thing: the construction would be CHUNKED, so the
@@ -545,8 +574,28 @@ def _s7_payloads() -> dict[str, int]:
         f"expected exactly one request per seam (40 items, BATCH_MAX={seam.BATCH_MAX}); "
         f"got {len(seen)} — if BATCH_MAX fell below 40 the §7 construction is chunked and "
         "its bytes are no longer the single-request shape the table records")
+    return seen
+
+
+def _s7_payloads(*, framed: bool = True) -> dict[str, int]:
+    """The two requests §7 tabulates, serialized the way ``_decide`` sends them."""
+    import json
+
     return {version: len(json.dumps(payload).encode("utf-8"))
-            for version, payload in zip(("vet-v2", "classify-v2"), seen, strict=True)}
+            for version, payload in zip(("vet-v2", "classify-v2"),
+                                        _s7_requests(framed=framed), strict=True)}
+
+
+def _s7_payload_tokens(*, framed: bool = True) -> dict[str, int]:
+    """The same two requests, counted over `cl100k_base` — the proxy §7 records."""
+    import json
+
+    import tiktoken
+
+    enc = tiktoken.get_encoding("cl100k_base")
+    return {version: len(enc.encode(json.dumps(payload)))
+            for version, payload in zip(("vet-v2", "classify-v2"),
+                                        _s7_requests(framed=framed), strict=True)}
 
 
 def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
@@ -567,9 +616,10 @@ def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
     instead of leaving a stale figure in four artifacts.
 
     Non-vacuity: the same construction measured with the framing removed is what moved these
-    numbers, so the **pre-framing** sizes (`vet-v1` 39,484 B, `classify-v1` 23,292 B) are
-    asserted NOT to be what the rows carry — restoring the old row without re-measuring cannot
-    pass, and neither can a re-measurement that forgot the framing is in the payload.
+    numbers, so the sizes the record carried BEFORE the framing (39,484 B / 23,292 B — the
+    superseded row, which is not the clause-removed measurement) are asserted NOT to be what
+    the rows carry — restoring the old row without re-measuring cannot pass, and neither can
+    a re-measurement that forgot the framing is in the payload.
 
     No network, no DB, no model: the transport is a stub that captures the payload.
     """
@@ -582,12 +632,112 @@ def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
         f"§7's recorded request sizes are not this head's payload: recorded {recorded}, "
         f"measured {measured} — re-measure and update the table, do not carry the old row")
 
-    # The framing is what moved them: the pre-framing figures this record still quotes as
-    # the "clause removed" comparison must NOT be what the table carries.
+    # The row the table carried before the framing (39,484 B / 23,292 B) must NOT be what
+    # the rows carry: a revert to it without re-measuring cannot pass.
     stale = {"vet-v2": 39_484, "classify-v2": 23_292}
     assert all(recorded[version] != before for version, before in stale.items()), (
-        "the pre-framing sizes are back in the table — the rows must be the FRAMED "
+        "the superseded pre-framing row is back in the table — the rows must be the FRAMED "
         f"payload's, not the carried-over figures: recorded {recorded}")
+
+
+#: A published figure pair: ``39,544 B ≈ 9,103 tok``. Whitespace-tolerant, because the
+#: artifacts are hard-wrapped at ~95 columns and a figure that wraps mid-pair is exactly
+#: the one a line-anchored regex would silently stop watching (the pre-fix row wrapped:
+#: ``39,484 B ≈ 9,265`` / ``tok``).
+_V1_FIGURE = re.compile(r"(?P<b>[\d,]+)\s*B\s*≈\s*(?P<t>[\d,]+)\s+tok")
+
+#: What makes a legacy pair readable as HISTORY rather than as a usable baseline.
+#: Round 5 of PR #10302's review (P2) found two different pre-framing figures in these
+#: artifacts with neither marked, which is how a percentage ends up measured against a
+#: baseline nothing counted.
+_SUPERSEDED_MARK = re.compile(r"superseded|not\W{0,2}reproduc|not a baseline|not comparable",
+                              re.IGNORECASE)
+
+#: How far from a legacy pair its "superseded" notice may sit — one paragraph.
+_SUPERSEDED_WINDOW = 600
+
+
+def _unmarked_legacy_figures(text: str, measured: dict[str, tuple[int, int]],
+                             also_measured: dict[str, tuple[int, int]] | None = None) -> list[str]:
+    """Published figure pairs that are neither a measurement nor marked stale."""
+    known = set(measured.values()) | set((also_measured or {}).values())
+    out = []
+    for m in _V1_FIGURE.finditer(text):
+        pair = (int(m.group("b").replace(",", "")), int(m.group("t").replace(",", "")))
+        if pair in known:
+            continue
+        window = text[max(0, m.start() - _SUPERSEDED_WINDOW):m.end() + _SUPERSEDED_WINDOW]
+        if _SUPERSEDED_MARK.search(window) is None:
+            out.append(f"{m.group('b')} B ≈ {m.group('t')} tok")
+    return out
+
+
+def test_the_pre_framing_baseline_is_a_measurement_and_a_superseded_row_is_marked():
+    """Every published pre-framing figure is either the measurement or marked stale.
+
+    THE DEFECT THIS PINS (PR #10302 review round 5, P2 — at
+    `docs/architecture/EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md:1031-1035`): the framing's
+    cost is quoted as a percentage OF A BASELINE, and these artifacts named **two**
+    different figures as that pre-framing request — `39,544 B ≈ 9,103 tok` /
+    `23,332 B ≈ 6,594 tok` in the sentence that derives +23% / +16%, and
+    `39,484 B ≈ 9,265 tok` / `23,292 B ≈ 6,112 tok` in the sentence that called the older
+    row "the pre-framing request". A 60 B / 40 B difference cannot move a token count by
+    162 / 482 tokens, so at most one of them was ever counted — the headline percentage
+    was quoted against a cell no artifact had measured, and a reader re-deriving it got
+    +21% / +26% instead.
+
+    So this test MEASURES the clause-removed construction (`_framed` replaced with the
+    bare question — the only splice of the clause, so this is the request the module built
+    before `#10117`) and requires: every ``<n> B ≈ <n> tok`` pair these artifacts publish
+    is either that measurement, or sits in a paragraph that says it is superseded. A
+    legacy row may be quoted — it may not be published as a second, comparable baseline.
+
+    Non-vacuity is in the test, not in a checkout: the same predicate is applied to the
+    PRE-FIX sentence, and it must flag it.
+    """
+    byte_cells = _s7_payloads(framed=False)
+    tok_cells = _s7_payload_tokens(framed=False)
+    # The clause-removed request is the PRE-framing version, so it is published as `-v1`.
+    as_v1 = {"vet-v2": "vet-v1", "classify-v2": "classify-v1"}
+    measured = {as_v1[version]: (byte_cells[version], tok_cells[version]) for version in byte_cells}
+    assert measured == {"vet-v1": (39_544, 9_103), "classify-v1": (23_332, 6_594)}, (
+        "the clause-removed construction no longer measures what the artifacts record as the "
+        "pre-framing request — a payload change or a `cl100k_base` re-count: re-measure and "
+        "update BOTH cells and the percentage derived from them (one baseline, not two)")
+    # The FRAMED cells are the sibling test's subject; named here so this guard is about the
+    # baseline only, and does not re-judge a legitimately quoted framed figure.
+    framed_bytes = _s7_payloads()
+    framed_tok = _s7_payload_tokens()
+    framed = {version: (framed_bytes[version], framed_tok[version]) for version in framed_bytes}
+    for artifact in (DOC, CHANGELOG):
+        text = artifact.read_text(encoding="utf-8")
+        unmarked = _unmarked_legacy_figures(text, measured, framed)
+        assert not unmarked, (
+            f"{artifact.name} publishes figures that are neither this head's measurement "
+            f"(framed or clause-removed) nor marked superseded: {unmarked} — a second, "
+            "un-reproduced baseline is how a headline percentage gets quoted against a "
+            "number nothing counted. Either quote the measured pair, or say the old row "
+            "does not reproduce.")
+        published = {(int(m.group("b").replace(",", "")), int(m.group("t").replace(",", "")))
+                     for m in _V1_FIGURE.finditer(text)}
+        assert set(measured.values()) <= published, (
+            f"{artifact.name} must publish the measured clause-removed baseline "
+            f"{sorted(measured.values())} — found {sorted(published)}; the framing's cost "
+            "percentage is derived from it")
+
+    # Non-vacuity, in-test: the PRE-FIX sentence (verbatim from the changelog at
+    # `952640ecab`, kept as a fixture rather than a checkout) must be flagged by the very
+    # predicate the real artifacts pass.
+    pre_fix = (
+        "The figures this entry carried before — `vet-v1` 39,484 B ≈ 9,265 tok and "
+        "`classify-v1` 23,292 B ≈ 6,112 tok — were the pre-framing request, kept here "
+        "only as the comparison."
+    )
+    assert _unmarked_legacy_figures(pre_fix, measured) == ["39,484 B ≈ 9,265 tok",
+                                                           "23,292 B ≈ 6,112 tok"], (
+        "the guard cannot see the defect it exists for — two pre-framing figures labelled "
+        "as the same request, neither reproduced: "
+        f"{_unmarked_legacy_figures(pre_fix, measured)}")
 
 
 # ── the framing's PROVENANCE must name a page that exists ─────────────────

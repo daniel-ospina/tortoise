@@ -1030,9 +1030,14 @@ record carries both rows with their per-call and per-item cost at the vendor's d
 clause is **+23%** on VET and **+16%** on classify against the same construction with it removed
 (`vet-v1` 39,544 B ≈ 9,103 tok; `classify-v1` 23,332 B ≈ 6,594 tok), because it rides in every
 question's `instructions` — the vendor evaluates the questions independently against one `state`, so
-one clause cannot cover the rest. The figures this entry carried before — `vet-v1` 39,484 B ≈ 9,265
-tok and `classify-v1` 23,292 B ≈ 6,112 tok — were the pre-framing request, kept here only as the
-comparison. The price
+one clause cannot cover the rest. ⚠️ **One baseline, and it is the one measured above.** The figures
+this entry carried before — `vet-v1` 39,484 B ≈ 9,265 tok and `classify-v1` 23,292 B ≈ 6,112 tok —
+do **not** reproduce as a second pre-framing measurement: a re-count of the same request is the
+39,544 B ≈ 9,103 tok / 23,332 B ≈ 6,594 tok quoted above (bytes agree to 0.15%, the token cells are
+1.8% and 7.3% off, which a 60 B / 40 B difference cannot account for). So that row is **superseded,
+not comparable**, and every percentage here is derived from the re-measured pair only — quoting
++23%/+16% against the old token cells instead would read +21%/+26% off a baseline that was never
+re-counted. The superseded row is kept for provenance, never as a comparison. The price
 per token is the **vendor's** documented rate — `$42 / $0.042` per Btok / Mtok for `jev-1.13.0`,
 input-only (output tokens are free), i.e. `4.2e-8 $/token` — read from `docs.typesafe.ai/models` on
 2026-10-27. ⚠️ An earlier version of this entry used `4.19e-7 $/token` (10× the vendor's rate)
@@ -1129,8 +1134,11 @@ stable version makes every stamped record lie about the question it answered.
 **50,004 B ≈ 11,223 tok ⇒ $0.00047/call ($0.0000118/item)**; `classify-v2` 40 tail items ⇒
 **28,562 B ≈ 7,674 tok ⇒ $0.00032 ($0.0000081/item)**. The clause is **+23%** on VET and **+16%** on
 classify against the identical construction without it (39,544 B ≈ 9,103 tok and 23,332 B ≈ 6,594
-tok — reproducing the previously recorded 39,484 B to within 0.15%, which is what makes the new
-figures comparable rather than merely newer). `docs/architecture/S2-DECISION-SEAM.md` §7 now states
+tok — the `B` cells reproducing the previously recorded 39,484 B / 23,292 B to within 0.15%, which
+is what makes the new figures comparable rather than merely newer; ⚠️ that earlier row's **token**
+cells, 9,265 / 6,112, do NOT reproduce at 9,103 / 6,594 and are superseded, not a second baseline —
+a 60 B / 40 B difference cannot move a count by 162 / 482 tokens, so no delta here is derived from
+them). `docs/architecture/S2-DECISION-SEAM.md` §7 now states
 the **construction** as well as the result, because an unstated construction is how the row moved
 through two review rounds unmeasured.
 

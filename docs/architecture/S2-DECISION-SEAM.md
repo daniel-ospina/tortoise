@@ -351,9 +351,15 @@ request, top-5 kinds offered with **no** kind descriptions, measured on
 
 **What the framing (`#10077` / `#10117`) costs.** On that identical construction the
 same requests measure **39,544 B ≈ 9,103 tok** (`vet-v1`) and **23,332 B ≈ 6,594 tok**
-(`classify-v1`) with the clause removed — within **0.15%** of the 39,484 B this table
-carried before, which is what makes the two figures comparable rather than merely
-newer. The framing itself is therefore **+10,460 B / +2,120 tok (+23% of tokens)** on `vet-v2`
+(`classify-v1`) with the clause removed — the `B` cells within **0.15%** of the 39,484 B
+the row carried before, which is what makes the two comparable rather than merely
+newer. ⚠️ The **token** cells of that earlier row (`9,265` / `6,112`) are NOT reproducible
+and are not a baseline: a re-count of the same request gives `9,103` / `6,594`, and the
+byte difference (60 B / 40 B) is an order of magnitude too small to explain the gap, so
+those two cells are superseded — every percentage below is derived from the measured
+pair above.
+
+The framing itself is therefore **+10,460 B / +2,120 tok (+23% of tokens)** on `vet-v2`
 and **+5,230 B / +1,080 tok (+16% of tokens)** on `classify-v2` (as BYTES those deltas are +26.5%
 and +22.4% — the percentages are quoted on tokens because the price is per input token): it rides in **every** question's
 `instructions` (~131 B / ~27 tok per question), because the vendor evaluates the
