@@ -25,12 +25,26 @@ What this suite pins:
 * the record is in the journal BEFORE the statement reaches the handle (the
   ordering that makes the lane declaration honest — the same property
   ``tests/test_9124_declared_live_doors.py`` pins textually for whole doors);
-* the statement is authorized by ITS OWN lane under an ARMED handle (the
-  reason read back AT the write handle, not the outer scope's);
-* ``rebuild()`` AND ``rebuild_all()`` restore the four fields on a minted
-  Point that is never promoted;
 * the hosted twin (`hosted_api._capture_session_impl`) does the same — the two
   lanes are byte-parity on these fields.
+
+⚠️ **FOUR LEGS THIS SUITE USED TO HAVE WENT WITH `TortoiseSDK.capture_session`
+(#4282, 2026-10-27), and the loss is stated here because they pinned the two
+properties that make the lane declaration HONEST.** Deleted: the armed-handle
+read-back (`test_the_stamp_is_authorized_by_its_own_lane_under_an_armed_handle`),
+the record-before-statement ordering
+(`test_the_record_precedes_the_stamp_statement`), the one-record-per-minted-id
+census (`test_the_capture_stamp_journals_one_record_per_minted_id`), the
+refused-record-skips-the-cache-write leg, and both never-promoted rebuild legs
+(`test_a_rebuild_restores_the_provenance_of_an_unpromoted_point`,
+`test_a_rebuild_all_of_a_re_creation_drops_the_dead_provenance`). **Measured, not
+assumed:** every one of them either called `capture_session` directly or took the
+`un_promoted_capture` fixture built on it, so no re-aim exists — the surviving
+`_stamp_capture_provenance` door is only reachable from the hosted lane, and the
+hosted twin below does NOT neutralise `_apply_capture_ingest_ep` the way the
+`un_promoted_capture` fixture did, so its rebuild assertion can pass on the
+`PointPromoted` snapshot alone. The lane CONSTANT and the guarded-call census
+still hold; the ordering and read-back proofs of the deleted door do not.
 """
 from __future__ import annotations
 
@@ -55,8 +69,10 @@ PROVENANCE = ("eventId", "source_session", "source_harness", "ingested_at")
 #: the write move together — the docstring's "a rename is a red test rather than
 #: a silent relabelling" would then be a claim nothing enforces. Both directions
 #: redden here: a renamed constant fails
-#: ``test_the_stamp_lane_literal_is_pinned``, and a write issued under any other
-#: (even any other ``capture.*``) lane fails the read-back at the handle.
+#: ``test_the_stamp_lane_literal_is_pinned``. (The second direction — a write
+#: issued under any other ``capture.*`` lane failing a read-back at the handle —
+#: was pinned by a leg that drove the deleted ``capture_session`` door and went
+#: with it in #4282; see the module docstring's loss note.)
 CAPTURE_LANE = "capture.provenance-stamp"
 
 CONV = [
@@ -108,11 +124,11 @@ def test_the_stamp_lane_literal_is_pinned():
 
     ``sdk._CAPTURE_PROVENANCE_LANE``'s docstring says the literal is stable ON
     PURPOSE and that a rename is a red test rather than a silent relabelling.
-    The read-back above compares the lane at the write handle against
-    ``CAPTURE_LANE``; this binds the module constant to that same literal, so
-    the docstring's claim is one this suite ENFORCES rather than restates. A
-    constant-only comparison (no literal in the test) would move with the
-    rename and stay green.
+    This binds the module constant to a LITERAL defined here, so the docstring's
+    rename claim is one the suite ENFORCES rather than restates: a constant-only
+    comparison (no literal in the test) would move with the rename and stay
+    green. (The armed-handle read-back that used to sit beside it went with
+    #4282's deleted door — see the module docstring.)
     """
     assert _CAPTURE_PROVENANCE_LANE == CAPTURE_LANE, (
         f"the capture stamp's lane constant is "

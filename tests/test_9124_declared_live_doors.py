@@ -316,12 +316,15 @@ _NO_JOURNAL = {
     #   the census itself: the two stamp doors are declared members of the
     #   apply-first lane, and a successor that drops off this surface reds
     #   below.
-    #   The five doors those writes MOVED to (`_write_session_and_turns`,
-    #   `_materialize_session_source` and `_stamp_capture_provenance` included)
-    #   are pinned as declared doors by
-    #   `test_every_apply_first_declared_door_states_an_order_and_a_record`
-    #   below, so a successor that drops off the census surface reds there
-    #   instead of being absorbed here.
+    #   The five doors those writes MOVED to are pinned as declared doors by
+    #   `test_every_mutating_sdk_entry_point_is_declared_or_inventoried` below,
+    #   so a successor that drops off the census surface reds there instead of
+    #   being absorbed here. ⚠️ Do NOT cite the apply-first pin for the whole
+    #   set: of the three named above only `_materialize_session_source` is an
+    #   apply-first member — `_stamp_capture_provenance` and
+    #   `_write_session_and_turns` declare the LIVE (journal-first) lane, which
+    #   is the stronger claim, and adding them here would be rejected by that
+    #   pin by design.
 
     "_clear_reliability_cache",
     "_connect_issue_objects",

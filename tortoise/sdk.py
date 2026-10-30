@@ -13155,11 +13155,14 @@ class TortoiseSDK:
         #     from the node the SET just wrote — not `now`. On the lane where this
         #     door's own mint CREATES the stub, the two are the same value (the
         #     mint is `_mint_source_stub(..., now=now)`, and the SET coalesces
-        #     into `$now`), which is what
+        #     into `$now`). (The two pins that said so —
         #     `test_a_keyless_capture_stamps_its_stub_with_the_capture_instant`
         #     and
         #     `test_the_extracting_lane_stamps_its_stub_with_the_capture_instant`
-        #     pin. On a PRE-EXISTING stub they DIFFER: the live SET's `coalesce`
+        #     — lived in `tests/test_8501_capture_path_anchor.py`, deleted whole
+        #     by #4282 with the SDK capture door, so the mint-equals-`$now` arm
+        #     is now UNPINNED; one of the two must be restored or this comment
+        #     stays a claim.) On a PRE-EXISTING stub they DIFFER: the live SET's `coalesce`
         #     keeps the earlier writer's instant (#398's never-overwrite contract
         #     — `ingestedAt` means when Tortoise FIRST saw this source), so a
         #     record stating `now` journals a value the write never wrote (#9451).

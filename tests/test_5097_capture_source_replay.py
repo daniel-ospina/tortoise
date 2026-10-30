@@ -30,14 +30,20 @@ precedent. This suite pins the carrier and its payload:
     retractable);
   * a rebuild reproduces the stored metadata.
 
-Both REPLAY ENGINES are pinned, because they fold this record in different
-orders and only one of them is the recovery path: ``rebuild()`` replays record
-by record, so the M2 stub exists before the record folds (ON MATCH);
-``rebuild_all()`` folds ``SourceCreated`` in pass 1b and mints the stub in
-pass 2, so the record itself CREATES the node (ON CREATE). A carrier that is
-faithful only on ``rebuild()`` is half a carrier — hence
-``test_rebuild_all_restores_the_session_source_metadata``, which compares the
-WHOLE property bag, not a chosen subset.
+Both REPLAY ENGINES must stay covered, because they fold this record in
+different orders and only one of them is the recovery path: ``rebuild()``
+replays record by record, so the M2 stub exists before the record folds (ON
+MATCH); ``rebuild_all()`` folds ``SourceCreated`` in pass 1b and mints the stub
+in pass 2, so the record itself CREATES the node (ON CREATE). A carrier that is
+faithful only on ``rebuild()`` is half a carrier.
+
+⚠️ **#4282 DELETED THE ENGINE-HALF OF THIS SUITE** (2026-10-27): the
+``rebuild`` / ``rebuild_all`` session-source tests and the two journal-carrier
+tests drove ``TortoiseSDK.capture_session``, one of the 26 dead public methods,
+and nothing replaced them — the survivors below are fold/window tests on the
+record's SHAPE, not on either engine restoring the whole property bag. Recorded
+as a loss in the PR's "Coverage removed" section rather than left as a claim
+this docstring makes on the suite's behalf.
 
 Formerly excluded here and now PINNED: ``ingestedAt``. It used to be the replay
 clock on a rebuilt session Source (the stub is created by the M2 ``_link_source``

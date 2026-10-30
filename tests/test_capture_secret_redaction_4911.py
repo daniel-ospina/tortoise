@@ -7,22 +7,23 @@ extraction and search. Nothing had leaked yet only because capture is
 session-end and the count was a coincidence of timing — the control was simply
 absent.
 
-What these tests pin, one acceptance criterion each:
+What these tests pin, one acceptance criterion each.
 
-1. ``test_every_credential_shape_is_redacted_end_to_end`` — a turn containing
-   each anchored shape is captured through ``sdk.capture_session`` and the row
-   read back from the graph carries ``[REDACTED:<kind>]``, never the value.
-2. ``test_redaction_is_visible_not_a_silent_truncation`` — the marker is
-   present AND the surrounding text survives, so a reader can tell the text is
-   incomplete. (The same silent-loss class as #4897, inverted.)
-3. ``test_redaction_count_is_recorded_per_session_and_surfaced`` — the count is
-   on the ``:Session`` node (``capture_redactions``) AND on the capture receipt.
-4. ``test_control_lives_at_the_single_stored_text_chokepoint`` — exactly ONE
+⚠️ **#4282 (2026-10-27) deleted criteria 1-3 with the `TortoiseSDK.capture_session`
+door they drove through.** `test_every_credential_shape_is_redacted_end_to_end`,
+`test_redaction_is_visible_not_a_silent_truncation` and
+`test_redaction_count_is_recorded_per_session_and_surfaced` were end-to-end legs —
+each captured a turn through that door and read the row back — so they are gone and
+their loss is recorded in the PR's "Coverage removed" section rather than restated
+here as coverage this file no longer has. The scrubber itself is untouched, and the
+criterion that survives is the one that makes it unskippable:
+
+1. ``test_control_lives_at_the_single_stored_text_chokepoint`` — exactly ONE
    place in the capture paths applies the scrubber (``_redact_turn_contents``)
    and every capture consumer derives its text through it — the stored turns,
    the session Source and the extractor — so no lane can drift and no
    persisting sink can be forgotten.
-5. ``test_local_spool_keeps_the_raw_turn_by_decision`` — the deliberate scope
+2. ``test_local_spool_keeps_the_raw_turn_by_decision`` — the deliberate scope
    decision (see that test's docstring): the LOCAL raw store is out of scope.
 
 Plus the invariants a naive implementation breaks: the prose false positives

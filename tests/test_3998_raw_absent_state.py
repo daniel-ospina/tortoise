@@ -1413,3 +1413,84 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
     # `:Source` above — ruling B applies to every `:Source` the write reaches.
     with pytest.raises(ValueError, match="retired field"):
         s.update_entity(pid, content="edited point A content")
+
+
+def test_the_declaration_covers_every_in_tree_source_writer(sdk):
+    """Review round 4, P2: the declaration drifted from the node. It was
+    written from the two writers I happened to be editing, but
+    ``get_source_reliability`` also mints three keys — so the read filter
+    silently DROPPED the reliability cache that the read had just returned to
+    the caller. Naming keys one at a time does not scale; this asserts the
+    invariant instead: every property an in-tree producer writes to a
+    ``:Source`` is DECLARED.
+
+    (1) FAILS the day a producer adds a key the declaration lacks — which is
+        exactly the drift that produced the dropped-cache defect.
+    (2) REACHABLE: each producer below is invoked for real and the node is read
+        back, so the surface measured is the one that exists, not a literal.
+    """
+    from tortoise.projection.entities import _SOURCE_NODE_PROP_NAMES
+
+    s, _events = sdk
+
+    def _keys_at(prop: str, val: str) -> set:
+        rows = s._get_proj().g.query(
+            f"MATCH (n:Source {{{prop}: $v}}) RETURN properties(n)",
+            params={"v": val},
+        ).result_set
+        return set(rows[0][0]) if rows else set()
+
+    s.create_source(RAW_URL, "document", contentHash="h1", title="t",
+                    source_path="/tmp/x.md")
+    s.get_source_reliability(RAW_URL)          # the reliability cache writer
+    produced = set(_source_props(s))
+
+    # #5196 review round 2, P2: the docstring above says "each producer below is
+    # invoked for real", but only two were — and the two the declaration's own
+    # comment names as the reason several keys must be present (the DOCUMENT
+    # writer and the session-capture writer) were never driven. A new undeclared
+    # key on either could not fail here, which is the "derive the surface from
+    # what I happened to edit" failure this test exists to replace.
+    doc = s.create_document("cov-doc-5196", "note")
+    doc_keys = _keys_at("url", doc["id"])     # `_upsert_document` MERGEs on url
+    assert doc_keys, "the document writer produced no :Source"
+    produced |= doc_keys
+
+    s._materialize_session_source(
+        "cov-5196", None, "2026-01-01T00:00:00+00:00")   # the session writer
+    sess_keys = _keys_at("url", "session:cov-5196")
+    assert sess_keys, "the session-capture writer produced no :Source"
+    produced |= sess_keys
+
+    # the index-merge writer (`_upsert_source`'s `run_clause`) — it minted
+    # `__runId`, which this test could not see, so the declaration's own invariant
+    # was unchecked for that producer (#5196 review round 3, P2).
+    s.create_source(RAW_URL + "?merge", "document", contentHash="h1",
+                    _merge_run_id="cov-rid-5196")
+    merge_keys = _keys_at("url", RAW_URL + "?merge")
+    assert merge_keys, "the index-merge writer produced no :Source"
+    assert "__runId" in merge_keys, (
+        "the writer no longer emits `__runId` — the declaration entry for it is "
+        "now dead and this test would not notice")
+    produced |= merge_keys
+
+    assert produced, "the fixture produced no :Source — the assertion would be vacuous"
+    undeclared = sorted(produced - set(_SOURCE_NODE_PROP_NAMES))
+    assert not undeclared, (
+        f"in-tree writers mint undeclared :Source properties {undeclared} — either "
+        f"declare them in entities._SOURCE_NODE_PROPS or stop them at the writer; an "
+        f"undeclared key is dropped from every filtered read"
+    )
+    # ...and the read keeps them, which is the defect this test was written for.
+    #
+    # #4282 deleted `get_provenance_chain` (one of the 26 dead public methods), so
+    # this half is re-aimed at the read that SURVIVES and carries the same filter
+    # — the primary entity read, `get_entity` -> `projection.entities.filter_source_props`
+    # (the #5196 round-3 P1 comment at `sdk.py` states the two paths share the one
+    # filter). Same claim, one function over: an undeclared key is dropped from a
+    # filtered read, and a DECLARED cache key is not.
+    entity = s.get_entity(RAW_URL)
+    assert entity, f"the source did not resolve through get_entity: {RAW_URL}"
+    assert "reliabilityComponents" in entity, (
+        f"the reliability cache was dropped from the read bag: {sorted(entity)}"
+    )
