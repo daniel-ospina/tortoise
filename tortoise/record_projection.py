@@ -2300,9 +2300,9 @@ def _relation_delete_statement(
 # land together. The graph side is the oracle and is mirrored, not re-invented:
 # `projection/__init__.py` pass-2b resolves the target through
 # `resolve_structural_target`, deletes the resurrection at `old`, and re-creates
-# it at `_final(src)` — and skips the whole descriptor when `_final(src) == src`
-# or when the resolved target IS the destination (the E2E-11.6 no-self-edge
-# contract).
+# it at its DIRECT successor — and skips the whole descriptor when
+# `_final(src) == src` or when the resolved target IS the destination (the
+# E2E-11.6 no-self-edge contract).
 
 #: rel → the label of the STRUCTURAL target, restated from
 #: `projection/edges.py::STRUCTURAL_REL_LABELS`. ⛔ The label is derived from the
@@ -2365,17 +2365,15 @@ _TERMINAL_POINT_STATUSES: tuple[str, ...] = (
 
 #: The bound on the `superseded_by` chase. The graph's `_final` walks its fold
 #: map, which cannot cycle; the record's is a table walk, so the recursion is
-#: both depth-bounded and `path`-guarded, and a cyclic or >32-hop chain reaches
-#: no `next_id IS NULL` row — i.e. it has NO destination.
+#: both depth-bounded and `path`-guarded. The MOVE reads ONE hop (`depth = 2`,
+#: the direct successor live named); the deeper hops exist because a chain's
+#: earlier descriptors each resolve at their own successor.
 #:
 #: ⚠️ NO DESTINATION ⇒ NOTHING MOVES, and that promise is only kept because the
 #: DELETE carries the same "a destination exists" conjunct as the INSERT: gating
 #: the delete on `_src_is_terminal(src)` + "src HAS a successor" alone fired the
-#: DELETE while the INSERT's `dest` subquery was empty, so a cyclic chain DELETED
-#: the row and wrote no replacement. NAMED RESIDUAL: on such a chain the graph's
-#: `_final` returns the first REPEATED node, so the fold moves the edge there
-#: while the record leaves it at `src` — a divergence on a state no producer
-#: emits, chosen over silently losing the row.
+#: DELETE while the INSERT's `dest` subquery was empty, so a chain the record
+#: cannot resolve DELETED the row and wrote no replacement.
 _SUPERSEDE_CHAIN_DEPTH = 32
 
 
@@ -2543,10 +2541,22 @@ def _structural_repoint_statements(
        is (`MATCH (old)-[r]->(t) WHERE ID(t)=$tid`); `idx` is deliberately NOT in
        the predicate, because the graph deletes the edge by its INTERNAL id (the
        descriptor carries no `idx`, and the structural writers all leave it 0).
-    2. `INSERT` the same row at `_final(src)`, the TERMINAL endpoint of the
-       `superseded_by` chain (a recursive CTE, so a 3-link chain resolves to the
-       last link and to nothing in between) — WITH the descriptor's TRANSFERRED
-       attributes (the `⛔ #10303` block below this docstring).
+    2. `INSERT` the same row at the DIRECT successor — `succ[src]`, the point
+       the supersede that emitted this descriptor actually named — WITH the
+       descriptor's TRANSFERRED attributes (the `⛔ #10303` block below this
+       docstring). ⛔ ONE HOP, not `_final(src)` (the terminal endpoint of the
+       chain): the graph's transfer is `supersede_point(old, new)`'s
+       `MERGE (new)-[:<rel>]->(t) ON CREATE SET nr += $attrs`, so the edge is
+       created at `new` and each LATER supersede carries it one more hop with
+       the value it holds at that moment. Resolving straight to the terminal
+       collapses a chain's descriptors onto one destination row — and a sibling
+       pair's too — and the two shapes then need OPPOSITE precedence: a chain's
+       LAST transfer created the final edge (so its payload must win), a sibling
+       pair's FIRST did (so its payload must win). One INSERT per descriptor, at
+       ITS OWN successor, gets both right for free: the `ON CONFLICT` clause does
+       the job `ON CREATE SET` does on the graph side, and the next link's DELETE
+       removes the intermediate row exactly as live's supersede removes the
+       intermediate edge.
        `ON CONFLICT … DO NOTHING`, not `DO UPDATE`, because since `#10139` the
        graph's transfer is `MERGE (s)-[:<rel>]->(t) ON CREATE SET nr += $attrs`
        (`projection/__init__.py`, the pass-2b structural replay leg): `ON
@@ -2587,11 +2597,11 @@ def _structural_repoint_statements(
     survivor-filtered `succ` map has no record-side expression, so an id-reuse
     journal (a point re-created live under a used id) is resolved here as
     `point.status` says at the moment the record runs — which is the LIVE order,
-    not the rebuild's post-filter one; (c) the graph's `_final` returns the first
-    REPEATED node on a CYCLIC chain, so the fold moves the edge there while this
-    record (path-guarded, depth-bounded) reaches no destination and moves
-    nothing — a divergence, named rather than papered over, on a state no
-    producer emits, chosen so a chain with no end loses no row.
+    not the rebuild's post-filter one; (c) a CYCLIC chain moves ONE hop here (its
+    direct successor, which is what live did) and stops, because the walk is
+    `path`-guarded — the graph's `succ` map carries the same guard, so both stop
+    at the same hop; the earlier "moves nothing" divergence is gone with the
+    terminal destination it came from.
     """
     etype = record.get("edge_type")
     label = _STRUCTURAL_REL_LABELS.get(etype) if isinstance(etype, str) else None
@@ -2611,14 +2621,14 @@ def _structural_repoint_statements(
     tgt_select, tgt_params = _structural_target_resolution(
         org_id, graph_id, label, rel_type, tgt, "tgt")
     # The move exists only for a TERMINAL src with a surviving successor AND a
-    # reachable DESTINATION. The third conjunct is what makes the pair atomic: a
-    # cyclic/path-guarded or >`_SUPERSEDE_CHAIN_DEPTH` chain satisfies the first
-    # two (src is terminal and HAS a successor) while `dest` — the `next_id IS
-    # NULL` row — is empty, so without it the DELETE ran and the INSERT wrote
+    # reachable DESTINATION — the DIRECT successor's own row (`depth = 2`). The
+    # third conjunct is what makes the pair atomic: a successor whose `point` row
+    # the record does not hold (or a path-guarded cycle that never leaves `src`)
+    # leaves `dest` empty, so without it the DELETE ran and the INSERT wrote
     # nothing: the row left the superseded point and never landed anywhere.
     moved = ("(SELECT terminal FROM succ WHERE depth = 1) "
              "AND EXISTS (SELECT 1 FROM succ WHERE next_id IS NOT NULL) "
-             "AND EXISTS (SELECT 1 FROM succ WHERE next_id IS NULL)")
+             "AND EXISTS (SELECT 1 FROM succ WHERE depth = 2)")
     delete = Statement(
         f"{cte}DELETE FROM public.relation "
         "WHERE org_id = %s AND graph_id = %s AND rel_type = %s "
@@ -2645,8 +2655,7 @@ def _structural_repoint_statements(
     insert = Statement(
         f"{cte}INSERT INTO public.relation ({', '.join(insert_columns)}) "
         f"SELECT {select_list} "
-        "FROM (SELECT node_key FROM succ WHERE next_id IS NULL "
-        "ORDER BY depth DESC LIMIT 1) dest, "
+        "FROM (SELECT node_key FROM succ WHERE depth = 2) dest, "
         f"{tgt_select} "
         "WHERE dest.node_key <> tgt.node_key "
         f"AND {moved} "
@@ -3788,7 +3797,7 @@ def _declared_mutations(
         if record_type == "DirectEdgeRepoint":
             # #9972/#9973: the STRUCTURAL (2b) shape means MOVE — resolve the
             # target by its replay key, remove the row at the superseded point,
-            # and re-create it at `_final(src)`. `None` = not that shape (the 2a
+            # and re-create it at the DIRECT successor live named. `None` = not that shape (the 2a
             # direct descriptor, whose `src` is already the successor), and it
             # keeps the plain upsert below byte for byte.
             moved = _structural_repoint_statements(

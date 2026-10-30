@@ -2268,14 +2268,25 @@ def test_a_structural_repoint_descriptor_resolves_its_name_keyed_target():
     assert "Object" in params, params             # the label the fold resolves
 
 
-def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
-    """#9973 indicator 1 — the move has TWO halves: remove at old, create at final.
+def test_a_structural_repoint_moves_its_edge_one_hop_at_a_time():
+    """#9973 indicator 1 — the move has TWO halves: remove at old, create at the
+    successor THAT SUPERSEDE NAMED.
 
     The descriptor's `src` is the point being SUPERSEDED (`sdk.py` 2b emission,
     `src=old_id`), so an upsert at `src` both kept the row the graph deleted and
     never wrote the successor's. #9972 alone is unobservable: a target-only fix
     re-writes the same wrong row (and erases its attributes through the
     `ON CONFLICT` path), which is why the two land as ONE change.
+
+    ⛔ `dest` is the DIRECT successor (`depth = 2`), not the chain's terminal
+    row: live's transfer is `MERGE (new)-[nr]->(t) ON CREATE SET nr += $attrs`,
+    so the edge is created at `new` and the NEXT supersede carries it one hop
+    further. Resolving straight to the terminal row collapses a chain's
+    descriptors (and a sibling pair's) onto one destination, where `DO NOTHING`
+    keeps the FIRST — right for siblings, wrong for a chain, whose last transfer
+    is the one that created the final row (`#10139` review round 4, P1). One hop
+    per descriptor reproduces both, and the next link's DELETE removes the
+    intermediate row exactly as live's supersede removes the intermediate edge.
     """
     statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
     assert len(statements) == 2, statements   # the two halves of ONE mutation
@@ -2288,9 +2299,11 @@ def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
     # the row's resolved target — the fold's own re-query.
     assert "src_key = (SELECT node_key FROM succ WHERE depth = 1)" in delete, delete
     assert "src_label = 'Point'" in delete, delete
-    # The insert files the chain's TERMINAL row (`next_id IS NULL`), not `src`.
+    # The insert files the DIRECT successor (`depth = 2`), not `src` and not the
+    # chain's terminal row.
     insert = inserts[0].sql
-    assert "succ WHERE next_id IS NULL" in insert, insert
+    assert "FROM (SELECT node_key FROM succ WHERE depth = 2) dest" in insert, insert
+    assert "next_id IS NULL" not in insert, insert
     assert "'Point', dest.node_key" in insert, insert
     # `_final(src) == src` is a clean NO-OP, not a delete-then-reinsert: a
     # re-created LIVE incarnation owns its edges (`_src_is_terminal`).
@@ -2298,11 +2311,12 @@ def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
         assert "(SELECT terminal FROM succ WHERE depth = 1)" in sql, sql
         assert "EXISTS (SELECT 1 FROM succ WHERE next_id IS NOT NULL)" in sql, sql
         # ⛔ The DESTINATION conjunct, on BOTH halves. Without it the pair is not
-        # one mutation: a cyclic or >32-hop chain satisfies the two conjuncts
-        # above (src is terminal and HAS a successor) while the INSERT's `dest`
-        # subquery is empty, so the DELETE ran and wrote no replacement — the row
-        # left the superseded point and landed nowhere.
-        assert "EXISTS (SELECT 1 FROM succ WHERE next_id IS NULL)" in sql, sql
+        # one mutation: a successor whose `point` row the record does not hold
+        # (or a path-guarded cycle that never leaves `src`) satisfies the two
+        # conjuncts above (src is terminal and HAS a successor) while the
+        # INSERT's `dest` subquery is empty, so the DELETE ran and wrote no
+        # replacement — the row left the superseded point and landed nowhere.
+        assert "EXISTS (SELECT 1 FROM succ WHERE depth = 2)" in sql, sql
     # NO SELF-EDGE (E2E-11.6): a chain that collapses the endpoints onto one node
     # must not mint `(X)-[:aboutPoint]->(X)`.
     assert "dest.node_key <> tgt.node_key" in insert, insert
@@ -2401,12 +2415,15 @@ def test_a_structural_repoint_with_no_attributes_emits_the_same_shape():
 
 
 def test_the_structural_move_reads_the_records_own_successor_chain():
-    """`_final(src)` is a `superseded_by` walk over `public.point` — no graph read.
+    """The `superseded_by` walk is a record read over `public.point` — no graph read.
 
     The record already holds the successor link (the `PointSuperseded` patch
     writes `props->>'superseded_by'`), which is what makes the move derivable
-    from the journal alone (Interface A). The walk is depth-bounded AND
-    `path`-guarded: a cycle has no terminal, so nothing moves.
+    from the journal alone (Interface A). The move takes ONE hop (`depth = 1` is
+    `src`, `depth = 2` is the direct successor live named); deeper hops exist
+    because a chain's earlier descriptors each resolve at their own successor.
+    The walk is depth-bounded AND `path`-guarded, so a cycle stops where live's
+    `succ` map stops — at the hop that would repeat a node.
     """
     cte, params = rp._supersede_chain_cte("o", "g", "p1")
     assert cte.startswith("WITH RECURSIVE succ("), cte

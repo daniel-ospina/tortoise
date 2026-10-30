@@ -16900,14 +16900,6 @@ class FalkorProjection(
                 # — must not collapse). Objects/Events/Documents are id-keyed
                 # entities: two distinct same-name targets must not collapse.
                 structural_seen: set[tuple] = set()
-                # #10139: deferred structural-transfer payloads, ONE per
-                # resolved successor edge. Keyed on the edge the statement
-                # creates — (final src, resolved target identity, etype) — so a
-                # chain's descriptors collapse onto one entry whose value is the
-                # LAST one journaled (dict assignment keeps the first insertion
-                # POSITION and overwrites the value, which is what the
-                # post-loop application relies on for journal order).
-                _pending_structural: dict[tuple, dict] = {}
 
                 def _src_is_terminal(sid: str) -> bool:
                     """#2489 (code-review P1): the delete-leg must ONLY clean
@@ -17056,13 +17048,37 @@ class FalkorProjection(
                             # future #2488 survivor filter / defensive) — never
                             # re-create the edge at old after the delete-leg.
                             continue
-                        if resolved.get("logical") and resolved["logical"] == src_f:
-                            # aboutPoint whose target IS the final successor
-                            # (chain collapse X→Y→Z with target Z): the create
-                            # would mint (succ)-[:aboutPoint]->(succ) — phantom
-                            # self-edge. Never recreate (E2E-11.6 no-self
-                            # contract); the delete-leg already cleaned the
-                            # resurrection at old.
+                        # ⛔ THE TRANSFER LANDS WHERE LIVE LANDED IT — at the
+                        # DIRECT successor (`succ[src]`), NOT at `_final(src)`.
+                        # Live's 2b transfer is `supersede_point(old, new)`'s
+                        # `MERGE (new)-[nr:rel]->(t) ON CREATE SET nr += $attrs`,
+                        # so the edge is created at the point THAT supersede
+                        # named, and every later supersede carries it one hop
+                        # further with whatever value the edge holds at that
+                        # moment (which is what the descriptor journals, since
+                        # the emitter reads `properties(r)` then). Replaying each
+                        # descriptor at its OWN successor, in journal order, is
+                        # what makes the payload land where live put it — for a
+                        # CHAIN (X→Y→Z: the Y→Z descriptor re-creates the edge at
+                        # Z carrying Y's current 0.91, and the intermediate edge
+                        # this leg creates at Y is removed by the NEXT
+                        # descriptor's delete-leg, the same order live runs its
+                        # delete and create in) and for SIBLINGS (two independent
+                        # retired points onto ONE successor: the second `MERGE`
+                        # matches, `ON CREATE` does not fire, and the FIRST
+                        # creator's payload survives, exactly as live's does).
+                        # ⛔ Resolving every descriptor to the FINAL successor
+                        # collapses those two cases into one statement and cannot
+                        # tell them apart: it landed a chain's LAST payload
+                        # (#10139 review round 3) and then, on the sibling shape,
+                        # a LAST where live keeps the FIRST (round 4).
+                        _dest = succ[src]
+                        if resolved.get("logical") and resolved["logical"] == _dest:
+                            # aboutPoint whose target IS the successor this
+                            # transfer lands on: the create would mint
+                            # (succ)-[:aboutPoint]->(succ) — phantom self-edge.
+                            # Never recreate (E2E-11.6 no-self contract); the
+                            # delete-leg already cleaned the resurrection at old.
                             continue
                         # Two-step MERGE on the resolved node identity — collapses
                         # duplicate creates to one edge (about* / extractedFrom
@@ -17092,34 +17108,23 @@ class FalkorProjection(
                         # emitter whitelisted with (`DIRECT_EDGE_ATTR_KEYS`,
                         # `edges.py`) — never `properties(r)` raw, and never a
                         # second copy of the tuple.
-                        # ⛔ CHAINS: the payload is DEFERRED, one entry per
-                        # resolved successor edge, and the LAST descriptor's
-                        # payload wins (#10139 review round 3, P2). Applied
-                        # in-line instead, `ON CREATE` makes the FIRST
-                        # descriptor to run the one that creates the edge, so a
-                        # chain's EARLIEST payload would land — measured on a
-                        # three-link chain (X holds 0.42, Y its own 0.91):
-                        # live ends at Z = 0.91, an in-line rebuild at Z = 0.42.
-                        # Live is last-writer-wins because every transfer reads
-                        # `properties(r)` of the edge its predecessor holds AT
-                        # THAT MOMENT (`sdk.supersede_point`), so the last
-                        # transfer carries the current value; aggregating into
-                        # one entry per (final successor, resolved target,
-                        # etype) and applying it after the sweep reproduces
-                        # exactly that. A REPLACE, not a merge of payloads: the
-                        # later descriptor read the whole edge, so a name it no
-                        # longer carries is one live no longer has either.
-                        # Precedence vs the successor's OWN binding is unchanged
-                        # — `ON CREATE SET` below still leaves an edge the
-                        # successor already holds untouched, which is why this
-                        # is aggregation and not an unconditional `SET`.
+                        # ⚠️ Precedence vs the successor's OWN binding is
+                        # `ON CREATE`'s: an edge the successor already holds is
+                        # left untouched, which is why the carry is applied by
+                        # the MERGE below and never by an unconditional `SET`.
+                        _carry = ""
+                        _params = {"sid": _dest, "tid": resolved["internal"]}
                         _transfer_attrs = {
                             k: ev[k] for k in DIRECT_EDGE_ATTR_KEYS
                             if k in ev
                         }
-                        _pending_structural[
-                            (src_f, resolved["internal"], etype)
-                        ] = _transfer_attrs
+                        if _transfer_attrs:
+                            _carry = " ON CREATE SET nr += $attrs"
+                            _params["attrs"] = _transfer_attrs
+                        self.g.query(
+                            f"MATCH (s:Point {{id:$sid}}), (t) WHERE ID(t) = $tid "
+                            f"MERGE (s)-[nr:{etype}]->(t){_carry}",
+                            params=_params)
                         continue
 
                     if (not isinstance(src, str) or not isinstance(tgt, str)
@@ -17181,26 +17186,6 @@ class FalkorProjection(
                             f"(b:{epi_labels[tgt_f]} {{id:$b}}) SET r += $attrs",
                             params={"a": src_f, "b": tgt_f, "attrs": attrs},
                         )
-
-                # ── #10139: apply the DEFERRED structural transfers ──────────
-                # After the whole descriptor sweep, one statement per resolved
-                # successor edge, in the journal order of the FIRST descriptor
-                # that named it — with the payload of the LAST one (see the
-                # chain note in the branch above). Runs here, still inside the
-                # pass-2b block and BEFORE the #5380 edge-message sweep, so the
-                # ordering guarantees around it are unchanged; only the chain
-                # collision within this leg is resolved, and it resolves the way
-                # live does.
-                for (_sid, _tid, _etype), _attrs in _pending_structural.items():
-                    _carry = ""
-                    _params = {"sid": _sid, "tid": _tid}
-                    if _attrs:
-                        _carry = " ON CREATE SET nr += $attrs"
-                        _params["attrs"] = _attrs
-                    self.g.query(
-                        f"MATCH (s:Point {{id:$sid}}), (t) WHERE ID(t) = $tid "
-                        f"MERGE (s)-[nr:{_etype}]->(t){_carry}",
-                        params=_params)
 
         # ── #5380: replay the EP edge-message write-backs ─────────────
         # AFTER every edge-creating pass (pass-1a hoists operator edges;

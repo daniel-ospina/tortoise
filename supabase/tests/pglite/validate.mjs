@@ -2508,14 +2508,18 @@ try {
       + 'did not move is the churn the gate exists to prevent');
   }
 
-  // (6) A CYCLIC chain has NO destination (x→y, y→z, z→y — path-guarded), so the
-  //     whole descriptor is a no-op: the graph's `_final(x)` is the first
-  //     REPEATED node, and the record — whose walk is depth-bounded — must not
-  //     delete what it cannot re-create. This is the discriminator for the gate's
-  //     THIRD conjunct: "src is terminal" and "src HAS a successor" are BOTH
-  //     TRUE here, so a DELETE gated on those two alone ran while the INSERT's
-  //     `dest` subquery (the `next_id IS NULL` row) yielded none — and the row
-  //     vanished with no error on `record_write_failures`.
+  // (6) A CYCLIC chain (x→y, y→z, z→y — path-guarded) moves ONE HOP, to the
+  //     DIRECT successor live named (`y`), and stops. That is live's own result:
+  //     `supersede_point(x, y)` moves x's edge to `y`, and the later hops move
+  //     an edge that no descriptor in THIS journal describes. It is also what
+  //     the graph's replay produces (`succ[x] = y`), so the two routes agree —
+  //     the pre-`#10139` record resolved the walk to "no terminal row" and left
+  //     the row at `x`, which DIVERGED from the graph's `y`.
+  //     ⚠️ The gate still carries a DESTINATION conjunct (`depth = 2` exists):
+  //     "src is terminal" and "src HAS a successor" are both true here, and a
+  //     DELETE gated on those two alone would run while the INSERT's `dest`
+  //     subquery yielded no row when the successor's `point` row is absent —
+  //     the row then vanished with no error on `record_write_failures`.
   const cycle = await run('9972-cycle', [
     { type: 'ObjectRegistered', ts: '2026-10-25T00:05:00Z', id: 'obj-cyc',
       name: 'Cycle Target', objectKind: 'org' },
@@ -2541,11 +2545,12 @@ try {
       id: 'x->y:aboutObject:Cycle Target', src: 'x', tgt: 'Cycle Target',
       target_label: 'Object', edge_type: 'aboutObject' },
   ]);
-  if (cycle.length !== 1 || cycle[0].src_key !== 'x') {
-    throw new Error('a CYCLIC supersede chain has no destination, so NOTHING '
-      + `must move — rows = ${JSON.stringify(cycle)}. [] is the delete-without-`
-      + 'insert: the DELETE was gated on "src is terminal and has a successor", '
-      + 'which a cycle satisfies, while the INSERT found no `next_id IS NULL` row');
+  if (cycle.length !== 1 || cycle[0].src_key !== 'y') {
+    throw new Error('a CYCLIC supersede chain must move the row ONE HOP, to the '
+      + `DIRECT successor (y) — rows = ${JSON.stringify(cycle)}. Keeping it at `
+      + 'x diverges from the graph (succ[x] = y) and from live, where '
+      + '`supersede_point(x, y)` moved the edge to y; [] is the delete-without-'
+      + 'insert the destination conjunct prevents');
   }
 
   // (7) `aboutPoint` — the target is a POINT named through `props ->> 'name'`,
@@ -2718,6 +2723,96 @@ try {
     + 'canonical triple — and a name held by 2+ carriers lands nothing (#5509)');
   console.log('✓ #9973: a supersede TRANSFERS the edge — the row leaves the '
     + 'superseded point, lands on the final successor, and re-replays idempotently');
+  // (12) #10139 review round 4 — the ORDERING of two descriptors that land on
+  //      the same successor row. The record moves each descriptor ONE HOP, at
+  //      the successor its own supersede named, exactly as the graph's replay
+  //      does, so both shapes come out as live does:
+  //
+  //        CHAIN  (c1→c2→c3, descriptors carrying 0.42 then 0.91): the first
+  //        hop's row at c2 is DELETED by the second descriptor's delete-leg and
+  //        replaced at c3 by 0.91 — live's last transfer created the final
+  //        edge, so its payload is the one that survives.
+  //
+  //        SIBLINGS (x1→z, x2→z, descriptors carrying 0.42 then 0.71): the
+  //        first insert lands at z and the second hits `ON CONFLICT DO NOTHING`
+  //        — live's second transfer found the edge already there, so `ON
+  //        CREATE` did not fire and 0.42 stands.
+  //
+  //      ⛔ A move resolved to the chain's TERMINAL row cannot reproduce both:
+  //      it collapses the pair onto one destination, where DO NOTHING always
+  //      keeps the FIRST — right for siblings, wrong for a chain (the shape
+  //      that made the record and the graph disagree at 0.42 vs 0.91).
+  const orderingRecords = (edges) => {
+    const ids = [...new Set(edges.flatMap((e) => [e.from, e.to]))];
+    const out = [
+      { type: 'ObjectRegistered', ts: '2026-10-25T00:10:00Z',
+        id: 'obj-10139-order', name: 'Ordering Corp', objectKind: 'org' },
+      ...ids.map((id, i) => ({
+        type: 'PointAdded', ts: `2026-10-25T00:10:0${i % 10}Z`, id,
+        point: { id, content: id, status: 'live' } })),
+      { type: 'EntityLinked', ts: '2026-10-25T00:10:02Z', id: edges[0].from,
+        source_label: 'Point', source_id: edges[0].from, target_label: 'Object',
+        target_id: 'obj-10139-order', edge_type: 'aboutObject',
+        confidence: edges[0].confidence },
+    ];
+    edges.forEach((e, i) => {
+      out.push(
+        { type: 'PointSuperseded', ts: `2026-10-25T00:10:2${i}Z`, id: e.from,
+          new_id: e.to, valid_from: `2026-10-25T00:10:2${i}Z`,
+          valid_to: `2026-10-25T00:10:2${i}Z`,
+          expired_at: `2026-10-25T00:10:2${i}Z` },
+        { type: 'DirectEdgeRepoint', ts: `2026-10-25T00:10:3${i}Z`,
+          id: `${e.from}->${e.to}:aboutObject:Ordering Corp`,
+          src: e.from, tgt: 'Ordering Corp', target_label: 'Object',
+          edge_type: 'aboutObject', confidence: e.confidence });
+    });
+    return out;
+  };
+  const chainOrder = await run('10139-chain-order', orderingRecords([
+    { from: 'ch1', to: 'ch2', confidence: 0.42 },
+    { from: 'ch2', to: 'ch3', confidence: 0.91 },
+  ]));
+  if (chainOrder.length !== 1 || chainOrder[0].src_key !== 'ch3') {
+    throw new Error('#10139 chain order: the chain must leave ONE row on the '
+      + `FINAL successor (ch3) and none in between; rows = `
+      + JSON.stringify(chainOrder));
+  }
+  {
+    const row = await db.query(
+      `SELECT confidence FROM public.relation
+        WHERE org_id = '10139-chain-order-org'
+          AND graph_id = '10139-chain-order-graph'
+          AND rel_type = 'aboutObject'`);
+    if (row.rows.length !== 1
+        || Number(row.rows[0].confidence) !== 0.91) {
+      throw new Error('#10139 chain order: the LAST transfer created the final '
+        + 'edge live, so its payload (0.91) must survive — rows = '
+        + JSON.stringify(row.rows));
+    }
+  }
+  const siblingOrder = await run('10139-sibling-order', orderingRecords([
+    { from: 'sb1', to: 'sbz', confidence: 0.42 },
+    { from: 'sb2', to: 'sbz', confidence: 0.71 },
+  ]));
+  if (siblingOrder.length !== 1 || siblingOrder[0].src_key !== 'sbz') {
+    throw new Error('#10139 sibling order: both transfers land on the shared '
+      + `successor (sbz) as ONE row; rows = ${JSON.stringify(siblingOrder)}`);
+  }
+  {
+    const row = await db.query(
+      `SELECT confidence FROM public.relation
+        WHERE org_id = '10139-sibling-order-org'
+          AND graph_id = '10139-sibling-order-graph'
+          AND rel_type = 'aboutObject'`);
+    if (row.rows.length !== 1
+        || Number(row.rows[0].confidence) !== 0.42) {
+      throw new Error('#10139 sibling order: live\'s SECOND transfer found the '
+        + 'edge already there, so `ON CREATE` did not fire and the FIRST '
+        + 'creator\'s 0.42 must survive — rows = '
+        + JSON.stringify(row.rows));
+    }
+  }
+
   console.log('✓ #10303: the RECORD route carries the descriptor\'s attributes to '
     + 'the moved row\'s columns, and `DO NOTHING` keeps a successor\'s own value '
     + '(0.91 over the retired 0.42) exactly as the graph\'s `ON CREATE SET` does');
