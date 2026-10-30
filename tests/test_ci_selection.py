@@ -5710,7 +5710,7 @@ def test_the_test_job_takes_its_runner_from_the_matrix_with_a_variable_rollback(
     emit = [s for s in wf["jobs"]["changes"]["steps"]
             if s.get("id") == "push-matrix"]
     assert len(emit) == 1, emit
-    env = {k: str(v) for k, v in (emit[0].get("env") or {}).items()}
+    env = _effective_step_env(wf, "changes", emit[0])
     assert "vars.CI_SHARD_ROUTING" in env.get("CI_SHARD_ROUTING", ""), (
         "the matrix emitter must pass the CI_SHARD_ROUTING repo variable to the "
         f"selector (#6897); got env={env!r}")
@@ -5721,6 +5721,48 @@ def test_the_test_job_takes_its_runner_from_the_matrix_with_a_variable_rollback(
     # measurement in the test-slow header).
     assert wf["jobs"]["test-slow"]["runs-on"] == "ubuntu-24.04", (
         "test-slow must stay version-pinned to GitHub-hosted (#6897 does not touch it)")
+
+
+def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
+    """#6897/#10186: ONE lever, EVERY emitter — the tier-2 split included.
+
+    `changes` emits `fast_matrix` from TWO steps: `push-matrix`
+    (`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs, and
+    its output OVERRIDES the push matrix — see the job `outputs:` block). The
+    opt-in is read from the ENVIRONMENT (`resolve_shard_routing(
+    os.environ.get("CI_SHARD_ROUTING"))`), so an emitter that does not carry
+    that variable silently resolves to hosted-only whatever the operator set:
+    a dead lever on exactly the event type every PR uses.
+
+    Measured on the pre-fix tree (`3db8f7d78`): the `env:` was attached to the
+    `push-matrix` STEP only, so with `CI_SHARD_ROUTING=pool-split` in the repo
+    variables a tier-2 PR still emitted nine rows on `["ubuntu-latest"]` and the
+    split never happened. Fail-SAFE (that is main's behaviour) but not the
+    documented contract — `docs/ops/ci-runner-x64.md` says `pool-split` opts in,
+    with no event qualification — and the failure mode is the worst kind: the
+    run looks exactly as if nobody had set the variable.
+
+    The env is asserted at JOB scope (which is where it now lives) through
+    `_effective_step_env`, and the emitter set is DISCOVERED from the run
+    commands rather than named, so a THIRD emitter added later cannot silently
+    miss the lever either.
+    """
+    wf = _load_python_ci()
+    emitters = []
+    for step in wf["jobs"]["changes"]["steps"]:
+        run = str(step.get("run") or "")
+        if "--emit-push-matrix" in run or "--split" in run:
+            emitters.append(step)
+    names = [s.get("name") for s in emitters]
+    assert len(emitters) >= 2, (
+        "the `changes` job must still emit the matrix from both the push step "
+        f"and the tier-2 split step; discovered {names}")
+    missing = [s.get("name") for s in emitters
+               if "vars.CI_SHARD_ROUTING"
+               not in _effective_step_env(wf, "changes", s).get("CI_SHARD_ROUTING", "")]
+    assert not missing, (
+        "every step that emits `fast_matrix` must see CI_SHARD_ROUTING, or the "
+        f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
@@ -6252,6 +6294,22 @@ def _load_python_ci() -> dict:
     import yaml
     wf_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "python-ci.yml"
     return yaml.safe_load(wf_path.read_text())
+
+
+def _effective_step_env(wf: dict, job_id: str, step: dict) -> dict:
+    """The env a STEP actually sees, as GitHub Actions composes it.
+
+    Workflow -> `jobs.<id>.env` -> `jobs.<id>.steps[*].env`, each scope
+    overriding the one above (`docs.github.com` -> "Store information in
+    variables": "The scope of a custom variable set by this method is limited to
+    the element in which it is defined"). A test that reads only
+    `step["env"]` therefore asserts the narrower thing than it claims: it pins
+    WHERE the variable is written instead of THAT it reaches the step, which is
+    how #10186 shipped a lever wired to one of two emitters.
+    """
+    merged = {k: str(v) for k, v in (wf["jobs"][job_id].get("env") or {}).items()}
+    merged.update({k: str(v) for k, v in (step.get("env") or {}).items()})
+    return merged
 
 
 def test_expect_uri_gated_iff_uri():

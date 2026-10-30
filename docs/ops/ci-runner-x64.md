@@ -419,6 +419,13 @@ does. A typo or a fork with no `vars` therefore fails SAFE, never onto the conte
 `python-ci.yml`'s `test` job takes its class from `matrix.runner` only, so there is no second copy
 of the mode to drift.
 
+The lever is set at **job scope** on `python-ci.yml`'s `changes` job, because that job emits
+`fast_matrix` from two steps — `--emit-push-matrix` (every event) and `--split` (tier-2 PRs, where its
+output OVERRIDES the push matrix). Scoped to one step, the variable is silently absent on the other
+and the PR surface never splits (measured on head `3db8f7d78`, where only the push step carried it);
+`tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`
+discovers the emitters from their `run:` commands, so a third one cannot miss the lever either.
+
 Changing the DEFAULT is a decision, and its home is #6897: it needs idle pool capacity at schedule
 time **and** a pool job wall within ~1.2x hosted on these rows, neither of which the runs above
 show. Do not set `pool-split` to "try it out" — a killed leg is a required check.
