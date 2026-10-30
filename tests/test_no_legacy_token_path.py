@@ -1701,12 +1701,23 @@ def test_architecture_docs_do_not_restate_the_rejected_parent_domain_session():
 _NO_SURFACE_ACCEPTS = re.compile(
     r"no longer accepted\s*[:(]"
     r"|\bno longer accepted by any surface\b"
-    r"|\bno\s+(?:[\w-]+\s+){0,2}(?:surface|consumer)s?\s+(?:accepts?|reads?|authenticat\w*)\s+it\b"
+    # ⛔ SUBJECT-AGNOSTIC once `_about_this_cookie` has established that the sentence is about
+    # THIS cookie. The earlier spelling hard-required the pronoun `it` and refused the passive
+    # `not accepted by …`, so four natural rewordings of the CORRECT closure were RED while the
+    # advice in the error message ("name the cookie") was exactly what the author had done
+    # (round-5 review, executed). A gate nobody can satisfy without finding the magic wording
+    # gets loosened by the next reader, which is the direction #3524 fights.
+    r"|\bno\s+(?:[\w-]+\s+){0,2}(?:surface|consumer)s?\s+(?:accepts?|reads?|authenticat\w*)\b"
     r"|\baccepted\s+by\s+nobody\b"
-    r"|\bnothing\b[^.\n]{0,40}\b(?:accepts?|reads?|authenticat\w*)\s+it\b"
+    r"|\bnothing\b[^.\n]{0,60}\b(?:accepts?|reads?|re-?reads?|authenticat\w*)\b"
+    r"|\bnobody\b[^.\n]{0,60}\b(?:accepts?|reads?|authenticat\w*)\b"
     r"|\bauthenticat\w*\s+nothing\b"
     r"|\bNO\s+surface\b"
-    r"|\bnot accepted\b(?!\s+by\b)",
+    # ⛔ the `(?!\s+by\b)` lookahead is gone: `the legacy cookie is not accepted by any
+    # surface` is a CLOSURE, not the #3559 claim. The claim it was guarding against is the
+    # PASSIVE PRESENT-TENSE one (`still accepted BY the consent page`), which the negative half
+    # now matches by name — see `_CONSENT_PAGE_STILL_ACCEPTS`.
+    r"|\bnot\s+(?:accepted|read|re-?read|authenticated|trusted)\b",
     re.IGNORECASE,
 )
 # The pre-step-4 affirmation, now FORBIDDEN as a live claim: the consent page is an
@@ -1714,6 +1725,14 @@ _NO_SURFACE_ACCEPTS = re.compile(
 # which is what makes the inversion exact rather than approximate.
 _CONSENT_PAGE_STILL_ACCEPTS = re.compile(
     r"\bpage\s+that\s+issues\s+it\b"
+    # ⛔ THE PASSIVE FORM — the claim with its verb BEFORE the noun. `The legacy cookie is
+    # still accepted by the consent page.` was invisible to every arm below, which all require
+    # the noun first, so the exact pre-step-4 reversion (restore the claim, keep the closure)
+    # shipped GREEN. The canonical #3559 wording only matched because it ends in the relative
+    # clause `that issues it`; deleting that suffix was enough to escape (round-5 review,
+    # executed).
+    r"|\b(?:accepted|read|re-?read|re-?reads|authenticated|trusted|issued)\s+by\s+(?:the\s+)?"
+    r"(?:mcp\s+)?consent[- ]page\b"
     # ⛔ `(?:re-?)?read` — the hyphen is optional, the `re` is not. Before this,
     # `read`/`reads` were NOT matched at all (only `re-read`), so `The consent page
     # reads the legacy cookie back as its identity` was invisible to the gate
@@ -1779,7 +1798,10 @@ _PRESENT_TENSE_ACCEPT = re.compile(
 #: closure, not a live claim, so those spans are removed before the tense test above.
 _NEGATED_ACCEPT = re.compile(
     r"\b(?:no longer|not|never|cannot|nothing|nobody|no\s+(?:[\w-]+\s+){0,2}(?:surface|consumer)s?)\b"
-    r"[^.;]{0,40}?\b(?:accepts?|reads?|re-?reads?|authenticat\w*|writes?|issues?)\b",
+    # ⛔ ONE intervening word at most. With a 40-char span, `The consent page is not
+    # deprecated and still accepts the cookie` read as a denial and excused itself.
+    r"(?:\s+[\w-]+){0,1}\s+"
+    r"\b(?:accepts?|accepted|reads?|read|re-?reads?|authenticat\w*|writes?|issues?)\b",
     re.IGNORECASE,
 )
 #: The subject clause of the retirement record — the page, not any other artefact.
@@ -1796,11 +1818,20 @@ _CLAUSE_SPLIT = re.compile(r";|\bbut\b|\bwhile\b|\bwhereas\b|—|–", re.IGNORE
 
 
 def _about_this_cookie(sentence: str) -> bool:
-    """Is this closure sentence about the LEGACY cookie (not just any cookie)?"""
+    """Is this closure sentence about the LEGACY cookie (not just any cookie)?
+
+    Four admissible arms, in decreasing strength: it NAMES the cookie; it says
+    `legacy … cookie`; it carries a pronoun (`it`) with a negative quantifier; or it
+    carries a bare `cookie` with a negative quantifier. The last one is the shipped
+    sentence's own shape once reworded — `nothing on our side accepts the cookie any
+    more` — and a bare `not` is deliberately NOT a quantifier, because that is what
+    `The __Host-authflow cookie is not accepted on the API host` carries.
+    """
     if _LEGACY_COOKIE_NAME.search(sentence) or _LEGACY_COOKIE_PHRASE.search(sentence):
         return True
-    return bool(re.search(r"\bit\b", sentence, re.IGNORECASE)
-                and _NEGATIVE_QUANTIFIER.search(sentence))
+    if not _NEGATIVE_QUANTIFIER.search(sentence):
+        return False
+    return bool(re.search(r"\bcookies?\b|\bit\b", sentence, re.IGNORECASE))
 
 
 def _excused_as_a_record(sentence: str) -> bool:
@@ -1812,6 +1843,11 @@ def _excused_as_a_record(sentence: str) -> bool:
     and still accepts …` — disposition in the first clause, live claim in the second —
     is refused).
     """
+    # ⛔ An explicit DENIAL is a closure, not a live claim — and it has to be checked
+    # first now that the negative half matches the passive form, or the correct
+    # `the legacy cookie is not accepted by the consent page` would red itself.
+    if _NEGATED_ACCEPT.search(sentence):
+        return True
     if _PRESENT_TENSE_ACCEPT.search(_NEGATED_ACCEPT.sub(" ", sentence)):
         return False
     for clause in _CLAUSE_SPLIT.split(sentence):
@@ -1931,6 +1967,20 @@ def test_the_acceptance_claim_DISCRIMINATES_on_the_shipped_state():
         "the word 'was' excused a LIVE acceptance claim — it is the past tense of 'to be', "
         "not a disposition of the page")
 
+    # (c2) ⛔ …and the closure must be ACCEPTABLE TO WRITE. Four natural rewordings of the
+    #      CORRECT sentence used to be RED (the arms hard-required the pronoun `it` and refused
+    #      the passive), which sends the next author hunting for magic wording — the direction
+    #      that gets a gate loosened. Executed both ways (round-5 review).
+    for closes in (
+        "- The legacy `sb-tortoise-auth-token` cookie: nothing on our side accepts the "
+        "cookie any more.\n",
+        "- The legacy bridge is gone; nothing reads or accepts the legacy cookie.\n",
+        "- The legacy `sb-tortoise-auth-token` cookie is not accepted by any surface.\n",
+        "- The legacy `sb-tortoise-auth-token` cookie is not accepted by the consent page.\n",
+    ):
+        assert _consent_page_acceptance_violations(rel, head + closes) == [], (
+            f"a CORRECT closure was refused: {closes!r}")
+
     # (d2) ⛔ A retirement marker in a SUBCLAUSE about a DIFFERENT artefact excuses nothing.
     #      Each of these is a live acceptance claim, and each satisfied the earlier
     #      "any marker anywhere in the sentence" rule — the same class as `was`, one
@@ -1946,6 +1996,11 @@ def test_the_acceptance_claim_DISCRIMINATES_on_the_shipped_state():
         "as its own session today.",
         "The consent page reads the legacy sb-tortoise-auth-token cookie back as its "
         "identity and mints the code.",
+        # the PASSIVE form — verb before the noun, which no arm matched before round 5:
+        "The legacy cookie is still accepted by the consent page.",
+        "The legacy cookie is still accepted by the consent page as the visitor's session.",
+        # …and a negation elsewhere in the sentence must not excuse it:
+        "The consent page is not deprecated and still accepts the legacy cookie.",
     ):
         laundered = good + f"- {launder}\n"
         assert _consent_page_acceptance_violations(rel, laundered), (
