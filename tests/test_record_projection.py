@@ -2405,6 +2405,55 @@ def test_a_structural_repoint_with_no_attributes_emits_the_same_shape():
     assert json.dumps({}) in insert.params, insert.params
 
 
+def test_a_chain_resolves_every_link_onto_one_row_so_the_FIRST_payload_wins():
+    """#10303 review round 4 (P1): a CHAIN's collision, pinned instead of silent.
+
+    A `superseded_by` chain journals ONE 2b descriptor per link (`X→Y`, then
+    `Y→Z`), each carrying the payload its own transfer landed LIVE (`0.42`,
+    then `0.91`). At replay BOTH resolve to the SAME destination row — the
+    `next_id IS NULL` row of the recursive walk — so the record inserts `0.42`
+    and then collides with it; `DO NOTHING` keeps the FIRST one.
+
+    Live and the graph's pass-2b replay keep the DEEPEST link's payload instead
+    (live: `Y→Z` reads Y's edge at that moment; replay: the direct-predecessor
+    rule, `test_a_CHAINS_latest_carry_wins_ACROSS_a_rebuild`). So on a CHAIN,
+    this route and the journal route still DISAGREE — `0.42` here, `0.91`
+    there — and the module docstring names it as residual (d) rather than
+    claiming `live == rebuild` unconditionally.
+
+    ⛔ Trying to close it with `DO UPDATE` is the trap this pins AGAINST: the
+    conflicting row is indistinguishable from the SUCCESSOR's OWN row (same
+    identity), so an update would re-stamp the successor's `0.91` with the
+    retired `0.42` — the measured `#9417` regression. Closing it needs a
+    journal-order discriminator, which a one-record-at-a-time translation does
+    not have.
+
+    What is pinned here is the mechanism, not a preference: the two inserts
+    target the SAME destination expression, carry DIFFERENT payloads, and each
+    ends in `DO NOTHING` — which is exactly why the first one to run wins.
+    """
+    first = rp.mutations_for(
+        _structural_repoint(src="x", confidence=0.42), org_id="o", graph_id="g")
+    second = rp.mutations_for(
+        _structural_repoint(src="y", confidence=0.91), org_id="o", graph_id="g")
+    dest = ("(SELECT node_key FROM succ WHERE next_id IS NULL "
+            "ORDER BY depth DESC LIMIT 1) dest")
+    inserts = []
+    for statements in (first, second):
+        insert = next(s for s in statements
+                      if "INSERT INTO public.relation" in s.sql)
+        assert dest in insert.sql, insert.sql
+        assert insert.sql.rstrip().endswith("DO NOTHING"), insert.sql
+        inserts.append(insert)
+    assert 0.42 in inserts[0].params and 0.91 in inserts[1].params, (
+        inserts[0].params, inserts[1].params)
+    # Each descriptor is translated ALONE (no lookahead over the batch): the two
+    # inserts are the SAME statement — only the carried payload differs — which
+    # is the structural reason this route cannot prefer the deeper link.
+    assert inserts[0].sql == inserts[1].sql, (
+        inserts[0].sql, inserts[1].sql)
+
+
 def test_the_structural_move_reads_the_records_own_successor_chain():
     """`_final(src)` is a `superseded_by` walk over `public.point` — no graph read.
 

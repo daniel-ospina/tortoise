@@ -2591,7 +2591,22 @@ def _structural_repoint_statements(
     REPEATED node on a CYCLIC chain, so the fold moves the edge there while this
     record (path-guarded, depth-bounded) reaches no destination and moves
     nothing — a divergence, named rather than papered over, on a state no
-    producer emits, chosen so a chain with no end loses no row.
+    producer emits, chosen so a chain with no end loses no row; (d) ⛔ a CHAIN's
+    collision is resolved the OTHER way here, and it is OPEN. Several descriptors
+    of one `superseded_by` chain (`X→Y→Z`) all resolve to the SAME destination
+    row, so the first-INSERT-wins rule this `DO NOTHING` enforces lands the
+    EARLIEST link's payload, while live and the graph's pass-2b replay end at the
+    DEEPEST link's — measured: `0.42` here against `0.91` there
+    (`tests/test_8398_aboutobject_replay.py::test_a_CHAINS_latest_carry_wins_
+    ACROSS_a_rebuild` for the graph, `test_record_projection.py::test_a_chain_
+    resolves_every_link_onto_one_row_so_the_FIRST_payload_wins` for this side).
+    The two rebuild routes therefore still disagree on a chain, in the direction
+    the graph has already fixed. ⛔ `DO UPDATE` is NOT the fix: it would clobber a
+    successor's OWN value, which is the measured `#9417` 0.91 → 0.42 regression.
+    Closing it needs a journal-order (provenance) discriminator — this route
+    translates ONE record at a time and cannot see that a later descriptor of the
+    same pass will transfer onto the same row — which is a change to the record
+    carrier, outside `#10139`'s scope. Stated, pinned by a test, not silent.
     """
     etype = record.get("edge_type")
     label = _STRUCTURAL_REL_LABELS.get(etype) if isinstance(etype, str) else None

@@ -1757,3 +1757,35 @@ reproduce the measured 0.91 → 0.42 destruction). `sourceVersion` stays uncarri
 fold drops it too — so the two routes agree by both losing that anchor rather than the record keeping
 an attribute the graph does not have. Pinned by
 `tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.
+
+**2026-10-30 — `#10303` review round 4 — WHICH payload wins is live's rule, not "the last
+descriptor".** The pass-2b structural replay aggregates the descriptors that resolve onto ONE successor
+edge and applies one payload, and the round-3 aggregation took the LAST descriptor's. That reproduces
+live for a CHAIN and inverts it for a SIBLING: `ON CREATE` fires only on the statement that CREATES the
+relationship, so two INDEPENDENT retired points sharing a successor (`X1→Z`, `X2→Z`) keep the FIRST
+creator's payload live (`0.42`) while the aggregation landed the second's (`0.71`) — a `live != rebuild`
+divergence on `confidence` in the direction opposite to the chain one, and neither is the rule the code
+was asserting. Live's actual rule is *the payload of the transfer that created the edge*, and the
+replay now names that descriptor with one predicate: the FIRST descriptor in journal order whose `src`
+is the destination's DIRECT predecessor (`succ.get(src) == _final(src)`). Every sibling descriptor
+qualifies, so the earliest wins; in a chain only the deepest link qualifies (the earlier link's payload
+landed on the INTERMEDIATE successor live, not on the destination). A journal whose last link was never
+emitted has no qualifier and keeps the last payload, as before, so a degraded journal still carries a
+value. Measured: chain `0.42`/`0.91` → live and rebuild both `0.91`; siblings `0.42`/`0.71` → live and
+rebuild both `0.42`. Pinned by
+`tests/test_8398_aboutobject_replay.py::test_a_CHAINS_latest_carry_wins_ACROSS_a_rebuild` and
+`::test_two_independent_transfers_onto_one_successor_keep_the_FIRST_payload_ACROSS_a_rebuild` (the
+latter reds on the last-payload rule).
+
+⚠️ **STATED, NOT CLOSED — the RECORD route still resolves a chain the other way.** `record_projection`
+starts carrying the same five attributes and reproduces `ON CREATE` for the single-hop and sibling
+cases (`ON CONFLICT … DO NOTHING` is first-insert-wins, which is the creator rule), but a chain's
+descriptors all resolve to the same destination ROW, so the first INSERT lands the EARLIEST link's
+payload — `0.42` where live and the journal rebuild hold `0.91`. That is an OPEN divergence between the
+two rebuild routes, named as residual (d) in `_structural_repoint_statements` and pinned by
+`tests/test_record_projection.py::test_a_chain_resolves_every_link_onto_one_row_so_the_FIRST_payload_wins`.
+`DO UPDATE` is NOT the fix: the conflicting row is indistinguishable from the SUCCESSOR's own row (same
+identity), so an update would re-stamp the successor's `0.91` with the retired `0.42` — the measured
+`#9417` regression. Closing it needs a journal-order (provenance) discriminator, which a
+one-record-at-a-time translation does not have; that is a change to the record carrier, outside
+`#10139`'s scope.

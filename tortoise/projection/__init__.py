@@ -16902,12 +16902,14 @@ class FalkorProjection(
                 structural_seen: set[tuple] = set()
                 # #10139: deferred structural-transfer payloads, ONE per
                 # resolved successor edge. Keyed on the edge the statement
-                # creates — (final src, resolved target identity, etype) — so a
-                # chain's descriptors collapse onto one entry whose value is the
-                # LAST one journaled (dict assignment keeps the first insertion
-                # POSITION and overwrites the value, which is what the
-                # post-loop application relies on for journal order).
-                _pending_structural: dict[tuple, dict] = {}
+                # creates — (final src, resolved target identity, etype) — so
+                # several descriptors that resolve onto ONE edge collapse into
+                # one entry: `(is_direct_predecessor, payload)`. The flag is
+                # what names WHICH descriptor's payload live let land — see the
+                # selection rule at the assignment below. Dict assignment keeps
+                # the first insertion POSITION and overwrites the value, which
+                # is what the post-loop application relies on for journal order.
+                _pending_structural: dict[tuple, tuple[bool, dict]] = {}
 
                 def _src_is_terminal(sid: str) -> bool:
                     """#2489 (code-review P1): the delete-leg must ONLY clean
@@ -17092,22 +17094,39 @@ class FalkorProjection(
                         # emitter whitelisted with (`DIRECT_EDGE_ATTR_KEYS`,
                         # `edges.py`) — never `properties(r)` raw, and never a
                         # second copy of the tuple.
-                        # ⛔ CHAINS: the payload is DEFERRED, one entry per
-                        # resolved successor edge, and the LAST descriptor's
-                        # payload wins (#10139 review round 3, P2). Applied
-                        # in-line instead, `ON CREATE` makes the FIRST
-                        # descriptor to run the one that creates the edge, so a
-                        # chain's EARLIEST payload would land — measured on a
-                        # three-link chain (X holds 0.42, Y its own 0.91):
-                        # live ends at Z = 0.91, an in-line rebuild at Z = 0.42.
-                        # Live is last-writer-wins because every transfer reads
-                        # `properties(r)` of the edge its predecessor holds AT
-                        # THAT MOMENT (`sdk.supersede_point`), so the last
-                        # transfer carries the current value; aggregating into
-                        # one entry per (final successor, resolved target,
-                        # etype) and applying it after the sweep reproduces
-                        # exactly that. A REPLACE, not a merge of payloads: the
-                        # later descriptor read the whole edge, so a name it no
+                        # ⛔ WHICH payload wins when several descriptors
+                        # resolve onto ONE successor edge — live's rule is "the
+                        # payload of the transfer that CREATED the edge", which
+                        # is what `ON CREATE` enforces there, so the replay has
+                        # to name the SAME descriptor (#10139 review round 4):
+                        #
+                        #   * a CHAIN (X→Y→Z) — X's descriptor lands on Y
+                        #     LIVE, so its payload is NOT what Z carries; Y's
+                        #     own transfer reads Y's edge at that moment and its
+                        #     payload IS. Measured (X 0.42, Y's own 0.91): live
+                        #     ends at Z = 0.91, and the descriptor that arrived
+                        #     at Z is the DEEPEST link, Y's.
+                        #   * two INDEPENDENT retired points (X1→Z, X2→Z) — X1's
+                        #     transfer creates Z's edge, X2's matches it and
+                        #     `ON CREATE` does not fire, so live KEEPS X1's
+                        #     payload. Last-payload-wins would land X2's —
+                        #     `live != rebuild` in the opposite direction from
+                        #     the chain (`test_two_independent_transfers_onto_
+                        #     one_successor_keep_the_FIRST_payload_ACROSS_a_
+                        #     rebuild`).
+                        #
+                        # ONE rule covers both: the payload is that of the
+                        # FIRST descriptor in journal order whose `src` is the
+                        # destination's DIRECT predecessor (`succ.get(src) ==
+                        # src_f`) — the first transfer that actually ARRIVED at
+                        # the destination, which is the one live let create it.
+                        # Every sibling descriptor qualifies, so the EARLIEST
+                        # wins; in a chain only the DEEPEST link qualifies. When
+                        # none qualifies (a journal whose last link was never
+                        # emitted) the LAST payload wins, as before, so a
+                        # degraded journal keeps a value rather than none.
+                        # Still a REPLACE of the whole payload, never a merge:
+                        # the descriptor read the whole edge, so a name it no
                         # longer carries is one live no longer has either.
                         # Precedence vs the successor's OWN binding is unchanged
                         # — `ON CREATE SET` below still leaves an edge the
@@ -17117,9 +17136,16 @@ class FalkorProjection(
                             k: ev[k] for k in DIRECT_EDGE_ATTR_KEYS
                             if k in ev
                         }
-                        _pending_structural[
-                            (src_f, resolved["internal"], etype)
-                        ] = _transfer_attrs
+                        _structural_key = (
+                            src_f, resolved["internal"], etype)
+                        _claimed = _pending_structural.get(_structural_key)
+                        # Once a DIRECT predecessor has claimed the edge its
+                        # payload is live's answer and nothing may replace it;
+                        # before that, a later descriptor still can (the chain's
+                        # deepest link, or the last of a degraded journal).
+                        if _claimed is None or not _claimed[0]:
+                            _pending_structural[_structural_key] = (
+                                succ.get(src) == src_f, _transfer_attrs)
                         continue
 
                     if (not isinstance(src, str) or not isinstance(tgt, str)
@@ -17185,13 +17211,14 @@ class FalkorProjection(
                 # ── #10139: apply the DEFERRED structural transfers ──────────
                 # After the whole descriptor sweep, one statement per resolved
                 # successor edge, in the journal order of the FIRST descriptor
-                # that named it — with the payload of the LAST one (see the
-                # chain note in the branch above). Runs here, still inside the
-                # pass-2b block and BEFORE the #5380 edge-message sweep, so the
-                # ordering guarantees around it are unchanged; only the chain
-                # collision within this leg is resolved, and it resolves the way
-                # live does.
-                for (_sid, _tid, _etype), _attrs in _pending_structural.items():
+                # that named it — with the payload live let land (the direct
+                # predecessor's; see the selection rule in the branch above).
+                # Runs here, still inside the pass-2b block and BEFORE the #5380
+                # edge-message sweep, so the ordering guarantees around it are
+                # unchanged; only the collision WITHIN this leg is resolved, and
+                # it resolves the way live does.
+                for (_sid, _tid, _etype), (_direct, _attrs) in \
+                        _pending_structural.items():
                     _carry = ""
                     _params = {"sid": _sid, "tid": _tid}
                     if _attrs:

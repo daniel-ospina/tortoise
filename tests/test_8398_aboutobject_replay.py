@@ -1690,3 +1690,77 @@ def test_a_CHAINS_latest_carry_wins_ACROSS_a_rebuild(wired) -> None:
         "the intermediate successor kept an edge live transferred away")
     assert _counts(proj)["aboutSubject"] == 1, (
         "the rebuild left more than the single transferred aboutSubject edge")
+
+
+def test_two_independent_transfers_onto_one_successor_keep_the_FIRST_payload_ACROSS_a_rebuild(
+        wired) -> None:
+    """A SIBLING collision is the OPPOSITE case, and live keeps the FIRST (#10139).
+
+    The chain test above shows live keeping the LATEST payload. That is a
+    property of the chain, not of replay: live's real rule is *the payload of
+    the transfer that CREATED the edge*, and `ON CREATE SET` is how it is
+    enforced. Two INDEPENDENT retired points that share one successor are the
+    case where that rule picks the OTHER descriptor:
+
+    * `supersede(X1→Z)` — Z holds no edge yet, so this transfer CREATES it with
+      X1's `0.42`;
+    * `supersede(X2→Z)` — Z's edge now exists, `MERGE` matches it and
+      `ON CREATE` does not fire, so X2's `0.71` is DISCARDED live.
+
+    Live therefore ends at `0.42` while the journal carries both payloads onto
+    the same successor edge — so an aggregation that always takes the LAST
+    descriptor lands `0.71` and is a `live != rebuild` divergence in the
+    direction opposite to the chain. Both retired points are honest, reachable
+    operations (`supersede_point` is called per (old, new) pair and nothing
+    forbids two olds sharing one successor).
+
+    The replay's rule — the payload of the first descriptor whose `src` is the
+    destination's DIRECT predecessor — selects the first CREATOR here (both
+    descriptors qualify, so the earliest wins) and the deepest link in the
+    chain test (only that one qualifies). One rule, both cases.
+
+    Non-vacuity: on the pre-fix aggregation (last payload wins) `replay` is
+    `0.71` and this leg reds.
+    """
+    sdk, proj, events, journal = wired
+    first = _nid(sdk.create_point("statement", "X1: first retired claim"))
+    second = _nid(sdk.create_point("statement", "X2: second retired claim"))
+    successor = _nid(sdk.create_point("statement", "Z: the shared successor"))
+    subj = _nid(sdk.create_subject("TheSharedSuccessorSubject"))
+    _bind(proj, sdk, first, subj, 0.42)
+    _bind(proj, sdk, second, subj, 0.71)
+
+    sdk.supersede_point(first, successor)
+    created = _about_confidence(proj, successor, subj)
+    assert created == pytest.approx(0.42), (
+        f"the FIRST transfer did not create the successor's edge: {created}")
+    sdk.supersede_point(second, successor)
+
+    live = _about_confidence(proj, successor, subj)
+    assert live == pytest.approx(0.42), (
+        "the second transfer overwrote the edge the first one created — "
+        f"`ON CREATE SET` is what keeps the creator's payload: {live}")
+
+    # Both descriptors carry their own payload onto the SAME successor edge.
+    # That collision is what this test is about: the journal alone does not
+    # say which one is live's answer, the direct-predecessor rule does.
+    payloads = [
+        r.get("confidence") for r in _records(journal)
+        if r.get("type") == "DirectEdgeRepoint"
+        and r.get("edge_type") == "aboutSubject"
+        and r.get("target_label") == "Subject"
+    ]
+    assert payloads == [pytest.approx(0.42), pytest.approx(0.71)], (
+        f"the sibling descriptors do not carry their own transfer values: "
+        f"{payloads}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    replay = _about_confidence(proj, successor, subj)
+    assert replay == pytest.approx(0.42), (
+        "live != rebuild on a SIBLING collision (#10139): live held "
+        f"{live} and the rebuild produced {replay} — the last descriptor's "
+        "payload is not the one live let land when the two transfers are not "
+        "a chain")
+    assert _counts(proj)["aboutSubject"] == 1, (
+        "the rebuild left more than the single transferred aboutSubject edge")
