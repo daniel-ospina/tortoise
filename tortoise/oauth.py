@@ -2470,14 +2470,21 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       showError("This approval link is not yours, or it has expired. Start the connection again from your client.");
       return;
     }
-    const why = (payload && (payload.reason || payload.error)) || ("HTTP " + res.status);
+    // The mint answers TWO shapes: `{error, message}` for a 400 and `{error, reason}`
+    // for a 503 (`api/consent/token.ts`). Reading only `reason` showed the visitor a
+    // bare code — "Could not confirm your session (invalid_request)" — where the mint
+    // had said why (`state is required.`). `reason` first keeps the 503 detail.
+    const why = (payload && (payload.reason || payload.message || payload.error)) || ("HTTP " + res.status);
     showError("Could not confirm your session (" + why + ").");
-    // ⛔ A 4xx that is not 401/403 is the REQUEST's fault, not a blip: the mint
-    // refuses a missing `state` with `400 invalid_request`, and `state` is not
-    // validated at authorize time, so this page can legitimately be reached
-    // without one. Offering "Try again" there would name a control that cannot
-    // ever help — the same dead end the render-time 503 exists to avoid. Only a
-    // 5xx or a transport failure is retryable.
+    // ⛔ A 4xx that is not 401/403 is the REQUEST's fault, not a blip. `state` IS
+    // required at authorize (`validate_authorize_params(..., require_state=True)`
+    // refuses an empty or missing one BEFORE this page renders), so a state-less
+    // render is not reachable through the supported path — this branch is
+    // defence-in-depth for any other 4xx the mint can answer (a bad or expired
+    // `attempt_key` → `403`, a body it refuses → `400`). Offering "Try again"
+    // there would name a control that cannot ever help — the same dead end the
+    // render-time 503 exists to avoid. Only a 5xx or a transport failure is
+    // retryable.
     offerRetry(res.status >= 500);
   }
 

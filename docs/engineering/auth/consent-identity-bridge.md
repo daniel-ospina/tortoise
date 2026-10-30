@@ -196,16 +196,18 @@ request). Reloading the SAME url does NOT recover: it is refused (`403 flow_not_
 ⚠️ **Where the raw key goes** (stated, because the row's SHA-256 is the narrow claim and is easy to
 misread as the whole one): the key rides the `selfPath` return target **and** `authorizeUrl` (the page is
 the mint's only caller), so it passes through the AS page URL, the visitor's history, the sign-in hop's
-return target — which `auth/start.ts` PERSISTS as `auth_flows.next` in this same D1 database — and the
-page's GoTrue `redirectTo` flow state. Read access to `auth_flows` (or those flow records) inside the
+return target — which `auth/start.ts` PERSISTS as `auth_flows.next` in this same D1 database — plus the page's GoTrue `redirectTo` flow state, WHICH WAS THE FIFTH CARRIER AND IS GONE: §9 step 4
+deleted the sign-in itself, so the page has no `redirectTo` hop and no `STRIP_PARAMS`
+(`grep -c 'signInWithOAuth\|redirectTo\|STRIP_PARAMS' tortoise/oauth.py` = 0). Read access to that (or those flow records) inside the
 window is therefore equivalent to holding the key. The two windows are DIFFERENT and neither is the
 attempt's: the persisted `auth_flows.next` copy lives `FLOW_MAX_AGE_S` (30 min), while the attempt's own
 `expires_at` is `CONSENT_ATTEMPT_TTL_S` (15 min) and is refreshed ONLY by the key's holder — a foreign or
 keyless re-entry does not extend it, because a renewable dead row would bound nothing. Add the request logs
 of both hops (`/api/consent/start?attempt_key=…`, `/auth?next=…attempt_key=…`) to the carrier list: they
 are the cheapest read path and need no database access at all. That is the accepted cost of a carrier that
-is not a cookie; §4 records why no cheaper carrier proves the CHANNEL, and stripping the param on the
-`redirectTo` hop is the one available reduction (step 4).
+is not a cookie; §4 records why no cheaper carrier proves the CHANNEL. The reduction that was available
+when this was measured — stripping the param on the `redirectTo` hop — **shipped** (§9 step 4 removed that
+hop), so the residual is the carriers above and nothing else.
 
 **Recorded exemptions from that no-oracle rule** (they are deliberate, and stated here so a later reader
 neither "fixes" them nor reads the sentence above as flow-wide):
