@@ -367,7 +367,9 @@ def test_id_reuse_double_supersede_no_parallel_edges(sup):
 # (_upsert_point_edges — extractedFrom prop / aboutEntities list) while the
 # successor loses them. The fix journals flat DirectEdgeRepoint descriptors
 # {src, tgt=<key>, target_label, edge_type} at 2b and replays them in
-# pass-2b (delete the resurrection at old + create at the final successor).
+# pass-2b (delete the resurrection at old + create at the successor supersede named).
+# The create is ONE HOP (`succ[src]`), not `_final(src)` — a chain reaches its
+# terminal node only as each hop's descriptor runs.
 # ═══════════════════════════════════════════════════════════════════════
 
 _STRUCT_RELS = ("aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
@@ -1049,6 +1051,62 @@ def test_delete_leg_skips_live_recreated_src(sup):
 # the CORRECTS edge + belief decay gone. The fold is now shared with
 # ``rebuild_all``'s sweep through ``_fold_point_restamp``.
 # ══════════════════════════════════════════════════════════════════════
+
+def test_a_cycle_with_a_descriptor_per_hop_loses_the_edge_at_rebuild(sup):
+    """A CYCLIC supersede is the ONE shape where the two rebuild routes DIVERGE.
+
+    Named here rather than absorbed (#10139 review round 5). `docs/ONTOLOGY.md`
+    and `_structural_repoint_statements`' residual (c) used to claim both routes
+    "stop at the same hop" because both walks are path-guarded. That holds for
+    the ONE-HOP cycle the PGlite `9972-cycle` case pins, and NOT for a cycle
+    carrying a descriptor per hop — which is what this test measures.
+
+    Why they part company: the record's walk is path-guarded and moves ONE hop
+    per descriptor, ending at the LAST hop's successor. pass-2b's `_final`
+    returns the first REPEATED node, so on a cycle `_final(src) == src` and its
+    create is SKIPPED — and the delete-leg above that guard has ALREADY run, so
+    each hop after the first removes the edge its predecessor created and
+    re-creates nothing. The rebuilt graph keeps no edge at all.
+
+    Not producible live: `supersede_point` refuses the closing hop (`#2498` — a
+    dead target cannot be re-terminalized), so the shape exists only in a
+    fabricated journal. ⭕ If this test is ever RED because the graph route now
+    KEEPS an edge, that is an improvement, not a regression — update this pin
+    together with the ONTOLOGY residual and `record_projection`'s (c).
+    """
+    _, events, sdk = sup
+    sdk.create_subject("CycleSubj", "org")
+    x = sdk.create_point("statement", "X", status="live",
+                         aboutEntities=["CycleSubj"])["id"]
+    y = sdk.create_point("statement", "Y", status="live")["id"]
+    z = sdk.create_point("statement", "Z", status="live")["id"]
+    proj = sdk._get_proj()
+    _rebuild(sdk, events)  # pass-2 materializes X's snapshot edge
+    assert _struct_edges(proj, x) == {("aboutSubject", "CycleSubj")}
+    sdk.supersede_point(x, y)  # hop 1 — the only hop a live writer accepts
+    assert _struct_edges(proj, y) == {("aboutSubject", "CycleSubj")}
+    # Hops 2 and 3 are FABRICATED: the live writer refuses the closing hop, so
+    # `z -> y` (and therefore the whole cycle) cannot come from a live journal.
+    with open(events / "events.jsonl", "a", encoding="utf-8") as fh:
+        for rec in (
+            {"type": "PointSuperseded", "id": y, "new_id": z},
+            {"type": "PointSuperseded", "id": z, "new_id": y},
+            {"type": "DirectEdgeRepoint", "src": y, "tgt": "CycleSubj",
+             "target_label": "Subject", "edge_type": "aboutSubject"},
+            {"type": "DirectEdgeRepoint", "src": z, "tgt": "CycleSubj",
+             "target_label": "Subject", "edge_type": "aboutSubject"},
+        ):
+            fh.write(json.dumps(rec) + "\n")
+    _rebuild(sdk, events)
+    surviving = {pid: _struct_edges(proj, pid) for pid in (x, y, z)}
+    assert surviving == {x: set(), y: set(), z: set()}, (
+        "the graph route's CYCLE behaviour changed: it used to keep NO edge "
+        "(each later hop's delete-leg removes the previous hop's create, then "
+        "`_final(src) == src` skips the re-create), while the RECORD route ends "
+        f"at the last hop's successor. Now: {surviving}. If the graph keeps an "
+        "edge it agrees with the record, so update docs/ONTOLOGY.md and "
+        "record_projection's residual (c) together with this pin.")
+
 
 def _apply_replay(sdk, events_dir) -> None:
     """The ``apply()`` arm: wipe + replay via ``rebuild(EventLog)`` — the

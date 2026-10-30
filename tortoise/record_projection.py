@@ -2597,11 +2597,20 @@ def _structural_repoint_statements(
     survivor-filtered `succ` map has no record-side expression, so an id-reuse
     journal (a point re-created live under a used id) is resolved here as
     `point.status` says at the moment the record runs — which is the LIVE order,
-    not the rebuild's post-filter one; (c) a CYCLIC chain moves ONE hop here (its
-    direct successor, which is what live did) and stops, because the walk is
-    `path`-guarded — the graph's `succ` map carries the same guard, so both stop
-    at the same hop; the earlier "moves nothing" divergence is gone with the
-    terminal destination it came from.
+    not the rebuild's post-filter one; (c) a CYCLIC supersede does NOT agree
+    with the graph route once it carries a descriptor PER HOP. This walk is
+    `path`-guarded and moves ONE hop per descriptor (ending at the LAST hop's
+    successor), while pass-2b's `_final` returns the first REPEATED node, so
+    `_final(src) == src` and its create is SKIPPED — after the delete-leg above
+    that guard has already removed the edge the previous hop created, leaving the
+    graph with NO edge. The two agree only on the ONE-HOP cycle the PGlite
+    `9972-cycle` case pins (both land on that hop's successor, `y`), which is
+    what live did; `#2498` makes the multi-hop shape unproducible by a live
+    writer (the closing hop is refused — a dead target cannot be
+    re-terminalized), so this is a fabricated-journal-only divergence, named
+    here rather than described as agreement. Pinned by
+    `tests/test_pointsuperseded_rebuild.py`::
+    `test_a_cycle_with_a_descriptor_per_hop_loses_the_edge_at_rebuild`.
     """
     etype = record.get("edge_type")
     label = _STRUCTURAL_REL_LABELS.get(etype) if isinstance(etype, str) else None

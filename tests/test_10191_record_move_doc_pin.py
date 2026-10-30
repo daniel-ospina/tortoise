@@ -215,12 +215,18 @@ def test_the_documented_record_side_move_is_the_move_the_record_emits():
     # at its likely intended home (04-projection) (b) is the CLOSED item — a
     # dangling pointer that sent a reader to a closed residual (#10244 review P2).
     assert "residual (b)" not in ontology, ontology
-    # ... and the cyclic divergence itself is now CLOSED (#10139 review round 4):
-    # both routes move ONE hop and both walks are `path`-guarded, so the record no
-    # longer "moves nothing" on a cycle. Pinned INVERTED — the corrected statement
-    # present, the retired residual (c) absent — so a doc that goes back to naming
-    # a cyclic divergence reds here instead of misinforming the next lane.
-    assert "cyclic" in ontology and "no longer a divergence" in ontology, ontology
+    # ... and the cycle claim is now SCOPED to the shape BOTH routes handle
+    # (#10139 review round 5). "Both walks are path-guarded, so both stop at the
+    # same hop" was FALSE for a cycle carrying a descriptor per hop: pass-2b's
+    # `_final` returns the first REPEATED node, so `_final(src) == src` SKIPS the
+    # create after that descriptor's delete-leg already removed the previous
+    # hop's edge — measured, the rebuilt graph keeps NO edge, while the record's
+    # path-guarded walk ends at the LAST hop's successor. The over-claim is
+    # pinned ABSENT and the scoped statement pinned PRESENT, so a doc that goes
+    # back to calling cycles non-divergent reds here.
+    assert "cyclic" in ontology.lower(), ontology
+    assert "no longer a divergence" not in ontology, ontology
+    assert "descriptor per hop" in ontology, ontology
     assert "residual (c)" not in ontology, ontology
 
 

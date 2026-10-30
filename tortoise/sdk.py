@@ -16788,7 +16788,9 @@ class TortoiseSDK:
         # §4.4 — same crash discipline as 2a-DIRECT). Rebuild pass-2 resurrects
         # these edges at OLD from the point's immutable snapshot (extractedFrom
         # prop / aboutEntities list), so the pass-2b replay must move them to the
-        # final successor AND delete the resurrection at old. Non-derivable rels
+        # successor THAT SUPERSEDE NAMED (`succ[src]`, ONE HOP per descriptor —
+        # NOT the terminal `_final(src)`, which is only the skip guard) AND
+        # delete the resurrection at old. Non-derivable rels
         # (aboutAction — Action dissolved in Ontology v3.0; wasDerivedFrom — A10
         # raw family) are NEVER snapshot-recreated: no descriptor (do NOT half-
         # own the A10 raw-edge family). The journal carries the target's LOGICAL
