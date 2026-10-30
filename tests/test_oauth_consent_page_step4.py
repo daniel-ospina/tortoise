@@ -363,8 +363,9 @@ def test_an_authorize_request_WITHOUT_state_is_the_clients_error_not_a_dead_end(
     So a state-less request that bounced would hand the visitor a JSON body in
     the browser: no page, no link, no recovery, nothing naming the field. Refused
     HERE it is the client's error, delivered at the client's own registered
-    redirect with `state` echoed — the same shape as every other refusal
-    (`RFC 6749 §4.1.2.1`).
+    redirect — the same shape as every other refusal (`RFC 6749 §4.1.2.1`),
+    except that `state` is echoed only when the client sent one, and this
+    request sent none, so it carries no `state` at all.
     """
     tc, _ = api_client
     reg = _register_client(tc)
