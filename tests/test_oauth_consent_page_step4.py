@@ -1953,10 +1953,15 @@ def test_the_state_requirement_is_MARKED_as_a_departure_where_a_reader_adopts():
       * the BEHAVIOUR the marker claims — a marker that outlives its refusal is
         the NEXT lane's false premise, so it reddens here too.
 
-    The scope is pinned by COUNT: `require_state=True` appears once, on the
-    render path. Adopting it at redemption (where a `state: null` token must
-    still redeem) makes the count two and reds this — that is the ruling's own
-    boundary, not this test's invention.
+    The scope is pinned per CALL SITE, not by counting the keyword: the two call
+    sites are identified by the SOURCE of their params (`params` = render,
+    `body` = redemption) and the keyword is read off each one's arguments, so a
+    COMMENT cannot influence either assertion, and MOVING the keyword from the
+    render path to redemption cannot hide behind an unchanged count. An earlier
+    cut counted `require_state=True` in the raw source and mis-graded in both
+    directions; both failures were measured. The total number of call sites is
+    itself asserted, so a THIRD site adopting the keyword — which neither of the
+    two per-site assertions would see — reds as unguarded rather than passing.
     """
     doc = CONSENT_BRIDGE_DOC.read_text(encoding="utf-8")
     start = doc.index("## 10. Integration docs")
@@ -2030,6 +2035,12 @@ def test_the_state_requirement_is_MARKED_as_a_departure_where_a_reader_adopts():
     # The two call sites differ by their SOURCE of params, so they are identified
     # by that and not by which one happens to carry the keyword (identifying by
     # the keyword is what makes a move invisible).
+    assert len(calls) == 2, (
+        f"expected exactly TWO `validate_authorize_params` call sites in "
+        f"hosted_api.py, found {len(calls)} — the two per-call-site assertions "
+        f"below only see the `params`- and `body`-sourced ones, so a THIRD site "
+        f"adopting `require_state=True` would be silently unguarded. §10's row "
+        f"says the keyword belongs on the render path ONLY; fail closed here")
     render = [c for c in calls if "params" in _names(c)]
     redeem = [c for c in calls if "body" in _names(c)]
     assert (len(render), len(redeem)) == (1, 1), (
