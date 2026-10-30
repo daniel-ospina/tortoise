@@ -250,8 +250,10 @@ route, no server-to-server authentication and no new failure domain on the conse
 
 **Signing key.** `CONSENT_TOKEN_SECRET` — a **dedicated** secret, provisioned on both platforms and
 declared in `config/required-bindings.yml` so the deploy preflight fails closed until it exists. It must
-**not** be the service-role key (key reuse across purposes) and must **not** be the anon key (the consent
-page embeds it in HTML, so it is public). Rotation is `kid`-scoped; two `kid`s are accepted during a
+**not** be the service-role key (key reuse across purposes) and must **not** be the anon key — public by
+construct, independently of this page (before §9 step 4 the consent page embedded it in HTML; the page
+now embeds nothing, so the reason is the key's own distribution, not a surface we later remove).
+Rotation is `kid`-scoped; two `kid`s are accepted during a
 rotation window. ⚠️ **That window is NOT BUILT yet** — it is the goal this paragraph states, and §9 step 1
 records the accepted-`kid` allowlist as deliberately unbuilt (one key is configured, so an allowlist of one
 is vacuous). Until it lands, a rotation is a VALUE SWAP that must land on both halves together and kills
@@ -501,8 +503,9 @@ and qualified here, where the rule is read. Nothing reverses the decision that s
 
 - the arm is live only where **`CONSENT_TOKEN_SECRET`** is set on the hosted API **and is a dedicated
   value of at least 32 UTF-8 bytes** (§2.3; a value equal to a service-role key or to
-  `SUPABASE_ANON_KEY` — both are in this process's environment, and the anon key is the one the
-  consent page publishes — is treated as unprovisioned, and so is a key too short to be one). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
+  `SUPABASE_ANON_KEY` — both are in this process's environment, and the anon key is public by
+  construct (it ships to every browser that loads the app, not because this page publishes it) — is
+  treated as unprovisioned, and so is a key too short to be one). Otherwise the arm answers a typed `503 temporarily_unavailable` naming the reason,
   and the bearer path is untouched — never a 500, and never a silent fall-through to the bearer;
 - single-use holds ACROSS MACHINES: §2.3's shared `jti` store (step 1) is DELIVERED and installed at
   startup from `hosted_api._lifespan` (`ControlPlaneJtiStore` + migration `20261030000001`), so the

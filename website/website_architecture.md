@@ -79,8 +79,9 @@ Host routing lives in `website/functions/_middleware.ts`:
   used that access token as the bearer for `/oauth/consent/preview` and `/oauth/consent`). **That
   page was DELETED by #3524 §9 step 4 (2026-10-30)**: it renders no sign-in, writes no cookie,
   holds no credential and calls no supabase client (`grep -c sb-tortoise tortoise/oauth.py` = 0) —
-  it redeems a bound single-use consent token instead of a session. So the legacy cookie is now
-  **issued by nobody and accepted by nobody**: the blog-admin console's supabase-js data layer
+  it redeems a bound single-use consent token instead of a session. So **nothing on our side issues
+  or accepts that legacy cookie any more** — it is issued by nobody and accepted by nobody: the
+  blog-admin console's supabase-js data layer
   rides the same-origin `/api/sb/*` Token Handler
   (`website/apps/blog-admin/src/lib/backend.ts`, #4178 — the legacy `src/lib/supabase.ts` adapter
   is DELETED), and `website/functions/blog/_shared/admin-auth.ts`'s legacy COOKIE fallback is
