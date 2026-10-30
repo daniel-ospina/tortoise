@@ -50,15 +50,67 @@ pytestmark = pytest.mark.embedded_only
 
 _SDKS: list[TortoiseSDK] = []
 
-#: The identifier-shaped query, reduced by the shipped `keep_numeric=False`
-#: policy to `capstone|write|probe` (the #8933 control, untouched here) — so
-#: every look-alike below matches the same three OR-terms.
-QUERY = "capstone-9664 write probe 2026-10-26"
+#: ⛔ #8933 RE-PIN (the corpus only — every FAIL VALUE below is unchanged).
+#: This module used to spell its query `capstone-9664 write probe 2026-10-26`
+#: and claimed the `keep_numeric=False` policy reduced it to
+#: `capstone|write|probe`, i.e. that "the #8933 control is untouched here".
+#: #8933 IS touched now, and its reopen (the owner ruling on #8933, 2026-10-26)
+#: means an identifier-shaped query no longer collapses to its bare words:
+#: `build_or_query` emits `capstone|write|probe|capstone9664|"capstone 9664"`
+#: and the WRITE side stores `capstone9664` on the target's `search_keys`, so the
+#: target and the look-alikes stop tying (measured on the shipped tree:
+#: `{1.857143, 2.0}`). That differentiates BY DESIGN — it is the ruling's own
+#: goal, not a #10121 regression — so the tie this module measures (the SCORE tie
+#: #10121 truncates on) has to be spelled on a corpus the identifier tokenizer is
+#: silent on: bare numbers only (`variant 9001` is numeric noise on both sides,
+#: no `<letter>-<digits>` span anywhere), which ties at a uniform score.
+#: The pin that keeps the re-pin from laundering anything: the corpus/query pair
+#: is asserted to carry NO derived alias and NO phrase term below.
+#:
+#: ⚠️ The fresh point must stay the SAME LENGTH as a look-alike: the BM25 arm
+#: normalises by document length, so giving the target a shorter body would
+#: separate the scores by a mechanism that has nothing to do with #10121. The
+#: look-alikes and the target therefore differ in exactly one numeric token —
+#: the same relationship the pre-#8933 corpus had, minus the identifier shape.
+#: The digits sit inside PARENTHESES, and that is load-bearing: `probe 9664`
+#: (a word, a space, digits) is itself an identifier span on the READ side, so
+#: the query would mint `probe9664` + `"probe 9664"` and re-break the tie —
+#: measured: `capstone write probe 9664` -> `capstone|write|probe|probe9664|
+#: "probe 9664"`. A punctuation guard (`(`) keeps the numeric token numeric.
+QUERY = "capstone write probe (9664)"
 
 #: Look-alikes: the SAME shape as the target, differing only in the digits the
 #: tokenizer drops. Every one of them scores identically to the target.
 def _lookalikes(n: int) -> list[str]:
-    return [f"capstone-{9000 + i} write probe 2026-10-2{i % 9}" for i in range(n)]
+    return [f"capstone write probe ({9000 + i})" for i in range(n)]
+
+
+def test_the_tie_corpus_is_one_the_identifier_tokenizer_is_SILENT_on():
+    """The uniform-score premise is a property of the SHIPPED tokenizer.
+
+    #8933's mechanism is additive and correct: an identifier-shaped corpus
+    differentiates (that is the ruling's intent, pinned in
+    ``tests/test_identifier_tokens_8933.py``). This module needs the opposite —
+    a corpus the tokenizer cannot tell apart — so the choice is pinned HERE, at
+    the corpus, instead of being left to fail as a TIE PREMISE assertion inside
+    a 200-point sweep. It also measures the tokenizer the re-pin was made
+    against, so a change to `identifier_alias`'s shape surfaces here rather
+    than as a corpus that silently stopped tying.
+    """
+    from tortoise.projection.entities import point_identifier_aliases
+    from tortoise.sparse import build_or_query, identifier_alias, identifier_phrase_terms
+
+    assert build_or_query(QUERY) == "capstone|write|probe", build_or_query(QUERY)
+    # ... and the arm that would have been added for an identifier still works,
+    # so "the corpus derives nothing" is a statement about THIS corpus, not
+    # about a tokenizer that stopped deriving.
+    assert identifier_alias("capstone-9664") == "capstone9664"
+    assert identifier_phrase_terms("capstone-9664") == ['"capstone 9664"']
+    for text in (QUERY, *_lookalikes(3)):
+        assert point_identifier_aliases({"content": text}) == [], (
+            f"the tie corpus derives an alias for {text!r} — it is "
+            "identifier-shaped again, and #8933 differentiates identifier "
+            "corpora BY DESIGN, so the uniform-score premise cannot hold")
 
 
 @pytest.fixture(autouse=True)
