@@ -1105,8 +1105,14 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 #: 2, inside the very function the next `/tmp` migrator reads. These two numbers are
 #: asserted against the workflows by `test_the_stated_inventory_matches_the_workflows`,
 #: so a further migration reds the guard instead of silently falsifying its map.
-_STATED_PER_RUNNER_PYTEST_LOG_SITES = 3
-_STATED_LITERAL_PYTEST_LOG_SITES = 2
+#:
+#: 4 and 1 since #10280 migrated `test-concurrency-falkor`'s reader to its own
+#: `$PYTEST_LOG` (it was the last leg but one on a host-global literal, and a co-tenant
+#: job on the same self-hosted host truncated its log mid-run — run 40884374618, job
+#: 123539933295 read `tests/test_backfill_sources.py`/`tests/test_billing.py`, files that
+#: leg never runs). `test-carve-out` is the ONE leg still on `/tmp/pytest.log`.
+_STATED_PER_RUNNER_PYTEST_LOG_SITES = 4
+_STATED_LITERAL_PYTEST_LOG_SITES = 1
 
 #: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
 #: workflows, so match the SHAPE, not one spelling. Anchored (`^tail`), so a comment
@@ -1169,7 +1175,7 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log`-named tails in python-ci.yml (3 of them the per-runner
+    #9300): 5 `pytest.log`-named tails in python-ci.yml (4 of them the per-runner
     `"$PYTEST_LOG"`, not a `/tmp` literal — see the DERIVED split pinned by
     `test_the_stated_inventory_matches_the_workflows`), 1 `trackb.log` (the must-pass
     Track B member, whose log name does not contain "pytest" — it was the coverage
@@ -1194,10 +1200,11 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
     # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
-    # `test`'s last-failed pre-phase (200), `test` (300) and `test-slow` (300) through
-    # the per-runner `"$PYTEST_LOG"` (the fast job since #10028, `test-slow` since the
-    # #10028 residue that PR closed), then the TWO remaining `/tmp/pytest.log` literals
-    # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
+    # `test`'s last-failed pre-phase (200), `test` (300), `test-slow` (300) and
+    # `test-concurrency-falkor` (120) through the per-runner `"$PYTEST_LOG"` (the fast
+    # job since #10028, `test-slow` since the #10028 residue that PR closed,
+    # `test-concurrency-falkor` since #10280), then the ONE remaining
+    # `/tmp/pytest.log` literal `test-carve-out` (200) — plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
