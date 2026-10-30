@@ -442,14 +442,14 @@ Authorize inert and offers the retry.
 - [ ] `docs/ops/auth-email-flows.md` §3's table is complete against the live allowlist (it claims to be the
       required set).
 
-## 9. What remains, and why it is not in this change
+## 9. What this change delivered, and what remains
 
 This document and `tests/test_oauth_consent_bridge.py` deliver tasks **1, 2, 4 and 5** of #3524: the token
 is specified rather than assumed, `authorization_endpoint` stability is verified and guarded, the mint hop
 is costed, and the sign-in fallback origin is settled with its record corrected. The BRIDGE half of task 3
 is **DELIVERED** by this diff (`functions/api/consent/start.ts`, `functions/api/consent/token.ts`,
-`functions/_shared/auth/consent-bridge.ts`); the *page rewrite* (step 4) is what remains, and should not be
-attempted as one blind pass:
+`functions/_shared/auth/consent-bridge.ts`). The *page rewrite* (step 4) was the last unit and it is
+**DELIVERED** too (row 4 below) — landed as its own unit, never as one blind pass:
 
 | Remaining step | Why it is its own unit |
 |---|---|

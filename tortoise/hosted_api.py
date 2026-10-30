@@ -41760,10 +41760,13 @@ async def oauth_consent(request: Request):
     proves the flow, it does not replace the request. The response shape is
     identical on both arms.
 
-    ⛔ Do NOT read the token on the consent page here or anywhere else yet:
-    a page that half-reads a token and half-reads the old cookie is the
-    "strictly worse than not starting" state §9 records for #3559. The page
-    rewrite is §9 step 4.
+    ✅ §9 step 4 is DELIVERED, so the page DOES read the token — here (this
+    route's `consent_token` body field) and at the preview (`X-Consent-Token`).
+    It reads ONLY the token: no cookie write, no inline provider client and no
+    bearer. That is what retires the #3559 "strictly worse than not starting"
+    half-read hazard §9 records — not a prohibition, which is why the older text
+    forbidding a page read is gone. The bearer arm below is for non-page callers
+    and is unchanged.
     """
     from tortoise.oauth import (
         OAuthError,

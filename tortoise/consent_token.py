@@ -44,8 +44,10 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO
   session origin (§2.3). The function here is the reference INVERSE of the verifier — it exists so
   the AS has a checkable counterpart to the contract and so tests can mint exactly what §2.1
   specifies. Shipping it as a route would put identity assertion on the wrong origin.
-* **No page change.** Reading a token on the page is §9 step 4; a page that half-reads a token and
-  half-reads the old cookie is the "strictly worse than not starting" state §9 records for #3559.
+* **No page logic here.** The page that reads a token is §9 step 4, and it is **DELIVERED** — it
+  lives in `tortoise/oauth.py` (`_CONSENT_HTML`) and the routes above, not in this module. It reads
+  only the token (no cookie, no inline client, no bearer), which is why the #3559 "strictly worse
+  than not starting" half-read hazard has no second source left to half-read.
 
 The `jti` register IS shared (§2.3, DELIVERED)
 ---------------------------------------------
