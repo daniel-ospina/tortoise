@@ -847,6 +847,87 @@ def test_repair_never_hands_the_pool_a_version_pinned_hosted_label(env):
     )
 
 
+def test_a_custom_host_shaped_label_survives_re_registration_exactly_as_the_repair_keeps_it(env):
+    """⛔ ONE INVARIANT, TWO WRITERS — SO THEY MUST COMPARE A LABEL THE SAME WAY.
+
+    `--repair-labels` matches the host-derived names EXACTLY (`is_host_label` in
+    `tools/install-ci-runner-x64.sh`: `self-hosted|Linux|macOS|Windows|X64|ARM64|ARM`), so an
+    operator's own `linux` or `x64` custom label is KEPT — filtering a label out of that PUT body
+    IS a removal, the one thing that block must never do. This writer compared case-INSENSITIVELY,
+    so the same label was silently DELETED from `--labels` on the next re-registration: a label one
+    writer keeps and the other removes, which is exactly what the shared `POOL_LABELS` fixture's
+    "one invariant, two writers" comment says cannot happen.
+
+    GitHub returns the reserved spellings (`Linux`, `X64`, …) and refuses to have them re-set, so
+    an exact-case compare loses nothing from the class — the host trio below is still dropped.
+
+    Non-vacuity: with the lower-cased compare restored (`x.lower() not in host_derived`) both
+    custom labels disappear from `--labels` and this arm reds.
+    """
+    e = env(
+        pool=[
+            (
+                "r1",
+                "offline",
+                False,
+                "self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,linux,x64",
+            )
+        ],
+        installs=[("gh-runner-x64-1", "r1")],
+        systemctl_rc=1,
+    )
+    e.record()
+    cfg = e.config()
+    kept = set(cfg.split("--labels ")[1].split(" ")[0].split(","))
+    assert kept == {"self-hosted-x64", "ubuntu-latest", "linux", "x64"}, (
+        "a re-registration keeps a CUSTOM label the repair keeps too — a case-folded host match "
+        "drops the operator's own `linux`/`x64` here while `--repair-labels` preserves it, and a "
+        f"label one writer deletes is not a shared invariant: {cfg}"
+    )
+    assert "Linux" not in kept and "X64" not in kept, (
+        "the host-derived spellings cannot be set by hand and must stay out of `--labels`: " + cfg
+    )
+
+
+@pytest.mark.parametrize("marker", ["Self-Hosted-Arm64", "SELF-HOSTED-ARM64"])
+def test_a_mixed_case_foreign_arch_marker_is_not_preserved(env, marker):
+    """⛔ THE ARCH-MARKER TEST IS CASE-INSENSITIVE, DELIBERATELY — unlike the host-derived one.
+
+    The two classes are not the same, and the neighbour above is what makes the difference easy to
+    get wrong: `Linux`/`X64` are vendor-FIXED spellings GitHub derives from the host (an exact-case
+    compare loses nothing), while `self-hosted-<arch>` is a CUSTOM label whose spelling is whatever
+    created it. docs.github.com "apply labels" says **"Labels are case-insensitive"**, so
+    `Self-Hosted-Arm64` IS the arm64 marker here and still answers a lower-case `runs-on:` —
+    preserving it on re-registration hands an arm64 job to an x86 box and builds a wrong artifact,
+    the false PASS this function's own docstring forbids.
+
+    Non-vacuity: with the exact-case prefix test restored
+    (`not x.startswith("self-hosted-")`) both spellings are preserved and this arm reds.
+    """
+    e = env(
+        pool=[
+            (
+                "r1",
+                "offline",
+                False,
+                f"self-hosted,Linux,X64,self-hosted-x64,ubuntu-latest,gpu,{marker}",
+            )
+        ],
+        installs=[("gh-runner-x64-1", "r1")],
+        systemctl_rc=1,
+    )
+    e.record()
+    cfg = e.config()
+    kept = set(cfg.split("--labels ")[1].split(" ")[0].split(","))
+    assert marker not in kept, (
+        "GitHub matches labels case-insensitively, so a mixed-case spelling of the OTHER arch's "
+        f"marker is that marker — it must be re-derived away, not preserved: {cfg}"
+    )
+    assert kept == {"self-hosted-x64", "ubuntu-latest", "gpu"}, (
+        "the custom labels still survive; only the foreign arch marker is dropped: " + cfg
+    )
+
+
 def test_another_repos_listener_still_counts_against_the_boxes_ceiling(env):
     """A foreign listener occupies the box, so it counts in `live` — no over-fill.
 
@@ -1071,7 +1152,7 @@ def test_a_provisioner_refusal_is_VISIBLE_not_green(env):
 def test_a_NON_sizing_provisioner_refusal_is_not_blamed_on_the_model_disagreement(env):
     """⛔ `die` EXITS 2 FROM EVERY GUARD ARM, so exit 2 alone does NOT mean the sizing dispute.
 
-    `tools/install-ci-runner-x64.sh:137` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }` — the
+    `tools/install-ci-runner-x64.sh:182` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }` — the
     wrong architecture, an unreadable fork cap, a FULL DISK, an unreadable core count and an
     unreadable gate state all refuse with 2. Naming #9672 for those would describe a disk-full box
     as "expected until the decision lands" and nobody would ever fix it. The classification is
@@ -1536,15 +1617,19 @@ MUTATIONS = {
         wrong=lambda r: "gpu" not in r.get("_config", ""),
     ),
     "other-arch-marker-preserved": dict(
+        # The mutation reverts the case-INSENSITIVE marker test to the exact-case one this lane
+        # found (review at `2d9a49ad`: a mixed-case marker survived BOTH heal paths). Its fixture
+        # therefore carries a mixed-case marker: a lower-case-only fixture cannot see the casing
+        # change at all, and would report this gate as enforced while it was not.
         old='and not x.lower().startswith("self-hosted-")',
         new="and True",
         kwargs=dict(
-            pool=[("r1", "offline", False, "self-hosted,ARM64,self-hosted-arm64,gpu")],
+            pool=[("r1", "offline", False, "self-hosted,ARM64,Self-Hosted-Arm64,gpu")],
             installs=[("gh-runner-x64-1", "r1")],
             systemctl_rc=1,
         ),
         args=(),
-        wrong=lambda r: "self-hosted-arm64" in r.get("_config", ""),
+        wrong=lambda r: "Self-Hosted-Arm64" in r.get("_config", ""),
     ),
     "version-pinned-hosted-label-preserved": dict(
         # The pool claims `ubuntu-latest` and never `ubuntu-<version>`; a version pin preserved
