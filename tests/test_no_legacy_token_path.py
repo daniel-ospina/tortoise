@@ -1713,26 +1713,139 @@ CLAIM_CLOSED_SENTENCE = (
 )
 
 #: The pre-step-4 claims, VERBATIM, exactly as they shipped before #3524 §9 step 4 deleted
-#: the page. Each is `(substring, why it is false now)`. `git show <base>:<doc>` and
-#: `git show 245f42128^:docs/auth-architecture.md` are where these came from — do not
-#: paraphrase them into new arms; add the sentence you actually saw.
+#: the page. Each is `(needle, why it is false now)`. `git show origin/main:<doc>` is where
+#: they come from — do not paraphrase them into new arms; add the sentence you actually saw.
+#:
+#: ⛔ COMPLETENESS IS THE POINT, and the first version of this list was not complete. It was
+#: written from memory rather than from git, so it carried one needle that matched NO real text
+#: (`…still re-reads it as its session` — the doc said `its OWN session`) and it covered 4 of
+#: the 24 claim clauses that actually shipped. Measured against `git show origin/main:<doc>`,
+#: with the closure sentence KEPT (so only this list can catch it): `docs/auth-architecture.md`
+#: **171 of 176** restored claim sentences were GREEN, and `website/website_architecture.md`
+#: **125 of 126** — including `The cookie is still ISSUED, and the consent page still re-reads
+#: it as its own session`, `Accepted by — only the consent page that issues it` and
+#: `… read back as its own session, so it still authenticates`. Every clause below is a live
+#: acceptance/issuance claim about the deleted page and each was verified GREEN-before/RED-after.
+#:
+#: ⛔ Norms, not regexes: a needle is still a LITERAL substring, matched through
+#: `_normalise_markdown` on both sides (markdown emphasis stripped, whitespace collapsed) — so
+#: a paste that re-wraps the line or bolds a word still matches, and correct prose still cannot
+#: trip a needle, because no needle is a grammatical pattern. A needle that appears in the
+#: shipped docs is a FALSE POSITIVE and `test_the_closure_claim_is_OWNED_not_parsed` (arm (g))
+#: asserts the shipped docs stay clean.
 _FORBIDDEN_VERBATIM: tuple[tuple[str, str], ...] = (
+    # ── docs/auth-architecture.md — CURRENT region (§2–§2.4, §5.5–§5.6) ──
     (
         "still accepted by the one page that issues it",
         "the page that issued it was DELETED (#3524 §9 step 4) — nothing accepts the cookie",
     ),
     (
-        "no surface other than the consent page accepts it",
-        "the consent page is no longer an accepting surface — that is the #3559 wording",
+        "the removed design is still being issued",
+        "nothing issues it: its only writer was the deleted page",
     ),
     (
         "reads that cookie back as the session",
         "the page reads no cookie and holds no session; a bound single-use token replaces it",
     ),
     (
-        "the consent page still re-reads it as its session",
+        "no surface other than the consent page accepts it",
+        "the consent page is no longer an accepting surface — that is the #3559 wording",
+    ),
+    (
+        "no other tortoise surface accepts it",
+        "at this head NO surface accepts it, the consent page included",
+    ),
+    (
+        "still re-reads it as its own session",
         "the page re-reads nothing — it was deleted, and its replacement reads a token",
     ),
+    (
+        "is still issued and still accepted",
+        "nothing issues it and nothing accepts it since step 4 closed the last writer",
+    ),
+    (
+        "accepted by that page itself",
+        "the page was DELETED; there is no page left to accept it",
+    ),
+    (
+        "the legacy writer, and the unfixed exception to the ruling above",
+        "there is no unfixed exception — step 4 deleted the writer and the ruling holds",
+    ),
+    (
+        "only the consent page that issues it",
+        "the page that issued it was deleted — this is the #3559 `Accepted by` wording",
+    ),
+    (
+        "writes that legacy cookie with document.cookie",
+        "the page writes no cookie — it renders no sign-in client and stores nothing",
+    ),
+    (
+        "so it is still issuing today",
+        "it stopped issuing when the page was deleted (#3524 §9 step 4)",
+    ),
+    (
+        "consent-page visitor's tokens are in the legacy cookie",
+        "the page holds no tokens and no cookie — it redeems a bound single-use token",
+    ),
+    (
+        "the consent page's cookie therefore still exists in a consent-page visitor's browser",
+        "a stale copy may survive as INERT residue; nothing issues it and nothing accepts it",
+    ),
+    (
+        "the consent page's separate legacy-cookie acceptance",
+        "that acceptance was DELETED with the page — it is not kept as a §2.1 special case",
+    ),
+    (
+        "still accepted as a credential is settled",
+        "it is settled the other way: nothing accepts the cookie as a credential",
+    ),
+    (
+        "the consent page itself still reads it as its credential",
+        "the page reads no credential — it redeems a bound token instead",
+    ),
+    (
+        "and the consent page will still authenticate with it",
+        "the page authenticates with a bound consent token, never the legacy cookie",
+    ),
+    # ── website/website_architecture.md — `_CURRENT_REGION` is the whole file ──
+    (
+        "read back as its own session, so it still authenticates",
+        "the page reads no cookie and holds no session; the PAST-tense history is fine",
+    ),
+    (
+        "still issued to — and still authenticates — the consent page that writes it",
+        "nothing is issued to that page — it was DELETED by #3524 §9 step 4",
+    ),
+    (
+        "no other surface accepts it:",
+        "at this head NO surface accepts it, the consent page included",
+    ),
+    (
+        "surviving on the one surface not yet migrated",
+        "the migration is DONE (#3524 §9 step 4), not surviving on one surface",
+    ),
+    (
+        "migrate that page off it",
+        "that page no longer exists — there is nothing left to migrate",
+    ),
+)
+
+#: Markdown emphasis and line wrapping are NOT part of a claim. A paste from `git show`
+#: re-wraps at the doc's own width and markdown emphasis (`**`/backticks) lands mid-phrase, so
+#: both sides of the comparison go through this. It normalises ONLY presentation — every word,
+#: every hyphen and every punctuation mark must still match exactly, which keeps the check a
+#: literal substring search and not an English grammar.
+_EMPHASIS_RE = re.compile(r"[*`]")
+
+
+def _normalise_markdown(text: str) -> str:
+    return " ".join(_EMPHASIS_RE.sub("", text).split()).lower()
+
+
+#: `(needle, reason)` with both sides already normalised — computed once, from the verbatim
+#: list above, so the two can never drift.
+_FORBIDDEN_NEEDLES: tuple[tuple[str, str], ...] = tuple(
+    (_normalise_markdown(needle), why) for needle, why in _FORBIDDEN_VERBATIM
 )
 
 
@@ -1753,13 +1866,14 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
         # the lines are joined, would sit in the middle of the sentence the doc is saying.
         "\n".join(re.sub(r"^\s*(?:>\s?)*", "", ln) for _, ln in _current_lines(rel, text))
     )
-    # Whitespace-normalised, so the sentence a doc OWNS may be WRAPPED by markdown's own line
-    # breaks (`docs/auth-architecture.md` wraps it inside a blockquote). The normalisation is
-    # whitespace only — the words, the emphasis and the punctuation must still match exactly.
-    scanned = " ".join(scanned.split())
+    # ONE normaliser for the doc and for the needles (see `_normalise_markdown`): the sentence a
+    # doc OWNS may be WRAPPED by markdown's own line breaks — `docs/auth-architecture.md` wraps it
+    # inside a blockquote — and a restored claim is a PASTE, so it arrives with the same wrapping.
+    # Presentation is normalised on both sides; the words are not.
+    scanned = _normalise_markdown(scanned)
 
     violations: list[str] = []
-    if CLAIM_CLOSED_SENTENCE not in scanned:
+    if _normalise_markdown(CLAIM_CLOSED_SENTENCE) not in scanned:
         violations.append(
             f"{rel} no longer carries, in its CURRENT-architecture region, the closure "
             f"sentence this gate owns:\n\n    {CLAIM_CLOSED_SENTENCE}\n\n"
@@ -1771,8 +1885,8 @@ def _consent_page_acceptance_violations(rel: str, text: str) -> list[str]:
             "did not mean to remove it, restore it."
         )
 
-    for phrase, why in _FORBIDDEN_VERBATIM:
-        if phrase.lower() in scanned.lower():
+    for phrase, why in _FORBIDDEN_NEEDLES:
+        if phrase in scanned:
             violations.append(
                 f"{rel} restates the PRE-STEP-4 claim verbatim: {phrase!r} — {why}. "
                 "#3524 §9 step 4 deleted that page; a reader acting on this line re-derives "
