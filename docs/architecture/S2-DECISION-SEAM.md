@@ -517,7 +517,7 @@ behind it, not a hope.
 | the prohibition clause dropped, the shape kept (the `#8175` regression) | ✅ the test's own non-vacuity half reds on `forbids_following_instructions` alone — the clause can be present, correctly placed, and still say nothing that stops it being followed |
 | the wrong field named (`narrative` for `state`) | ✅ reds on `names_state_as_data`: a framing that points at the wrong input leaves the actual untrusted text unnamed |
 | the element binding dropped (`answer only from element id={ref}`) | ✅ reds on `binds_the_answer_to_the_named_element`, which is the half `#10176` needs in-band meanwhile |
-| the clause moved into the `state` array (same wording, untrusted position) | ✅ the position assertion reds: an instruction inside the block the attacker controls is one that block can countermand |
+| the clause also appended to a `state` element, every question left framed | ✅ **only** `_position_gaps` reds (`["rules"]`): `_framing_gaps` reports nothing at all, because it reads `instructions` and is structurally blind to where the clause lives — and that blindness is exactly why position needed its own mutant rather than riding on the wording one. An instruction inside the block the attacker controls is one that block can countermand. |
 | a prompt version reverted to `-v1` with the framed wording | ✅ the version assertion reds — the stamp is what lets an armed run's record name the question it answered, so a silent change under a stable version is a record that lies |
 
 ## 9. What this does NOT close

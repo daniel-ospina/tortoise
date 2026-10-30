@@ -537,6 +537,14 @@ def _s7_payloads() -> dict[str, int]:
     seam.classify_tail([(f"t{i}", _s7_text(_S7_CLASSIFY_ITEM_CHARS, i), offered)
                         for i in range(40)],
                        descriptions={}, transport=call, batch_size=seam.BATCH_MAX)
+    # One request per seam, named — a bare `zip(..., strict=True)` raises `ValueError`
+    # ("zip() argument 2 is longer/shorter") if `BATCH_MAX` ever drops below 40, which is a
+    # failure that would blame the wrong thing: the construction would be CHUNKED, so the
+    # measured bytes stop being the single-request shape §7 tabulates.
+    assert len(seen) == 2, (
+        f"expected exactly one request per seam (40 items, BATCH_MAX={seam.BATCH_MAX}); "
+        f"got {len(seen)} — if BATCH_MAX fell below 40 the §7 construction is chunked and "
+        "its bytes are no longer the single-request shape the table records")
     return {version: len(json.dumps(payload).encode("utf-8"))
             for version, payload in zip(("vet-v2", "classify-v2"), seen, strict=True)}
 
@@ -584,10 +592,19 @@ def test_section_7_cost_rows_are_a_measurement_of_this_head_s_payload():
 
 # ── the framing's PROVENANCE must name a page that exists ─────────────────
 
-#: Every artifact that carries the untrusted-data framing's provenance. Three, and the
-#: reason the check is corpus-shaped: the same sentence moved between all three in one
-#: PR, so a guard watching one would have passed while the other two drifted.
-_FRAMING_ARTIFACTS = (SEAM_MODULE, DOC, CHANGELOG)
+#: Every artifact that carries the untrusted-data framing's provenance. The reason the
+#: check is corpus-shaped: the same sentence moved between all of these in one PR, so a
+#: guard watching one would have passed while the others drifted.
+#:
+#: `SEAM_TEST` is a member because the retracted paraphrase survived one file OVER: the
+#: first corpus (module + doc + changelog) left `tests/` out, so round 4 of PR #10302's
+#: review found the seam test's own docstring still presenting "be explicit in the trusted
+#: fields" as the vendor's prescription while this guard stayed green. The corpus excludes
+#: THIS file only, and only because it carries the paraphrase as a deliberate FIXTURE
+#: (`_REMEDY_PARAPHRASE`, and the synthetic pre-fix documents below) — an exclusion with a
+#: stated reason, not an uncovered artifact.
+SEAM_TEST = ROOT / "tests" / "test_s2_decision_seam_5087.py"
+_FRAMING_ARTIFACTS = (SEAM_MODULE, DOC, CHANGELOG, SEAM_TEST)
 
 #: The page that actually carries the note, as a path a reader can follow. The note lives
 #: in *Jev 1.13 jaggedness* → *Adversarial content*
@@ -610,7 +627,12 @@ _VENDOR_REMEDY = "be explicit in the criteria"
 
 #: The paraphrase that must NOT be presented as the vendor's. It is a fair description of
 #: what this seam DOES; it is not what the page says, so it may not wear the quote marks.
-_REMEDY_PARAPHRASE = "be explicit in the trusted fields"
+#: A REGEX, not a substring: the artifacts said it more than one way — "be explicit in the
+#: `trusted` fields", "prescribes being explicit in the trusted fields" — and a plain
+#: substring missed the `being` form, which is verbatim the sentence review round 4 found
+#: still alive in `tests/`. A marker that cannot match the phrasing it exists to refuse is
+#: a guard whose green means nothing.
+_REMEDY_PARAPHRASE = re.compile(r"\bb(?:e|eing) explicit in the (?:`?trusted`?\s+)?fields")
 
 #: The vendor scopes its note to `jev-1.13` ("Applies to `jev-1.13`. Last reviewed
 #: 2026-10-02") and says the edges may be fixed in later versions, while this seam sends
@@ -650,7 +672,7 @@ def _provenance_gaps(text: str) -> list[str]:
         gaps.append("unfollowable: names no page path or title a reader can reach")
     if _VENDOR_REMEDY not in flat:
         gaps.append(f"remedy-not-verbatim: the page says {_VENDOR_REMEDY!r}")
-    if _REMEDY_PARAPHRASE in flat:
+    if _REMEDY_PARAPHRASE.search(flat):
         gaps.append("remedy-put-in-the-vendors-mouth: 'trusted fields' is our wording, not theirs")
     if _VERSION_OVERCLAIM.search(text):
         gaps.append("version-overclaim: the note is scoped to jev-1.13, not a later release")
@@ -686,9 +708,10 @@ def test_the_framing_cites_a_vendor_page_that_exists_and_quotes_it_verbatim():
 
     Non-vacuity: the same checkers run over the **pre-fix** sentence of each artifact and
     must red on the defect that artifact actually carried (all three cited the phantom
-    page; the module additionally carried the version overclaim). Static: three file
-    reads, no network — the fetched-at facts are recorded in the regexes' comments, and
-    the check is deliberately offline so it cannot flake on the vendor's uptime.
+    page; the module additionally carried the version overclaim; the seam test carried the
+    retracted remedy paraphrase). Static: four file reads, no network — the fetched-at
+    facts are recorded in the regexes' comments, and the check is deliberately offline so
+    it cannot flake on the vendor's uptime.
     """
     for artifact in _FRAMING_ARTIFACTS:
         text = artifact.read_text(encoding="utf-8")
@@ -713,6 +736,12 @@ def test_the_framing_cites_a_vendor_page_that_exists_and_quotes_it_verbatim():
         "  hostile by default\"*, Troubleshooting → *Adversarial content*) and prescribes\n"
         "  being explicit in the trusted fields;\n")
     assert _PHANTOM_PAGE.search(pre_fix_record)
+    # …and the corpus check reds on it too, which is what makes `SEAM_TEST` a member and
+    # not decoration: this is verbatim the sentence round 4 found in `tests/` while the
+    # three-artifact corpus passed.
+    pre_fix_record_gaps = _provenance_gaps(pre_fix_record)
+    assert ("remedy-put-in-the-vendors-mouth: 'trusted fields' is our wording, not theirs"
+            in pre_fix_record_gaps), pre_fix_record_gaps
 
     # …and a correct provenance passes every checker, so the guard cannot be satisfied by
     # mangling the text in some other direction.
