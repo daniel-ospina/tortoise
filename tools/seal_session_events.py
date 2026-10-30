@@ -51,19 +51,33 @@ into a session path, because it touches files a live hook is appending to.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below.  This module does
+# `from datetime import UTC` at module level, which is 3.11+; on the ambient
+# `python3` (Apple CLT 3.9.6) the documented `python tools/x.py --check` form
+# would die with an unattributed ImportError before any diagnostic — the exact
+# harm #5128 was filed for.  The gate that enforces this shape is
+# tests/test_entry_point_python_guard.py, not a style rule (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/seal_session_events.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/seal_session_events.py`"
+    )
+
 import argparse
 import contextlib
 import gzip
 import hashlib
 import os
 import re
-import sys
 import tempfile
-import zlib
-from errno import EMLINK, ENOSYS, ENOTSUP, EOPNOTSUPP, EPERM
-from dataclasses import dataclass
 import time
+import zlib
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from errno import EMLINK, ENOSYS, ENOTSUP, EOPNOTSUPP, EPERM
 from pathlib import Path
 
 #: The substrate this tool owns.  Overridable in every entry point so a test

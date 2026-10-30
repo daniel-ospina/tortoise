@@ -7,9 +7,9 @@ seals a file a live hook is still appending to, fails these rows.
 """
 from __future__ import annotations
 
-import gzip
 import contextlib
 import errno
+import gzip
 import importlib.util
 import os
 import sys
@@ -149,12 +149,12 @@ def test_check_is_drift_before_and_clean_after(tmp_path, capsys):
     argv = ["--root", str(tmp_path), "--today", TODAY.isoformat(),
             "--keep-days", "7"]
 
-    assert seal.main(argv + ["--check"]) == seal.EXIT_DRIFT
+    assert seal.main([*argv, "--check"]) == seal.EXIT_DRIFT
     capsys.readouterr()
 
-    assert seal.main(argv + ["--apply"]) == seal.EXIT_OK
+    assert seal.main([*argv, "--apply"]) == seal.EXIT_OK
     capsys.readouterr()
-    assert seal.main(argv + ["--check"]) == seal.EXIT_OK
+    assert seal.main([*argv, "--check"]) == seal.EXIT_OK
     assert "ok —" in capsys.readouterr().out
 
 
