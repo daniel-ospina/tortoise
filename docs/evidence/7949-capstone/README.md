@@ -596,8 +596,9 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
 # ⛔ AND THE FILE IT SUPERSEDES IS DELETED: exactly ONE scored log may exist, and
 # both the test and the pre-registration gate refuse a second one.
 # NO ARM EXPORTS: the probe forces TORTOISE_VET/TORTOISE_CLASSIFY_LATER itself,
-# pins TORTOISE_VALUE_GATE unset, and prints the os.environ READ-BACK as its
-# `arm:` line — check that line in the log it writes, not your shell.
+# pins TORTOISE_VALUE_GATE and TORTOISE_S2_DECISION_SEAM unset, and prints the
+# os.environ READ-BACK as its `arm:` line — check that line in the log it writes,
+# not your shell.
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI=//p" | tr -d "'")"
 uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
     --prereg "$(git rev-parse HEAD)"

@@ -19,6 +19,7 @@ the three sources those cites name (`sdk.py`, `projection/edges.py`,
 from __future__ import annotations
 
 import importlib.util as _ilu
+import ast
 import json
 import os
 import re
@@ -38,6 +39,10 @@ PREREG = _REPO / "docs/evidence/7949-capstone/preregistration.json"
 E1E2 = _REPO / "docs/evidence/7949-capstone/e1-e2.log"
 
 
+#: `sdk.py` as text — read ONCE, so every derivation below sees the same bytes.
+SDK_SOURCE = (_REPO / "tortoise/sdk.py").read_text()
+
+
 def _sdk_line_naming(code: str) -> int:
     """The ONE line of `sdk.py` that carries `code` — READ from the tree.
 
@@ -52,9 +57,7 @@ def _sdk_line_naming(code: str) -> int:
     resolves to a SYMBOL rather than a line, precisely because a line number
     cannot survive an edit above it.
     """
-    hits = [n for n, line in enumerate(
-        (_REPO / "tortoise/sdk.py").read_text().splitlines(), 1)
-        if code in line]
+    hits = [n for n, line in enumerate(SDK_SOURCE.splitlines(), 1) if code in line]
     assert len(hits) == 1, (
         f"`{code}` is on {len(hits)} lines of sdk.py {hits} — the pin names one")
     return hits[0]
@@ -73,6 +76,22 @@ _SEAM_SYMBOL = "_capture_step_witness"
 #: decides whether the seam reaches the receipt at all.
 _META_FOLD_CITE = ("tortoise/sdk.py:" + str(_sdk_line_naming(
     "_capture_stats_with_step_witness(out, len(extracted))")))
+
+
+def _enclosing_functions(source: str, lineno: int) -> list[str]:
+    """The `def`s whose body carries `lineno` of `source` (1-based).
+
+    Parsed, not indent-counted: a line number tells you WHERE the cite points, and
+    only the parse tree tells you WHAT it is inside. ``ast`` is the tree sdk.py is
+    already read as text for, so this adds no new source of truth.
+    """
+    tree = ast.parse(source)
+    return [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= lineno <= (node.end_lineno or node.lineno)
+    ]
 
 
 def _load():
@@ -892,9 +911,21 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _SEAM_SYMBOL in unobserved["S2.3"], unobserved["S2.3"]
-    # the fold's call site is still resolvable at this head (the pin that would
-    # red if the seam stopped being CALLED at all)
-    assert _META_FOLD_CITE.removeprefix("tortoise/sdk.py:").isdigit()
+    # The cite resolves to the PRODUCTION fold — the seam is called from INSIDE
+    # `_extract_session_v2`, not from a stray copy elsewhere in the module.
+    # (`_sdk_line_naming` above already reds, at IMPORT, if the call site vanishes
+    # altogether; this arm is the one that reds when the call MOVES, which that
+    # import-time check cannot see.)
+    fold_line = int(_META_FOLD_CITE.rsplit(":", 1)[1])
+    assert _enclosing_functions(SDK_SOURCE, fold_line) == ["_extract_session_v2"], (
+        f"{_META_FOLD_CITE} is not inside _extract_session_v2 — the seam is not called "
+        "from the production capture fold")
+    # non-vacuity: the same mechanism DISCRIMINATES — the identical call attributed
+    # to another function's extent is not `_extract_session_v2`.
+    assert _enclosing_functions(
+        "def commit():\n"
+        "    return _capture_stats_with_step_witness(out, len(extracted))\n", 2
+    ) == ["commit"]
 
 
 def test_the_seam_witnesses_eight_of_eight_with_no_probe_edit_to_the_rule():

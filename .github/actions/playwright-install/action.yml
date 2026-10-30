@@ -63,11 +63,26 @@ runs:
         set -euo pipefail
         conf=/etc/apt/apt.conf.d/99-ci-dpkg-lock-timeout
         printf 'DPkg::Lock::Timeout "%s";\n' "$LOCK_TIMEOUT" | sudo tee "$conf" >/dev/null
-        # ASSERT the write, do not assume it: apt SILENTLY IGNORES a configuration
-        # key it does not know, so on an apt without this option a no-op here
-        # would leave the race exactly as it was while this step reported green.
-        grep -q "DPkg::Lock::Timeout \"$LOCK_TIMEOUT\"" "$conf" || {
-          echo "::error::$conf does not carry DPkg::Lock::Timeout — apt will NOT wait for the lock"
+        # ASSERT against APT'S OWN CONFIGURATION SPACE, never against the file this
+        # shell wrote three lines above: a `grep "$conf"` can only fail if `tee`
+        # failed, and `set -euo pipefail` already fails the step on that — it never
+        # observes whether apt READ the fragment, so it cannot catch the outcome it
+        # was written for (a fragment apt skips reports a green step with the wait
+        # not in effect). `apt-config dump` prints the configuration space apt itself
+        # loaded (apt-config(8): "just show the contents of the configuration space"),
+        # which includes everything read from Dir::Etc::Parts — so a fragment apt
+        # skipped (unreadable, unparseable, a pruned Dir::Etc) is ABSENT here.
+        #   - `-i`: apt's config lookup is case-insensitive, so a differently-cased
+        #     binding must not red.
+        #   - the VALUE is matched too, so a default apt may ship for this key cannot
+        #     answer for a fragment that never landed.
+        #   - the dump is captured and matched as a herestring, NOT piped into
+        #     `grep -q`: grep exits at the first match, apt-config then dies of EPIPE
+        #     and `pipefail` would read that as a failure — a FALSE red on a correct
+        #     config.
+        apt_conf="$(apt-config dump)"
+        grep -qi "DPkg::Lock::Timeout \"$LOCK_TIMEOUT\"" <<<"$apt_conf" || {
+          echo "::error::apt did not load DPkg::Lock::Timeout \"$LOCK_TIMEOUT\" from $conf — apt will NOT wait for the lock"
           exit 1
         }
         # Bounded retry — the only thing here that covers a contended LISTS lock

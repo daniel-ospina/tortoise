@@ -1493,10 +1493,16 @@ def _playwright_action_offenders(actions: dict[str, dict]) -> list[str]:
             problems.append(
                 f"{key}: the lock wait is written AFTER the install it must cover"
             )
-        if "grep -q" not in run:
+        if not re.search(r"apt-config\s+dump", run):
             problems.append(
-                f"{key}: the lock-wait write is never read back — apt silently ignores a "
-                "configuration key it does not know, so a no-op would read as compliance"
+                f"{key}: the lock-wait write is never read back from apt's OWN configuration "
+                "space — grepping the file this step just wrote can only fail if `tee` did "
+                "(which `pipefail` already catches), so a fragment apt never loaded would "
+                "read as compliance. `apt-config dump` is the read-back that can answer it"
+            )
+        elif run.index("apt-config dump") > run.index("python -m playwright install"):
+            problems.append(
+                f"{key}: the lock-wait read-back runs AFTER the install it must guard"
             )
         bodies = _retry_loop_bodies(run, "for attempt in 1 2 3;")
         if not any(INLINE_PLAYWRIGHT_INSTALL.search(body) for body in bodies):
@@ -1535,7 +1541,8 @@ def test_the_playwright_action_arm_reds_on_a_no_op_lock_wait() -> None:
     good = (
         "set -euo pipefail\n"
         'printf \'DPkg::Lock::Timeout "600";\\n\' | sudo tee /etc/apt/apt.conf.d/x >/dev/null\n'
-        'grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n'
+        'apt_conf="$(apt-config dump)"\n'
+        'grep -qi "DPkg::Lock::Timeout \"600\"" <<<"$apt_conf"\n'
         "for attempt in 1 2 3; do\n"
         '  if python -m playwright install --with-deps chromium; then exit 0; fi\n'
         "  sleep $((attempt * 20))\n"
@@ -1555,19 +1562,35 @@ def test_the_playwright_action_arm_reds_on_a_no_op_lock_wait() -> None:
     after = (
         "python -m playwright install --with-deps chromium\n"
         'printf \'DPkg::Lock::Timeout "600";\\n\' | sudo tee /etc/apt/apt.conf.d/x\n'
-        'grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n'
+        'apt_conf="$(apt-config dump)"\n'
+        'grep -qi "DPkg::Lock::Timeout \"600\"" <<<"$apt_conf"\n'
         "echo failed after 3 attempts\n"
     )
     assert any("AFTER" in p for p in _playwright_action_offenders(_synthetic_action(after)))
-    # Written but never read back: apt ignores an unknown key SILENTLY.
-    unasserted = good.replace('grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n', "")
+    # Written but never read back from apt: a fragment apt never loaded is a no-op.
+    unasserted = good.replace(
+        'apt_conf="$(apt-config dump)"\n'
+        'grep -qi "DPkg::Lock::Timeout \"600\"" <<<"$apt_conf"\n',
+        "",
+    )
     assert any(
         "read back" in p for p in _playwright_action_offenders(_synthetic_action(unasserted))
+    )
+    # ...and a read-back spelled against the FILE it just wrote is the same thing:
+    # it cannot fail, so it certifies nothing about apt.
+    self_grep = good.replace(
+        'apt_conf="$(apt-config dump)"\n'
+        'grep -qi "DPkg::Lock::Timeout \"600\"" <<<"$apt_conf"\n',
+        'grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n',
+    )
+    assert any(
+        "read back" in p for p in _playwright_action_offenders(_synthetic_action(self_grep))
     )
     # A single unprotected call: no retry at all.
     once = (
         'printf \'DPkg::Lock::Timeout "600";\\n\' | sudo tee /etc/apt/apt.conf.d/x\n'
-        'grep -q "DPkg::Lock::Timeout" /etc/apt/apt.conf.d/x\n'
+        'apt_conf="$(apt-config dump)"\n'
+        'grep -qi "DPkg::Lock::Timeout \"600\"" <<<"$apt_conf"\n'
         "python -m playwright install --with-deps chromium\n"
         "echo failed after 3 attempts\n"
     )
