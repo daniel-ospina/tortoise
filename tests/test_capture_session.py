@@ -2916,8 +2916,7 @@ def test_apply_supersessions_legacy_idless_object_is_refused_not_folded(sdk):
     forbids is the SILENT version of it.
     """
     from tortoise.commit_ops import apply_supersessions
-    from tortoise.entity_identity import (clear_non_folded_entries,
-                                          non_folded_entries)
+    from tortoise.entity_identity import clear_non_folded_entries, non_folded_entries
 
     # process-level record: clear it so the assertion below cannot pass on a
     # neighbouring test's entry (non-vacuity).
