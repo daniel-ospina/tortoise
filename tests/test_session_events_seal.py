@@ -436,6 +436,80 @@ def test_the_identical_archive_path_still_pays_the_change_test(tmp_path, monkeyp
     assert path.exists()
 
 
+def test_a_source_removed_by_a_concurrent_run_is_a_success_not_a_false_alarm(tmp_path, monkeypatch, capsys):
+    """Two ``--apply`` runs (or two lanes on one box) can seal the same day: the
+    peer's unlink lands between our post-publish change test and our own unlink.
+    POSIX ``unlink`` answers ``ENOENT`` for a link that no longer exists, and
+    that IS the goal state — reporting it as a failure reds ``--apply`` with
+    "their plain copies are untouched" on a substrate where every record is
+    sealed, which is the false alarm this tool exists to not be.
+
+    The window is microseconds wide and not observable deterministically, so the
+    change test is pinned open and the peer's removal is injected at the rename
+    (case A) and at the archive read (case B): both shapes reach the unlink with
+    the source already gone, exactly as a race leaves it.
+
+    Mutation: ``_unlink_source``'s ``except FileNotFoundError: return False``
+    deleted (the pre-fix shape, a bare ``path.unlink()`` in both arms) REDs this
+    row. Both arms were measured against the mutated tool: case A reports
+    ``verify-failed`` ("archive published but the source was NOT removed ... both
+    copies are on disk") and makes ``main`` exit EXIT_ERROR, case B reports
+    ``verify-failed`` ("archived but the source could not be removed: [Errno 2]").
+    """
+    # ---- case A: the PUBLISH path, through the operator's own entry point.
+    day_a = TODAY - timedelta(days=9)
+    a = _write(tmp_path, day_a, b'{"session_id": "race-a"}\n')
+    b = _write(tmp_path, TODAY - timedelta(days=10), b'{"session_id": "race-b"}\n')
+
+    monkeypatch.setattr(seal, "_changed_since", lambda *args, **kwargs: False)
+    real_replace = seal.os.replace
+
+    def racing_replace(src, dst, *args, **kwargs):
+        real_replace(src, dst, *args, **kwargs)
+        for peer in (a, b):
+            if peer.exists():
+                peer.unlink()  # the concurrent run's unlink, first
+
+    monkeypatch.setattr(seal.os, "replace", racing_replace)
+
+    result = seal.seal_one(tmp_path, a)
+    assert result.status == "sealed", result
+    assert result.ok
+    assert "already gone" in result.detail, result.detail
+    assert not a.exists()
+    assert gzip.decompress(seal.archive_path(tmp_path, day_a).read_bytes()) == (
+        b'{"session_id": "race-a"}\n')
+
+    code = seal.main(["--root", str(tmp_path), "--today", TODAY.isoformat(),
+                      "--keep-days", "7", "--apply"])
+    assert code == seal.EXIT_OK, code
+    capsys.readouterr()
+    monkeypatch.undo()
+
+    # ---- case B: the ALREADY-SEALED arm (finishing an interrupted run).
+    day_c = TODAY - timedelta(days=11)
+    c = _write(tmp_path, day_c, b'{"session_id": "race-c"}\n')
+    seal.archive_path(tmp_path, day_c).parent.mkdir(parents=True, exist_ok=True)
+    seal.archive_path(tmp_path, day_c).write_bytes(
+        gzip.compress(b'{"session_id": "race-c"}\n', mtime=0))
+
+    monkeypatch.setattr(seal, "_changed_since", lambda *args, **kwargs: False)
+    real_decompress = gzip.decompress
+
+    def racing_decompress(data):
+        out = real_decompress(data)
+        if c.exists():
+            c.unlink()  # a peer lane finished this day first
+        return out
+
+    monkeypatch.setattr(seal.gzip, "decompress", racing_decompress)
+    second = seal.seal_one(tmp_path, c)
+
+    assert second.status == "already-sealed", second
+    assert second.ok
+    assert not c.exists()
+
+
 def test_an_unreadable_archive_dir_is_not_ok(tmp_path, capsys):
     """`pathlib.glob` swallows the scandir OSError, so an unreadable archive dir
     answered "ok". The alarm must answer about what it could NOT see.

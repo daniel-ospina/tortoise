@@ -21,10 +21,17 @@ archived**:
 1. a day file is only SEALED (gzip) after a byte-for-byte round-trip check;
 2. the original is removed only when the sealed copy's decompressed sha256
     equals the original's — the sealed file *is* the evidence, re-encoded;
-3. an existing archive is never clobbered — a differing one is a conflict to
-   report, not a thing to overwrite;
+3. a differing archive is never clobbered — it is a conflict to report, not a
+   thing to overwrite.  The ONE exception is a strict PREFIX of the source: a
+   stale re-encoding of an earlier snapshot of the same file, which is
+   SUPERSEDED through the same round-trip verification, because accepting it
+   there would unlink the only copy of the missing tail;
 4. today's file is never sealed, even at ``--keep-days 0``: it is being
-   appended to right now, and sealing a live append is how a record is torn.
+   appended to right now, and sealing a live append is how a record is torn;
+5. the source is removed only once it is provably archived, and a source that
+   is ALREADY gone is the goal state, not a failure (see
+   :func:`_unlink_source`) — a concurrent run that finished the same day first
+   must not red the alarm.
 
 Bounds, stated honestly: sealing bounds the **plain working set** (files
 younger than the window) and multiplies the archive's capacity by the gzip
@@ -198,6 +205,31 @@ def _changed_since(path: Path, before: os.stat_result | None, size: int) -> bool
     return not _unchanged_since(path, before) or size != before.st_size
 
 
+def _unlink_source(path: Path, root: Path) -> bool:
+    """Remove a source that is provably archived.  ``True`` when THIS call
+    removed the entry, ``False`` when it was already gone.
+
+    A source that has already disappeared is the GOAL state, not a failure:
+    POSIX ``unlink`` answers ``ENOENT`` for a link that does not exist, and the
+    two readers that can get here — a second ``--apply`` and a peer lane on the
+    same box — may both have sealed the same day, with the peer's unlink landing
+    between our post-publish change test and this call.  Reporting that as
+    ``verify-failed`` reds ``--apply`` (EXIT_ERROR, "could NOT be sealed; their
+    plain copies are untouched") on a substrate where every record IS sealed,
+    which is the false alarm this file exists to *not* be (#6388).
+
+    Only ``ENOENT`` is swallowed: ``EACCES``/``EISDIR``/``EBUSY`` still raise, so
+    the caller's "archived but the source could not be removed" verdict keeps
+    meaning what it says.  The same absent-vs-unreadable split
+    ``tortoise/capture_spool.py`` makes for its own spool.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def seal_one(root: Path, path: Path) -> Sealed:
     """Seal ONE day file.  Returns a verdict; never raises on a bad file."""
     day = _day_of(path)
@@ -238,7 +270,7 @@ def seal_one(root: Path, path: Path) -> Sealed:
                 return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                               "file changed while sealing — source kept")
             try:
-                path.unlink()
+                _unlink_source(path, root)
             except OSError as e:
                 return Sealed(day, "verify-failed", len(plain),
                               _size_or_zero(target),
@@ -261,6 +293,7 @@ def seal_one(root: Path, path: Path) -> Sealed:
     tmp: Path | None = None
     published = False
     removed = False
+    already_gone = False
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=str(target.parent),
@@ -293,7 +326,7 @@ def seal_one(root: Path, path: Path) -> Sealed:
         if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                           "file changed while sealing — source kept")
-        path.unlink()
+        already_gone = not _unlink_source(path, root)
         removed = True
         # The unlink happened in `root`, so `root` is the entry that needs to be
         # durable — fsyncing the archive dir here would leave the removal
@@ -313,7 +346,9 @@ def seal_one(root: Path, path: Path) -> Sealed:
         if tmp is not None:
             with contextlib.suppress(OSError):
                 tmp.unlink()
-    return Sealed(day, "sealed", len(plain), _size_or_zero(target))
+    return Sealed(day, "sealed", len(plain), _size_or_zero(target),
+                  "the source was already gone (a concurrent run sealed it "
+                  "first)" if already_gone else "")
 
 
 def _fsync_dir(path: Path) -> None:
