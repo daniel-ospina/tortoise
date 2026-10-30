@@ -2326,6 +2326,24 @@ _STRUCTURAL_REL_LABELS: dict[str, str] = {
     "extractedFrom": "Source",
 }
 
+#: The five EDGE attributes a structural `DirectEdgeRepoint` carries, restated
+#: from `projection/edges.py::DIRECT_EDGE_ATTR_KEYS` — the ONE vocabulary the
+#: live carry (`sdk.supersede_point`), the pass-2b replay fold and this move all
+#: read (#10139). Restated rather than imported for the STANDALONE reason above
+#: (the PGlite harness `spec_from_file_location`s this module with the stdlib
+#: only, so a `tortoise.…` import would not resolve there) and pinned to the
+#: fold's own tuple — both directions — by
+#: `tests/test_record_projection.py::test_the_structural_carry_reads_the_folds_own_vocabulary`.
+#:
+#: ⛔ `source_version` is deliberately NOT a member, on either side: the fold
+#: writes this anchor as `sourceVersion` and its transfer/replay drops it, so a
+#: member here would make the record CARRY an attribute the graph loses — a new
+#: divergence in place of the old one. The record contract also forbids
+#: re-applying it on a re-link ("a re-link must not ADVANCE a recorded version").
+_DIRECT_EDGE_ATTR_KEYS: tuple[str, ...] = (
+    "direction", "confidence", "weight", "label", "batch_id",
+)
+
 #: The statuses the graph's terminal gate EXCLUDES, restated from
 #: `live.TERMINAL_EXCLUDED_STATUSES` (same STANDALONE reason; pinned by
 #: `test_the_terminal_status_set_is_the_canonical_ones`).
@@ -2501,6 +2519,8 @@ def _structural_repoint_statements(
     org_id: str,
     graph_id: str,
     record: Mapping[str, Any],
+    columns: Mapping[str, frozenset[str]] | None = None,
+    refused: Mapping[str, frozenset[str]] | None = None,
 ) -> list[Statement] | None:
     """The MOVE a 2b structural `DirectEdgeRepoint` describes (#9972/#9973).
 
@@ -2525,12 +2545,19 @@ def _structural_repoint_statements(
        descriptor carries no `idx`, and the structural writers all leave it 0).
     2. `INSERT` the same row at `_final(src)`, the TERMINAL endpoint of the
        `superseded_by` chain (a recursive CTE, so a 3-link chain resolves to the
-       last link and to nothing in between). `ON CONFLICT … DO NOTHING`, not
-       `DO UPDATE`: the graph's transfer is a BARE `MERGE (s)-[:<rel>]->(t)` with
-       no attribute `SET` (`projection/__init__.py`, the pass-2b structural
-       replay leg), and #9417's rule is that a successor's OWN live value wins
-       — a `DO UPDATE` would overwrite it with the descriptor's absent
-       attributes. `<rel>` is the INTERPOLATED `etype`, not a parameter: Cypher
+       last link and to nothing in between) — WITH the descriptor's TRANSFERRED
+       attributes (the `⛔ #10303` block below this docstring).
+       `ON CONFLICT … DO NOTHING`, not `DO UPDATE`, because since `#10139` the
+       graph's transfer is `MERGE (s)-[:<rel>]->(t) ON CREATE SET nr += $attrs`
+       (`projection/__init__.py`, the pass-2b structural replay leg): `ON
+       CREATE`, so #9417's rule holds — a successor's OWN live value wins — and
+       `DO NOTHING` is that SAME precedence on this side of the house. A row the
+       successor does not have is INSERTED carrying the retired edge's
+       attributes; a row it already has is left untouched, byte for byte,
+       exactly as `ON CREATE SET` leaves it. `DO UPDATE` would overwrite the
+       successor's value with the retired point's — the measured 0.91 → 0.42
+       regression `#9417`'s review P1 exists to prevent — and `<rel>` is the
+       INTERPOLATED `etype`, not a parameter: Cypher
        refuses a parameter as a relationship type (`-[:$param]->` is invalid —
        Neo4j Cypher Manual, Syntax → Parameters), which is why the writer
        f-string-formats the type into the pattern. The no-self-edge predicate
@@ -2538,11 +2565,25 @@ def _structural_repoint_statements(
        a chain that collapses the endpoints onto one node must not mint
        `(X)-[:aboutPoint]->(X)`.
 
-    ⚠️ NAMED RESIDUALS, not fixed here: (a) the descriptor carries no edge
-    `attrs` (`#10139`), so a moved row lands with `props = '{}'` while the LIVE
-    graph carries the old edge's `confidence` (#9417's `ON CREATE SET`) — the
-    row exists at the right node and its attributes are absent, which is
-    #10139's own contract, not a second silent loss; (b) `#2488`'s
+    ⛔ #10303 (P1): the moved row CARRIES the transferred attributes — the same
+    `_DIRECT_EDGE_ATTR_KEYS` set the fold replays, read FLAT off the descriptor
+    exactly as `sdk.supersede_point` emits them (`_relation_upsert_statement`'s
+    consumer reads an attribute payload the same way, `{k: payload[k] for k in
+    rel.attrs}`). Before this, the descriptor carried the values (#10139) and
+    this route still wrote an empty row: the journal-rebuild and record-rebuild
+    routes then disagreed about the same journal on a data-bearing property,
+    which is the `#9553` class this module polices. They are routed by
+    `_split_properties`, not by this function: `direction`/`confidence`/
+    `weight`/`label`/`batch_id` are COLUMNS of `public.relation`, so they land on
+    the row's columns (and the `props` tail stays `{}` for them); a name with no
+    column would land in the tail instead. ⚠️ So the record's own `props` tail is
+    NOT where to look for the carry — the columns are.
+
+    ⚠️ NAMED RESIDUALS, not fixed here: (a) `sourceVersion` is NOT carried — the
+    fold's transfer and replay drop it too (a pre-existing `extractedFrom`
+    anchor loss `projection/edges.py` states), so the two routes agree by both
+    losing it rather than the record keeping an attribute the graph does not
+    have; (b) `#2488`'s
     survivor-filtered `succ` map has no record-side expression, so an id-reuse
     journal (a point re-created live under a used id) is resolved here as
     `point.status` says at the moment the record runs — which is the LIVE order,
@@ -2587,10 +2628,23 @@ def _structural_repoint_statements(
         f"AND {moved}",
         [*cte_params, org_id, graph_id, rel_type, label, *tgt_scalar_params],
     )
+    carried = {k: record[k] for k in _DIRECT_EDGE_ATTR_KEYS if k in record}
+    col_values, tail = _split_properties(
+        "relation", carried,
+        columns=columns if columns is not None else table_columns(),
+        refused=refused if refused is not None else refused_props_names(),
+    )
+    attr_columns = list(col_values)
+    insert_columns = ["org_id", "graph_id", "rel_type", "src_label",
+                      "src_key", "tgt_label", "tgt_key", "idx",
+                      *attr_columns, "props"]
+    select_list = ", ".join([
+        "%s", "%s", "%s", "'Point'", "dest.node_key", "%s", "tgt.node_key",
+        "%s", *(["%s"] * len(attr_columns)), "%s",
+    ])
     insert = Statement(
-        f"{cte}INSERT INTO public.relation (org_id, graph_id, rel_type, "
-        "src_label, src_key, tgt_label, tgt_key, idx, props) "
-        f"SELECT %s, %s, %s, 'Point', dest.node_key, %s, tgt.node_key, %s, %s "
+        f"{cte}INSERT INTO public.relation ({', '.join(insert_columns)}) "
+        f"SELECT {select_list} "
         "FROM (SELECT node_key FROM succ WHERE next_id IS NULL "
         "ORDER BY depth DESC LIMIT 1) dest, "
         f"{tgt_select} "
@@ -2598,8 +2652,9 @@ def _structural_repoint_statements(
         f"AND {moved} "
         "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, "
         "tgt_label, tgt_key, idx) DO NOTHING",
-        [*cte_params, org_id, graph_id, rel_type, label, idx, json.dumps({}),
-         *tgt_params],
+        [*cte_params, org_id, graph_id, rel_type, label, idx,
+         *(_jsonb_or_scalar(c, v) for c, v in col_values.items()),
+         json.dumps(tail), *tgt_params],
     )
     return [delete, insert]
 
@@ -3736,7 +3791,8 @@ def _declared_mutations(
             # and re-create it at `_final(src)`. `None` = not that shape (the 2a
             # direct descriptor, whose `src` is already the successor), and it
             # keeps the plain upsert below byte for byte.
-            moved = _structural_repoint_statements(org_id, graph_id, record)
+            moved = _structural_repoint_statements(
+                org_id, graph_id, record, columns, refused)
             if moved is not None:
                 return moved
         return _relation_upsert_statement(org_id, graph_id, effect, record,
