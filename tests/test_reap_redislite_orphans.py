@@ -186,14 +186,14 @@ def test_the_age_arm_clears_every_reaper_job_outer_timeout(reaper):
     )
 
     widest = max(c for c in caps.values() if c is not None)
-    assert reaper.WIDEST_REAPER_JOB_TIMEOUT_MINUTES == widest, (
+    assert widest == reaper.WIDEST_REAPER_JOB_TIMEOUT_MINUTES, (
         f"`WIDEST_REAPER_JOB_TIMEOUT_MINUTES` mirrors a stale measurement: it says "
         f"{reaper.WIDEST_REAPER_JOB_TIMEOUT_MINUTES} min, the workflows now cap the "
         f"widest reaper-invoking job at {widest} min "
         f"({sorted(j for j, c in caps.items() if c == widest)}) — re-derive the "
         "constant and its comment instead of trusting the stored number"
     )
-    assert reaper.DEFAULT_MAX_AGE_MINUTES > widest, (
+    assert widest < reaper.DEFAULT_MAX_AGE_MINUTES, (
         f"the age arm ({reaper.DEFAULT_MAX_AGE_MINUTES} min) does not clear the widest "
         f"job cancel bound ({widest} min): a leg can still be RUNNING with a server "
         "that old, so the SIGTERM is the #3653 live-peer kill, not a proof"
