@@ -2429,7 +2429,7 @@ class TestARenderedCodeElementGetsAMonoFace:
     per-character fallback — so a named serif chosen in plain sight stays GREEN, which
     is the layout-decision boundary the sibling class records.
 
-    Three ways an earlier version of this guard went GREEN over a page that renders a
+    Four ways an earlier version of this guard went GREEN over a page that renders a
     non-mono face, each closed here:
 
     1. **Inert text.** It read the file as text, so a `/* … */` comment inside the
@@ -2457,6 +2457,15 @@ class TestARenderedCodeElementGetsAMonoFace:
     3. **A rule that styles the element only in context.** `.art-body pre code` — and
        `pre.anything code` — says nothing about an inline `<code>` in a paragraph, so
        that pairing is skipped; everything else is the cascade.
+    4. **A custom property NAME read case-blind.** The resolver folded custom property
+       names, so `:root{--Mono:Menlo} code{font-family:var(--MONO)}` resolved to
+       `Menlo` and went GREEN. css-variables-1 §2 is explicit that custom property
+       names are **not** ASCII case-insensitive and are equal only when identical —
+       `--foo` and `--FOO` are distinct properties — so CSS computes the
+       guaranteed-invalid value, invalidates `font-family` at computed-value time, and
+       the element renders the UA `monospace`: Courier, the #6870 face. Names now match
+       exactly; only the family *value* is folded, which css-fonts makes
+       case-insensitive (#10254 review, round 13).
 
     Three ways it wrongly REFUSED a correct page, all closed: a rule wrapped in
     `@media`, a `font-family: var(--code-font)` indirection, and the element with a
@@ -2619,6 +2628,9 @@ class TestARenderedCodeElementGetsAMonoFace:
             # time). The declaration does not apply, the element inherits, and the UA
             # `monospace` — Courier — wins. Never a face, whichever names it carried.
             return False
+        # the FAMILY VALUE is folded here and only here: font family names are ASCII
+        # case-insensitive (css-fonts-4), unlike the custom property NAMES the resolver
+        # matches, which keep their casing.
         v = substituted.strip().lower()
         if not v or v in ("inherit", "unset", "initial", "revert"):
             # inheriting is the failing case for an element with no author rule: the
@@ -2652,6 +2664,19 @@ class TestARenderedCodeElementGetsAMonoFace:
         `None` for an unbalanced reference: that is a parse error in CSS, so the whole
         declaration is dropped and no family in it applies — the caller refuses it
         rather than reading the residue as text.
+
+        The returned NAME keeps the author's casing. Custom property names are the one
+        identifier family CSS does NOT fold: css-variables-1 §2, "Unlike other CSS
+        properties, custom property names are not ASCII case-insensitive. Instead,
+        custom property names are only equal to each other if they are identical to
+        each other" — `--foo` and `--FOO` are two distinct properties. Lowercasing the
+        name here made this guard disagree with the browser in the fail-GREEN
+        direction: `:root{--Mono:Menlo} code{font-family:var(--MONO)}` is the
+        guaranteed-invalid value with no fallback, so `font-family` is invalid at
+        computed-value time and the element renders the UA `monospace` — Courier, i.e.
+        #6870 itself — while the collapsed key resolved it to `Menlo` (#10254 review,
+        round 13). Only the FAMILY VALUE is case-insensitive (css-fonts), and `_is_mono`
+        is where that fold belongs.
         """
         depth, i = 0, start + 3
         while i < len(text):
@@ -2675,8 +2700,8 @@ class TestARenderedCodeElementGetsAMonoFace:
                 comma = j
                 break
         if comma is None:
-            return inner.strip().lower(), None, i
-        return inner[:comma].strip().lower(), inner[comma + 1:], i
+            return inner.strip(), None, i
+        return inner[:comma].strip(), inner[comma + 1:], i
 
     def _substitute(self, value, defined, depth=0):
         """`value` with its `var()` references replaced the way CSS replaces them.
@@ -2742,7 +2767,11 @@ class TestARenderedCodeElementGetsAMonoFace:
 
     def _elements_styled_mono(self, css):
         """The element names (`code`, `pre`) that some rule gives a mono family."""
-        defined = {name.lower(): value for name, value in self.VAR_DEF.findall(css)}
+        # keyed by the author's exact name: custom property names are case-SENSITIVE
+        # (css-variables-1 §2 — `--foo` and `--FOO` are distinct), so folding case
+        # here resolves a reference the browser invalidates (#10254 review, round 13).
+        # `value` is left raw too; family-value folding is `_is_mono`'s job.
+        defined = {name.strip(): value for name, value in self.VAR_DEF.findall(css)}
         # the LAST matching rule wins the cascade, so a later
         # `code{font-family:inherit}` must un-style it, not be ignored
         last_family = {}
@@ -2913,6 +2942,24 @@ class TestARenderedCodeElementGetsAMonoFace:
              "code{font-family:var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace)}", False),
             ("defined mono, fallback unused",
              ":root{--mono:Menlo,monospace} code{font-family:var(--mono, Georgia)}", True),
+            # Custom property NAMES are case-sensitive (css-variables-1 §2: "custom
+            # property names are not ASCII case-insensitive … only equal to each other
+            # if they are identical to each other"), so a reference differing in case is
+            # the guaranteed-invalid value, not the token. These three were GREEN while
+            # the resolver folded the name — and CSS computes exactly the #6870 face
+            # (no fallback → invalid at computed-value time → inherit → UA `monospace`,
+            # which is Courier on macOS Chrome). Pinned in BOTH directions, and only the
+            # family VALUE is folded (`menlo` matches `Menlo`).
+            ("a case-differing reference is the guaranteed-invalid value, NOT the token",
+             ":root{--Mono:Menlo} code{font-family:var(--MONO)}", False),
+            ("…the other way round: `--mono` declared, `--MONO` asked for",
+             ":root{--mono:Menlo} code{font-family:var(--MONO)}", False),
+            ("…and it is not rescued by an unrelated `--mono` elsewhere",
+             ":root{--MONO:Menlo;--mono:Georgia,serif} code{font-family:var(--Mono)}", False),
+            ("a case-differing reference falls back like any other missing token",
+             ":root{--Mono:Menlo} code{font-family:var(--MONO, Menlo)}", True),
+            ("the IDENTICAL name resolves — case is preserved, never folded away",
+             ":root{--Mono:Menlo} code{font-family:var(--Mono)}", True),
             ("missing token — the fallback IS substituted",
              "code{font-family:var(--mono, Menlo)}", True),
             ("defined serif, no fallback to rescue it",
@@ -3027,12 +3074,12 @@ class TestARenderedCodeElementGetsAMonoFace:
         declared = {}
         for selectors, body in cls.RULE.findall(css):
             for name, _value in cls.VAR_DEF.findall(body):
-                declared.setdefault(name.strip().lower(), set()).update(
+                declared.setdefault(name.strip(), set()).update(
                     s.strip() for s in selectors.split(",") if s.strip())
         referenced = set()
         for _selectors, body in cls.RULE.findall(css):
             for family in cls.FAMILY.findall(body):
-                referenced.update(t.lower() for t in cls.VAR_REF.findall(family))
+                referenced.update(t.strip() for t in cls.VAR_REF.findall(family))
         return [
             (token, sorted(declared[token])) for token in sorted(referenced)
             # a token declared nowhere is a different defect (the guard refuses it, fail
