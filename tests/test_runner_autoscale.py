@@ -839,7 +839,7 @@ def test_repair_keeps_the_os_label_and_drops_the_arm64_spelling(env):
     it as a hosted label (`github/docs` `data/reusables/actions/supported-github-runners.md`), it
     names an ARM64 image, and on this x64 pool it is a false architecture claim — an arm64 job served
     by x86 hardware is a false PASS, not a queue delay. This runbook is the x64 pool
-    (`docs/ops/ci-runner-x64.md:13`) and the ARM64 VMs register their own markers (`:33-34`), so the
+    (`docs/ops/ci-runner-x64.md:13`) and the ARM64 VMs register their own markers (`:48-50`), so the
     `-arm` pin is the least likely attachment here and is still in the dropped class.
     `ubuntu-2204-tools` is the opposite boundary: a CUSTOM label that merely starts `ubuntu-<digits>`
     and must NOT be eaten by a widened match.

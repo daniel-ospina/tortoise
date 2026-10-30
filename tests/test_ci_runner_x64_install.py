@@ -81,6 +81,26 @@ if not INSTALLER.exists():  # pragma: no cover - a broken checkout must not read
 # Every headroom leg EXCEPT the one under test, satisfied. The guards run forks → disk → cpu, so
 # without this the disk bound can refuse first and the cpu assertion fails on a message that never
 # mentions cpu (that is what a GitHub-hosted ubuntu-latest does: ~14G free on `/`, where /opt is).
+# ⛔ EVERY DOCUMENTED `runs-on` FORM THAT CAN CARRY A STATIC LABEL SET, or the counter-guard over
+# the runbook's accepted-cost inventory is blind to one form again each round. Keys are NODES, not
+# spellings — plain, single- and double-quoted all resolve to the key `runs-on` (measured with
+# PyYAML for every form below; spec 1.2.2 makes two spellings that resolve equal a DUPLICATE key,
+# which is the same statement) — and the VALUE has four documented forms, all of which the shipped
+# `--status` extractor reads: scalar, explicit key (`? runs-on` / `: value`), block sequence, and a
+# `{group: …, labels: […]}` mapping. A pin added in any of them makes its file pool-eligible, so a
+# count that sees only the plain scalar spelling silently omits that file from the inventory.
+_QUOTED_RUNS_ON = r'(?:"runs-on"|\'runs-on\'|runs-on)'
+RUNS_ON_UBUNTU_2404_RE = (
+    # scalar value, and the explicit-key form (a two-line construct: `? runs-on` then `: value`)
+    r'^    (?:' + _QUOTED_RUNS_ON + r'[ \t]*:[ \t]+ubuntu-24\.04'
+    r'|\?[ \t]*' + _QUOTED_RUNS_ON + r'[ \t]*\r?\n[ \t]*:[ \t]+ubuntu-24\.04'
+    # block sequence: the runs-on key, then one or more `- label` items (stops at the next key)
+    r'|' + _QUOTED_RUNS_ON + r'[ \t]*:\r?\n(?:[ \t]+-[^\n]*\r?\n)*?[ \t]+-[ \t]*["\']?ubuntu-24\.04["\']?'
+    # flow mapping: `{group: …, labels: [ubuntu-24.04]}` (the group: prefix is consumed)
+    r'|' + _QUOTED_RUNS_ON + r'[ \t]*:[ \t]*\{[^\n}]*\blabels:[ \t]*\[[^\]]*\bubuntu-24\.04\b[^\n}]*\}'
+    r')[ \t]*\r?$'
+)
+
 _NEUTRAL_HEADROOM = {
     "CI_RUNNER_FORKS_PER_RUNNER": "0",
     "CI_RUNNER_FORK_CAP": "1000000",
@@ -1906,6 +1926,54 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
 
 
 # ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────
+def test_the_inventory_pattern_carries_every_documented_runs_on_form():
+    r"""The counter-guard over the inventory must see every form that can make a file pool-eligible.
+
+    This is the arm that reds when `RUNS_ON_UBUNTU_2404_RE` is narrowed back — it exists because the
+    shipped pattern was `["\']?runs-on[\']?`: it OPENED on both quotes and CLOSED on one, so a pin
+    added as `"runs-on": ubuntu-24.04` (a spelling YAML resolves to the SAME key, measured with
+    PyYAML) left `total` at 9 and
+    `test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible` green — the exact
+    stale-inventory failure `finding-provenance.yml` produced for a whole review round, one spelling
+    over. The same one-instance-over reasoning applies to the VALUE forms: a `runs-on` block
+    sequence or a `{group: …, labels: […]}` mapping is equally servable by the mitigation, and a
+    count that sees only the plain scalar omits that file from the accepted-cost list just as
+    silently.
+
+    Mutation: restore the pre-fix pattern (`^    ["\']?runs-on[\']?[ \t]*:[ \t]*ubuntu-24\.04$`) ->
+    the double-quoted and explicit-key arms RED, and the block/mapping arms RED too.
+    """
+    positive = {
+        "plain scalar": "    runs-on: ubuntu-24.04\n",
+        "single-quoted key": "    'runs-on': ubuntu-24.04\n",
+        "double-quoted key": '    "runs-on": ubuntu-24.04\n',
+        "explicit key": "    ? runs-on\n    : ubuntu-24.04\n",
+        "block sequence": "    runs-on:\n      - self-hosted-x64\n      - ubuntu-24.04\n",
+        "labels mapping": "    runs-on: {group: pi-runner, labels: [self-hosted-x64, ubuntu-24.04]}\n",
+    }
+    for name, text in positive.items():
+        assert re.search(RUNS_ON_UBUNTU_2404_RE, text, re.MULTILINE), (
+            f"the inventory's counter-guard cannot see the {name} form, so a pin added that way makes "
+            f"its file pool-eligible while the runbook's accepted-cost list stays silent about it — "
+            f"widen RUNS_ON_UBUNTU_2404_RE, do not relax this arm: {text!r}"
+        )
+
+    # The boundaries that must NOT count, or the guard would red the count on legitimate spellings.
+    negative = {
+        "the arm64 hosted spelling": "    runs-on: ubuntu-24.04-arm\n",
+        "a different version pin": "    runs-on: ubuntu-latest\n",
+        "an expression, not a static set": "    runs-on: ${{ matrix.os }}\n",
+        "a step-level key (indent 8)": "        runs-on: ubuntu-24.04\n",
+        "a mapping without the label": "    runs-on: {group: pi-runner, labels: [self-hosted-x64]}\n",
+        "a block without the label": "    runs-on:\n      - self-hosted-x64\n      - ubuntu-latest\n",
+    }
+    for name, text in negative.items():
+        assert not re.search(RUNS_ON_UBUNTU_2404_RE, text, re.MULTILINE), (
+            f"the counter-guard counts {name}, which is not a `ubuntu-24.04` job pin — the inventory "
+            f"number would then be wrong in the direction nobody re-checks: {text!r}"
+        )
+
+
 def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
     """A `runs-on: ubuntu-24.04` job whose file was never told about the mitigation stays invisible.
 
@@ -1928,15 +1996,14 @@ def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
     but named nowhere, and its own comment still asserts the reverse).
     """
     wf_dir = REPO_ROOT / ".github" / "workflows"
-    # ⛔ THE PATTERN CARRIES EVERY YAML SPELLING OF THE KEY, or this pin cannot see the spelling the
-    # extractor used to miss: counting only `^    runs-on: ubuntu-24\.04$` reds when an EXISTING pin
-    # is re-spelled as a quoted key (total 9 -> 8), but `'runs-on': ubuntu-24.04` ADDED as a new pin
-    # leaves the count at 9 and the suite green — so the one counter-guard over this inventory was
-    # blind to exactly the spelling that made the extractor report the label NOWHERE.
+    # ⛔ THE PATTERN CARRIES EVERY DOCUMENTED FORM OF THE KEY — see `RUNS_ON_UBUNTU_2404_RE`. The
+    # single-quoted spelling alone was not enough: it closes on one quote, so a pin added as
+    # `"runs-on": ubuntu-24.04` left the count at 9 and this suite green, which is the same
+    # blind spot one spelling over from the one the extractor had just been fixed for.
     pinned = {
         path.name: len(
             re.findall(
-                r'^    ["\']?runs-on[\']?[ \t]*:[ \t]*ubuntu-24\.04$',
+                RUNS_ON_UBUNTU_2404_RE,
                 path.read_text(),
                 re.MULTILINE,
             )
@@ -2025,3 +2092,33 @@ def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path
     assert r.returncode != 0, f"a missing installer must FAIL, not pass or skip: {r.stdout}{r.stderr}"
     assert "skipped" not in r.stdout, f"a missing installer must never be a skip: {r.stdout}"
     assert "installer not found" in (r.stdout + r.stderr), r.stdout + r.stderr
+
+
+# ── 9. a sibling test's runbook CITE is a reader instruction too ───────────────────────────────
+def test_the_autoscale_tests_runbook_refs_land_on_what_they_name():
+    """A sibling test's runbook cite is a reader instruction like any other, and nothing read it.
+
+    `tests/test_runner_autoscale.py` argues why `ubuntu-24.04-arm` stays dropped and cites a line
+    span for the sentence it leans on ("the ARM64 VMs register their own markers"). The number was
+    right on `main`; this PR's own measurement paragraph was inserted ABOVE it, so `:33-34` came to
+    name the `ubuntu-latest = 0 of 12` paragraph instead. No test read the cite at all — the same
+    only-range-checked class `test_the_runbooks_cross_file_refs_land_on_what_they_name` exists for,
+    one direction over (a test citing the runbook, not the runbook citing a workflow).
+
+    Mutation: restore `:33-34` in that docstring -> RED (the span says `ubuntu-latest = 0 of 12`,
+    not the ARM64 sentence).
+    """
+    sibling = (REPO_ROOT / "tests" / "test_runner_autoscale.py").read_text()
+    m = re.search(r"the ARM64 VMs register their own markers \(`:([0-9]+)-([0-9]+)`\)", sibling)
+    assert m is not None, (
+        "`tests/test_runner_autoscale.py` no longer cites a runbook span for the ARM64-marker "
+        "sentence — re-anchor this pin rather than deleting it"
+    )
+    lo, hi = int(m.group(1)), int(m.group(2))
+    lines = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+    assert 1 <= lo <= hi <= len(lines), f"cite :{lo}-{hi} is outside the runbook's {len(lines)} lines"
+    span = "\n".join(lines[lo - 1 : hi])
+    assert "ARM64 VMs register" in span, (
+        f"`tests/test_runner_autoscale.py` cites docs/ops/ci-runner-x64.md:{lo}-{hi} for the "
+        f"arm64-marker sentence, but that span is {span!r} — re-derive the ref, do not offset it"
+    )
