@@ -501,7 +501,7 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
     """⛔ THE UNION'S NAMED CARVE-OUT (a): `ubuntu-<version>` is DROPPED, not carried forward.
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
-    decision (not just a style choice): `docs/ops/ci-runner-x64.md:84-85` —
+    decision (not just a style choice): `docs/ops/ci-runner-x64.md:90-92` —
     "`_preserve_labels` DROPS the whole class on re-registration … so an attachment survives a
     repair that re-applies it (`--repair-labels` keeps only the box's own label under `on|auto`) and does NOT
     survive a re-registration". `tools/runner_autoscale.py::_preserve_labels` already drops the
@@ -544,9 +544,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:540-542`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:546-548`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:696-697`). Keeping
+    (`docs/ops/ci-runner-x64.md:702-703`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -3229,12 +3229,12 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
 
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
-        84: r"DROPS the whole class on re-registration",
-        540: r"A foreign arch marker",
-        696: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        90: r"DROPS the whole class on re-registration",
+        546: r"A foreign arch marker",
+        702: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        448: r"test_the_changes_job_carries_no_job_scope_env",
+        813: r"test_the_changes_job_carries_no_job_scope_env",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -3282,7 +3282,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:448` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:813` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3340,8 +3340,9 @@ _TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_aut
 # citing comment names. Keyed by the runbook line the citation must point at at THIS head.
 _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
-    25: r"`ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted only\*\*",
-    67: r"deliberately \*\*do not\*\* claim any `ubuntu-<version>` label",
+    25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
+    85: r"still does \*\*not\*\* claim any",
+    90: r"DROPS the whole class on re-registration",
 }
 
 
