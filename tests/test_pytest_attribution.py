@@ -1170,10 +1170,13 @@ def capture_site(line: str) -> str | None:
         # a literal `/tmp/*.log`.
         return target
     if _RUNNER_TEMP_TMPL_RE.match(target):
-        # The `${RUNNER_TEMP:-/tmp}/<name>` spelling: ALSO per-runner, and the one
-        # every hardened job in this workflow now uses (#7815). Returned verbatim
-        # so the `--log <token>` pairing is the same string comparison as the
-        # literal case.
+        # The `${RUNNER_TEMP:-/tmp}/<name>` spelling: ALSO per-runner. #7815 moved every
+        # hardened job in this workflow onto it; #10280 then moved five of the six onto
+        # the `"$PYTEST_LOG"` indirection instead, so today this spelling covers
+        # `test-d14-hosted-api` ALONE. The branch stays because that leg is a real site
+        # and a guard whose subject is this drift must not be spelling-dependent.
+        # Returned verbatim so the `--log <token>` pairing is the same string comparison
+        # as the literal case.
         return target
     if not (target.startswith("/tmp/") and target.endswith(".log")):
         return None
@@ -1347,9 +1350,12 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
 
     ⛔ THE DELIVERED STATE (#7815, PR #10143): Four of the five legs this pin used to
     derive as residuals — `test-concurrency-falkor`, `test-track-b`, `test-carve-out`,
-    `test-d14-hosted-api` — now write `${RUNNER_TEMP:-/tmp}/...` inside their own job, so
-    a host-global capture target survives in exactly ONE leg,
-    `post-merge-validation.yml`'s `validate` (`/tmp/pmv-pytest.log`). That is a
+    `test-d14-hosted-api` — are MIGRATED, so a host-global capture target survives in
+    exactly ONE leg, `post-merge-validation.yml`'s `validate` (`/tmp/pmv-pytest.log`).
+    They are migrated in TWO spellings: #10280 moved the first three onto `"$PYTEST_LOG"`
+    (resolved once per job from `${RUNNER_TEMP:?}`, fail-closed), while
+    `test-d14-hosted-api` keeps this PR's per-step `${RUNNER_TEMP:-/tmp}/...`. Both are
+    per-runner; neither writes a host-global `/tmp` artifact. That is a
     migration's COMPLETION of §10280's list, not a regression of it.
 
     ⛔ The set is EVERY host-global capture target, not the `/tmp/pytest.log` spelling
