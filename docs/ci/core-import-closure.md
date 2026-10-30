@@ -22,8 +22,8 @@ This document changes nothing about selection: `config/ci-surfaces.yml` semantic
 closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 - Instrument: `tools/ci_import_closure.py` (`closure` / `validate` / `report`)
-- Pins: `tests/test_ci_import_closure.py` (94 test functions / 96 collected, incl. the harness
-  mutation check and the two verdict-rule pins — re-derive with
+- Pins: `tests/test_ci_import_closure.py` (95 test functions / 97 collected, incl. the harness
+  mutation check, the verdict-rule pins and the truth-cache producer-count pin — re-derive with
   `grep -c '^def test_' tests/test_ci_import_closure.py` and
   `pytest --collect-only -q`; a count written here without that command is a snapshot, not a fact)
   ⚠️ **Qualified, and the qualification is the point.** The test file is registered on `core`, which
@@ -36,8 +36,9 @@ closed to `_full_selection()`. Selection is deliberate; this is measurement.
   `config/ci-surfaces.yml`'s own comment states the same boundary.
 - Reproduce: `uv run python tools/ci_import_closure.py` · `… validate --window 40`
 - **Measurement basis:** the head of PR #10143 — the commit that adds this line. Two things make a
-  re-run differ from these tables: `main` keeps adding `core` registrations (**752** here, 751 on
-  `main` alone, and 745 at `3934648ae` — the gap is `main`, not this lane), and the
+  re-run differ from these tables: `main` keeps adding `core` registrations (**756** here — 752 at
+  `96a1cd871`, the 4 more arrived with this branch's `origin/main` merge — and 745 at `3934648ae`;
+  the gap is `main`, not this lane), and the
   file enumeration has two paths — `git ls-files` (used whenever git is available) and a
   pruning directory walk of the WHOLE repo (the fallback). They enumerate the same package set; a
   fallback that walked a fixed root list (`tortoise`, `tests`, `battery`, `tools`) used to differ
@@ -47,26 +48,26 @@ closed to `_full_selection()`. Selection is deliberate; this is measurement.
 
 ## 1. What was derived
 
-Static `ast` analysis of every tracked `*.py`: for each of the **752** `core` test files, the
+Static `ast` analysis of every tracked `*.py`: for each of the **756** `core` test files, the
 transitive set of `tortoise/**` modules it imports. Modules under analysis are never imported
 (that has side effects and measures the wrong thing); every edge comes from the source text, and
 `tests/`-side helpers are traversed but not reported.
 
 | Measure | Value |
 |---|---|
-| core test files | **752** (751 before this lane registered its own test) |
-| `tortoise/**` modules in the tree | 258 |
+| core test files | **756** (755 before this lane registered its own test) |
+| `tortoise/**` modules in the tree | 259 |
 | **distinct closure sets** (a split's real granularity) | **59** |
-| closure size — median / mean / min / max | **186** / 158.2 / 0 / 207 |
-| files sharing the single **most common** closure (186 modules; the largest is 207) | **431** |
-| files with an EMPTY closure (no `tortoise/**` import at all) | **118** |
-| files reaching `tortoise/__init__.py` | **634 (84.3 %)** |
-| files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 143 (19.0 %) |
+| closure size — median / mean / min / max | **187** / 158.7 / 0 / 208 |
+| files sharing the single **most common** closure (187 modules; the largest is 208) | **432** |
+| files with an EMPTY closure (no `tortoise/**` import at all) | **120** |
+| files reaching `tortoise/__init__.py` | **636 (84.1 %)** |
+| files whose closure is `UNKNOWN`-tainted (reported, never dropped) | 144 (19.0 %) |
 
 ### 1.1 Function-local imports are the whole ballgame (and the trap)
 
 The same derivation restricted to **module-level** imports only — the naive reader — reports a
-median core closure of **21 modules** and a `tortoise/__init__.py` closure of **6**. That looks like
+median core closure of **19 modules** and a `tortoise/__init__.py` closure of **6**. That looks like
 a triumphant 88 % reduction and it is exactly the false green: `tortoise/sdk.py` has **89** in-repo
 import targets, of which **28 carry a module-level edge** and **61 arrive only from a function
 body** — and **13 of those 28 also arrive from a function body** (`tests/test_ci_import_closure.py`,
@@ -77,53 +78,53 @@ deferred. Measured both ways on the same tree:
 
 | | module-level only | all nesting (this tool) |
 |---|---|---|
-| `closure(tortoise/__init__.py)` | **6** | **186** |
-| core closure median / max | **21** / 86 | **186** / 207 |
+| `closure(tortoise/__init__.py)` | **6** | **187** |
+| core closure median / max | **19** / 86 | **187** / 208 |
 
-A closure that reads only top-level imports would have selected **302** of 752 files for a change to
-`tortoise/sdk.py`, against **634** with every nesting walked — and its median closure is 21 modules
-where this tool's is 186. Three different populations are in play here, and the closure gap and the
-direct-importer set are close in size (332 and 332) without being the same set — their overlap is 77
+A closure that reads only top-level imports would have selected **302** of 756 files for a change to
+`tortoise/sdk.py`, against **636** with every nesting walked — and its median closure is 19 modules
+where this tool's is 187. Three different populations are in play here, and the closure gap and the
+direct-importer set are close in size (334 and 332) without being the same set — their overlap is 77
 files:
 
 | quantity | value | definition |
 |---|---|---|
-| closure gap | **332** | files whose closure CONTAINS `tortoise.sdk` with every nesting walked and does not under the module-level reader (`634 − 302`) |
-| direct importers | **332** | of 752 core files, those with any `tortoise.sdk` edge of their own |
+| closure gap | **334** | files whose closure CONTAINS `tortoise.sdk` with every nesting walked and does not under the module-level reader (`636 − 302`) |
+| direct importers | **332** | of 756 core files, those with any `tortoise.sdk` edge of their own |
 | direct, module-level | **236** | of those 332, the ones with a module-level `tortoise.sdk` edge — so **96** import it only inside a function body |
 
 This is the reason the tool walks the whole tree and tags every edge `in_function`: a reader that
-kept only module-level edges would lose `tortoise.sdk` from 332 closures, and only **77** of those
-files import `sdk` inside a function themselves — the other **255** reach it transitively, through
+kept only module-level edges would lose `tortoise.sdk` from 334 closures, and only **77** of those
+files import `sdk` inside a function themselves — the other **257** reach it transitively, through
 another module's deferred edge. (A file with a module-level `sdk` edge cannot be in the gap at all:
 its module-level closure would already contain `tortoise.sdk`. So the only direct importers inside
 the gap are the function-only ones — bounded by the 96 in the table above and measured as 77.)
 
-**59 distinct sets sounds like granularity. It is not.** 431 + 118 = **549 of 752 (73.0 %)** core
-files sit in one of two degenerate buckets — "the entire 186-module block" or "nothing at all" —
-and a change to any module in that block still selects 634 files, i.e. **84.3 % of the surface**.
-The best reduction a closure-based split could deliver for those changes is 752 → 634 (15.7 %).
+**59 distinct sets sounds like granularity. It is not.** 432 + 120 = **552 of 756 (73.0 %)** core
+files sit in one of two degenerate buckets — "the entire 187-module block" or "nothing at all" —
+and a change to any module in that block still selects 636 files, i.e. **84.1 % of the surface**.
+The best reduction a closure-based split could deliver for those changes is 756 → 636 (15.9 %).
 
 ## 2. Why the block exists: ONE deferred import
 
-`tortoise/__init__.py`'s own closure is **186 modules**. Removing a single edge drops it to **7**:
+`tortoise/__init__.py`'s own closure is **187 modules**. Removing a single edge drops it to **7**:
 
 ```text
 tortoise/__init__.py        line 39   from tortoise.config import RELATIVE_PATH_ERROR   (module level)
 tortoise/config.py          line 135  from tortoise.sdk import _derive_graph_name       (function-local)
 tortoise/sdk.py             42 535 lines, 89 in-repo modules (28 module-level, 61 function-local only,
                             13 of the 28 reached BOTH ways)
-                            → 186-module closure for every test that imports ANY tortoise.* submodule
+                            → 187-module closure for every test that imports ANY tortoise.* submodule
 ```
 
-Because importing a submodule imports its package first, that chain lands in 84.3 % of the core
+Because importing a submodule imports its package first, that chain lands in 84.1 % of the core
 surface. So the answer to the issue's own question is yes — **most core tests transitively depend
 on `tortoise/__init__.py`** — but the mechanism is not "the shim re-exports everything". The shim
 imports four modules (`config`, `embedded_lifecycle`, `fork_safety`, and one function-local), and
 `config.py`'s *cycle-breaking deferred* import of `sdk` is what drags the hub in. Measured:
 
 ```text
-closure(tortoise/__init__.py)                                  = 186 modules
+closure(tortoise/__init__.py)                                  = 187 modules
 closure(tortoise/__init__.py)  without the config → sdk edge    =   7 modules
 ```
 
@@ -138,7 +139,7 @@ test that ACTUALLY failed on it?* Ground truth is each run's `junit.xml` artifac
 a failing test — see §3.3). Two derived mappings are scored:
 
 - **naive** — a core file stays selected only if a changed `tortoise/**` module is in its closure.
-- **keep-non-python** — the same, plus core files whose closure is **empty**: 118 files import
+- **keep-non-python** — the same, plus core files whose closure is **empty**: 120 files import
   nothing from the package because they assert an invariant of a CONFIG/WORKFLOW/DOC file (or
   drive a script as a subprocess). No import edge can ever exist for them, so only a hand-written
   registration carries that dependency.
@@ -165,6 +166,15 @@ misses, so the two miss counts below are lower bounds (the 40-PR count includes 
 checks only; a green PR contributes nothing here). 7 further PRs went red with **no test-level
 failure at all** — a post-test hygiene step, a run whose junit described zero testcases, a run with
 no readable artifact — and every one of those is recorded rather than scored as clean (§3.4).
+
+⚠️ **Those §3 counts are re-derived at this head against a COLD cache** (`rm -rf
+.ci-selection/closure-cache` first, so the run cannot short-circuit on an older reader's answer — §5).
+They are unchanged from the previous round, and that is a measurement, not a copy: the v4→v5 bump
+made the zero-testcase gate **per ARTIFACT**, which writes `K` entries where the per-run gate wrote
+1, so it could have inflated the "8". It did not — **no per-artifact zero-testcase entry fires
+anywhere in this 40-PR window**, so the 8 is still 5 sibling-substituted legs + 3 artifacts with no
+`junit.xml`, across the same 5 PRs, and the console tally and the `--json` total agree on 8. The
+medians move with `main`, not with the reader (today 973 / 488 / 606).
 
 | mapping | misses | PRs | median selected tests (today: 973) |
 |---|---|---|---|
@@ -199,7 +209,7 @@ The three classes are additive requirements, not bugs to patch:
 1. keep the hand-written registrations for non-Python subjects (`SOURCE_PATTERNS` / `CORE_ALSO` —
    which already exist and are the reason `core` is blunt);
 2. keep a surface-wide minimum when a **test file** changes (today's rule);
-3. resolve the 143 tainted files, or exclude them from any narrowing.
+3. resolve the 144 tainted files, or exclude them from any narrowing.
 
 Requirement (1) alone means the closure can never *replace* the hand-written map — only narrow the
 part of `core` that is genuinely import-driven. That is a smaller change than the issue anticipated,
@@ -209,15 +219,15 @@ and its ceiling is the 15 % in §1.
 
 | shape | decision | why |
 |---|---|---|
-| function-local imports | **dependency** (`in_function: true`) | the suite uses them heavily; `tortoise/sdk.py` has 61 of its 89 in-repo import targets only inside function bodies. A top-level-only reader reports a 6-module closure for the package shim instead of 186 and a median core closure of 21 instead of 186 (§1.1) — the sharpest false-green in this whole measurement. |
+| function-local imports | **dependency** (`in_function: true`) | the suite uses them heavily; `tortoise/sdk.py` has 61 of its 89 in-repo import targets only inside function bodies. A top-level-only reader reports a 6-module closure for the package shim instead of 187 and a median core closure of 19 instead of 187 (§1.1) — the sharpest false-green in this whole measurement. |
 | `TYPE_CHECKING` blocks | **dependency** (tagged `type_checking`) | the opposite of `tach`, which skips them because it asks about *runtime coupling*. Our question is *would a change here be observable*, where over-approximation is the safe direction and one extra test beats a false green. `--exclude-type-checking` reproduces tach's polarity. |
 | `if not TYPE_CHECKING:` | **runtime** dependency (`type_checking: false`) | the NEGATED guard is the standard idiom for a runtime import a type checker cannot see. `ast.walk` found the `TYPE_CHECKING` name anywhere in the test, so the negated body was tagged type-only and `--exclude-type-checking` DELETED a real runtime edge — the same axis inversion the `_dedupe_deps` key removes, one level up. |
 | decorators, default values, annotations, return annotation | **import-time** (`in_function: false`) | they are evaluated where the `def` EXECUTES, not when the body is called. Tagging them function-local made `--import-time-only` drop real import-time edges — an under-selection inside the reader that exists to *demonstrate* under-selection, which skews the 21-module figure it publishes. |
 | `from __future__` | **not a dependency**, counted and named | no `tortoise/**` target can match it; excluding it silently would make the exclusion invisible. |
-| re-export shims | `tortoise/__init__.py` modelled via an explicit **`package-init` edge** on every `import tortoise.x`; `tortoise/__all__.py` reported when imported (1 test) | the package-init edge is what answers "do most tests depend on the shim" — and it is where 84.3 % of the surface comes from. `__all__.py` is a *data* module of approved names, not a re-export surface. |
+| re-export shims | `tortoise/__init__.py` modelled via an explicit **`package-init` edge** on every `import tortoise.x`; `tortoise/__all__.py` reported when imported (1 test) | the package-init edge is what answers "do most tests depend on the shim" — and it is where 84.1 % of the surface comes from. `__all__.py` is a *data* module of approved names, not a re-export surface. |
 | dynamic imports | constant argument **resolved**; computed argument → `UNKNOWN` with reason | `importlib.import_module("tortoise.x")` is still static information; only a computed name is a blind spot. |
 | `getattr(module, ...)` | in-repo module + literal attr → resolve (or no edge); computed attr → `UNKNOWN`; third-party module → **no taint** | the candidate is built from the binding's **dotted target**, never its local name: `from tortoise import projection` + `getattr(projection, "in_memory")` resolves `tortoise.projection.in_memory`, where a local-name candidate (`projection.in_memory`) is not a module at all and would drop a real submodule with neither an edge nor an `UNKNOWN`. Taint must mean "may be MISSING a `tortoise` module" or it says nothing: over-tainting marks the whole connected component and the signal collapses (measured: 89 % tainted before this rule, 19 % after). |
-| package/module name collision | **package wins** (CPython's `FileFinder` order) | `tortoise/projection/__init__.py` and `tortoise/projection.py` share a name; resolving to the module **used to** under-select by 7 modules. On this tree it changes no closure's module count (measured: 634 core closures swap `tortoise/projection/__init__.py` for `tortoise/projection.py` and back, 0 net), so the pin for the precedence rule is the SYNTHETIC case in the test file, and the pair is still reported in `shadowed_modules` rather than discarded. |
+| package/module name collision | **package wins** (CPython's `FileFinder` order) | `tortoise/projection/__init__.py` and `tortoise/projection.py` share a name; resolving to the module **used to** under-select by 7 modules. On this tree it changes no closure's module count (measured: 636 core closures swap `tortoise/projection/__init__.py` for `tortoise/projection.py` and back, 0 net), so the pin for the precedence rule is the SYNTHETIC case in the test file, and the pair is still reported in `shadowed_modules` rather than discarded. |
 | unparseable / unresolvable | `UNKNOWN` + reason (`syntax`, `unresolved-name`, `dynamic-import-call`, `dynamic-module-attr`, `module-loader`) | reported, never dropped. |
 
 ### 3.3 Ground truth is the junit, not the job
@@ -318,7 +328,22 @@ uncached because they describe something LIVE: the window listing itself (`--win
 merges that happened since, so it is re-paged), and an **open** PR's head — which moves on every
 push, so a lane validating its own PR always re-reads it (§3.4). The ground truth is keyed by the
 head **sha** and the diff list by the same sha — never by the PR number, which names a stream of
-different trees (§3.4). It
+different trees (§3.4).
+
+⛔ **The truth cache also names the EXTRACTOR, and that version moves with the RULES, not just the
+shape.** `GROUND_TRUTH_VERSION` is in the filename (`truth-v5-<repo>-<sha>.json`), because
+`pr_ground_truth` short-circuits on `cached.exists()`: a truth written by an older extractor is a
+CACHED TRUNCATION and a fixed extractor would keep reading the old answer forever. Every bump so far
+(v1→v2, v2→v3, v3→v4, v4→v5) exists because a **producer of `artifact_errors`** changed — that
+field is what makes a window PARTIAL and what blocks the cache — while the KEY SET did not, so the
+shape pin could not see any of them. The shape is pinned per version
+(`test_the_truth_cache_shape_is_pinned_to_its_version`) **and so are the rules**:
+`test_a_new_artifact_errors_producer_forces_a_ground_truth_version_bump` counts the
+distinct `artifact_errors` producers and records the count per version, so adding a state that can
+now be recorded unread — or removing one — fails until the version moves and the count is
+re-recorded. **A re-derivation of §3 is only a re-derivation on a COLD cache**; a warm one re-reads
+the answer the previous reader wrote, which is why every round that changed the extraction bumped
+the version in the same commit and deleted `.ci-selection/closure-cache` before re-measuring (§3). It
 exits **2** when the window is partial — an artifact it could not read, an unparseable or missing
 `junit.xml`, a red leg whose artifact listing was **empty** (artifacts expire after 90 days by
 default, and deleting a run deletes its artifacts, so "nothing uploaded" is an ordinary state, not
@@ -335,20 +360,20 @@ here is a ratio over that count.
 **Is a file-level split of `surfaces.core` justified by the data? No.**
 
 1. **The granularity is not there.** 59 distinct closure sets, but 73.0 % of core files are in the
-   two degenerate buckets (one 186-module set, or empty), and the median core closure is **186 of
-   258 modules (72 %)**. A change to any module in that block still selects 634 files — 84.3 % of
-   the surface — so the ceiling of a split is a 15.7 % reduction, for a change that would narrow a
+   two degenerate buckets (one 187-module set, or empty), and the median core closure is **187 of
+   259 modules (72 %)**. A change to any module in that block still selects 636 files — 84.1 % of
+   the surface — so the ceiling of a split is a 15.9 % reduction, for a change that would narrow a
    guard.
 2. **The derivation is not safe.** 13 historical misses (13 under BOTH mappings) over 40 merged PRs
    — a lower bound, since 8 artifact problems in that window left its ground truth partial — in two
    scored classes, and only one class is an analysis limitation. A mapping that would not have run
    13 tests that actually failed is not a mapping to build selection on.
 3. **The lever is import hygiene, not surface bookkeeping.** In order of measured leverage:
-   - the **one deferred `config → sdk` import** (§2): worth 179 of the 186 modules in the shim's
-     closure, i.e. it is the entire 84.3 % block;
+   - the **one deferred `config → sdk` import** (§2): worth 180 of the 187 modules in the shim's
+     closure, i.e. it is the entire 84.1 % block;
    - **`tortoise/sdk.py`** (42 535 lines, 89 in-repo import targets) and **`tortoise/hosted_api.py`**
      (88, of which 51 only in function bodies): splitting *these* is what gives a closure something
-     to differentiate on — 332 of 752 core files import `tortoise.sdk` directly;
+     to differentiate on — 332 of 756 core files import `tortoise.sdk` directly;
    - **test-side hygiene** where a test imports the whole package for one constant.
 
    Doing (a) or (b) makes this measurement worth re-running; nothing in `ci-surfaces.yml` needs to

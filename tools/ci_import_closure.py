@@ -1051,8 +1051,9 @@ def summarise(closures: dict[str, Closure], index: ModuleIndex,
     own closure (`package_init_closure`) is recomputed here, and recomputing it
     with the DEFAULT reader inside an `--import-time-only` run would publish the
     all-nesting number as the answer to the module-level question (#10143 review
-    P2: `--import-time-only --json` reported `package_init_closure: 186` next to
-    a median of 21).
+    P2: `--import-time-only --json` reported the all-nesting closure beside the
+    module-level median — 186 beside 21 on the tree of that round, 187 beside 19
+    on today's, which is why the numbers are not the point: the reader was).
     """
     complete = {k: v for k, v in closures.items() if not v.tainted}
     sizes = sorted(len(v.modules) for v in closures.values())
