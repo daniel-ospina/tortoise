@@ -5324,8 +5324,17 @@ def test_sweep_granularity_rolls_up_per_question_embedding_coverage(monkeypatch)
         # the census travels with the number so it stays auditable
         expected_total = 20 if points_total is not None else None
         assert results[0]["points_total"] == expected_total
+        # #4821 review P2: BOTH halves read None when the cell knows nothing
+        # about its points. `points_embedded: 0` beside `points_total: None`
+        # reads as "0 embedded" for an unknown population — indistinguishable
+        # from "N points, none embedded", which is the ambiguity the census
+        # exists to remove.
         assert results[0]["points_embedded"] == (
-            2 * points_embedded if points_embedded is not None else 0)
+            2 * points_embedded if points_embedded is not None else None)
+        assert (results[0]["points_total"] is None) is (
+            results[0]["points_embedded"] is None), (
+            "the census pair must be known or unknown TOGETHER — a None "
+            "total beside a 0 embedded is an invented zero")
         assert results[0]["vector_strategy"] == "enabled"
 
 
@@ -5352,40 +5361,172 @@ def test_embedding_coverage_is_never_on_the_retrieval_aggregate(
     assert _aggregate_embedding_coverage(report["outcomes"]) == 0.0
 
 
+def _sweep_cell(**over):
+    """One ``run_sweep`` result row, complete enough for ``_print_table``."""
+    row = {
+        "chunk_turns": 1,
+        "evidence_recall@10": 0.9,
+        "chunk_evidence_recall@10": 0.9,
+        "session_recall@10": 0.9,
+        "turn_recall@10": 0.9,
+        "context_tokens_mean": 100.0,
+        "context_point_count_mean": 4.0,
+        "n_completed": 1,
+        "vector_strategy": "enabled",
+        "embedding_coverage": 1.0,
+        "points_total": 40,
+        "points_embedded": 40,
+    }
+    row.update(over)
+    return row
+
+
+def test_dense_leg_verified_consumes_the_write_time_witness(capsys):
+    """#4821 review P1: ``vector_strategy`` alone is NOT a measurement
+    verdict — it is a PRE-FLIGHT answer (``report.py`` derives it as
+    ``"enabled" if embedder_status.get("available")``), so an embedder that
+    loads and then writes NOTHING still reads ``enabled``. The write-time
+    ``embedding_coverage`` is the witness that catches it, and the predicate
+    must consume it: otherwise the table prints
+    ``vector_strategy=enabled  embedding_coverage=[0.0]  (MEASURED)`` and the
+    winner is handed on as SELECTED — #4821's exact failure mode re-entering
+    through the field added to prevent it.
+
+    RED when the witness is dropped from the predicate: the zero-of-N cell
+    reads measured, the table says MEASURED, and ``_print_winner`` selects."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    # Positive control: a real hybrid cell is MEASURED (so the new arm is not
+    # a blanket refusal).
+    assert sg._dense_leg_verified([_sweep_cell()]) is True
+    # Partial coverage is still a real hybrid run — MEASURED, number shown.
+    assert sg._dense_leg_verified(
+        [_sweep_cell(embedding_coverage=0.5, points_embedded=20)]) is True
+
+    # The arm under test: the pre-flight succeeded, the write wrote nothing.
+    zero = [_sweep_cell(embedding_coverage=0.0, points_embedded=0)]
+    assert sg._dense_leg_verified(zero) is False
+
+    capsys.readouterr()
+    sg._print_table(zero, ingest_mode="v2", context_cap=8000,
+                    max_chunks_per_session=2)
+    out = capsys.readouterr().out
+    line = [ln for ln in out.splitlines() if ln.startswith("dense leg:")]
+    assert line, out
+    assert "NOT MEASURED" in line[0], line[0]
+    assert "MEASURED" not in line[0].replace("NOT MEASURED", ""), line[0]
+
+    # ... and the winner line cannot reach the SELECTED vocabulary.
+    sg._print_winner({"chunk_turns": 1, "evidence_recall@10": 0.9,
+                      "context_tokens_mean": 100.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(zero))
+    assert "SELECTED granularity" not in capsys.readouterr().out
+
+    # An UNKNOWN point population is not a miss — the coverage arm must not
+    # refuse a pre-R3 resume (the vector_strategy arm still governs it).
+    assert sg._dense_leg_verified(
+        [_sweep_cell(embedding_coverage=None, points_total=None,
+                     points_embedded=None)]) is True
+
+
+def test_sweep_granularity_v2_waived_sweep_never_exits_zero(
+        monkeypatch, tmp_path):
+    """#4821 review P2: ``main``'s step-2 gate is
+    ``ingest_mode == "v2" and (winner is None or not measured)``, and the
+    ``or not measured`` half is the ENTIRE "no script may land a waived sweep
+    as a result" enforcement — with no test. Every existing ``main()`` case
+    passes ``--mock``, which forces deterministic ingest, so the branch never
+    executed and deleting ``or not measured`` left the suite green.
+
+    RED when that clause is deleted: the waived v2 sweep returns 0."""
+    import tools.longmem_eval.sweep_granularity as sg
+    from tests import model_adapters
+
+    monkeypatch.setattr(model_adapters, "build_extractor_model",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(sg, "build_reader", lambda *a, **k: MockReader())
+    monkeypatch.setattr(sg, "build_judge", lambda *a, **k: MockJudge())
+    _pin_no_embedder(monkeypatch)
+
+    winner = {"chunk_turns": 1, "evidence_recall@10": 0.9,
+              "context_tokens_mean": 100.0}
+    unmeasured = [_sweep_cell(vector_strategy="unavailable",
+                              embedding_coverage=0.0, points_embedded=0)]
+    monkeypatch.setattr(sg, "run_sweep",
+                        lambda *a, **k: (unmeasured, winner))
+
+    out = tmp_path / "waived-v2.json"
+    argv = ["--data", str(MINI), "--ingest-mode", "v2", "--skip-preflight",
+            "--limit", "1", "--chunk-turns", "1", "--output", str(out)]
+    assert sg.main(argv) == 1, (
+        "a v2 sweep whose dense leg was NOT measured returned 0 — a script "
+        "could land a keyword-only sweep as a step-2 result")
+    assert json.loads(out.read_text(encoding="utf-8"))["dense_leg"][
+        "measured"] is False
+
+    # NON-VACUITY: the same argv with a MEASURED cell returns 0, so the 1
+    # above is caused by `not measured` and by nothing else on the path.
+    monkeypatch.setattr(sg, "run_sweep",
+                        lambda *a, **k: ([_sweep_cell()], winner))
+    assert sg.main(argv) == 0
+
+
 def test_no_entry_point_bypasses_the_dense_leg_gate():
-    """#4821 structural guard: within the LongMemEval package, a direct
-    ``run_evaluation(...)`` call is allowed ONLY in ``run.py``, where the
-    gate lives and where ``run_measured_evaluation`` is defined.
+    """#4821 structural guard: within the LongMemEval package, a reference to
+    ``run_evaluation`` is allowed ONLY in ``run.py``, where the gate lives and
+    where ``run_measured_evaluation`` is defined.
 
     This is what makes the fix hold for entry points that do not exist yet:
-    a third CLI module that calls ``run_evaluation`` directly turns this RED
-    instead of landing a second silent bypass. The fix is to route it through
+    a third CLI module that reaches ``run_evaluation`` turns this RED instead
+    of landing a second silent bypass. The fix is to route it through
     ``run_measured_evaluation(..., embedder_status=gate_dense_leg(...))``
     (as ``sweep_granularity.run_sweep`` now does), not to add a name here.
+
+    ⛔ THE GUARD MATCHES *REFERENCES*, NOT CALLS (#4821 review P2). It used to
+    look only at ``ast.Call`` func names and ``ImportFrom`` — so
+    ``import tools.longmem_eval.run as R`` + ``_EVALUATE = R.run_evaluation`` +
+    ``fn = _EVALUATE`` + ``fn(...)`` stayed green: the ``Attribute`` sat in an
+    ``Assign`` value, where no call-shaped rule looks. A guard that is "one
+    alias away from green" is one alias away whichever alias has not been
+    thought of yet, so the rule is now the NAME: any ``ast.Name`` whose id is
+    ``run_evaluation``, any ``ast.Attribute`` whose attr is, any ``import``
+    that binds it, and ``getattr(<anything>, "run_evaluation")``.
+
+    ⛔ AND IT WALKS SUBPACKAGES. ``pkg.glob("*.py")`` made a future
+    ``tools/longmem_eval/<sub>/entry.py`` invisible to the guard while still
+    letting it reach the measurement.
     """
     import ast
 
     pkg = Path(__file__).resolve().parent.parent / "tools/longmem_eval"
     offenders: dict[str, int] = {}
-    for path in sorted(pkg.glob("*.py")):
+    for path in sorted(pkg.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         hits = 0
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                if ((isinstance(fn, ast.Name) and fn.id == "run_evaluation")
-                        or (isinstance(fn, ast.Attribute)
-                            and fn.attr == "run_evaluation")):
-                    hits += 1
+            # A reference is as good as a call: `R.run_evaluation` assigned to
+            # a local, then called through that local, is the same bypass.
+            if ((isinstance(node, ast.Name) and node.id == "run_evaluation")
+                    or (isinstance(node, ast.Attribute)
+                        and node.attr == "run_evaluation")):
+                hits += 1
             # An import is as good as a call: `from .run import run_evaluation
-            # as _x` is the same bypass under a different name, and a guard
-            # that only reads call names is one alias away from green.
+            # as _x` is the same bypass under a different name.
             elif isinstance(node, ast.ImportFrom) and (
                     (node.module or "").endswith("run")):
                 hits += sum(1 for a in node.names
                             if a.name == "run_evaluation")
+            # A dynamic reach for the name, which no static name match sees.
+            elif isinstance(node, ast.Call) and (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"):
+                hits += sum(
+                    1 for a in node.args
+                    if isinstance(a, ast.Constant)
+                    and a.value == "run_evaluation")
         if hits:
-            offenders[path.name] = hits
+            offenders[str(path.relative_to(pkg))] = hits
     assert set(offenders) == {"run.py"}, (
         "an entry point reaches run_evaluation() directly, bypassing the "
         f"dense-leg gate (#4821): {offenders!r} — route it through "

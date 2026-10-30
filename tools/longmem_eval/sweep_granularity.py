@@ -106,6 +106,29 @@ def _aggregate_embedding_coverage(outcomes: list[dict]) -> float | None:
     return None
 
 
+def _points_census(outcomes: list[dict]) -> dict:
+    """The raw point census behind a cell's rolled-up coverage.
+
+    Derived as ONE pair, never two independent sums (#4821 review P2). The
+    sum of ``points_embedded`` is ``0`` whenever the cell's outcomes carry no
+    census at all — so pairing it with ``points_total: None`` published
+    ``{points_total: None, points_embedded: 0}``, where a consumer summing
+    ``points_embedded`` across cells reads "0 embedded" for a population it
+    does not know. That is indistinguishable from "N points, none embedded",
+    which is the exact ambiguity the receipt exists to remove.
+
+    A cell that knows about no points therefore reports ``None`` for BOTH
+    halves, and a cell that embedded none of N reports ``(N, 0)`` — a real
+    zero, which ``_dense_leg_verified`` reads as not-measured."""
+    totals = [o.get("points_total") for o in outcomes]
+    embedded = [o.get("points_embedded") for o in outcomes]
+    known_total = sum(t for t in totals if isinstance(t, int))
+    known_embedded = sum(e for e in embedded if isinstance(e, int))
+    if not known_total:
+        return {"points_total": None, "points_embedded": None}
+    return {"points_total": known_total, "points_embedded": known_embedded}
+
+
 def _dense_leg_verified(results: list[dict]) -> bool:
     """Was the dense leg VERIFIED USABLE for every cell of this sweep?
 
@@ -119,9 +142,40 @@ def _dense_leg_verified(results: list[dict]) -> bool:
     when the embedder is simply available. Nothing gates on that distinction
     (the deterministic cell selects no winner), so this answers the question
     the labels actually ask — is a degraded leg being passed off as a
-    measurement?"""
-    return bool(results) and all(
-        r.get("vector_strategy") == "enabled" for r in results)
+    measurement?
+
+    BOTH witnesses must agree (#4821 review P1). ``vector_strategy`` is a
+    PRE-FLIGHT answer: ``report.py`` derives it as ``"enabled" if
+    embedder_status.get("available")``, i.e. "the gate's probe succeeded",
+    NOT "a vector was written". The embedder can load and still write zero
+    vectors — ``compute_embeddings`` degrades to ``[None] * n`` when
+    ``model.encode`` raises, ``encode_batch_for_store`` does the same on a
+    short batch (#4280), and ``_degrade_to_width`` drops every row on a width
+    mismatch. In each of those the pre-flight says ``enabled`` while the
+    write-time ``embedding_coverage`` is ``0.0``, so a predicate reading only
+    ``vector_strategy`` would print
+    ``vector_strategy=enabled  embedding_coverage=[0.0]  (MEASURED)`` — a line
+    that contradicts itself — and then hand the SELECTED granularity to the
+    pilot and the 500-Q run. That is #4821's failure mode re-entering through
+    the field added to prevent it.
+
+    So: ``vector_strategy`` must be ``enabled`` for EVERY cell, AND a cell
+    that knows about points must not have embedded none of them. Partial
+    coverage stays MEASURED — that is a real hybrid run, and its number is
+    published; zero-of-N is not a measurement of the dense leg. A cell that
+    knows nothing about its points (``points_total is None``, a pre-R3
+    resume) is not refuted by this arm; the ``vector_strategy`` arm still
+    governs it."""
+    if not results:
+        return False
+    for r in results:
+        if r.get("vector_strategy") != "enabled":
+            return False
+        total = r.get("points_total")
+        if r.get("embedding_coverage") == 0.0 and isinstance(total, int) \
+                and total > 0:
+            return False
+    return True
 
 
 def _select_winner(results: list[dict], *, ingest_mode: str,
@@ -226,14 +280,7 @@ def run_sweep(
                 report.get("outcomes") or []),
             # The raw census, so the rolled-up number stays auditable back to
             # the points it was computed over (None on a pre-R3 resume).
-            "points_total": sum(
-                t for t in (o.get("points_total")
-                            for o in (report.get("outcomes") or []))
-                if isinstance(t, int)) or None,
-            "points_embedded": sum(
-                e for e in (o.get("points_embedded")
-                            for o in (report.get("outcomes") or []))
-                if isinstance(e, int)),
+            **_points_census(report.get("outcomes") or []),
         })
     return results, _select_winner(results, ingest_mode=ingest_mode,
                                    context_cap=context_cap)
