@@ -1641,17 +1641,23 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     # bare STEP cites, so this sentence — the one that names the entry point a
     # reader reproduces from — was the ONLY cite in the bundle that nothing
     # re-checked. It rotted exactly as rule (a)'s README twin did: the
-    # re-derivation moved the `def` half to 13236 and left `called at :11682`
+    # re-derivation moved the `def` half and left the `called at` half
     # untouched, so `capstone_run.py:19` and `README.md:615` stated two
     # different, both-wrong call sites for one fact, and both pin files stayed
     # green. Two documents stating one fact is a claim that can only be pinned
-    # where each one states it.
+    # where each one states it. (The numbers are deliberately NOT quoted here:
+    # this paragraph outlived two heads, and a quoted line number is the very
+    # drift it describes — this paragraph's own earlier revision quoted both
+    # halves, and the merge that brought `origin/main` in moved them.)
     #
-    # Non-vacuity: the pre-fix probe reads `(``sdk.py:13236``, called at
-    # ``:11682``)`, and `sdk.py:11682` at this head is
-    # `from tortoise.commit_schema import compute_client_commit_id` — so the
-    # call-site assertion reds there. It is the assertion that was already red
-    # in the README before this round; the pin now covers the second site too.
+    # Non-vacuity: at the pre-fix head the probe named the def and left the
+    # call site at a line carrying NO call to `_extract_session_v2` — measured on
+    # CI, not reasoned: `tests/test_7949_capstone_verdict_check.py::
+    # test_the_probes_line_citations_resolve_too` was the dispatched red, with
+    # `assert 'self._extract_session_v2(' in <that line>` failing. So the
+    # call-site assertion reds on the stale cite. It is the assertion that was
+    # already red in the README before this round; the pin now covers the second
+    # site too.
     probe_entry = re.search(r"`sdk\.py:(\d+)`, called at `:(\d+)`", probe)
     assert probe_entry, (
         "the probe's entry-point cite moved or was reformatted; re-derive it, "

@@ -1352,8 +1352,11 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13513`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
-# ``tortoise/extractor_v2.py:8975-8979``
+# Shapes this matches, ILLUSTRATIVE ONLY — the live cites are in the bundle docs, so
+# a number quoted here is not pinned by anything and would drift with the next
+# insertion above it (the exact failure mode the sweep exists to catch):
+# `tortoise/sdk.py:<line>`, ``tortoise/projection/edges.py:<start>-<end>``,
+# `edges.py:<line>`, ``tortoise/extractor_v2.py:<start>-<end>``.
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
@@ -1622,7 +1625,8 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:13513` to `12401` reds it, and before this leg nothing read that row.
+    fold cite from its live line to `12401` reds it, and before this leg nothing
+    read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
