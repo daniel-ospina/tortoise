@@ -3217,6 +3217,14 @@ class TestARenderedCodeElementGetsAMonoFace:
         Non-vacuity: the same predicate is applied first to the pages INSIDE `ROOTS`, and
         must find at least `MIN_PAGES` of them — a predicate that had stopped seeing
         elements would otherwise pass this test by finding nothing anywhere.
+
+        The exclusion itself is pinned by the two properties that actually make these
+        emitters invisible to this scan, each with the mutation that reds it. Asserted
+        over `inside` instead — the shape this test shipped with — it could never fire:
+        `inside` is derived from `_sources`, i.e. from `ROOTS`, so no member of it can be
+        a path outside `ROOTS`, and an assertion no edit can falsify pins nothing
+        (#10254 review P3). Being outside `ROOTS` is one half; the other is that `.py` is
+        not in `SUFFIXES`, so the walk would not read them even under a widened root.
         """
         repo = Path(__file__).resolve().parent.parent
 
@@ -3224,15 +3232,28 @@ class TestARenderedCodeElementGetsAMonoFace:
             text = (repo / rel).read_text(errors="replace")
             return self.COMMENT.sub(" ", self.INERT.sub(" ", text))
 
-        inside = [rel for rel in
-                  (p.relative_to(repo).as_posix() for p in self._sources(repo))
-                  if self.RENDERS_CODE.search(_visible(rel))]
+        scanned = {p.relative_to(repo).as_posix() for p in self._sources(repo)}
+        inside = [rel for rel in sorted(scanned) if self.RENDERS_CODE.search(_visible(rel))]
         assert len(inside) >= self.MIN_PAGES, (
             "this predicate finds no element even on the pages this guard scans "
             f"({inside}) — it is not measuring what it claims")
-        assert not any(rel in inside for rel in self.OUT_OF_ROOT_EMITTERS), (
-            "an out-of-root emitter is inside `ROOTS` after all — the scope note in this "
-            "class is now wrong")
+
+        under_root = [rel for rel in self.OUT_OF_ROOT_EMITTERS
+                      if rel.split("/")[0] in self.ROOTS]
+        assert not under_root, (
+            f"{under_root} now sit under a `ROOTS` entry ({self.ROOTS}) — the scope note "
+            "in this class says they are outside it, so either narrow `ROOTS` back or "
+            "adopt the emitter the way the message below describes")
+        readable = [rel for rel in self.OUT_OF_ROOT_EMITTERS
+                    if Path(rel).suffix in self.SUFFIXES]
+        assert not readable, (
+            f"{readable} carry a suffix this scan reads ({self.SUFFIXES}) — the suffix "
+            "set is half of why these emitters are invisible here, so adopting `.py` "
+            "makes the scope note's justification false even while `ROOTS` is unchanged")
+        reachable = [rel for rel in self.OUT_OF_ROOT_EMITTERS if rel in scanned]
+        assert not reachable, (
+            f"{reachable} are yielded by `_sources` — this scan reads a page the scope "
+            "note claims it cannot, so the exclusion is no longer deliberate")
 
         grew = []
         for rel in self.OUT_OF_ROOT_EMITTERS:
