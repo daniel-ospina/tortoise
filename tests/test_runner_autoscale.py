@@ -1207,7 +1207,7 @@ def test_a_provisioner_refusal_is_VISIBLE_not_green(env):
 def test_a_NON_sizing_provisioner_refusal_is_not_blamed_on_the_model_disagreement(env):
     """⛔ `die` EXITS 2 FROM EVERY GUARD ARM, so exit 2 alone does NOT mean the sizing dispute.
 
-    `tools/install-ci-runner-x64.sh:232` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }` — the
+    `tools/install-ci-runner-x64.sh:234` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }` — the
     wrong architecture, an unreadable fork cap, a FULL DISK, an unreadable core count and an
     unreadable gate state all refuse with 2. Naming #9672 for those would describe a disk-full box
     as "expected until the decision lands" and nobody would ever fix it. The classification is

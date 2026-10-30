@@ -32,7 +32,9 @@ THE AUTHORITY IT ENCODES — owner ruling, agent-infra#2344 comment 6347825624
   carries it when a runner is re-registered from NOTHING (`ORPHANED` -- the one case with no labels
   to keep); but a runner the pool still knows goes through `_preserve_labels`, which keeps the
   class dropped, and nothing in this file re-attaches it afterwards. So the pin survives
-  `--repair-labels` (which KEEPS it while the flag is `on|auto`) and does NOT survive a
+  `--repair-labels` (which KEEPS it only where the flag's RESOLUTION claims it — `on`, or `auto` on
+  a host reporting the pinned release; an `auto` that declines claims nothing, #10275) and does NOT
+  survive a
   re-registration. The invariant stays OBSERVED, not ASSERTED: `read_pool()` reads the live label
   set on every pass and `_preserve_labels` drops a pin from it, but no test and no gate compares
   the live set to the invariant (`docs/ops/ci-runner-x64.md:90-92`), so re-measure it after any runner
@@ -301,7 +303,7 @@ class ProvisionerRefused(ActionFailed):
     `verdict=fill-refused-by-provisioner` and exits 5 instead of a green timer over a box that
     cannot grow — the false PASS that a "a refusal is an answer, exit 0" reading created.
     ⛔ TWO KINDS OF REFUSAL ARRIVE HERE, AND THEY ARE NOT THE SAME FACT: `die()` in
-    `tools/install-ci-runner-x64.sh:232` exits 2 for EVERY guard arm, so this is either the
+    `tools/install-ci-runner-x64.sh:234` exits 2 for EVERY guard arm, so this is either the
     sizing disagreement (`cpu headroom` / `memory headroom` — the tool computed a count the
     callee's `COUNT*2 + 2 <= ncpu` / `COUNT*2 + 4 <= MemAvailable` guard rejects, open at #9672)
     or one of the callee's other arms (architecture, forks, disk, an unreadable measurement, gate
@@ -709,7 +711,7 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
     fallback is engaged right now, and the OS fact whenever the operator opted into it.
 
     This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels`
-    (`tools/install-ci-runner-x64.sh:336`, in this tree since #9639) instead of inventing a
+    (`tools/install-ci-runner-x64.sh:338`, in this tree since #9639) instead of inventing a
     second rule, and it is `auto`: the gate's state is the source of truth, so a runner never
     acquires a permanent claim on the pool. The reader CAN open it, which is why this file
     re-derives NOTHING it cannot check: the arch marker is this box's own `uname -m`, and the
@@ -1369,7 +1371,7 @@ def converge(
         except ProvisionerRefused as exc:
             record["problem_kind"] = "refusal"
             # ⛔ THE INSTALLER'S `die` EXITS 2 FROM EVERY GUARD, NOT JUST THE SIZING ONE.
-            # `tools/install-ci-runner-x64.sh:232` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
+            # `tools/install-ci-runner-x64.sh:234` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
             # so the wrong arch, an unreadable fork cap, a FULL DISK, an unreadable core count and
             # an unreadable gate state all arrive here as rc=2 exactly like the cpu/memory arms do.
             # Only `cpu headroom` / `memory headroom` are the two-models disagreement (#9672), and
@@ -1547,7 +1549,8 @@ def _preserve_labels(current: list[str], machine: str) -> str:
     ⛔ THAT DROP STANDS WHILE THE #6897 MITIGATION IS ENGAGED, and the residual is NAMED rather than
     hidden: the installer can attach `ubuntu-24.04` (`CI_RUNNER_OS_LABEL=on|auto`, #10275), so a
     runner RE-registered by this path loses a pin it legitimately carried. Nothing here re-attaches
-    it — a deliberate `--repair-labels` pass does (with the flag `on|auto` it KEEPS `$OS_LABEL` and
+    it — a deliberate `--repair-labels` pass does (where the running resolution CLAIMS `$OS_LABEL`
+    — `on`, or `auto` on a matching host — it KEEPS that one label and
     DROPS the rest of the family with a `NOT KEPT:` line, `tools/install-ci-runner-x64.sh`) — and
     `--status`'
     `label-coverage` exit 5 is what makes that gap visible instead of silent.

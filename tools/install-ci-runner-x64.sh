@@ -55,13 +55,15 @@
 #   `finding-provenance` / `mirror-images` onto a bare box whose PATH lacks their tools (measured
 #   2026-10-24: exit 127, `gh: command not found`); (b) a FOREIGN ARCH MARKER (`self-hosted-arm64`
 #   on this x64 box) — the pre-#2327 damage a repair is expected to HEAL. (b) is ALWAYS dropped; (a)
-#   only under `CI_RUNNER_OS_LABEL=off`/unset (kept — but ONLY the one spelling this box may claim,
-#   `$OS_LABEL` — under `on|auto`; another image's pin such as `ubuntu-24.04-arm` stays dropped,
-#   because a label names an IMAGE and keeping it is a false-architecture claim). Both are PRINTED,
-#   never silently skipped. `_preserve_labels` drops both but reads NO flag.
+#   is KEPT only where THIS RUN's resolution claims it — `CI_RUNNER_OS_LABEL=on`, or `auto` on a host
+#   whose `/etc/os-release` reports the pinned release — and then ONLY the one spelling this box may
+#   claim, `$OS_LABEL`; another image's pin such as `ubuntu-24.04-arm` stays dropped, because a label
+#   names an IMAGE and keeping it is a false-architecture claim. The reader is `$OS_LABELS`, the
+#   RESOLUTION `resolve_labels` computed, never the flag spelling (#10275). Both are PRINTED, never
+#   silently skipped. `_preserve_labels` drops both but reads NO flag.
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
-#   `resolve_os_label` (`:304`), reached from `resolve_labels` — i.e. from install, repair and
+#   `resolve_os_label` (`:306`), reached from `resolve_labels` — i.e. from install, repair and
 #   `--print-labels` — so a runner this script registers under `on|auto` carries `ubuntu-24.04`; the
 #   autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
 #   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
@@ -97,7 +99,7 @@
 #   tools/install-ci-runner-x64.sh --count 2                  # install/repair runners 1..2
 #   tools/install-ci-runner-x64.sh --count 2 --dry-run        # plan + headroom arithmetic only
 #   tools/install-ci-runner-x64.sh --status                   # remote view + label coverage + units
-#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin unless CI_RUNNER_OS_LABEL=on + a foreign arch marker; refuses --fallback off — it cannot DETACH)
+#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin unless THIS BOX's resolution claims it — `CI_RUNNER_OS_LABEL=on`, or `auto` on the matching release — + a foreign arch marker; refuses --fallback off — it cannot DETACH)
 #   tools/install-ci-runner-x64.sh --uninstall --count 2      # deregister + remove
 #   tools/install-ci-runner-x64.sh --print-labels             # the label set config.sh would get
 #   tools/install-ci-runner-x64.sh --help
@@ -394,7 +396,7 @@ list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
 # It must be dropped by a repair: `self-hosted-arm64` is a CUSTOM label (GitHub returns only
 # `self-hosted`, `Linux`/`macOS`/`Windows` and `X64`/`ARM64`/`ARM` as read-only), so a union that
 # keeps it leaves an x86 box advertising an arm64 pool — the false PASS this file forbids at
-# `:75-78`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
+# `:77-80`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
 # puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too. ⛔ MATCHED CASE-INSENSITIVELY (`tr`), UNLIKE `is_host_label` ABOVE — the exact-case rule does NOT transfer to this class: docs.github.com "apply labels" states "Labels are case-insensitive", and a CUSTOM label's spelling is whatever created it, so `Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64 marker and still answer a lower-case `runs-on:` — an exact-case test here is how a mixed-case stamp escapes both heal paths and keeps the false PASS alive.
 is_foreign_arch_label() {
   case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
@@ -1102,44 +1104,61 @@ if [ "$MODE" = repair ]; then
       # PRINTED — a union that silently kept a false arch claim or a version pin is the defect this
       # loop's own `removed=` line exists to expose.
       if is_foreign_arch_label "$l"; then arch_dropped="${arch_dropped:+$arch_dropped,}$l"; continue; fi
-      # ⛔ THE VERSION-PIN CARVE-OUT IS THE FLAG'S `off` STATE, NOT AN UNCONDITIONAL DROP. #6897's
+      # ⛔ THE VERSION-PIN CARVE-OUT READS THE BOX'S **RESOLUTION**, NOT THE FLAG'S SPELLING. #6897's
       # `OVERRIDES:` marker suspends the version-pin invariant for as long as hosted deadlocks, it
       # measures the departure as APPLIED (2026-10-29: 7 of 7 x64 runners carry `ubuntu-24.04`), and
       # it records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. A repair that
       # dropped the pin whatever the flag said reached that revert with NO SWITCH INVOLVED: the next
       # manual heal would have reverted an applied owner departure while the operator read a warning
-      # about a label their own box had been asked to claim. So the box's choice is READ here, under
-      # the same name and values the install-side contract uses (#10275): `on|auto` keeps the pin
-      # (the mitigation IS this box's state), `off`/unset drops it (the pre-departure invariant, and
-      # what `_preserve_labels` drops on re-registration). An unrecognised value never reaches here —
-      # the flag is validated ONCE, before the mode dispatch (`die … must be off|on|auto`), so the
-      # `*)` arm below is unreachable by construction and kept only so a future edit that moves the
-      # validation cannot silently turn a typo into a KEEP.
+      # about a label their own box had been asked to claim. So the box's choice is READ here, and it
+      # is read AS THIS RUN RESOLVED IT: `resolve_labels` already ran in this mode (repair mode calls
+      # `need gh` first, so the read is available) and its `resolve_os_label` set `$OS_LABELS` to
+      # `,$OS_LABEL` ONLY where the claim was actually made — empty under `off`/unset **and** under an
+      # `auto` that DECLINED on this host (a 22.04 box, a container with no /etc/os-release, a
+      # non-Linux lane), which is the decline it printed out loud ~750 lines above.
+      # ⛔ RE-DERIVING THAT ANSWER FROM THE FLAG'S SPELLING was a THIRD answer that matched neither
+      # sibling writer. The pre-fix `case "${CI_RUNNER_OS_LABEL:-off}" in on|auto)` read the FLAG, so a
+      # declining `auto` printed "auto DECLINED … $OS_LABEL not claimed" and then KEPT the pin and
+      # re-PUT it — and because a repair only UNIONS, that claim the box had just declined became
+      # PERMANENT until an operator ran an explicit `off` repair. `--status`, in this same script,
+      # reads the RESOLUTION for the identical flag and reported the pool as NOT asked, and
+      # `runner_autoscale.py::_os_labels` agreed with `--status` — the instrument and the writer
+      # contradicting each other on one box. A flag spelling cannot answer "did this host claim it";
+      # only the resolution can, so the resolution is what this carve-out reads. (An unrecognised
+      # value never reaches here: the flag is validated ONCE before the mode dispatch, `die … must be
+      # off|on|auto`, so there is no third reading to defend against — the `*)` arm that used to sit
+      # here was unreachable by construction and is gone with the spelling it existed to guard.)
       if is_version_pinned_hosted_label "$l"; then
-        case "${CI_RUNNER_OS_LABEL:-off}" in
-          on|auto)
-            # ⛔ THE KEEP IS NARROWED TO THE ONE LABEL THIS BOX MAY CLAIM. `$OS_LABEL` is the only
-            # spelling `resolve_os_label` can ever emit, and a label is a claim about the IMAGE, not
-            # about architecture: keeping `ubuntu-24.04-arm` here would let an x86_64 runner serve
-            # an ARM64 job and produce a wrong artifact — the false PASS, not the queue delay, that
-            # this file's header forbids. It also diverges from the sibling writer of the same
-            # invariant, `tools/runner_autoscale.py::_preserve_labels`, which drops the WHOLE
-            # family on every arch ("it names an image, not an architecture") — and a keep and a
-            # drop on the same label is the divergence that function's own comment forbids. A
-            # repair UNIONS, so a kept pin is permanent until someone runs an explicit `off` repair:
-            # the narrowing has to happen HERE or not at all. Anything else in the family is
-            # reported on the `not kept=` / `removed=` lines, never silently absorbed.
-            if [ "$l" = "$OS_LABEL" ]; then
-              pinned_kept="${pinned_kept:+$pinned_kept,}$l"
-            else
-              pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
-              say "NOT KEPT: '$l' is a version-pinned hosted label outside this box's own label set ($OS_LABEL is the only one it can claim) — keeping it would make another image's claim on an x86_64 runner. Reported on the removed= line; nothing re-applies it here."
-              continue
-            fi ;;
-          off) pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"; continue ;;
-          *) pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
-             say "WARNING: CI_RUNNER_OS_LABEL='$CI_RUNNER_OS_LABEL' is not on|auto|off — read as off, so the version pin '$l' is not kept (unreachable: the flag is validated before dispatch)"; continue ;;
-        esac
+        if list_has "$OS_LABELS" "$OS_LABEL"; then
+          # ⛔ THE KEEP IS NARROWED TO THE ONE LABEL THIS BOX MAY CLAIM. `$OS_LABEL` is the only
+          # spelling `resolve_os_label` can ever emit, and a label is a claim about the IMAGE, not
+          # about architecture: keeping `ubuntu-24.04-arm` here would let an x86_64 runner serve
+          # an ARM64 job and produce a wrong artifact — the false PASS, not the queue delay, that
+          # this file's header forbids. It also diverges from the sibling writer of the same
+          # invariant, `tools/runner_autoscale.py::_preserve_labels`, which drops the WHOLE
+          # family on every arch ("it names an image, not an architecture") — and a keep and a
+          # drop on the same label is the divergence that function's own comment forbids. A
+          # repair UNIONS, so a kept pin is permanent until someone runs an explicit `off` repair:
+          # the narrowing has to happen HERE or not at all. Anything else in the family is
+          # reported on the `not kept=` / `removed=` lines, never silently absorbed.
+          if [ "$l" = "$OS_LABEL" ]; then
+            pinned_kept="${pinned_kept:+$pinned_kept,}$l"
+          else
+            pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
+            say "NOT KEPT: '$l' is a version-pinned hosted label outside this box's own label set ($OS_LABEL is the only one it can claim) — keeping it would make another image's claim on an x86_64 runner. Reported on the removed= line; nothing re-applies it here."
+            continue
+          fi
+        else
+          # ⛔ THE RESOLUTION CLAIMED NOTHING, SO THERE IS NOTHING FOR A UNION TO PRESERVE. The pin a
+          # runner already carries here is a claim this box has just DECLINED (`auto` on a host that
+          # is not the release) or was never granted (`off`/unset — the pre-departure invariant, and
+          # what `_preserve_labels` drops on re-registration). Keeping it is the false PASS the
+          # carve-out exists to stop, and a union makes it permanent. The reason is not restated
+          # here: `resolve_os_label` printed it, and the `removed=` line prints the resolution that
+          # decided it — one measurement, one message.
+          pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
+          continue
+        fi
       fi
       list_has "$after" "$l" || after="${after:+$after,}$l"
     done
@@ -1190,7 +1209,13 @@ if [ "$MODE" = repair ]; then
     say "  before=[$current]"
     say "  after =[$after]"
     say "  host-owned, not sent=[$host_skipped] alien-arch, not kept=[$arch_dropped] version-pinned, not kept=[$pinned_dropped] version-pinned, kept=[$pinned_kept]"
-    say "  removed=[$removed]  (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} decides the version-pin carve-out)"
+    # ⛔ THE SUMMARY PRINTS WHAT DECIDED THE CARVE-OUT — the RESOLUTION, not only the flag's spelling.
+    # Printing the flag alone made the log agree with the writer even where the writer was wrong: a
+    # declining `auto` printed `(CI_RUNNER_OS_LABEL=auto decides …)` beside a `kept=[ubuntu-24.04]`
+    # line, i.e. a reading the operator could not tell from the claiming arm. `resolved claim=none`
+    # is the same value `--status` reads for this flag.
+    pin_claim="${OS_LABELS:+$OS_LABEL}"
+    say "  removed=[$removed]  (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}, resolved claim=${pin_claim:-none} — the RESOLUTION decides the version-pin carve-out)"
     body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$after" | sed 's/,/","/g')")"
     if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; set +f; continue; fi
     # ⛔ `relabelled` IS A CLAIM ABOUT THE SERVER'S STATE, NOT ABOUT THE PUT'S EXIT STATUS. A whole-set
