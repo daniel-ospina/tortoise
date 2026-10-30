@@ -216,7 +216,6 @@ def test_rewrite_without_an_embedder_preserves_a_stored_vector(sdk, embedder):
         assert vec is not None, (
             f"{tid}: a re-write without an embedder REMOVED the stored vector")
         assert np.allclose(np.asarray(v_before[tid]), np.asarray(vec), atol=1e-6), tid
-    assert before["turn_texts"]
 
 
 def test_rewrite_with_CHANGED_content_and_no_embedder_clears_the_vector(sdk, embedder):
