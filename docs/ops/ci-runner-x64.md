@@ -120,7 +120,8 @@ path only ever reaches a runner that already exists. The autoscaler's FILL leg s
 `CI_RUNNER_OS_LABEL`, every runner the schedule **adds** joins without `ubuntu-24.04`. The pool then
 drifts back to zero answers one fill at a time, and `--status` used to print "covered" at every step
 until the last carrier was replaced. **Three pins** close it: `tools/install-runner-autoscale-schedule.sh`
-renders `CI_RUNNER_OS_LABEL` into the timer (systemd unit, launchd plist, cron entry) **and** its
+renders `CI_RUNNER_OS_LABEL` into the timer (systemd unit, launchd plist, cron entry — the two
+structured ones via `Environment=`/`EnvironmentVariables`, the cron entry via an explicit `export`, since a bare `NAME=value` before its `;` is only a shell variable of cron's `/bin/sh`) **and** its
 probe, captured from the operator's environment at install time and defaulting to `off`, so the
 install command is the opt-in. The render is **unconditional**: gating it on a provisioner that
 resolved left the third pin below inert on the boxes where it is the only repair there is.
