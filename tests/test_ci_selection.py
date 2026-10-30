@@ -12381,3 +12381,18 @@ def test_batch_review_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_batch_review.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_seal_session_events_tool_change_selects_core_not_tier1():
+    # tools/seal_session_events.py (#6388) owns tests/test_session_events_seal.py,
+    # which is `core`-registered in config/ci-surfaces.yml. Without its CORE_ALSO
+    # entry this was the same #3261 silent-drop class `queue_resweep` records:
+    # `tools/` is swallowed by NON_PYTHON_PREFIXES before the `core` fallback, so
+    # a tool-only diff took the docs-only early return and selected NO surface —
+    # the guard never ran on the file it guards.
+    #
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/seal_session_events.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_session_events_seal.py" in r["test_files"], r
+    assert r["full"] is False, r
