@@ -805,6 +805,35 @@ SOURCE_PATTERNS = {
                    # test_the_monospace_guard_is_selected_on_every_root_it_scans.
                    "apps/graph-viz/src/",
                    "tortoise/oauth.py",
+                   # #10254 review (P2): the ELEMENT-level guard
+                   # (`tests/test_website_static.py::
+                   # TestARenderedCodeElementGetsAMonoFace`) declares `apps/` in its
+                   # `ROOTS`, and `apps/graph-viz/index.html` is the one subject in
+                   # that root the guard can DECIDE on that NO leg ran. Two files
+                   # under `apps/graph-viz/` carry their own `<style>` block at this
+                   # head — this one and `src/components/ontology/HierarchyChart.tsx:645`
+                   # — and the second already selects this surface through the
+                   # `apps/graph-viz/src/` row above, so it needs no entry of its own
+                   # (#10254 review: the earlier wording called this page "the only
+                   # subject the guard can DECIDE on", which the measurement
+                   # contradicts). It renders no `<code>`/
+                   # `<pre>` today, which is precisely why it needs naming: the
+                   # moment someone re-copies a Courier-rendering snippet into that
+                   # page, the guard would flag it and no leg would run it.
+                   # MEASURED before this entry: `select(['apps/graph-viz/index.html'])
+                   # -> surfaces=[], full=False`, `test_website_static.py` ABSENT (a
+                   # graph-viz-page-only diff filters to `changed == []` — `apps/` is
+                   # in NON_PYTHON_PREFIXES and matched no row — and takes the
+                   # docs-only tier-1 early return). Of the 21 decidable subjects the
+                   # guard scans at this head, this was the ONLY unwired one; the
+                   # other 20 already select this surface. Concrete path, not the
+                   # `apps/graph-viz/` directory: the same reasoning as the
+                   # `package.json` entry above — a wholesale claim would pull the
+                   # whole `core` set onto every source edit in that app.
+                   # Pinned by tests/test_website_static.py::
+                   # TestARenderedCodeElementGetsAMonoFace::
+                   # test_every_page_it_can_decide_on_selects_this_guard.
+                   "apps/graph-viz/index.html",
                    # The guard's other declared emitter (`MODULES`). It carries no
                    # mono declaration today, so nothing forces its wiring — which
                    # is exactly why it is named here: the guard's subject list
