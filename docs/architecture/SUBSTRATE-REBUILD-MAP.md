@@ -218,9 +218,10 @@ What a *leaf* cell means in that table, stated because it is narrower than
 "dependency-free": **no import of anything under `tortoise/` that EXECUTES at
 module level** — the property the contention argument rests on, since a
 module-level cycle is what serializes two lanes. "Module level" is read as
-"runs at import time", not "sits at column 0": a `try:`/`if:`/`with:` at
-module scope runs too, so an internal import wrapped in one counts, while an
-`if TYPE_CHECKING:` block (which does not run) does not. `fanout`,
+"runs at import time", not "sits at column 0": a `try:`/`if:`/`with:`/`for:`/
+`while:`/`match:`/`class` at module scope runs too, so an internal import
+wrapped in one counts, while the BODY of an `if TYPE_CHECKING:` block (which
+does not run) and an in-function import do not. `fanout`,
 `source_identity` and `quota` hold on that reading (verified at `4f68a2aa7`: no
 internal import of theirs executes at module level). Two of
 them are **not** dependency-free in the wider sense, and the difference is
@@ -425,7 +426,7 @@ What it checks, and deliberately does not:
 |---|---|
 | every **file family** a lane declares resolves on disk | whether a lane is *live* (that is the tracker's job — §1's command) |
 | every **symbol** the interface map places is still **declared** in the file it names (`STRUCTURAL_REL_LABELS`, `stub_key`, `_SOURCE_HANDLED`, `_DOC_RETIRED_KEYS`, `relabel_legacy_documents`, `build_master_list`, `compile_vocab`, `compile_value_brief`) — *declared*, not merely mentioned: a comment or a reader does not satisfy it — and that the document still *names* it | whether the symbol still *means* what the map says |
-| every §5 row whose `depends on` cell says `*leaf*` really imports nothing under `tortoise/` that executes at **module level** — a module-scope `try:`/`if:`/`with:` body counts (it runs at import time), an `if TYPE_CHECKING:` block and a lazy in-function import do not (that is how `source_identity` and `quota` break their cycles) | whether a row's dependency list is *complete*: the non-leaf rows name the interfaces that matter to the contention argument, not every import |
+| every §5 row whose `depends on` cell says `*leaf*` really imports nothing under `tortoise/` that executes at **module level** — a module-scope `try:`/`if:`/`with:`/`for:`/`while:`/`match:`/`class` body counts (it runs at import time), the BODY of an `if TYPE_CHECKING:` block and a lazy in-function import do not (that is how `source_identity` and `quota` break their cycles) | whether a row's dependency list is *complete*: the non-leaf rows name the interfaces that matter to the contention argument, not every import |
 | | whether `:Document` is minted anywhere — **not regex-checkable**, and §5 records the measurement showing why |
 | | the tracker state of any issue — **the 76/33 split above is a point-in-time measurement, and it is dated in the frontmatter** |
 | this document is registered in `docs/00_index.md` | the correctness of the placement judgements |

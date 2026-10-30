@@ -22,10 +22,12 @@ tree disagree:
   5. every §5 row whose `depends on` cell says `*leaf*` really imports nothing under
      `tortoise/` at MODULE level (a lazy in-function import does not count: it is
      how `source_identity` and `quota` deliberately break their cycles). A
-     **module-scope** `try:` / `if:` / `with:` body counts as module level — it
-     still executes at import time, so a `try: from . import x` creates exactly
-     the cycle the cell denies; only `if TYPE_CHECKING:` (which does not run) and
-     in-function imports are exempt;
+     **module-scope** block body counts as module level — `try:` / `if:`
+     (`else:` included) / `with:` / `for:` / `while:` / `match:` / `class` —
+     because it still executes at import time, so a `try: from . import x` or a
+     class-body import creates exactly the cycle the cell denies; only the BODY
+     of `if TYPE_CHECKING:` (which does not run) and in-function imports are
+     exempt;
   6. the document's `measured_at_commit` is an ancestor of `HEAD` — the map names
      the tree it was cut from (`tools/finding_provenance.py`'s rule, applied to a
      doc rather than to a finding). ⚠️ **(6) is the one claim that needs history.**
@@ -125,7 +127,14 @@ INTERFACE_SYMBOLS: tuple[tuple[str, str], ...] = (
 
 _FRONTMATTER_SHA = re.compile(r"^measured_at_commit:\s*([0-9a-f]{7,40})\s*$", re.M)
 #: A backticked repo-relative path inside a lane row's file-family cell.
-_BACKTICK_PATH = re.compile(r"`((?:tortoise|tools|config|tests|docs)/[^`\s]+)`")
+#: WIDENED off a five-prefix allowlist (#5086 review P3, cycle 7): a family
+#: under any other top-level directory (`battery/`, `graph-scripts/`,
+#: `integrations/`, `operations/`, `packs/`, `supabase/`, `validation/` all exist
+#: in this repo) was not in the match at all, so it never reached the existence
+#: test AND never entered `seen` — a lane row could name a family nobody checks
+#: while the guard reported CLEAN. A path this cannot adjudicate is drift, never
+#: silence, which is what matching every `dir/` prefix buys.
+_BACKTICK_PATH = re.compile(r"`((?:[\w.-]+/)[^`\s]*)`")
 
 
 def _read(path: Path) -> str:
@@ -229,6 +238,12 @@ _LEAF_CELL = "*leaf*"
 #: (#5086 review P3, cycle 6). `ast.TryStar` (`except*`) executes identically.
 _IMPORT_TIME_BLOCKS: tuple[type, ...] = (ast.Try, ast.TryStar, ast.With)
 
+#: Module-scope statements whose body is a BLOCK that runs at import time, one
+#: iteration/case at a time. A `for:`/`while:`/`match:` body is executed when the
+#: module is imported, so an internal import inside it creates the same cycle a
+#: column-0 import does (#5086 review P3, cycle 7).
+_IMPORT_TIME_LOOP_BLOCKS: tuple[type, ...] = (ast.For, ast.AsyncFor, ast.While)
+
 
 def _is_type_checking_guard(test: ast.expr) -> bool:
     """`if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` — the one exempt block.
@@ -246,9 +261,22 @@ def _is_type_checking_guard(test: ast.expr) -> bool:
 def _walk_module_scope(body: list[ast.stmt]) -> list[ast.stmt]:
     """Every statement that RUNS at import time, descending into block bodies.
 
-    Descends into `try`/`with` (always) and `if` (unless the test is the
-    `TYPE_CHECKING` guard). Functions and classes are NOT descended into: their
-    bodies are the lazy-import case the `*leaf*` claim explicitly allows.
+    Descends into `try`/`with` (always), into the `for`/`while`/`match` bodies
+    (they are blocks executed at import time — the language reference §4.1 is
+    explicit that a block is "a piece of Python program text that is executed as
+    a unit"), and into `class` bodies, which are blocks too: a class-body import
+    runs when the module is imported and creates exactly the cycle the `*leaf*`
+    cell denies (#5086 review P3, cycle 7). `async with`/`async for` cannot occur
+    at module scope (they are a syntax error outside a coroutine), so they need
+    no arm here.
+
+    `def`/`async def` bodies are NOT descended into: those are the lazy-import
+    case the `*leaf*` claim explicitly allows, and are how `source_identity` and
+    `quota` deliberately break their cycles.
+
+    For the `TYPE_CHECKING` guard only the BODY is exempt (it does not run); its
+    `else:` arm runs, so it is still walked — skipping the whole `ast.If` dropped
+    a real import while its own justification was that the body does not run.
     """
     found: list[ast.stmt] = []
     for node in body:
@@ -258,11 +286,18 @@ def _walk_module_scope(body: list[ast.stmt]) -> list[ast.stmt]:
                 found += _walk_module_scope(handler.body)
             found += _walk_module_scope(getattr(node, "orelse", []))
             found += _walk_module_scope(getattr(node, "finalbody", []))
-        elif isinstance(node, ast.If):
-            if _is_type_checking_guard(node.test):
-                continue
+        elif isinstance(node, _IMPORT_TIME_LOOP_BLOCKS):
             found += _walk_module_scope(node.body)
+            found += _walk_module_scope(getattr(node, "orelse", []))
+        elif isinstance(node, ast.Match):
+            for case in node.cases:
+                found += _walk_module_scope(case.body)
+        elif isinstance(node, ast.If):
+            if not _is_type_checking_guard(node.test):
+                found += _walk_module_scope(node.body)
             found += _walk_module_scope(node.orelse)
+        elif isinstance(node, ast.ClassDef):
+            found += _walk_module_scope(node.body)
         else:
             found.append(node)
     return found
@@ -278,8 +313,9 @@ def _module_level_internal_imports(path: Path) -> list[str]:
     either — the property at stake.
 
     "Module level" therefore means "executes at import time", not "is a direct
-    child of the module body": a module-scope `try:`/`if:`/`with:` body runs too,
-    so a wrapped internal import is reported (#5086 review P3, cycle 6).
+    child of the module body": a module-scope `try:`/`if:`/`with:`/`for:`/
+    `while:`/`match:`/`class` body runs too, so a wrapped internal import is
+    reported (#5086 review P3, cycles 6-7).
     """
     tree = ast.parse(_read(path))
     found: list[str] = []

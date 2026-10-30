@@ -211,6 +211,33 @@ def test_a_lane_family_that_does_not_resolve_is_drift() -> None:
     assert any("tortoise/does_not_exist.py" in p for p in problems), problems
 
 
+def test_a_family_outside_the_five_prefixes_is_checked_not_skipped() -> None:
+    """Fails if a lane row outside `tortoise|tools|config|tests|docs/` is skipped.
+
+    Reachable: `battery/`, `graph-scripts/`, `integrations/`, `operations/`,
+    `packs/`, `supabase/` and `validation/` all exist in this repo, and the map
+    is the artifact the review history shows GROWING (L8 was added by this very
+    PR) — so a lane row naming a family there is a plausible next edit. Under
+    the old five-prefix `_BACKTICK_PATH` such a path never entered the match,
+    never reached the existence test, and never entered `seen`, so the guard
+    reported CLEAN over a family nobody checked (#5086 review P3, cycle 7).
+    """
+    doc = _doc()
+    anchor = "`tortoise/fanout.py`"
+    in_tables = smc._section(doc, "## 3.") + smc._section(doc, "## 4.")
+    assert anchor in in_tables, "the §3 anchor is gone — this control measures nothing"
+
+    resolved = doc.replace(anchor, "`battery/runner`", 1)
+    assert smc.check_lane_families(resolved) == [], (
+        "an EXISTING family under a non-allowlisted prefix must resolve, not "
+        "vanish from the population"
+    )
+
+    missing = doc.replace(anchor, "`battery/does_not_exist.py`", 1)
+    problems = smc.check_lane_families(missing)
+    assert any("battery/does_not_exist.py" in p for p in problems), problems
+
+
 def test_the_lane_table_is_actually_enumerated() -> None:
     """Fails if §3's families stop being parsed, leaving only §4's checked.
 
@@ -229,8 +256,14 @@ def test_the_lane_table_is_actually_enumerated() -> None:
         for p in cited
         if not p.endswith((".md", ".yml")) and "*" not in p and (REPO / p).exists()
     }
-    assert len(code) >= 18, sorted(code)
+    assert len(code) >= 19, sorted(code)
     assert "tortoise/fanout.py" in code
+    #: `tools/` is a bare directory cell, and it is the one path the OLD
+    #: five-prefix allowlist still matched only because `tools` was in it. Its
+    #: presence pins the widening: a family outside `tortoise/ tools/ config/
+    #: tests/ docs/` is now enumerated instead of silently skipped (#5086 review
+    #: P3, cycle 7).
+    assert "tools" in code
 
 
 def test_a_glob_is_not_a_family_path() -> None:
@@ -720,6 +753,70 @@ def test_a_module_scope_try_wrapped_internal_import_is_not_a_leaf(tmp_path: Path
         "    from . import entities\n"
         "def lazy():\n"
         "    from tortoise import projection\n",
+        encoding="utf-8",
+    )
+    assert smc._module_level_internal_imports(clean) == []
+
+
+def test_a_class_body_loop_body_or_type_checking_else_import_is_not_a_leaf(
+    tmp_path: Path,
+) -> None:
+    """Fails if "module level" stops at the block types cycle 7 added.
+
+    Reachable: every construct below is a BLOCK the language reference §4.1
+    defines as "a piece of Python program text that is executed as a unit" — a
+    `class` body, a `for`/`while` body, a `match` case body, and the `else:` arm
+    of an `if TYPE_CHECKING:` guard (which runs precisely because the guard's
+    body does not). Each executes at import time and each returned `[]` before
+    the fix, so the control is reachable rather than vacuous: a module-scope
+    `class C: from . import x` creates exactly the cycle the `*leaf*` cell
+    denies, and the guard reported the file as a leaf.
+
+    The negative half is as load-bearing: `def` bodies and the `TYPE_CHECKING`
+    body stay exempt — that is how `source_identity` and `quota` deliberately
+    break their cycles, and the shipped tree is CLEAN on that reading (#5086
+    review P3, cycle 7).
+    """
+    module = tmp_path / "blocks.py"
+    module.write_text(
+        "from __future__ import annotations\n"
+        "class C:\n"
+        "    from . import from_class_body\n"
+        "for _i in range(1):\n"
+        "    from . import from_for_body\n"
+        "while False:\n"
+        "    from . import from_while_body\n"
+        "match 1:\n"
+        "    case 1:\n"
+        "        from . import from_match_case\n"
+        "if TYPE_CHECKING:\n"
+        "    from . import exempt_from_guard_body\n"
+        "else:\n"
+        "    from . import from_guard_else\n"
+        "def lazy():\n"
+        "    from . import exempt_from_function\n",
+        encoding="utf-8",
+    )
+    imports = smc._module_level_internal_imports(module)
+    assert imports == [
+        ".from_class_body",
+        ".from_for_body",
+        ".from_guard_else",
+        ".from_match_case",
+        ".from_while_body",
+    ], imports
+
+    clean = tmp_path / "clean_blocks.py"
+    clean.write_text(
+        "from __future__ import annotations\n"
+        "if TYPE_CHECKING:\n"
+        "    from . import entities\n"
+        "class C:\n"
+        "    def method(self):\n"
+        "        from tortoise import projection\n"
+        "for _i in range(1):\n"
+        "    def inner():\n"
+        "        from . import redact\n",
         encoding="utf-8",
     )
     assert smc._module_level_internal_imports(clean) == []
