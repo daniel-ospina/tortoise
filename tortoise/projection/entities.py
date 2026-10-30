@@ -1258,7 +1258,7 @@ def append_identifier_aliases(props: dict, aliases: list[str]) -> bool:
     return True
 
 
-def strip_identifier_aliases(view: dict) -> bool:
+def strip_identifier_aliases(view: dict, extra=None) -> bool:
     """#8933 Stage 2 — remove the DERIVED aliases from a canonical view.
 
     The alias is a PURE function of the view's own ``content``/``search_keys``
@@ -1279,8 +1279,9 @@ def strip_identifier_aliases(view: dict) -> bool:
     red. An unclearable false red on a faithful graph is the #5048/#8006/#8317
     class this checker exists to refuse. Under the strip both directions are
     clean: a MISSING alias is not a divergence (it is derived, not independent
-    evidence) and neither is a stale one (a revision neither re-derives nor
-    retracts it).
+    evidence) and neither is a stale one — the last clause is what ``extra``
+    below carries, because round 9's revise door DOES retract the stale half
+    from the node while the record keeps it.
 
     The same reasoning removes the need for a ``_PROJECTION_STATE_FORMAT``
     bump: ``db_hash`` is computed from a view this function has already
@@ -1294,12 +1295,37 @@ def strip_identifier_aliases(view: dict) -> bool:
     an unchanged journal+graph pair when an operator flips the bisect lever
     (#10203 review round 7, F2).
 
+    ⛔ ``extra`` is the OTHER half of the same canonical form, and it is
+    required for the write path to be comparable at all (#10203 review, P1).
+    The strip above removes the alias of the view's CURRENT content, but a
+    CONTENT EDIT also RETRACTS the aliases the PREVIOUS content derived
+    (:func:`revise_identifier_aliases`), and a token the caller happened to
+    supply itself is in both sets — ``create(search_keys="err4032 release")``
+    over ``content="error ERR-4032 on deploy"``, then an edit to
+    ``"deploy failed"``: the node keeps ``release`` while the journal side (the
+    create payload, which owns the caller's keys) keeps ``err4032 release``.
+    The token was invisible while it was derivable and became DECISIVE the
+    moment it went stale, so ``check_consistency`` reported
+    ``fields=['search_keys']`` on a FAITHFUL graph and its advice ("replay the
+    journal") reproduced exactly that graph — the unclearable false red of
+    #5048/#8006/#8317, reintroduced on the previous-content edge of the same
+    ambiguity the current-content strip already resolves.
+
+    The caller passes the tokens the write path retracted for THAT point,
+    derived from the journal's own content history (``consistency``), so this
+    stays a pure function and stays env-invariant: whether a stale alias is
+    still on the node is a fact about the WRITER's ``TORTOISE_IDENTIFIER_TOKENS``
+    gate at edit time, not about the graph's faithfulness — an operator
+    bisecting with the switch flipped must not move the verdict.
+
     Returns ``True`` when the view changed.
     """
     keys = view.get("search_keys")
     if not isinstance(keys, str) or not keys:
         return False
     derived = set(_derive_point_identifier_aliases(view))
+    if extra:
+        derived |= set(extra)
     if not derived:
         return False
     tokens = keys.split()

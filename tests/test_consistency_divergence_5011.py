@@ -558,6 +558,226 @@ def test_the_checkers_verdict_does_not_depend_on_the_checkers_env(
         f"switch: on={while_on['db_hash']} off={while_off['db_hash']}")
 
 
+def test_a_CALLER_supplied_alias_is_not_a_divergence_after_a_content_edit(
+        tmp_path, monkeypatch):
+    """#10203 review (P1, blocking) — a token the CALLER supplied that happens to
+    equal the alias its own content derives must not turn a faithful graph red
+    when a content edit retracts it.
+
+    The retraction itself is the write path's own rule and stays: a content edit
+    recomputes ``search_keys``, and its base is the node's value MINUS the
+    aliases its PREVIOUS content derived (an edit that drops an identifier must
+    stop matching the old code — ``revise_identifier_aliases``). The journal
+    records no derived value, so the RECORD keeps the create payload's keys. When
+    the caller supplied the alias ITSELF the two halves then disagreed on a token
+    that was invisible to the comparison while it was derivable and DECISIVE the
+    moment it went stale.
+
+    Measured before the fix on exactly this shape: node ``release``, record view
+    ``err4032 release``, ``ok=False``, ``fields=['search_keys']``, action
+    "reconcile by replaying the journal" — an action that reproduces the same
+    graph, because a replay runs the same retraction. That is the unclearable
+    false red of #5048/#8006/#8317 on the one edge the current-content strip did
+    not cover: ``strip_identifier_aliases`` canonicalised the alias of the
+    view's CURRENT content, and nothing canonicalised the alias of the content it
+    PREVIOUSLY held.
+
+    (1) Fails on the pre-fix strip: the live check reports the divergence above
+        (and the replay, checked below, reproduces it).
+    (2) Reachable: the ordinary SDK create + content edit, with a real journal —
+        and the node's post-edit value, the record's ownership of the caller's
+        key and the absence of a journalled ``search_keys`` are all asserted
+        FIRST, so the pin cannot pass on a graph that never carried the token.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
+    log_path = str(tmp_path / "caller-alias.jsonl")
+    sdk = TortoiseSDK(os.path.join(str(tmp_path), "caller_alias.db"),
+                      namespace=f"test_10203_p1_{uuid4().hex[:8]}",
+                      event_log_path=log_path)
+    try:
+        pid = sdk.create_point(
+            content="error ERR-4032 on deploy", kind="statement",
+            search_keys="err4032 release")["id"]
+        sdk.update_point(pid, content="deploy failed")
+        graph = sdk._get_proj().g
+
+        rows = graph.query(
+            f"MATCH (n:Point {{id:'{pid}'}}) RETURN n.search_keys")
+        node = rows.result_set[0][0] if rows.result_set else None
+        assert node == "release", (
+            "precondition: the edit no longer retracts the stale alias, so the "
+            f"shape this pin is about is unreachable: {node!r}")
+
+        events = EventLog(log_path).read_all()
+        created = [e for e in events if e.get("type") == "PointAdded"]
+        assert created and "err4032" in str(
+            (created[0].get("point") or {}).get("search_keys") or ""), (
+            "precondition: the RECORD must own the caller's key, or the two "
+            f"halves cannot disagree about it: {created}")
+        assert not any(e.get("search_keys") is not None
+                       for e in events if e.get("type") == "PointRevised"), (
+            "precondition: a derived value reached the record, which would "
+            f"change what this pin is measuring: {events}")
+
+        live = check_consistency(log_path, sdk._get_proj())
+        assert live["ok"] is True, (
+            "a FAITHFUL graph diverged on the caller-supplied alias its own "
+            "content edit retracted (the alias of the PREVIOUS content is "
+            f"being compared): {live['divergent_points']} "
+            f"action={live.get('action')!r}")
+        assert live["divergence"] is None, live
+
+        # The verdict's OWN advice is "replay the journal" — so the repair must
+        # clear it. It did not before the fix: the replay retracts the same
+        # token, i.e. the advice reproduced the red for ever.
+        replayed = FalkorProjection(
+            os.path.join(str(tmp_path), "caller_alias_rp.db"),
+            graph_name=f"test_10203_p1_rp_{uuid4().hex[:8]}")
+        try:
+            for event in events:
+                replayed.apply(event)
+            again = check_consistency(log_path, replayed)
+            assert again["ok"] is True, (
+                "the advised repair does not clear the divergence either — a "
+                "replay reproduces exactly the graph that was reported: "
+                f"{again['divergent_points']}")
+        finally:
+            replayed.close()
+    finally:
+        sdk.close()
+
+
+def test_the_stale_alias_is_not_a_divergence_nor_a_rehash_across_a_gate_flip(
+        tmp_path, monkeypatch):
+    """#10203 review (P1), the OTHER half: whether the retracted alias is still
+    on the node is a fact about the WRITER's gate, so it must move neither the
+    verdict nor ``db_hash``.
+
+    ``TORTOISE_IDENTIFIER_TOKENS`` is a process-level bisect lever, so an
+    operator can flip it BETWEEN two writes of one point: with it ON the content
+    edit retracts the stale alias, with it OFF the edit does not touch
+    ``search_keys`` at all and the create's alias survives. Those two graphs come
+    from ONE journal and both are faithful to it. A canonical form that kept the
+    stale token reported the OFF graph as ``divergence="content"`` on
+    ``search_keys`` against a reference that never held it, and a ``db_hash``
+    that kept it would re-baseline (``unrecorded-mutation``) on the flip.
+
+    (1) Fails before the fix on the OFF graph (the field divergence) and on the
+        ``db_hash`` equality (the two graphs canonicalise differently).
+    (2) Reachable: the SAME journal, replayed into two graphs — the token is
+        really on one of them and really absent from the other, both asserted.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    log_path = str(tmp_path / "gate-flip.jsonl")
+    monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
+    sdk = TortoiseSDK(os.path.join(str(tmp_path), "gate_flip.db"),
+                      namespace=f"test_10203_flip_{uuid4().hex[:8]}",
+                      event_log_path=log_path)
+    try:
+        pid = sdk.create_point(
+            content="error ERR-4032 on deploy", kind="statement")["id"]
+        # The edit runs with the lever OFF: the create's alias survives.
+        monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "0")
+        sdk.update_point(pid, content="deploy failed")
+
+        def keys(graph):
+            rows = graph.query(
+                f"MATCH (n:Point {{id:'{pid}'}}) RETURN n.search_keys")
+            return rows.result_set[0][0] if rows.result_set else None
+
+        kept = keys(sdk._get_proj().g)
+        assert kept == "err4032", (
+            "precondition: the OFF write must LEAVE the stale alias on the "
+            f"node, or this pin is not about the gate at all: {kept!r}")
+
+        off_run = check_consistency(log_path, sdk._get_proj())
+        assert off_run["ok"] is True, (
+            "a graph written with the bisect lever OFF diverged on the alias "
+            f"the ON writer would have retracted: {off_run['divergent_points']}")
+
+        # The SAME journal, replayed with the lever ON: the edit retracts it.
+        monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "1")
+        events = EventLog(log_path).read_all()
+        replayed = FalkorProjection(
+            os.path.join(str(tmp_path), "gate_flip_rp.db"),
+            graph_name=f"test_10203_flip_rp_{uuid4().hex[:8]}")
+        try:
+            for event in events:
+                replayed.apply(event)
+            retracted = keys(replayed.g)
+            assert not retracted or "err4032" not in str(retracted).split(), (
+                "precondition: the ON writer must RETRACT the stale alias, or "
+                f"both graphs are the same state: {retracted!r}")
+            on_run = check_consistency(log_path, replayed)
+            assert on_run["ok"] is True, on_run["divergent_points"]
+            assert on_run["db_hash"] == off_run["db_hash"], (
+                "the stale alias moved ``db_hash``, so a stored baseline reads "
+                "back as `unrecorded-mutation` when the operator flips the "
+                f"bisect lever: on={on_run['db_hash']} off={off_run['db_hash']}")
+        finally:
+            replayed.close()
+    finally:
+        sdk.close()
+
+
+def test_a_RECREATED_point_does_not_inherit_the_dead_incarnations_retraction(
+        proj, tmp_path):
+    """#10203 review round 2 (P2, measured) — the stale-alias set must not cross a
+    hard delete.
+
+    The retracted set is per point and the fold accumulates it across the whole
+    ordered pass, so without a re-creation boundary a DEAD incarnation's
+    retractions were applied to the live one — and since the strip removes the
+    token from BOTH views, a real unjournalled write became invisible. That is
+    the one direction this checker exists to catch, so the reset is load-bearing
+    rather than tidiness.
+
+    (1) Fails if the reset is dropped: the unjournalled `SET` below reads
+        `ok=True` with no `search_keys` in the divergence, i.e. a genuine
+        mutation is canonically erased. It does NOT fail for the earlier
+        false-red reason (a pre-fix tree has no strip at all), so it is a
+        REGRESSION guard on this fix's own mechanism, stated rather than
+        implied.
+    (2) Reachable: the re-creation is a journal fact (`EntityMutated op=delete`
+        then a same-id `PointAdded`, the shape `journal_recreate_seqs` names),
+        and the token is really on the node — asserted before the check.
+    """
+    log_path = str(tmp_path / "recreate.jsonl")
+    log = _seed(proj, log_path, [
+        _pt("p1", "error ERR-4032 on deploy",
+            search_keys=["err4032", "release"]),
+    ])
+    revised = {"type": "PointRevised", "id": "p1",
+               "new_content": "deploy failed"}
+    log.append(revised)
+    proj.apply(revised)
+    for event in ({"type": "EntityMutated", "op": "delete", "id": "p1",
+                   "label": "Point"},
+                  _pt("p1", "deploy failed", search_keys=["release"])):
+        log.append(event)
+        proj.apply(event)
+
+    rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN n.search_keys")
+    recreated = rows.result_set[0][0] if rows.result_set else None
+    assert recreated == "release", (
+        "precondition: the re-created incarnations starts from its own "
+        f"record: {recreated!r}")
+
+    # An UNJOURNALLED write re-adds the token the DEAD incarnation retracted.
+    proj.g.query(
+        "MATCH (n:Point {id:'p1'}) SET n.search_keys = 'release err4032'")
+    after = check_consistency(log_path, proj)
+    assert after["ok"] is False, (
+        "a write that bypassed the journal was canonicalised away by a HARD "
+        "DELETED incarnation's retracted-alias set")
+    assert "search_keys" in {f for d in after["divergent_points"]
+                             for f in d["fields"]}, after["divergent_points"]
+
+
+
 def test_uncarried_list_is_empty_when_the_journal_has_no_such_field(proj, tmp_path):
     """The negative control for the test above: without the field, the report
     must be empty — otherwise ``uncarried_journal_fields`` is a constant.
