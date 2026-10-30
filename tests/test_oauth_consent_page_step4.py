@@ -664,6 +664,7 @@ function snap() {
     orgChooserOn: sel.classList.contains('on'),
     orgOptions: sel.childNodes.map((o) => ({ value: o.value, text: o.textContent })),
     resourceLine: els['resource-line'].textContent,
+    scopeLine: els['scope-line'].textContent,
   };
 }
 
@@ -844,6 +845,52 @@ def test_a_missing_attempt_key_is_a_typed_refusal_not_a_mint_call(api_client, tm
     assert out["afterLoad"]["errorVisible"] is True
 
 
+def test_the_page_displays_the_scope_that_will_actually_be_BOUND(api_client, tmp_path):
+    """⛔ THE CONSENT SCREEN MUST NOT UNDER-STATE WHAT IT AUTHORIZES.
+
+    When the authorize URL omits `scope`, the AS mints the code with the CLIENT's registered
+    scope (`body.get("scope") or client.get("scope") or "mcp"`) — so rendering the request's
+    value (`"mcp"`) showed a NARROWER scope than the visitor was granting. Measured at
+    `68a7ec727`: a client registered `scope: "mcp offline_access"` + an authorize URL with no
+    `scope` rendered "Requested scopes: mcp" while the token exchange returned
+    `mcp offline_access` (round 9 of #10346's review). RFC 6749 §3.3 and RFC 9700 both require
+    the consent screen to show what is granted.
+
+    `resolved_scope` is stamped server-side at render; the raw `scope` still rides along and
+    is still what the page POSTS, so the request is unchanged and only the display is.
+    """
+    tc, _ = api_client
+    params = _authorize_params(tc, client={"scope": "mcp offline_access"},
+                               attempt_key="ak-scope")
+    del params["scope"]                     # the case: the URL names no scope
+    r = tc.get("/oauth/authorize", params=params)
+    assert r.status_code == 200, r.text
+    assert '"resolved_scope": "mcp offline_access"' in r.text, (
+        "the page does not carry the scope that will be BOUND — a visitor reading "
+        "'Requested scopes: mcp' would be approving less than the code grants")
+    assert r.text.count('"resolved_scope":') == 1, (
+        "the params object must carry ONE resolved_scope — the server's — not one merged in "
+        "from the query (a client-supplied value would let the URL lie about the scope)")
+
+    # …and when the request DOES name a scope, that is what is displayed (request wins).
+    params2 = _authorize_params(tc, client={"scope": "mcp offline_access"},
+                                attempt_key="ak-scope2", scope="mcp")
+    r2 = tc.get("/oauth/authorize", params=params2)
+    assert r2.status_code == 200, r2.text
+    assert '"resolved_scope": "mcp"' in r2.text, (
+        "the request's own scope must win over the client's registered default")
+
+    # ⛔ AND THE PAGE MUST RENDER IT. Carrying the value in PARAMS proves nothing on its own —
+    # the pre-fix page carried `scope` and still printed `mcp`; this is the assertion that the
+    # visitor's screen shows the resolved scope, driven through the real page script.
+    raw_q = r.request.url.query
+    out = _run_page(r.text, {"search": "?" + (raw_q.decode() if isinstance(raw_q, bytes)
+                                              else raw_q)}, tmp_path)
+    assert out["afterLoad"]["scopeLine"] == "mcp offline_access", (
+        f"the consent screen shows {out['afterLoad']['scopeLine']!r} while the code grants "
+        "'mcp offline_access' — the screen must not under-state what it authorizes")
+
+
 def test_the_authorize_click_posts_the_token_and_navigates_with_the_state_echoed(
         api_client, tmp_path):
     """The bound token + the raw params to `/oauth/consent`, then the SERVER's
@@ -874,10 +921,23 @@ def test_the_authorize_click_posts_the_token_and_navigates_with_the_state_echoed
         "/oauth/token later performs; the page must not rewrite it")
     assert body["response_type"] == "code"
     assert body["code_challenge_method"] == "S256"
-
-    assert len(out["navs"]) == 1, out["navs"]
+    # ⛔ AND THE TWO §2.2 BIND FIELDS THAT HAD NO ASSERTION AT ALL. Deleting
+    # `code_challenge:` (or `client_id:`) from the page's consent POST left all 46 cases
+    # green — the harness answers from index-scripted responses and never inspects this body
+    # — while in production EVERY approval would answer `400 invalid_request` ("code_challenge
+    # (PKCE, 43-128 chars) is required.") or `401 invalid_token: bind.client_id`: the flow is
+    # dead immediately after the visitor approves, with the suite reporting clean (round 9 of
+    # #10346's review, measured). They ride the rendered query, so `raw` supplies them.
     from urllib.parse import parse_qs
 
+    sent_params = {k: v[0] for k, v in parse_qs(raw).items()}
+    assert body["code_challenge"] == sent_params["code_challenge"], (
+        "the PKCE challenge must be posted with the token — /oauth/consent binds it, and a "
+        "missing one turns every approval into a 400 the visitor cannot act on")
+    assert body["client_id"] == sent_params["client_id"], (
+        "the client_id must be posted with the token — it is one of the four bind fields")
+
+    assert len(out["navs"]) == 1, out["navs"]
     assert out["navs"][0].startswith(REDIRECT + "?")
     sent = {k: v[0] for k, v in parse_qs(out["navs"][0].split("?", 1)[1]).items()}
     assert sent == {"code": "ac_123", "state": state}, sent

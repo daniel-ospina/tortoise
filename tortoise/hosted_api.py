@@ -41803,7 +41803,12 @@ async def oauth_authorize(request: Request):
         # #3443: `redirect_target` rides along with the raw params — the page
         # navigates THAT (deny included, which has no server round trip) and
         # posts `redirect_uri` back for validation as before.
-        params={**params, "redirect_target": redirect_target},
+        # `resolved_scope` is what will actually be BOUND (the mint falls back to the
+        # CLIENT's registered scope when the request omits one), so the page displays the
+        # scope the visitor is granting rather than the one the URL named. The raw
+        # `scope` param still rides along untouched — it is what the page POSTS back.
+        params={**params, "redirect_target": redirect_target,
+                "resolved_scope": params["scope"] or client.get("scope") or "mcp"},
         raw_query=request.url.query,
         app_origin=app_origin,
     )

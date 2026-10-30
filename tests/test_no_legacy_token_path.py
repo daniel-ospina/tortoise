@@ -1943,7 +1943,12 @@ _PAGE_SUBJECT = (
 #:   carries no `still`, so the record cannot be reddened by this arm.
 _PAGE_LIVE_NOUN_FIRST = re.compile(
     r"(?P<page>" + _PAGE_SUBJECT + r")"
-    r"(?P<before>[^.\n]{0,80}?)"
+    # ⛔ 40 NOT 80. At 80 the span reached a verb belonging to ANOTHER subject in the same
+    # sentence — `The MCP consent page kept its own session — an inline supabase client reading
+    # \`sb-tortoise-auth-token\` back …` matched on the CLIENT's `reading` and reddened a
+    # correct past-tense record (round 9, executed). 40 still covers the shapes this arm exists
+    # for (` that writes it`, ` (\`tortoise/oauth.py\`) still accepts`, `, so nothing issues it`).
+    r"(?P<before>[^.\n]{0,40}?)"
     # ⛔ NON-GREEDY, and that is load-bearing: greedy `before` ran past the FIRST verb to a
     # LATER one and then read a negation belonging to THAT verb — `The consent page still
     # accepts the legacy cookie, though it no longer writes it.` had its `accepts` swallowed
@@ -1952,17 +1957,48 @@ _PAGE_LIVE_NOUN_FIRST = re.compile(
     # record — so `the consent page that used to read it back as its session` reddened as a
     # live claim the moment this arm was added (executed: `docs/auth-architecture.md`). Present
     # tense is third-person singular here because the page is one page.
-    r"(?P<verb>(?:re-?)?reads|accepts|authenticates|issues|writes|mints"
-    r"|signs\s+(?:visitors?\s+)?in|logs\s+(?:visitors?\s+)?in)\b",
+    # ⛔ THE `-ing` FORMS TOO. `The consent page is still READING the legacy cookie` and
+    # `continues to accept` / `keeps on accepting` were invisible: the alternation had only the
+    # third-person `-s` forms, so the progressive — the most natural way to say a page keeps
+    # doing something — did not match (round 9, executed). `read` (bare) stays OUT: it is the
+    # PAST tense of the retirement record; `reading`/`reads` cannot be.
+    # ⛔ NO BARE `accept`/`issue`/`write`/`mint`: those are nouns as often as verbs
+    # (`the consent page write path`), and the `-s`/`-ing` forms are the ones that make a
+    # sentence a claim. The `keeps on …` / `continues to …` shapes are matched as a COMPOSITE,
+    # because `keeps` alone is not acceptance — `that page keeps no session` is a denial of
+    # exactly the opposite kind (measured: it reddened a correct line).
+    r"(?P<verb>(?:re-?)?(?:reads|reading)"
+    r"|accepts|accepting|authenticates|authenticating"
+    r"|issues|issuing|writes|writing|mints|minting"
+    r"|honou?rs?|honou?ring"
+    r"|(?:keeps?\s+(?:on\s+)?|continues?\s+to\s+)"
+    r"(?:re-?)?(?:reads?|reading|accepts?|accepting|issues?|issuing|writes?|writing"
+    r"|mints?|minting|honou?rs?|honou?ring|read|accept|issue|write|mint)\b"
+    r"|signs\s+(?:visitors?\s+)?in|signing\s+(?:visitors?\s+)?in"
+    r"|logs\s+(?:visitors?\s+)?in|logging\s+(?:visitors?\s+)?in)\b",
     re.IGNORECASE,
 )
+#: ⛔ A SHAPE, NOT A LIST OF PARTICIPLES. Enumerating them left every spelling outside the list
+#: invisible: `The legacy cookie is still written by the consent page.`, `…still set by the
+#: consent page and read back as its session`, `remains accepted`, `Only the consent page still
+#: honours the legacy cookie` all came back CLEAN (round 9, executed). `still` + ANY passive
+#: participle (`-ed`/`-en`) + `by the <page>` is the claim's actual shape, and `still` is what
+#: separates it from the record — `formerly accepted by the deleted consent page` carries none.
+_PASSIVE_PARTICIPLE = r"(?:[a-z]+(?:ed|en)|written|set|kept|sent|read|made|given|held)"
 _PAGE_LIVE_VERB_FIRST = re.compile(
-    r"\bstill\b[^.\n]{0,40}"
-    r"(?:(?:re-?)?read|accepted|issued|trusted|authenticated|reads?|accepts?|issues?"
-    r"|authenticates?)\b"
+    # `remains`/`continues to be` are the same assertion without the word `still`.
+    r"(?:\bstill\b|\bremains?\b|\bcontinues?\s+to\s+be\b)[^.\n]{0,40}\b"
+    + _PASSIVE_PARTICIPLE + r"\b"
     r"[^.\n]{0,24}\bby\s+(?:the\s+)?(?P<page>" + _PAGE_SUBJECT + r")",
     re.IGNORECASE,
 )
+
+#: ⛔ A FILENAME IS NOT A SENTENCE END. The noun-first arm terminates its span on `.`, and these
+#: docs name the page's own file constantly — `The consent page (\`tortoise/oauth.py\`) still
+#: accepts the legacy cookie.` came back CLEAN because `oauth.py`'s dot ended the span before the
+#: verb (round 9, executed). Path-like tokens are MASKED to a placeholder before matching, so the
+#: full stop inside a filename cannot act as a full stop, while a real sentence end still does.
+_FILE_TOKEN = re.compile(r"`?[\w./-]*[\w-]\.(?:py|ts|tsx|js|json|md|yml|yaml|html|sql)`?")
 
 #: …and a NEGATED verb is a CLOSURE, not a claim. Deliberately NARROW — at most two words
 #: between the negation and the verb, and anchored so it must END at the verb. Rounds 4-6 died
@@ -1987,11 +2023,13 @@ def _page_live_acceptances(scanned: str) -> list[str]:
     origin/main:<doc>` — which is why the past tense is not an arm here.
     """
     found: list[str] = []
+    # See `_FILE_TOKEN`: a dotted filename must not terminate the noun-first span.
+    masked = _FILE_TOKEN.sub("\u2039file\u203a", scanned)
     for pattern, negatable in (
         (_PAGE_LIVE_NOUN_FIRST, True),
         (_PAGE_LIVE_VERB_FIRST, False),
     ):
-        for m in pattern.finditer(scanned):
+        for m in pattern.finditer(masked):
             if negatable and _NEGATED_BESIDE_VERB.search(m.group("before")):
                 continue
             # `scanned` is whitespace-NORMALISED, so its offsets are not the doc's line

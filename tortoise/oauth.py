@@ -2565,7 +2565,13 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   byId("client-line").textContent =
       (PARAMS.client_name || PARAMS.client_id || "This client") +
       " wants to access your Tortoise MCP surface.";
-  byId("scope-line").textContent = PARAMS.scope || "mcp";
+  // ⛔ THE SCOPE THAT WILL BE BOUND, not the one the request happened to send. When an
+  // authorize URL omits `scope`, the code is minted with the CLIENT's registered scope
+  // (`body.get("scope") or client.get("scope") or "mcp"`), so rendering `"mcp"` showed
+  // a narrower scope than the visitor was granting — the consent screen under-stating
+  // what it authorizes. `resolved_scope` is stamped server-side (hosted_api
+  // `oauth_authorize`), and the raw value is kept as the fallback.
+  byId("scope-line").textContent = PARAMS.resolved_scope || PARAMS.scope || "mcp";
   byId("resource-line").textContent = PARAMS.resource || "(the MCP server, no team declared)";
 
   mint();
