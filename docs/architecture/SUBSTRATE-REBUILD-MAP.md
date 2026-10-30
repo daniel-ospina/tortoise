@@ -197,7 +197,7 @@ Taken from the import graph, not from prose.
 | `projection/edges.py` | `source_identity` | `STRUCTURAL_REL_LABELS` (`:55`) + `stub_key` (`:84`) — **the replay keys** | #5026 · #5025 (closed) |
 | `source_identity.py` | *leaf* | canonical source identity (the dedup key) | #5038 |
 | `fanout.py` | *leaf* | the fan-out cap | #4999 |
-| `vet_gate.py` | *leaf* | the S2.2 VET decision | E1's remaining steps |
+| `vet_gate.py` | `value_gate` | the S2.2 VET decision | E1's remaining steps |
 | `embeddings.py` | `env_truthy` · `ids` | embed/serialise — the journal payload | #5004 |
 | `consistency.py` | `projection` | divergence detection | #5011 |
 | `assembly.py` · `subgraph.py` | `fanout` | traversal + assembly | #5010 |
@@ -205,10 +205,28 @@ Taken from the import graph, not from prose.
 
 **The "clean LEAF" claim, re-measured** (files under `tortoise/` importing
 each module, at `4f68a2aa7`): `fanout` **2** · `source_identity` **4** ·
-`embeddings` **14** · `vet_gate` **0** (no module imports it — its consumers are
-entered through `vet_gate.vet_candidates`, so this is a fact about the import
-graph and not about reachability). The leaves created by the merged lanes are
-still leaves. **The contention remains entirely in the pre-existing aggregators.**
+`embeddings` **14** · `vet_gate` **1** (`extractor_v2.py:157`, a module-level
+`from . import vet_gate as _vet_gate` — that module *is* the
+`vet_gate.vet_candidates` consumer, so this is a fact about the import graph and
+not about reachability). Every importer of every one of the four is a
+**pre-existing aggregator**, so **the contention remains entirely in the
+pre-existing aggregators.** But "leaf" is the wrong word for `vet_gate` itself:
+it carries one internal dependency of its own — `value_gate`, the stdlib-only
+identifier predicate that both it and `extractor_v2` import (`vet_gate.py:149`).
+The three other *leaf* rows above (`source_identity`, `fanout`, `quota`) were
+re-checked the same way and hold: none imports anything under `tortoise/`.
+
+*Leaf* in the table above means **no module-level import of anything under
+`tortoise/`** — that is the property the contention argument rests on, because a
+module-level import cycle is what serializes two lanes. On that reading `fanout`,
+`source_identity` and `quota` are all leaves (verified at `4f68a2aa7`: none has a
+column-0 internal import). Two of them are **not** dependency-free in the wider
+sense, and the difference is deliberate rather than stale: `source_identity.py:271`
+and eleven sites in `quota.py` (`:78`, `:476`, `:518`, `:556`, `:604`, `:647`,
+`:724`, `:883`, `:1035`, `:1249`, `:1648`) import `tortoise.*` **inside
+functions**, lazily, to break import cycles. A lane editing `projection`'s private
+helpers still has those call sites to consider, and this table does not claim
+otherwise.
 
 ### The one interface that must not be broken
 
@@ -356,9 +374,14 @@ the tree disagree:
 ```
 
 `2` is a **state error, not a pass**: this checkout could not read the document,
-or could not *answer* one of the claims — the case that matters here is the
-ancestry claim in a shallow clone, which is reported as `UNVERIFIED` with the
-cause named, never as drift (the document is not wrong; the clone is shallow).
+or could not *answer* one of the claims — reported as `UNVERIFIED` with the cause
+named, never as drift (the document is not wrong). Two arms reach it, and both are
+"could not answer" rather than "not an ancestor": the ancestry claim in a shallow
+clone (git exits 128 — the object is absent by construction), and a probe killed
+at its **10 s bound** (git was attempting the lazy fetch that the 128 arm hits
+immediately). `git merge-base --is-ancestor` reports 0 / 1 / a non-zero status
+that is *not* 1 for errors; a killed probe returned no status at all, so it never
+means "the document drifted".
 
 ### Where the guard runs, and which half runs where
 

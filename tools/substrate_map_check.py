@@ -62,11 +62,24 @@ Pinned by `tests/test_substrate_map.py`.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would raise ImportError on an older interpreter BEFORE a
+# later-placed guard could run, which is the unattributed failure #5128 is about
+# (D9 shape; the same guard as `tools/bridge_table.py`, its sibling in the `docs`
+# job's drift step). Pinned by `tests/test_entry_point_python_guard.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/substrate_map_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/substrate_map_check.py`"
+    )
+
 import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -232,8 +245,14 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     not: on this box's partial clone an unknown sha took **24 s** and a network
     round trip to the promisor remote (measured, `GIT_NO_LAZY_FETCH=1` does not
     avoid it — the cost is CPU in ref enumeration, not the socket). An unbounded
-    ancestry probe inside a CI gate is a hang waiting for a typo, so a timeout is
-    a PROBLEM (the map names a tree nobody can verify), never a pass.
+    ancestry probe inside a CI gate is a hang waiting for a typo, so it is
+    bounded. A timeout is the **"could not answer"** channel, not the "not an
+    ancestor" one: `--is-ancestor` reports 0 (true) / 1 (not an ancestor) / a
+    non-zero status that is not 1 for ERRORS, and a probe killed at the bound is
+    no git status at all. So it is UNVERIFIED — a state error (exit 2) — never
+    drift and never a pass: scoring it as drift told the reader the DOCUMENT was
+    wrong and to "re-measure the claim", the same misdiagnosis the 128 arm fixed
+    (#5086 review P1-1), arriving slowly.
     """
     match = _FRONTMATTER_SHA.search(doc)
     if not match:
@@ -249,12 +268,18 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"},
         )
     except subprocess.TimeoutExpired:
+        # "Could not answer", not "not an ancestor": the probe was KILLED, so git
+        # never returned a status (0 / 1 / other). The request it was stuck on is
+        # the absent-object lazy fetch — the 128 condition, arriving slowly — so
+        # this belongs in the UNVERIFIED channel beside it (exit 2), never in the
+        # DRIFTED one (exit 1), which instructs the reader to re-measure a
+        # document that is not wrong.
         return (
+            [],
             [
                 f"measured_at_commit {sha} could not be verified within "
                 f"{ANCESTRY_TIMEOUT_S}s (git is trying to fetch an object it does not have)"
             ],
-            [],
         )
     except OSError as exc:  # pragma: no cover - git absent is a state error
         raise _state_error(f"git unavailable ({exc})") from exc

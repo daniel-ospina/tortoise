@@ -50,21 +50,52 @@ _LABEL_CLAIM = re.compile(
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
 
-def _label_hits() -> tuple[int, int, int]:
+def _label_population() -> list[Path]:
+    """Every `git ls-files` entry under `tortoise/` — the population §5's claim reads.
+
+    §5 quotes `git grep -n ':Document'`, and the git-grep manual is explicit about
+    what that searches: *"the tracked files in the work tree"* — every suffix, not
+    just `.py`. 28 of the 287 tracked files under `tortoise/` are not `.py`
+    (`onboarding/SKILL.md`, `config/capture_disclosure.json`, `pi-hooks/*.ts`,
+    `config/routing.yaml`, …). Taking the population from the claim is what makes
+    the assertion below able to fail (#5086 review cycle 5, P3).
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "tortoise/"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [REPO / line for line in out.stdout.splitlines() if line.strip()]
+
+
+def _label_hits(population: list[Path] | None = None) -> tuple[int, int, int]:
     """`(lines, files, narrow)` for `:Document` under `tortoise/`.
 
-    Measured directly rather than through `subprocess`, so a broken `git` cannot
-    make the claim and its check agree by both failing: `git grep -n` prints one
-    line per MATCHING LINE, `git grep -l` one per FILE — the exact distinction
-    §5's figure got wrong.
+    Measured by reading each tracked file directly rather than through
+    `subprocess`, so a broken `git` cannot make the claim and its check agree by
+    both failing: `git grep -n` prints one line per MATCHING LINE, `git grep -l`
+    one per FILE — the exact distinction §5's figure got wrong.
+
+    The POPULATION is the claim's, not a convenient one. A `.py`-only walk reports
+    the same 55/17 as the claim does today, so it looks correct — but an
+    occurrence added to one of the 28 non-`.py` tracked files raises the true
+    figure while the walk keeps returning 55, and the assertion then compares a
+    stale claim against a stale measurement and PASSES. That is the false-CLEAN
+    class this file exists to close, on the one figure §5 calls load-bearing (the
+    evidence for NOT regex-checking the label).
     """
     lines = files = narrow = 0
-    for path in sorted((REPO / "tortoise").rglob("*.py")):
-        hits = [
-            line
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if ":Document" in line
-        ]
+    for path in sorted(population if population is not None else _label_population()):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            # `git grep` skips binary/unreadable files by default too; the
+            # exception is never allowed to excuse a TEXT file, only to skip one
+            # this reader cannot decode.
+            continue
+        hits = [line for line in text.splitlines() if ":Document" in line]
         if not hits:
             continue
         files += 1
@@ -297,19 +328,44 @@ def test_a_sha_that_is_not_an_ancestor_is_drift(monkeypatch) -> None:
 
 
 def test_an_unbounded_ancestry_probe_cannot_hang_the_gate(monkeypatch) -> None:
-    """Fails if a slow/hanging git probe is allowed to read as clean.
+    """Fails if a bounded git probe is scored as a PASS **or as DRIFT**.
 
     Reachable: measured on this box's partial clone, an absent sha makes
     `git merge-base --is-ancestor` spend ~24 s attempting a lazy fetch. Without
     the bound the gate blocks; with the bound as a PASS it would silently certify
-    a tree nobody verified — so the timeout must surface as a problem.
+    a tree nobody verified — so the timeout must surface as NOT-CLEAN.
+
+    The channel matters, and that is the half this pins (#5086 review cycle 5):
+    a probe killed at the bound never returned a git status, and `--is-ancestor`
+    distinguishes "no, not an ancestor" (exit 1) from "error" (any other
+    non-zero). The 128 arm already reads as UNVERIFIED; a timeout is the same
+    condition arriving slowly, so scoring it as drift handed the reader the wrong
+    instruction — *"the document and the tree disagree, re-measure the claim"* —
+    about a document that is not wrong. Exit 2, never exit 1.
     """
+
     def _boom(*a, **k):
+        calls.append(k)
         raise subprocess.TimeoutExpired(cmd="git", timeout=smc.ANCESTRY_TIMEOUT_S)
 
+    calls: list[dict] = []
     monkeypatch.setattr(smc.subprocess, "run", _boom)
-    problems, _unverified = smc.check_measured_at_commit(_doc())
-    assert any("could not be verified within" in p for p in problems), problems
+    problems, unverified = smc.check_measured_at_commit(_doc())
+    assert problems == [], (
+        "a killed probe is 'could not answer', not `is not an ancestor` — scoring "
+        f"it as drift sends the reader to the document: {problems}"
+    )
+    assert len(unverified) == 1, unverified
+    assert "could not be verified within" in unverified[0], unverified
+    # The BOUND is the property this test is named for, and stubbing `run`
+    # wholesale would otherwise let a regression drop the kwarg silently: without
+    # it the gate hangs instead of reporting, and every assertion above still
+    # passes. Pinned here because the pre-fix version of this test could not fail
+    # on a removed `timeout=`.
+    assert calls and calls[0].get("timeout") == smc.ANCESTRY_TIMEOUT_S, (
+        f"the ancestry probe must pass timeout={smc.ANCESTRY_TIMEOUT_S}; an "
+        f"unbounded probe is the hang this test exists to prevent: {calls}"
+    )
 
 
 def test_a_missing_measured_at_commit_is_drift() -> None:
@@ -467,6 +523,68 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     assert narrow == 2, (
         f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 2 "
         "RST literals §5 records — the exclusion argument needs re-measuring"
+    )
+
+
+def test_the_label_figure_measures_the_CLAIMS_population_not_just_python(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Fails if `_label_hits()` suffixes its population down to `.py`.
+
+    Reachable, and it was the shipped state (#5086 review cycle 5, P3): §5's
+    figure is a `git grep -n ':Document'`, and the git-grep manual says that
+    searches *"the tracked files in the work tree"* — every suffix. The walk here
+    was `(REPO / "tortoise").rglob("*.py")`, so 28 tracked non-`.py` files under
+    `tortoise/` were outside the population the claim is stated over. It is
+    LATENT, not live: both populations happen to agree today (55 lines / 17 files
+    either way), which is exactly what makes it dangerous — an occurrence added to
+    `onboarding/SKILL.md` would raise the true figure while the walk kept
+    returning 55, and the assertion above would compare a stale claim against a
+    stale measurement and go green.
+
+    The control is the DISCRIMINATOR, not a re-assertion: the same content counts
+    identically whatever the file is called, so a suffix filter shows up as a
+    difference. A `.py`-only walk scores the `.yaml` arm `(0, 0)` and this fails.
+    """
+    body = "note: ':Document' is retired\n"
+    as_py = tmp_path / "tracked.py"
+    as_yaml = tmp_path / "tracked.yaml"
+    as_py.write_text(body, encoding="utf-8")
+    as_yaml.write_text(body, encoding="utf-8")
+
+    # The REAL population, read before any monkeypatching below.
+    population = _label_population()
+
+    # The DEFAULT population is the line that was broken, so drive it: monkeypatch
+    # `_label_population` and call `_label_hits()` with NO argument. Asserting only
+    # on explicitly-passed populations would leave the default (`rglob("*.py")`,
+    # the shipped defect) unpinned — a revert of that one line would then pass.
+    monkeypatch.setattr(sys.modules[__name__], "_label_population", lambda: [as_yaml])
+    assert _label_hits() == (1, 1, 0), (
+        "`_label_hits()`'s DEFAULT population must be the claim's — every tracked "
+        "file. It read `(REPO / 'tortoise').rglob('*.py')` once, which reports the "
+        "same 55/17 as the claim today and so looked correct; a tracked non-`.py` "
+        "file carrying `:Document` is exactly what separates the two."
+    )
+    # And the loop itself must not suffix-filter, wherever the population came from.
+    assert _label_hits([as_py]) == (1, 1, 0)
+    assert _label_hits([as_yaml]) == (1, 1, 0)
+
+    non_py = [p for p in population if p.suffix != ".py"]
+    assert non_py, (
+        "`_label_population()` returns no non-`.py` tracked file — if `tortoise/` "
+        "really has none the walk is right by accident, and this assertion should "
+        "be re-derived rather than deleted"
+    )
+    # The SPECIMEN asserts the real source is `git ls-files tortoise/` (all
+    # suffixes). Its failure means THIS example path moved — update the example;
+    # do not change where `_label_population()` reads from.
+    specimen = REPO / "tortoise" / "onboarding" / "SKILL.md"
+    assert specimen in non_py, (
+        f"{specimen.relative_to(REPO)} is no longer among the tracked non-`.py` "
+        "files — it is this test's SPECIMEN of one, so update the example path "
+        "here. Population: "
+        f"{len(population)} files, {len(non_py)} of them non-`.py`."
     )
 
 
