@@ -649,6 +649,106 @@ def test_the_stale_sweep_journals_a_TIERLESS_delete_not_a_demote(
         sdk.close()
 
 
+def test_a_MIXED_generation_session_keeps_a_LEGACY_creation_with_NO_retraction(
+        tmp_path, monkeypatch):
+    """The asymmetry `sdk._write_capture_turns` ACCEPTS, pinned instead of
+    described — the MIXED-generation case neither neighbour covers.
+
+    One session can hold turns captured by two generations of this code, and the
+    change feed is the surface that remembers which:
+
+    * a turn captured **after** this change journals the CARRIER, which is NOT in
+      `_GRAPH_EVENT_TYPES`, so it is announced nowhere (pinned by
+      `test_an_armed_capture_writes_NO_graph_event_for_its_turns`);
+    * a turn captured **before** it journalled its own `PointAdded`, which IS in
+      `_GRAPH_EVENT_TYPES` — the turn WAS announced on this lane, and its removal
+      (the stale sweep, gated on `not _record_holds_turns`) is now silent.
+
+    So a legacy turn keeps a creation in the feed with no matching retraction,
+    and a subscriber keeps a point the sweep dropped. That is the ACCEPTED
+    direction — ⛔ re-announcing turns on this lane to "repair" it would re-
+    advertise entities the lane deliberately refuses to store, and would redden
+    the post-change leg — and this leg is what reds if a future lane instead
+    re-adds the `PointRetracted` emission without re-deriving that trade.
+
+    Non-vacuity: flip `sdk._write_capture_turns`'s gate to `if True:` (i.e.
+    restore the pre-change emission on this lane) and the `PointRetracted`
+    assertion below reds. The LEGACY emission is the pre-fix producer's own
+    record, verbatim (`{"id", "kind", "content_hash"}` + `point=` +
+    `contains_session=`), so the feed this leg starts from is the one the
+    pre-fix code left behind.
+    """
+    log_path = _journal(tmp_path)
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
+    try:
+        _capture_with_record_armed(sdk, monkeypatch)  # the post-change capture
+        proj = sdk._get_proj()
+
+        def _turn_events() -> list[tuple]:
+            rows = proj.g.query(
+                "MATCH (e:GraphEvent) WHERE e.payload CONTAINS $sid "
+                "RETURN e.type, e.payload", params={"sid": SESSION_ID}
+            ).result_set
+            return [row for row in rows
+                    if any(tid in str(row[1]) for tid in EXPECTED_TURN_IDS)]
+
+        # The armed capture announced nothing — re-checked here because the
+        # legacy emission below is only meaningful against an otherwise empty
+        # feed, and because it makes THIS leg's start state independent of the
+        # sibling leg continuing to hold that property.
+        assert _turn_events() == [], _turn_events()
+
+        # ── the PRE-CHANGE producer, replayed verbatim ──────────────────────
+        # `_t2` is chosen because the shorter re-capture below SWEEPS it: the
+        # sweep is the removal whose retraction the gate no longer emits.
+        legacy_id = EXPECTED_TURN_IDS[2]
+        sdk._emit_event(
+            "PointAdded",
+            {"id": legacy_id, "kind": "event", "content_hash": "legacy"},
+            point={"id": legacy_id, "content": CONV[2]["content"],
+                   "pointKind": "event"},
+            contains_session=SESSION_ID,
+        )
+        created = _turn_events()
+        assert [row[0] for row in created] == ["PointAdded"], created
+        assert legacy_id in str(created[0][1])
+
+        # ── a SHORTER re-capture: ids at/beyond the new window are stale ────
+        _capture_with_record_armed(sdk, monkeypatch, turns=CONV[:1])
+
+        # THE PIN — the feed is UNCHANGED: the sweep retracted nothing, so the
+        # legacy creation still stands and the swept turn keeps no removal row.
+        assert _turn_events() == created, (
+            "the record-held lane emitted a change-feed event about a turn: the "
+            "sweep's `PointRetracted` is gated on `not _record_holds_turns`, and "
+            f"this lane stores no turn node to retract. Got {_turn_events()}")
+        assert not [row for row in _turn_events() if row[0] == "PointRetracted"]
+
+        # `poll_events` is what a SUBSCRIBER sees, so the asymmetry is stated
+        # where it bites: the creation is still served for a turn the session no
+        # longer holds, and no removal is. Pinned, not repaired.
+        served = [e for e in sdk.poll_events()["events"]
+                  if any(tid in str(e) for tid in EXPECTED_TURN_IDS)]
+        assert [e["type"] for e in served] == ["PointAdded"], (
+            f"poll_events serves something other than the legacy creation: {served}")
+        assert legacy_id in str(served[0])
+
+        # ── while the REMOVAL itself is journalled and replayable ───────────
+        # The asymmetry is about the FEED only: the sweep's record half is a
+        # real row DELETE (tier-less — a demote would keep serving a turn the
+        # session no longer holds), so a rebuild cannot resurrect `_t2` even
+        # though the feed still advertises it.
+        removed = [r for r in _records(log_path)
+                   if r.get("type") == "EntityMutated"
+                   and r.get("op") == "delete"
+                   and r.get("id") in EXPECTED_TURN_IDS]
+        assert sorted(r["id"] for r in removed) == EXPECTED_TURN_IDS[1:], (
+            f"the sweep journalled the wrong population: {removed}")
+        assert all("cache_tier" not in r for r in removed), removed
+    finally:
+        sdk.close()
+
+
 def test_a_tier_scoped_delete_of_a_non_point_is_REFUSED():
     """The tier column exists only on `public.point`; emitting the demote for
     another label would be SQL against a column that is not there."""
