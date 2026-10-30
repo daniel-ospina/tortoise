@@ -55,11 +55,13 @@
 #   `finding-provenance` / `mirror-images` onto a bare box whose PATH lacks their tools (measured
 #   2026-10-24: exit 127, `gh: command not found`); (b) a FOREIGN ARCH MARKER (`self-hosted-arm64`
 #   on this x64 box) — the pre-#2327 damage a repair is expected to HEAL. (b) is ALWAYS dropped; (a)
-#   only under `CI_RUNNER_OS_LABEL=off`/unset (KEPT under `on|auto`). Both are PRINTED, never
-#   silently skipped. `_preserve_labels` drops both but reads NO flag.
+#   only under `CI_RUNNER_OS_LABEL=off`/unset (kept — but ONLY the one spelling this box may claim,
+#   `$OS_LABEL` — under `on|auto`; another image's pin such as `ubuntu-24.04-arm` stays dropped,
+#   because a label names an IMAGE and keeping it is a false-architecture claim). Both are PRINTED,
+#   never silently skipped. `_preserve_labels` drops both but reads NO flag.
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
-#   `resolve_os_label` (`:302`), reached from `resolve_labels` — i.e. from install, repair and
+#   `resolve_os_label` (`:304`), reached from `resolve_labels` — i.e. from install, repair and
 #   `--print-labels` — so a runner this script registers under `on|auto` carries `ubuntu-24.04`; the
 #   autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
 #   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
@@ -392,7 +394,7 @@ list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
 # It must be dropped by a repair: `self-hosted-arm64` is a CUSTOM label (GitHub returns only
 # `self-hosted`, `Linux`/`macOS`/`Windows` and `X64`/`ARM64`/`ARM` as read-only), so a union that
 # keeps it leaves an x86 box advertising an arm64 pool — the false PASS this file forbids at
-# `:73-76`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
+# `:75-78`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
 # puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too. ⛔ MATCHED CASE-INSENSITIVELY (`tr`), UNLIKE `is_host_label` ABOVE — the exact-case rule does NOT transfer to this class: docs.github.com "apply labels" states "Labels are case-insensitive", and a CUSTOM label's spelling is whatever created it, so `Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64 marker and still answer a lower-case `runs-on:` — an exact-case test here is how a mixed-case stamp escapes both heal paths and keeps the false PASS alive.
 is_foreign_arch_label() {
   case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
@@ -403,13 +405,23 @@ is_foreign_arch_label() {
 }
 # Is $1 a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …)? Same class/shape as
 # `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two writers. The pool
-# claims `ubuntu-latest` and NEVER an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:67`) — that is
+# claims `ubuntu-latest` and NEVER an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:63`) — that is
 # the label a leg pins to escape this pool; `ubuntu-2204-tools` is NOT in the class (boundary test in
 # `tests/test_runner_autoscale.py`), hence both ends anchored. ⛔ A HERE-STRING, never a builtin
 # writer piped into a quiet grep (#841): under `pipefail` the quiet grep's early exit leaves the
 # writer with SIGPIPE and the PIPELINE non-zero over text that DID match — a false negative here would drop this carve-out and put a version pin back on the pool. `repo-harnesses` enforces the shape.
 is_version_pinned_hosted_label() {
   grep -qiE '^ubuntu-[0-9]+(\.[0-9]+)*(-arm)?$' <<<"$1"
+}
+
+# Print the OFFLINE half of a coverage measurement: context, never coverage. GitHub's own runner
+# status list defines `Offline` as "the runner is not connected to GitHub", so an offline runner
+# cannot be handed a job — the ONLINE count is the answer, and this line is what stops a pool of
+# carriers that have all fallen over from reading as covered. Called on every verdict arm.
+offline_context() { # $1=label  $2=offline carriers of it  $3=offline runners in the pool
+  if [ "$3" -gt 0 ]; then
+    say "     Offline, so NOT counted as an answer: $3 runner(s) in the pool are not \`online\`, $2 of them carrying $1."
+  fi
 }
 
 # ── status ─────────────────────────────────────────────────────────────────────
@@ -436,12 +448,20 @@ if [ "$MODE" = status ]; then
   # no runner answered it, so the required aggregate was never dispatched and every PR stayed BLOCKED.
   # Run this from the repo root — it reads the workflows to learn which labels must be answerable.
   say "label-coverage — labels the workflows name vs runners answering them:"
-  # ⛔ ONE PAGINATED READ OF (name, labels), NOT A ONE-PAGE LABEL TALLY. `per_page=100` with no
-  # `--paginate` silently truncated a pool larger than 100 and reported a covered label as `0
+  # ⛔ ONE PAGINATED READ OF (name, status, labels), NOT A ONE-PAGE LABEL TALLY. `per_page=100` with
+  # no `--paginate` silently truncated a pool larger than 100 and reported a covered label as `0
   # runners` (a false red on a large pool) — the read directly above it (`fallback_engaged`) is
   # paginated for the same reason. The runner COUNT comes out of the same read, which is what lets
   # the partial-coverage arm below exist at all: a label tally cannot tell 12 runners from 1.
-  pool_tsv="$(gh api --paginate "repos/$REPO/actions/runners" --jq '.runners[] | [.name, ([.labels[].name]|join(","))] | @tsv' 2>/dev/null)" || exit 3
+  # ⛔ AND THE ROW CARRIES `.status`, BECAUSE A LABEL ON AN OFFLINE RUNNER IS NOT AN ANSWER. GitHub's
+  # own runner list defines `Offline` as "the runner is not connected to GitHub" (and `Idle` as
+  # connected and ready) — an offline runner cannot be handed a job, so counting it as coverage
+  # reports the exact incident this block exists to surface as GREEN: 7 carriers of `ubuntu-24.04`,
+  # all offline, printed `7 of 7` with no `⚠️ PARTIAL` and exit 0 under `CI_RUNNER_OS_LABEL=on`.
+  # Runners go offline routinely (that is what `runner_autoscale.py::converge`'s DEAD/ORPHANED
+  # re-registration exists for), so this is a state, not an edge case. The count below is therefore
+  # ONLINE-only, and the offline rows are counted as CONTEXT and printed.
+  pool_tsv="$(gh api --paginate "repos/$REPO/actions/runners" --jq '.runners[] | [.name, .status, ([.labels[].name]|join(","))] | @tsv' 2>/dev/null)" || exit 3
   # ⛔ THE RUNNER COUNT IS A MEASUREMENT, AND IT IS THE DENOMINATOR — so it is PASSED to the awk
   # below, not re-inferred there. `awk` counts RECORDS, and an empty pool still feeds it ONE empty
   # record (`printf '%s\n' ""`), so `total` came out as 1 and an empty pool printed
@@ -449,6 +469,11 @@ if [ "$MODE" = status ]; then
   # empty read is not a coverage verdict". The correct 0 was computed here and then never read.
   pool_total="$(printf '%s\n' "$pool_tsv" | grep -c . || true)"
   case "$pool_total" in ''|*[!0-9]*) pool_total=0 ;; esac
+  # …and the ONLINE half of it, from the same read: the denominator of every class below is a
+  # population that can ANSWER, so it is the online population. An empty online pool keeps the
+  # pre-existing `0 of 0` reading (a measurement), never a silent fallback to the offline rows.
+  pool_online="$(printf '%s\n' "$pool_tsv" | awk -F'\t' '$2 == "online" {n++} END {printf "%d", n+0}')"
+  case "$pool_online" in ''|*[!0-9]*) pool_online=0 ;; esac
   # ⛔ THE BARE-PIN VERDICT READS THE OPERATOR'S INTENT, NOT ONLY THE COUNT — the same predicate
   # this block already applies to `ubuntu-latest` ("a pool carrying no `ubuntu-latest` IS the healthy
   # state, because the gate is not routing it here"). Without it the block verdicts the CONFIGURATION
@@ -762,13 +787,18 @@ if [ "$MODE" = status ]; then
     # no PARTIAL -> tests/test_ci_runner_x64_install.py
     # ::test_label_coverage_reports_partial_coverage_rather_than_green RED.
     counts="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" -v x64label="$ARCH_LABEL" -v armlabel="$ARM_POOL_LABEL" \
-      -v fallbacklabel="$FALLBACK_LABEL" -v pool_total="$pool_total" '
-      {k=split($2,a,","); hit=0; x64=0; arm=0
+      -v fallbacklabel="$FALLBACK_LABEL" -v pool_total="$pool_total" -v pool_online="$pool_online" '
+      {k=split($3,a,","); hit=0; x64=0; arm=0
        for(i=1;i<=k;i++){ if(a[i]==want) hit=1; if(a[i]==x64label) x64=1; if(a[i]==armlabel) arm=1 }
-       if (hit) n++; if (x64) nx64++; if (arm) narm++
-       if (hit && x64) nx++; if (hit && arm) na++}
+       # ⛔ ONLINE IS A GATE, NOT A DECORATION: an offline runner is "not connected to GitHub", so
+       # it cannot be handed the job. Every count below is online-only, which is what makes an
+       # all-offline pool read `0 of N` (a verdict) instead of `N of N` (a false green).
+       if ($2 == "online") { online++
+         if (hit) n++; if (x64) nx64++; if (arm) narm++
+         if (hit && x64) nx++; if (hit && arm) na++ }
+       else if (hit) offhit++ }        # carriers that CANNOT answer — context, never coverage
       END { total = pool_total + 0   # the MEASURED runner count, never the record count above
-            denom = total
+            denom = pool_online       # every class below is measured against online runners
             cls = "other"
             num = n                 # whole-pool classes count the whole pool, numerator included
             if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) { denom = narm; cls = "arm"; num = na }
@@ -777,13 +807,20 @@ if [ "$MODE" = status ]; then
             # ⛔ THE FALLBACK PAIRS THE DENOMINATOR WITH ITS OWN NUMERATOR. When the sub-pool is
             # empty the denominator becomes the whole pool — so the numerator must widen with it,
             # or a label carried by a runner OUTSIDE the (measured-empty) sub-pool would read as
-            # `0 of N` and exit 5 on a carrier it had just counted.
-            if (denom == 0) { denom = total; num = n }
-            printf "%d %d %s", num+0, denom+0, cls }')"
+            # `0 of N` and exit 5 on a carrier it had just counted. Both halves stay ONLINE-only, so
+            # the widening can never pull an offline carrier back in as coverage.
+            if (denom == 0) { denom = pool_online; num = n }
+            printf "%d %d %s %d %d", num+0, denom+0, cls, offhit+0, total-online }')"
     n="${counts%% *}"
     rest="${counts#* }"
     denom="${rest%% *}"
-    label_class="${rest#* }"
+    rest="${rest#* }"
+    label_class="${rest%% *}"
+    rest="${rest#* }"
+    off_hit="${rest%% *}"
+    off_pool="${rest#* }"
+    case "$off_hit" in ''|*[!0-9]*) off_hit=0 ;; esac
+    case "$off_pool" in ''|*[!0-9]*) off_pool=0 ;; esac
     # ⛔ THE INTENT IS PER LABEL, NOT PER BLOCK. `resolve_os_label` can only ever set `$OS_LABEL`
     # (`ubuntu-24.04`), but the `bare` class the awk defines is ANY `^ubuntu-[0-9][0-9.]*$` — so
     # with the flag `on`, a workflow pinning `ubuntu-22.04` at zero took the verdict arm, exited `5`,
@@ -812,7 +849,11 @@ if [ "$MODE" = status ]; then
       #
       # ⛔ REPORT THE MEASUREMENT, NOT A CAUSE: the line used to assert "only GitHub-hosted can
       # answer it, and hosted is not available here" for EVERY zero-answer label.
-      say "  ⛔ $label = 0 of $denom self-hosted runner(s) answer it."
+      say "  ⛔ $label = 0 of $denom online self-hosted runner(s) answer it."
+      # Offline carriers are printed as context on EVERY arm, because they are the one reading that
+      # distinguishes "nobody was ever asked" from "asked, and every carrier has fallen over" —
+      # the state the coverage count must never absorb as coverage.
+      offline_context "$label" "$off_hit" "$off_pool"
       # The class came from the awk above, so this arm and the DENOMINATOR cannot disagree.
       case "$label_class" in
         arm)
@@ -853,7 +894,8 @@ if [ "$MODE" = status ]; then
       # the scheduled autoscaler ADDS runners, and a fill/repair pass that omits the label leaves
       # the pool drifting back to zero answers one runner at a time with this instrument green at
       # every step. `0 < n < denom` is the only read that sees it before the last one goes.
-      say "  $label = $n of $denom runner(s) — ⚠️ PARTIAL: the other $((denom - n)) cannot answer it."
+      say "  $label = $n of $denom online runner(s) — ⚠️ PARTIAL: the other $((denom - n)) cannot answer it."
+      offline_context "$label" "$off_hit" "$off_pool"
       # ⛔ THE REMEDY IS CLASS-BLIND HERE TOO, AND THIS IS WHERE IT BITES. The zero-answer arm above
       # decides per class; this one printed the bare-pin instruction for EVERY class. So a pool
       # mid-fallback-transition printed `ubuntu-latest = 5 of 12 … re-apply with
@@ -901,7 +943,8 @@ if [ "$MODE" = status ]; then
           ;;
       esac
     else
-      say "  $label = $n of $denom runner(s)"
+      say "  $label = $n of $denom online runner(s)"
+      offline_context "$label" "$off_hit" "$off_pool"
     fi
   done
   if [ "$uncovered" = 0 ]; then
@@ -1013,14 +1056,34 @@ if [ "$MODE" = repair ]; then
       # about a label their own box had been asked to claim. So the box's choice is READ here, under
       # the same name and values the install-side contract uses (#10275): `on|auto` keeps the pin
       # (the mitigation IS this box's state), `off`/unset drops it (the pre-departure invariant, and
-      # what `_preserve_labels` drops on re-registration). An unrecognised value is read as `off` —
-      # the invariant-consistent side, never a silent keep — and says so, once per such label.
+      # what `_preserve_labels` drops on re-registration). An unrecognised value never reaches here —
+      # the flag is validated ONCE, before the mode dispatch (`die … must be off|on|auto`), so the
+      # `*)` arm below is unreachable by construction and kept only so a future edit that moves the
+      # validation cannot silently turn a typo into a KEEP.
       if is_version_pinned_hosted_label "$l"; then
         case "${CI_RUNNER_OS_LABEL:-off}" in
-          on|auto) pinned_kept="${pinned_kept:+$pinned_kept,}$l" ;;
+          on|auto)
+            # ⛔ THE KEEP IS NARROWED TO THE ONE LABEL THIS BOX MAY CLAIM. `$OS_LABEL` is the only
+            # spelling `resolve_os_label` can ever emit, and a label is a claim about the IMAGE, not
+            # about architecture: keeping `ubuntu-24.04-arm` here would let an x86_64 runner serve
+            # an ARM64 job and produce a wrong artifact — the false PASS, not the queue delay, that
+            # this file's header forbids. It also diverges from the sibling writer of the same
+            # invariant, `tools/runner_autoscale.py::_preserve_labels`, which drops the WHOLE
+            # family on every arch ("it names an image, not an architecture") — and a keep and a
+            # drop on the same label is the divergence that function's own comment forbids. A
+            # repair UNIONS, so a kept pin is permanent until someone runs an explicit `off` repair:
+            # the narrowing has to happen HERE or not at all. Anything else in the family is
+            # reported on the `not kept=` / `removed=` lines, never silently absorbed.
+            if [ "$l" = "$OS_LABEL" ]; then
+              pinned_kept="${pinned_kept:+$pinned_kept,}$l"
+            else
+              pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
+              say "NOT KEPT: '$l' is a version-pinned hosted label outside this box's own label set ($OS_LABEL is the only one it can claim) — keeping it would make another image's claim on an x86_64 runner. Reported on the removed= line; nothing re-applies it here."
+              continue
+            fi ;;
           off) pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"; continue ;;
           *) pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
-             say "WARNING: CI_RUNNER_OS_LABEL='$CI_RUNNER_OS_LABEL' is not on|auto|off — read as off, so the version pin '$l' is not kept"; continue ;;
+             say "WARNING: CI_RUNNER_OS_LABEL='$CI_RUNNER_OS_LABEL' is not on|auto|off — read as off, so the version pin '$l' is not kept (unreachable: the flag is validated before dispatch)"; continue ;;
         esac
       fi
       list_has "$after" "$l" || after="${after:+$after,}$l"
