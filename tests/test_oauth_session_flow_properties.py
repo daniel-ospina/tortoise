@@ -40,9 +40,12 @@ are the real modules, so the classification under test (`isRefreshTokenDead`, th
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -57,6 +60,7 @@ REPO = Path(__file__).resolve().parent.parent
 AUTH_DIR = REPO / "website/apps/dashboard/functions/_shared/auth"
 TOKEN_TS = AUTH_DIR / "token.ts"
 CONSENT_FLOW_TS = AUTH_DIR / "consent-flow.ts"
+TEST_FILE = "tests/test_oauth_session_flow_properties.py"
 
 # Resolve `./x` to `./x.ts`: `token.ts` imports `./session` / `./supabase`
 # extensionlessly (the Pages runtime resolves it; Node ESM does not), so the
@@ -749,3 +753,304 @@ def test_the_purity_guard_cannot_be_bypassed_by_an_inline_comment_in_a_string() 
     )
     with pytest.raises(AssertionError, match="fetch"):
         _assert_consent_flow_is_pure(adversarial)
+
+
+# ── the mutation proof, kept executable ──────────────────────────────────────
+#
+# #8448 proved these four properties by MUTATION — each implementation was
+# deliberately broken and the matching test went red — but the proof was a
+# one-time manual act recorded in a PR body. That is the shape the #8438 defect
+# came back through: a test named `single-flight` once asserted `changeCounts ==
+# [1, 0]`, a result a real guard cannot produce, so it would have FAILED had the
+# property been implemented, and it was green the whole time. A green test is
+# not evidence that it tests anything; only "break the property and watch THIS
+# test go red" is, and that evidence rots the moment nobody re-runs it.
+#
+# So the proof is a test. Each entry below is ONE mutation that removes ONE
+# property, the exact source span it rewrites, the node that must then FAIL, and
+# the property assertion's own message — because "the child exited 1" and "the
+# property's assertion fired" are different claims, and only the second is a kill
+# (`_property_test_fails` requires both, so a failure for any OTHER reason is
+# loud here instead of counted as proof). `TORTOISE_MUTATION_PROOF=1` runs them;
+# the default lane runs only the structural pin, which is what keeps the table
+# honest for free.
+
+#: (property, file, exact source span, replacement, the test that must go RED,
+#:  a fragment of THAT test's own failure message)
+PROPERTY_MUTATIONS: tuple[tuple[str, Path, str, str, str, str], ...] = (
+    (
+        "single-flight",
+        TOKEN_TS,
+        "  const running = inFlightRefreshes.get(handle);\n  if (running) return running;\n",
+        "  // MUTATION: the in-flight map is no longer consulted\n",
+        "test_property_1_single_flight_issues_exactly_one_refresh",
+        "the in-flight guard is gone",
+    ),
+    (
+        "refresh-once",
+        TOKEN_TS,
+        "  if (row.access_token && row.access_token_expires_at"
+        " && row.access_token_expires_at - REFRESH_SKEW_MS > now) {\n",
+        "  if (false) {\n",
+        "test_property_2_refresh_once_is_bounded_by_skew_and_cooldown",
+        "the skew no longer holds",
+    ),
+    (
+        "never-sign-out",
+        TOKEN_TS,
+        '    if (refreshed.retryable) return { ok: false, reason: "unavailable" };\n',
+        '    if (refreshed.retryable) return { ok: false, reason: "no_session" };\n',
+        "test_property_3_never_sign_out_a_transient_failure_is_not_a_dead_session",
+        "a fault read as a session verdict is the #3485 sign-out",
+    ),
+    (
+        "auto-advance",
+        CONSENT_FLOW_TS,
+        '  if (input.session === "usable") {\n'
+        '    return { action: "advance", status: 302, to: input.authorize_url };\n'
+        "  }\n",
+        "  // MUTATION: a usable session no longer advances on its own\n",
+        "test_property_4_auto_advance_without_a_manual_click",
+        "the advance decision table changed",
+    ),
+)
+
+
+def test_every_property_mutation_still_targets_exactly_one_span() -> None:
+    """The mutation table must still point at the live implementation.
+
+    A mutation whose span has MOVED silently proves nothing — it rewrites
+    nothing, the test stays green, and "all four mutated and went red" becomes a
+    claim about a file that no longer exists in that shape. So the cheap check
+    runs every lane, and it FAILS with a re-pointing instruction rather than
+    quietly passing.
+
+    The NODE id rots the same way and is pinned here for the same reason. The
+    table above is the only place those four test ids are written down, and a
+    rename reddens nothing on its own: the opt-in proof would run
+    `pytest <file>::<gone-node>`, collect zero tests, exit 4 — and before this
+    pin existed the harness read that as a kill (#10343 review P1). Checking the
+    collection on EVERY lane makes a rename loud where the span check already is,
+    instead of only under `TORTOISE_MUTATION_PROOF=1`.
+    """
+    collected = _collected_node_ids()
+    for label, path, span, _replacement, node, _expected in PROPERTY_MUTATIONS:
+        assert path.is_file(), f"{label}: {path} is gone — re-point the mutation"
+        hits = path.read_text().count(span)
+        assert hits == 1, (
+            f"{label}: the mutated span occurs {hits} time(s) in {path.name} — the "
+            "implementation moved. Re-point `PROPERTY_MUTATIONS` at the line that now "
+            f"carries {label!r}; do not delete the leg (see {node})."
+        )
+        assert f"{TEST_FILE}::{node}" in collected, (
+            f"{label}: `{node}` is not collected by {TEST_FILE} — the test was renamed "
+            "or removed. Re-point `PROPERTY_MUTATIONS` at the test that now carries "
+            f"{label!r}; a mutation aimed at a node that does not exist proves nothing."
+        )
+
+
+def _collected_node_ids() -> set[str]:
+    """Every node id pytest collects from this file — collected, never run."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", TEST_FILE, "--collect-only", "-q", "--no-header"],
+        capture_output=True, text=True, timeout=300, cwd=str(REPO),
+    )
+    assert proc.returncode == 0, (
+        f"collecting {TEST_FILE} exited {proc.returncode}; the node-id pin cannot "
+        f"answer and must not read as a pass.\nstdout:\n{proc.stdout[-4000:]}\n"
+        f"stderr:\n{proc.stderr[-2000:]}"
+    )
+    return {line.strip() for line in proc.stdout.splitlines() if "::" in line}
+
+
+# pytest's exit-code table is the only thing that separates a KILL from a harness
+# error, and it is why `returncode != 0` is not a test failure
+# (docs.pytest.org/en/stable/reference/exit-codes.html):
+#   0 all passed · 1 collected and run, some FAILED · 2 interrupted ·
+#   3 internal error · 4 usage error, INCLUDING a node id that does not exist ·
+#   5 no tests were collected.
+# Only 1 is a kill — which is Stryker's own definition of one ("at least one test
+# failed while this mutant was active"; `Runtime error` and `Compile error` are
+# explicitly NOT in the score). Treating every non-zero exit as a kill is a FALSE
+# GREEN (#10343 review P1): rename a property test and pytest exits 4 having run
+# zero tests, yet the proof would print "<node> RED with the property removed".
+_PYTEST_OK = 0
+_PYTEST_TESTS_FAILED = 1
+
+# The OTHER half of a kill, and the one the exit code cannot see: a mutation that
+# breaks the module still reddens its test — `_run` (above) wraps every non-zero
+# node exit as "harness scenario … failed", so the child exits 1, prints a
+# `FAILED` line, and would be recorded as a kill while the assertion never ran.
+# The field calls that a `Runtime error` and excludes it from the score (#10343
+# review cycle 2). So the child's output must carry the property's OWN message
+# (the sixth column of `PROPERTY_MUTATIONS`) and must not carry this prefix.
+_HARNESS_FAILURE = "harness scenario"
+
+# Budget arithmetic — every INNER bound sits under the 1200 s outer mark below, so
+# a slow child names itself instead of the item dying as a bare timeout with no
+# per-property diagnostic (#10343 review cycle 1, P2):
+#     baseline child, 4 nodes ......... 200 s
+#     4 mutated children, 1 node each .. 4 x 200 s = 800 s
+#     ---------------------------------------------------
+#     worst case .................... 1000 s  <  1200 s
+# Measured cost at this head is ~24 s for the whole item (~6 s a child); the 200 s
+# per-child bound is headroom for the loaded box where the hand-run version
+# measured 206 s.
+_PROPERTY_RUN_TIMEOUT_S = 200
+
+
+def _assert_baseline_green() -> None:
+    """Every property test must be GREEN before anything is mutated.
+
+    A kill is RELATIVE TO A BASELINE or it is not evidence. A property test that
+    was already failing for its own stated reason satisfies every check in
+    `_property_test_fails` — exit 1, a `FAILED` line, no harness prefix, its own
+    message — without the mutation changing anything, so the proof would report a
+    kill it never established. That is the one shape the checks below cannot see,
+    and it bites hardest when the proof is most worth running: someone
+    investigating a suspected regression in `token.ts` / `consent-flow.ts`, where
+    the baseline is exactly what is in doubt.
+
+    Mutation testing's own definition of a kill presupposes this — "at least one
+    test FAILED **while this mutant was active**" — and its tooling runs the suite
+    unmutated first for the same reason. Aborts BEFORE any write, so a red
+    baseline never touches a tracked source.
+    """
+    nodes = [node for _label, _path, _span, _repl, node, _expected in PROPERTY_MUTATIONS]
+    argv = [
+        sys.executable, "-m", "pytest",
+        *(f"{TEST_FILE}::{node}" for node in nodes),
+        "-q", "--no-header", "-rf",
+    ]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=_PROPERTY_RUN_TIMEOUT_S,
+            cwd=str(REPO),
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            f"the four property tests did not finish unmutated within "
+            f"{_PROPERTY_RUN_TIMEOUT_S}s — there is no baseline to measure a kill "
+            "against, and a mutation applied to an unmeasured tree proves nothing."
+        )
+    assert proc.returncode == _PYTEST_OK, (
+        "the property tests are ALREADY red unmutated — a mutation cannot be shown "
+        "to have killed anything against a baseline that was never green. Fix the "
+        "source, or the test, before amending `PROPERTY_MUTATIONS`.\n"
+        f"stdout:\n{proc.stdout[-4000:]}\nstderr:\n{proc.stderr[-2000:]}"
+    )
+    assert "FAILED " not in proc.stdout, (
+        "the baseline child exited 0 but still reported a FAILED line, which is not "
+        f"a shape a green baseline takes.\nstdout:\n{proc.stdout[-4000:]}"
+    )
+
+
+def _property_test_fails(node: str, expected: str) -> bool:
+    """Run ONE property test in a fresh process; True only when it goes RED.
+
+    "Red" means a NAMED test failed — and failed on the property's own assertion.
+    Every other shape RAISES rather than returning True, because each is a run
+    that never reached the assertion: a bad node id (pytest exit 4), an
+    unparsable mutant (the harness wrapper, exit 1), a missing pytest. A run that
+    does not execute the assertion is not evidence about the property.
+    """
+    argv = [sys.executable, "-m", "pytest", f"{TEST_FILE}::{node}", "-q", "--no-header", "-rf"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=_PROPERTY_RUN_TIMEOUT_S,
+            cwd=str(REPO),
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            f"{node}: exceeded {_PROPERTY_RUN_TIMEOUT_S}s with the property removed — "
+            "the budget, not the property, decided this leg (see the outer "
+            "`pytest.mark.timeout(1200)`)."
+        )
+    if proc.returncode == _PYTEST_TESTS_FAILED:
+        assert f"FAILED {TEST_FILE}::{node}" in proc.stdout, (
+            f"{node}: pytest exited 1 but no `FAILED {TEST_FILE}::{node}` line is in "
+            "its output, so this non-zero exit is not that test failing and proves "
+            f"nothing about the property.\nstdout:\n{proc.stdout[-4000:]}\n"
+            f"stderr:\n{proc.stderr[-2000:]}"
+        )
+        assert _HARNESS_FAILURE not in proc.stdout, (
+            f"{node}: the child died inside the HARNESS, not inside the property — "
+            f"`_run` wraps any non-zero node exit as {_HARNESS_FAILURE!r}, so a "
+            "mutation that makes the module unparsable reddens this test with exit "
+            "1 and a FAILED line and would otherwise be counted as a kill. A mutant "
+            "that does not parse is a Runtime error — not a kill, and not evidence "
+            "about the property. Fix the mutation's `replacement` so it still "
+            f"parses.\nstdout:\n{proc.stdout[-4000:]}"
+        )
+        assert expected in proc.stdout, (
+            f"{node}: the test failed, but its output does not carry the property's "
+            f"own message ({expected!r}), so it failed for some other reason and "
+            "proves nothing about the property.\nstdout:\n"
+            f"{proc.stdout[-4000:]}"
+        )
+        return True
+    if proc.returncode == _PYTEST_OK:
+        return False
+    pytest.fail(
+        f"{node}: pytest exited {proc.returncode}, which is not the tests-failed code "
+        "(1) — per pytest's exit-code table 2=interrupted, 3=internal error, 4=usage "
+        "error (a node id that does not exist), 5=nothing collected. A run that never "
+        "executed the assertion cannot prove the property.\n"
+        f"stdout:\n{proc.stdout[-4000:]}\nstderr:\n{proc.stderr[-2000:]}"
+    )
+
+
+# 1200 s for the whole item, so the inner bounds above are the binding constraint
+# and this mark is the backstop (pyproject.toml's repo-wide `timeout = 300` is a
+# PER-ITEM budget this item legitimately exceeds — "a leg that needs a longer
+# single item must SAY so").
+@pytest.mark.timeout(1200)
+@pytest.mark.skipif(
+    os.environ.get("TORTOISE_MUTATION_PROOF") != "1",
+    reason="opt-in (~3.5 min, four subprocess runs): TORTOISE_MUTATION_PROOF=1",
+)
+def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
+    """Break each property in the real source; its own test must fail.
+
+    The four nodes are proved GREEN unmutated first, so every kill below is
+    relative to a baseline this artifact established itself. The restore is
+    byte-identical and ASSERTED by sha256 — and the assertion runs in the
+    `finally`, on the error path too, because the paths that skip the loop body
+    are exactly the ones a mutated tracked file could survive: an unexpected
+    mutation, a harness error, a budget red. The MUTATION WRITE is inside that
+    `try` as well, so the restore covers the write it is meant to undo rather
+    than only the run after it. The write is bytes-to-bytes, so the comparison is
+    bytes-to-bytes too. The previous version of this proof ran by hand, where no
+    restore was asserted at all.
+    """
+    _assert_baseline_green()
+    for label, path, span, replacement, node, expected in PROPERTY_MUTATIONS:
+        original_bytes = path.read_bytes()
+        original = original_bytes.decode("utf-8")
+        before = hashlib.sha256(original_bytes).hexdigest()
+        assert original.count(span) == 1, f"{label}: span is no longer unique"
+        # The MUTATION WRITE is inside the `try` on purpose: `write_bytes` truncates
+        # on open, so a raise from it (ENOSPC/EIO mid-write, KeyboardInterrupt, this
+        # item's own SIGALRM) would otherwise be the one path that leaves a tracked
+        # source truncated with no restore attempted and no sha256 to say so.
+        try:
+            path.write_bytes(
+                original_bytes.replace(span.encode("utf-8"), replacement.encode("utf-8"))
+            )
+            went_red = _property_test_fails(node, expected)
+        finally:
+            path.write_bytes(original_bytes)
+            after = hashlib.sha256(path.read_bytes()).hexdigest()
+            assert before == after, (
+                f"{label}: restore is NOT byte-identical ({before[:16]}… → {after[:16]}…) — "
+                f"{path.name} is still carrying the mutation. `git checkout -- {path}` "
+                "before doing anything else."
+            )
+        assert went_red, (
+            f"{label}: {node} stayed GREEN with the property removed — the test does "
+            "not test the property it is named for"
+        )
+        # Printed so the evidence is visible in the run, not only in a green tick:
+        # run with `-s` and this is the pasteable proof (`TORTOISE_MUTATION_PROOF=1`).
+        print(f"  {label}: {node} RED with the property removed; restore byte-identical "
+              f"({before[:16]}…)")

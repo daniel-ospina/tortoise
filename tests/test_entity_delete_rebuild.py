@@ -35,10 +35,11 @@ from datetime import UTC, datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+from _node_ids import node_id
 
 from tortoise.ids import ulid
 from tortoise.log import EventLog
-from tortoise.sdk import TortoiseSDK, _entity_name_id
+from tortoise.sdk import TortoiseSDK
 
 # The one journaled write-contract record type (#3299). The ``op`` field
 # discriminates the transition; this suite pins ``op="delete"``.
@@ -99,7 +100,7 @@ class TestDeleteSurvivesRebuild:
         name = "delete-me-subject"
         sdk.create_entity("subject", name, subjectKind="core:other",
                           is_episodic=False)
-        oid = _entity_name_id("Subject", name)
+        oid = node_id(sdk, "Subject", name)
         assert _subject(proj, name), "seed Subject must exist live"
 
         assert sdk._delete_entity(oid) is True, "node must be deleted"
@@ -122,7 +123,7 @@ class TestDeleteSurvivesRebuild:
         name = "delete-me-object"
         sdk.create_entity("object", name, objectKind="core:other",
                           is_episodic=False)
-        oid = _entity_name_id("Object", name)
+        oid = node_id(sdk, "Object", name)
 
         assert sdk._delete_entity(oid) is True
         assert not _object(proj, name)
@@ -230,7 +231,7 @@ class TestRebuildFidelity:
                           objectKind="core:other", is_episodic=False)
         sdk.create_entity("subject", "drop-subject",
                           subjectKind="core:other", is_episodic=False)
-        drop_id = _entity_name_id("Subject", "drop-subject")
+        drop_id = node_id(sdk, "Subject", "drop-subject")
         assert sdk._delete_entity(drop_id) is True
 
         proj.rebuild_all(str(events), confirm_destructive=True)
@@ -250,7 +251,7 @@ class TestRebuildFidelity:
         name = "recreate-me"
         sdk.create_entity("subject", name, subjectKind="core:other",
                           is_episodic=False)
-        oid = _entity_name_id("Subject", name)
+        oid = node_id(sdk, "Subject", name)
         assert sdk._delete_entity(oid) is True
         sdk.create_entity("subject", name, subjectKind="core:other",
                           is_episodic=False)
@@ -364,7 +365,7 @@ def test_deleted_entity_absent_after_rebuild_dispatch(env):
     proj = sdk._get_proj()
     sdk.create_entity("object", "dispatch-delete", objectKind="core:other",
                       is_episodic=False)
-    oid = _entity_name_id("Object", "dispatch-delete")
+    oid = node_id(sdk, "Object", "dispatch-delete")
     assert sdk._delete_entity(oid) is True
 
     proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
@@ -434,7 +435,7 @@ class TestIdentityIsKindPlusId:
         name = "collide-subject-3860"
         sdk.create_entity("subject", name, subjectKind="core:other",
                           is_episodic=False)
-        sid = _entity_name_id("Subject", name)
+        sid = node_id(sdk, "Subject", name)
         assert _subject(proj, name), "seed Subject must exist live"
 
         assert sdk._delete_entity(sid) is True
