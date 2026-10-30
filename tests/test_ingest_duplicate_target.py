@@ -449,6 +449,70 @@ def test_clean_operator_is_not_adopted_by_a_wider_request(make_sdk):
         [(0, q1), (1, q1), (2, q3)], _operator_input_slots(sdk, wide)
 
 
+def test_idx_less_operator_is_not_adopted(make_sdk):
+    """#10330 item 1 — the ``size(from_slots) > 0`` conjunct is LOAD-BEARING and
+    was invisible to every test (mutation M5: strip only it → the whole group
+    still passed, while the harm below came back).
+
+    ``from_slots`` is ``collect(CASE WHEN r.idx = 0 THEN t.id ELSE null END)``
+    and FalkorDB's ``collect`` DROPS nulls, so an operator with no ``idx`` 0
+    (source) slot yields an EMPTY ``from_slots`` — not ``[null]`` (measured on
+    this tree: ``targets=['b','c'] n_edges=3 from_slots=[]``). Without the
+    conjunct, ``size([x IN slot_ids WHERE x IN from_slots])`` is then ``0``,
+    which is ``<= 1``, so the source-slot bound goes VACUOUSLY true and the
+    legacy carve-out admits an operator whose excess slot is not evidenced as
+    a duplicate of its own source at all: the ``idx``-less ``[b, c, c]`` shape
+    below adopted a 2-slot request (measured under M5: ``kind='exact'`` on the
+    ``idx``-less node) and handed the caller a factor with NO source slot and a
+    duplicated target — the original #9750 harm, restored.
+
+    The conjunct is what excludes it: an operator carrying no source slot
+    carries no evidence that its excess is a pre-fix TARGET duplicate, so the
+    carve-out never applies, the request MISSES, and the retry mints its own
+    clean 2-slot operator.
+    """
+    sdk = make_sdk("idx_less")
+    a = sdk.create_point(kind="statement", content="one")["id"]
+    b = sdk.create_point(kind="statement", content="two")["id"]
+    c = sdk.create_point(kind="statement", content="three")["id"]
+    op = sdk.create_operator("IMPL", a, [b, c])
+    g = sdk._get_proj().g
+    # simulate an `idx`-LESS residual: no `idx` 0 (source) slot at all, and the
+    # excess slot repeats a TARGET — 3 typed edges over 2 distinct endpoints,
+    # i.e. exactly the `n_edges > size(targets)` shape the carve-out keys on.
+    for rel in ("IMPL", "INPUT"):
+        g.query(f"MATCH (o:Point {{id:$o}})-[r:{rel}]->(t) DELETE r",
+                params={"o": op["id"]})
+    for idx, target in ((1, b), (2, c), (3, c)):
+        g.query("MATCH (o:Point {id:$o}), (t:Point {id:$t}) "
+                "CREATE (o)-[:IMPL {idx:$i}]->(t) "
+                "CREATE (t)-[:INPUT {idx:$i}]->(o)",
+                params={"o": op["id"], "t": target, "i": idx})
+    assert [i for i, _ in _operator_input_slots(sdk, op["id"])] == [1, 2, 3], \
+        _operator_input_slots(sdk, op["id"])
+    # the PREMISE the conjunct restores: `collect` really did drop the nulls
+    assert g.query(
+        "MATCH (o:Point {id:$o}) OPTIONAL MATCH (o)-[r:IMPL]->(t) "
+        "RETURN collect(CASE WHEN r.idx = 0 THEN t.id ELSE null END) "
+        "AS from_slots", params={"o": op["id"]},
+    ).result_set[0][0] == [], "`from_slots` must be EMPTY for an idx-less operator"
+
+    assert sdk._find_operator("IMPL", [b, c]) is None, (
+        "an operator with NO source slot must not answer a 2-slot request by "
+        "endpoint set alone — its excess slot is not evidenced as a legacy "
+        "duplicate TARGET, so the carve-out must not fire")
+
+    # …and the ingest spelling mints its own clean operator instead of adopting it
+    res = sdk.ingest({"connections": [
+        {"from": b, "to": [c], "operator": "IMPL"}]})
+    assert res["created"]["connections"] == 1, res
+    assert res["deduped"]["connections"] == 0, res
+    assert res["ids"]["connections"] != [op["id"]], res["ids"]
+    assert [(i, t) for i, t in
+            _operator_input_slots(sdk, res["ids"]["connections"][0])] == \
+        [(0, b), (1, c)], _operator_input_slots(sdk, res["ids"]["connections"][0])
+
+
 def test_crash_partial_still_absorbs_a_repeated_target(make_sdk):
     """#10305 — the arity leg must NOT disturb the crash-partial absorb, which is
     the one place the ingest-side ``dsts = _distinct_dsts`` collapse is
