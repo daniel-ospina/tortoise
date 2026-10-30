@@ -1125,13 +1125,17 @@ _RUNNER_TEMP_LOG = "\"$PYTEST_LOG\""
 #: The other per-runner spelling: a job whose log lives in its OWN
 #: `${RUNNER_TEMP}` — #7815 moved `test-d14-hosted-api` there, because a
 #: `/tmp` literal is shared between concurrent jobs on a self-hosted runner.
-#: It matched five legs when #7815 landed; #10280 then moved `test-slow`,
-#: `test-concurrency-falkor`, `test-track-b` and `test-carve-out` onto the
-#: `"$PYTEST_LOG"` indirection instead (resolved once per job, fail-closed on
-#: `${RUNNER_TEMP:?}`), so this spelling now covers d14 alone. The branch is kept
-#: because d14 is a real site and a guard whose subject is this drift must not be
-#: spelling-dependent. Quoting is preserved from the line it came from, so the
-#: `--log <token>` pairing below compares like with like.
+#: Later migrations moved other legs onto the `"$PYTEST_LOG"` indirection instead
+#: (resolved once per job, fail-closed on `${RUNNER_TEMP:?}`), so this spelling now
+#: covers `test-d14-hosted-api` alone. The branch is kept because that leg is a real
+#: site and a guard whose subject is this drift must not be spelling-dependent — and
+#: NO COUNT is stated here on purpose: the split has moved twice, and a count in a
+#: comment is not derived by any pin, so it goes stale silently. The pins that DO
+#: derive numbers are `_STATED_PER_RUNNER_PYTEST_LOG_SITES` /
+#: `_STATED_LITERAL_PYTEST_LOG_SITES` and `test_the_stated_inventory_matches_the_workflows`;
+#: read those, never this sentence, for how many legs use which spelling.
+#: Quoting is preserved from the line it came from, so the `--log <token>` pairing
+#: below compares like with like.
 _RUNNER_TEMP_TMPL_RE = re.compile(
     r"^\"?\$\{RUNNER_TEMP:-/tmp\}/[^\"\s|]+\.(?:log|xml)\"?$")
 #: A leg may persist its output through `| tee /tmp/x.log` instead of a tail; both are
@@ -1170,11 +1174,12 @@ def capture_site(line: str) -> str | None:
         # a literal `/tmp/*.log`.
         return target
     if _RUNNER_TEMP_TMPL_RE.match(target):
-        # The `${RUNNER_TEMP:-/tmp}/<name>` spelling: ALSO per-runner. #7815 moved every
-        # hardened job in this workflow onto it; #10280 then moved five of the six onto
-        # the `"$PYTEST_LOG"` indirection instead, so today this spelling covers
+        # The `${RUNNER_TEMP:-/tmp}/<name>` spelling: ALSO per-runner. #7815 moved the
+        # hardened jobs onto it; later migrations moved most of them onto the
+        # `"$PYTEST_LOG"` indirection instead, so today this spelling covers
         # `test-d14-hosted-api` ALONE. The branch stays because that leg is a real site
-        # and a guard whose subject is this drift must not be spelling-dependent.
+        # and a guard whose subject is this drift must not be spelling-dependent — and
+        # no count is stated here, for the reason given on `_RUNNER_TEMP_TMPL_RE` above.
         # Returned verbatim so the `--log <token>` pairing is the same string comparison
         # as the literal case.
         return target

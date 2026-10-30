@@ -7167,8 +7167,10 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
 #     that its junitxml happens to satisfy — the coverage manifest is the thing
 #     that certifies "these tests ran", so it must not be writable by a peer.
 #
-# The three jobs below were the residue #10028 left (its own comment said the
-# `test-slow` migration was the second of four). They are asserted as a TABLE,
+# The jobs in the table below are the residue #10028 left (its own comment said the
+# `test-slow` migration was the second of four). The tuple is the list of legs, and it
+# is the ONLY place that list lives — a count stated in this sentence went stale the
+# moment a leg was added to it, so no count is stated here. They are asserted as a TABLE,
 # not one bespoke test per job, so a leg added to the selector's matrix inherits
 # the check by adding its job id here — and so the assertion cannot drift into
 # "whatever the last migrated job happens to look like".
