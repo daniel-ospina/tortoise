@@ -974,7 +974,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4; #9750's 40-line helper at
-    `sdk.py:5168` moved it by 40), so any typed number is
+    `sdk.py:5858` moved it by 40), so any typed number is
     stale on the next merge and a merge that "takes the newer side" silently
     restores it. `_META_FOLD_CITE` therefore READS the line out of `sdk.py` on
     every run (`_sdk_line_naming`) instead of typing it — the cause must still name
@@ -1007,7 +1007,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     # to `_META_FOLD_CITE` alone passes whenever BOTH sides are typed the same
     # way, so a probe that TYPES the number reds only on the next branch that
     # inserts a line above the fold (#9964's 326, #9202's 4, and this branch's
-    # own 40-line helper at `sdk.py:5168` — each one moved the fold, and each
+    # own 40-line helper at `sdk.py:5858` — each one moved the fold, and each
     # one needed a hand re-derivation). Resolving the emitted cite against the
     # tree cannot be satisfied by agreement; it needs the code to BE there.
     sdk_lines = (_REPO / "tortoise/sdk.py").read_text().splitlines()
