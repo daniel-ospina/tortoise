@@ -5122,114 +5122,82 @@ def test_sweep_granularity_cli_waiver_is_the_only_way_through(
 
 # ── #4821 review P2: the PERMITTING direction must be proven too ──────────
 #
-# The contract has two directions, and only the refusing one was pinned: every
-# assertion on `_dense_leg_verified` was `is False`, the `SELECTED
-# granularity` line was only ever asserted ABSENT, `_print_table` was called by
-# no test at all, and `main`'s v2 branch was unreachable from the suite (both
-# `main()` calls are `--mock` → deterministic). Three mutants therefore
-# survived the whole module — and a suite that EXECUTES a branch without
-# discriminating its two outcomes still lets that branch be rewritten (pitest's
-# standard: a surviving mutant is a test gap, not an opinion):
+# The contract has two directions and only the refusing one was pinned: every
+# assertion on `_dense_leg_verified` was `is False`, the `SELECTED granularity`
+# line was only ever asserted ABSENT, `_print_table` was called by no test at
+# all, and `main`'s v2 branch was unreachable from the suite (every `main()`
+# call passed `--mock`, which forces deterministic ingest). A suite that
+# EXECUTES a branch without discriminating its outcomes still lets the branch
+# be rewritten — a surviving mutant is a test gap, not an opinion:
 #   M-A `_dense_leg_verified` → `return False` — every legitimate hybrid sweep
-#       is FALSELY BLOCKED (`NOT A MEASUREMENT`, exit 1): the primary operator
-#       path, and the PR's own claimed behaviour "(b) the legitimate path still
-#       works";
-#   M-B `main`'s `if ingest_mode == "v2" and (winner is None or not measured)`
-#       → drop `or not measured` — the exit-code gate this PR adds ("no script
-#       may land a keyword-only sweep as a result") silently disappears;
-#   M-C `_print_winner`'s `if not measured:` → `if True:` — a genuinely
-#       MEASURED sweep never prints SELECTED.
-#
-# The two tests below are hermetic (no DB, no embedder, no network, no model):
-# `main`'s work after `run_sweep` is print + write + return, so supplying the
-# gate and the sweep leaves every line under test — the real
-# `_dense_leg_verified`, `_print_table` and `_print_winner` — live.
+#       falsely blocked. Killed by the positive controls in
+#       `test_dense_leg_verified_consumes_the_write_time_witness` and by this
+#       test's exit-0 arm.
+#   M-B `main`: drop `or not measured` from the step-2 gate — killed by
+#       `test_sweep_granularity_v2_waived_sweep_never_exits_zero`.
+#   M-C `_print_winner`: `if not measured:` → `if True:` — NOT discriminated by
+#       either: every other assertion on the winner line is an ABSENCE, and
+#       the exit code does not depend on that print. That is what the test
+#       below pins, together with `_print_table`'s `MEASURED` label (only the
+#       `NOT MEASURED` side was asserted) and the measured receipt + exit code
+#       end-to-end through `main`.
 
 _ENABLED_STATUS = {"available": True, "reason": None, "model": "pinned",
                    "sentence_transformers_version": "x"}
-_WAIVED_STATUS = {"available": False, "reason": "no_embedder", "model": None,
-                  "sentence_transformers_version": None}
 
 
-def _sweep_cell(*, vector_strategy: str) -> dict:
-    """A per-cell receipt in the shape ``run_sweep`` returns."""
-    embedded = vector_strategy == "enabled"
-    return {"chunk_turns": 1, "vector_strategy": vector_strategy,
-            "embedding_coverage": 1.0 if embedded else 0.0,
-            "evidence_recall@10": 0.5, "chunk_evidence_recall@10": 0.5,
-            "session_recall@10": 0.5, "turn_recall@10": 0.5,
-            "context_tokens_mean": 10.0, "context_point_count_mean": 1.0,
-            "n_completed": 1, "points_total": 4,
-            "points_embedded": 4 if embedded else 0}
+def test_sweep_main_selects_and_exits_zero_when_measured(
+        monkeypatch, tmp_path, capsys):
+    """#4821 review P2 — the direction that PERMITS a sweep (M-A + M-C).
 
+    A v2 sweep whose cells recorded ``vector_strategy=enabled`` with real
+    coverage IS a measurement: the table says ``MEASURED``, the winner line
+    says ``SELECTED granularity``, the receipt says ``measured: true``, and
+    ``main`` exits 0. RED when ``_dense_leg_verified`` is `return False` (M-A:
+    the whole legitimate hybrid path is falsely blocked — the PR's own claimed
+    behaviour "(b) the legitimate path still works") and RED when
+    ``_print_winner`` prints the unmeasured vocabulary unconditionally (M-C);
+    both were green before this test existed.
 
-def _run_main_hermetically(monkeypatch, tmp_path, *, vector_strategy,
-                           embedder_status, extra_argv=()):
-    """Drive ``main``'s v2 branch with no DB, embedder, network or model.
-
-    Only the OUTERMOST collaborators are supplied (the gate, the reader/judge,
-    the extractor builder and the sweep itself); everything the tests assert
-    on — the measured derivation, the table's dense-leg label, the winner
-    vocabulary, the receipt and the exit code — is the real code.
-
-    Note: the gate is patched rather than ``run_sweep``'s ``dense_leg_required``
-    driven, because a supplied ``embedder_status`` silently WINS over
-    ``dense_leg_required`` in ``run_sweep`` (documented precedence), so a test
-    that drove the requirement without the gate would prove nothing.
+    Hermetic — no DB, embedder, network or model. The gate, the reader/judge,
+    the extractor builder and the sweep are supplied; the measured
+    derivation, the table's label, the winner vocabulary, the receipt and the
+    exit code are the real code.
     """
     import tests.model_adapters as _ma
     import tools.longmem_eval.sweep_granularity as sg
 
-    results = [_sweep_cell(vector_strategy=vector_strategy)]
-    winner = {"chunk_turns": 1, "evidence_recall@10": 0.5,
-              "context_tokens_mean": 10.0}
-    calls: dict = {}
+    winner = {"chunk_turns": 1, "evidence_recall@10": 0.9,
+              "context_tokens_mean": 100.0}
+    results = [_sweep_cell()]  # enabled, coverage 1.0, 40/40 points embedded
+    gate_calls: dict = {}
 
     def _gate(*, dense_leg_required):
-        calls["required"] = dense_leg_required
-        return embedder_status
+        gate_calls["required"] = dense_leg_required
+        return _ENABLED_STATUS
 
+    # The gate is patched rather than `run_sweep`'s `dense_leg_required`
+    # driven, because a supplied `embedder_status` silently WINS over
+    # `dense_leg_required` in `run_sweep` — a test that drove the requirement
+    # alone would prove nothing.
     monkeypatch.setattr(sg, "gate_dense_leg", _gate)
     monkeypatch.setattr(sg, "build_reader", lambda *a, **k: MockReader())
     monkeypatch.setattr(sg, "build_judge", lambda *a, **k: MockJudge())
     # `main` imports the extractor builder locally; a real v2 run would put a
     # provider on the wire, and nothing downstream of the build is under test.
-    monkeypatch.setattr(_ma, "build_extractor_model", lambda *a, **k: object(),
-                        raising=True)
+    monkeypatch.setattr(_ma, "build_extractor_model", lambda *a, **k: object())
     monkeypatch.setattr(sg, "run_sweep", lambda *a, **k: (results, winner))
-    out = tmp_path / "sweep.json"
+
+    out = tmp_path / "measured-v2.json"
     rc = sg.main(["--data", str(MINI), "--ingest-mode", "v2", "--limit", "1",
-                  "--output", str(out), *extra_argv])
-    return rc, out, calls
-
-
-def test_sweep_main_selects_and_exits_zero_when_measured(
-        monkeypatch, tmp_path, capsys):
-    """#4821 review P2 — M-A + M-C: the direction that PERMITS a sweep.
-
-    A v2 sweep whose cells all recorded ``vector_strategy=enabled`` IS a
-    measurement: the table says ``MEASURED``, the winner line says
-    ``SELECTED granularity``, the receipt says ``measured: true``, and
-    ``main`` exits 0. RED when ``_dense_leg_verified`` is `return False`
-    (M-A: the whole legitimate hybrid path is falsely blocked) or when
-    ``_print_winner`` prints the unmeasured vocabulary unconditionally
-    (M-C) — both were green before this test existed.
-    """
-    import tools.longmem_eval.sweep_granularity as sg
-
-    # the unit-level witness first: the cheapest kill for M-A, and the only
-    # positive assertion on the predicate the whole gate rests on.
-    assert sg._dense_leg_verified([{"vector_strategy": "enabled"}]) is True
-
-    rc, out, calls = _run_main_hermetically(
-        monkeypatch, tmp_path, vector_strategy="enabled",
-        embedder_status=_ENABLED_STATUS)
+                  "--chunk-turns", "1", "--output", str(out)])
     printed = capsys.readouterr()
-    assert calls["required"] is True, (
+    assert gate_calls["required"] is True, (
         "a sweep without --skip-preflight must ask the gate for a REQUIRED leg")
     assert rc == 0, "a MEASURED v2 sweep exited non-zero (M-A)"
     assert "dense leg: vector_strategy=enabled" in printed.out
-    assert "(MEASURED)" in printed.out, "_print_table mislabelled a measured leg"
+    assert "(MEASURED)" in printed.out, (
+        "_print_table mislabelled a measured leg")
     assert "SELECTED granularity" in printed.out, (
         "a measured sweep never printed the SELECTED vocabulary (M-C)")
     assert "NOT A MEASUREMENT" not in printed.err
@@ -5237,39 +5205,6 @@ def test_sweep_main_selects_and_exits_zero_when_measured(
     assert payload["dense_leg"]["measured"] is True
     assert payload["dense_leg"]["required"] is True
     assert payload["dense_leg"]["waived"] is False
-
-
-def test_sweep_main_exits_nonzero_when_the_dense_leg_was_not_measured(
-        monkeypatch, tmp_path, capsys):
-    """#4821 review P2 — M-B: dropping ``or not measured`` from ``main``'s exit
-    gate must not be green.
-
-    A waived v2 sweep still writes its LABELLED receipt, but it prints
-    ``NOT MEASURED`` / ``UNMEASURED candidate …`` and exits 1 — no script may
-    land a keyword-only sweep as a result. The refusing direction is already
-    covered for the CLI refusal path; what was missing is the case where the
-    sweep RAN and the leg was not measured, which is the only path that
-    reaches this condition with ``winner`` NOT None.
-    """
-    import tools.longmem_eval.sweep_granularity as sg
-
-    assert sg._dense_leg_verified([{"vector_strategy": "unavailable"}]) is False
-
-    rc, out, calls = _run_main_hermetically(
-        monkeypatch, tmp_path, vector_strategy="unavailable",
-        embedder_status=_WAIVED_STATUS, extra_argv=("--skip-preflight",))
-    printed = capsys.readouterr()
-    assert calls["required"] is False, (
-        "--skip-preflight never reached the gate — the waiver is inert")
-    assert rc == 1, (
-        "a keyword-only v2 sweep exited 0 — the exit-code gate is gone (M-B)")
-    assert "(NOT MEASURED)" in printed.out
-    assert "SELECTED granularity" not in printed.out
-    assert "UNMEASURED candidate granularity" in printed.out
-    payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["dense_leg"]["measured"] is False
-    assert payload["dense_leg"]["waived"] is True
-    assert payload["dense_leg"]["embedder"]["reason"] == "no_embedder"
 
 
 # ── #4821 review P1: the coverage witness must actually testify ───────────
