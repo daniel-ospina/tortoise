@@ -568,8 +568,8 @@ def test_property_3_never_sign_out_a_transient_failure_is_not_a_dead_session() -
 
     Removing the property is collapsing the two reasons (or classifying by status
     alone), which the table below detects: each infrastructure answer would come
-    back as `no_session` and sign the user out during an outage. Verified by
-    mutation (see the PR body).
+    back as `no_session` and sign the user out during an outage. Mutation-proven
+    by the `never-sign-out` leg of `PROPERTY_MUTATIONS`.
     """
     for responses, expected, why in _NEVER_SIGN_OUT_CASES:
         out = _run("never_sign_out", responses=responses)
@@ -635,8 +635,8 @@ def test_property_4_auto_advance_without_a_manual_click() -> None:
     or the route that called the decision. A table of constants cannot tell a
     pass-through from a hardcode — so a second run feeds DISTINCT sentinels and
     asserts the decision echoes them, which is what makes the self-redirect loop
-    falsifiable. Verified by mutation (see the PR body): advancing to `auth_url`
-    or to any hardcoded route goes red on the sentinel below.
+    falsifiable. Mutation-proven by the `auto-advance` leg of `PROPERTY_MUTATIONS`:
+    advancing to `auth_url` or to any hardcoded route goes red on the sentinel below.
     """
     cases = [
         {"session": "usable", "authorize_url": _AUTHORIZE, "auth_url": _AUTH, "attempted": False},
@@ -884,7 +884,7 @@ def test_every_property_mutation_still_targets_exactly_one_span() -> None:
     quietly passing.
 
     The NODE id rots the same way and is pinned here for the same reason. The
-    table above is the only place those four test ids are written down, and a
+    table above is the only place the table's test ids are written down, and a
     rename reddens nothing on its own: the opt-in proof would run
     `pytest <file>::<gone-node>`, collect zero tests, exit 4 — and before this
     pin existed the harness read that as a kill (#10343 review P1). Checking the
@@ -944,17 +944,22 @@ _PYTEST_TESTS_FAILED = 1
 # (the sixth column of `PROPERTY_MUTATIONS`) and must not carry this prefix.
 _HARNESS_FAILURE = "harness scenario"
 
-# Budget arithmetic — every INNER bound sits under the 1200 s outer mark below, so
-# a slow child names itself instead of the item dying as a bare timeout with no
+# Budget arithmetic — every INNER bound sits under the outer mark below, so a slow
+# child names itself instead of the item dying as a bare timeout with no
 # per-property diagnostic (#10343 review cycle 1, P2):
-#     baseline child, 4 nodes ......... 200 s
-#     4 mutated children, 1 node each .. 4 x 200 s = 800 s
-#     ---------------------------------------------------
-#     worst case .................... 1000 s  <  1200 s
-# Measured cost at this head is ~24 s for the whole item (~6 s a child); the 200 s
+#     baseline child, one arg per leg .... 1 x _PROPERTY_RUN_TIMEOUT_S
+#     N mutated children, 1 node each .... N x _PROPERTY_RUN_TIMEOUT_S
+#     ---------------------------------------------------------------
+#     worst case ......................... (N + 1) x _PROPERTY_RUN_TIMEOUT_S
+# The outer mark is DERIVED from the table, not hand-written: cycle 5 added two
+# legs (4 -> 6) against a hand-written 1200 s, which silently broke the invariant
+# this comment states (1400 s of inner budget under a 1200 s outer mark, so a slow
+# leg died as the bare timeout the design exists to prevent). #10343 review cycle 6.
+# Measured cost at this head is ~54 s for the whole item (6 legs); the 200 s
 # per-child bound is headroom for the loaded box where the hand-run version
 # measured 206 s.
 _PROPERTY_RUN_TIMEOUT_S = 200
+_MUTATION_PROOF_TIMEOUT_S = (len(PROPERTY_MUTATIONS) + 1) * _PROPERTY_RUN_TIMEOUT_S + 200
 
 
 def _assert_baseline_green(auth_dir: Path | None = None) -> None:
@@ -1022,7 +1027,7 @@ def _property_test_fails(node: str, expected: str, auth_dir: Path | None = None)
         pytest.fail(
             f"{node}: exceeded {_PROPERTY_RUN_TIMEOUT_S}s with the property removed — "
             "the budget, not the property, decided this leg (see the outer "
-            "`pytest.mark.timeout(1200)`)."
+            "`pytest.mark.timeout(_MUTATION_PROOF_TIMEOUT_S)`)."
         )
     if proc.returncode == _PYTEST_TESTS_FAILED:
         assert f"FAILED {TEST_FILE}::{node}" in proc.stdout, (
@@ -1062,15 +1067,17 @@ def _property_test_fails(node: str, expected: str, auth_dir: Path | None = None)
 # and this mark is the backstop (pyproject.toml's repo-wide `timeout = 300` is a
 # PER-ITEM budget this item legitimately exceeds — "a leg that needs a longer
 # single item must SAY so").
-@pytest.mark.timeout(1200)
+@pytest.mark.timeout(_MUTATION_PROOF_TIMEOUT_S)
 @pytest.mark.skipif(
     os.environ.get("TORTOISE_MUTATION_PROOF") != "1",
-    reason="opt-in (~3.5 min, four subprocess runs): TORTOISE_MUTATION_PROOF=1",
+    reason="opt-in (one mutated child per leg, ~1 min here / ~3.5 min loaded): "
+    "TORTOISE_MUTATION_PROOF=1",
 )
 def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
-    """Break each property in the real source; its own test must fail.
+    """Break each property in a COPY of the source; its own test must fail.
 
-    The four nodes are proved GREEN unmutated first, so every kill below is
+    Every node the table names is proved GREEN unmutated first, so every kill
+    below is
     relative to a baseline this artifact established itself. Everything runs
     against a COPY of the auth module, never the working tree — see the body. The
     restore is byte-identical and ASSERTED by sha256, and the assertion runs in
