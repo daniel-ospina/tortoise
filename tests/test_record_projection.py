@@ -2294,14 +2294,25 @@ def test_a_structural_repoint_descriptor_resolves_its_name_keyed_target():
     assert "Object" in params, params             # the label the fold resolves
 
 
-def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
-    """#9973 indicator 1 — the move has TWO halves: remove at old, create at final.
+def test_a_structural_repoint_moves_its_edge_one_hop_at_a_time():
+    """#9973 indicator 1 — the move has TWO halves: remove at old, create at the
+    successor THAT SUPERSEDE NAMED.
 
     The descriptor's `src` is the point being SUPERSEDED (`sdk.py` 2b emission,
     `src=old_id`), so an upsert at `src` both kept the row the graph deleted and
     never wrote the successor's. #9972 alone is unobservable: a target-only fix
     re-writes the same wrong row (and erases its attributes through the
     `ON CONFLICT` path), which is why the two land as ONE change.
+
+    ⛔ `dest` is the DIRECT successor (`depth = 2`), not the chain's terminal
+    row: live's transfer is `MERGE (new)-[nr]->(t) ON CREATE SET nr += $attrs`,
+    so the edge is created at `new` and the NEXT supersede carries it one hop
+    further. Resolving straight to the terminal row collapses a chain's
+    descriptors (and a sibling pair's) onto one destination, where `DO NOTHING`
+    keeps the FIRST — right for siblings, wrong for a chain, whose last transfer
+    is the one that created the final row (`#10139` review round 4, P1). One hop
+    per descriptor reproduces both, and the next link's DELETE removes the
+    intermediate row exactly as live's supersede removes the intermediate edge.
     """
     statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
     assert len(statements) == 2, statements   # the two halves of ONE mutation
@@ -2314,9 +2325,11 @@ def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
     # the row's resolved target — the fold's own re-query.
     assert "src_key = (SELECT node_key FROM succ WHERE depth = 1)" in delete, delete
     assert "src_label = 'Point'" in delete, delete
-    # The insert files the chain's TERMINAL row (`next_id IS NULL`), not `src`.
+    # The insert files the DIRECT successor (`depth = 2`), not `src` and not the
+    # chain's terminal row.
     insert = inserts[0].sql
-    assert "succ WHERE next_id IS NULL" in insert, insert
+    assert "FROM (SELECT node_key FROM succ WHERE depth = 2) dest" in insert, insert
+    assert "next_id IS NULL" not in insert, insert
     assert "'Point', dest.node_key" in insert, insert
     # `_final(src) == src` is a clean NO-OP, not a delete-then-reinsert: a
     # re-created LIVE incarnation owns its edges (`_src_is_terminal`).
@@ -2324,27 +2337,119 @@ def test_a_structural_repoint_moves_its_edge_to_the_final_successor():
         assert "(SELECT terminal FROM succ WHERE depth = 1)" in sql, sql
         assert "EXISTS (SELECT 1 FROM succ WHERE next_id IS NOT NULL)" in sql, sql
         # ⛔ The DESTINATION conjunct, on BOTH halves. Without it the pair is not
-        # one mutation: a cyclic or >32-hop chain satisfies the two conjuncts
-        # above (src is terminal and HAS a successor) while the INSERT's `dest`
-        # subquery is empty, so the DELETE ran and wrote no replacement — the row
-        # left the superseded point and landed nowhere.
-        assert "EXISTS (SELECT 1 FROM succ WHERE next_id IS NULL)" in sql, sql
+        # one mutation: a successor whose `point` row the record does not hold
+        # (or a path-guarded cycle that never leaves `src`) satisfies the two
+        # conjuncts above (src is terminal and HAS a successor) while the
+        # INSERT's `dest` subquery is empty, so the DELETE ran and wrote no
+        # replacement — the row left the superseded point and landed nowhere.
+        assert "EXISTS (SELECT 1 FROM succ WHERE depth = 2)" in sql, sql
     # NO SELF-EDGE (E2E-11.6): a chain that collapses the endpoints onto one node
     # must not mint `(X)-[:aboutPoint]->(X)`.
     assert "dest.node_key <> tgt.node_key" in insert, insert
-    # A bare MERGE is what the fold's transfer is: no attribute SET, so an
-    # existing successor row keeps its own value (#9417) — `DO UPDATE` would
-    # overwrite it with the descriptor's absent attributes.
+    # ⛔ #10303: `DO NOTHING` is the fold's OWN precedence, not an approximation
+    # of it. Since `#10139` the transfer is `MERGE … ON CREATE SET nr += $attrs`:
+    # a row the successor does not have is created carrying the retired edge's
+    # attributes, a row it already has is left untouched. `DO NOTHING` reproduces
+    # exactly that (`DO UPDATE` would overwrite the successor's own value with
+    # the retired point's — the measured 0.91 -> 0.42, #9417 review P1).
     assert insert.rstrip().endswith("DO NOTHING"), insert
 
 
+def test_the_structural_carry_reads_the_folds_own_vocabulary():
+    """#10303 — ONE vocabulary, and the RECORD side reads the same tuple.
+
+    The move's carried set is the fold's replay vocabulary (`DIRECT_EDGE_ATTR_KEYS`,
+    `projection/edges.py`), so a key added to one side cannot be dropped by the
+    other. Pinned BOTH directions: an extra local key would carry an attribute
+    the graph LOSES (a new divergence in place of the old one), a missing one
+    drops an attribute it keeps.
+
+    ⛔ `source_version` is pinned ABSENT: it is the RECORD column name while the
+    graph writes the anchor as `sourceVersion`, so the fold's transfer and replay
+    drop it — a member here would make the record keep an attribute the graph does
+    not have. Its names are a SUBSET of `RelationUpsert.attrs` (the vocabulary
+    `_relation_upsert_statement` writes), which is what makes them writable here
+    at all.
+    """
+    from tortoise.projection.edges import DIRECT_EDGE_ATTR_KEYS
+
+    assert rp._DIRECT_EDGE_ATTR_KEYS == DIRECT_EDGE_ATTR_KEYS, (
+        rp._DIRECT_EDGE_ATTR_KEYS, DIRECT_EDGE_ATTR_KEYS)
+    assert "source_version" not in rp._DIRECT_EDGE_ATTR_KEYS
+    assert set(rp._DIRECT_EDGE_ATTR_KEYS) <= set(rp.RelationUpsert().attrs), (
+        rp._DIRECT_EDGE_ATTR_KEYS, rp.RelationUpsert().attrs)
+
+
+def test_a_structural_repoint_carries_the_descriptors_attributes():
+    """#10303 review P1 — the RECORD route carries what the descriptor carries.
+
+    `sdk.supersede_point` journals the retired edge's attributes FLAT on the 2b
+    descriptor (`#10139`) and the graph's pass-2b replay re-applies them
+    (`ON CREATE SET nr += $attrs`). This route wrote the moved row with NO
+    attributes at all, so ONE journal rebuilt to two different stores — the
+    journal route keeping `confidence`, the record route dropping it. That is a
+    divergence this PR CREATED rather than inherited: before `#10139` both routes
+    dropped the value and therefore agreed.
+
+    ⚠️ Where the cascade is observable: `direction`/`confidence`/`weight`/
+    `label`/`batch_id` are COLUMNS of `public.relation`, and `_split_properties`
+    routes each carried name to the column when there is one — so the values land
+    on the row's COLUMNS and the `props` tail stays `{}`. A reader looking for
+    the carry in `props` will not find it; the columns are the record's home for
+    these five (`#7968`'s placement).
+
+    RED before the fix (measured by reverting the carry in place): the INSERT had
+    no attribute column and no attribute param, so every assertion below on the
+    carried value failed while the move's topology assertions stayed green.
+    """
+    statements = rp.mutations_for(
+        _structural_repoint(confidence=0.83, batch_id="b-10139"),
+        org_id="o", graph_id="g")
+    insert = next(s for s in statements
+                  if "INSERT INTO public.relation" in s.sql)
+    assert "idx, confidence, batch_id, props)" in insert.sql, insert.sql
+    assert 0.83 in insert.params, insert.params
+    assert "b-10139" in insert.params, insert.params
+    # The tail carries none of the five (they all have columns) — stated so the
+    # empty tail is not read as "the carry was dropped again".
+    assert json.dumps({}) in insert.params, insert.params
+    # PRECEDENCE — see the docstring above the `DO NOTHING` in the module: this is
+    # `ON CREATE SET` on the record side, so a successor's OWN row is untouched.
+    assert insert.sql.rstrip().endswith("DO NOTHING"), insert.sql
+    assert "DO UPDATE" not in insert.sql, insert.sql
+    # The DELETE leg carries NOTHING: the graph deletes the edge by its internal
+    # id and the attributes transfer to the successor; they are not retained at
+    # the superseded point.
+    delete = next(s for s in statements
+                  if "DELETE FROM public.relation" in s.sql)
+    assert "confidence" not in delete.sql, delete.sql
+
+
+def test_a_structural_repoint_with_no_attributes_emits_the_same_shape():
+    """The BARE descriptor's statement is unchanged — the carry is additive.
+
+    A descriptor carrying none of the vocabulary's keys (the shape the PGlite
+    harness's `9972-move` case replays) must keep the column list it had before
+    `#10303`: the fix adds carried attributes to a row that carries some, it does
+    not re-cut every bare move's statement.
+    """
+    statements = rp.mutations_for(_structural_repoint(), org_id="o", graph_id="g")
+    insert = next(s for s in statements
+                  if "INSERT INTO public.relation" in s.sql)
+    assert "tgt_key, idx, props)" in insert.sql, insert.sql
+    assert json.dumps({}) in insert.params, insert.params
+
+
 def test_the_structural_move_reads_the_records_own_successor_chain():
-    """`_final(src)` is a `superseded_by` walk over `public.point` — no graph read.
+    """The `superseded_by` walk is a record read over `public.point` — no graph read.
 
     The record already holds the successor link (the `PointSuperseded` patch
     writes `props->>'superseded_by'`), which is what makes the move derivable
-    from the journal alone (Interface A). The walk is depth-bounded AND
-    `path`-guarded: a cycle has no terminal, so nothing moves.
+    from the journal alone (Interface A). The move takes ONE hop (`depth = 1` is
+    `src`, `depth = 2` is the direct successor live named); deeper hops exist
+    because a chain's earlier descriptors each resolve at their own successor.
+    The walk is depth-bounded AND `path`-guarded, so a cycle stops where live's
+    `succ` map stops — at the hop that would repeat a node.
     """
     cte, params = rp._supersede_chain_cte("o", "g", "p1")
     assert cte.startswith("WITH RECURSIVE succ("), cte

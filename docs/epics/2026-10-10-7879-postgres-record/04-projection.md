@@ -362,8 +362,8 @@ closed at both layers:
   > two apart) by `(src, edge_type, RESOLVED target node)`, while the successor-side transfer still runs. Residuals:
   > (a) `wasDerivedFrom`/`aboutAction` are moved live but not derivable, so 2b journals no repoint for them and the
   > journal route loses them after a supersede; (b) **CLOSED for the derivable set by #10191** — the record now
-  > applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the terminal of the
-  > `superseded_by` chain), so the row follows the edge; what stays open in **#9836** is the *non-derivable* half of
+  > applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the
+  > hop `superseded_by` names — one hop per descriptor, so a chain reaches the terminal row as each hop runs), so the row follows the edge; what stays open in **#9836** is the *non-derivable* half of
   > (a) on the record route, and its shape differs by endpoint: 2b journals **no** descriptor for them, so nothing
   > moves the row and the record keeps the row at the pre-supersede point while live moved the edge to the
   > successor. A shape the producer DECLINES at the mint (`_record_addressable`) holds nothing at all — no
