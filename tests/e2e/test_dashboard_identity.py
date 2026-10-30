@@ -434,6 +434,25 @@ def _wire(page: Page, *, inv: dict | None = None,
                                             "role": "owner", "status": "active",
                                             "email": "identity-e2e@premise-labs.dev"}]))
             return
+        if path.endswith("/v1/invites/pending") and method == "GET":
+            # #10327: ANSWER this read instead of letting it fall to the 404
+            # catch-all below. The account menu fetches it when it opens and
+            # renders the result ABOVE "+ Create new organization"; a failed
+            # read grows a `role=alert` retry row there (main.jsx:10934-10940,
+            # 10969), moving the button DOWN by the row's height — measured on
+            # the pre-fix tree at exactly 40px (y 367.78 → 407.78) at an
+            # arbitrary moment after the menu mounts. The three create-org
+            # specs click that button, so a click whose point was computed
+            # before the shift is dispatched into the alert row and SWALLOWED:
+            # no dialog, no error, menu still open — the dashboard-e2e red on
+            # runs 41038160303 (this PR) and 41029185303 (feat/5086-tm), both
+            # timing out on `dialog`/`Organization name` after the click.
+            # An empty list is the state this fixture means (no invites); the
+            # two invite specs below register their OWN route for this path and
+            # run first, so their fixtures are unaffected.
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"invites": []}))
+            return
         route.fulfill(status=404, content_type="application/json", body="{}")
 
     page.route("**/*", handle)
@@ -797,7 +816,19 @@ def test_create_team_success(page: Page):
     menu = page.locator(".account-menu")
     expect(menu.get_by_role("button", name="+ Create new organization")).to_be_visible()
     expect(menu.get_by_text("Switch organization")).to_have_count(0)  # single-team: no switch label
-    menu.get_by_role("button", name="+ Create new organization").click(force=True)  # menu closes + dialog opens → unmounts
+    # #10327: NOT `force=True` here. Force disables Playwright's "receives
+    # pointer events" actionability check (playwright.dev/python/docs/
+    # actionability → "Forcing actions": force "will not check that the target
+    # element actually receives click events"), which is the ONLY check that
+    # notices a menu item that moved between the click point being computed and
+    # the event being dispatched — the #10327 dashboard-e2e flake (the menu
+    # grew an invite-alert row above this button, the click landed in the row
+    # and the handler never ran). `_wire` now answers /v1/invites/pending, and
+    # this click stays non-forced so any FUTURE async insertion above the
+    # button is retried instead of silently swallowed. The menu unmounting when
+    # the dialog opens is not a hazard: it happens in the click HANDLER, after
+    # dispatch.
+    menu.get_by_role("button", name="+ Create new organization").click()  # menu closes + dialog opens → unmounts
     # W1 (#1997) + #2494: the create dialog renders as 'Create a new
     # organization' with an 'Organization name' input. Since #2789 the dialog
     # is named by its own heading (aria-labelledby → the name-mode <h3>, which
@@ -850,7 +881,8 @@ def test_create_team_free_capped_gate(page: Page):
 
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
-    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click(force=True)  # menu closes → unmounts
+    # #10327: non-forced — see the actionability note in test_create_team_success.
+    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click()  # menu closes → unmounts
     page.get_by_label("Organization name").fill("blocked")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render
     # #2789: the limit mode NAMES the dialog from its own heading
@@ -908,7 +940,8 @@ def test_create_team_pre_checked_at_cap(page: Page):
 
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
-    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click(force=True)
+    # #10327: non-forced — see the actionability note in test_create_team_success.
+    page.locator(".account-menu").get_by_role("button", name="+ Create new organization").click()
     dialog = page.get_by_role("dialog", name="You can only have one free organization")
     expect(dialog).to_contain_text("You can only have one free organization", timeout=15000)
     # The name input is NOT shown — no rejection-after-typing flow.
@@ -1044,6 +1077,37 @@ def test_pending_invites_in_menu(page: Page):
     menu.get_by_role("button", name="Decline").click()
     expect(menu.get_by_text("Invites")).to_have_count(0)
     expect(menu.get_by_text("Bravo")).to_have_count(0)
+
+
+def test_account_menu_invite_read_is_answered_by_the_fixture(page: Page):
+    """#10327: the shared fixture must ANSWER `/v1/invites/pending`, not 404 it.
+
+    The account menu renders that read ABOVE "+ Create new organization"
+    (main.jsx:10934-10940 → 10969). A FAILED read inserts a retry `role=alert`
+    row there, and the create-org button below it moves DOWN by the row's
+    height at an arbitrary moment after the menu mounts — measured on this
+    file's own fixture at exactly 40px (y 367.78 → 407.78). The three
+    create-org specs click that button, so a click whose point was computed
+    before the shift dispatches into the alert row and is SWALLOWED: no
+    dialog, no error, menu still open. That is the dashboard-e2e red on
+    runs 41038160303 (this PR) and 41029185303 (feat/5086-tm).
+
+    Pinned on the FIXTURE's answer (not on a rendered position) because the
+    200 is what makes the menu's geometry deterministic for every clicking
+    spec here: a 404 reds this assertion directly.
+    """
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1))
+    page.goto(DASHBOARD_URL)
+    with page.expect_response("**/v1/invites/pending**") as resp_info:
+        _open_account_menu(page)
+    assert resp_info.value.status == 200, (
+        f"_wire must answer /v1/invites/pending, got {resp_info.value.status} "
+        "(the catch-all 404 makes the menu grow a retry row above the create-org button)")
+    menu = page.locator(".account-menu")
+    expect(menu.get_by_role("button", name="+ Create new organization")).to_be_visible()
+    # ...so no retry row is inserted above that button.
+    expect(menu.get_by_role("alert")).to_have_count(0)
 
 
 _TWO_TEAMS = [
