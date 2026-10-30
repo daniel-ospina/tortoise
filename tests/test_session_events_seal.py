@@ -308,9 +308,12 @@ def test_an_unverifiable_source_is_a_conflict_not_an_unlink(tmp_path, monkeypatc
     result = seal.seal_one(tmp_path, path)
     monkeypatch.undo()
 
-    assert result.status == "conflict"
+    assert result.status in {"conflict", "verify-failed"}, result.status
+    assert not result.ok
     assert path.exists(), "an unverified source must never be unlinked"
     assert not seal.archive_path(tmp_path, day).exists()
+    # The predicate itself, fail-closed: no stat means UNVERIFIED, not "same".
+    assert seal._changed_since(path, None, 5) is True
 
 
 def test_restore_never_replaces_a_live_day_file(tmp_path):
@@ -320,14 +323,139 @@ def test_restore_never_replaces_a_live_day_file(tmp_path):
     """
     day = TODAY
     live = _write(tmp_path, day, b'{"session_id": "live"}\n', aged=False)
-    before_inode = live.stat().st_ino
     seal.seal_one(tmp_path, live)
     live.write_bytes(b'{"session_id": "live"}\n')          # same content
+    # The inode of the LIVE file — captured AFTER the recreation above, so this
+    # cannot pass on an inode number the filesystem recycled (#6388 cycle 3).
+    before_inode = live.stat().st_ino
     sealed = seal.archive_path(tmp_path, day)
 
     assert seal.restore(tmp_path, day) == ""
     assert live.stat().st_ino == before_inode, "the live inode must not move"
     assert sealed.exists()
+
+
+def test_a_stale_prefix_archive_is_superseded_never_accepted(tmp_path, capsys):
+    """The P0 state: an archive holding a PREFIX of the source.
+
+    Accepting it ("already archived") would unlink the only copy of the missing
+    tail and report success. It must be superseded by the fuller content.
+    Mutation: the stale-prefix arm returning `already-sealed` instead of falling
+    through to the publish path REDs here (and silently loses the last record).
+    """
+    day = TODAY - timedelta(days=10)
+    full = b'{"session_id": "a"}\n{"session_id": "late-append"}\n'
+    stale = b'{"session_id": "a"}\n'
+    path = _write(tmp_path, day, full)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(stale, mtime=0))
+
+    result = seal.seal_one(tmp_path, path)
+
+    assert result.status == "sealed", result
+    assert gzip.decompress(target.read_bytes()) == full, "the tail must survive"
+    assert not path.exists()
+
+
+def test_an_interrupted_run_does_not_unlink_a_file_that_grew(tmp_path):
+    """A writer that appended after the snapshot keeps its bytes: the archive is
+    a strict PREFIX of the source, so it is superseded (never accepted), and the
+    appended record is never dropped.
+
+    Mutation: the stale-prefix arm returning `already-sealed` and unlinking the
+    source REDs here — the appended record would be gone with it.
+    """
+    day = TODAY - timedelta(days=9)
+    body = b'{"session_id": "b"}\n'
+    path = _write(tmp_path, day, body)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(body, mtime=0))
+
+    grown = body + b'{"session_id": "appended"}\n'
+    path.write_bytes(grown)
+    stamp = time.time() - 86400
+    os.utime(path, (stamp, stamp))
+
+    result = seal.seal_one(tmp_path, path)
+
+    assert result.status == "sealed", result
+    assert gzip.decompress(target.read_bytes()) == grown, "the append must survive"
+    assert not path.exists()
+
+
+def test_restore_refuses_a_file_created_while_it_was_reading(tmp_path):
+    """The `dst.exists()` check is a TOCTOU; the create must be exclusive, so a
+    file that appears during the archive read is never replaced (an os.replace
+    there swaps the inode under a writer's fd and loses its record).
+
+    Mutation: restore's `O_EXCL` open replaced by mkstemp+os.replace REDs here.
+    """
+    day = TODAY - timedelta(days=9)
+    body = b'{"session_id": "r"}\n'
+    seal.seal_one(tmp_path, _write(tmp_path, day, body))
+    dst = tmp_path / f"{day.isoformat()}.jsonl"
+
+    real_decompress = seal.gzip.decompress
+
+    def racing(data):
+        out = real_decompress(data)
+        if not dst.exists():
+            dst.write_bytes(out)  # the live file appears mid-read
+        return out
+
+    seal.gzip.decompress = racing
+    try:
+        verdict = seal.restore(tmp_path, day)
+    finally:
+        seal.gzip.decompress = real_decompress
+
+    assert "appeared while restoring" in verdict, verdict
+    assert dst.read_bytes() == body, "the racing file is never replaced"
+
+
+def test_the_identical_archive_path_still_pays_the_change_test(tmp_path, monkeypatch):
+    """`already-sealed` must not be a licence to unlink blind: the same change
+    test every other unlink pays applies here too.
+
+    Mutation: the identical branch's `_changed_since` gate deleted REDs here
+    (measured: the two rows around this one stay green without it).
+    """
+    day = TODAY - timedelta(days=9)
+    body = b'{"session_id": "i"}\n'
+    path = _write(tmp_path, day, body)
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(body, mtime=0))
+
+    monkeypatch.setattr(seal, "_changed_since", lambda *a, **k: True)
+    result = seal.seal_one(tmp_path, path)
+
+    assert result.status == "conflict", result
+    assert path.exists()
+
+
+def test_an_unreadable_archive_dir_is_not_ok(tmp_path, capsys):
+    """`pathlib.glob` swallows the scandir OSError, so an unreadable archive dir
+    answered "ok". The alarm must answer about what it could NOT see.
+
+    Mutation: enumerating with `Path.glob` instead of `os.scandir` REDs here.
+    """
+    day = TODAY - timedelta(days=9)
+    seal.seal_one(tmp_path, _write(tmp_path, day, b'{"session_id": "u"}\n'))
+    if os.geteuid() == 0:  # pragma: no cover - root ignores mode 000
+        pytest.skip("root ignores mode 000")
+    archive = tmp_path / seal.ARCHIVE_DIRNAME
+    os.chmod(archive, 0o000)
+    try:
+        code = seal.main(["--root", str(tmp_path), "--today", TODAY.isoformat(),
+                          "--keep-days", "7", "--check"])
+    finally:
+        os.chmod(archive, 0o755)
+    capsys.readouterr()
+
+    assert code == seal.EXIT_ERROR, code
 
 
 def test_a_differing_archive_is_never_clobbered(tmp_path):

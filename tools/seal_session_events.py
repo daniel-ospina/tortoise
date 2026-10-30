@@ -171,6 +171,28 @@ def eligible(root: Path, *, keep_days: int, today: date,
     return out
 
 
+def _size_or_zero(path: Path) -> int:
+    """The archive's size, or 0 when it cannot be read — used only for REPORTING
+    a verdict, so an unreadable target must never abort the run (#6388 review
+    cycle 3, P2)."""
+    with contextlib.suppress(OSError):
+        return path.stat().st_size
+    return 0
+
+
+def _changed_since(path: Path, before: os.stat_result | None, size: int) -> bool:
+    """Did the source move while we were working on it?
+
+    FAIL CLOSED: an unverifiable source (``before is None``) counts as changed,
+    so the only data-loss check in this tool never degrades to "unchanged" when
+    it cannot answer.  A size mismatch covers the read->stat window; identity +
+    mtime covers the stat->unlink window.
+    """
+    if before is None:
+        return True
+    return not _unchanged_since(path, before) or size != before.st_size
+
+
 def seal_one(root: Path, path: Path) -> Sealed:
     """Seal ONE day file.  Returns a verdict; never raises on a bad file."""
     day = _day_of(path)
@@ -178,42 +200,50 @@ def seal_one(root: Path, path: Path) -> Sealed:
         raise ValueError(f"not a session-events day file: {path}")
     try:
         plain = path.read_bytes()
+        stat_before = path.stat()
     except OSError as e:
         return Sealed(day, "verify-failed", 0, 0, f"unreadable: {e}")
     digest = _sha256(plain)
-    try:
-        stat_before = path.stat()
-    except OSError:
-        stat_before = None
     target = archive_path(root, day)
 
+    # An archive already on disk splits into exactly three states, and only ONE
+    # of them may short-circuit:
+    #  * IDENTICAL content -> a run was interrupted between the publish and the
+    #    unlink. Finish the job (through the same change test as any other
+    #    unlink — a writer may have appended since that snapshot).
+    #  * a strict PREFIX of the source -> a stale re-encoding of an earlier
+    #    snapshot of THIS file (a race published before a late append landed).
+    #    It must be SUPERSEDED, never accepted: accepting it here would unlink
+    #    the only copy of the missing tail and report success (#6388 review
+    #    cycle 3, P0).  Falls through to the publish path below.
+    #  * anything else -> genuine disagreement. NEVER clobber; keep both.
     if target.exists():
         try:
             prior = gzip.decompress(target.read_bytes())
         except (OSError, EOFError, zlib.error) as e:
-            return Sealed(day, "conflict", len(plain), target.stat().st_size,
+            return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                           f"existing archive is unreadable: {e}")
-        if _sha256(prior) != digest:
-            if plain.startswith(prior) and len(prior) < len(plain):
-                # The archive is a provably STALE PREFIX of the same file — a
-                # re-encoding of an earlier snapshot (a race published it before
-                # a late append landed).  Superseding it drops no byte and is
-                # the only way this state ever heals; the ordinary disagreement
-                # below does NOT.
-                pass
-            else:
-                # NEVER clobber: the two copies disagree, and either one may be
-                # the only complete record.  A human decides; both stay.
-                return Sealed(day, "conflict", len(plain), target.stat().st_size,
-                              f"{target} already exists with different content — "
-                              "left both copies in place")
-        # Identical content already archived (a run interrupted between the
-        # archive write and the unlink): finish the job, seal nothing twice.
-        with contextlib.suppress(OSError):
-            path.unlink()
-        return Sealed(day, "already-sealed", len(plain), target.stat().st_size)
+        if _sha256(prior) == digest:
+            if _changed_since(path, stat_before, len(plain)):
+                return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                              "file changed while sealing — source kept")
+            try:
+                path.unlink()
+            except OSError as e:
+                return Sealed(day, "verify-failed", len(plain),
+                              _size_or_zero(target),
+                              f"archived but the source could not be removed: {e}")
+            _fsync_dir(root)
+            return Sealed(day, "already-sealed", len(plain), _size_or_zero(target))
+        if not (plain.startswith(prior) and len(prior) < len(plain)):
+            return Sealed(day, "conflict", len(plain), _size_or_zero(target),
+                          f"{target} already exists with different content — "
+                          "left both copies in place")
+        # else: stale prefix -> supersede it below (verified, as any publish).
 
     tmp: Path | None = None
+    published = False
+    removed = False
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=str(target.parent),
@@ -228,44 +258,45 @@ def seal_one(root: Path, path: Path) -> Sealed:
         # A `gzip` that wrote a truncated archive must leave the plain file
         # alone — a bound that costs a record is worse than an unbounded disk.
         if _sha256(gzip.decompress(tmp.read_bytes())) != digest:
-            return Sealed(day, "verify-failed", len(plain), tmp.stat().st_size,
+            return Sealed(day, "verify-failed", len(plain), _size_or_zero(tmp),
                           "sealed copy does not round-trip — source kept")
         # THE CHANGE TEST RUNS BEFORE PUBLISH: a file that grew while we read it
         # must not publish an archive at all, or the archive becomes a truncated
         # day that looks complete and every later run calls it a conflict —
         # an alarm that can never be cleared (#6388 review cycle 2).
-        if stat_before is not None:
-            changed = (not _unchanged_since(path, stat_before)
-                       or len(plain) != stat_before.st_size)
-        else:
-            # An UNVERIFIABLE source is a conflict, never an unlink: fail closed
-            # on the only data-loss check in this tool.
-            changed = True
-        if changed:
+        if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), 0,
                           "file changed while sealing — source kept")
         os.replace(tmp, target)
+        published = True
         _fsync_dir(target.parent)
-        # NOTHING APPENDED SINCE THE SNAPSHOT? A writer that added bytes
-        # between the read above and this unlink would have them destroyed with
-        # the inode. Compare identity + size + mtime: any change keeps the
-        # source (and the archive is a strict prefix of the truth, never a
-        # replacement for it).
-        if not _unchanged_since(path, stat_before):
-            # The last belt: the file changed between the publish above and this
-            # unlink.  The archive is a verified prefix, the source stays.
-            return Sealed(day, "conflict", len(plain), target.stat().st_size,
+        # The LAST belt: the file changed between the publish above and this
+        # unlink. The archive is a verified prefix, the source stays — and the
+        # stale-prefix arm above heals this state on the next run.
+        if _changed_since(path, stat_before, len(plain)):
+            return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                           "file changed while sealing — source kept")
         path.unlink()
-        _fsync_dir(target.parent)
+        removed = True
+        # The unlink happened in `root`, so `root` is the entry that needs to be
+        # durable — fsyncing the archive dir here would leave the removal
+        # resurrectable after a power loss (#6388 review cycle 3, P2).
+        _fsync_dir(root)
     except (OSError, EOFError, zlib.error) as e:
+        if removed:  # pragma: no cover - only a post-unlink fsync can land here
+            return Sealed(day, "sealed", len(plain), _size_or_zero(target),
+                          f"sealed; a post-removal fsync failed: {e}")
+        if published:
+            return Sealed(day, "verify-failed", len(plain), _size_or_zero(target),
+                          f"archive published but the source was NOT removed "
+                          f"({e}) — both copies are on disk")
         return Sealed(day, "verify-failed", len(plain), 0,
                       f"seal failed: {e} — source kept")
     finally:
         if tmp is not None:
             with contextlib.suppress(OSError):
                 tmp.unlink()
-    return Sealed(day, "sealed", len(plain), target.stat().st_size)
+    return Sealed(day, "sealed", len(plain), _size_or_zero(target))
 
 
 def _fsync_dir(path: Path) -> None:
@@ -314,25 +345,30 @@ def restore(root: Path, day: date) -> str:
             return f"{dst} already exists and the archive is unreadable: {e}"
         return (f"{dst} already exists with different content — refusing to "
                 "overwrite it")
-    tmp: Path | None = None
+    # EXCLUSIVE CREATE, never os.replace: `dst.exists()` above is a TOCTOU, and
+    # an os.replace reaching a file created after that check swaps the inode
+    # under a writer's fd, losing its appended bytes silently (#6388 review
+    # cycle 3, P1). O_EXCL makes "someone else created it" an error we report.
     try:
         plain = gzip.decompress(target.read_bytes())
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=str(root), prefix=dst.name + ".",
-                                        suffix=".tmp")
-        tmp = Path(tmp_name)
+    except (OSError, EOFError, zlib.error) as e:
+        return f"{target} is unreadable: {e}"
+    try:
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return (f"{dst} appeared while restoring — refusing to overwrite it")
+    except OSError as e:
+        return f"restore failed: {e}"
+    try:
         with os.fdopen(fd, "wb") as out:
             out.write(plain)
             out.flush()
             os.fsync(out.fileno())
-        os.replace(tmp, dst)
         _fsync_dir(root)
-    except (OSError, EOFError, zlib.error) as e:
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            dst.unlink()
         return f"restore failed: {e}"
-    finally:
-        if tmp is not None:
-            with contextlib.suppress(OSError):
-                tmp.unlink()
     return ""
 
 
@@ -341,10 +377,16 @@ def _unreadable_archives(root: Path) -> list[Path]:
     bytes is the one state where the evidence no longer exists."""
     out = []
     archive_dir = root / ARCHIVE_DIRNAME
+    # `Path.glob` cannot report "could not look": pathlib's wildcard selector
+    # swallows the scandir OSError, so a mode-000 archive dir answered "clean"
+    # (#6388 review cycle 3, P1). `os.scandir` is explicit, and only the genuine
+    # "there is no archive yet" errnos are benign.
     try:
-        candidates = sorted(archive_dir.glob("*.jsonl.gz"))
+        entries = list(os.scandir(archive_dir))
     except (FileNotFoundError, NotADirectoryError):
         return out
+    candidates = sorted(Path(e.path) for e in entries
+                        if e.name.endswith(".jsonl.gz"))
     for path in candidates:
         try:
             gzip.decompress(path.read_bytes())
