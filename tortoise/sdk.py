@@ -22768,21 +22768,27 @@ class TortoiseSDK:
                     # describe the graph THIS route actually writes (the direct
                     # route takes one target and has no operator and no INPUT
                     # mirror, so the operator sentence would be false there).
+                    # (review round 2, P3) The WHOLE sentence is branched: the
+                    # operator route's tail about a preserved positional `idx`
+                    # is false on the direct route, which writes no `idx` at all
+                    # — and a warning that contradicts itself is worse than no
+                    # warning.
                     _effect = (
                         "one connection writes ONE typed edge and ONE INPUT "
                         "edge per DISTINCT target (the operator's input set "
-                        "is a set, #9750)"
+                        "is a set, #9750); the repeated spelling was collapsed "
+                        "with the order preserved, so the positional idx is "
+                        "unchanged"
                         if _route != "direct" else
                         "a direct edge takes ONE target, so the repeated "
-                        "spelling was ignored (#9750)"
+                        "spelling was ignored and the write is identical to "
+                        "the singular spelling (#9750)"
                     )
                     self._append_warning(
                         "duplicate_target_deduped:"
                         + ",".join(_collapsed)
                         + f":{op_type} — the connection's 'to' list named the "
-                        f"same target more than once; {_effect}. The repeated "
-                        f"spelling was collapsed (order preserved, so the "
-                        f"positional idx is unchanged)."
+                        f"same target more than once; {_effect}."
                     )
                 if _request_route == "direct" and _route == "operator":
                     self._append_warning(
@@ -22832,19 +22838,19 @@ class TortoiseSDK:
                                         "result": conn_result,
                                         "deduped": bool(conn_result.get("deduped"))})
                     continue
-                # (#9750 review round 1, P2) The KEY is the DISTINCT input list,
-                # including the SOURCE slot. `_find_operator` compares
-                # `size(DISTINCT targets) = size($inputs)` (set semantics on both
-                # sides), so handing it the slot list (`[src, *dsts]`, which
-                # carries the source twice when a target resolves onto the
-                # source's own node) made the key unsatisfiable for that shape:
-                # the retry fell into PARTIAL-ABSORB, wrote zero edges and
-                # reported `operator_absorb_completed` for an operator that was
-                # already complete. The EDGE SHAPE is untouched —
-                # `create_operator` writes its own `inputs`, which keep the
-                # deliberate self-support slot.
+                # (#9750 review round 1, P2) the REQUEST is handed over as its
+                # real SLOT list, `[src, *dsts]` — `_find_operator` normalizes
+                # `$inputs` to the DISTINCT set itself (one place, every caller),
+                # so both sides of `size(DISTINCT targets) = size($inputs)` count
+                # the same thing even when a target resolved onto the source's
+                # own node. ⛔ Do NOT pre-dedupe here: the repeat is exactly what
+                # tells that query the request is INEXPRESSIBLE as an edge
+                # completion (`written` is an id set), and pre-deduping hid it
+                # into a partial-absorb that landed an `idx` GAP.
+                # The EDGE SHAPE is untouched — `create_operator` writes its own
+                # `inputs`, which keep the deliberate self-support slot.
                 existing = self._find_operator(
-                    op_type, _distinct_preserving_order([src, *dsts]),
+                    op_type, [src, *dsts],
                     label=label, direction=direction)
                 if existing is not None and existing.get("kind") == "exact":
                     oid = existing["id"]
@@ -22906,6 +22912,7 @@ class TortoiseSDK:
                         raise ValueError(_claim_class.override_refusal(
                             source_id=src, target_ids=list(dsts),
                             surface=f"ingest({op_type}) partial-absorb"))
+                    _completed = 0
                     for _i, _inp in enumerate([src] + dsts):  # noqa: RUF005
                         if _inp in written:
                             continue
@@ -22933,7 +22940,14 @@ class TortoiseSDK:
                             f"MERGE (t)-[:INPUT {{idx:$idx}}]->(o)",
                             params={"oid": oid, "inp": _inp, "idx": _i},
                         )
-                    completed = len([src] + dsts) - len(written)  # noqa: RUF005
+                        _completed += 1
+                    # (#9750 review round 2, P3) COUNT THE WRITES, do not derive
+                    # them: `len([src] + dsts) - len(written)` subtracts an id SET
+                    # from a SLOT count, so a request that repeats an id (a target
+                    # that resolved onto the source's own node) over-reports the
+                    # completions in the §3.2 key-8 payload — it claimed 2 while
+                    # exactly one edge had been written.
+                    completed = _completed
                     if promotion_policy == "auto" and existing.get("status") is None:
                         try:  # noqa: SIM105
                             self._reapply_operator_promotion(oid)
@@ -23617,16 +23631,16 @@ class TortoiseSDK:
         canonical_dir = self._canonical_direction(op_type, direction)
         # ── #9750: BOTH SIDES OF THE KEY ARE SETS ──────────────────────────
         # The graph side collects `DISTINCT t.id` below, so `$inputs` is
-        # normalized the same way HERE (once, for every caller) — otherwise a
-        # caller handing the SLOT list (`[src, src]`, which a target that
-        # resolves onto the source's own node legitimately produces) makes the
-        # key unsatisfiable `size(1) = size(2)`, and the resubmission falls into
-        # the PARTIAL-ABSORB arm and reports a completion that never happened.
+        # normalized to the same DISTINCT set HERE — once, for EVERY caller, so
+        # no caller can make the key unsatisfiable by handing it a SLOT list
+        # (`[src, src]`, which a target that resolves onto the source's own node
+        # legitimately produces): that shape read `size(1) = size(2)`, fell into
+        # the PARTIAL-ABSORB arm and reported a completion that never happened.
         # Sets on both sides is what "the same input set" means; the WRITE keeps
         # its slots (the self-support operator is written with `idx` 0 and 1 over
         # one id) — the KEY is a lookup, not the edge shape.
-        params: dict = {"op": op_type,
-                        "inputs": _distinct_preserving_order(inputs)}
+        _inputs_distinct = _distinct_preserving_order(inputs)
+        params: dict = {"op": op_type, "inputs": _inputs_distinct}
         conds = [
             "size(targets) = size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
@@ -23651,9 +23665,11 @@ class TortoiseSDK:
             params["directions"] = sorted(direction_spellings(canonical_dir))
         # ── #9750: DISTINCT, because the KEY is a set ─────────────────────
         # `targets` is the LEFT side of `size(targets) = size($inputs)`, and
-        # `$inputs` is de-duplicated BY THE CALLER (ingest passes
-        # `_distinct_preserving_order([src, *dsts])`), so both sides count the
-        # same thing: DISTINCT endpoints. A graph written BEFORE #9750 can
+        # `$inputs` is normalized to that same DISTINCT set by THIS function
+        # (`_inputs_distinct`, above) — ⛔ NOT by the caller, which deliberately
+        # passes the raw SLOT list so a repeated id stays visible to the
+        # inexpressible-request decline. Both sides therefore count the same
+        # thing: DISTINCT endpoints. A graph written BEFORE #9750 can
         # still carry the duplicate edges the old writer produced (`idx` 1 and
         # 2 over one id), whose `collect(t.id)` yields the same id twice —
         # reading that as TWO targets made the exact-hit miss on a request that
@@ -23682,6 +23698,17 @@ class TortoiseSDK:
         if rows:
             return {"id": rows[0][0], "status": rows[0][1],
                     "kind": "exact", "written": list(inputs)}
+        # ── #9750 (review round 2, P3): an INEXPRESSIBLE request is a MISS ──
+        # `written` (below) is a set of IDS, so the completion loop cannot
+        # reproduce a request whose OWN slot list repeats an id — it skips the
+        # second occurrence and lands an `idx` GAP (measured: a crash remnant of
+        # `[src, src, b]` was "completed" to `[(0,src),(2,b)]`, a shape no writer
+        # produces and every later resubmission then exact-matches). Declining
+        # here makes the worst case a MISS — the caller mints a complete operator
+        # for its input set — instead of a silently slot-less one, and it stops
+        # `operator_absorb_completed` reporting writes that cannot happen.
+        if len(_inputs_distinct) != len(list(inputs)):
+            return None
         # ── partial-absorb (cycle-11/12/13): on an exact miss, look for a
         # PARTIAL operator (any non-terminal status — see the status clause in
         # pcond below) whose written set is a PROPER SUBSET of the
@@ -23718,10 +23745,14 @@ class TortoiseSDK:
             # `idx 1`, and `ep.py` reads the factor positionally, so the
             # operator became malformed and then permanently adopted by a
             # resubmission. Requiring the edge count to EQUAL the distinct count
-            # excludes every slot-carrying operator from this arm (it is not
-            # partial — it is complete in a shape this arm cannot express), so
+            # excludes every COMPLETE slot-carrying operator from this arm (it is
+            # not partial — it is complete in a shape this arm cannot express), so
             # the worst case becomes a MISS (a new operator for a genuinely
-            # different input set) instead of a corrupted factor.
+            # different input set) instead of a corrupted factor. The INCOMPLETE
+            # window (a crash that landed before the duplicate slot) is closed
+            # above, by declining a request whose own slot list repeats an id —
+            # and `completed` is COUNTED from the writes the loop performs, not
+            # derived from a SLOT count minus an id SET.
             # ⛔ Referenced through the WITH alias (`n_edges`), never as a bare
             # `count(r)` in the WHERE: an aggregate written there makes FalkorDB
             # fail the whole query with `_AR_EXP_UpdateEntityIdx: Unable to

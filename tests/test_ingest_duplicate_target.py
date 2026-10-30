@@ -222,6 +222,11 @@ def test_direct_route_repeated_ref_not_multi_item(make_sdk):
                 if w.startswith("duplicate_target_deduped"))
     assert "takes ONE target" in _dup, _dup
     assert "INPUT" not in _dup, _dup
+    # (review round 2, P3) the operator route's tail must NOT survive here: the
+    # direct writer writes no positional `idx`, so "the positional idx is
+    # unchanged" would contradict the sentence before it.
+    assert "positional idx" not in _dup, _dup
+    assert "collapsed" not in _dup, _dup
 
 
 def test_self_support_operator_is_never_completed_by_position(make_sdk):
@@ -287,6 +292,74 @@ def test_find_operator_key_is_a_set_for_the_repeated_source_slot(make_sdk):
         [w.split(":", 1)[0] for w in second["warnings"]], second["warnings"]
     slots = _operator_input_slots(sdk, oid)
     assert [i for i, _ in slots] == [0, 1], slots
+
+
+def test_absorb_never_completes_an_inexpressible_request(make_sdk):
+    """Review round 2, P3 — the crash window the `n_edges = size(targets)` guard
+    does NOT cover, and the `completed` count that over-reported it.
+
+    ``_find_operator``'s ``written`` is a set of IDS, so the completion loop
+    cannot reproduce a request whose OWN slot list repeats an id — reachable when
+    a target resolves onto the SOURCE's node (two same-content items fold) while
+    the caller spelled two different refs, so Phase 1's ref-level self-edge guard
+    does not fire. Measured before this arm declined such a request: a crash
+    remnant holding only ``idx 0`` was "completed" to ``[(0,src),(2,q3)]`` — an
+    `idx` GAP no writer produces, which every later resubmission then
+    exact-matches — while the §3.2 key-8 payload claimed TWO completions for ONE
+    edge written.
+
+    The invariant pinned here is shape-level, so it survives any future rework of
+    the arm: after the retry, EVERY operator's typed `idx` list is contiguous
+    from 0.
+    """
+    sdk = make_sdk("inexpressible")
+    bundle = {"points": [{"ref": "q1", "kind": "statement", "content": "same"},
+                         {"ref": "q2", "kind": "statement", "content": "same"},
+                         {"ref": "q3", "kind": "statement", "content": "other"}],
+              "connections": [{"from": "q1", "to": ["q2", "q3"],
+                               "operator": "IMPL"}]}
+    first = sdk.ingest(bundle)
+    oid = first["ids"]["connections"][0]
+    assert first["ids"]["refs"]["q1"] == first["ids"]["refs"]["q2"], first["ids"]
+    g = sdk._get_proj().g
+    # simulate the crash: only the source slot landed
+    g.query("MATCH (o:Point {id:$o})-[r:IMPL]->(t) WHERE r.idx > 0 DELETE r",
+            params={"o": oid})
+
+    res = sdk.ingest(bundle)
+
+    assert "operator_absorb_completed" not in \
+        [w.split(":", 1)[0] for w in res["warnings"]], res["warnings"]
+    idx_by_op: dict[str, list[int]] = {}
+    for node_id, idx in g.query(
+            "MATCH (o:Point {is_operator:true})-[r:IMPL]->(t) "
+            "RETURN o.id, r.idx ORDER BY o.id, r.idx").result_set:
+        idx_by_op.setdefault(node_id, []).append(idx)
+    for node_id, idxs in idx_by_op.items():
+        assert idxs == list(range(len(idxs))), \
+            (node_id, idxs, "idx GAP in the factor's positional input list")
+
+
+def test_absorb_reports_the_writes_it_makes(make_sdk):
+    """Review round 2, P3 — `operator_absorb_completed` must count EDGES WRITTEN.
+
+    It used to be derived as ``len([src] + dsts) - len(written)``: a SLOT count
+    minus an id SET, which over-reports by one for every repeated id. Here the
+    request is duplicate-free and exactly one input is missing, so the payload
+    must say ``:1``."""
+    sdk = make_sdk("absorb_count")
+    a = sdk.create_point(kind="statement", content="one")["id"]
+    b = sdk.create_point(kind="statement", content="two")["id"]
+    c = sdk.create_point(kind="statement", content="three")["id"]
+    sdk.create_operator("IMPL", a, [b])           # crash partial: {a, b} of {a, b, c}
+
+    res = sdk.ingest({"connections": [
+        {"from": a, "to": [b, c], "operator": "IMPL"}]})
+
+    done = [w for w in res["warnings"] if w.startswith("operator_absorb_completed")]
+    assert len(done) == 1, res["warnings"]
+    assert done[0].endswith(":1"), done[0]
+    assert _edge_counts(sdk) == (3, 3), _edge_counts(sdk)
 
 
 # ═══════════════════════════════════════════════════════════════════════
