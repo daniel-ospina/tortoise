@@ -423,6 +423,23 @@ def _wire(page: Page, *, inv: dict | None = None,
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"keys": rows}))
             return
+        if path.endswith("/v1/invites/pending") and method == "GET":
+            # #9191 (measured on this suite as `test_create_team_free_capped_gate`,
+            # jobs 122617073611 and 123390215789): the app fetches this when the
+            # account menu OPENS. Left to the 404 catch-all below,
+            # `loadPendingInvites` answers with its retryable-error row, which is a
+            # PARENT-MENU re-render — and when it lands between the locator resolve
+            # and the click, `+ Create new organization` is clicked on a detached
+            # node: the menu stays open, no dialog mounts, and the next await times
+            # out 30s later. Answered here instead (the app's normal "no invites"
+            # state, `res.invites`), so the menu settles deterministically before
+            # any test clicks an item inside it. The two `test_pending_invites_*`
+            # specs register their OWN route for this path AFTER `_wire`, and
+            # Playwright matches routes in reverse registration order, so this arm
+            # does not shadow them.
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"invites": []}))
+            return
         if path.endswith("/v1/sessions") or path.endswith("/backups"):
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"sessions": [], "backups": []}))
@@ -846,6 +863,57 @@ def test_create_team_success(page: Page):
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render detaches the name-changed button
     # the dashboard switches to the new team (the blob shows its name)
     expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("good name with spaces", timeout=15000)
+
+
+def test_the_account_menu_settles_instead_of_404ing_its_invites(page: Page):
+    """#9191/#10179: the menu's own invites fetch must SETTLE, not 404 into a re-render.
+
+    Measured twice on this file's create-org arms (`test_create_team_free_capped_gate`,
+    jobs 122617073611 at 2026-10-28T04:16Z and 123390215789 at 2026-10-29T11:22Z):
+    the click on `+ Create new organization` landed on a DETACHED node, so the menu
+    stayed open, no dialog mounted, and the next `fill()` timed out 30 s later —
+    while the SAME sha passed on a rerun (run 39255712408 attempt 2, head
+    97703631c here). The cause is in the FIXTURE, not the app: `_wire()` stubbed
+    everything except `/v1/invites/pending`, whose 404 makes `loadPendingInvites`
+    answer with its retryable-error row — a PARENT-MENU re-render racing the click.
+    `_wire()` now answers `{"invites": []}` (the app's normal no-invites state).
+
+    This arm is the deterministic half: on the pre-fix fixture the fetch answers
+    404, so the response this arm BINDS TO is not ok and the arm reds on every
+    run — the fix is proven rather than trusted to a 1-in-3 flake reproducing.
+
+    ⛔ The fetch is AWAITED before any claim about what it rendered (#10179 P2-1).
+    `to_have_count(0)` succeeds on the first poll when the element is simply
+    absent, i.e. it asserts "absent NOW", not "never appears" — so an absence
+    assertion evaluated straight after the click races `loadPendingInvites`'s
+    response and passes on the PRE-FIX fixture whenever the response has not been
+    delivered yet. Binding the assertion to the response (and asserting the
+    response itself, which is the thing the fixture changed) makes the arm red on
+    every run with the stub removed, and green once the 200 is restored.
+    """
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1))
+
+    page.goto(DASHBOARD_URL)
+    with page.expect_response(
+        lambda r: r.url.endswith("/v1/invites/pending")
+    ) as invites_resp:
+        _open_account_menu(page)
+    # The fixture's answer IS half of what this arm pins: `_wire` must serve the
+    # app's normal no-invites state, and 404 is the retryable-error path.
+    assert invites_resp.value.ok, (
+        f"the invites fetch answered {invites_resp.value.status} — `_wire` must "
+        "serve the app's normal no-invites state, not fall through to the 404 "
+        "catch-all (which is the #9191 detached-node re-render)"
+    )
+    menu = page.locator(".account-menu")
+    # The retryable-error row `loadPendingInvites` writes on a failed fetch:
+    # `{ _loadError: 'Could not load invites — reopen the menu to retry' }`.
+    expect(menu.get_by_text("Could not load invites")).to_have_count(0)
+    # …and the item the create-org arms click is present and stable, not re-rendered
+    # under them: this resolves BEFORE any click, so a regression here is a clear
+    # assertion rather than a detached-node click 30 s downstream.
+    expect(menu.get_by_role("button", name="+ Create new organization")).to_be_visible()
 
 
 def test_create_team_free_capped_gate(page: Page):

@@ -16,8 +16,53 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "skip-guard.py"
+PYTHON_CI = (
+    Path(__file__).resolve().parents[1] / ".github" / "workflows" / "python-ci.yml"
+)
+
+# The gating `test` matrix run's watchdog duration, in EITHER form (#10028): the
+# per-shard expression `${{ matrix.watchdog_minutes }}m`, or a literal budget.
+GATING_WATCHDOG_RE = re.compile(
+    r"timeout -s INT -k 10 (?:\d+|\$\{\{\s*matrix\.watchdog_minutes\s*\}\})m"
+)
+
+
+def gating_pytest_runs(workflow_text: str, job_name: str = "test") -> list[str]:
+    """The gating pytest invocations of `job_name` — and ONLY that job's.
+
+    Scanned per JOB, never over the whole file. A whole-text regex cannot tell
+    two jobs apart, so the moment another leg adopted the same spellings the pin
+    counted two runs and stopped being able to say which run it had checked: it
+    reds with `assert 2 == 1` rather than reporting anything about the fast
+    suite. #10280 migrated `test-slow` from a host-global `--junitxml=/tmp/junit.xml`
+    literal to the per-job `--junitxml="$PYTEST_JUNIT"`, which is exactly that —
+    and it was invisible on `main` only because the literal `/tmp` path kept the
+    slow leg from matching (the same accident that once made this pin retarget
+    ONTO `test-slow`, #10028).
+
+    The `--junitxml="$PYTEST_JUNIT"` token is still load-bearing WITHIN the job:
+    the last-failed PRE-PHASE writes `--junitxml="$PYTEST_JUNIT_LF"` and is not
+    the run the skip guard reconciles (#6142).
+    """
+    jobs = (yaml.safe_load(workflow_text) or {}).get("jobs") or {}
+    if job_name not in jobs:
+        raise AssertionError(
+            f"python-ci.yml has no {job_name!r} job — this pin reads the fast-suite "
+            "gating run, and a renamed job must not silently uncheck it"
+        )
+    runs: list[str] = []
+    for step in jobs[job_name].get("steps") or []:
+        for line in (step.get("run") or "").splitlines():
+            if (
+                GATING_WATCHDOG_RE.search(line)
+                and "-m pytest" in line
+                and '--junitxml="$PYTEST_JUNIT"' in line
+            ):
+                runs.append(line)
+    return runs
 
 # pytest -v progress format (REAL output always ends with the progress marker
 # "[ N%]" — pytest 9.1.1, verified)
@@ -386,6 +431,53 @@ class TestGuardAcceptsCleanLog:
             "reconciles --collect-only nodeids against junitxml testcases, and "
             "the file/line attributes only exist under junit_family=xunit1"
         )
+
+    def test_the_rs_pin_is_scoped_to_the_fast_job_not_to_the_whole_file(self):
+        """#10280 non-vacuity: the selector must resolve the FAST job, not "the
+        one line that happened to match".
+
+        The pre-fix pin filtered the whole workflow text, so it could only ever
+        see a second leg by accident: it counted TWO gating runs the moment
+        `test-slow` was migrated off its host-global `/tmp` literal onto the same
+        per-job `$PYTEST_JUNIT` spelling (measured on #10280: `assert 2 == 1`).
+        This fixture reproduces that shape — the file-wide probe below still sees
+        2, so the fixture cannot go stale into passing for the wrong reason — and
+        the job-scoped selector must return exactly the fast run.
+        """
+        text = """
+jobs:
+  test:
+    steps:
+      - run: |
+          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -n "$XDIST_WORKERS" -v -r fEs --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1
+  test-slow:
+    steps:
+      - run: |
+          timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v -r fEs --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1
+"""
+        file_wide = [
+            line
+            for line in text.splitlines()
+            if GATING_WATCHDOG_RE.search(line)
+            and "-m pytest" in line
+            and '--junitxml="$PYTEST_JUNIT"' in line
+        ]
+        assert len(file_wide) == 2, (
+            "the fixture no longer reproduces the two-job shape the #10280 red "
+            f"came from, so it proves nothing: {file_wide}"
+        )
+        runs = gating_pytest_runs(text)
+        assert len(runs) == 1, runs
+        assert "matrix.watchdog_minutes" in runs[0], (
+            "the selector resolved the SLOW leg (literal `40m`) instead of the "
+            f"fast job's gating run: {runs[0]}"
+        )
+
+    def test_a_renamed_fast_job_reds_instead_of_silently_unchecking_the_pin(self):
+        """A scoped pin must not degrade into a no-op: if the job it reads is
+        renamed, the absence must be a failure, never an empty selection."""
+        with pytest.raises(AssertionError, match="no 'test' job"):
+            gating_pytest_runs("jobs:\n  fast:\n    steps: []\n")
 
 
 class TestGuardFailsOnLiveFalkorDBSkip:
