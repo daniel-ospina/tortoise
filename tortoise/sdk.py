@@ -16967,6 +16967,10 @@ class TortoiseSDK:
                 # not be rebuilt. ⛔ That is fixed since #10139 (the descriptor
                 # carries the values flat) — the wording above is the HISTORY of why
                 # `ON CREATE` is the form, not a live claim about the descriptor.
+                # ⚠️ What the descriptor journals is the RETIRED edge's attributes,
+                # never the value a careless carry destroyed — so the clobber itself
+                # stays unrecoverable even now, which is why the precedence is
+                # enforced here rather than repaired on rebuild.
                 # ⛔ PRECEDENCE, stated: the successor's own live value WINS. That is
                 # what the pre-#9417 code did (a bare MERGE left a pre-existing edge
                 # untouched), so this preserves it while still refusing to leave a

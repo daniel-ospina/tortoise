@@ -4345,11 +4345,15 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
         ),
         # ⛔ NOT the bare prefix `carry no` / `carries no`: measured, that reds at
         # least four TRUE §13 sentences that name a counted KEY (`DirectEdgeRepoint`
-        # carries no `attrs`, *"carries none of direction/…"*, *"§13 carries no
+        # carries no `idx`, *"carries none of direction/…"*, *"§13 carries no
         # line numbers"*, *"carries no recorded version read at all"*). The OBJECT
         # is what separates a denial from the record, so the object is what the
         # frame reads.
-        "`DirectEdgeRepoint` carries no `attrs`.",
+        # ⚠️ This witness said `attrs`, which `#10139` RETIRED (`the descriptor
+        # carries the five flat keys) — kept only as the regex's control shape, so
+        # it is spelled with a key that is still absent today (`idx`) rather than
+        # quoting a claim the code now contradicts.
+        "`DirectEdgeRepoint` carries no `idx`.",
     ),
     (
         re.compile(r"\b(?:write|writes)\s+nothing\b"),
