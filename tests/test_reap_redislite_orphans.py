@@ -178,10 +178,12 @@ def _opts_in(value: object) -> bool:
     * a literal truthy spelling — `_truthy` above, which is how `ci.yml`,
       `deploy-pages.yml`, `evals-on-demand.yml` and `perf-lane.yml` set it;
     * a non-empty EXPRESSION — `TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}`,
-      which is how the repo's two WIDEST embedded jobs set it
-      (`python-ci.yml:1542` in `test`, `:2380` in `test-slow`: the variable is
-      exported at step scope and can be EMPTY on the docker lane, so the
-      expression is all a text scan ever sees).
+      which is how `python-ci.yml`'s two matrix legs set it at step scope
+      (`:1542` in `test`, `:2380` in `test-slow`): the variable is exported at
+      step scope and is EMPTY on the docker lane, so the expression is all a text
+      scan ever sees. (The JOIN-WIDEST embedded jobs are `test` and
+      `evals-on-demand.yml::evals`, and `evals` opts in with a literal — so this
+      is the form used by the python-ci matrix, not the form the widest uses.)
 
     An expression is admitted DELIBERATELY, and the direction is fail-closed: a
     job that sets one MAY run URI-less, so it joins the population whose cap
@@ -234,18 +236,18 @@ def _embedded_lane_job_outer_timeouts(
     pytest watchdog — bounds how long a live leg's redislite server can possibly
     exist.
 
-    A job is admitted on either signal it cannot own a server without: it
-    invokes this reaper, or it opts into the URI-less embedded lane — at workflow
-    `env:` level (inherited by every job), at job level, or at step level, and in
-    either spelling `_opts_in` accepts (a truthy literal, or a non-empty
-    `${{ … }}` expression). The marker is the
+    A job is admitted on either of the two signals this repo's CI uses to own
+    one: it invokes this reaper, or it opts into the URI-less embedded lane — at
+    workflow `env:` level (inherited by every job), at job level, or at step
+    level, and in either spelling `_opts_in` accepts (a truthy literal, or a
+    non-empty `${{ … }}` expression). The marker is the
     carve-out env var rather than the string "pytest" deliberately —
     `ci.yml::flip-gate` runs pytest from inside `verify-cutover`, so a `pytest`
     scan cannot see the exact job this population was widened for. The residual
     (a URI-set job whose suite constructs embedded anyway, through the
-    `tests/_embedded.py` no-redirect registry) is recorded in the module's
-    derivation block, not silently absorbed: the reaper-invoking half covers
-    today's such jobs, and every one of them is capped below the arm.
+    `tests/_embedded.py` `TEST_NO_REDIRECT_STEMS` registry) is recorded in the
+    module's derivation block, not silently absorbed: the reaper-invoking half
+    covers today's such jobs, and every one of them is capped below the arm.
     """
     found: dict[str, int | None] = {}
     for path in _workflow_files(workflows_dir):
@@ -369,13 +371,14 @@ def test_the_embedded_lane_scan_reads_every_workflow_extension(tmp_path):
 def test_an_expression_valued_carve_out_is_admitted(tmp_path):
     """NON-VACUOUS: reds if `_opts_in` falls back to literal spellings only.
 
-    The repo's two widest embedded jobs opt in the way a text scan cannot spell:
+    `python-ci.yml`'s two matrix legs opt in the way a text scan cannot spell:
     `TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}` (`python-ci.yml:1542` in
     `test`, `:2380` in `test-slow`). They are admitted today by the
     reaper-invocation half, so this hole is INVISIBLE on the real tree — which is
     exactly why it needs its own fixture: a job that sets the expression and does
-    not run the reaper would otherwise be admitted by nothing, and if it were
-    uncapped the age-arm proof would go false while `uncapped == []` kept
+    not run the reaper would otherwise be admitted by nothing (or by a
+    `TEST_NO_REDIRECT_STEMS` suite, which the scan cannot see either), and if it
+    were uncapped the age-arm proof would go false while `uncapped == []` kept
     reporting green (review @ `1e9b96be5`, ISSUE 2).
 
     The fixture job is deliberately UNCAPPED and the expected value is `None`:

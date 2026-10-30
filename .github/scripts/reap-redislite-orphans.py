@@ -68,7 +68,7 @@ project's own interpreter.
 Usage:
     python3 .github/scripts/reap-redislite-orphans.py                  # dry run
     python3 .github/scripts/reap-redislite-orphans.py --apply          # kill
-    python3 .github/scripts/reap-redislite-orphans.py --max-age-minutes 120 --apply
+    python3 .github/scripts/reap-redislite-orphans.py --max-age-minutes 95 --apply
 
 Exit codes: 0 = ran (dry or apply) — INCLUDING when it found nothing to look at;
 2 = something this tool was told to read could not be read (`--proc-json`, or the
@@ -112,14 +112,38 @@ _SOCKET_FLAG = "unixsocket"
 # redislite server", not "jobs that run this line" — the process table this
 # tool reads is the HOST's, and ownership is decided by argv + age, never by
 # which workflow started the server. Membership is read mechanically from the
-# two signals a workflow cannot own a server without: it invokes this reaper,
-# or it sets the URI-less embedded opt-in (`TORTOISE_TEST_CARVE_OUT`, read
-# through the declared contract in `tests/_embedded.py`) — the marker, not the
-# string "pytest", because a job may run pytest from INSIDE a shell script
+# two signals a job needs in order to own one: it invokes this reaper, or it sets
+# the URI-less embedded opt-in (`TORTOISE_TEST_CARVE_OUT`, read through the
+# declared contract in `tests/_embedded.py`) — the marker, not the string
+# "pytest", because a job may run pytest from INSIDE a shell script
 # (`ci.yml::flip-gate` → `verify-cutover`), which no `pytest` text scan sees.
 # The pin also carries an explicitly frozen expected set and two by-name
 # exemptions for the requests-only e2e suites, so this population cannot drift
 # silently in either direction.
+#
+# ⛔ WHAT THE SCAN CANNOT SEE, recorded rather than absorbed. Two residuals, both
+# in the false-PASS direction, so neither may be quietly dropped:
+#
+#   a) A URI-set job can still keep an embedded server: `TEST_NO_REDIRECT_STEMS`
+#      in `tests/_embedded.py` exempts a handful of files from the docker
+#      redirect precisely so they KEEP constructing embedded (that module's own
+#      comment: "Without this exemption a URI-set session redirects the
+#      fixture's explicit `db_path` construction to the server"). A job that runs
+#      one of those stems with `TORTOISE_DB_URI` set, no carve-out and no reaper
+#      step is admitted by NEITHER signal. No workflow→file mapping is derivable
+#      here — the shard split is computed by `tools/ci_selection.py` at run time —
+#      so this is stated, not scanned: today those stems run inside
+#      `python-ci.yml::test`/`test-slow`, which the reaper half admits and which
+#      are capped below this arm. A job that starts running them elsewhere has to
+#      add itself to the pin's population by hand.
+#   b) The population is CI JOBS; `classify()` quantifies over EVERY `redis-server`
+#      on the host, and the runners are shared with the agent fleet
+#      (`python-ci.yml`: "jobs landing on local hardware compete with the agent
+#      fleet"). A fleet `pytest` holding a session-scoped server for longer than
+#      this arm has no `timeout-minutes` at all, so no workflow-derived arm can
+#      prove anything about it. Pre-existing, not introduced here (the shipped 45
+#      was strictly worse), but it is why this arm is a bound on OUR legs and not
+#      a licence to reap anything older.
 #
 # At the time of writing the widest is `test` at 90 (`python-ci.yml`);
 # `evals-on-demand.yml::evals` 90, `test-slow` 60,
