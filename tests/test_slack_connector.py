@@ -2,8 +2,30 @@
 from __future__ import annotations  # noqa: I001
 
 import json
+import socket
 import pytest  # noqa: F401
 from tortoise.connectors.slack import SlackConnector, _ts_to_iso, _verify_slack_sig
+
+
+# The webhook legs must never demand a HOST-GLOBAL port be free. They used to
+# hardcode 18994/18995/18999, and 18995 was named by two of them at once:
+#
+#   * under `-n 4` (the shards run xdist with 4 workers) the two 18995 legs are
+#     co-scheduled and the second `HTTPServer.bind` raises
+#     `OSError: [Errno 98] Address already in use` — measured in CI at
+#     `840fd3078` (run 41007224545, job `test (g)` 123914139669), where BOTH
+#     legs red together;
+#   * and a PEER lane's leftover pytest process holding 18995 reds them for any
+#     unrelated PR on a shared self-hosted runner (measured locally: pid 4040760
+#     from a previous day's shard was still bound to 127.0.0.1:18995).
+#
+# `_free_port()` is the same helper `tests/test_monitoring.py` and
+# `tests/test_write_doors_9068.py` already use: ask the OS for a port nobody
+# holds instead of asserting one is free.
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 # ── Message → Event mapping ──────────────────────────────────────
@@ -182,13 +204,14 @@ def test_webhook_disabled_when_port_zero():
 def test_webhook_url_verification():
     """Slack URL verification challenge returns 200 with challenge text."""
     import urllib.request
+    wanted = _free_port()
     sc = SlackConnector(config={
         "token": "xoxb-test",
-        "webhook_port": 18999,
+        "webhook_port": wanted,
         "signing_secret": "",
     })
     port = sc.start_webhook()
-    assert port == 18999
+    assert port == wanted, "the connector must serve on the port it was configured with"
 
     try:
         payload = json.dumps({
@@ -196,7 +219,7 @@ def test_webhook_url_verification():
             "challenge": "test-challenge-abc",
         }).encode()
         req = urllib.request.Request(
-            "http://localhost:18999/",
+            f"http://localhost:{port}/",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -215,7 +238,7 @@ def test_webhook_start_is_idempotent():
     import urllib.request
     sc = SlackConnector(config={
         "token": "xoxb-test",
-        "webhook_port": 18995,
+        "webhook_port": _free_port(),
         "signing_secret": "",
     })
     port1 = sc.start_webhook()
@@ -253,7 +276,7 @@ def test_webhook_processing_error_returns_500():
 
     sc = SlackConnector(config={
         "token": "xoxb-test",
-        "webhook_port": 18994,
+        "webhook_port": _free_port(),
         "signing_secret": "",
     })
     port = sc.start_webhook(on_event=boom)
@@ -286,7 +309,7 @@ def test_webhook_non_dict_payload_returns_400():
 
     sc = SlackConnector(config={
         "token": "xoxb-test",
-        "webhook_port": 18995,
+        "webhook_port": _free_port(),
         "signing_secret": "",
     })
     port = sc.start_webhook()
@@ -304,3 +327,62 @@ def test_webhook_non_dict_payload_returns_400():
             assert False, "handler must respond with 400, not drop the connection"  # noqa: B011
     finally:
         sc.stop_webhook()
+
+
+def test_the_legacy_fixed_ports_being_taken_cannot_red_these_legs():
+    """A port this file used to hardcode cannot red the suite when it is taken.
+
+    The four webhook legs above name 18994/18995/18999 in their history, and
+    18995 twice at once. This leg OCCUPIES all three (when the host lets it) and
+    then starts a webhook, asserting it comes up and serves anyway.
+
+    FAIL VALUE, MEASURED: point ``_free_port()`` at the constant 18995 (the
+    value the old legs shared) and this leg reds with
+    ``OSError: [Errno 98] Address already in use`` at ``HTTPServer.bind`` — the
+    exact CI failure of SHARD ``test (g)`` at ``840fd3078`` (job 123914139669),
+    where ``test_webhook_start_is_idempotent`` and
+    ``test_webhook_non_dict_payload_returns_400`` red together because xdist
+    co-scheduled two legs that both demanded 18995.
+    """
+    import urllib.request
+
+    legacy = (18994, 18995, 18999)
+    blockers: list[socket.socket] = []
+    for port in legacy:
+        s = socket.socket()
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+            s.listen(1)
+            blockers.append(s)
+        except OSError:  # pragma: no cover - a peer already holds it, which is the point
+            s.close()
+    try:
+        sc = SlackConnector(config={
+            "token": "xoxb-test",
+            "webhook_port": _free_port(),
+            "signing_secret": "",
+        })
+        port = sc.start_webhook()
+        try:
+            assert port and port not in legacy, (
+                f"the webhook came up on a legacy host-global port ({port}) — "
+                "this file must allocate its port, never demand one"
+            )
+            payload = json.dumps({
+                "type": "url_verification",
+                "challenge": "collision-probe",
+            }).encode()
+            req = urllib.request.Request(
+                f"http://localhost:{port}/",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                assert r.status == 200
+                assert r.read().decode() == "collision-probe"
+        finally:
+            sc.stop_webhook()
+    finally:
+        for s in blockers:
+            s.close()
