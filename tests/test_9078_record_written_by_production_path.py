@@ -422,11 +422,12 @@ def capture_sdk(tmp_path, monkeypatch):
        with the pin they do not.
 
     ``TORTOISE_SESSION_LLM_MOCK=1`` is the repo's documented deterministic,
-    ZERO-NETWORK extractor — the same seam ``_capture()`` below pins on these
-    exact grounds — so a leg whose subject is the RECORD WRITE refuses the same
-    way on every box, keyed or keyless. Pinned on the FIXTURE, not per test, so
-    an arm-gate leg that never goes through ``_capture()`` cannot reopen the
-    hole.
+    ZERO-NETWORK extractor, so a leg whose subject is the RECORD WRITE refuses the
+    same way on every box, keyed or keyless. Pinned on the FIXTURE, not per test,
+    so a leg that never reaches the extractor cannot reopen the hole by leaving the
+    seam unset. (#4282 deleted `capture_session` and with it the `_capture()`
+    stack this paragraph used to point at; the pin is on the extractor seam itself,
+    which is what those legs actually traverse.)
     """
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 

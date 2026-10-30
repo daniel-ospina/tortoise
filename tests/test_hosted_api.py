@@ -8428,10 +8428,16 @@ class TestProvisioningService:
             assert body["graph"]["kind"] == "custom"
             assert body["key"]["scopes"] == ["graphs:read", "graphs:write"]
             assert body["key"]["graph_id"] == body["graph"]["id"]
-            # Reveal-once: listing keys never re-exposes plaintext
-            keys = sdk.apikey_list(tid)
-            for k in keys:
-                assert "key_plaintext" not in k
+            # Reveal-once: the registry NODES never carry plaintext. Read the
+            # nodes, not a projection — #4282 deleted `apikey_list`, and this
+            # assertion is about what the store holds, so a whole-node read is
+            # strictly stronger than the old 10-column projection was.
+            nodes = sdk._get_registry().query(
+                "MATCH (k:APIKey {org_id:$tid}) RETURN properties(k)",
+                params={"tid": tid}).result_set
+            assert nodes, "the reveal-once assertion had no rows to read"
+            for (props,) in nodes:
+                assert "key_plaintext" not in props
             # minted key has deleg=0 (one-level-deep by construction)
             gid = body["graph"]["id"]
             node = sdk._get_registry().query(
@@ -8918,9 +8924,13 @@ class TestProvisioningService:
             # revoked it. Revoked keys stay listed (revoked_at set), so
             # assert revocation, not absence.
             caller_key_id = key["id"]
-            orphans = [k for k in sdk.apikey_list(tid)
-                       if k.get("created_by_key_id") == caller_key_id
-                       and k.get("revoked_at") is None]
+            # #4282 deleted `apikey_list`; the two props this assertion reads
+            # are read straight off the registry nodes it projected.
+            orphans = [row[0] for row in sdk._get_registry().query(
+                "MATCH (k:APIKey {org_id:$tid}) "
+                "WHERE k.created_by_key_id = $ck AND k.revoked_at IS NULL "
+                "RETURN k.id",
+                params={"tid": tid, "ck": caller_key_id}).result_set]
             assert not orphans, \
                 f"active orphan key(s) after failed mint: {orphans}"
         finally:
@@ -8948,7 +8958,10 @@ class TestGraphLifecycle:
             gid = r.json()["graph"]["id"]
             minted_plaintext = r.json()["key_plaintext"]
             # Envelope key.id is a REAL key (listable — the registry node id)
-            listed = [k["id"] for k in sdk.apikey_list(tid)]
+            # #4282 deleted `apikey_list`; list the ids off the nodes it read.
+            listed = [row[0] for row in sdk._get_registry().query(
+                "MATCH (k:APIKey {org_id:$tid}) RETURN k.id",
+                params={"tid": tid}).result_set]
             assert r.json()["key"]["id"] in listed
             # Delete with a graphs:delete-scoped key
             delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])

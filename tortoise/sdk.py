@@ -165,12 +165,10 @@ from .projection.entities import (
 from .projection import _FULLTEXT_INDEX_LABEL_FIELDS
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
-from .projection import is_missing_graph_error  # #2163: absent-graph family == success
-from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
+from .graph_ops import phased  # #3359: per-capture graph-op accounting
 from .quota import (
     DOCUMENT_METER_PREDICATE,
     MAX_EXTRACTIONS_PER_TURN,
-    MAX_SESSION_TURNS,
     is_metered_document_kind,
     refuse_document_writer_demotion,  # #5140: the document writers' loud refusal
     stored_source_document_kinds,     # #5140: ONE reader of the meter key

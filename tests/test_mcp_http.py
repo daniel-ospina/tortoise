@@ -578,11 +578,12 @@ class TestTortoiseHealthTruth:
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
         team = reg.org_create("health-truth-team")
-        # Team lives in the REGISTRY graph, not the tenant projection —
-        # `_get_proj().g` here was a silent no-op (measured by review round 15).
-        reg._get_registry().query(
-            "MATCH (t:Team {id:$id}) SET t.max_points = 1000",
-            params={"id": team["id"]})
+        # ⚠️ No cap is written here, deliberately. Review round 15 found the write
+        # was aimed at `_get_proj().g` (a silent no-op — Team lives in the
+        # REGISTRY graph), and re-aiming it does not make it honest: nothing in
+        # this test consumes `max_points`, and the free tier's `max_graph_nodes` is
+        # 10,000, so `= 1000` could only TIGHTEN. A setup write no assertion
+        # consumes is dropped, not re-aimed (#4282 review 18, F4).
         key = reg.apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],

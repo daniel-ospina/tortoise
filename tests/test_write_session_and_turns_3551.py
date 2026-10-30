@@ -391,8 +391,34 @@ def test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture(tmp_path):
     assert weird in _wired(), "the unplaceable id was wrongly swept"
 
 
-# ── neither caller holds independent MERGE text ────────────────────────────
+# ── the surviving caller holds no independent MERGE text ───────────────────
 
+
+def test_the_writer_holds_no_independent_merge_text():
+    """W1 calls the primitive and carries no copy of the Session/turn text.
+
+    Was `test_neither_writer_holds_independent_merge_text`, over
+    `(ha_mod._capture_session_impl, TortoiseSDK.capture_session)`. #4282 deleted
+    the second lane, so the two-lane claim is one-lane; the assertions below are
+    unchanged and they are NOT about the deleted method — a W1 that re-inlined
+    the `:Session` MERGE would emit the same bytes as the primitive and stay
+    green in `test_hosted_writer_is_behaviour_equivalent`, so this source scan is
+    the only detector for the #3086/#3551 forked-store drift.
+    """
+    src = inspect.getsource(ha_mod._capture_session_impl)
+    assert "_write_session_and_turns" in src, (
+        "ha_mod._capture_session_impl does not call the shared primitive")
+    assert "MERGE (s:Session" not in src, (
+        "ha_mod._capture_session_impl still holds a :Session MERGE literal")
+    assert "s.created_at=coalesce(s.created_at, $now)" not in src, (
+        "ha_mod._capture_session_impl still holds the Session field list")
+    assert "s.turn_count=$tc" not in src, (
+        "ha_mod._capture_session_impl still holds the Session field list")
+    assert "_write_capture_turns(" not in src, (
+        "ha_mod._capture_session_impl bypasses the primitive for the turn store")
+    # And the primitive itself is still the one the SDK defines: `capture_session`
+    # is gone, but the hosted lane must not grow its own copy of it.
+    assert ha_mod._write_session_and_turns is sdk_mod._write_session_and_turns
 
 
 # ── behaviour equivalence (the refactor's real gate) ───────────────────────
