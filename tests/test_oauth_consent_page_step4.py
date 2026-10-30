@@ -61,6 +61,7 @@ from tortoise.hosted_api import app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OAUTH = REPO_ROOT / "tortoise" / "oauth.py"
+HOSTED_API = REPO_ROOT / "tortoise" / "hosted_api.py"
 SIGNUP_HTML = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "signup.html"
 CONSENT_BRIDGE_TS = (
     REPO_ROOT / "website" / "apps" / "dashboard" / "functions" / "_shared"
@@ -1927,3 +1928,76 @@ def test_the_coverage_evidence_matches_the_FILE_it_counts():
     assert (int(claimed.group(1)), int(claimed.group(2))) == (cases, functions), (
         f"the bridge record claims {claimed.group(1)} cases / {claimed.group(2)} test "
         f"functions; the file holds {cases} / {functions}. Update the record, not this test.")
+
+
+def test_the_state_requirement_is_MARKED_as_a_departure_where_a_reader_adopts():
+    """`require_state=True` departs from a SPEC DEFAULT, so the departure is
+    MARKED where a reader ADOPTS from — not only where it is implemented.
+
+    RFC 6749 §4.1.1 makes `state` RECOMMENDED, so a state-less authorize request
+    is admissible, and this AS's own `bind` still admits `state: null` at
+    redemption. The page-render path refuses it anyway because the app's
+    `start.ts`/`token.ts` use `state` as the ATTEMPT's identity, and a bounce
+    would hand the visitor a bare JSON 400. A later lane holding the RFC is
+    exactly the reader that relaxes this as a tidy-up — so per `AGENTS.md` the
+    ruling carries an `OVERRIDES:` line on the artifact that lane reads.
+
+    Both directions are pinned, which is the whole point:
+
+      * the marker + the wire-contract sentence in the bridge doc §10; and
+      * the BEHAVIOUR the marker claims — a marker that outlives its refusal is
+        the NEXT lane's false premise, so it reddens here too.
+
+    The scope is pinned by COUNT: `require_state=True` appears once, on the
+    render path. Adopting it at redemption (where a `state: null` token must
+    still redeem) makes the count two and reds this — that is the ruling's own
+    boundary, not this test's invention.
+    """
+    doc = CONSENT_BRIDGE_DOC.read_text(encoding="utf-8")
+    start = doc.index("## 10. Integration docs")
+    section = doc[start:doc.index("\n## ", start + 1)]
+
+    assert re.search(r"`state` is REQUIRED at the page", section), (
+        "the bridge doc §10 wire contract — the section a reader of the page's "
+        "contract adopts from — no longer carries the `state` requirement row")
+
+    marker = re.search(
+        r"\*\*OVERRIDES:\*\* RFC 6749 §4\.1\.1[^\n]*RECOMMENDED", section)
+    assert marker, (
+        "the `state` requirement is a CLIENT-VISIBLE departure from a spec default "
+        "(RFC 6749 §4.1.1 makes `state` RECOMMENDED) and it carries no "
+        "`**OVERRIDES:**` marker naming that default, so the next lane holding the "
+        "RFC reads the refusal as an over-strict tidy-up and relaxes it — silently "
+        "restoring the bounce that dies as a bare JSON 400. `AGENTS.md` → "
+        "\"MARK A DELIBERATE DEPARTURE WITH AN `OVERRIDES:` LINE\".")
+
+    assert re.search(r"invalid_request", section) and re.search(
+        r"registered", section), (
+        "the marker must state the WIRE SHAPE it overrides with: refused as "
+        "`error=invalid_request` at the client's own REGISTERED redirect "
+        "(RFC 6749 §4.1.2.1), not as a JSON body — a marker that names neither is "
+        "not the contract a client implementer can read")
+
+    assert re.search(r"[Rr]edemption is \*\*unaffected\*\*", section), (
+        "the marker must pin its own SCOPE: redemption is unaffected, because "
+        "§2.1's `bind` admits `state: null` and such a token must still be "
+        "redeemable. Without it the marker licenses the opposite tidy-up")
+
+    # ── the behaviour the marker claims, so the marker cannot outlive it ──
+    hosted = HOSTED_API.read_text(encoding="utf-8")
+    assert "require_state=True" in hosted, (
+        "the doc now advertises a `state` requirement that `hosted_api.py` no "
+        "longer enforces — a marker outliving its behaviour is the next lane's "
+        "false premise")
+    assert hosted.count("require_state=True") == 1, (
+        f"`require_state=True` appears {hosted.count('require_state=True')} times in "
+        "hosted_api.py; it belongs on the PAGE-RENDER path ONLY. Redemption must "
+        "not adopt it — §2.1's `bind` admits `state: null` and that token must "
+        "still redeem")
+
+    oauth_src = OAUTH.read_text(encoding="utf-8")
+    assert re.search(
+            r'if require_state and not \(state or ""\)\.strip\(\):', oauth_src), (
+        "`validate_authorize_params` no longer carries the `require_state` arm, so "
+        "the page accepts a state-less request it cannot complete; the doc still "
+        "claims it is refused")
