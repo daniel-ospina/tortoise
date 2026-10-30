@@ -1302,7 +1302,8 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
     `⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS` paragraph that retires it (PR #10244
     review, P3). It said *"every leg writes the SAME global path"*, which stopped being
     true when #10028 migrated the fast matrix and the `test-slow` migration in this PR
-    completed the second job: 14 legs now write `${RUNNER_TEMP}/pytest.log`, while the
+    completed the second job, and #10280 then migrated `test-concurrency-falkor`: 15
+    legs now write `${RUNNER_TEMP}/pytest.log`, while the
     rest still write a host-global literal. A header claiming the retired premise teaches
     the opposite of what the code does, in the exact sentence the next lane quotes.
 

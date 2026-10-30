@@ -2030,6 +2030,16 @@ async def _lifespan(app):
     _CONTROL_PLANE_PROBE.reset()
     _probe_sdk_reset()
 
+    # ── #3524 §9 step 1: the consent token's single-use register is SHARED state
+    # (control plane, migration 20261030000001), not this process's memory. Installed here
+    # rather than at import because the AS runs several Fly machines: a register that only
+    # one machine can see lets a replayed token mint a SECOND authorization code — the
+    # replay §2.2's `jti` exists to bound. Idempotent and side-effect-free when the arm is
+    # never used (no query is issued until a redemption).
+    from tortoise.consent_token import install_shared_consent_jti_store
+
+    install_shared_consent_jti_store()
+
     # ── #2850: arm liveness BEFORE anything that can block. The heartbeat
     # task, the dedicated /healthz listener and the stall watchdog are all
     # synchronous/cheap — they cannot delay uvicorn's bind, and they mean the
