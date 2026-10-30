@@ -6323,7 +6323,6 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     the guard depends on), (b) a manifest-generation step exists BEFORE the
     pytest step (echoing each leg's ${{ matrix.files }} to
     ${RUNNER_TEMP}/pytest-files + --collect-only -m 'not track_b' ->
-    ${RUNNER_TEMP}/pytest-files + --collect-only -m 'not track_b' ->
     $PYTEST_MANIFEST), and (c) a skip-guard step gated on rc==0 AND
     non-empty $FILES runs tools/skip-guard.py with --manifest.
 
