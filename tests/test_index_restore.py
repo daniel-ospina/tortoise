@@ -471,10 +471,17 @@ def test_t12_instantiates_edges_rebuild_drop_and_restore(tmp_path):
         assert n_live >= 2, f"expected issue/PR edges live, got {n_live}"
         proj = sdk._get_proj()
         proj.rebuild_all(str(events_dir), confirm_destructive=True)
-        # the aboutObject edges are DROPPED (indexer-side, unjournaled)
+        # ⛔ #3590: the aboutObject edges now SURVIVE the rebuild. The old
+        # assertion here wanted them DROPPED ("indexer-side, unjournaled",
+        # #5048's gap) and the re-index to restore them; at this head the
+        # session Event's `about_entities` names are journaled and the fold
+        # resolves them, so replay rebuilds the SAME edges — which is the
+        # property the drop/restore cycle only approximated. What stays pinned
+        # is that the edges are not duplicated or lost by the re-index below.
         assert g.query(
-            "MATCH ()-[:aboutObject]->() RETURN count(*)").result_set[0][0] == 0
-        # re-index restores them (the session upsert re-wires)
+            "MATCH ()-[:aboutObject]->() RETURN count(*)").result_set[0][0] \
+            == n_live
+        # re-index is idempotent on them (the session upsert re-wires, no dupes)
         sdk.index_directory(str(corpus), extract_metadata=False)
         assert g.query(
             "MATCH (e:Event {eventId:'session_r9'})-[:aboutObject]->(o:Object) "
