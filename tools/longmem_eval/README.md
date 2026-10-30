@@ -699,8 +699,16 @@ The 3-point micro-test that SELECTS the granularity knob before the pilot:
 # offline smoke (deterministic ingest implied by --mock).
 # --skip-preflight WAIVES the dense leg exactly as for `run.py` above (#4718):
 # the sweep now runs the same pre-flight, so without it a host with no embedder
-# stops before the dataset load. Drop the flag to REQUIRE the real leg — the
-# waived sweep records `vector_strategy="unavailable"` and prints NOT MEASURED.
+# stops before the dataset load. Drop the flag to REQUIRE the real leg.
+#
+# The waiver is not itself the label — what ran is. On this offline smoke's
+# host (no embedder) the waived sweep records `vector_strategy="unavailable"`,
+# `embedding_coverage=0.0` and prints NOT MEASURED. Taken on a host where the
+# embedder DOES load, the same waiver is a no-op: the cells record `enabled`,
+# the sweep is a real measurement, and it prints SELECTED. A cell that loads
+# the embedder but embeds 0 of N points is the third case — `enabled` from the
+# pre-flight but zero write-time coverage — and that reads NOT MEASURED, since
+# the dense leg did not actually run.
 python -m tools.longmem_eval.sweep_granularity --data tests/fixtures/longmemeval_mini.json \
     --limit 5 --mock --skip-preflight
 

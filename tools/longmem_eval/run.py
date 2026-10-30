@@ -717,10 +717,24 @@ def gate_dense_leg(*, dense_leg_required: bool) -> dict:
 
     The contract is #4718's: the dense leg is REQUIRED unless
     ``dense_leg_required=False`` explicitly waives it, and a waiver is
-    RECORDED in the returned status (never silent). The returned dict is the
-    only thing :func:`run_measured_evaluation` accepts, so an entry point
-    cannot reach a measurement without either a passing gate or a declared
-    waiver.
+    RECORDED in the returned status (never silent).
+
+    What the seam actually guarantees, stated exactly (#4821 review P2). An
+    entry point **cannot forget the gate**: :func:`run_measured_evaluation`
+    has no default for ``embedder_status`` and refuses ``None``, so the
+    omission that let ``sweep_granularity.py`` reach a keyword-only receipt is
+    a ``TypeError``/``ValueError`` rather than a silently-permitted posture.
+    It also refuses the D5 ``reason="not_checked"`` marker, which is the
+    *programmatic* ``run_evaluation`` default and not a measurement posture.
+
+    It does NOT authenticate provenance: the validation is on the dict's
+    SHAPE (``available`` + ``reason`` present, ``reason != "not_checked"``),
+    so a caller that deliberately constructs ``{"available": True,
+    "reason": None}`` reaches a measurement with no gate having run. That is
+    a deliberate hand-rolled dict, not a forgotten gate, and the inventory
+    guard (``tests/test_longmem_runner.py::
+    test_no_entry_point_bypasses_the_dense_leg_gate``) is what covers the
+    entry-point class. Do not read this docstring as a cryptographic claim.
     """
     return _preflight_embedder(dense_leg_required=dense_leg_required)
 
