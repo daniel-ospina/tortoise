@@ -1757,3 +1757,22 @@ reproduce the measured 0.91 → 0.42 destruction). `sourceVersion` stays uncarri
 fold drops it too — so the two routes agree by both losing that anchor rather than the record keeping
 an attribute the graph does not have. Pinned by
 `tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.
+
+**2026-10-30 — `#10303` review, ISSUE 1 — the CHAIN residual: `ON CREATE` picks the EARLIEST
+payload, so `live == rebuild` is a SINGLE-HOP claim.** The two rounds above carry the property across
+a supersede on both halves. This entry records the one case where the halves still disagree, which the
+pass-2b residual used to state BACKWARDS (*"the later one wins … live's chain is consistent with
+that"* — both halves false). On a chain `X→Y→Z` both descriptors resolve onto the SAME `Z` edge
+(`_final`, and `structural_seen` does not collapse them — its key carries `src`), and `ON CREATE`
+fires only on the statement that CREATES the relationship, so the FIRST descriptor's payload lands
+and every later descriptor MATCHES that edge and is a no-op. Live resolves the same chain the other
+way round: each transfer reads `properties(r)` off the edge its predecessor holds at that moment, so
+where the intermediate successor carried its own `0.91` the live chain ends at **0.91** on `Z` while
+the replay of the same journal ends at the retired **0.42**. Measured, not inferred —
+`tests/test_8398_aboutobject_replay.py::test_a_chained_supersede_diverges_LATEST_live_against_EARLIEST_replay`.
+⛔ The `ON CREATE SET` CHOICE is unchanged and still right: it is what keeps a successor's own live
+value authoritative (`#9417`), and it is what the single-hop tests assert. What was wrong was the
+claim ABOUT its chain consequence. Closing the divergence needs a per-key "this pass created it"
+marker, which changes replay precedence beyond `#10139`'s scope — so it is stated in
+`projection/_rebuild_all_replay`'s pass-2b branch and in §13 as OPEN, and the test will red if it is
+closed without the record being updated.

@@ -598,7 +598,8 @@ def test_supersede_does_not_delete_the_successors_own_confidence(sdk):
     wins and the successor's live value is destroyed — and at the time the
     `DirectEdgeRepoint` descriptor carried no `attrs`, so the overwritten value
     was journaled nowhere and could not be rebuilt (it carries them since
-    `#10139`).
+    `#10139`, but only the RETIRED edge's — never the value its own carry
+    destroyed).
 
     Pre-#9417 this could not happen: the transfer was a bare MERGE, which leaves a
     pre-existing edge untouched. The carry must therefore be `ON CREATE SET`:

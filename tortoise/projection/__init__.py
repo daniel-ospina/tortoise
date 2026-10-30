@@ -17084,13 +17084,39 @@ class FalkorProjection(
                         # emitter whitelisted with (`DIRECT_EDGE_ATTR_KEYS`,
                         # `edges.py`) — never `properties(r)` raw, and never a
                         # second copy of the tuple.
-                        # ⚠️ RESIDUAL, named: two descriptors that resolve to the
-                        # SAME successor edge (a chain X→Y→Z where X's and Y's
-                        # descriptors both land on Z) apply in journal order, so
-                        # the later one wins on a key both carry. Live's chain is
-                        # consistent with that — each later transfer carries the
-                        # value live holds at that moment — and no producer emits
-                        # the divergent order, so this is stated, not closed.
+                        # ⚠️ RESIDUAL, OPEN and MEASURED — a CHAIN does NOT
+                        # reproduce live's precedence, it INVERTS it. Two
+                        # descriptors that resolve to the SAME successor edge (a
+                        # chain X→Y→Z, whose descriptors both land on Z —
+                        # `structural_seen` does not collapse them, the keys
+                        # differ by `src`) apply in journal order, and `ON
+                        # CREATE` fires only on the statement that CREATES the
+                        # relationship: the FIRST descriptor's payload lands and
+                        # every later one MATCHES and is a no-op. Live resolves
+                        # the same chain the other way round — each later
+                        # transfer reads `properties(r)` off the edge the
+                        # predecessor holds at that moment, so where an
+                        # intermediate successor carried its own value the
+                        # LATEST one propagates. Measured (embedded
+                        # journal-backed SDK, X's edge 0.42, Y's own 0.91): live
+                        # ends at 0.91 on Z, this replay at 0.42 —
+                        # `tests/test_8398_aboutobject_replay.py::
+                        # test_a_chained_supersede_diverges_LATEST_live_against_EARLIEST_replay`,
+                        # which pins both numbers. ⛔ The `ON CREATE SET` CHOICE is
+                        # still right — it is what keeps the successor's own value
+                        # authoritative, and it is what the two-node tests above
+                        # assert. What was wrong was the CLAIM that the chain
+                        # degrades the same way on both halves (this residual
+                        # said the later payload wins and that live is consistent
+                        # with it — both halves false); a chain is ordinary
+                        # output of two plain `supersede_point` calls, not a
+                        # state only a bad producer emits. CLOSING it needs a
+                        # per-key "this pass CREATED it" marker — `ON CREATE` for
+                        # a key that already existed (`EntityLinked` re-materialized
+                        # the successor's own value before this leg runs), a plain
+                        # `SET` for a key an EARLIER descriptor of THIS pass made
+                        # — which changes replay precedence beyond #10139's
+                        # scope. Stated, not closed.
                         _carry = ""
                         _params = {"sid": src_f, "tid": resolved["internal"]}
                         _transfer_attrs = {
