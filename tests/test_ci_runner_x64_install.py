@@ -4229,3 +4229,85 @@ def test_no_surface_claims_the_repair_keeps_the_whole_version_pinned_class():
         "the runbook must name the narrowing too — it is the page an operator reads before running "
         "`--repair-labels`"
     )
+
+
+# ── 8j. the relays a SIBLING test file makes into the runbook and the tree ──────────────────
+_CITING_TEST_FILE = "tests/test_ci_selection.py"
+
+
+def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
+    """⛔ EVERY PIN ABOVE READS THIS FILE; A SIBLING'S RELAYS WERE UNSCANNED, AND ONE DRIFTED.
+
+    `tests/test_ci_selection.py` tells a maintainer that `docs/ops/ci-runner-x64.md` and the
+    capstone pin's re-cut history both advertise
+    `test_the_changes_job_carries_no_job_scope_env` — the reference-surface relay for #10186
+    FINDING 1. While re-deriving this PR's own refs, that runbook citation was moved to `:474` by
+    a constant: at this head `:474` is a BLANK LINE inside a fenced block (473 closes the fence,
+    475 opens "If a runner is gone …") and the sentence naming the test is the file's only
+    occurrence of it, at `:862`. Nothing redded, because every pin above scans THIS file's
+    citations and `tests/test_ci_selection.py` is in none of their surfaces — so the one file
+    whose relay drifted was the one file no pin read.
+
+    A blank-line target is worse than a stale one, because the reader concludes the assertion is
+    gone. All three citations in the sibling file are pinned here, two-way: a citation this pin
+    does not know FAILS (add it rather than leaving it unchecked), a known site that stopped
+    citing FAILS (the pin must not silently shrink), and each citation must land on the line that
+    says the thing its own paragraph claims.
+
+    Non-vacuity (measured): with the pre-fix citation (runbook `:474`, named that way in this
+    docstring rather than as a `path:line` ref, so 8e's scan does not read it as a claim) the
+    landing check reds on ``cites …:474, but that line is ''``; re-pointed at `:862` it
+    is GREEN; re-pointed at `:448` (where the sentence lives on `origin/main`, i.e. a plausible
+    offset re-derivation) it reds again — which is what makes this a landing check and not a
+    range check.
+    """
+    citing = (REPO_ROOT / _CITING_TEST_FILE).read_text().splitlines()
+
+    # (target file, cited line) -> a regex the CITED LINE ITSELF must match
+    anchors: dict[tuple[str, int], str] = {
+        # the /docs guard's import of the schema types the citing paragraph names
+        ("tests/test_website_docs_consistency.py", 56):
+            r"from tortoise\.commit_schema import Point, point_content_id",
+        # the reference-surface relay that drifted: the runbook sentence naming the test
+        ("docs/ops/ci-runner-x64.md", 862): r"test_the_changes_job_carries_no_job_scope_env",
+        # the capstone pin's re-cut history, which names it too
+        ("tests/test_capstone_preregistration_9075.py", 1590):
+            r"test_the_changes_job_carries_no_job_scope_env",
+    }
+
+    ref = re.compile(r"((?:tests/[A-Za-z0-9_/]+\.py)|(?:docs/ops/ci-runner-x64\.md)):(\d+)")
+    cited: dict[tuple[str, int], list[int]] = {}
+    for i, line in enumerate(citing):
+        for m in ref.finditer(line):
+            cited.setdefault((m.group(1), int(m.group(2))), []).append(i + 1)
+    assert cited, (
+        f"{_CITING_TEST_FILE} no longer cites the runbook or the tree — re-anchor this pin rather "
+        "than deleting it; a pin over an empty reference set checks nothing"
+    )
+
+    unknown = sorted(set(cited) - anchors.keys())
+    assert not unknown, (
+        f"{_CITING_TEST_FILE} cites target(s) this pin does not know — re-derive them against the "
+        f"tree at this head and add them to `anchors`: {unknown}"
+    )
+    stale = sorted(anchors.keys() - set(cited))
+    assert not stale, (
+        "this pin still lists citations nothing makes — a pin over refs that were re-worded or "
+        f"removed is pinning nothing: {stale}"
+    )
+
+    wrong: list[str] = []
+    for (target, n), citing_lines in sorted(cited.items()):
+        path = REPO_ROOT / target
+        assert path.is_file(), f"{_CITING_TEST_FILE}:{citing_lines} cites a missing file: {target}"
+        lines = path.read_text().splitlines()
+        assert 1 <= n <= len(lines), f"{target}:{n} is past EOF ({len(lines)} lines)"
+        if not re.search(anchors[(target, n)], lines[n - 1]):
+            wrong.append(
+                f"{_CITING_TEST_FILE}:{citing_lines} cites {target}:{n}, but that line is "
+                f"{lines[n - 1].strip()!r}"
+            )
+    assert not wrong, (
+        "a citation names a line that does not say it — re-derive the number at this head: "
+        + "; ".join(wrong)
+    )
