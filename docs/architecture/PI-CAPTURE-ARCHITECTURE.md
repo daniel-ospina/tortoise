@@ -477,8 +477,8 @@ the server's admission pool.
 
 These all stay on **#3515**, which this PR references (`Refs`, not `Closes`) for
 exactly this reason: they are the issue's own Indicators, and closing it while they
-are unbuilt would read as done.  ⚠️ **#3515 has since been CLOSED** (2026-10-24, when
-#9788 landed), so this list is the historical ledger, not a live pointer — the
+are unbuilt would read as done.  ⚠️ **#3515 has since been CLOSED** (2026-10-24,
+when #9788 landed), so this list is the historical ledger, not a live pointer — the
 current home of each remainder is named in its bullet where one exists.  **A
 remainder without a live home is not done; it is unowned**, and the startup bullet
 below is the one that matters here.

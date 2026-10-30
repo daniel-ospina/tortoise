@@ -1571,45 +1571,42 @@ def test_pi_install_failure_still_reports_the_writes_that_landed(home, capsys):
     assert "Capture install FAILED for pi" in captured.err, captured.err
 
 
-def test_pi_hooks_upgrade_failure_still_reports_the_writes_that_landed(
-        home, tmp_path, capsys, monkeypatch):
-    """#10241 review (cycle 5): `InstallResult`'s docstring declares the
-    actions-before-failure rule as a CONTRACT that both renderers owe
-    (``tortoise install`` and ``hooks upgrade``), and `hooks upgrade` renders
-    them (`__main__._upgrade_artifact_seam`) — but only the `install` renderer
-    was pinned, so the `hooks upgrade` half could be dropped and the suite
-    would still be green.  That is the same defect class the contract exists
-    to prevent: the second consumer drifts from the first with nothing RED.
+def test_hooks_upgrade_failure_still_reports_the_writes_that_landed(home, capsys,
+                                                                   monkeypatch):
+    """`InstallResult` states ONE contract for BOTH CLI renderers (#10241): a
+    FAILED repair may already have written state (a `.bak` of the user's own
+    seam, a legacy extension renamed aside), so its actions are printed beside
+    the failure. Only the `tortoise install` half was pinned, so a future edit
+    could drop the `hooks upgrade` half and ship green — which is the very
+    class this rule exists to close (two renderers shipped the same defect).
 
-    Mutation: move the `for action in result.actions` loop back below the
-    `if not result.ok` short-circuit in `__main__._upgrade_artifact_seam` (only
-    the failure line prints, so the backup filename never reaches the user —
-    RED)."""
+    Mutation: delete the `for action in result.actions` loop above
+    `if not result.ok` in `__main__._upgrade_artifact_seam` (only the error
+    line prints, so `"backed up" in captured.out` reds)."""
     from types import SimpleNamespace
 
     from tortoise import __main__ as cli
+    from tortoise import capture_install as ci
     from tortoise.capture_install import InstallResult
 
     def _stub(*_args, **_kwargs):
         return InstallResult(
             "pi", changed=True,
-            actions=("backed up /x/tortoise-capture.ts → "
-                     "/x/tortoise-capture.ts.bak",),
+            actions=("backed up /x/tortoise-capture.ts → /x/tortoise-capture.ts.bak",),
             error="the file pi LOADS is not the file this repo SHIPS: …")
 
-    # `_upgrade_artifact_seam` imports the installer INSIDE the function, so
-    # patching the module attribute is what that import resolves.
-    monkeypatch.setattr(capture_install, "install_capture", _stub)
-
-    args = SimpleNamespace(harness="pi", dry_run=False)
-    rc = cli._upgrade_artifact_seam(args, tmp_path, home)
+    # `_upgrade_artifact_seam` imports the installer INSIDE the call, so patching
+    # the module attribute is what the call site resolves — no CLI fixture needed.
+    monkeypatch.setattr(ci, "install_capture", _stub)
+    rc = cli._upgrade_artifact_seam(
+        SimpleNamespace(harness="pi", dry_run=False), home, home)
 
     captured = capsys.readouterr()
     assert rc == 1
-    assert "backed up" in captured.out, (
-        "the repair's failure did not print the write that landed: "
-        f"{captured.out!r}")
+    assert "backed up" in captured.out, captured.out
     assert "not the file this repo SHIPS" in captured.err, captured.err
+    # The success sentence must not appear on the failure path.
+    assert "upgraded." not in captured.out, captured.out
 
 
 # ── codex: the artifact + the $CODEX_HOME registration (#3818) ──────────
