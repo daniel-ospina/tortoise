@@ -1864,14 +1864,21 @@ jobs:
     # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
     # (legacy), read by tests/_live_utils.py.
     steps:
-      # ⛔ FIRST STEP ON PURPOSE — same contract as the fast job's (#10028) and
-      # as `test-concurrency-falkor`'s (#10280). This job was the UN-MIGRATED
-      # half: `pytest-rc`, `pytest-files` and the redislite/tempdir hygiene
-      # reports had already moved to `${RUNNER_TEMP}`, but the three artifacts
-      # the VERDICT and the guards are READ FROM were still the host-global
-      # `/tmp/pytest.log` / `/tmp/junit.xml` / `/tmp/expected-nodeids.txt`.
-      # `.github/scripts/pytest-attribution.sh` named that exact residue in its
-      # own "NAMED RESIDUAL" header.
+      # ⛔ FIRST STEP ON PURPOSE — same contract as the fast job's (#10028)
+      # and as `test-concurrency-falkor`'s (#10280).
+      # This job was the UN-MIGRATED half: `pytest-rc`, `pytest-files` and the
+      # redislite/tempdir hygiene reports had already moved to `${RUNNER_TEMP}`,
+      # but the three artifacts the VERDICT and the guards are read from were
+      # still the host-global `/tmp/pytest.log` / `/tmp/junit.xml` /
+      # `/tmp/expected-nodeids.txt`. `.github/scripts/pytest-attribution.sh`
+      # named that exact residue in its own "NAMED RESIDUAL" header, whose STATUS
+      # paragraph records THIS job as migrated (2026-10-29). The header's residual
+      # paragraph names the legs that still write the host-global literals —
+      # `test-track-b`, `test-carve-out` and `test-d14-hosted-api` here, plus the
+      # warn-only `validate` job in `post-merge-validation.yml` — the deliberate
+      # residual carried by #10280. That list is DERIVED and pinned by
+      # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
+      # so read it there rather than trusting this comment's copy of it.
       #
       # MEASURED (run 40808264676, `test-slow (a)`): the leg's own manifest
       # declared **367** expected nodeids, its own run reported
@@ -1881,6 +1888,15 @@ jobs:
       # truncated the file between this leg's `tail` and its attribution read.
       # `pytest-attribution.sh` therefore printed `STALE session summary (NOT
       # this leg's verdict)` / `INCOMPLETE` under that exit code.
+      #
+      # The same sharing made legs (b) and (e) print FAILED nodeids for
+      # `tests/test_epic903_fixtures.py`, `tests/test_epic903_scheduler.py` and
+      # `tests/test_graph_diagnostics.py` — files whose only progress line in
+      # those legs' logs is `tests/test_ci_selection.py`, i.e. tests they never
+      # ran — and made the #964 heartbeat DECREASE inside a "single" session
+      # (444 passed -> 353 passed). The six nodeids genuinely belong to legs (c)
+      # and (d), which do run those files; neither of those legs' own sets is
+      # recoverable from the tail.
       #
       # ⛔ THE VERDICT ITSELF IS THE ARTIFACT THAT CAN BE ANOTHER LEG'S, and it
       # needs no kill to go wrong. MEASURED on THIS PR (run 40921262252,
@@ -1912,7 +1928,7 @@ jobs:
       # reject the WHOLE file (#6253: zero jobs, zero check-runs, and the
       # required `python-ci-gate` ABSENT rather than red). `steps.<id>.with` DOES
       # allow the `runner` context, which is why the upload below uses it.
-      - name: Resolve per-job pytest artifact paths (#10280)
+      - name: Resolve per-job pytest artifact paths (#10028)
         run: |
           set -euo pipefail
           base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
@@ -2068,7 +2084,7 @@ jobs:
         # `matrix.files` expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
         # construction the run step builds) -> $PYTEST_MANIFEST (per-job since
-        # the #10280 migration; it was the host-global /tmp/expected-nodeids.txt).
+        # the #10028 migration; it was the host-global /tmp/expected-nodeids.txt).
         run: |
           FILES=""
           # #2148 tier-2 (slow_run == true, full == false): run only the
@@ -2109,7 +2125,7 @@ jobs:
         # legitimately take >90s; 300s still caps any hang.
         # #964: liveness heartbeat — see the fast job's run step. pytest
         # output is buffered to $PYTEST_LOG (per-job, `<runner.temp>/pytest.log`
-        # since the #10280 migration; it was the host-global /tmp/pytest.log) for
+        # since the #10028 migration; it was the host-global /tmp/pytest.log) for
         # the guaranteed tail, so
         # the job log was silent for 30-50 min; the loop below prints
         # progress to the live job log every 5 min.
@@ -2369,7 +2385,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}-${{ matrix.half }}
-          # #10280: the per-JOB paths resolved in this job's FIRST step, NOT the
+          # #10028: the per-JOB paths resolved in this job's FIRST step, NOT the
           # host-global `/tmp/...` literals four sibling legs share. Uploading by
           # the literal path is how one leg's artifact silently replaced
           # another's (the same defect #6263 fixed in the artifact NAME).
