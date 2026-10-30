@@ -878,7 +878,7 @@ def test_preserve_labels_drops_the_version_pinned_class_and_the_arch_marker():
     it wants GitHub-hosted. The arch MARKER is re-derived from this box instead — a mis-registered
     runner can carry the other arch's marker, and passing it straight back is the false PASS (an
     arm64 job built on x86) this function exists to prevent — GitHub derives the marker from the
-    host at registration and it cannot be set by hand, so the ARM64 VMs register their own markers (`:48-49`, `docs/ops/ci-runner-x64.md`) and this box registers its own.
+    host at registration and it cannot be set by hand, so the ARM64 VMs register their own markers (`:50-51`, `docs/ops/ci-runner-x64.md`) and this box registers its own.
     """
     for label in ("ubuntu-24.04", "ubuntu-24.04-arm"):
         assert RA._preserve_labels(["self-hosted-x64", label], "x86_64") == (
@@ -1205,7 +1205,7 @@ def test_a_provisioner_refusal_is_VISIBLE_not_green(env):
 def test_a_NON_sizing_provisioner_refusal_is_not_blamed_on_the_model_disagreement(env):
     """⛔ `die` EXITS 2 FROM EVERY GUARD ARM, so exit 2 alone does NOT mean the sizing dispute.
 
-    `tools/install-ci-runner-x64.sh:230` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }` — the
+    `tools/install-ci-runner-x64.sh:232` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }` — the
     wrong architecture, an unreadable fork cap, a FULL DISK, an unreadable core count and an
     unreadable gate state all refuse with 2. Naming #9672 for those would describe a disk-full box
     as "expected until the decision lands" and nobody would ever fix it. The classification is
