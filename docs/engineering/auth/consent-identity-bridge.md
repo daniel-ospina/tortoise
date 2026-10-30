@@ -511,8 +511,10 @@ contract rather than of the implementation:
   refusals that can be evaluated for free (the assertion, the binding, a malformed `resource`) are
   evaluated first.
 
-Step 4 remains, and it still lands last: a page that half-reads a token and half-reads the
-old cookie is the "strictly worse than not starting" state.
+Step 4 was the last step, and it is DELIVERED (#3524 §9 step 4): the ordering rule above existed so
+that no deployment could ever serve a page that half-reads a token and half-reads the old cookie —
+the "strictly worse than not starting" state. That page is gone, not partially migrated: it holds
+no cookie and no client.
 
 ## 10. Integration docs
 
@@ -522,10 +524,7 @@ old cookie is the "strictly worse than not starting" state.
 | **Signing** | HMAC-SHA256, dedicated `CONSENT_TOKEN_SECRET`, `kid`-scoped rotation. Never the service-role key; never the anon key — public by construct, independently of this page (§9 step 4 deleted the inline client that used to embed it, so the page is no longer evidence either way). |
 | **Issuer** | `CONSENT_TOKEN_ISSUER` (optional; default `https://app.premiselabs.co`) is the `iss` the AS accepts — the knob a preview deployment sets so it verifies its OWN mint. Read per call, never cached at import. |
 | **TTL / replay** | `exp = iat + 120 s` (leeway ≤30 s) **and** a single-use `jti`; neither substitutes for the `bind` set. |
-| **The page (§9 step 4)** | `GET /oauth/authorize` renders `tortoise/oauth.py::_CONSENT_HTML` **only when the request carries `attempt_key`**; otherwise it is a `302` to `{app}/auth?next=/api/consent/start?{raw query}` (`consent_bounce_url`), and the sign-in page's own session probe forwards a signed-in visitor straight through. The page then POSTs `{state, attempt_key}` to `{app}/api/consent/token` (`credentials: include`) and, on a `200 {token, exp}`, asks `GET /oauth/consent/preview` which team the grant binds (the
-token in `X-Consent-Token`, the four bind fields in the query) and renders the org line — or the #1701 R1
-chooser — from that ANSWER, then POSTs `consent_token` + the raw authorize params to `/oauth/consent`,
-navigating the response's `redirect_target` with `code` + the response's `state`. **It holds no credential, writes no cookie, and signs nobody in** — the AS's only render-time evidence is the attempt key the app wrote onto the URL. |
+| **The page (§9 step 4)** | `GET /oauth/authorize` renders `tortoise/oauth.py::_CONSENT_HTML` **only when the request carries `attempt_key`**; otherwise it is a `302` to `{app}/auth?next=/api/consent/start?{raw query}` (`consent_bounce_url`), and the sign-in page's own session probe forwards a signed-in visitor straight through. The page then POSTs `{state, attempt_key}` to `{app}/api/consent/token` (`credentials: include`) and, on a `200 {token, exp}`, asks `GET /oauth/consent/preview` which team the grant binds (the token in `X-Consent-Token`, the four bind fields in the query) and renders the org line — or the #1701 R1 chooser — from that ANSWER, then POSTs `consent_token` + the raw authorize params to `/oauth/consent`, navigating the response's `redirect_target` with `code` + the response's `state`. **It holds no credential, writes no cookie, and signs nobody in** — the AS's only render-time evidence is the attempt key the app wrote onto the URL. |
 | **Redemption** | `POST /oauth/consent` (`@app.post("/oauth/consent")` in `hosted_api.py`) — TWO identity sources as of §9 step 2: the bearer (`verify_session_jwt`, `session_auth.py:588`) or a `consent_token` in the body verified by `tortoise/consent_token.verify_consent_token`. |
 | **Endpoint stability** | `authorization_server_metadata` (`oauth.py:2124`); `_oauth_base(request)` (a function in `hosted_api.py`). Guarded. |
 | **CORS** | new, exact-origin to the AS origin, on the mint route only. The BFF carries none today; `/oauth/token` must never become reachable through it (`SCOPE.md` §9 class 3). |
