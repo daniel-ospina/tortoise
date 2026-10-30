@@ -23734,8 +23734,8 @@ class TortoiseSDK:
             "size(targets) < size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
             "size(targets) > 0",
-            # ── #9750 (review round 1, P2): NO SLOT-CARRYING OPERATOR IS EVER
-            # "COMPLETED" BY POSITION. `create_operator` deliberately lets a
+            # ── #9750 (review round 1, P2): NO OPERATOR CARRYING DUPLICATE
+            # EDGES IS EVER "COMPLETED" BY POSITION. `create_operator` deliberately lets a
             # target repeat the SOURCE (the self-support shape, `idx` 0 and 1
             # over one id), so an operator can hold FEWER distinct endpoints
             # than edges. The completion below writes each missing input at ITS
@@ -23745,10 +23745,16 @@ class TortoiseSDK:
             # `idx 1`, and `ep.py` reads the factor positionally, so the
             # operator became malformed and then permanently adopted by a
             # resubmission. Requiring the edge count to EQUAL the distinct count
-            # excludes every COMPLETE slot-carrying operator from this arm (it is
-            # not partial — it is complete in a shape this arm cannot express), so
-            # the worst case becomes a MISS (a new operator for a genuinely
-            # different input set) instead of a corrupted factor. The INCOMPLETE
+            # excludes every operator whose edges EXCEED its distinct endpoints
+            # from this arm (it is not partial — it is complete in a shape this
+            # arm cannot express), so the worst case becomes a MISS (a new
+            # operator for a genuinely different input set) instead of a corrupted
+            # factor.
+            # ⛔ It does NOT make the arm POSITIONALLY safe: a duplicate-free
+            # partial whose written set is not a positional PREFIX still writes its
+            # missing input onto an occupied `idx` (measured: `{a,c}` + `to: [b, c]`
+            # leaves two `IMPL` edges at `idx 1`). That defect is PRE-EXISTING and
+            # tracked in #10307 — do not read this guard as covering it. The INCOMPLETE
             # window (a crash that landed before the duplicate slot) is closed
             # above, by declining a request whose own slot list repeats an id —
             # and `completed` is COUNTED from the writes the loop performs, not

@@ -53,8 +53,11 @@ WARNING_KEYS = {
     "point_mediated_route",
     # #9750: the thirteenth key — a repeated endpoint in the connection's `to`
     # list was collapsed before the operator write (the input set is a SET).
-    # Same rule: the doc row, its A12 note and the served skill mirror land in
-    # the same change.
+    # Same rule, with one ordering constraint: the SERVED mirror is DERIVED
+    # (`config/served-skills-upstream.yml` pins its bytes upstream), so the key
+    # lands in the upstream skill repo FIRST and this repo re-derives the mirror
+    # with `tools/served_skills_parity.py --sync` in the same change — a
+    # hand-edit of the served copy reds the parity gate instead.
     "duplicate_target_deduped",
 }
 

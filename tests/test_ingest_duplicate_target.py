@@ -229,9 +229,11 @@ def test_direct_route_repeated_ref_not_multi_item(make_sdk):
     assert "collapsed" not in _dup, _dup
 
 
-def test_self_support_operator_is_never_completed_by_position(make_sdk):
+def test_duplicate_edge_operator_is_never_completed_by_position(make_sdk):
     """Review round 1, P2 — the shape the dedupe must NOT collapse, and the
-    partial-absorb arm must not "complete".
+    partial-absorb arm must not "complete" (it is the arm's OWN positionality
+    that is unsafe — see #10307 for the duplicate-FREE, out-of-order residue,
+    which this guard deliberately does not cover).
 
     ``create_operator`` deliberately keeps a target that repeats the SOURCE
     (``idx`` 0 and 1 over one id), so an operator can hold FEWER distinct
