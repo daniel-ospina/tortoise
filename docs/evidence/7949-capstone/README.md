@@ -284,12 +284,12 @@ artifact's 6/8 — that pins the record, not the probe's capability.)
 ## E3 — the census, and the contradiction it measures
 
 The anchor is a property of the **derivation link**, not of the node
-(`tortoise/projection/edges.py:502-510` `_anchor_on_create` / `_DERIVATION_ANCHOR_SET`), and the
-derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:475`: `Event`,
+(`tortoise/projection/edges.py:537-545` `_anchor_on_create` / `_DERIVATION_ANCHOR_SET`), and the
+derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:510`: `Event`,
 `Document`). ⛔ **The two directions are not interchangeable**, and the first stamp of this bundle
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
-(`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2432-2457`,
+(`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2467-2492`,
 reached from the capture path at `sdk.py:13754` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
