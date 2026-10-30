@@ -148,7 +148,26 @@ PROSE_FAMILY_MARKER = "*(prose — not measured)*"
 
 
 def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    """Read a measurement input; failing to read one is a STATE ERROR (2).
+
+    The module contract above says exit 2 covers "a measurement input …
+    unreadable/ABSENT here", but an unguarded `read_text` escapes `measure()` as a
+    bare `OSError`/`UnicodeDecodeError`, so `main()` never returns and CPython
+    exits **1** — the code this tool reserves for DRIFTED, with a traceback
+    instead of the `state error:` line. An operator separating "the map drifted"
+    from "this checkout cannot answer" then gets the wrong branch (#5086 review
+    P3, cycle 9).
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        try:
+            where = str(path.relative_to(ROOT))
+        except ValueError:  # pragma: no cover - a path tests hand us
+            where = str(path)
+        raise _state_error(
+            f"cannot read {where} ({exc.__class__.__name__}: {exc})"
+        ) from exc
 
 
 def _state_error(message: str) -> SystemExit:
@@ -239,6 +258,16 @@ def _family_paths(text: str) -> set[str]:
     return paths
 
 
+#: A §3 LANE row, identified by a NORMALISED first cell rather than the literal
+#: `| **L` prefix. The prefix test made the row's own identifier a narrowing: a
+#: row that renders identically but is not literally bold (`| L4 …`, a leading
+#: space, `| **l4**`) never entered the per-row loop, contributed no adjudicable
+#: path to `seen`, and so was reported CLEAN while measuring nothing — the same
+#: "narrower population read as a pass" class one door along from the family
+#: regex (#5086 review P3, cycle 9).
+_LANE_ROW = re.compile(r"^\s*\|\s*\**\s*L\d", re.I)
+
+
 def _lane_rows_without_a_family(lanes: str) -> list[str]:
     """Per §3 LANE row: it must name an adjudicable path, or say it is prose.
 
@@ -251,7 +280,7 @@ def _lane_rows_without_a_family(lanes: str) -> list[str]:
     """
     problems: list[str] = []
     for line in lanes.splitlines():
-        if not line.startswith("| **L"):
+        if not _LANE_ROW.match(line):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) < 4:
@@ -373,7 +402,12 @@ def _module_level_internal_imports(path: Path) -> list[str]:
     `while:`/`match:`/`class` body runs too, so a wrapped internal import is
     reported (#5086 review P3, cycles 6-7).
     """
-    tree = ast.parse(_read(path))
+    try:
+        tree = ast.parse(_read(path))
+    except SyntaxError as exc:
+        # An unparseable file is an input this checkout cannot measure, not a
+        # drift claim about the document — exit 2, never the drift code.
+        raise _state_error(f"cannot parse {path.name} ({exc})") from exc
     found: list[str] = []
     for node in _walk_module_scope(tree.body):
         if isinstance(node, ast.ImportFrom):
@@ -441,7 +475,14 @@ def check_leaf_rows(doc: str) -> list[str]:
 
 
 def check_registered(doc_text: str) -> list[str]:
-    """The document is reachable from the docs index (an unindexed doc is unfound)."""
+    """The document is reachable from the docs index (an unindexed doc is unfound).
+
+    An ABSENT `docs/00_index.md` is reported as a DRIFT problem, not a state
+    error: the index is itself a checked artifact of this repository (every doc
+    must be registered in it), so "the index is gone" is a claim about the tree
+    rather than about what this checkout can read — and deleting the index must
+    never turn the registration claim into a pass.
+    """
     if not INDEX.exists():
         return [f"{INDEX.relative_to(ROOT)} does not exist"]
     if DOC.name not in _read(INDEX):

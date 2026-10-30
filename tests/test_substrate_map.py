@@ -293,6 +293,63 @@ def test_a_lane_row_with_a_prose_only_family_is_reported() -> None:
         "declares no checkable file family" in p for p in registry_only
     ), registry_only
 
+    #: The row's IDENTIFIER is a population too: a row that renders the same but
+    #: is not literally `| **L` must still be measured, or its family is skipped
+    #: silently — the same narrower-population class one door along. Both variants
+    #: below returned `[]` before the identifier was normalised (measured against
+    #: this file's previous head), so each is a reachable control.
+    for variant in ("| L4 retrieval-traversal", "| **l4** retrieval-traversal"):
+        reformatted = doc.replace(anchor, "the retrieval seams", 1).replace(
+            "| **L4** retrieval-traversal", variant, 1
+        )
+        assert variant in reformatted, f"the L4 row did not take the {variant!r} form"
+        found = smc.check_lane_families(reformatted)
+        assert any("declares no checkable file family" in p for p in found), (
+            f"a lane row written {variant!r} must still be measured; got {found}"
+        )
+
+
+def test_an_unreadable_measurement_input_is_exit_2_not_the_drift_code(monkeypatch) -> None:
+    """Fails if an unreadable input escapes as a traceback (exit 1 = DRIFTED).
+
+    Reachable: a symbol file removed, or one blocked by permissions. The module
+    contract says exit 2 covers "a measurement input … unreadable/ABSENT here",
+    but an unguarded `read_text` escapes `measure()` as a bare `OSError`, so
+    `main()` never returns and CPython exits **1** — the code reserved for a
+    document that drifted. An operator reading the exit code is then told the map
+    is wrong when the checkout could not answer (#5086 review P3, cycle 9).
+    """
+    target = REPO / smc.INTERFACE_SYMBOLS[0][1]
+    real_read_text = Path.read_text
+
+    def _deny(self, *args, **kwargs):
+        if self == target:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _deny)
+    with pytest.raises(SystemExit) as excinfo:
+        smc.check_interface_symbols(_doc())
+    assert excinfo.value.code == 2, (
+        f"an unreadable measurement input is a state error (2), never the drift "
+        f"code; got {excinfo.value.code!r}"
+    )
+
+
+def test_an_unparseable_leaf_module_is_exit_2_not_the_drift_code(tmp_path: Path) -> None:
+    """Fails if `ast.parse` throwing `SyntaxError` becomes the drift code.
+
+    Reachable: a leaf module edited into a syntax error. The document is then
+    correct and the TREE is unreadable, so the answer is the state error (2), not
+    "the document and the tree disagree" (1) — the same wrong-branch failure the
+    exit-code contract exists to prevent (#5086 review P3, cycle 9).
+    """
+    broken = tmp_path / "broken.py"
+    broken.write_text("def oops(:\n    pass\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        smc._module_level_internal_imports(broken)
+    assert excinfo.value.code == 2, f"got {excinfo.value.code!r}"
+
 
 def test_the_lane_table_is_actually_enumerated() -> None:
     """Fails if §3's families stop being parsed, leaving only §4's checked.
