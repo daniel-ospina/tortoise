@@ -1091,3 +1091,117 @@ def test_the_e2e_harness_docstring_agrees_with_the_browser_hold() -> None:
     assert "getAttribute('aria-busy')" in segment, (
         "the spec must SAMPLE the in-flight state in the browser — the "
         "expression, not merely the word, which its own docstring also carries")
+
+
+# ── #8058: the catalog wait is a CONDITION, not a wall-clock poll ──────
+# `test_first_timer_wizard_build_fork_records_no_catalog_presented` redded the
+# REQUIRED `dashboard-e2e` check at 2963b8a44 with "timed out after 5000ms
+# waiting for the registry catalog fetch". The wait polled a dict the Playwright
+# ROUTE HANDLER fills, and in the sync API that handler is a callback on the
+# dispatcher, which only runs while the test thread is INSIDE a Playwright call
+# (`playwright/sync_api/_context_manager.py`) — so a `time.sleep` between polls
+# advances no handler at all and the arm verdicts on which preceding call the
+# request happened to land in, i.e. on ambient machine load (#5049: verdicts
+# from conditions, not ambient state). The two guards below pin both halves of
+# the fix, in the python lane, because `dashboard-e2e` needs two previews and a
+# 2-minute run — the shape that let this regress unnoticed in the first place.
+
+def _e2e_module_constant(name: str) -> str:
+    """The string literal inside a module-level `NAME = re.compile("…")`.
+
+    Read from the SOURCE (that module raises `pytest.skip(allow_module_level=True)`
+    on import unless `RUN_DASHBOARD_E2E` is set), and required to be a LITERAL so
+    the guard below can compile the same matcher the spec arms.
+    """
+    tree = ast.parse(_E2E_ONBOARDING.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == name):
+            continue
+        call = node.value
+        assert isinstance(call, ast.Call), f"{name} must be built by a call"
+        assert call.args, f"{name} must be built from an argument"
+        arg = call.args[0]
+        assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
+            f"{name} must be a string LITERAL, so this guard reads the same "
+            "matcher the spec arms")
+        return arg.value
+    raise AssertionError(f"{name} not found in {_E2E_ONBOARDING}")
+
+
+def test_the_shared_wait_helper_pumps_the_page_between_polls() -> None:
+    """#8058: `_wait_until` must sleep through the PAGE, never `time.sleep`.
+
+    Pre-fix it called `time.sleep(0.1)`, so its predicate could only ever see
+    route-handler state written during the previous pumping call — the failure
+    the required `dashboard-e2e` check reported at 2963b8a44.
+    """
+    helper = _e2e_function("_wait_until")
+    sleeps = [node for node in ast.walk(helper)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "sleep"]
+    assert not sleeps, (
+        "_wait_until must not sleep with a bare timer: a sync route handler is "
+        "dispatched only while the test thread is inside a Playwright call, so "
+        "`time.sleep` cannot advance the very handler the poll is waiting on "
+        "(#8058). Use `page.wait_for_timeout`.")
+    pumps = [node for node in ast.walk(helper)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "wait_for_timeout"]
+    assert pumps, (
+        "_wait_until must pump the page between polls (`page.wait_for_timeout`), "
+        "or a handler that fires mid-wait is never observed (#8058)")
+
+
+def test_the_catalog_wait_is_the_request_condition_not_a_counter_poll() -> None:
+    """#8058: the build-fork catalog wait arms the REQUEST event, not a clock.
+
+    Non-vacuity: pre-fix the spec's only wait was
+    `_wait_until(lambda: cap["capabilities"] == 1, timeout_ms=5_000)` — a bare
+    timer over handler-owned state, which is what the `dashboard-e2e` job redded
+    on. `page.expect_request` resolves the instant the fetch is issued, so the
+    timeout is a failure bound rather than the verdict.
+    """
+    src = _E2E_ONBOARDING.read_text(encoding="utf-8")
+    spec = _e2e_function("test_first_timer_wizard_build_fork_records_no_catalog_presented")
+    segment = "\n".join(src.splitlines()[spec.lineno - 1:spec.end_lineno])
+    assert "expect_request(" in segment, (
+        "the catalog wait must arm the intercepted REQUEST — that event is the "
+        "deterministic signal (#8058)")
+    assert "_CATALOG_REQUEST" in segment, (
+        "the armed matcher must be the shared `_CATALOG_REQUEST` constant, so the "
+        "URL this spec waits on is pinned in ONE place")
+    # The counter is still asserted (it is the "exactly once" pin), but no WAIT
+    # may read it: a wait whose only predicate is harness state can never observe
+    # a handler that fires mid-wait.
+    for node in ast.walk(spec):
+        if not isinstance(node, ast.Call):
+            continue
+        called = node.func
+        if not (isinstance(called, ast.Name) and called.id == "_wait_until"):
+            continue
+        call_src = ast.get_source_segment(src, node) or ""
+        assert "capabilities" not in call_src, (
+            "the catalog fetch must be awaited as a request CONDITION, not "
+            f"polled through the handler-owned counter (#8058): {call_src}")
+
+
+def test_the_catalog_request_matcher_matches_the_url_the_app_fetches() -> None:
+    """#8058: a matcher that never matches makes the wait above vacuous.
+
+    `api('/v1/capabilities')` fetches `${API_BASE}/v1/capabilities` — same-origin,
+    so `/api/v1/capabilities` (main.jsx:3196). The constant is a REGEX rather
+    than a glob so an org-scoped query string cannot silently unarm it."""
+    import re as _re
+
+    matcher = _re.compile(_e2e_module_constant("_CATALOG_REQUEST"))
+    assert matcher.search("http://127.0.0.1:8790/api/v1/capabilities"), (
+        "the matcher must match the URL `api('/v1/capabilities')` actually fetches")
+    assert matcher.search("http://127.0.0.1:8790/api/v1/capabilities?org_id=team_o"), (
+        "a query string must not silently unarm the wait")
+    assert not matcher.search("http://127.0.0.1:8790/api/v1/capabilities-extended"), (
+        "the matcher must not swallow a sibling route")

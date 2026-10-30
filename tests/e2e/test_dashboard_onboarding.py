@@ -432,16 +432,40 @@ def _measure_key_row(page: Page) -> dict:
     }""")
 
 
-def _wait_until(fn, *, timeout_ms: int = 5_000, message: str = "") -> None:
+# #8058: the BFF proxy path the registry-backed build catalog is fetched from
+# (`api('/v1/capabilities')` → `/api/v1/capabilities`). Matched as a REGEX, not a
+# glob, so a query string appended by a future org-scoped call still matches.
+_CATALOG_REQUEST = re.compile(r"/v1/capabilities(?:\?.*)?$")
+
+
+def _wait_until(page: Page, fn, *, timeout_ms: int = 5_000, message: str = "") -> None:
     """Bounded poll (the sync Playwright API's expect.poll is unavailable in
-    this env) — replaces instantaneous reads that can race a React effect."""
+    this env) — replaces instantaneous reads that can race a React effect.
+
+    #8058: the poll SLEEPS through `page.wait_for_timeout`, never `time.sleep`.
+    A sync route handler is a callback on Playwright's dispatcher, and the
+    dispatcher only runs while the test thread is inside a Playwright call
+    (`playwright/sync_api/_context_manager.py`: the event loop is switched to by
+    a sync call and switched back when that call returns). A `time.sleep`
+    between polls therefore advances no handler at all — the predicate can only
+    ever see handler state written during the PREVIOUS pumping call — so a wait
+    on a handler-owned side effect verdicts on which call the effect happened to
+    land in, i.e. on ambient machine load. `page.wait_for_timeout` pumps, so a
+    request that arrives mid-wait is actually observed.
+
+    The budget is still wall clock, so a predicate that CAN be expressed as a
+    Playwright condition must use that instead (`page.expect_request` /
+    `expect_response` around the action that issues the request, as the build
+    catalog spec below does) — #5049: verdicts from conditions, not ambient
+    state.
+    """
     deadline = time.time() + timeout_ms / 1000
     last = None
     while time.time() < deadline:
         last = fn()
         if last:
             return
-        time.sleep(0.1)
+        page.wait_for_timeout(100)
     raise AssertionError(f"timed out after {timeout_ms}ms waiting for {message}: {last!r}")
 
 
@@ -669,7 +693,7 @@ def test_coming_soon_modal_dialog_contract_and_skip_reaches_done(page: Page) -> 
     # this side waits for it.
     page.keyboard.press("Escape")
     expect(dialog).to_have_count(0)
-    _wait_until(lambda: page.evaluate(
+    _wait_until(page, lambda: page.evaluate(
         "() => document.activeElement && document.activeElement.dataset.integrationKey") is not None,
         message="focus returned to the tile that opened the dialog, never <body>")
     # Skip reaches done
@@ -1271,7 +1295,7 @@ def test_connect_prompt_card_has_no_nested_interactive_and_dragselect_is_safe(pa
     # The one explicit control still copies the card's own prompt text.
     card_text = card.inner_text()
     card.locator("button").last.click()
-    _wait_until(lambda: page.evaluate("() => navigator.clipboard.readText()") != sentinel,
+    _wait_until(page, lambda: page.evaluate("() => navigator.clipboard.readText()") != sentinel,
                 timeout_ms=5_000, message="the explicit copy to resolve")
     copied = page.evaluate("() => navigator.clipboard.readText()")
     assert card_text.startswith(copied), \
@@ -1631,12 +1655,17 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     # the payload REPLACES the placeholder rather than merging with it, so
     # asserting that name plus the fallback names' absence proves a
     # registry-backed render and not the offline fallback.
-    page.get_by_role("button", name=re.compile("Build an application on top")).click()
-    expect(page.locator("body")).to_contain_text("Build catalog", timeout=10_000)
-    # The fetch is issued by a passive effect when the card mounts — poll
-    # instead of snapshotting immediately after the text appears.
-    _wait_until(lambda: cap["capabilities"] == 1, timeout_ms=5_000,
-                message="the registry catalog fetch (exactly once, from the fork card)")
+    # #8058: wait on the CONDITION — the intercepted REQUEST — not a 5 s wall
+    # clock. The fetch is issued by a passive effect once the build fork is
+    # picked, so the request event IS the deterministic signal: the wait resolves
+    # the instant it is issued, and the timeout is only a failure BOUND. The
+    # listener is armed BEFORE the click, because the effect can fire before any
+    # wait started afterwards would be watching.
+    with page.expect_request(_CATALOG_REQUEST, timeout=15_000):
+        page.get_by_role("button", name=re.compile("Build an application on top")).click()
+        expect(page.locator("body")).to_contain_text("Build catalog", timeout=10_000)
+    # ...and the mock payload can only render once the route handler has RUN, so
+    # this expect is also the pump that settles the handler-owned counter below.
     expect(page.locator("body")).to_contain_text("Registry-only module", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Session recorder")
     page.get_by_role("button", name="Continue →").click()
