@@ -1017,9 +1017,11 @@ def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
     byte-identical and ASSERTED by sha256 — and the assertion runs in the
     `finally`, on the error path too, because the paths that skip the loop body
     are exactly the ones a mutated tracked file could survive: an unexpected
-    mutation, a harness error, a budget red. The write is bytes-to-bytes, so the
-    comparison is bytes-to-bytes as well. The previous version of this proof ran
-    by hand, where no restore was asserted at all.
+    mutation, a harness error, a budget red. The MUTATION WRITE is inside that
+    `try` as well, so the restore covers the write it is meant to undo rather
+    than only the run after it. The write is bytes-to-bytes, so the comparison is
+    bytes-to-bytes too. The previous version of this proof ran by hand, where no
+    restore was asserted at all.
     """
     _assert_baseline_green()
     for label, path, span, replacement, node, expected in PROPERTY_MUTATIONS:
@@ -1027,10 +1029,14 @@ def test_each_property_test_goes_red_when_its_property_is_mutated() -> None:
         original = original_bytes.decode("utf-8")
         before = hashlib.sha256(original_bytes).hexdigest()
         assert original.count(span) == 1, f"{label}: span is no longer unique"
-        path.write_bytes(
-            original_bytes.replace(span.encode("utf-8"), replacement.encode("utf-8"))
-        )
+        # The MUTATION WRITE is inside the `try` on purpose: `write_bytes` truncates
+        # on open, so a raise from it (ENOSPC/EIO mid-write, KeyboardInterrupt, this
+        # item's own SIGALRM) would otherwise be the one path that leaves a tracked
+        # source truncated with no restore attempted and no sha256 to say so.
         try:
+            path.write_bytes(
+                original_bytes.replace(span.encode("utf-8"), replacement.encode("utf-8"))
+            )
             went_red = _property_test_fails(node, expected)
         finally:
             path.write_bytes(original_bytes)
