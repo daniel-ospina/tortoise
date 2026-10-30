@@ -79,11 +79,12 @@ OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on
     guessable key is the same forgery
     oracle as a reused one — the floor is a length heuristic, not a strength guarantee, so pick a
     generated value). Must NOT be the service-role key (key reuse across purposes) or the anon key
-    (§2.3: the anon key is public by construct — Supabase designs it to be shipped to browsers, so
-    it must be assumed held by anyone — and it is in THIS process's environment, which is what
-    makes a collision observable here. Neither half is a claim about this deployment's bundles:
-    #4054/#4178 kept the key out of them on purpose). Unset ⇒ the arm is unavailable and the
-    bearer path is unaffected.
+    (§2.3: the anon key is public by construct — Supabase's low-privilege key is DESIGNED to be
+    shipped to a browser, and only Row Level Security bounds what it may reach — and it is in
+    this process's environment, so a collision is OBSERVABLE here. It is not this deployment's
+    bundle: #4054 removed the UMD script and #4178 keeps `VITE_SUPABASE_ANON_KEY`
+    non-load-bearing, so do NOT read "designed to be shipped" as "this app ships it").
+    Unset ⇒ the arm is unavailable and the bearer path is unaffected.
   * ``CONSENT_TOKEN_ISSUER`` — optional, defaults to ``https://app.premiselabs.co`` (the session
     origin). A token whose `iss` differs is refused, so this must match the minting origin.
   * the shared `jti` store — installed from `hosted_api._lifespan` (above). If nothing is
@@ -163,11 +164,12 @@ _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 #: anyone can hold it)". BOTH halves are checked here: `SUPABASE_ANON_KEY` is in this process's
 #: environment, so a collision is observable — an earlier version of this tuple claimed otherwise
 #: and would have left the
-#: WORSE half unguarded (that key is public by construction — Supabase designs it to be shipped to
-#: browsers, so it must be assumed held by anyone — and it is in THIS process's environment, which
-#: is what makes a collision observable; neither half says this app ships it, and #4054/#4178 kept
-#: it out of every browser-delivered artefact on purpose). §8's human checklist still carries the
-#: cross-deployment case, where the Pages project's env differs from the API's.
+#: WORSE half unguarded (that key is public by construction — Supabase designs it for browser
+#: exposure and only Row Level Security bounds it — which never made it a SECRET, and #3524 §9
+#: step 4 deleted the only page that ever embedded it, so this app does not ship it at all:
+#: #4054 removed the dashboard's UMD script, #4178 keeps `VITE_SUPABASE_ANON_KEY`
+#: non-load-bearing). §8's human checklist still carries the cross-deployment case, where the
+#: Pages project's env differs from the API's.
 _REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_ANON_KEY")
 
 #: The shortest secret this arm will use. A FLOOR, not an entropy measurement: it catches the
@@ -191,10 +193,10 @@ def consent_token_secret_problem() -> str | None:
     A REUSED key is treated as *not provisioned* rather than as a working arm. §2.3 makes a
     dedicated secret a ``must``, and the failure it guards is silent and total: a
     ``CONSENT_TOKEN_SECRET`` copied from the anon key turns this verifier into a forgery oracle —
-    that key is public by construction (Supabase designs it to be shipped to browsers, and it is in
-    this process's environment, so treating it as a secret is a category error), so anyone
-    holding it could assert any ``sub`` with any ``bind``, and ``sub`` is the only identity input
-    on the token
+    that key is public by construction (Supabase designs it to be shipped to a browser and bounds
+    it only by Row Level Security, so anyone who has it can hold it — no page of THIS app needs to
+    publish it, and per #4054/#4178 none does), so anyone holding it could assert any ``sub`` with
+    any ``bind``, and ``sub`` is the only identity input on the token
     arm. A reused service-role key is the same class from the other direction: one leak of the
     wider credential silently becomes an assertion signing key. Refusing here costs one
     typed 503 and one restart with the right value; accepting it costs every account.

@@ -1786,3 +1786,144 @@ def test_the_token_arm_and_the_bearer_arm_are_BOTH_still_live(
     }, headers={"Authorization": "Bearer fake-session-jwt"})
     assert r.status_code == 200, r.text
     assert r.json()["code"], r.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# the coverage evidence this PR publishes about THIS FILE is derived, not typed
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: Where this suite's own size is asserted to the outside world. Two homes, both
+#: of which had gone stale TWICE on this PR (review rounds 2, 5, 9, 11): the
+#: `durations` weight's "what it covers" note (`config/ci-surfaces.yml`) and
+#: §9 step 4's evidence cell (`docs/engineering/auth/consent-identity-bridge.md`).
+#: A number a lane types is a number that rots on the next test; these are
+#: DERIVED from the file below and compared, so a new case cannot land without
+#: the evidence following it.
+CI_SURFACES = REPO_ROOT / "config" / "ci-surfaces.yml"
+CONSENT_BRIDGE_DOC = (
+    REPO_ROOT / "docs" / "engineering" / "auth" / "consent-identity-bridge.md"
+)
+
+
+def _module_level_literal_lengths(tree) -> dict[str, int]:
+    """`NAME = [ … ]` / `NAME = ( … )` at module scope → its LENGTH.
+
+    Needed because one parametrisation passes a module-level list by NAME
+    (`@pytest.mark.parametrize("token", _PLACEHOLDERS)`), and resolving it is the
+    difference between counting 8 cases and quietly counting 1.
+    """
+    import ast
+
+    lengths: dict[str, int] = {}
+    for node in tree.body:
+        targets, value = (), None
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = (node.target,), node.value
+        if not isinstance(value, (ast.List, ast.Tuple)):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                lengths[target.id] = len(value.elts)
+    return lengths
+
+
+def _coverage_arithmetic(path: Path) -> tuple[int, int]:
+    """(collected cases, test functions) for a pytest module — FROM ITS SOURCE.
+
+    `collected = Σ over test functions of Π over that function's literal
+    `parametrize` lists`. Deliberately NOT `pytest --collect-only` inside a test:
+    a nested collection re-imports this module in a second interpreter and its
+    own conftest, which is both slow and a different environment than the one
+    that governs the doc claim.
+
+    ⛔ Every `parametrize` argument set must be a LITERAL list/tuple (or a
+    module-level name bound to one). A computed set would make this arithmetic
+    silently undercount — the exact failure mode ("stale evidence ships green")
+    that this gate exists to end — so an unresolvable one is a LOUD failure here,
+    not a guess.
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    named = _module_level_literal_lengths(tree)
+    cases = 0
+    functions = 0
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        functions += 1
+        multiplier = 1
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call) or len(decorator.args) < 2:
+                continue
+            if not ast.unparse(decorator.func).endswith("parametrize"):
+                continue
+            values = decorator.args[1]
+            if isinstance(values, ast.Name):
+                assert values.id in named, (
+                    f"{path.name}: parametrize in {node.name} passes {values.id!r}, which is not "
+                    "a module-level list/tuple literal — this counter cannot derive the case "
+                    "count, so the coverage evidence cannot be checked")
+                multiplier *= named[values.id]
+            elif isinstance(values, (ast.List, ast.Tuple)):
+                multiplier *= len(values.elts)
+            else:
+                raise AssertionError(
+                    f"{path.name}: parametrize in {node.name} passes "
+                    f"{ast.unparse(values)!r}; the case count is only derivable from a literal "
+                    "or a module-level literal, and a silent undercount is how this evidence "
+                    "went stale")
+        cases += multiplier
+    return cases, functions
+
+
+def test_the_coverage_evidence_matches_the_FILE_it_counts():
+    """⛔ Both published counts are DERIVED here, so neither can silently rot again.
+
+    Round 11 measured `config/ci-surfaces.yml` claiming 55 cases and §9 step 4
+    claiming 55 cases / 39 test functions, against a file that collects 56 and
+    defines 40 — after rounds 2, 5 and 9 had each reported the same number stale.
+    The numbers are this PR's own evidence that "the page surface is covered", so
+    a lane that adds a test and forgets them is publishing a false coverage
+    claim, not making a bookkeeping slip.
+
+    Non-vacuity: the assertions below compare against numbers computed from this
+    module's AST, so restoring `55 cases` (or `39 test functions`) anywhere reds
+    — and each home must still BE FOUND, so deleting the claim is not a way to
+    pass (a missing row would leave nothing to compare and this would be a gate
+    that scans nothing).
+    """
+    cases, functions = _coverage_arithmetic(Path(__file__))
+
+    # sanity: the derivation inspected a real suite, not an empty module
+    assert functions >= 30 and cases >= functions, (
+        f"derived {cases} cases / {functions} test functions from {Path(__file__).name} — "
+        "that is not this suite, so the comparison below would prove nothing")
+
+    surfaces = CI_SURFACES.read_text(encoding="utf-8")
+    row = re.search(
+        r"^  test_oauth_consent_page_step4\.py: .*?What it covers: (\d+) cases",
+        surfaces, re.MULTILINE | re.DOTALL)
+    assert row, (
+        "config/ci-surfaces.yml has no `durations` row for this file carrying "
+        "`What it covers: N cases` — the weight's justification is the only place the "
+        "CI map states this suite's size, and it is gone")
+    assert int(row.group(1)) == cases, (
+        f"config/ci-surfaces.yml says this suite covers {row.group(1)} cases; the file "
+        f"collects {cases} ({functions} test functions). Update the row, not this test.")
+
+    doc = CONSENT_BRIDGE_DOC.read_text(encoding="utf-8")
+    claimed = re.search(
+        r"`tests/test_oauth_consent_page_step4\.py`\s*\((\d+) cases\s*/\s*(\d+) test functions",
+        doc)
+    assert claimed, (
+        "docs/engineering/auth/consent-identity-bridge.md §9 step 4 no longer states "
+        "`tests/test_oauth_consent_page_step4.py` (N cases / M test functions) — the "
+        "evidence cell for the delivered page rewrite must carry its own numbers")
+    assert (int(claimed.group(1)), int(claimed.group(2))) == (cases, functions), (
+        f"the bridge record claims {claimed.group(1)} cases / {claimed.group(2)} test "
+        f"functions; the file holds {cases} / {functions}. Update the record, not this test.")
