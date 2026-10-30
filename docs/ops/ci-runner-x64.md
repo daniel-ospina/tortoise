@@ -34,18 +34,18 @@ The architecture labels are **derived by GitHub from the host at registration** 
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
 and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
 
-- `ARM64`/`X64` are **ornaments in default routing** — no job matches on them, and none can, unless
-  a job names `self-hosted` too (a `runs-on` must satisfy EVERY label, so `self-hosted-arm64` or
-  `self-hosted-x64` alone matches nothing). Naming `self-hosted` is what the repo refuses **as a
-  default**: the `test-slow` pin's header in `.github/workflows/python-ci.yml` is "Do NOT change it
-  back to `ubuntu-latest`, and never to `self-hosted`", and the reason is that a `self-hosted` pin
-  removes the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS and
-  "the aggregate stays pending — not answered yet" instead of being answered by the pool. **One
-  opt-in departure exists and is recorded below** — `CI_SHARD_ROUTING=pool-split` names
-  `[self-hosted, self-hosted-x64]` on the fast matrix's ODD rows, with its `OVERRIDES:` line and its
-  outage-wait exposure (`→ The fast-matrix split is OPT-IN`). So "no job matches on them" is true of
-  the DEFAULT tree and false of the opt-in one; read both sentences together or this page
-  contradicts itself.
+- `ARM64`/`X64` are **ornaments in DEFAULT routing** — no job in the default tree requests them, so
+  nothing distinguishes the classes today. They are NOT unroutable: labels match cumulatively and a
+  custom label routes on its own (that is how `ubuntu-latest` reaches the pool, next bullet), so a
+  bare `runs-on: self-hosted-x64` DOES select this box. What the repo refuses **as a default** is
+  naming `self-hosted`: the `test-slow` pin's header in `.github/workflows/python-ci.yml` is "Do NOT
+  change it back to `ubuntu-latest`, and never to `self-hosted`", and the reason is that a
+  `self-hosted` pin removes the GitHub-hosted half of the race, so during a hosted outage the
+  required leg WAITS and "the aggregate stays pending — not answered yet" instead of being answered
+  by the pool. **One opt-in departure exists and is recorded below** — `CI_SHARD_ROUTING=pool-split`
+  names `[self-hosted, self-hosted-x64]` on the fast matrix's ODD rows, with its `OVERRIDES:` line
+  and its outage-wait exposure (`→ The fast-matrix split is OPT-IN`); read that section with this
+  one, since what makes the pair exclusive is the ABSENCE of `ubuntu-latest`, not the label pair.
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
   (`fallback_on`) attaches it, `:290` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
@@ -455,9 +455,9 @@ now forbids the job-scope form, so "put it back on the job" is a red check, not 
 whose odd rows still raced for a hosted label would not route at all; the departure is OPT-IN, off by
 default, and its cost is stated here rather than inherited silently.
 
-Naming both labels is the only shape that routes: `self-hosted-x64` alone matches nothing (a runner
-must satisfy EVERY label in `runs-on`), and `[self-hosted, self-hosted-x64]` matches only these x64
-runners, which carry both. What that costs is exactly the trade the rule refuses:
+Label matching is cumulative — a runner must carry EVERY label named in `runs-on` — so the pair
+`[self-hosted, self-hosted-x64]` matches only these x64 runners, which carry both; a bare
+`self-hosted-x64` would select them too. What that costs is exactly the trade the rule refuses:
 
 - **No hosted half on those four legs.** With the gate in `fallback_off` (the normal state on a
   healthy day), or the box simply down, a `self-hosted` pin does not degrade to anything — it
