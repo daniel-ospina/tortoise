@@ -1348,6 +1348,90 @@ def test_label_coverage_counts_only_online_carriers(tmp_path: Path):
     )
 
 
+def test_label_coverage_never_widens_a_class_numerator_to_foreign_arch_carriers(tmp_path: Path):
+    """⛔ AN EMPTY SUB-POOL IS THE INCIDENT — WIDENING THE NUMERATOR TO THE WHOLE POOL HIDES IT.
+
+    The class denominator (`nx64` for a bare `ubuntu-<version>`, `narm` for an `-arm` spelling) can
+    legitimately be 0, and the read used to widen BOTH halves in that case
+    (`if (denom == 0) { denom = pool_online; num = n }`). `n` counts EVERY online carrier, so the
+    widening put foreign-arch carriers back into the numerator the class exists to exclude — and
+    the verdict got BETTER as more of them were added, which is the fail-open direction:
+
+      0 online x64 + 5 online arm64 wrongly carrying `ubuntu-24.04`
+        -> `ubuntu-24.04 = 5 of 5 online runner(s)` and exit 0   (full coverage, stated)
+        -> `0 of 0 ... answer it` + `⛔ UNCOVERED` + exit 5        (the incident, after the fix)
+
+    The same shape hid a false architecture claim for the `-arm` class (0 online arm64, 2 online x64
+    wrongly carrying `ubuntu-24.04-arm` read `2 of 2`, now `0 of 0`).
+
+    Mutation: restore the widening, or use `n` as the numerator for a class -> the first arm below
+    prints `5 of 5` and exits 0 -> RED; the second prints `2 of 2` -> RED.
+    """
+    repo = _repo_with_workflows(
+        tmp_path / "cov-foreign", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+
+    # ── the bare class: every online carrier is FOREIGN-arch, the one real x64 carrier is offline ──
+    foreign = _stub_gh(
+        tmp_path / "gh-foreign",
+        "\n".join(
+            [
+                "a%d\tonline\tself-hosted,Linux,ARM64,self-hosted-arm64,ubuntu-24.04" % i
+                for i in range(1, 6)
+            ]
+            + ["x1\toffline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04"]
+        ),
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{foreign}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=repo,
+    )
+    assert r.returncode == 5, (
+        f"0 online x64 runners is NO answer for a bare x64 pin however many arm64 runners wrongly "
+        f"carry it — a verdict, not a green: {(r.returncode, r.stderr)}"
+    )
+    assert "5 of 5" not in r.stderr, (
+        f"five foreign-arch carriers are not five answers; counting them makes the read WORSE as "
+        f"unusable runners are added: {r.stderr}"
+    )
+    assert "0 of 0 online self-hosted runner(s) answer it" in r.stderr, (
+        f"the denominator counts the runners that COULD answer (the online x64 pool, here empty), "
+        f"and the numerator must be counted in that same population: {r.stderr}"
+    )
+    assert "⛔ UNCOVERED" in r.stderr, r.stderr
+    assert "1 runner(s) in the pool are not `online`, 1 of them carrying ubuntu-24.04" in r.stderr, (
+        f"the offline x64 carrier is still printed as CONTEXT, so the measurement stays readable: "
+        f"{r.stderr}"
+    )
+
+    # ── the `-arm` class: 0 online arm64, 2 online x64 wrongly carrying the ARM spelling ─────────
+    arm_repo = _repo_with_workflows(
+        tmp_path / "cov-foreign-arm", "jobs:\n  a:\n    runs-on: ubuntu-24.04-arm\n    steps: []\n"
+    )
+    wrong_arch = _stub_gh(
+        tmp_path / "gh-wrong-arch",
+        "\n".join(
+            "x%d\tonline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04-arm" % i
+            for i in range(1, 3)
+        ),
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{wrong_arch}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=arm_repo,
+    )
+    assert "2 of 2" not in r.stderr, (
+        f"an x64 runner carrying an `-arm` spelling is a false architecture claim, never coverage: "
+        f"{r.stderr}"
+    )
+    assert "0 of 0 online self-hosted runner(s) answer it" in r.stderr, r.stderr
+    assert r.returncode == 0, (
+        f"an `-arm` spelling is not this pool's class on an x64 box, so it is a REPORT, not a "
+        f"block: {(r.returncode, r.stderr)}"
+    )
+
+
 def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Path):
     """`0 < n < pool_total` is the erosion state: a label half the pool cannot answer is WARNED.
 
