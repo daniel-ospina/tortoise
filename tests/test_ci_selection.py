@@ -6393,6 +6393,59 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     invocation = run["run"]
     assert '--junitxml="$PYTEST_JUNIT"' in invocation
     assert "-o junit_family=xunit1" in invocation
+    # (d) the resolve step comes FIRST (it publishes $GITHUB_ENV, which only
+    # reaches SUBSEQUENT steps) and fails CLOSED on a missing RUNNER_TEMP — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
+    resolve = steps[0]
+    assert resolve.get("name", "").startswith("Resolve per-job pytest artifact paths")
+    assert "${RUNNER_TEMP:?" in resolve["run"], \
+        "the resolve step must REFUSE to fall back to the host-global /tmp"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"), ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'echo "{var}=$base/{leaf}"' in resolve["run"]
+    # ... and no part of THIS job may name the host-global artifact again. The
+    # literals are what the collision needs, so their absence is the property —
+    # ACROSS EVERY KEY OF EVERY STEP, not just `run:`. All three literals lived in
+    # the `upload-artifact` step's `with: path:` block before #10028, so a
+    # `run`-only scan is green on exactly the key the collision rides: reverting
+    # that block re-points the upload at the host-global files while the step's
+    # own `if-no-files-found: ignore` + `continue-on-error: true` keep the leg
+    # green on ANOTHER job's `pytest.log`. `json.dumps` carries every YAML value
+    # verbatim (parsed data holds no comments), so the `"# "`-strip still forgives
+    # a shell comment that names a RETIRED path.
+    def host_global_hits(step_list):
+        blob = json.dumps(step_list)
+        return [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                                "/tmp/expected-nodeids.txt")
+                if lit in blob.replace("# " + lit, "")]
+
+    assert host_global_hits(steps) == [], (
+        f"{host_global_hits(steps)} is host-global: two concurrent jobs on a "
+        f"shared runner clobber it and red this leg on the clash (#10028, #7815)")
+    # ⛔ NON-VACUITY, asked of a COPY: reverting ONLY the upload's `path:` block to
+    # the pre-#10028 literals — the one shape a `run`-only scan cannot see — must
+    # red. The real file cannot be both correct and reverted, so the mutation is
+    # the only way to show the guard actually discriminates.
+    upload = next(s for s in steps
+                  if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+    reverted = [
+        {**s, "with": {**s["with"],
+                        "path": "/tmp/pytest.log\n/tmp/junit.xml\n"
+                                "/tmp/expected-nodeids.txt"}}
+        if s is upload else s
+        for s in steps
+    ]
+    assert host_global_hits(reverted) == ["/tmp/pytest.log", "/tmp/junit.xml",
+                                          "/tmp/expected-nodeids.txt"], (
+        "the guard must red on a reverted upload `path:` — that block is where "
+        "all three host-global literals live, and it is not a `run:` key")
+    # ...and this is the fail-open that mutation closes: the retired `run`-only
+    # scan sees NOTHING in those same steps, so it certified a reverting leg green.
+    assert [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                            "/tmp/expected-nodeids.txt")
+            if lit in "\n".join(s.get("run", "") for s in reverted)] == [], (
+        "a `run`-only scan is blind to the upload's `path:` — the blank result is "
+        "the defect this scan's broader key set fixes, not a passing check")
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
     cmdline = next(line for line in invocation.splitlines()
@@ -6711,7 +6764,126 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert (job["strategy"]["matrix"]
             == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
         "the carve-out matrix must come from the selector's carve_matrix output"
-    assert "--junitxml=/tmp/junit.xml" in run["run"]
+    # #10280: the junitxml is the PER-SHARD path, not the host-global literal it
+    # used to be (see the job loop in
+    # `test_every_pytest_capture_leg_resolves_its_artifacts_per_job`).
+    assert "--junitxml=\"$PYTEST_JUNIT\"" in run["run"]
+
+
+# ── #10280: no python-ci pytest leg may keep a host-global /tmp artifact ──
+#
+# The class, stated once so a future leg inherits the reasoning: every runner
+# install on this host shares ONE `/tmp`, and one runner runs one job at a time.
+# So a per-RUNNER path (`$RUNNER_TEMP`) is per-JOB, while a `/tmp` literal is
+# SHARED with whatever else the pool is doing. Measured consequences, in both
+# directions:
+#
+#   * FALSE RED (run 40990582554): `test-track-b` wrote `4 expected nodeids ->
+#     /tmp/expected-nodeids.txt`, then a concurrent `test-carve-out (c)` leg
+#     overwrote that file with its own `616 expected nodeids` (11s earlier on a
+#     sibling runner), and the required check reported `616 expected nodeid(s)
+#     absent from the junitxml` with every test in the leg passing.
+#   * FALSE RED (run 40808264676, #10028): a sibling's `> /tmp/pytest.log`
+#     truncated `test-slow (a)`'s log between its `tail` and the reporter's read,
+#     so a green leg concluded `STALE session summary` / `INCOMPLETE`.
+#   * FALSE PASS (the same sharing, inverted): a leg whose own manifest was
+#     replaced by a LARGER one can just as easily be replaced by a smaller set
+#     that its junitxml happens to satisfy — the coverage manifest is the thing
+#     that certifies "these tests ran", so it must not be writable by a peer.
+#
+# The three jobs below were the residue #10028 left (its own comment said the
+# `test-slow` migration was the second of four). They are asserted as a TABLE,
+# not one bespoke test per job, so a leg added to the selector's matrix inherits
+# the check by adding its job id here — and so the assertion cannot drift into
+# "whatever the last migrated job happens to look like".
+_PER_JOB_ARTIFACT_JOBS = (
+    "test",
+    "test-slow",
+    "test-track-b",
+    "test-carve-out",
+    "test-concurrency-falkor",
+)
+#: Every host-global pytest artifact spelling the migration retired. Widened
+#: beyond `/tmp/pytest.log` on purpose: filtering on that one literal is what let
+#: `trackb.log` and `junit.xml` read as "already fine" (#10280's review).
+_HOST_GLOBAL_PYTEST_ARTIFACTS = (
+    "/tmp/pytest.log",
+    "/tmp/junit.xml",
+    "/tmp/expected-nodeids.txt",
+    "/tmp/trackb.log",
+    "/tmp/pytest-d14.log",
+    "/tmp/junit-d14.xml",
+)
+
+
+def test_every_pytest_capture_leg_resolves_its_artifacts_per_job():
+    """#10280: every migrated leg resolves its artifacts under `$RUNNER_TEMP`.
+
+    Non-vacuous on the pre-fix workflow, by the reason that actually holds per leg:
+    NONE of the three newly-migrated legs (`test-track-b`, `test-carve-out`,
+    `test-concurrency-falkor`) had a resolver step — so assertion (1) fails on all
+    three — and EACH named at least one of the literals above from an executable
+    `run:` line — so assertion (2) fails on all three too. Both halves are what this
+    test rests on; how MANY distinct literals a leg had is not (the pre-fix counts
+    were 3, 3 and 1 respectively, and a count is the kind of restated measurement
+    that goes stale in the commit which changes the code). Restoring any one literal
+    (or the `/tmp` upload `path:`) reds it again.
+    """
+    wf = _load_python_ci()
+    for job_id in _PER_JOB_ARTIFACT_JOBS:
+        job = wf["jobs"][job_id]
+        steps = job["steps"]
+
+        # (1) resolved FIRST — `$GITHUB_ENV` reaches only SUBSEQUENT steps, and an
+        # empty `--junitxml=` is silently the wrong (empty) path.
+        first = steps[0]
+        assert first.get("name", "").startswith(
+            "Resolve per-job pytest artifact paths"
+        ), f"{job_id}: the artifact paths must be resolved in the FIRST step"
+        assert "${RUNNER_TEMP:?" in first["run"], (
+            f"{job_id}: RUNNER_TEMP must fail closed — a silent /tmp fallback is "
+            "the bug itself"
+        )
+        assert "$GITHUB_ENV" in first["run"], (
+            f"{job_id}: the resolver must export through $GITHUB_ENV"
+        )
+
+        # (2) no executable line of the job may name a host-global literal.
+        # Comments are exempt on purpose — the migration's rationale quotes them.
+        offenders = []
+        for step in steps:
+            body = step.get("run")
+            if not isinstance(body, str):
+                continue
+            for line in body.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                offenders += [f"{job_id} / {step.get('name')}: {line.strip()}"
+                              for lit in _HOST_GLOBAL_PYTEST_ARTIFACTS
+                              if lit in line]
+        assert not offenders, (
+            "a host-global /tmp pytest artifact is SHARED with every other runner "
+            "install on this host — a co-tenant then rewrites this leg's log, "
+            "manifest or junit (#7815/#10280): " + "; ".join(offenders)
+        )
+
+        # (3) the upload artifacts are the runner's own files, not `/tmp`'s.
+        # `runner` is a valid context in `steps.<id>.with` (see the #6253 note on
+        # test-slow), which is why this is read from the step rather than a
+        # job-level `env:` block.
+        for step in steps:
+            path = (step.get("with") or {}).get("path")
+            if path is None or "upload-artifact" not in str(step.get("uses", "")):
+                continue
+            for line in str(path).splitlines():
+                assert "${{ runner.temp }}" in line, (
+                    f"{job_id}: the uploaded pytest artifact {line.strip()!r} is not "
+                    "under ${{ runner.temp }} — it would upload a co-tenant's file"
+                )
+                assert "/tmp/" not in line, (
+                    f"{job_id}: the uploaded pytest artifact {line.strip()!r} names "
+                    "the host-global shared /tmp (#10280)"
+                )
 
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
