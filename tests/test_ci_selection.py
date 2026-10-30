@@ -5742,11 +5742,12 @@ def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
     with no event qualification — and the failure mode is the worst kind: the
     run looks exactly as if nobody had set the variable.
 
-    The env is asserted through `_effective_step_env` (job + step scope, as
-    Actions composes them), so WHERE it is written is free — but a separate
-    assertion below forbids job scope on this job (the capstone pin). The
-    emitter set is DISCOVERED from the run commands rather than named, so a
-    THIRD emitter added later cannot silently miss the lever either.
+    The env is asserted through `_effective_step_env` (job + step, merged per
+    step) and additionally, at STEP scope alone, by
+    `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate` —
+    job scope is barred by the capstone pin; the emitter set is DISCOVERED from
+    the run commands rather than named, so a THIRD emitter added later cannot
+    silently miss the lever either.
     """
     wf = _load_python_ci()
     emitters = []
@@ -5766,34 +5767,49 @@ def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
         f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
 
 
-def test_the_changes_job_carries_no_job_scope_env():
-    """#10186 review ISSUE 1 (BLOCKING): the lever must NOT be job-scoped here.
+def test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate():
+    """#10186 review ISSUE 1 (blocking): the lever may NOT live at JOB scope.
 
     `changes` also owns the capstone pre-registration gate step, and
-    `tests/test_capstone_preregistration_9075.py::ci_ordering_half_violations`
-    allow-lists the `env:` keys in EVERY scope above that step with an EMPTY
-    job allow-list (`_SAFE_JOB_ENV`, whose comment names THIS job as the reason
-    it can be empty: "The `changes` job carries no `env:` of its own today").
-    Any key at job scope can hook the gate's interpreter or shell (`BASH_ENV`, a
-    `PYTHONPATH` `sitecustomize.py`, `LD_PRELOAD`, `PATH`), so the pin refuses
-    it — and that pin rides a REQUIRED fast shard.
+    `tests/test_capstone_preregistration_9075.py` refuses ANY `env:` key in a
+    scope above that step — `_SAFE_JOB_ENV` is empty for every job — because a
+    key there can hook the gate's interpreter or shell (`BASH_ENV`, a
+    `PYTHONPATH` `sitecustomize.py`, `LD_PRELOAD`, `PATH`) so `python3` exits 0
+    with the real check never running. A job-scope lever therefore reds a
+    required FAST shard: measured at head `3eaf43fda`, that pin reported 44
+    failures (`ci_ordering_half_violations` returned one violation, and the
+    unmutated-workflow assertion runs once per silencing-idiom parametrization).
 
-    Measured at head `3eaf43fda`: putting `CI_SHARD_ROUTING` at job scope made
-    `ci_ordering_half_violations(real_workflow)` return one violation and red
-    `test_ci_runs_the_ordering_half_on_full_history` plus every parametrization
-    of `test_the_ci_pin_rejects_every_silencing_idiom`. The lever lives on the
-    two EMITTER STEPS instead, which is why this test is the guard: a future
-    edit that finds job scope "simpler" re-reds a fast shard.
+    So the rule is DERIVED from the pin instead of restated: whatever
+    `_SAFE_JOB_ENV` permits for `changes` is the entire allowance, and the lever
+    is carried by each emitter STEP's own `env:` instead. A future pin edit that
+    permits a key here loosens this test automatically, which is the point —
+    one rule, two readers.
 
-    Non-vacuous on the pre-fix tree: at `3eaf43fda` the job's `env:` was
-    `{"CI_SHARD_ROUTING": "${{ vars.CI_SHARD_ROUTING }}"}`, so this assertion
-    fails there.
+    Non-vacuous: at `3eaf43fda` the job carried
+    `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
+    assertions below fail on that tree.
     """
+    from tests.test_capstone_preregistration_9075 import _SAFE_JOB_ENV
+
     wf = _load_python_ci()
-    assert not (wf["jobs"]["changes"].get("env") or {}), (
-        "the `changes` job must carry no job-scope `env:` — it owns the capstone "
-        "gate step, whose pin allows no env key at job scope (#10186 review); "
-        "put the key on the emitter steps instead")
+    job = wf["jobs"]["changes"]
+    allowed = set(_SAFE_JOB_ENV.get("changes", frozenset()))
+    extra = sorted(set(job.get("env") or {}) - allowed)
+    assert not extra, (
+        "the `changes` job must not carry `env:` keys above the capstone gate "
+        f"step (#10186); only {sorted(allowed)} are permitted, found {extra}")
+    emitters = [s for s in job["steps"]
+                if "--emit-push-matrix" in str(s.get("run") or "")
+                or "--split" in str(s.get("run") or "")]
+    assert len(emitters) >= 2, [s.get("name") for s in emitters]
+    bare = [s.get("name") for s in emitters
+            if "vars.CI_SHARD_ROUTING"
+            not in str((s.get("env") or {}).get("CI_SHARD_ROUTING", ""))]
+    assert not bare, (
+        "each matrix emitter must carry `CI_SHARD_ROUTING` in its OWN `env:` "
+        "(step scope) — inheriting it from the job is what reds the capstone "
+        f"gate pin (#10186): {bare}")
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():

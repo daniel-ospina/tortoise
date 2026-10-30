@@ -1600,10 +1600,19 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Tiered selection",
          "3e532b44ae1d76d09b0557c32139fdc8f0546fe5ed92bd11d1d4130f0a8d6ce8"),
         ("Emit push matrix (#1472/#6135)",
+         # Re-cut 2026-10-30 (PR #10186): an `env:` key added — `CI_SHARD_ROUTING`,
+         # the runner-split opt-in's ONE lever — with the `run:` script byte-identical.
+         # The lever cannot live at job scope (any job-scope key sits above the gate step
+         # and hooks its interpreter, which is what `_SAFE_JOB_ENV` refuses), so it is
+         # carried by each of this job's TWO emitters; the digests move by the env block
+         # alone, deliberately, per this pin's own instruction.
          "f0e928484d97c448337a2110b86dc54718b6fd5e36611369ae515aafff88c3f0"),
         ("Non-gating lanes — what this gate does NOT run (#10194)",
          "9b6ec88d732ebef44f83fa29380ed9f73d8d9daa01cc61964939db0a1bd26bc7"),
         ("Tier-2 duration split (#1473)",
+         # Re-cut 2026-10-30 (PR #10186), same env-only reason as the push emitter above:
+         # this emitter's output OVERRIDES the push matrix on tier-2 PRs, so a lever on
+         # the push step alone is dead on exactly the event every PR uses.
          "6a2cee39ab47ddba253e5c4a46b6a01650ea4c9a58cad56f68ba9255706bb7ca"),
         ("Capstone pre-registration gate — the ordering half (#9075)", _GATE_SENTINEL),
         ("Secrets scan (evidence artifacts,",
