@@ -13214,8 +13214,9 @@ class TortoiseSDK:
         A graph operator IS a Point (``is_operator=true``), so it takes the
         Point arm below: ``update(<operator_id>, label=...)`` edits an existing
         operator edge in place. So ``update`` belongs to the operator-mutation
-        vocabulary even though ``operator_action`` exposes only mitigate/annotate
-        (#6131).
+        vocabulary even though the deleted ``operator_action`` exposed only
+        mitigate/annotate (#6131; #4282 deleted that door — ``mitigate_operator`` and
+        ``annotate_operator`` are the surviving writes).
 
         Note what this path does NOT do: unlike ``create_operator``, which returns
         a structured ``undeclared_relation`` warning when the predicate is neither
@@ -17948,8 +17949,9 @@ class TortoiseSDK:
         return result
 
     # ── Operator action consolidation (epic #888 W2) ──────────────────
-    # operator_action() is the unified operator write entry; the legacy
-    # mitigate_operator/annotate_operator remain the implementations.
+    # mitigate_operator/annotate_operator are the operator write entry points.
+    # The unified operator_action() wrapper that sat in front of them was
+    # deleted in #4282; do not reintroduce a pointer to it here.
     def annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
         """Annotate an operator Point with structured epistemic dimensions.
@@ -23915,7 +23917,7 @@ class TortoiseSDK:
                 "suggested_relation": "IMPL",
                 "reason": (
                     f"semantically related (similarity={score:.2f}) with no "
-                    "existing connection — candidate for operator_action"
+                    "existing connection — candidate for mitigate_operator"
                 ),
                 "similarity": round(score, 6),
             })
@@ -36559,7 +36561,8 @@ class TortoiseSDK:
           - NAND     — either side carries contradiction markers
           - mitigate — candidate is an operator Point (mitigation anchor)
         Nudges are advisory only — surfaced in the write response, never
-        enforced (the agent acts via operator_action/create_edge if it wants).
+        enforced (the agent acts via create_operator + mitigate_operator, or
+        create_edge, if it wants; #4282 deleted ``operator_action``).
         """
         tokens = {w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower())}
         if not tokens:
@@ -40050,7 +40053,10 @@ class TortoiseSDK:
         operator is created (operator iff mitigation, or Point↔Point
         support/contradict). Lazy promotion: when mitigation becomes needed,
         create the operator via create_operator and mitigate it with
-        operator_action(action='mitigate').
+        mitigate_operator(id, reason, strength=...). (The SDK method
+        ``operator_action(action='mitigate')`` that used to wrap that call was
+        deleted in #4282; the MCP tool ``tortoise_operator_action`` survives —
+        it is not an SDK method.)
 
         ``relation`` must be one of the typed structural relations:
         performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember,

@@ -16,16 +16,22 @@ and reported — and it was WRONG.
 
 Why the assertions are shaped this way — every test is written to be able to fail:
 
-1. the refusal must no longer claim to be the whole vocabulary (reverting the
-   message reddens it);
-2. the capability must be real and pinned by BEHAVIOUR — an operator can be
+1. the capability must be real and pinned by BEHAVIOUR — an operator can be
    re-labelled in place and deleted, and a plain Point still deletes through the
    same verb, so neither assertion is vacuous (routing operators away from the
    Point arm reddens both, and dropping the control would let a "delete
    everything" regression pass);
-3. the prose at the point of use is asserted on purpose. For a DISCOVERABILITY
+2. the prose at the point of use is asserted on purpose. For a DISCOVERABILITY
    defect the docstring **is** the artifact, so prose that drifts back to hiding
    operators is precisely the regression this file exists to catch.
+
+What #4282 removed, and what it did NOT remove: ``operator_action`` is gone, so
+its refusal-message test (old item 1) lost its subject and was deleted with it.
+The DISCLOSURE needles did not — they live in ``update``/``delete``, both of which
+survive — so that test stays, with the two ``operator_action`` needles excised
+from its tuple. It is kept deliberately: this is the assertion a reviewer once
+made vacuous by replacing the sentence with a neutral one, and it is the only pin
+on that disclosure anywhere in the tree.
 
 Runnable with: `.venv/bin/python -m pytest tests/test_6131_operator_mutation_vocabulary.py -v`
 The fixture is a per-test embedded DB (``db_path``), so it needs no running server.
@@ -83,3 +89,41 @@ def test_control_a_plain_point_still_deletes_through_the_same_verb(tmp_path: Pat
     assert not sdk.get_point(a["id"])
 
 
+def test_the_readable_surfaces_name_the_generic_verbs() -> None:
+    """Docstrings are the artifact for a discoverability defect (#6131, part 3).
+
+    #4282 deleted ``operator_action``, and with it this test's two
+    ``operator_action`` needles — the ones pinning that door's own
+    ``update(<operator_id>)`` / ``delete(<operator_id>)`` pointers. The six
+    needles below all target ``update``/``delete``, which SURVIVE, so they are
+    restored verbatim: an operator is still a Point, the generic verbs still take
+    it, and the disclosure that says so still has to be present at the point of
+    use.
+    """
+    for fn, needle in (
+        (TortoiseSDK.delete, "operator"),
+        # NOT the bare word "operator": that matches vacuously elsewhere in
+        # `update.__doc__` (`create_operator`, `<operator_id>`), so deleting the
+        # whole operator paragraph left all five tests GREEN (review cycle 3,
+        # P2). Pin the distinctive CLAIM instead of a word that happens to recur.
+        (TortoiseSDK.update, "edits an existing operator edge in place"),
+        (TortoiseSDK.update, "belongs to the operator-mutation vocabulary"),
+        (TortoiseSDK.update, "list_relations"),
+        # The DISCLOSURE itself, not just the pointer to the vocabulary. Pinning
+        # only "list_relations" let the P2 regression return: a reviewer replaced
+        # this whole sentence with a neutral one that still said
+        # "list_relations()" and all five tests stayed green. These two needles
+        # pin the two facts the disclosure exists to state — that no declaredness
+        # check runs here, and that the label is therefore stored silently.
+        (TortoiseSDK.update, "no declaredness check"),
+        (TortoiseSDK.update, "installs the label silently"),
+    ):
+        # Collapse whitespace before matching: a docstring is wrapped to the
+        # line length, so a needle that spans a wrap ("performs no\n        declaredness
+        # check") would never match and the test would fail while the prose was
+        # correct. Re-wrapping is a legitimate edit; losing the disclosure is not.
+        doc = " ".join((fn.__doc__ or "").split())
+        assert needle in doc, (
+            f"{fn.__name__}.__doc__ no longer mentions {needle!r} — the "
+            f"operator-mutation vocabulary is undiscoverable again: {doc[:160]!r}"
+        )

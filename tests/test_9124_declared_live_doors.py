@@ -307,14 +307,21 @@ _NO_JOURNAL = {
     # `apply-first-declared`) and the door now reaches no mutating handle call
     # at all — so a row here would be a STALE census entry, which
     # `test_the_inventories_hold_no_stale_entry` reds on. A door that issues no
-    # handle write has no lane to name; the two successors carry the stamps'
-    # declaration, and
-    # `test_the_capture_door_delegates_its_writes_to_declared_doors` pins that
-    # split so the stamps cannot slip back into an undeclared body.
-    #   The five doors those writes MOVED to are named by that pin —
-    #   `_write_session_and_turns`, `_materialize_session_source` and
-    #   `_stamp_capture_provenance` included — so a successor that drops off
-    #   the census surface reds there instead of being absorbed here.
+    # handle write has no lane to name, and the two successors carry the stamps'
+    # declaration.
+    #   The pin that used to be cited HERE
+    #   (`test_the_capture_door_delegates_its_writes_to_declared_doors`) was
+    #   deleted by #4282 together with the door it inspected — keeping the
+    #   citation would advertise a guard that no longer runs. What holds now is
+    #   the census itself: the two stamp doors are declared members of the
+    #   apply-first lane, and a successor that drops off this surface reds
+    #   below.
+    #   The five doors those writes MOVED to (`_write_session_and_turns`,
+    #   `_materialize_session_source` and `_stamp_capture_provenance` included)
+    #   are pinned as declared doors by
+    #   `test_every_apply_first_declared_door_states_an_order_and_a_record`
+    #   below, so a successor that drops off the census surface reds there
+    #   instead of being absorbed here.
 
     "_clear_reliability_cache",
     "_connect_issue_objects",
