@@ -654,6 +654,57 @@ def test_apply_does_not_claim_absence_over_a_settle_deferred_file(tmp_path, caps
     assert "no plain day file older than" not in err
 
 
+def test_absence_never_publishes_over_a_newer_peer_archive(tmp_path, monkeypatch):
+    """The P0 window: a peer appends+seals+unlinks WHILE we compress. Our stale
+    snapshot must never replace the peer's fuller archive — the absent source is
+    not evidence about what the ARCHIVE holds.
+
+    Mutation: `os.link(tmp, target)` replaced by `os.replace(tmp, target)` (the
+    cycle-6 shape) REDs here: the peer's tail is lost, unalarmed.
+    """
+    day = TODAY - timedelta(days=9)
+    path = _write(tmp_path, day, b'{"n": 1}\n')
+    target = seal.archive_path(tmp_path, day)
+    full = b'{"n": 1}\n{"n": 2}\n'
+
+    real_compress = seal.gzip.compress
+
+    def racing(data, mtime=0):
+        if not target.exists():  # the peer finishes the day mid-compress
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(real_compress(full, mtime=0))
+            path.unlink()
+        return real_compress(data, mtime=mtime)
+
+    monkeypatch.setattr(seal.gzip, "compress", racing)
+    result = seal.seal_one(tmp_path, path)
+    monkeypatch.undo()
+
+    assert gzip.decompress(target.read_bytes()) == full, "the tail must survive"
+    assert result.ok, result
+
+
+def test_absence_without_a_readable_archive_is_not_success(tmp_path):
+    """Success on absence is a claim about the ARCHIVE, so it must be checked.
+
+    Mutation: `_already_gone` returning `already-sealed` without decompressing
+    REDs both arms (absent archive and corrupt archive).
+    """
+    day = TODAY - timedelta(days=9)
+    path = _write(tmp_path, day, b'{"session_id": "n"}\n')
+    path.unlink()  # gone, and nothing archived
+
+    absent = seal.seal_one(tmp_path, path)
+    assert not absent.ok, absent
+    assert "nowhere" in absent.detail, absent.detail
+
+    target = seal.archive_path(tmp_path, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"not gzip at all")
+    corrupt = seal.seal_one(tmp_path, path)
+    assert not corrupt.ok, corrupt
+
+
 def test_a_differing_archive_is_never_clobbered(tmp_path):
     """Two copies that disagree: NEITHER is discarded — a human decides.
 

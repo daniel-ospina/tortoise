@@ -132,7 +132,8 @@ def eligible(root: Path, *, keep_days: int, today: date,
              now: float | None = None,
              settle_seconds: int = SETTLE_GRACE_SECONDS,
              unreadable: list[Path] | None = None,
-             deferred: list[Path] | None = None) -> list[Path]:
+             deferred: list[Path] | None = None,
+             vanished: list[Path] | None = None) -> list[Path]:
     """Plain day files OLDER than the keep window, oldest first.
 
     Two exclusions, both load-bearing:
@@ -169,6 +170,18 @@ def eligible(root: Path, *, keep_days: int, today: date,
             continue
         try:
             st = path.stat()
+        except FileNotFoundError:
+            if path.is_symlink():
+                # A DANGLING LINK is a broken candidate, not a peer-finished
+                # day: it is still on disk and must stay visible to the alarm.
+                if unreadable is not None:
+                    unreadable.append(path)
+                continue
+            # A peer finished this day between the scan and the stat: gone is
+            # not unreadable, and `--check` must not raise over it.
+            if vanished is not None:
+                vanished.append(path)
+            continue
         except OSError:
             # "could not look" is not "clean": the caller gets the path so
             # `--check` can answer EXIT_ERROR instead of ok (the same rule the
@@ -255,6 +268,30 @@ def _unlink_source(path: Path) -> bool:
     return True
 
 
+def _already_gone(root: Path, day: date, plain_bytes: int) -> Sealed:
+    """The source is gone; answer with what the ARCHIVE proves, never with hope.
+
+    A peer run (a second ``--apply``, or another lane on the same box) can seal
+    and remove a day at any point after we selected it, and absence then means
+    SUCCESS — but only if an archive holding the record still exists and reads.
+    ``_size_or_zero`` cannot tell "absent" from "unreadable" from "0 bytes", so
+    the verdict is derived from a real decompress here, in ONE place: the four
+    sites that can observe absence each used to build their own sentence, and
+    that duplication is how one of them shipped claiming luck as evidence
+    (#6388 review cycle 7, P0/P1).
+    """
+    target = archive_path(root, day)
+    try:
+        gzip.decompress(target.read_bytes())
+    except (OSError, EOFError, zlib.error) as e:
+        return Sealed(day, "verify-failed", plain_bytes, _size_or_zero(target),
+                      "the source is gone and no readable archive proves the "
+                      f"day was sealed ({e}) — the records exist nowhere")
+    return Sealed(day, "already-sealed", plain_bytes, _size_or_zero(target),
+                  "the source was already gone (a concurrent run sealed it "
+                  "first)")
+
+
 def seal_one(root: Path, path: Path) -> Sealed:
     """Seal ONE day file.  Returns a verdict; never raises on a bad file."""
     day = _day_of(path)
@@ -265,11 +302,8 @@ def seal_one(root: Path, path: Path) -> Sealed:
         stat_before = path.stat()
     except FileNotFoundError:
         # A peer run sealed and removed this day between our selection and this
-        # read: the day is DONE, not failed.
-        return Sealed(day, "already-sealed", 0,
-                      _size_or_zero(archive_path(root, day)),
-                      "the source was already gone (a concurrent run "
-                      "sealed it first)")
+        # read. Success ONLY if its archive proves the day was sealed.
+        return _already_gone(root, day, 0)
     except OSError as e:
         return Sealed(day, "verify-failed", 0, 0, f"unreadable: {e}")
     digest = _sha256(plain)
@@ -299,10 +333,7 @@ def seal_one(root: Path, path: Path) -> Sealed:
     if prior is not None:
         if _sha256(prior) == digest:
             if _source_gone(path):
-                return Sealed(day, "already-sealed", len(plain),
-                              _size_or_zero(target),
-                              "the source was already gone (a concurrent run "
-                              "sealed it first)")
+                return _already_gone(root, day, len(plain))
             if _changed_since(path, stat_before, len(plain)):
                 return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                               "file changed while sealing — source kept")
@@ -353,13 +384,42 @@ def seal_one(root: Path, path: Path) -> Sealed:
         # an alarm that can never be cleared (#6388 review cycle 2).
         if _source_gone(path):
             # A peer removed the source while we were compressing. Our `tmp`
-            # holds EXACTLY the bytes we read and verified, so publish it: the
-            # day is sealed, and nothing plain is left behind.
-            os.replace(tmp, target)
+            # holds exactly the bytes WE read — which says nothing about what a
+            # peer's archive holds, so it must never be published blind: a race
+            # that appended and sealed would lose the tail to our stale
+            # snapshot (#6388 review cycle 7, P0). `os.link` is atomic and
+            # answers EEXIST instead of overwriting.
+            try:
+                os.link(tmp, target)
+            except FileExistsError:
+                try:
+                    raced = gzip.decompress(target.read_bytes())
+                except (OSError, EOFError, zlib.error) as e:
+                    return Sealed(day, "conflict", len(plain),
+                                  _size_or_zero(target),
+                                  "the source vanished and the archive a peer "
+                                  f"published is unreadable ({e}) — kept theirs")
+                if _sha256(raced) == digest:
+                    pass  # identical: our copy is redundant
+                elif plain.startswith(raced):
+                    os.replace(tmp, target)  # our snapshot is the superset
+                else:
+                    # The peer's archive holds bytes we never read (it appended
+                    # and sealed while we compressed). That is MORE evidence
+                    # than ours, not less: the day IS sealed, ours is stale.
+                    # Kept theirs; the verdict says so rather than alarming.
+                    return Sealed(day, "already-sealed", len(plain),
+                                  _size_or_zero(target),
+                                  "the source vanished and a peer's archive "
+                                  "holds bytes we did not read — kept theirs")
+            except OSError as e:
+                return Sealed(day, "verify-failed", len(plain),
+                              _size_or_zero(target),
+                              f"could not publish while the source vanished: {e}")
             _fsync_dir(target.parent)
             return Sealed(day, "sealed", len(plain), _size_or_zero(target),
-                          "the source was already gone (a concurrent run "
-                          "sealed it first)")
+                          "the source was already gone; this run's verified "
+                          "bytes are archived")
         if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), 0,
                           "file changed while sealing — source kept")
@@ -371,8 +431,8 @@ def seal_one(root: Path, path: Path) -> Sealed:
         # stale-prefix arm above heals this state on the next run.
         if _source_gone(path):
             return Sealed(day, "sealed", len(plain), _size_or_zero(target),
-                          "the source was already gone (a concurrent run "
-                          "sealed it first)")
+                          "the source was already gone; this run's verified "
+                          "bytes are archived")
         if _changed_since(path, stat_before, len(plain)):
             return Sealed(day, "conflict", len(plain), _size_or_zero(target),
                           "file changed while sealing — source kept")
