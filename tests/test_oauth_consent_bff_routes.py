@@ -361,6 +361,10 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
                           { throws: Boolean(opts.storeThrows), ddlFault: opts.ddlFault ?? null });
   if (opts.wantLegacySchema) store._legacySchema();
   const e = env({ SESSIONS: store });
+  // The AS-origin knob, movable on the start leg too (the mint leg has its own override above).
+  // `dropAsOrigin` DELETES the key rather than blanking it, so the default can be exercised.
+  if (opts.asOrigin !== undefined) e.CONSENT_AS_ORIGIN = opts.asOrigin;
+  if (opts.dropAsOrigin) delete e.CONSENT_AS_ORIGIN;
   const source = opts.params || {
     client_id: "client-abc", redirect_uri: "https://client.example/cb",
     code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
@@ -1631,6 +1635,56 @@ def test_the_owner_fill_is_refused_by_a_FOREIGN_key_even_when_the_owner_is_known
     assert out["status"] == 403, out
     assert out["attempts"][0]["user_id"] == "user-1", out["attempts"][0]
     assert out["attempts"][0]["attempt_key_hash"] == "a" * 64, out["attempts"][0]
+
+
+def test_a_misconfigured_AS_origin_is_a_TYPED_503_and_never_an_untyped_500() -> None:
+    """A bad `CONSENT_AS_ORIGIN` must not turn the public consent entry into a 500.
+
+    THE BUG THIS PINS: `authorizeUrl` calls `new URL("/oauth/authorize", asOrigin)`, and the URL
+    constructor throws a `TypeError` on a base that does not parse (WHATWG URL §6.1). Nothing
+    wrapped that call, so a scheme-less value — the natural slip for a binding this project tells
+    operators to set per deployment (`config/required-bindings.yml`) — escaped as an UNTYPED 500
+    with no log line, on the one route a cold browser hits first. The page cannot tell that apart
+    from a bug in itself, which is precisely the class this file's property 3 refuses for the store.
+
+    TWO arms, because they fail DIFFERENTLY on the pre-fix code, and both were MEASURED with `node -e`:
+    a scheme-less/hostless value and `javascript:…` both THROW (`new URL("/oauth/authorize", base)`
+    → `Invalid URL`, because a relative reference cannot resolve against a non-special-scheme base —
+    so on the pre-fix route the throw escapes `onRequestGet`, kills the driver process, and this test
+    reds with a harness exit failure rather than a status mismatch), while `ftp://…` is a SPECIAL
+    scheme: it resolves to `ftp://api.premiselabs.co/oauth/authorize` and the pre-fix route answers a
+    **302 to an `ftp:` URL**. The assertion is therefore on the outcome a caller actually receives,
+    not on a throw.
+    """
+    for bad in (
+        "api.premiselabs.co",              # scheme-less: the operator slip, throws pre-fix
+        "not a url at all",                # unparseable, throws pre-fix
+        "javascript:alert(1)",             # parses alone, but cannot base a relative ref: throws pre-fix
+        "ftp://api.premiselabs.co",        # special scheme, wrong protocol: 302 pre-fix
+    ):
+        out = _run("start_signed_in", asOrigin=bad)
+        assert out["status"] == 503, (bad, out)
+        assert out["body"] == {"error": "unavailable", "reason": "as_origin_misconfigured"}, (
+            bad, out["body"])
+        assert out["location"] is None, (
+            f"{bad!r} produced a REDIRECT to {out['location']!r} instead of failing closed")
+        # Refused BEFORE the store: a deployment that cannot build an authorize URL must not leave
+        # attempt rows behind that no browser can ever complete.
+        assert out["attempts"] == [], (bad, out["attempts"])
+        # ...and the operator's only signal. A silent refusal is indistinguishable from an outage.
+        assert "CONSENT_AS_ORIGIN" in out["stderr"], (bad, out["stderr"][-600:])
+
+
+def test_the_AS_origin_default_still_works_when_the_binding_is_ABSENT() -> None:
+    """The refusal above must not have turned an UNPROVISIONED knob into an outage.
+
+    `CONSENT_AS_ORIGIN` is a `recommended`, not `required`, binding at
+    `config/required-bindings.yml:391` — every deployment that never set it must keep working, so
+    absence resolves to the documented default rather than to `as_origin_misconfigured`.
+    """
+    out = _run("start_signed_in", dropAsOrigin=True)
+    assert out["status"] == 302, out
+    assert (out["location"] or "").startswith(_AS_ORIGIN + "/oauth/authorize?"), out["location"]
 
 
 def test_the_redirect_uri_is_forwarded_BYTE_FOR_BYTE_to_the_AS() -> None:

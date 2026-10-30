@@ -119,6 +119,37 @@ export function validate(params: URLSearchParams): ValidatedParams | string {
   return { client_id, redirect_uri, code_challenge, state, scope, resource };
 }
 
+/** The AS origin's default. Mirrors `token.ts::consentAsOrigin`, one knob, one fallback. */
+const DEFAULT_AS_ORIGIN = "https://api.premiselabs.co";
+
+/**
+ * The AS origin, PARSED and validated — or `null` when the binding is unusable.
+ *
+ * ⛔ This is not defensive padding, it is the difference between a typed refusal and an untyped 500.
+ * `authorizeUrl` below calls `new URL("/oauth/authorize", asOrigin)`, and the URL constructor THROWS
+ * a `TypeError` when the base does not parse (WHATWG URL §6.1, "If parsedURL is failure, then throw
+ * a TypeError"; measured: `new URL("/oauth/authorize", "api.premiselabs.co")` → `TypeError: Invalid
+ * URL`). A scheme-less value is the natural operator slip for a binding this project tells operators
+ * to set PER DEPLOYMENT (`config/required-bindings.yml`), and unwrapped it escapes `onRequestGet` as
+ * an untyped 500 on every request to the public consent entry, with nothing in the response — or in
+ * the logs — naming the cause. That is the same class this file's contract already refuses for the
+ * store (property 3: a store fault is a typed 503, never a redirect), and the sibling mint route
+ * survives the same bad value already (`token.ts::allowedOrigin` parses it inside a try/catch).
+ *
+ * A non-http(s) scheme is refused for the same reason one step along: `new URL("/x", "javascript:…")`
+ * does NOT throw — it resolves a URL of an opaque scheme, which this route would then happily send a
+ * browser to. Only an absolute `http:`/`https:` origin is an AS.
+ */
+export function parseAsOrigin(raw: string | undefined): string | null {
+  try {
+    const url = new URL(raw ?? DEFAULT_AS_ORIGIN);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 /** The AS authorize URL, rebuilt from the VALIDATED params (never the raw request string). */
 export function authorizeUrl(
   asOrigin: string,
@@ -155,7 +186,17 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: "invalid_request", message: validated }, { status: 400 });
   }
 
-  const asOrigin = env.CONSENT_AS_ORIGIN ?? "https://api.premiselabs.co";
+  // Resolved ONCE, and refused BEFORE any store access: a misconfigured origin is deployment-wide,
+  // so there is nothing a per-request attempt row could add — and writing one from a deployment
+  // that cannot hand out an authorize URL is a row nobody can ever use.
+  const asOrigin = parseAsOrigin(env.CONSENT_AS_ORIGIN);
+  if (asOrigin === null) {
+    // Fail closed, typed, and NAMED. The caller is a browser that can only render a refusal, so the
+    // log line is the one place the operator can learn WHICH binding is wrong — the same reasoning
+    // as the store-fault log below, and the reason this must not be a bare 500.
+    console.error("CONSENT_AS_ORIGIN is not an absolute http(s) origin", env.CONSENT_AS_ORIGIN);
+    return json({ error: "unavailable", reason: "as_origin_misconfigured" }, { status: 503 });
+  }
   const attempted = params.get(CONSENT_RETRY_PARAM) === "1";
 
   // ── the session: `__Host-session`, and the SAME 401/503 split as everywhere else ────
