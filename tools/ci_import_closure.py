@@ -918,8 +918,8 @@ def compute_closures(
 
     `follow_function_local=False` reproduces the NAIVE reader (module-level
     imports only). It exists to make the trap in the report measurable with the
-    committed tool: on this tree it yields a median core closure of 21 modules
-    instead of 186, which would look like an 88 % reduction and would be a false
+    committed tool: on this tree it yields a median core closure of 19 modules
+    instead of 187, which would look like a 90 % reduction and would be a false
     green (see `docs/ci/core-import-closure.md` §1.1).
     """
     out: dict[str, Closure] = {}
@@ -1824,7 +1824,7 @@ def derived_core_selection(
       (c) `keep_empty_closures` and its closure is EMPTY.
 
     (c) is not a fudge, it is the one class the closure provably cannot answer:
-    118 of the 752 core files import nothing from the package — they assert
+    120 of the 756 core files import nothing from the package — they assert
     invariants of a CONFIG, WORKFLOW or DOC file, which is exactly why they were
     hand-registered in `SOURCE_PATTERNS`/`CORE_ALSO` in the first place. An
     import closure has no edge to carry that dependency, so a mapping that drops
@@ -2401,7 +2401,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_closure.add_argument(
         "--import-time-only", action="store_true",
         help="ignore function-local imports — the NAIVE reader, kept so the "
-             "false-green trap in the report is measurable (median 21 vs 186)")
+             "false-green trap in the report is measurable (median 19 vs 187)")
 
     p_validate = sub.add_parser("validate", help="replay historical PRs")
     _common(p_validate)

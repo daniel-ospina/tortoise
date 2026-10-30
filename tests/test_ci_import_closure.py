@@ -19,12 +19,17 @@ No network: every `gh`-shaped path is exercised through pure functions
 """
 from __future__ import annotations
 
+import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.ci_import_closure import REPO as _REPO  # noqa: E402
 
 from tools.ci_import_closure import (  # noqa: I001
     DIRECT, MISS_NO_PATH, MISS_NOT_PYTHON, MISS_TAINTED, PACKAGE_INIT,
@@ -396,7 +401,7 @@ def test_harness_does_not_blame_the_derivation_for_a_test_the_selector_never_run
 
 
 def test_empty_closure_files_survive_only_when_asked_to():
-    """118 of 752 core files import nothing from the package: they guard a
+    """120 of 756 core files import nothing from the package: they guard a
     CONFIG/WORKFLOW/DOC file, which no import edge can carry (#10070, #10120)."""
     core = ["tests/test_config_guard.py", "tests/test_imports_pkg.py"]
     closures = {
@@ -666,10 +671,10 @@ def test_real_suite_core_surface_is_derived(repo_closure):
     del index, scans
     expected = len([f for f in manifest["surfaces"]["core"] if f.endswith(".py")])
     # EXACTLY, not `>= expected * 0.95` (#10143 review P2). The comment claimed
-    # exact basename resolution while the assertion tolerated 5 % — at 752
-    # members that is up to 37 core files silently ceasing to resolve with every
+    # exact basename resolution while the assertion tolerated 5 % — at 756
+    # members that is up to 38 core files silently ceasing to resolve with every
     # test still green, and every published percentage is a ratio over this
-    # count. Measured today: all 752 resolve. `core_test_files` now reports an
+    # count. Measured at `427037b36`: all 756 resolve. `core_test_files` now reports an
     # unresolvable member instead of dropping it, so the failure names the file.
     unresolved: list[str] = []
     core = core_test_files(manifest, unresolved)
@@ -684,7 +689,7 @@ def test_package_init_reaches_the_sdk_hub_through_config(repo_closure):
     """THE #10132 MECHANISM, pinned as evidence rather than prose.
 
     `tortoise/__init__.py` -> (module level) `tortoise.config` ->
-    (function-local) `tortoise.sdk`, the 42k-line hub -> 186 of 258 modules.
+    (function-local) `tortoise.sdk`, the 42k-line hub -> 187 of 259 modules.
     Because importing ANY `tortoise.*` submodule imports the package first, that
     chain lands in ~85% of core closures, which is why a file-level split cannot
     narrow anything. If this assertion starts failing, the chain was broken —
@@ -759,8 +764,8 @@ def test_the_LIVE_shim_records_its_importlib_edge(repo_closure):
 def test_import_time_only_reproduces_the_naive_reader_that_under_selects():
     """`--import-time-only` is the trap, kept measurable.
 
-    On this repo it reports a median core closure of 21 modules instead of 186 —
-    a ">88 % reduction" that would ship a false green, because `tortoise/sdk.py`
+    On this repo it reports a median core closure of 19 modules instead of 187 —
+    a ">89 % reduction" that would ship a false green, because `tortoise/sdk.py`
     reaches 61 of its 89 in-repo modules ONLY from a function body.
     """
     idx = _index("tortoise/__init__.py", "tortoise/lazy.py")
@@ -960,7 +965,7 @@ def test_the_verdict_and_summarise_publish_the_SAME_hub_share():
     (#10143 review P3).
 
     Restricted to the shape where the shim IS the busiest hub (the real tree's
-    shape, 634 of 752), because `summarise` measures `tortoise/__init__.py`
+    shape, 636 of 756), because `summarise` measures `tortoise/__init__.py`
     specifically while the verdict takes the top hub: this pin must not assert an
     equality the two are not supposed to have.
     """
@@ -2652,3 +2657,250 @@ def test_an_open_prs_head_is_never_cached(monkeypatch, tmp_path):
         "second call must re-read it")
     assert list(tmp_path.iterdir()) == [], (
         "an open PR's metadata was written under a key that cannot describe it")
+
+
+# ---------------------------------------------------------------------------
+# The PUBLISHED figures are anchored to a SHA, and re-derived from that sha
+# ---------------------------------------------------------------------------
+# ⛔ THE DEFECT THIS CLOSES (#10143 review P2, and the SAME class as #7948 §13).
+# The document and the `00_index` row stated their figures "at the head of PR
+# #10143 — the commit that adds this line". A figure tied to a MOVING ref carries
+# no pin: the final `merge(10143)` landed four `core` registrations, four test
+# files and one `tortoise/` module, and every count in §1 was then a snapshot of
+# the PARENT tree (752 / 1 234 / 258) while the text claimed the head that
+# carried it (756 / 1 238 / 259). Re-derived at the head: measured on the parent
+# `64356c16` = 752 / 1 234 / 258 and at `427037b36` = 756 / 1 238 / 259, i.e.
+# exactly one commit of drift, invisible because nothing re-derived it.
+#
+# Two arms, because the two halves fail differently:
+#   1. TEXT — a count may not be stated against a moving ref; the basis must be
+#      a sha. Always runs, in any clone.
+#   2. TREE — every "N at `<sha>`" claim is re-derived from that sha's own tree
+#      (`git show` / `git ls-tree`), so a hand-edited count reds instead of
+#      rotting. SKIPS, with its reason, when the sha is not in the clone (a
+#      `fetch-depth: 1` CI checkout, or a squash merge that drops the commit).
+_DOC = Path(__file__).resolve().parents[1] / "docs" / "ci" / "core-import-closure.md"
+_INDEX = Path(__file__).resolve().parents[1] / "docs" / "00_index.md"
+
+#: The MOVING refs themselves — `at this PR's head`, `at the head of PR #…`, `at
+#: the merge head`, `the commit that adds this line`. Written generally on
+#: purpose: the two spellings this document actually used are only two of the
+#: forms the class takes.
+_MOVING_REF = (
+    r"(?:\b(?:at|on)\s+[^.;\n]{0,40}?\bhead\b"
+    r"|\bthe\s+head\b"
+    r"|\bthe\s+commit\s+that\s+adds\s+this\b)"
+)
+
+#: A count anchored to a MOVING ref, in EITHER order — the document wrote
+#: `752 here … at the head of PR #10143` and the `00_index` row wrote `Measured
+#: at PR #10143's head … : 752 core files`. A guard that only sees one direction
+#: clears the other, which is why both are matched.
+_MOVING_REF_COUNT = re.compile(
+    rf"(?:\b\d[\d  ]*\b[^.;\n]{{0,100}}?{_MOVING_REF}"
+    rf"|{_MOVING_REF}[^.;\n]{{0,80}}?\b\d[\d ]*\b)",
+    re.IGNORECASE,
+)
+
+#: The basis must NAME a sha, not a ref: `**Measurement basis:** \`427037b36\``.
+_BASIS_SHA = re.compile(r"\*\*Measurement basis:\*\*\s*`([0-9a-f]{7,40})`")
+
+#: An `N at \`<sha>\`` claim — the form the basis paragraph states its counts in.
+_SHA_CLAIM = re.compile(r"(\d[\d  ]*)[^\n;.]{0,60}?`([0-9a-f]{7,40})`")
+
+
+def _doc_text() -> str:
+    assert _DOC.exists(), f"{_DOC} is the report these figures belong to"
+    return _DOC.read_text()
+
+
+def _basis_paragraph(text: str) -> str:
+    """The `- **Measurement basis:**` bullet, up to the next bullet."""
+    start = text.index("**Measurement basis:**")
+    end = text.find("\n- ", start)
+    return text[start:end if end != -1 else len(text)]
+
+
+def _unpinned_counts(text: str) -> list[tuple[int, str]]:
+    """`(line, fragment)` for every count stated against a moving ref."""
+    return [
+        (text.count("\n", 0, m.start()) + 1, m.group(0))
+        for m in _MOVING_REF_COUNT.finditer(text)
+    ]
+
+
+def test_no_published_count_is_anchored_to_a_moving_ref():
+    """A count tied to a branch tip has no pin, so it rots on the next merge.
+
+    Non-vacuous: the pre-fix basis line — *"the head of PR #10143 — the commit
+    that adds this line"* — reds here; so does the `00_index` row's *"Measured
+    at PR #10143's head"*. Both were true statements about a ref and false
+    statements about the numbers next to them.
+    """
+    text = _doc_text()
+    index_row = next(
+        line for line in _INDEX.read_text().splitlines()
+        if "core-import-closure.md" in line)
+    assert _BASIS_SHA.search(_basis_paragraph(text)), (
+        "the document states its figures without naming the sha they were "
+        "derived at — a count against a moving ref is exactly how §1 came to "
+        "describe the parent tree while claiming the head: name the sha")
+    unpinned = _unpinned_counts(_basis_paragraph(text)) + _unpinned_counts(index_row)
+    assert not unpinned, (
+        "a published count is anchored to a MOVING ref, so nothing re-derives "
+        "it and it rots on the next merge (measured: 752/1 234/258 were one "
+        "commit behind at the head that carried them). Quote the sha it was "
+        "measured at:\n  - " + "\n  - ".join(f"{frag!r}" for _line, frag in unpinned))
+
+
+def test_the_moving_ref_guard_rejects_the_pre_fix_basis_line():
+    """The mutation check for the arm above — the text this PR replaced.
+
+    Copied verbatim from `427037b36:docs/ci/core-import-closure.md`, so the
+    guard cannot be satisfied by a spelling that only looks pinned.
+    """
+    pre_fix = (
+        "- **Measurement basis:** the head of PR #10143 — the commit that adds "
+        "this line. Two things make a re-run differ from these tables: `main` "
+        "keeps adding `core` registrations (**752** here, 751 on `main` alone, "
+        "and 745 at `3934648ae` — the gap is `main`, not this lane)\n")
+    assert not _BASIS_SHA.search(pre_fix), (
+        "the pre-fix line named no sha, so the basis arm reds on it")
+    assert _unpinned_counts(pre_fix), (
+        "the pre-fix basis line stated counts against a moving ref and the "
+        "guard did not see it — a guard that cannot reject the text it was "
+        "written for is vacuous")
+    index_pre_fix = (
+        "**Measured at PR #10143's head** (`main` keeps adding `core` "
+        "registrations): 752 core files, 59 distinct closure sets")
+    assert _unpinned_counts(index_pre_fix), (
+        "the `00_index` row used the same moving-ref spelling and must red too")
+
+
+def _git(*args: str) -> str | None:
+    """`git <args>` stdout, or None when the object is not in this clone."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=_REPO, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _core_counts_at(sha: str) -> dict | None:
+    """Mirror `core_test_files()` against the tree of `sha`, without a checkout.
+
+    Returns `members` / `resolved` / `unresolved` / `all_tests`, or None when the
+    sha (or `config/ci-surfaces.yml` at it) is not available here. `unresolved`
+    is carried rather than dropped for the same reason the tool reports it: a
+    member that resolves to nothing silently shrinks the denominator every
+    published percentage is a ratio over.
+    """
+    manifest_text = _git("show", f"{sha}:config/ci-surfaces.yml")
+    tests_tree = _git("ls-tree", "-r", "--name-only", sha, "--", "tests")
+    if manifest_text is None or tests_tree is None:
+        return None
+    from tools import ci_import_closure as ci
+
+    from tools import ci_selection
+
+    manifest = yaml.safe_load(manifest_text)
+    members = ci_selection._surface_members(manifest["surfaces"].get("core"))
+    all_py = [p for p in tests_tree.split() if p.endswith(".py")]
+    by_basename: dict[str, list[str]] = {}
+    for rel in all_py:
+        by_basename.setdefault(rel.rsplit("/", 1)[-1], []).append(rel)
+    resolved: set[str] = set()
+    unresolved: list[str] = []
+    for member in members:
+        if not str(member).endswith(".py"):
+            continue
+        if f"tests/{member}" in set(all_py):
+            resolved.add(f"tests/{member}")
+        elif by_basename.get(str(member)):
+            resolved.update(by_basename[str(member)])
+        else:
+            unresolved.append(str(member))
+    return {
+        "members": sum(1 for m in members if str(m).endswith(".py")),
+        "resolved": len(resolved),
+        "unresolved": unresolved,
+        # the `1 238` denominator: `test_*.py` anywhere under tests/, which is
+        # what both the document and the index row mean by "test files"
+        "all_tests": sum(1 for p in all_py
+                         if p.rsplit("/", 1)[-1].startswith("test_")),
+        "tortoise": len([p for p in (_git(
+            "ls-tree", "-r", "--name-only", sha, "--", "tortoise") or "").split()
+            if p.endswith(".py")]),
+    }
+
+
+def test_the_published_counts_match_the_tree_of_the_sha_they_name():
+    """§1 and the index row, re-derived from the sha the document names.
+
+    Three tree-level counts (core test files, test files, `tortoise/**` modules)
+    are settled by the tree alone — no ast pass — so this arm is cheap enough to
+    run on the `core` surface. The aggregates that ride on them (median, bucket
+    sizes, 636/84.1 %) come from the tool and are out of scope here; the
+    reproduce line in the document is what re-derives those.
+
+    SKIPS (with the reason) in a shallow clone, where the sha is not an object —
+    that is the honest state: the text arm above still runs everywhere.
+    """
+    text = _doc_text()
+    basis = _BASIS_SHA.search(_basis_paragraph(text))
+    assert basis, (
+        "no `**Measurement basis:** `<sha>`` in the document — the figures "
+        "cannot be re-derived, which is the defect this arm exists for")
+    sha = basis.group(1)
+
+    counts = _core_counts_at(sha)
+    if counts is None:
+        pytest.skip(
+            f"{sha} is not an object in this clone (a `fetch-depth: 1` "
+            "checkout, or a squash merge that dropped the commit) — the "
+            "counts cannot be re-derived here")
+
+    # the basis paragraph's own `N at <sha>` claims: each is the core member
+    # count of THAT tree, so '745 at 3934648ae' is checkable, not decorative
+    claims = _SHA_CLAIM.findall(_basis_paragraph(text))
+    assert claims, "the basis paragraph states no `N at <sha>` claim"
+    for number, claim_sha in claims:
+        got = _core_counts_at(claim_sha)
+        if got is None:
+            pytest.skip(f"{claim_sha} is not an object in this clone")
+        assert int(number.replace(" ", "")) == got["members"], (
+            f"the document states {number} core test files at `{claim_sha}`, "
+            f"whose manifest has {got['members']}")
+
+    table = re.search(r"^\| core test files \| \*\*(\d+)\*\*", text, re.MULTILINE)
+    assert table, "§1's `core test files` row is gone — the table below it is a ratio over it"
+    assert not counts["unresolved"], (
+        "core member(s) resolve to no test file at "
+        f"`{sha}`: {counts['unresolved']} — the published denominator is short "
+        "by that many")
+    assert int(table.group(1)) == counts["resolved"] == counts["members"], (
+        f"§1 publishes **{table.group(1)}** core test files; the tree of `{sha}` "
+        f"has {counts['resolved']} resolved (of {counts['members']} members)")
+
+    modules = re.search(
+        r"^\| `tortoise/\*\*` modules in the tree \| (\d+) \|", text, re.MULTILINE)
+    assert modules, "§1's `tortoise/**` modules row is gone"
+    assert int(modules.group(1)) == counts["tortoise"], (
+        f"§1 publishes {modules.group(1)} `tortoise/**` modules; `{sha}` has "
+        f"{counts['tortoise']}")
+
+    index_row = next(
+        line for line in _INDEX.read_text().splitlines()
+        if "core-import-closure.md" in line)
+    row = re.search(
+        r"`surfaces\.core` is (\d+) of ([\d ]+) test files \((\d+\.\d) %\)", index_row)
+    assert row, "the `00_index` row no longer states the `core` share."
+    core_n, all_n = int(row.group(1)), int(row.group(2).replace(" ", ""))
+    assert (core_n, all_n) == (counts["resolved"], counts["all_tests"]), (
+        "the `00_index` row publishes "
+        f"{core_n} of {all_n} test files; the tree of `{sha}` has "
+        f"{counts['resolved']} of {counts['all_tests']}")
+    assert row.group(3) == f"{round(100 * core_n / all_n, 1):.1f}", (
+        f"the `00_index` row states {row.group(3)} % for {core_n}/{all_n} — the "
+        f"two halves of one row cannot disagree")
