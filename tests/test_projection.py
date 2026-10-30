@@ -2622,8 +2622,23 @@ def test_document_version_does_not_double_bump_across_the_two_folds(live_proj):
 
 
 def test_upsert_event_uses_dict_kind(live_proj):
-    """#125: structured uses {name, kind} → Object objectKind from kind field."""
+    """#125 / #3590 D1: a structured ``uses {name, kind}`` entry resolves to the
+    REGISTERED Object and wires the edge.
+
+    ⚠️ MIGRATED (#3590 D1, owner RULED 2026-10-26). This pin used to assert that
+    the fold MINTED the Object from the mention and stamped ``objectKind`` from
+    the entry's ``kind`` field. D1 rules that a bare mention does not create an
+    entity and that no door registers a mention's name, so the entry's ``kind``
+    has nowhere to land any more: the fold RESOLVES the mention to its single
+    live holder (``mention=True``) and DROPS the link, recording the miss, when
+    there is none. What survives of #125 here is the PARSING contract — the dict
+    shape and the legacy string shape below both resolve the same name and
+    produce the same edge, and the resolved node keeps the kind its own
+    registration gave it.
+    """
     proj = live_proj
+    proj.apply({"type": "ObjectRegistered", "id": "obj-uses-1",
+                "name": "tortoise-capture", "objectKind": "skill"})
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-1", "eventKind": "sessionCaptured",
         "subject": "agent-pi", "object": "doc-1", "objectType": "Document",
@@ -2698,8 +2713,16 @@ def test_upsert_event_document_source_kind_repairs_a_pre_fix_null(live_proj):
 
 
 def test_upsert_event_legacy_string_uses_still_works(live_proj):
-    """#125 backward compat: legacy string uses still create Object objectKind='other'."""
+    """#125 backward compat / #3590 D1: a legacy STRING ``uses`` still wires.
+
+    ⚠️ MIGRATED with its dict-shape sibling above: the string form used to mint
+    the Object with ``objectKind='other'``. D1 retires the mint, so the pin now
+    asserts the compat claim that is still real — a bare string parses into the
+    same edge a one-element dict would — against a registered target.
+    """
     proj = live_proj
+    proj.apply({"type": "ObjectRegistered", "id": "obj-uses-legacy",
+                "name": "legacy-tool", "objectKind": "tool"})
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-3", "eventKind": "review", "subject": "agent-pi",
         "object": "thing-1", "uses": "legacy-tool"}})
@@ -2708,7 +2731,7 @@ def test_upsert_event_legacy_string_uses_still_works(live_proj):
         "RETURN o.name, o.objectKind"
     ).result_set
     assert rows and rows[0][0] == "legacy-tool", rows
-    assert rows[0][1] == "other", rows
+    assert rows[0][1] == "tool", rows
 
 
 def test_falkor_subject_stub_resolves_canonical_id():
@@ -2724,11 +2747,18 @@ def test_falkor_subject_stub_resolves_canonical_id():
         pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()  # wipes all graphs on every call
 
-    # EventRecorded lands FIRST → mints a Subject name-stub under the
-    # deterministic `sub-<sha256>` id (#7936; the webhook path,
-    # _event_plain_merge). The CANONICAL id below is a DIFFERENT spelling
-    # (`subject:alice`), so it is not yet present on any node — which is the
-    # point: the ON MATCH id write, not the stub value, does the healing.
+    # The pre-registration stub is built with the ONE construction that still
+    # mints one — `edges._mint_subject_stub` (#3590's bounded exception: the
+    # fold-side about-name stub kept so `how:"name"` records already in a journal
+    # stay replayable, filed as #8914). ⚠️ MIGRATED: this pin used to let an
+    # `EventRecorded` mention mint it via `_event_plain_merge`, which #3590 D1
+    # (owner RULED 2026-10-26) retired — a bare mention mints nothing. The
+    # #1918 guarantee under test is unchanged: whatever stub pre-exists, the
+    # CANONICAL registration's `ON MATCH` id write must heal it. The canonical
+    # spelling below (`subject:alice`) is DIFFERENT from the stub's `id = name`,
+    # so it is not present on any node yet — which is the point.
+    from tortoise.projection.edges import _mint_subject_stub
+    _mint_subject_stub(proj.g, "alice")
     proj.apply({"type": "EventRecorded", "event": {
         "id": "evt-1918", "eventKind": "meeting.held",
         "subject": "alice", "object": "",
