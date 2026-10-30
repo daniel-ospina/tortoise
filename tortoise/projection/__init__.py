@@ -16574,6 +16574,7 @@ class FalkorProjection(
 
             from .edges import (
                 DERIVABLE_STRUCTURAL_RELS,
+                DIRECT_EDGE_ATTR_KEYS,
                 STRUCTURAL_REL_LABELS,
                 resolve_structural_target,
             )
@@ -16753,9 +16754,8 @@ class FalkorProjection(
                         replayed_at_terminal.add((src, etype, tid_rows[0][0]))
                 # Last-writer-wins attr SET — the final attrs post-rebuild
                 # (REVIEW-FIX P1 cycle-26 on the emission site).
-                attrs = {k: ev[k] for k in
-                         ("direction", "confidence", "weight", "label",
-                          "batch_id") if k in ev}
+                attrs = {k: ev[k] for k in DIRECT_EDGE_ATTR_KEYS
+                         if k in ev}
                 if attrs:
                     self.g.query(
                         f"MATCH (a:{labels[src]} {{id:$a}})-[r:{etype}]->"
@@ -17050,22 +17050,83 @@ class FalkorProjection(
                             # future #2488 survivor filter / defensive) — never
                             # re-create the edge at old after the delete-leg.
                             continue
-                        if resolved.get("logical") and resolved["logical"] == src_f:
-                            # aboutPoint whose target IS the final successor
-                            # (chain collapse X→Y→Z with target Z): the create
-                            # would mint (succ)-[:aboutPoint]->(succ) — phantom
-                            # self-edge. Never recreate (E2E-11.6 no-self
-                            # contract); the delete-leg already cleaned the
-                            # resurrection at old.
+                        # ⛔ THE TRANSFER LANDS WHERE LIVE LANDED IT — at the
+                        # DIRECT successor (`succ[src]`), NOT at `_final(src)`.
+                        # Live's 2b transfer is `supersede_point(old, new)`'s
+                        # `MERGE (new)-[nr:rel]->(t) ON CREATE SET nr += $attrs`,
+                        # so the edge is created at the point THAT supersede
+                        # named, and every later supersede carries it one hop
+                        # further with whatever value the edge holds at that
+                        # moment (which is what the descriptor journals, since
+                        # the emitter reads `properties(r)` then). Replaying each
+                        # descriptor at its OWN successor, in journal order, is
+                        # what makes the payload land where live put it — for a
+                        # CHAIN (X→Y→Z: the Y→Z descriptor re-creates the edge at
+                        # Z carrying Y's current 0.91, and the intermediate edge
+                        # this leg creates at Y is removed by the NEXT
+                        # descriptor's delete-leg, the same order live runs its
+                        # delete and create in) and for SIBLINGS (two independent
+                        # retired points onto ONE successor: the second `MERGE`
+                        # matches, `ON CREATE` does not fire, and the FIRST
+                        # creator's payload survives, exactly as live's does).
+                        # ⛔ Resolving every descriptor to the FINAL successor
+                        # collapses those two cases into one statement and cannot
+                        # tell them apart: it landed a chain's LAST payload
+                        # (#10139 review round 3) and then, on the sibling shape,
+                        # a LAST where live keeps the FIRST (round 4).
+                        _dest = succ[src]
+                        if resolved.get("logical") and resolved["logical"] == _dest:
+                            # aboutPoint whose target IS the successor this
+                            # transfer lands on: the create would mint
+                            # (succ)-[:aboutPoint]->(succ) — phantom self-edge.
+                            # Never recreate (E2E-11.6 no-self contract); the
+                            # delete-leg already cleaned the resurrection at old.
                             continue
                         # Two-step MERGE on the resolved node identity — collapses
                         # duplicate creates to one edge (about* / extractedFrom
-                        # are MERGE-created live). Structural 2b transfers are
-                        # bare: NO attr SET, no direction/confidence/weight.
+                        # are MERGE-created live).
+                        # ⛔ #10139: the descriptor CARRIES the transferred edge's
+                        # attributes, so the replay applies them instead of
+                        # re-creating the edge bare. Before this, `confidence` on
+                        # an `about*` edge survived a supersede LIVE (#9417's
+                        # carry) and was dropped by the very next `rebuild_all` —
+                        # a `live != rebuild` divergence on a data-bearing
+                        # property, which is the class #9553 polices.
+                        #
+                        # ⛔ `ON CREATE SET`, NOT a bare `SET` — the SAME form and
+                        # the SAME precedence as #9417's live transfer ("the
+                        # successor's own live value WINS"). It is not merely
+                        # mirroring: at this point in the replay the successor's
+                        # own binding has ALREADY been re-materialized WITH its
+                        # confidence by the `EntityLinked` trailing sweep above
+                        # (`fold_deferred_entity_links` runs before pass-2b), so an
+                        # unconditional `SET nr += $attrs` would overwrite it with
+                        # the retired point's value — reproducing live's measured
+                        # 0.91→0.42 regression on the replay side. `ON CREATE`
+                        # populates only an edge this leg created, which is exactly
+                        # the case live created too.
+                        #
+                        # ⚠️ The payload is read through the SAME vocabulary the
+                        # emitter whitelisted with (`DIRECT_EDGE_ATTR_KEYS`,
+                        # `edges.py`) — never `properties(r)` raw, and never a
+                        # second copy of the tuple.
+                        # ⚠️ Precedence vs the successor's OWN binding is
+                        # `ON CREATE`'s: an edge the successor already holds is
+                        # left untouched, which is why the carry is applied by
+                        # the MERGE below and never by an unconditional `SET`.
+                        _carry = ""
+                        _params = {"sid": _dest, "tid": resolved["internal"]}
+                        _transfer_attrs = {
+                            k: ev[k] for k in DIRECT_EDGE_ATTR_KEYS
+                            if k in ev
+                        }
+                        if _transfer_attrs:
+                            _carry = " ON CREATE SET nr += $attrs"
+                            _params["attrs"] = _transfer_attrs
                         self.g.query(
                             f"MATCH (s:Point {{id:$sid}}), (t) WHERE ID(t) = $tid "
-                            f"MERGE (s)-[:{etype}]->(t)",
-                            params={"sid": src_f, "tid": resolved["internal"]})
+                            f"MERGE (s)-[nr:{etype}]->(t){_carry}",
+                            params=_params)
                         continue
 
                     if (not isinstance(src, str) or not isinstance(tgt, str)
@@ -17119,9 +17180,8 @@ class FalkorProjection(
                         f"MERGE (a)-[:{etype}]->(b)",
                         params={"a": src_f, "b": tgt_f},
                     )
-                    attrs = {k: ev[k] for k in
-                             ("direction", "confidence", "weight",
-                              "label", "batch_id") if k in ev}
+                    attrs = {k: ev[k] for k in DIRECT_EDGE_ATTR_KEYS
+                             if k in ev}
                     if attrs:
                         self.g.query(
                             f"MATCH (a:{epi_labels[src_f]} {{id:$a}})-[r:{etype}]->"

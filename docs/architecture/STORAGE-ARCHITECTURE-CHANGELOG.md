@@ -1721,3 +1721,39 @@ No census vocabulary entry, no document correction and no producer behaviour cha
 This round is also the reason the ledger leg now reads in BOTH directions: the module cites this round as `cycle 15`, so `test_the_ledger_records_every_review_cycle_the_record_cites` reds if this entry is ever removed. The leg had been one-sided since round 9 — it could only catch a ledger that fell behind a CITED cycle — and a round whose comments carried no cycle number was invisible to it, which is exactly how this entry came to be missing while the leg stayed green.
 
 No census vocabulary entry, no document correction and no producer behaviour changed in this round: `MAP_WRITERS` / `RECORDED_WRITERS` / `NOT_AN_ABOUT_WRITER`, the corrected passages and the `#10265` producer are untouched, and `_denied_verdicts` / `_unstated_verdicts` over the guarded sections stayed `[]` at the new head.
+
+**2026-10-30 — `#10139`.** The REBUILD half of `#9417`, and the end of the LAST declared false
+positive. The pass-2b structural `DirectEdgeRepoint` fold re-created a transferred `about*` edge with
+a BARE `MERGE`, so the `confidence` the live transfer carried across a supersede was DROPPED on every
+`rebuild_all` / `recover_from_log` — a live != rebuild divergence on a data-bearing property (the
+`#9553` class; measured: 0.83 live, edge present with `{}` after the rebuild). The descriptor that
+feeds that fold now carries the retired edge's attributes (flat, the same keys `DIRECT_EDGE_ATTR_KEYS`
+holds for the 2a-DIRECT descriptor and its emission), and the fold re-applies them with `ON CREATE SET
+nr += $attrs` — the SAME precedence the live transfer uses, so a successor that already holds its own
+`confidence` keeps it (measured: 0.91 stays 0.91; an unconditional `SET` put the retired point's 0.42
+there instead). `projection._rebuild_all_replay` therefore carries `confidence` on an about edge and is
+a COUNTED map-form writer: the composition is **2 originating + 5 re-materializing**, **7 writers the
+census sees (3 NAMED + 4 MAP)**, and zero declared false positives. The five transfer keys are named in
+ONE place (`projection/edges.py::DIRECT_EDGE_ATTR_KEYS`) instead of a literal tuple at each emission
+and replay site — the drift this row was one change away from, since the live and rebuilt halves each
+had their own copy. Pinned by `tests/test_8398_aboutobject_replay.py` (the replay, behaviourally) and
+`tests/test_9397_about_edge_properties.py` (the census).
+
+**2026-10-30 — `#10139` / `#10303` review P1 — the RECORD route carries them too.** The pass-2b
+fold above was only ONE of the two rebuild routes, and the other one
+(`record_projection._structural_repoint_statements`, the 2b MOVE's insert leg) still wrote the moved
+`relation` row with an EMPTY attribute set — so the descriptor carried the retired edge's
+`confidence` and the journal-rebuild restored it while the record rebuild dropped it. That is the
+`#9553` divergence class created by THIS change rather than existing before it: until `#10139` both
+routes dropped the value, so they agreed. The move now reads the descriptor through the SAME
+vocabulary the fold replays (`DIRECT_EDGE_ATTR_KEYS`, restated in `record_projection` for the
+STANDALONE reason its other constants are and pinned to the fold's own tuple), and routes each name
+through `_split_properties`: `direction`/`confidence`/`weight`/`label`/`batch_id` are COLUMNS of
+`public.relation`, so they land there and the row's `props` tail stays `{}` — the tail is not where
+this carry is observable. `ON CONFLICT … DO NOTHING` is kept, and it IS the fold's precedence rather
+than an approximation of it: a row the successor does not have is inserted carrying the values, a row
+it already has is left byte-identical, exactly as `ON CREATE SET` leaves it (`DO UPDATE` would
+reproduce the measured 0.91 → 0.42 destruction). `sourceVersion` stays uncarried on BOTH sides — the
+fold drops it too — so the two routes agree by both losing that anchor rather than the record keeping
+an attribute the graph does not have. Pinned by
+`tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.
