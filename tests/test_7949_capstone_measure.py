@@ -1153,7 +1153,7 @@ def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
                      "other=15 (anchored 0)",
                      "total=326", "STRUCTURALLY INCAPABLE",
                      "create_operator", "never writes extractedFrom",
-                     "BY CONSTRUCTION", "tortoise/sdk.py:2376",
+                     "BY CONSTRUCTION", "tortoise/sdk.py:2399",
                      # the denominator is stated as the WRITER class, and the
                      # residual is inside it
                      "supposed-to-derive", "the class where a LOST derivation "
@@ -1543,7 +1543,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13685`, ``tortoise/projection/edges.py:2538-2563``, `edges.py:552`,
+# `tortoise/sdk.py:2399`, ``tortoise/projection/edges.py:2573-2598``, `edges.py:587`,
 # ``tortoise/extractor_v2.py:8975-8979``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1817,7 +1817,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:14329` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:14399` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
