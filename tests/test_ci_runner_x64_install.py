@@ -503,7 +503,7 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
     decision (not just a style choice): `docs/ops/ci-runner-x64.md:84-85` —
     "`_preserve_labels` DROPS the whole class on re-registration … so an attachment survives a
-    repair that re-applies it (`--repair-labels` keeps the class under `on|auto`) and does NOT
+    repair that re-applies it (`--repair-labels` keeps only the box's own label under `on|auto`) and does NOT
     survive a re-registration". `tools/runner_autoscale.py::_preserve_labels` already drops the
     family
     (`VERSION_PINNED_HOSTED_LABEL`), so a union that kept it would leave the two writers with
@@ -3808,4 +3808,63 @@ def test_the_autoscale_tests_runbook_refs_land_on_what_they_name():
     assert "ARM64 VMs register" in span, (
         f"`tests/test_runner_autoscale.py` cites docs/ops/ci-runner-x64.md:{lo}-{hi} for the "
         f"arm64-marker sentence, but that span is {span!r} — re-derive the ref, do not offset it"
+    )
+
+
+# ── 12. the narrowed keep is described as narrowed, everywhere it is described ────────────────
+def test_no_surface_claims_the_repair_keeps_the_whole_version_pinned_class():
+    """⛔ A KEEP THAT IS NARROWED IN CODE AND WIDE IN PROSE IS THE FALSE-ARCHITECTURE CLAIM BACK.
+
+    `--repair-labels` keeps ONLY `$OS_LABEL` (`if [ "$l" = "$OS_LABEL" ]`, and every other member of
+    the family is printed `NOT KEPT:`) — deliberately, because keeping `ubuntu-24.04-arm` is how an
+    x86_64 runner serves an ARM64 job and produces a wrong artifact. The instruction read by the
+    next maintainer is the COMMENT and the RUNBOOK, not the `case` arm, so a sentence saying the
+    repair "keeps the class" licenses exactly the state the narrowing exists to forbid.
+
+    This is not hypothetical: the claim was removed from two workflow comments, then from
+    `runner_autoscale.py::_preserve_labels`, and each time it survived in a SIBLING sentence that
+    no test read (the re-registration branch of `tools/runner_autoscale.py` here, and the runbook
+    sentence that contradicted its own "TWO NAMED CARVE-OUTS" section ON THE SAME PAGE). So the pin
+    is
+    mechanical and covers every surface that describes the repair, not the one line a review named.
+
+    Mutation: restore any of the three `keeps the class` sentences -> RED on the file it is in.
+    """
+    surfaces = [
+        REPO_ROOT / "tools" / "runner_autoscale.py",
+        REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md",
+        REPO_ROOT / "MEMORY.md",
+        REPO_ROOT / "tests" / "test_runner_autoscale.py",
+        REPO_ROOT / "tests" / "test_reporting_workflow_concurrency.py",
+    ]
+    wide = re.compile(r"keep[s]?\s+the\s+(whole\s+)?class", re.IGNORECASE)
+    offenders: list[str] = []
+    for path in surfaces:
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if wide.search(line):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
+        # a claim can also be WRAPPED across two prose lines, which the per-line scan above cannot
+        # see — normalise before concluding the surface is clean (#10275: the surviving sentence in
+        # the runbook was a wrap of the one the review had already removed elsewhere).
+        joined = re.sub(r"\s+", " ", path.read_text())
+        if wide.search(joined) and not wide.search(path.read_text()):
+            offenders.append(f"{path.relative_to(REPO_ROOT)}: (wrapped) {wide.search(joined).group(0)!r}")
+    assert not offenders, (
+        "the repair keeps `$OS_LABEL` and DROPS the rest of the version-pinned family "
+        "(`NOT KEPT:`), so no surface may say it keeps the class — a narrowed keep described as "
+        "wide is the false-architecture claim the narrowing removed: " + "; ".join(offenders)
+    )
+
+    # ...and the narrowed truth is actually STATED where a maintainer looks, not merely un-denied.
+    # (whitespace-normalised: both files wrap this sentence across two lines.)
+    narrowed = re.compile(r"dropping the rest of the family|drops? the rest of the family", re.IGNORECASE)
+    autoscale = re.sub(r"\s+", " ", (REPO_ROOT / "tools" / "runner_autoscale.py").read_text())
+    assert narrowed.search(autoscale), (
+        "`_preserve_labels`'s residual must name the narrowing (`$OS_LABEL` kept, the rest dropped) "
+        "— an unstated narrowing reads as the wide keep this pin forbids"
+    )
+    runbook = re.sub(r"\s+", " ", (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text())
+    assert narrowed.search(runbook), (
+        "the runbook must name the narrowing too — it is the page an operator reads before running "
+        "`--repair-labels`"
     )

@@ -88,7 +88,7 @@ on a 24.04 x86_64 host); the live pool is opted IN as the temporary mitigation d
 contract above. The arm64 spellings GitHub also publishes (`ubuntu-24.04-arm`,
 `ubuntu-22.04-arm`, `ubuntu-26.04-arm`) are never emitted. `tools/runner_autoscale.py::
 _preserve_labels` DROPS the whole class on re-registration — reading NO flag, the way it always
-has — so an attachment survives a repair that re-applies it (`--repair-labels` keeps the class under
+has — so an attachment survives a repair that re-applies it (`--repair-labels` keeps only the box's own label under
 `on|auto`, see "TWO NAMED CARVE-OUTS" below) and does NOT survive a re-registration. That is NOT
 the same as "cannot become
 permanent": `scripts/ci_runner_gate.sh` treats any non-auto label as `extra` (`:222`) and re-emits
