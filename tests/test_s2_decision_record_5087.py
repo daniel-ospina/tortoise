@@ -650,7 +650,7 @@ _V1_FIGURE = re.compile(r"(?P<b>[\d,]+)\s*B\s*≈\s*(?P<t>[\d,]+)\s+tok")
 #: Round 5 of PR #10302's review (P2) found two different pre-framing figures in these
 #: artifacts with neither marked, which is how a percentage ends up measured against a
 #: baseline nothing counted.
-_SUPERSEDED_MARK = re.compile(r"superseded|not\W{0,2}reproduc|not a baseline|not comparable",
+_SUPERSEDED_MARK = re.compile(r"superseded|not\W{0,4}reproduc|not a baseline|not comparable",
                               re.IGNORECASE)
 
 #: How far from a legacy pair its "superseded" notice may sit — one paragraph.
