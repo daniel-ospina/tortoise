@@ -1070,9 +1070,9 @@ def test_migrated_legs_read_their_OWN_pytest_log():
 
     ⛔ Half 2 is only load-bearing because `_HOST_TMP_PATH_RE` can MATCH: it read
     `[\\s=]>'\"` until the #10280 review (the `]` closed the class early), so it
-    found 0 of the 50 `/tmp/<path>` occurrences in this workflow and this pin
-    went green on the mixed state below. Both non-vacuity probes are the two
-    tests that follow it.
+    found 0 of the 50 `/tmp/<path>` occurrences on this workflow's non-comment
+    lines — the corpus this test builds — and this pin went green on the mixed
+    state below. Both non-vacuity probes are the two tests that follow it.
     """
     import yaml
 
