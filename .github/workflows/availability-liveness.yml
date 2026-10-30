@@ -105,7 +105,7 @@ jobs:
     # that visible; re-measure rather than trusting this text:
     # `gh api repos/<owner>/<repo>/actions/runners`. The installer never hands
     # `config.sh` a version pin with the flag off — pinned at
-    # `tests/test_ci_runner_x64_install.py:208`.
+    # `tests/test_ci_runner_x64_install.py:228`.
     # ⛔ THE COST, STATED: GitHub's label matching is cumulative and unscoped
     # (github/docs, "Using self-hosted runners in a workflow"), so while the
     # mitigation is engaged this observer is POOL-ELIGIBLE — and a guard whose
