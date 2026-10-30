@@ -860,7 +860,7 @@ silently-empty cell.
 | `id` | `_rebuild_all_replay` |
 | `created_at` | `_write_session_and_turns`, `_execute_commit_writes`, `_commit_region`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `turn_count` | `_write_session_and_turns`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `_rebuild_all_replay` |
-| `turn_max_index` | `_write_session_and_turns`, `_rebuild_all_replay` |
+| `turn_max_index` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `is_episodic` | `_write_session_and_turns`, `_link_session`, `_fold_session_recorded`, `_execute_commit_writes`, `_commit_region`, `BACKFILL_STATEMENTS`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_rebuild_all_replay` |
 | `harness` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `capture_lane` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |

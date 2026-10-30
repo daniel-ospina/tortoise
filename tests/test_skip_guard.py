@@ -154,6 +154,19 @@ def _write(tmp_path, name, text):
     return str(p)
 
 
+#: THE SELECTOR-COUNTS PROSE IN `test_workflow_keeps_rs` IS DERIVED, NOT RESTATED
+#: (2026-10-30, #10264 review). That docstring carries two measurements by hand — how
+#: many duration-prefixed `python -m pytest` legs write `--junitxml="$PYTEST_JUNIT"`,
+#: and which predicate excludes which leg it must NOT read. #10280 moved
+#: `test-carve-out` onto the same per-job junit in this very PR, and BOTH halves went
+#: false in the commit that changed the code: it still said TWO, and it attributed the
+#: carve-out's exclusion to a junit pairing the carve-out now carries. Neither number
+#: reds the count floor below (`assert len(fast_run) == 1` still holds), which is why
+#: they are asserted against the workflow here instead of left to a reader to notice.
+#: A further migration that changes the split reds this guard.
+_STATED_JUNIT_LEG_COUNT = 3
+
+
 class TestGuardAcceptsCleanLog:
     def test_no_skips_at_all(self):
         proc = run_guard("".join(PASS_LINES))
@@ -207,25 +220,42 @@ class TestGuardAcceptsCleanLog:
         -r fEs is the order-independent superset (f=FAILED, E=ERROR, s=SKIPPED).
 
         The SELECTION is the fragile half: EIGHT watchdog-wrapped `python -m
-        pytest` command lines in this file match the duration prefix, and TWO of
-        them write `--junitxml="$PYTEST_JUNIT"` — the fast gating run and, since
-        #10028, the single-process `test-slow` leg. So the selector carries one
-        exclusion term per leg it must NOT read (the `$PYTEST_JUNIT_LF`
-        pre-phase, and the slow leg). A term that stops discriminating does not
-        error — it silently compares another leg's command line — which is why
-        the count floor below is load-bearing."""
+        pytest` command lines in this file match the duration prefix, and THREE of
+        them write `--junitxml="$PYTEST_JUNIT"` — the fast gating run, the
+        single-process `test-slow` leg (since #10028), and `test-carve-out`
+        (since #10280). So the selector carries one exclusion term per leg it must
+        NOT read (the `$PYTEST_JUNIT_LF` pre-phase), plus ONE term that now
+        excludes the other two legs at once (the xdist expansion). A term that
+        stops discriminating does not error — it silently compares another leg's
+        command line — which is why the count floor below is load-bearing. Both
+        halves of that sentence are MEASURED below, not restated: the stated
+        leg count is `_STATED_JUNIT_LEG_COUNT`, and every junit-carrying leg this
+        chain does not select must be dropped by the xdist term."""
         workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" \
             / "python-ci.yml"
         text = workflow.read_text()
         fast_run = [
             l for l in text.splitlines()  # noqa: E741
-            # #10028: the duration must be matched in EITHER form. The gating
-            # run's watchdog is the per-shard expression
-            # `${{ matrix.watchdog_minutes }}m`, never a literal, so the old
-            # `\d+m` matched only the legs that hardcode a budget — which is the
-            # real reason this guard was green on the WRONG job: the retired
+            # #10028 / #10264: the gating run's watchdog is the per-shard
+            # EXPRESSION `${{ matrix.watchdog_minutes }}m`, never a literal, so the
+            # old `\d+m` matched only the legs that hardcode a budget — which is
+            # the real reason this guard was green on the WRONG job: the retired
             # `--junitxml=/tmp/junit.xml` literal selected `test-slow` (literal
             # `40m`, literal path) instead of this job's gating run.
+            #
+            # ⛔ ...but that expression is a NARROWING, not a selection: it matches
+            # the TWO legs whose budget comes from the matrix — `test` and
+            # `test-carve-out`. No single predicate below selects the gating run;
+            # the CHAIN does, and each link is load-bearing. `test-carve-out` AND
+            # `test-slow` are both dropped by the xdist expansion below — ONE term
+            # for TWO legs, because #10280 gave the carve-out the same per-job
+            # junit, so the junit pairing no longer separates it. An editor who
+            # drops either as "redundant now that
+            # the expression is unique" retargets this pin onto the carve-out or
+            # the slow leg — exactly the retarget the pin exists to catch: the
+            # retired `\d+|expression` alternation selected `test-slow` again once
+            # #10028 moved it onto the SAME per-job `"$PYTEST_JUNIT"` (two
+            # matches, and the slow leg checked in place of the gating one).
             if re.search(
                 r"timeout -s INT -k 10 (?:\d+|\$\{\{\s*matrix\.watchdog_minutes\s*\}\})m", l)
             and "-m pytest" in l
@@ -268,6 +298,67 @@ class TestGuardAcceptsCleanLog:
         # (measured: the old filter matched exactly one line, and it was
         # test-slow's). Name the count and the selection variable.
         assert len(fast_run) == 1, fast_run
+        # The comment above explains WHY the expression is only a NARROWING (the
+        # rest of the chain is what selects). Derive that justification instead of
+        # restating it: if the expression alone ever selects only the gating run,
+        # the comment has become the false half and the remaining predicates look
+        # droppable — which is how this pin retargets.
+        expr_matches = [
+            ln for ln in text.splitlines()
+            if re.search(
+                r"timeout -s INT -k 10 \$\{\{\s*matrix\.watchdog_minutes\s*\}\}m", ln)
+            and "-m pytest" in ln
+        ]
+        assert len(expr_matches) > len(fast_run), (
+            "the watchdog expression alone is claimed to be a NARROWING, not a "
+            "selection — the `\"$PYTEST_JUNIT\"` pairing and the xdist expansion "
+            "are what make it unique. The expression now matches only the gating "
+            f"run, so that justification is stale: {expr_matches}"
+        )
+        # ── the docstring's SELECTOR MAP, derived instead of restated (#10264
+        # review, 2026-10-30). Two claims above are measurements:
+        #
+        #   (a) THREE duration-prefixed legs write `--junitxml="$PYTEST_JUNIT"`
+        #       → `_STATED_JUNIT_LEG_COUNT`;
+        #   (b) of those, every leg this chain does NOT select is dropped by the
+        #       xdist term — that is what "ONE term for TWO legs" means.
+        #
+        # They are asserted against the workflow, not read out of the prose, so the
+        # next migration that changes the split reds here instead of silently
+        # falsifying the map the next editor of this filter reads. On the pre-#10280
+        # tree (a) fails (carve-out wrote `--junitxml=/tmp/junit.xml`, so the count
+        # was 2) — the prose then said TWO and was true; this pin is what keeps it
+        # true.
+        junit_legs = [
+            ln for ln in text.splitlines()
+            if re.search(
+                r"timeout -s INT -k 10 (?:\d+|\$\{\{\s*matrix\.watchdog_minutes\s*\}\})m", ln)
+            and "-m pytest" in ln
+            and '--junitxml="$PYTEST_JUNIT"' in ln
+        ]
+        assert len(junit_legs) == _STATED_JUNIT_LEG_COUNT, (
+            f"the docstring says {_STATED_JUNIT_LEG_COUNT} duration-prefixed legs "
+            'write `--junitxml="$PYTEST_JUNIT"`, the workflow has '
+            f"{len(junit_legs)} — update BOTH the stated count and the docstring's "
+            f"selector map: {junit_legs}"
+        )
+        assert fast_run[0] in junit_legs, (
+            "the selected leg does not carry the junit pairing the docstring names as "
+            f"the chain's second link: {fast_run[0]}"
+        )
+        not_selected = [ln for ln in junit_legs if ln != fast_run[0]]
+        assert not_selected, (
+            'the docstring claims the xdist expansion drops the legs the junit pairing '
+            'leaves — it now drops none, so the pin has no chain left to justify'
+        )
+        still_matching = [ln for ln in not_selected
+                          if '-n "$XDIST_WORKERS"' in ln]
+        assert not still_matching, (
+            'the docstring attributes the exclusion of these junit-carrying legs to '
+            'the xdist expansion (`-n "$XDIST_WORKERS"`), but they carry it too — '
+            'so the real discriminator is something the docstring does not name, '
+            f"and a retarget here would go unexplained: {still_matching}"
+        )
         assert "$FILES" in fast_run[0], (
             "the pinned invocation does not expand $FILES — it is not the "
             f"fast-suite gating run: {fast_run[0]}"
