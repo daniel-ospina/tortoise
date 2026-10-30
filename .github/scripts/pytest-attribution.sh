@@ -127,21 +127,53 @@ fi
 #     line after the summary and no second banner, because the file was rewritten
 #     underneath the leg.
 #
-# ⚠️ NAMED RESIDUAL, and the real fix: this reporter cannot always tell one session's
-# output from another's, because every leg writes the SAME global path
-# (`/tmp/pytest.log`) while the rc file next to it already moved to
+# ⚠️ NAMED RESIDUAL, and the real fix FOR THE LEGS NAMED BELOW: this reporter
+# cannot always tell one session's output from another's while a leg writes a
+# HOST-GLOBAL path (`/tmp/*.log`) — the rc file next to it already moved to
 # `${RUNNER_TEMP:-/tmp}/pytest-rc`. A foreign writer that rewrites the file and stops
 # leaves no NUL hole and no unbalanced stack, so under rc=1 it can still read as the
-# leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}`.
+# leg's verdict. For those legs the durable fix is a per-leg log path under
+# `${RUNNER_TEMP}` (#10280); both matrix jobs already pass one, so for them the
+# signals below are a backstop rather than the load-bearing defence.
 #
-# ⚠️ STATUS: PARTIALLY APPLIED (2026-10-25). `python-ci.yml`'s `test` job — the fast
-# matrix, NINE legs, and the largest share of this failure — now passes
-# `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and therefore
-# per-job, since a runner runs one job at a time). For THAT job signals (1)-(3) are
-# now a backstop against a test that shells out to pytest, not the load-bearing
-# defence against a co-tenant. The other legs still write `/tmp/...` literals and
-# still need the same change; the three signals below keep the KILL path — the one
-# that produced the "timeout flakes" — from being fooled until they get it.
+# ⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS (2026-10-29, #10028). `python-ci.yml`'s
+# `test` job — the fast matrix, NINE legs, and the largest share of this failure —
+# passes `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`, per-runner and
+# therefore per-job, since a runner runs one job at a time), and `test-slow`'s FIVE
+# legs now pass it too. That second half was a measured false red, not a tidy-up:
+# run 40808264676's `test-slow (a)` printed its own `365 passed, 2 skipped` (= its
+# manifest's 367 expected nodeids) AND its own `pytest exit code: 0` banner, and the
+# job still concluded `failure`, because a sibling's `> /tmp/pytest.log` truncated
+# the file between the leg's `tail` and this reporter's read. For those two jobs
+# signals (1)-(3) are a backstop against a test that shells out to pytest, not the
+# load-bearing defence against a co-tenant.
+#
+# The legs that still write `/tmp/...` literals, and still need the same change, are
+# the deliberate residual named on #10280, which carries the rest of the migration:
+#
+#   `test-concurrency-falkor`   (`/tmp/pytest.log`)      — `python-ci.yml`
+#   `test-track-b`              (`/tmp/trackb.log`)      — `python-ci.yml`
+#   `test-carve-out`            (`/tmp/pytest.log`)      — `python-ci.yml`
+#   `test-d14-hosted-api`       (`/tmp/pytest-d14.log`)  — `python-ci.yml`
+#   `validate`                  (`/tmp/pmv-pytest.log`)  — `post-merge-validation.yml`
+#
+# ⛔ THIS LIST IS DERIVED, NOT REMEMBERED — do not edit it from memory. It is
+# `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
+# which reads every capture site in both workflows this guard names and reds unless the
+# paragraph above names EXACTLY the legs still capturing a host-global `/tmp/*.log`.
+# Migrating one leg (or adding a leg) is therefore a deliberate edit HERE, in the same
+# change — and naming a leg that HAS migrated is a red too, because an over-wide residual
+# sends the next lane to migrate work that is already done.
+#
+# `test-track-b` is the sharpest of the five: it is #10280's own ROOT measurement (its
+# shared `/tmp/expected-nodeids.txt` + `/tmp/junit.xml` produced `4 expected nodeids ->
+# 640 absent`), i.e. the leg where a shared manifest/JUnit makes a false PASS on a
+# required check reachable. `validate` is the warn-only job, so for it the consequence is
+# a misleading artifact rather than a false red on a required check — named anyway, so
+# the residual reads as one scope instead of a list that stops where the gate impact does.
+#
+# For THOSE legs the three signals below stay load-bearing, and they keep the KILL path —
+# the one that produced the "timeout flakes" — from being fooled until they get it.
 #
 # So ownership is "PROVEN, or treated as STALE", on three independent signals:
 #
