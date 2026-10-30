@@ -3328,6 +3328,24 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         f"(pending-not-answered instead of a false red): {span!r}"
     )
 
+    # The provisioner invocation — a ref into a file THIS PR edits, and one the first pass missed.
+    # `tools/runner_autoscale.py` gained ~96 lines above it, so the number that was correct on
+    # `main` (`:965`, the installer invocation) landed on a systemd unit-name f-string here and
+    # still passed the only check it had (`1 <= n <= EOF`). Pinned by SENTENCE, like the three
+    # above, so a sibling-bullet ref drifts red instead of passing a range check.
+    m = re.search(r"`tools/runner_autoscale\.py:(\d+)` invokes the installer", runbook)
+    assert m is not None, (
+        "the runbook no longer cites `tools/runner_autoscale.py:<line>` for the installer "
+        "invocation — re-anchor this pin rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert '"--count", str(target_count), "--fallback", "auto"' in at(
+        "tools/runner_autoscale.py", n
+    ), (
+        f"the runbook cites tools/runner_autoscale.py:{n} as the installer invocation, but that "
+        f"line is {at('tools/runner_autoscale.py', n)!r}"
+    )
+
 
 # ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────
 def test_the_inventory_pattern_carries_every_documented_runs_on_form():
