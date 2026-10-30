@@ -2901,3 +2901,25 @@ def test_the_published_counts_match_the_tree_of_the_sha_they_name():
     assert row.group(3) == f"{round(100 * core_n / all_n, 1):.1f}", (
         f"the `00_index` row states {row.group(3)} % for {core_n}/{all_n} — the "
         f"two halves of one row cannot disagree")
+
+
+def test_the_tree_arm_skips_instead_of_erroring_when_the_sha_is_absent(monkeypatch):
+    """A `fetch-depth: 1` clone must SKIP this arm, not fail the suite.
+
+    The arm shells out to `git show <sha>:config/ci-surfaces.yml`; in a shallow
+    CI checkout (or after a squash merge that drops the commit) that object does
+    not exist, and an arm that turned "I cannot read this" into a red would block
+    every PR for a reason unrelated to it — the fail-open direction this suite's
+    harness pins exist to forbid. `_core_counts_at` returns None in that state and
+    the arm skips with the reason, so the TEXT arm above stays the one that always
+    runs (it needs no git at all).
+    """
+    from tools import ci_import_closure as ci
+
+    assert ci.REPO.exists()
+    assert _core_counts_at("0" * 40) is None, (
+        "a sha that is not an object in this clone must report unavailable, not "
+        "raise — an exception here would red a shallow checkout")
+    monkeypatch.setattr(sys.modules[__name__], "_core_counts_at", lambda sha: None)
+    with pytest.raises(pytest.skip.Exception):
+        test_the_published_counts_match_the_tree_of_the_sha_they_name()
