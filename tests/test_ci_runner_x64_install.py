@@ -3677,9 +3677,9 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
     drop's rationale saw "harmless" thirty lines above the sentence naming it as a residual.
 
     Mutation: restore either pre-fix sentence -> the checker reports the pre-fix absolute and the
-    missing flag, and the citation arm reds too when the prose is re-pointed at a row with no
-    mitigation. Control: the real sites pass on all three arms, so this is not a pin that "never"
-    matches.
+    missing flag; re-point a corrected sentence at a row that records no mitigation -> the citation
+    arm reds alone. Both directions are executable below, so no arm of this pin rests on my word for
+    it. Control: the real sites pass all three arms, so this is not a pin that "never" matches.
     """
     runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
     sites = _version_pin_comment_sites()
@@ -3711,6 +3711,26 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
             f"{name}: the checker no longer sees the pre-fix defect it exists for — it would pass "
             "the very prose this test was written against."
         )
+
+    # …and the CITATION arm, alone: a sentence that is otherwise blameless (names the flag, states
+    # the DEFAULT, repeats no absolute) but sends the reader to `:25` — the `ubuntu-latest` row,
+    # which records no mitigation — instead of the `ubuntu-24.04` row that does. Without this the
+    # third arm could be dead code.
+    #
+    # ⛔ The ref is ASSEMBLED from two literals on purpose. The 8e pin above asserts that every
+    # `docs/ops/ci-runner-x64.md:<line>` written in this file is a REAL citation, and this one is a
+    # negative control, not a citation: pointing a reader at `:25` in prose would be a lie the
+    # file's own pin cannot express.
+    _MISDIRECTED_REF = "docs/ops/ci-runner-x64.md" + ":25"
+    misdirected = (
+        "The pool's DEFAULT is `ubuntu-latest`, never an `ubuntu-<version>` "
+        f"({_MISDIRECTED_REF}); `CI_RUNNER_OS_LABEL=on|auto` suspends that for one label."
+    )
+    unreached = _mitigation_denials(misdirected, runbook)
+    assert any("records no mitigation" in p for p in unreached), (
+        "the citation arm no longer fires on a blameless sentence sent to a row that records no "
+        f"mitigation: {unreached}"
+    )
 
 
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
