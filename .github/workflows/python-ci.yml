@@ -850,8 +850,8 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that run it) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -1969,8 +1969,8 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that run it) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2469,8 +2469,8 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that run it) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2909,8 +2909,8 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that run it) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |

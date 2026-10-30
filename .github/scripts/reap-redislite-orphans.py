@@ -35,9 +35,13 @@ It kills a redislite server only when the server is provably nobody's:
    suite's directory is never removed (the session teardown refuses while a
    live server holds the root — `#3752`). This is the actual #1005 litter: the
    tempdirs left by failed runs.
-2. **The process is older than the longest leg watchdog.** A redislite server
-   older than the widest `matrix.watchdog_minutes` bound cannot belong to a
-   running leg, because that leg would already have been killed.
+2. **The process is older than every leg's OUTER cancel bound.** A redislite
+   server older than the widest `jobs.<job_id>.timeout-minutes` among the jobs
+   that run this step cannot belong to a running leg, because GitHub cancels the
+   job at that bound. It is a JOB bound, not a `matrix.watchdog_minutes` bound:
+   the watchdog only stops pytest, so it bounds neither the setup/pre-phase
+   around it nor — see the derivation at `DEFAULT_MAX_AGE_MINUTES` — the 55
+   minutes the repo's own policy lets that watchdog reach.
 
 Everything else is KEPT, including every unmeasurable case (unreadable
 `/proc`, unknown age, unparsable argv): a cleanup step that fails is a leak,
@@ -51,7 +55,7 @@ project's own interpreter.
 Usage:
     python3 .github/scripts/reap-redislite-orphans.py                  # dry run
     python3 .github/scripts/reap-redislite-orphans.py --apply          # kill
-    python3 .github/scripts/reap-redislite-orphans.py --max-age-minutes 45 --apply
+    python3 .github/scripts/reap-redislite-orphans.py --max-age-minutes 120 --apply
 
 Exit codes: 0 = ran (dry or apply) — INCLUDING when it found nothing to look at;
 2 = something this tool was told to read could not be read (`--proc-json`, or the
@@ -74,12 +78,50 @@ import sys
 _IS_REDIS = re.compile(r"(?:^|/)(redis-server)$")
 _SOCKET_FLAG = "unixsocket"
 
-# Default: comfortably above the widest leg watchdog measured on this matrix
-# (27 min in `test`), so a server this old provably outlived any leg that could
-# own it. Deliberately NOT lowered to the 30-minute dir-litter floor the same
-# step uses for `find`: a directory carries no live-process risk, a SIGTERM to
-# a live server does.
-DEFAULT_MAX_AGE_MINUTES = 45
+# ── the age arm: DERIVED from the cancel bound, never a remembered measurement ─
+#
+# This arm is a PROOF ("no running leg can own this server"), so its threshold
+# has to clear the longest a leg can possibly stay alive — and "the widest leg
+# watchdog" is not that length. Two repo facts settle the real bound:
+#
+#   1. A `test` leg's pytest watchdog is DERIVED, and the policy explicitly
+#      permits it to reach 55 min: `tools/ci_selection.py::WATCHDOG_CEILING_MIN`,
+#      emitted per leg by `fast_matrix_include()` and consumed as
+#      `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m`.
+#   2. The HARD bound on a running leg is the job's OUTER `timeout-minutes` —
+#      GitHub cancels the job there (workflow syntax, `jobs.<job_id>.timeout-
+#      minutes`) — and that cap bounds SETUP + the last-failed pre-phase + the
+#      gated run together, so it is strictly wider than any inner watchdog. The
+#      widest among the jobs that invoke this reaper is `test` at 90
+#      (`python-ci.yml`); `test-slow` 60, `test-carve-out` 30,
+#      `test-concurrency-falkor` 15, `post-merge-validation.yml::validate` 60.
+#
+# A server YOUNGER than the widest outer cancel bound can still belong to a live
+# leg, so reaping on age is only a proof ABOVE it. The invariant is
+#
+#     DEFAULT_MAX_AGE_MINUTES > widest job `timeout-minutes` (>= the 55 ceiling)
+#
+# and both halves are pinned against their live sources by
+# `tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_every_reaper_job_outer_timeout`
+# and `::test_the_age_arm_clears_the_widest_permitted_leg_watchdog`. Raising the
+# ceiling, or a job's outer cap, reds this file's own suite — instead of
+# silently turning the proof back into a live-peer kill (the #3653 defect).
+#
+# Deliberately NOT lowered to the 30-minute dir-litter floor the same step uses
+# for `find`: a directory carries no live-process risk, a SIGTERM to a live
+# server does. A conservative arm costs a leak the orphan gate reports; a
+# too-low arm costs somebody else's red PR.
+#
+# Mirrored as literals rather than imported: this script is deliberately
+# stdlib-only and 3.9-clean, and it runs in a setup step under the runner's
+# `python3` before the project venv or `tools/` is importable. The pins above
+# are what keep the mirror honest.
+WIDEST_REAPER_JOB_TIMEOUT_MINUTES = 90
+# `timeout -s INT -k 10` gives a cancelled leg 10 s after SIGINT before SIGKILL,
+# and the runner then tears the step down. Minutes of slack over the bound,
+# deliberately small: the bound itself already carries the margin.
+CANCEL_SLACK_MINUTES = 5
+DEFAULT_MAX_AGE_MINUTES = WIDEST_REAPER_JOB_TIMEOUT_MINUTES + CANCEL_SLACK_MINUTES
 
 
 def socket_dir_from_argv(argv: list[str]) -> str | None:
@@ -273,8 +315,8 @@ def classify(row: dict, max_age_s: float) -> tuple[bool, str]:
         return False, f"age unmeasurable and {socket_dir} still exists — fail closed"
     if age >= max_age_s:
         return True, (
-            f"age {int(age)}s >= {int(max_age_s)}s — older than the widest leg "
-            "watchdog, so no running leg can own it"
+            f"age {int(age)}s >= {int(max_age_s)}s — older than every leg's outer "
+            "cancel bound, so no running leg can own it"
         )
     return False, (
         f"age {int(age)}s < {int(max_age_s)}s — could be a concurrent leg's live instance"

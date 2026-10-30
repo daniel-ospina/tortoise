@@ -54,30 +54,44 @@ def reaper():
     return _load_module()
 
 
+def _age_bound_s(reaper) -> float:
+    """The SHIPPED age bound in seconds — never a second literal for it.
+
+    Round 15 of the PR review: every boundary test used to pass `45 * 60` by hand,
+    so the suite stayed green while the shipped default disagreed with the repo's
+    own watchdog policy. The bound is read from the module under test here, and
+    its two SOURCES are pinned by `test_the_age_arm_clears_every_reaper_job_outer_timeout`
+    and `test_the_age_arm_clears_the_widest_permitted_leg_watchdog` below — the
+    tests that actually fail when the constant drifts out of safety.
+    """
+    return reaper.DEFAULT_MAX_AGE_MINUTES * 60.0
+
+
 # ── the decision table ────────────────────────────────────────────────────
 
 
 def test_a_live_peers_young_server_is_kept(reaper, tmp_path):
     """THE #3653 REGRESSION: a young server with a live socket dir is a peer's."""
     row = {"pid": 1, "socket_dir": str(tmp_path), "age_seconds": 90}
-    reap, reason = reaper.classify(row, max_age_s=45 * 60)
+    reap, reason = reaper.classify(row, max_age_s=_age_bound_s(reaper))
     assert reap is False, reason
     assert "concurrent leg" in reason
 
 
 def test_an_aged_server_is_reaped(reaper, tmp_path):
-    """Past the widest leg watchdog nothing running can own it."""
-    row = {"pid": 1, "socket_dir": str(tmp_path), "age_seconds": 46 * 60}
-    reap, reason = reaper.classify(row, max_age_s=45 * 60)
+    """Past the widest OUTER cancel bound nothing running can own it."""
+    bound = _age_bound_s(reaper)
+    row = {"pid": 1, "socket_dir": str(tmp_path), "age_seconds": bound + 60}
+    reap, reason = reaper.classify(row, max_age_s=bound)
     assert reap is True, reason
-    assert "watchdog" in reason
+    assert "no running leg can own it" in reason
 
 
 def test_a_server_whose_socket_dir_is_gone_is_reaped(reaper, tmp_path):
     """The #1005 residue: the dir is gone, so the instance can serve nothing."""
     gone = tmp_path / "vanished"
     row = {"pid": 1, "socket_dir": str(gone), "age_seconds": 1}
-    reap, reason = reaper.classify(row, max_age_s=45 * 60)
+    reap, reason = reaper.classify(row, max_age_s=_age_bound_s(reaper))
     assert reap is True, reason
     assert "is gone" in reason
 
@@ -85,7 +99,7 @@ def test_a_server_whose_socket_dir_is_gone_is_reaped(reaper, tmp_path):
 def test_an_unmeasurable_age_on_a_live_dir_is_kept(reaper, tmp_path):
     """Fail CLOSED: no age is not evidence of abandonment."""
     row = {"pid": 1, "socket_dir": str(tmp_path), "age_seconds": None}
-    reap, reason = reaper.classify(row, max_age_s=45 * 60)
+    reap, reason = reaper.classify(row, max_age_s=_age_bound_s(reaper))
     assert reap is False, reason
     assert "fail closed" in reason
 
@@ -93,9 +107,121 @@ def test_an_unmeasurable_age_on_a_live_dir_is_kept(reaper, tmp_path):
 def test_undeterminable_ownership_is_kept(reaper):
     """An argv this code cannot read must never authorise a kill."""
     row = {"pid": 1, "socket_dir": None, "age_seconds": 10 * 60 * 60}
-    reap, reason = reaper.classify(row, max_age_s=45 * 60)
+    reap, reason = reaper.classify(row, max_age_s=_age_bound_s(reaper))
     assert reap is False, reason
     assert "undeterminable" in reason
+
+
+# ── the age arm's two SOURCES, pinned ────────────────────────────────────────
+#
+# The age arm's whole claim is a safety proof: "older than this, no live leg can
+# own it". Round 15 of the PR review found the shipped 45-minute default did not
+# clear the repo's own numbers — the docstring measured a 27-minute widest
+# watchdog while `tools/ci_selection.py::WATCHDOG_CEILING_MIN` permits 55, and
+# the widest JOB cap among the legs that run this step is 90. Nothing failed when
+# the numbers moved, because every boundary test passed `45 * 60` in by hand.
+# These two pins bind the constant to its sources, so drift REDS instead of
+# silently restoring the live-peer kill (#3653).
+
+
+def _reaper_job_outer_timeouts() -> dict[str, int | None]:
+    """Job-level `timeout-minutes` for every job that invokes the scoped reaper.
+
+    Keyed `<workflow>:<job>`. GitHub cancels a job at its OWN `timeout-minutes`
+    (workflow syntax: "the maximum number of minutes to let a job run before
+    GitHub automatically cancels it"), so that cap — not any inner pytest
+    watchdog — bounds how long a live leg's redislite server can possibly exist.
+    Job-level caps sit at a 4-space indent; step-level ones are deeper and are
+    NOT the bound, so the match is anchored on exactly four spaces.
+    """
+    found: dict[str, int | None] = {}
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        job: str | None = None
+        block: list[str] = []
+        jobs: list[tuple[str, list[str]]] = []
+        for line in path.read_text().splitlines():
+            key = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+            if key:
+                if job is not None:
+                    jobs.append((job, block))
+                job, block = key.group(1), []
+            elif job is not None:
+                block.append(line)
+        if job is not None:
+            jobs.append((job, block))
+        for name, body in jobs:
+            if not any("reap-redislite-orphans.py" in ln for ln in body):
+                continue
+            cap = None
+            for ln in body:
+                m = re.match(r"^    timeout-minutes:\s*(\d+)\s*(?:#.*)?$", ln)
+                if m:
+                    cap = int(m.group(1))
+                    break
+            found[f"{path.name}:{name}"] = cap
+    return found
+
+
+def test_the_age_arm_clears_every_reaper_job_outer_timeout(reaper):
+    """NON-VACUOUS: this reds on the pre-fix `DEFAULT_MAX_AGE_MINUTES = 45`
+    (45 does not clear `python-ci.yml::test`'s 90-minute outer cancel bound).
+
+    A job with NO `timeout-minutes` inherits GitHub's 360-minute default, and no
+    age arm can be a proof under that, so an un-capped reaper job reds here too.
+    """
+    caps = _reaper_job_outer_timeouts()
+
+    expected = {f"python-ci.yml:{leg}" for leg in EMBEDDED_LEGS}
+    expected.add("post-merge-validation.yml:validate")
+    assert expected <= set(caps), (
+        "a job that invokes the scoped reaper was not discovered — this pin would "
+        f"otherwise go vacuous: missing {sorted(expected - set(caps))}"
+    )
+
+    uncapped = sorted(job for job, cap in caps.items() if cap is None)
+    assert uncapped == [], (
+        "a reaper-invoking job carries no job-level `timeout-minutes`, so it inherits "
+        "GitHub's 360-minute default and no age bound can prove ownership: "
+        + ", ".join(uncapped)
+    )
+
+    widest = max(c for c in caps.values() if c is not None)
+    assert reaper.WIDEST_REAPER_JOB_TIMEOUT_MINUTES == widest, (
+        f"`WIDEST_REAPER_JOB_TIMEOUT_MINUTES` mirrors a stale measurement: it says "
+        f"{reaper.WIDEST_REAPER_JOB_TIMEOUT_MINUTES} min, the workflows now cap the "
+        f"widest reaper-invoking job at {widest} min "
+        f"({sorted(j for j, c in caps.items() if c == widest)}) — re-derive the "
+        "constant and its comment instead of trusting the stored number"
+    )
+    assert reaper.DEFAULT_MAX_AGE_MINUTES > widest, (
+        f"the age arm ({reaper.DEFAULT_MAX_AGE_MINUTES} min) does not clear the widest "
+        f"job cancel bound ({widest} min): a leg can still be RUNNING with a server "
+        "that old, so the SIGTERM is the #3653 live-peer kill, not a proof"
+    )
+
+
+def test_the_age_arm_clears_the_widest_permitted_leg_watchdog(reaper):
+    """NON-VACUOUS: this reds on the pre-fix arm (45 < `WATCHDOG_CEILING_MIN`=55).
+
+    `tools/ci_selection.py` derives a `test` leg's pytest watchdog as
+    `min(max(ceil(est * WATCHDOG_HEADROOM), WATCHDOG_FLOOR_MIN), WATCHDOG_CEILING_MIN)`
+    and emits it per leg, so 55 is a budget the policy PERMITS a live leg to run
+    with. An age arm at or below it can fire on a leg that is still inside its own
+    sanctioned budget — the case that stayed green before this pin existed.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from tools.ci_selection import WATCHDOG_CEILING_MIN, shard_watchdog_minutes
+
+    assert shard_watchdog_minutes(10 * 60 * 60) == WATCHDOG_CEILING_MIN, (
+        "the ceiling is no longer reachable through the producer this pin reasons "
+        f"about (got {shard_watchdog_minutes(10 * 60 * 60)}, want {WATCHDOG_CEILING_MIN}); "
+        "re-derive the age arm against whatever replaces `shard_watchdog_minutes`"
+    )
+    assert reaper.DEFAULT_MAX_AGE_MINUTES > WATCHDOG_CEILING_MIN, (
+        f"the age arm ({reaper.DEFAULT_MAX_AGE_MINUTES} min) does not clear the widest "
+        f"leg watchdog the policy permits ({WATCHDOG_CEILING_MIN} min) — a leg inside "
+        "its sanctioned budget can own a server this old"
+    )
 
 
 @pytest.mark.parametrize(
@@ -125,19 +251,20 @@ def test_a_dry_run_never_signals(reaper, tmp_path, monkeypatch):
     killed: list[int] = []
     monkeypatch.setattr(reaper.os, "kill", lambda pid, sig: killed.append(pid))
     rows = [{"pid": 4242, "socket_dir": str(tmp_path / "gone"), "age_seconds": 1}]
-    assert reaper.run(rows, max_age_s=45 * 60, apply=False) == 0
+    assert reaper.run(rows, max_age_s=_age_bound_s(reaper), apply=False) == 0
     assert killed == [], "a dry run must never signal"
 
 
 def test_apply_signals_exactly_the_reapable_rows(reaper, tmp_path, monkeypatch):
     killed: list[int] = []
     monkeypatch.setattr(reaper.os, "kill", lambda pid, sig: killed.append(pid))
+    bound = _age_bound_s(reaper)
     rows = [
         {"pid": 11, "socket_dir": str(tmp_path), "age_seconds": 60},  # live peer
         {"pid": 22, "socket_dir": str(tmp_path / "gone"), "age_seconds": 60},  # litter
-        {"pid": 33, "socket_dir": str(tmp_path), "age_seconds": 99 * 60},  # aged
+        {"pid": 33, "socket_dir": str(tmp_path), "age_seconds": bound + 60},  # aged
     ]
-    assert reaper.run(rows, max_age_s=45 * 60, apply=True) == 0
+    assert reaper.run(rows, max_age_s=bound, apply=True) == 0
     assert killed == [22, 33], killed
 
 
@@ -236,7 +363,7 @@ def test_a_measured_empty_host_is_still_exit_0(reaper, tmp_path):
     inventory = tmp_path / "proc.json"
     inventory.write_text("[]")
     assert reaper.main(["--proc-json", str(inventory)]) == 0
-    assert reaper.run([], max_age_s=45 * 60, apply=True) == 0
+    assert reaper.run([], max_age_s=_age_bound_s(reaper), apply=True) == 0
 
 
 # ── the workflow shape: the blind, host-global reap must not come back ──────
