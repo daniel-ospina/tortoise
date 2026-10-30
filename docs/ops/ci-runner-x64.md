@@ -38,14 +38,14 @@ and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`
   nothing distinguishes the classes today. They are NOT unroutable: labels match cumulatively and a
   custom label routes on its own (that is how `ubuntu-latest` reaches the pool, next bullet), so a
   bare `runs-on: self-hosted-x64` DOES select this box. What the repo refuses **as a default** is
-  naming `self-hosted`: the `test-slow` pin's header in `.github/workflows/python-ci.yml` is "Do NOT
-  change it back to `ubuntu-latest`, and never to `self-hosted`", and the reason is that a
-  `self-hosted` pin removes the GitHub-hosted half of the race, so during a hosted outage the
-  required leg WAITS and "the aggregate stays pending — not answered yet" instead of being answered
-  by the pool. **One opt-in departure exists and is recorded below** — `CI_SHARD_ROUTING=pool-split`
-  names `[self-hosted, self-hosted-x64]` on the fast matrix's ODD rows, with its `OVERRIDES:` line
-  and its outage-wait exposure (`→ The fast-matrix split is OPT-IN`); read that section with this
-  one, since what makes the pair exclusive is the ABSENCE of `ubuntu-latest`, not the label pair.
+  not a spelling but a CLASS — any POOL-ONLY label: `self-hosted`, and equally the bare custom
+  `self-hosted-x64` above, since no GitHub-hosted runner carries either. The `test-slow` pin's
+  header in `.github/workflows/python-ci.yml` names the spelling ("Do NOT change it back to
+  `ubuntu-latest`, and never to `self-hosted`"), and the reason it gives covers both: a pool-only
+  pin removes the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS
+  and "the aggregate stays pending — not answered yet" instead of being answered by the pool.
+  **One opt-in departure exists and is recorded below** — `CI_SHARD_ROUTING=pool-split` names
+  `[self-hosted, self-hosted-x64]` on the ODD rows (`OVERRIDES:` + outage-wait exposure in that section).
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
   (`fallback_on`) attaches it, `:290` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
