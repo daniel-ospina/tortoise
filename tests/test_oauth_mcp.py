@@ -462,6 +462,48 @@ class TestAuthorizePage:
         assert "frame-ancestors 'none'" in csp
         assert r.text.count('nonce="') == 1
 
+    def test_authorize_requires_pkce(self, api_client):
+        """RFC 7636: a `code` request with no PKCE challenge is an `invalid_request`,
+        relayed to the REGISTERED redirect with `state` echoed (RFC 6749 §4.1.2.1).
+
+        Restored after the class was slimmed for #3524 §9 step 4 (#10346 review): the
+        slim version dropped it, and the surviving error-path tests all used a
+        response_type the endpoint refuses — so “no challenge at all” had no test.
+        The assertions below name the error AND the destination, because `error=` in
+        a Location is satisfied by a redirect to the wrong target too.
+        """
+        tc, _ = api_client
+        reg = _register_client(tc)
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "state": "st-1"},
+            follow_redirects=False)
+        assert r.status_code in (302, 303, 307), r.text
+        location = r.headers["location"]
+        assert location.startswith(REDIRECT + "?"), location
+        assert "error=invalid_request" in location, location
+        assert "state=st-1" in location, location
+
+    def test_authorize_rejects_plain_challenge(self, api_client):
+        """RFC 7636 §4.2: `code_challenge_method=plain` is refused — this AS supports
+        S256 only — as the same relayed `invalid_request` error.
+
+        Restored with `test_authorize_requires_pkce` above (same review finding).
+        """
+        tc, _ = api_client
+        reg = _register_client(tc)
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code",
+            "code_challenge": "x" * 64, "code_challenge_method": "plain",
+            "state": "st-1"},
+            follow_redirects=False)
+        assert r.status_code in (302, 303, 307), r.text
+        location = r.headers["location"]
+        assert location.startswith(REDIRECT + "?"), location
+        assert "error=invalid_request" in location, location
+        assert "state=st-1" in location, location
+
 class TestLoopbackPortAgnostic:
     """#2846 — RFC 8252 §7.3: for loopback redirect URIs the AS must ignore the
     port, because a native client (Claude Code CLI) binds an ephemeral port at
