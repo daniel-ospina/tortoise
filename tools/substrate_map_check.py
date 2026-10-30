@@ -148,7 +148,26 @@ PROSE_FAMILY_MARKER = "*(prose — not measured)*"
 
 
 def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    """Read a measurement input; failing to read one is a STATE ERROR (2).
+
+    The module contract above says exit 2 covers "a measurement input …
+    unreadable/ABSENT here", but an unguarded `read_text` escapes `measure()` as a
+    bare `OSError`/`UnicodeDecodeError`, so `main()` never returns and CPython
+    exits **1** — the code this tool reserves for DRIFTED, with a traceback
+    instead of the `state error:` line. An operator separating "the map drifted"
+    from "this checkout cannot answer" then gets the wrong branch (#5086 review
+    P3, cycle 9).
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        try:
+            where = str(path.relative_to(ROOT))
+        except ValueError:  # pragma: no cover - a path tests hand us
+            where = str(path)
+        raise _state_error(
+            f"cannot read {where} ({exc.__class__.__name__}: {exc})"
+        ) from exc
 
 
 def _state_error(message: str) -> SystemExit:
@@ -246,14 +265,16 @@ _TABLE_SEPARATOR = re.compile(r"^\|[\s:|-]+\|$")
 def _lane_table_body_rows(lanes: str) -> list[str] | None:
     """The body rows of §3's LANE table — the first table in the section.
 
-    The population is the TABLE, not a row SHAPE. Enumerating rows by a
-    `| **L` prefix skipped every row written any other way (an unbolded
-    `| L9 …`, a table that stopped bolding its ids), so a lane row whose family
-    is prose could sit inside §3 while the guard reported CLEAN over it — the
-    same "narrower population read as a pass" class as the family regex, one door
-    along (#5086 review P3, cycle 9). A table whose header/separator cannot be
-    found returns `None`, so the caller REPORTS the unenumerable population
-    instead of reading it as emptiness.
+    The population is the TABLE, not a row SHAPE. Enumerating rows by a prefix
+    (`| **L`, then a normalised `L<digit>`) skipped every row written any other
+    way — an unbolded `| L9 …`, a table that stopped bolding its ids, a row
+    re-labelled `| **Retrieval traversal**` — so a lane row whose family is prose
+    could sit inside §3 while the guard reported CLEAN over it. Every prefix rule
+    is the same "narrower population read as a pass" class, one door along: the
+    fix is to take the population from the CONTAINER, not from the row's text
+    (#5086 review P3, cycle 9). A table whose header/separator cannot be found
+    returns `None`, so the caller REPORTS the unenumerable population instead of
+    reading it as emptiness.
     """
     rows: list[str] = []
     for line in lanes.splitlines():
@@ -280,7 +301,9 @@ def _lane_rows_without_a_family(lanes: str) -> list[str]:
     The row population is §3's lane TABLE (`_lane_table_body_rows`), never a
     prefix of the row text: a checker that only recognises `| **L` rows is a
     shape allowlist, and a row that stops matching the shape escapes measurement
-    silently (#5086 review P3, cycle 9).
+    silently (#5086 review P3, cycle 9). A body row that does not LOOK like a lane
+    row is reported for the same reason — it is in the lane table and nothing
+    measured it, so it is the reader's to fix, not the checker's to drop.
     """
     body = _lane_table_body_rows(lanes)
     if body is None:
@@ -294,7 +317,7 @@ def _lane_rows_without_a_family(lanes: str) -> list[str]:
     for line in body:
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) < 4:
-            problems.append(f"lane row is not a 5-cell table row: {line[:60]}")
+            problems.append(f"§3's lane table row is not a 5-cell table row: {line[:60]}")
             continue
         lane, family = cells[0], cells[3]
         if _family_paths(family) or PROSE_FAMILY_MARKER in family:
@@ -412,7 +435,12 @@ def _module_level_internal_imports(path: Path) -> list[str]:
     `while:`/`match:`/`class` body runs too, so a wrapped internal import is
     reported (#5086 review P3, cycles 6-7).
     """
-    tree = ast.parse(_read(path))
+    try:
+        tree = ast.parse(_read(path))
+    except SyntaxError as exc:
+        # An unparseable file is an input this checkout cannot measure, not a
+        # drift claim about the document — exit 2, never the drift code.
+        raise _state_error(f"cannot parse {path.name} ({exc})") from exc
     found: list[str] = []
     for node in _walk_module_scope(tree.body):
         if isinstance(node, ast.ImportFrom):
@@ -480,7 +508,14 @@ def check_leaf_rows(doc: str) -> list[str]:
 
 
 def check_registered(doc_text: str) -> list[str]:
-    """The document is reachable from the docs index (an unindexed doc is unfound)."""
+    """The document is reachable from the docs index (an unindexed doc is unfound).
+
+    An ABSENT `docs/00_index.md` is reported as a DRIFT problem, not a state
+    error: the index is itself a checked artifact of this repository (every doc
+    must be registered in it), so "the index is gone" is a claim about the tree
+    rather than about what this checkout can read — and deleting the index must
+    never turn the registration claim into a pass.
+    """
     if not INDEX.exists():
         return [f"{INDEX.relative_to(ROOT)} does not exist"]
     if DOC.name not in _read(INDEX):
