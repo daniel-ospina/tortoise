@@ -18679,7 +18679,7 @@ def _record_unavailable() -> HTTPException:
     that predicate asks only whether the DSN is set (``return _dsn() is not
     None``), while the WRITE side asks the same capability question with both
     conjuncts — ``sdk._get_event_log() is not None and _record_dsn() is not
-    None`` (`tortoise/sdk.py:2652`), because the turn-record carrier is
+    None`` (`tortoise/sdk.py:2657-2658`), because the turn-record carrier is
     gated on a configured journal. Without `TORTOISE_EVENT_LOG_BASE_DIR` the
     write door declines `no_durable_journal` and the GRAPH keeps the turns, so
     "the graph keeps only the counters" is a property of armed+journaling, not
@@ -18745,7 +18745,7 @@ def _record_holds_turns() -> bool:
     live. Turns reach the record through the turn-record CARRIER
     (``record_projection.TURNS_RECORD_TYPE``, #10017 — the per-turn `PointAdded`
     records before it), which needs a configured journal AND the DSN —
-    `sdk.py:2652`'s two conjuncts —
+    `sdk.py:2657-2658`'s two conjuncts —
     while this predicate tests the DSN ONLY. So on an armed-but-NOT-journaling
     deployment the writer puts the turns in the GRAPH while this read still asks
     the record, and the record's empty answer then stands for turns the graph

@@ -1864,6 +1864,60 @@ jobs:
     # $TORTOISE_TEST_DOCKER_PORT (passworded) and $TORTOISE_TEST_LEGACY_PORT
     # (legacy), read by tests/_live_utils.py.
     steps:
+      # ⛔ FIRST STEP ON PURPOSE — same contract as the fast job's (#10028).
+      # This job was the UN-MIGRATED half: `pytest-rc`, `pytest-files` and the
+      # redislite/tempdir hygiene reports had already moved to `${RUNNER_TEMP}`,
+      # but the three artifacts the VERDICT and the guards are read from were
+      # still the host-global `/tmp/pytest.log` / `/tmp/junit.xml` /
+      # `/tmp/expected-nodeids.txt`. `.github/scripts/pytest-attribution.sh`
+      # named that exact residue in its own "NAMED RESIDUAL" header, whose STATUS
+      # paragraph records THIS job as migrated (2026-10-29). The header's residual
+      # paragraph names the legs that still write the host-global literals —
+      # `test-concurrency-falkor`, `test-track-b`, `test-carve-out` and
+      # `test-d14-hosted-api` here, plus the warn-only `validate` job in
+      # `post-merge-validation.yml` — the deliberate residual carried by #10280. That
+      # list is DERIVED and pinned by
+      # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
+      # so read it there rather than trusting this comment's copy of it.
+      #
+      # MEASURED (run 40808264676, `test-slow (a)`): the leg's own manifest
+      # declared **367** expected nodeids, its own run reported
+      # `365 passed, 2 skipped` (= 367) in 2378.86s, and its own
+      # `pytest exit code: 0` banner printed — a fully GREEN leg — yet the job
+      # still concluded `failure`, because a sibling leg's `> /tmp/pytest.log`
+      # truncated the file between this leg's `tail` and its attribution read.
+      # `pytest-attribution.sh` therefore printed `STALE session summary (NOT
+      # this leg's verdict)` / `INCOMPLETE` under that exit code.
+      # The same sharing made legs (b) and (e) print FAILED nodeids for
+      # `tests/test_epic903_fixtures.py`, `tests/test_epic903_scheduler.py` and
+      # `tests/test_graph_diagnostics.py` — files whose only progress line in
+      # those legs' logs is `tests/test_ci_selection.py`, i.e. tests they never
+      # ran — and made the #964 heartbeat DECREASE inside a "single" session
+      # (444 passed -> 353 passed). The six nodeids genuinely belong to legs (c)
+      # and (d), which do run those files; neither of those legs' own sets is
+      # recoverable from the tail.
+      #
+      # `runner.temp` is `<runner_install>/_work/_temp`, and a runner executes one
+      # job at a time, so this is per-JOB unique even when several runner installs
+      # share one `/tmp`. Failing closed on `RUNNER_TEMP` — never falling back to
+      # `/tmp` — is the whole point: a silent fallback is indistinguishable from
+      # the bug being fixed.
+      #
+      # ⛔ NOT a job-level `env:` block: `runner` is not an allowed context at
+      # `jobs.<job_id>.env`, and `${{ runner.temp }}` there makes actionlint
+      # reject the WHOLE file (#6253: zero jobs, zero check-runs, and the
+      # required `python-ci-gate` ABSENT rather than red). `steps.<id>.with` DOES
+      # allow the `runner` context, which is why the upload below uses it.
+      - name: Resolve per-job pytest artifact paths (#10028)
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
+          {
+            echo "PYTEST_LOG=$base/pytest.log"
+            echo "PYTEST_JUNIT=$base/junit.xml"
+            echo "PYTEST_MANIFEST=$base/expected-nodeids.txt"
+          } >> "$GITHUB_ENV"
+          echo "pytest artifacts for this leg are under $base (per-job, not the host /tmp)"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -2009,7 +2063,8 @@ jobs:
         # pytest step (off the 40m watchdog), using each leg's DERIVED
         # `matrix.files` expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
-        # construction the run step builds) -> /tmp/expected-nodeids.txt.
+        # construction the run step builds) -> $PYTEST_MANIFEST (per-job since
+        # the #10028 migration; it was the host-global /tmp/expected-nodeids.txt).
         run: |
           FILES=""
           # #2148 tier-2 (slow_run == true, full == false): run only the
@@ -2031,7 +2086,7 @@ jobs:
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output "$PYTEST_MANIFEST"
         env:
           # Same defect class as the fast matrix's manifest step (see above): the
           # collect must see what the run sees, or the expected set silently omits
@@ -2049,7 +2104,9 @@ jobs:
         # Per-test --timeout=300: these files have tests/setups that
         # legitimately take >90s; 300s still caps any hang.
         # #964: liveness heartbeat — see the fast job's run step. pytest
-        # output is buffered to /tmp/pytest.log for the guaranteed tail, so
+        # output is buffered to $PYTEST_LOG (per-job, `<runner.temp>/pytest.log`
+        # since the #10028 migration; it was the host-global /tmp/pytest.log) for
+        # the guaranteed tail, so
         # the job log was silent for 30-50 min; the loop below prints
         # progress to the live job log every 5 min.
         run: |
@@ -2092,8 +2149,8 @@ jobs:
           # the authoritative numbers are the tail + WATCHDOG banner below.
           ( while true; do
               sleep 300
-              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
-              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              p=$(grep -c ' PASSED' "$PYTEST_LOG" 2>/dev/null || true)
+              f=$(grep -c ' FAILED' "$PYTEST_LOG" 2>/dev/null || true)
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
@@ -2124,13 +2181,13 @@ jobs:
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
-          timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
-          tail -n 300 /tmp/pytest.log
+          tail -n 300 "$PYTEST_LOG"
           # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
           # post-summary interpreter-exit noise fills it and pushes BOTH the
           # session summary and the `-r fEs` report above the cut, so the log
@@ -2138,7 +2195,7 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -2147,15 +2204,15 @@ jobs:
           # THIS job log, so without the nodeids it sees an unattributable
           # failure and refuses — a refusal, not a comparison (#4453).
           echo "==================== pytest failure nodeids ===================="
-          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
+          grep -E '^(FAILED|ERROR) ' "$PYTEST_LOG" || echo "(no FAILED/ERROR nodeids)"
           # #880: 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
           # ignored INT mid-test; 2 = pytest's own SIGINT summary — the count
           # banner must print for all three (previously only 124 matched,
           # so the banner never printed on the real kill path).
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
-            passed=$(grep -c ' PASSED' /tmp/pytest.log)
-            failed=$(grep -c ' FAILED' /tmp/pytest.log)
-            errored=$(grep -c ' ERROR' /tmp/pytest.log)
+            passed=$(grep -c ' PASSED' "$PYTEST_LOG")
+            failed=$(grep -c ' FAILED' "$PYTEST_LOG")
+            errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: pytest killed after 40m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
@@ -2186,9 +2243,9 @@ jobs:
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+              python3 tools/skip-guard.py "$PYTEST_LOG" --junitxml="$PYTEST_JUNIT" --manifest "$PYTEST_MANIFEST"
             else
-              python3 tools/skip-guard.py /tmp/pytest.log
+              python3 tools/skip-guard.py "$PYTEST_LOG"
             fi
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
@@ -2308,10 +2365,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}-${{ matrix.half }}
+          # #10028: the per-JOB paths resolved in this job's FIRST step, NOT the
+          # host-global `/tmp/...` literals four sibling legs share. Uploading by
+          # the literal path is how one leg's artifact silently replaced
+          # another's (the same defect #6263 fixed in the artifact NAME).
           path: |
-            /tmp/pytest.log
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
+            ${{ runner.temp }}/pytest.log
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
           if-no-files-found: ignore
 
       - name: Stop FalkorDB services (#6673)
