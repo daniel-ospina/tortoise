@@ -894,6 +894,93 @@ def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
     assert "HOME=" in line[0], f"cron needs HOME pinned too (gh credential): {line[0]}"
 
 
+def test_cron_entry_exports_the_pins_it_renders(tmp_path):
+    """The cron entry must **EXPORT** its pins, not merely assign them (#10275 review, P2).
+
+    ⛔ WHY A SUBSTRING ASSERTION CANNOT COVER THIS. `cron_line` renders `$CRON_ENV` BEFORE a `;`,
+    and cron runs the entry through `/bin/sh -c`. POSIX gives an assignment with no command name
+    no export attribute (POSIX.1-2017 `export`: the attribute "shall cause them to be in the
+    environment of subsequently executed commands"), so the bare form sets a shell variable of the
+    one shell cron started and the `python` after the `;` inherits NOTHING. Measured on this box:
+        env -i HOME=.. PATH=.. /bin/sh -c 'CI_RUNNER_OS_LABEL=on; python3 -c "…get(…)"'  -> None
+        the same line with `export CI_RUNNER_OS_LABEL=on`                                 -> on
+    The three existing cron arms (`:679`, `:696`, `:712`) assert the TEXT `CI_RUNNER_OS_LABEL=on`
+    appears, which the inert rendering satisfies just as happily: on a cron host the FILL leg
+    (`--fallback auto` through the provisioner) and the ORPHANED re-registration both read
+    `off`, so the #6897 mitigation this PR's third pin exists to carry never reached the pool.
+
+    So this case runs the entry's OWN command half under `/bin/sh` with `CI_RUNNER_OS_LABEL` and
+    `RUNNER_AUTOSCALE_PROVISIONER` absent from the parent environment — cron's own env (`HOME`,
+    `/usr/bin:/bin`) and nothing else — and asserts the process the schedule starts REPORTS them.
+    The tool is replaced by a stub observer that prints what it inherited; the rest of the line
+    (`cd <repo> && <interpreter> <tool>`) is the entry's own text, not a re-implementation.
+
+    Mutation: drop the `export` from `$CRON_ENV` (the pre-fix shape) -> the observer prints
+    `CI_RUNNER_OS_LABEL=UNSET` and `RUNNER_AUTOSCALE_PROVISIONER=UNSET` -> RED. Dropping
+    `$CRON_ENV` from the render is RED for the same reason.
+    """
+    sb = _sandbox(
+        tmp_path,
+        uname="Linux",
+        cron=True,
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
+    )
+    tool_path = sb["repo"] / "tools" / "install-ci-runner-x64.sh"
+    tool_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    tool_path.chmod(0o755)
+
+    res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="on"))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    rendered = [ln for ln in res.stdout.splitlines() if f"{LABEL}-cron" in ln]
+    assert len(rendered) == 1, res.stdout
+
+    # cron's five schedule fields, then the command it will run.
+    command = rendered[0].split(None, 5)[5]
+    # Drop the log redirect and the trailing `# <label>` comment: neither is the question here.
+    command = command.split(" >> ", 1)[0]
+    # The interpreter + tool the entry starts, replaced by an observer that can ANSWER "what did
+    # the process inherit". Asserted present first: a silent no-op replace would make this vacuous.
+    invocation = f"{sb['env']['AUTOSCALE_PYTHON']} {sb['install'] / 'runner_autoscale.py'}"
+    assert invocation in command, f"the entry does not start the pinned interpreter: {command}"
+    observer = sb["bin"] / "env-observer"
+    observer.write_text(
+        "#!/bin/sh\n"
+        'printf "CI_RUNNER_OS_LABEL=%s\\n" "${CI_RUNNER_OS_LABEL-UNSET}"\n'
+        'printf "RUNNER_AUTOSCALE_PROVISIONER=%s\\n" "${RUNNER_AUTOSCALE_PROVISIONER-UNSET}"\n'
+        'printf "HOME=%s\\n" "${HOME-UNSET}"\n',
+        encoding="utf-8",
+    )
+    observer.chmod(0o755)
+    command = command.replace(invocation, str(observer))
+
+    # ⛔ CRON'S ENVIRONMENT, NOT THE FIXTURE'S: the account's HOME and `/usr/bin:/bin` (cron sets
+    # those itself, which is why they survive the unexported form), and NEITHER pin.
+    cron_env = {"HOME": str(sb["home"]), "PATH": "/usr/bin:/bin"}
+    for absent in ("CI_RUNNER_OS_LABEL", "RUNNER_AUTOSCALE_PROVISIONER"):
+        assert absent not in cron_env
+    out = subprocess.run(
+        ["/bin/sh", "-c", command],
+        env=cron_env,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+    assert out.returncode == 0, (command, out.stdout, out.stderr)
+    assert f"CI_RUNNER_OS_LABEL=on" in out.stdout, (
+        "the entry's `CI_RUNNER_OS_LABEL=on` never reached the process the schedule starts — it is "
+        f"a shell variable of cron's `/bin/sh`, not an export. output: {out.stdout!r} line: {rendered[0]}"
+    )
+    assert f"RUNNER_AUTOSCALE_PROVISIONER={tool_path}" in out.stdout, (
+        "the provisioner override stayed a shell variable too, so the FILL leg resolves its own "
+        f"candidate list instead. output: {out.stdout!r} line: {rendered[0]}"
+    )
+    # The one variable that WAS reaching the tool before the fix: it must still, so this case is
+    # about the export and not about the entry losing its HOME pin.
+    assert f"HOME={sb['home']}" in out.stdout, out.stdout
+
+
 @pytest.mark.parametrize(
     ("interval", "want_sched", "want_note"),
     [

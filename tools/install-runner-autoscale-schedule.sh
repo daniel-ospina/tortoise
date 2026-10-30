@@ -224,7 +224,21 @@ done
 # sets HOME to the account's PASSWD home, and gh reads its credential from
 # $HOME/.config/gh/hosts.yml — which on these boxes is not that home. A cron-only host with PATH
 # but no HOME fired, found no credential, and exited 2 every interval (round 10, F2's cron half).
-CRON_ENV="HOME=$HOME PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin"
+#
+# ⛔ AND THE ASSIGNMENTS ARE **EXPORTED**, NOT MERELY MADE — this block is rendered BEFORE A `;`
+# (see `cron_line`), so `NAME=value` there has NO command name to attach to: POSIX gives such an
+# assignment no export attribute, it becomes a plain shell variable of the one `/bin/sh` cron
+# started, and the `python` AFTER the `;` inherits none of it. Measured 2026-10-30 (#10275 review):
+#   env -i HOME=.. PATH=.. /bin/sh -c '.. CI_RUNNER_OS_LABEL=on; python3 -c "import os;print(
+#   os.environ.get(\"CI_RUNNER_OS_LABEL\"))"'                                   -> None
+#   the same line with `export CI_RUNNER_OS_LABEL=on`                           -> on
+# `export` is the entire difference between a pin that REACHES the timer's process and one that
+# only decorates the entry — it is not a style choice. `HOME`/`PATH` survived the unexported form
+# only because cron exports them itself, which is why the two variables this block pins for the
+# TOOL (`RUNNER_AUTOSCALE_PROVISIONER`) and for the #6897 mitigation (`CI_RUNNER_OS_LABEL`) were
+# both silently inert on every cron host; the systemd (`Environment=`) and launchd
+# (`EnvironmentVariables`) renderers export by construction, so this leg was the odd one out.
+CRON_ENV="export HOME=$HOME PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin"
 [ -n "$PROVISIONER" ] && CRON_ENV="$CRON_ENV RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER"
 # ⛔ THE OS-LABEL PIN IS UNCONDITIONAL — it is NOT a provisioner input. `runner_autoscale.py`
 # reads it itself on the ORPHANED re-registration path (REPAIR), which needs no provisioner, so
@@ -481,6 +495,13 @@ cron_line() {
     echo "NOTE: cron cannot express ${INTERVAL}s — the entry fires every ${eff} min," \
          "never more often than requested (round 11 review: '*/45' fired 45 then 15)." >&2
   fi
+  # ⛔ `$CRON_ENV` SITS BEFORE A `;`, SO IT MUST CARRY ITS OWN `export` (see where it is built, and
+  # the measurement there). cron runs the entry through `/bin/sh -c`; assignments with no command
+  # name only set shell variables of that shell, so a bare `CI_RUNNER_OS_LABEL=on` here reaches the
+  # crontab and NOT the tool the same line starts 40 characters later — a pin that renders, prints,
+  # and does nothing. Pinned behaviourally by
+  # `tests/test_install_runner_autoscale_schedule.py::test_cron_entry_exports_the_pins_it_renders`
+  # (a substring assertion cannot tell the two renderings apart).
   printf '%s %s; cd %s && %s %s%s >> %s 2>&1 # %s\n' \
     "$sched" "$CRON_ENV" "$REPO" "$PYTHON" "$INSTALLED" "$ARGV_TAIL" "$LOG" "$LABEL-cron"
 }
