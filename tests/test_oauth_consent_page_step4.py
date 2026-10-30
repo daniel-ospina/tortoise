@@ -1983,6 +1983,17 @@ def test_the_state_requirement_is_MARKED_as_a_departure_where_a_reader_adopts():
         "§2.1's `bind` admits `state: null` and such a token must still be "
         "redeemable. Without it the marker licenses the opposite tidy-up")
 
+    # ── the marker's SECOND home: the issue, which is the artifact a lane reads ──
+    # `AGENTS.md` → "the marker belongs ON THE ISSUE … with the decision ledger carrying the same
+    # line as the index". The relay is half of the finding this row answers (a ruling that lives
+    # only in a doc is invisible to the lane scoping #3524), and a LINK is the one part of a
+    # marker a tidy-up drops while every word above survives — so it is asserted, not assumed.
+    assert re.search(r"issues/3524#issuecomment-\d+", section), (
+        "§10's `state` row no longer points at the decision comment carrying the same "
+        "`OVERRIDES:` line on #3524 — the marker's second home is gone, so the ruling is back "
+        "to living only where a reader of THIS file finds it, invisible to the lane scoping "
+        "#3524. That is the exact gap this row closes; re-relay the line and restore the link.")
+
     # ── the behaviour the marker claims, so the marker cannot outlive it ──
     hosted = HOSTED_API.read_text(encoding="utf-8")
     assert "require_state=True" in hosted, (
