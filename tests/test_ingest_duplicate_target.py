@@ -296,6 +296,54 @@ def test_find_operator_key_is_a_set_for_the_repeated_source_slot(make_sdk):
     assert [i for i, _ in slots] == [0, 1], slots
 
 
+def test_self_support_operator_with_extra_target_adopts_same_set_request(make_sdk):
+    """Review round 5, P3 — the trade §3.2 key 13 now RECORDS, pinned so it
+    cannot be changed silently in either direction.
+
+    ``create_operator("IMPL", a, [a, b])`` keeps the self-support slot AND the
+    other target — 3 slots over 2 distinct endpoints, an arity no same-set
+    request can spell. The exact arm's key is a SET, so ``to: [b]`` (2 slots)
+    EXACT-matches it and is reused **unchanged**: no edge is written, no warning
+    is emitted, and ``ep.py`` reads the 3-slot factor.
+
+    ⛔ Considered and rejected: adding ``n_edges = size($slots)`` to the EXACT
+    arm. It would red ``test_legacy_duplicate_graph_still_dedups`` and re-open
+    the duplicate-operator defect #9750 closes, so the mismatch is DISCLOSED
+    (docs/INGEST_CONTRACT.md §3.2 key 13 + ``create_operator``'s docstring) and
+    the missing diagnostic is #10320 — not silently invented here.
+
+    FAILS on the pre-fix writer: without ``collect(DISTINCT t.id)`` the 3-slot
+    operator's ``collect(t.id)`` is ``[a, a, b]`` (size 3) against a size-2
+    request, so BOTH arms miss and this ``to: [b]`` mints a SECOND operator.
+    """
+    sdk = make_sdk("self_support_extra_target")
+    a = sdk.create_point(kind="statement", content="one")["id"]
+    b = sdk.create_point(kind="statement", content="two")["id"]
+    op = sdk.create_operator("IMPL", a, [a, b])
+
+    slots = _operator_input_slots(sdk, op["id"])
+    assert [(i, t) for i, t in slots] == [(0, a), (1, a), (2, b)], slots
+    assert _edge_counts(sdk) == (3, 3), _edge_counts(sdk)
+
+    assert sdk._find_operator("IMPL", [a, b])["kind"] == "exact"
+
+    res = sdk.ingest({"connections": [
+        {"from": a, "to": [b], "operator": "IMPL"}]})
+
+    assert res["deduped"]["connections"] == 1, res
+    assert res["created"]["connections"] == 0, res["created"]
+    assert res["ids"]["connections"] == [op["id"]], res["ids"]
+    assert _count(sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 1
+    # the adopted arity is NOT repaired and NOT reported — the recorded trade
+    assert _edge_counts(sdk) == (3, 3), _edge_counts(sdk)
+    assert [(i, t) for i, t in _operator_input_slots(sdk, op["id"])] == \
+        [(0, a), (1, a), (2, b)]
+    assert "duplicate_target_deduped" not in \
+        [w.split(":", 1)[0] for w in res["warnings"]], res["warnings"]
+    assert res["warnings"] == [] or all(
+        "arity" not in w for w in res["warnings"]), res["warnings"]
+
+
 def test_absorb_never_completes_an_inexpressible_request(make_sdk):
     """Review round 2, P3 — the crash window the `n_edges = size(targets)` guard
     does NOT cover, and the `completed` count that over-reported it.

@@ -18148,6 +18148,16 @@ class TortoiseSDK:
         repeats the SOURCE is NOT collapsed: ``create_operator(op, a, [a])``
         is the deliberate self-support shape (``idx`` 0 and 1 over one id).
 
+        ⚠️ A self-support target list that ALSO carries another target —
+        ``create_operator(op, a, [a, b])`` — writes THREE slots over TWO
+        distinct endpoints, and no same-set request can express that arity.
+        ``ingest``'s dedup key is a SET on both sides, so a request for the
+        same endpoint set (``{"from": a, "to": [b]}``) EXACT-matches this
+        operator and is reused **unchanged**: the narrower factor is neither
+        written nor reported (§3.2 key 13's adoption caveat, and #10320 for the
+        missing diagnostic). Supersede and re-create if you need the narrower
+        arity.
+
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism). ⛔ ``MITIGATES`` is
             NOT an operator kind (#4937 — the F1 ruling recorded on #2552):
