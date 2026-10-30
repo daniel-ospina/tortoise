@@ -354,6 +354,20 @@ recorded in §9 — it needs a decision about fail-loud vs warn on a machine who
 extension was installed by an older product version, which is a product-policy
 decision, not a mechanism.
 
+**#10241 (2026-10-29) — the install-time half of that gap is closed.** The byte
+check above was the *pre-write* comparison (`_is_regular_unchanged` answers "should
+I write?"), so an install could report `installed …` — and `tortoise install pi`
+could print `Pi capture extension installed.` — over bytes it had never read back:
+measured on the reference box, the installed seam was generation 14 (149,736 B)
+against a shipped generation 15 (152,752 B). `capture_install.assert_seam_target`
+now runs after every real `_install_pi` write (and on the no-op path): it RESOLVES
+the path Pi will load, sha256s it, compares that with the shipped artifact, and
+fails the install with a message naming **both** paths (and both digests, plus the
+resolved target when the install is a symlink) instead of claiming success. What
+is still open is only the STARTUP surface — reporting the same divergence at
+session start rather than at the next `tortoise install pi` — which keeps the
+fail-loud-vs-warn decision above.
+
 ---
 
 ## 8. GUARANTEED vs NOT GUARANTEED

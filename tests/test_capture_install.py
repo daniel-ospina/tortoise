@@ -924,6 +924,116 @@ def test_pi_install_fails_loudly_when_a_legacy_disable_would_destroy_state(home)
     assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "keep.ts").exists()
 
 
+def test_pi_install_asserts_the_resolved_target_instead_of_trusting_the_write(
+        home, monkeypatch):
+    """#10241: an install may not report success over bytes it has NOT read
+    back. The Pi seam is a hand-copied file, so the installed copy is a
+    SNAPSHOT — and a snapshot can still be the previous generation after a
+    write that silently did not land (an immutable/overlay destination, an
+    external writer, or any future early return).
+
+    The assertion is driven by a REAL stale copy on disk plus a write that
+    does not land — the exact shape of the measured divergence (installed
+    generation 14 vs shipped 15 on the reference box), and it must name BOTH
+    paths and BOTH digests, because "some file differs" is not actionable.
+
+    Mutation: drop the post-write `assert_seam_target` call in `_install_pi` —
+    the installer returns `ok`/`changed`/`installed …` over the stale
+    generation, which is the silent divergence the issue names."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    stale = (b"// tortoise-hook-version: 14\n"
+             b"// the previous generation\nexport default {};\n")
+    dst.write_bytes(stale)
+    monkeypatch.setattr(capture_install, "_atomic_bytes",
+                        lambda dst, data, mode: None)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        f"the install claimed success over unverified bytes: {res.actions}")
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    assert str(dst) in res.error, res.error
+    assert str(shipped) in res.error, res.error
+    assert hashlib.sha256(stale).hexdigest() in res.error, res.error
+    assert hashlib.sha256(_PI).hexdigest() in res.error, res.error
+    assert dst.read_bytes() == stale, "the fixture's stale copy was overwritten"
+
+
+def test_pi_install_passes_the_resolved_target_assertion(home):
+    """The passing direction: an install that DID land is asserted clean, so
+    the new check cannot be satisfied by refusing everything.
+
+    Mutation: return a divergence unconditionally from `assert_seam_target`
+    (every install fails) — or compare the shipped file against itself
+    (every stale install passes); this pins that a real install is VERIFIED,
+    not merely assumed."""
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert res.changed
+    dst = home / ".pi" / "agent" / "extensions" / capture_install.PI_EXTENSION_NAME
+    assert dst.read_bytes() == _PI
+    assert capture_install.assert_seam_target("pi", home=home) == ""
+    # The no-op re-run asserts the same thing: "already current" is a claim
+    # about the file on disk, not about this run's intent.
+    again = install_capture("pi", home=home)
+    assert again.ok, again.error
+    assert capture_install.assert_seam_target("pi", home=home) == ""
+
+
+def test_seam_target_assertion_names_both_paths_for_a_stale_install(home):
+    """A stale install — no fault injection, just the state the reference box
+    was measured in — fails the assertion with a message naming the installed
+    path AND the shipped path, with both digests.
+
+    Mutation: report the installed path only, or compare generations instead
+    of bytes (a prose-only seam edit moves the bytes without moving the
+    generation the reader trusts, so a marker-only check passes it)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    stale = (b"// tortoise-hook-version: 15\n"
+             b"// hand-edited, same marker\nexport default {};\n")
+    dst.write_bytes(stale)
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    assert msg, "a stale/hand-edited installed seam passed the assertion"
+    assert str(dst) in msg, msg
+    assert str(shipped) in msg, msg
+    assert hashlib.sha256(stale).hexdigest() in msg, msg
+    assert hashlib.sha256(_PI).hexdigest() in msg, msg
+
+
+def test_seam_target_assertion_names_the_resolved_target_of_a_symlink(home):
+    """A `verified-target` install is graded on the bytes Pi LOADS, so the
+    message must name the RESOLVED target as well as the loaded path — a user
+    reading only the loaded path would edit the wrong file.
+
+    Mutation: hash `loaded` instead of `loaded.resolve()` (identical for a
+    real file, wrong for the symlink shape this checks, and the message then
+    omits the target it actually read)."""
+    real_home = home.resolve()
+    ext_dir = real_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    old_copy = real_home / "old-checkout" / capture_install.PI_EXTENSION_NAME
+    old_copy.parent.mkdir(parents=True)
+    old_copy.write_bytes(b"// tortoise-hook-version: 14\n// stale\n")
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(old_copy)
+
+    msg = capture_install.assert_seam_target("pi", home=real_home)
+
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    assert msg, "a symlinked install pointing at a stale copy passed"
+    assert str(dst) in msg, msg
+    assert str(old_copy) in msg, msg
+    assert str(shipped) in msg, msg
+
+
 # ── codex: the artifact + the $CODEX_HOME registration (#3818) ──────────
 
 

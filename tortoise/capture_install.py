@@ -116,7 +116,11 @@ commands CANNOT reach, because both resolve through ``get_layout`` and reject
 ``pi`` outright (#5351).  Pi's installed seam is graded by ``tortoise doctor``
 and by ``session verify`` through the same contract, and it is repaired by
 ``tortoise install pi`` (plus ``hook_install.detect_artifact_install`` for the
-read side).
+read side).  Because the Pi seam is a COPY, not a link into the package, the
+installer also **asserts** the copy it claims: :func:`assert_seam_target`
+resolves the path Pi will load and compares its sha256 with the shipped
+artifact's, failing loudly with both paths named rather than reporting
+``installed …`` over an older generation (#10241).
 
 Because the two modules answer the same question — "is this entry ours?" —
 :func:`_is_our_script_command` here **delegates** to #3866's
@@ -171,6 +175,7 @@ print "installed" for a state the repair path will not touch.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -1291,6 +1296,104 @@ def legacy_extension_obstacle(harness: str,
             f"{PI_DISABLED_DIRNAME} — move one aside")
 
 
+def _sha256_file(path: Path) -> str | None:
+    """The sha256 hex digest of ``path``, or ``None`` when it is unreadable.
+
+    ``None`` is a first-class answer, never an exception: this feeds an
+    ASSERTION about a user-editable file (``~/.pi/agent/extensions/…``), and a
+    digest reader that raised would turn a reported divergence into a
+    traceback — the same contract ``hook_install.read_hook_version`` keeps.
+    Read in chunks so a large refactor of the seam cannot make this allocate
+    the whole artifact twice.
+    """
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def assert_seam_target(harness: str,
+                       *,
+                       home: str | os.PathLike[str] | None = None,
+                       ) -> str:
+    """``""`` when the file ``harness`` LOADS is the file this repo SHIPS.
+
+    #10241: the Pi seam is installed by COPYING a file (``_install_pi`` →
+    ``_atomic_bytes``), deliberately — a symlink into ``site-packages`` would
+    dangle and lose capture entirely when an upgrade moves the package (see
+    ``docs/architecture/PI-CAPTURE-ARCHITECTURE.md`` §7).  The cost of a copy
+    is that the installed file is a SNAPSHOT of whatever generation was
+    current when it was copied, so it can stay at generation 14 while the repo
+    ships 15 and capture with older logic.  Nothing asserted otherwise: the
+    installer reported ``installed …`` from its own write INTENT and never
+    re-read what landed, and the only comparison anywhere
+    (``hook_install.detect_artifact_install``) has to be asked for by hand and
+    names the installed path without naming the shipped one.
+
+    This is that missing assertion, and it asks the question the ISSUE asks —
+    is the file the runtime will LOAD the file the repo SHIPS — which is not
+    the same question as "is the path we wrote the path we meant":
+
+    * the loaded path is RESOLVED through symlinks first, because a symlinked
+      install is graded on the bytes at its target (that is what Pi loads);
+    * the comparison is BYTES (sha256), not the ``tortoise-hook-version``
+      marker.  The marker is a proxy: the seam bumps it on a PROSE-only edit
+      precisely because the byte comparison is what a reader trusts (seam
+      generation 4 records why), so the digest is the ground truth here.
+
+    Returns a loud sentence naming BOTH paths — the loaded path (plus the path
+    it resolves to, when that differs) and the shipped artifact — with BOTH
+    digests, when they differ.  An ABSENT seam is not this function's finding:
+    ``missing-artifact`` already reports it, and an absent file has no
+    divergence to assert.
+
+    ``home`` defaults to the running user's home, matching
+    :func:`install_capture`; every path comes from
+    ``hook_install.ARTIFACT_CONTRACTS[harness]``, so this cannot name a
+    different artifact than the installer writes (#4680).
+    """
+    contract = hook_install.ARTIFACT_CONTRACTS.get(harness)
+    if contract is None:
+        return ""  # no artifact seam for this harness — nothing to assert
+    shipped = contract.source
+    root = hook_install.artifact_root(
+        harness, Path(home) if home is not None else Path.home())
+    if root is None:  # pragma: no cover - registry membership is checked above
+        return ""
+    loaded = root / contract.install_name
+    if not loaded.is_symlink() and not loaded.exists():
+        return ""  # absent, not divergent: `missing-artifact` owns that
+    try:
+        resolved = loaded.resolve()
+    except (OSError, RuntimeError) as e:
+        # A symlink LOOP (or an unsearchable component): the harness cannot
+        # load this path at all, and no digest can describe it.
+        return (f"the capture extension {harness} loads cannot be resolved: "
+                f"{loaded} → {e.__class__.__name__}: {e}. Remove the symlink "
+                f"and re-run `tortoise install {harness}`.")
+    loaded_digest = _sha256_file(resolved)
+    shipped_digest = _sha256_file(shipped)
+    if shipped_digest is None:
+        # A shipped artifact that cannot be read is a REPO defect pinned by
+        # tests, never this install's problem — the same posture
+        # `detect_artifact_install` takes for an unmarkered shipped seam.
+        return ""
+    if loaded_digest == shipped_digest:
+        return ""
+    via = "" if resolved == loaded else f" (which resolves to {resolved})"
+    return (
+        f"the file {harness} LOADS is not the file this repo SHIPS: "
+        f"{loaded}{via}, sha256 {loaded_digest or 'unreadable'}, differs from "
+        f"the shipped {shipped}, sha256 {shipped_digest} — the installed "
+        f"capture seam would run older or locally edited logic. Re-run "
+        f"`tortoise install {harness}` to replace it."
+    )
+
+
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
     ext_dir = pi_home(home)
@@ -1374,6 +1477,18 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
             _atomic_bytes(dst, payload, 0o644)
             actions.append(f"installed {dst}")
         changed = True
+
+    # #10241: success is CLAIMED here, so it is VERIFIED here — the installer
+    # re-reads the file Pi will load, resolved through any symlink, and refuses
+    # to report an install whose bytes are not the bytes it shipped. Runs on
+    # the NO-OP path too, because "already current — nothing to do" is equally
+    # a claim about the file on disk. A dry run wrote nothing, so it can assert
+    # nothing; the action lines already say what WOULD happen.
+    if not dry_run:
+        divergence = assert_seam_target(harness, home=home)
+        if divergence:
+            return InstallResult(harness, changed=changed,
+                                 actions=tuple(actions), error=divergence)
 
     return InstallResult(harness, changed=changed, actions=tuple(actions))
 
@@ -1732,6 +1847,7 @@ __all__ = [
     "OPENCLAW_PLUGIN_DIRNAME",
     "PI_EXTENSION_NAME",
     "InstallResult",
+    "assert_seam_target",
     "codex_home",
     "cursor_home",
     "install_capture",
