@@ -4315,3 +4315,101 @@ class Test9876AmbiguousEntityNameOnCommit:
         r = client.post("/v1/sessions/commit", json=again)
         assert r.status_code == 200, r.text
         assert r.json()["duplicate"] is True, r.text
+
+
+# ── #9876 review — the LIVE pass must classify an about-edge MENTION the way
+# the replay pass does ───────────────────────────────────────────────────────
+
+_ABOUT_NAME = "Ghost"
+
+
+class Test9876AboutMentionDisposition:
+    """A commit's ``events[].about_entities`` name is ATTRIBUTION, so its miss
+    takes the EXEMPT ``unfolded-mention`` shape on BOTH passes.
+
+    ``hosted_api`` step 6a resolves each deferred about name with
+    ``resolve_fold_name``. The replay pass resolves the same reference with
+    ``mention=True`` (``projection/entities.py:4896`` status-fold target,
+    ``:5275`` ``EventRecorded.object``), and D1's ``unfolded-mention`` row
+    enumerates *"an about-edge name"* as an exempt ATTRIBUTION use — so a
+    non-exempt record here is one reference with two dispositions: exactly the
+    live/replay parity break R8 forbids (*one journal → one disposition on
+    every surface*), and a report claiming a fold refused something for a write
+    where nothing was folded.
+    """
+
+    def test_a_mention_that_races_an_ambiguous_carrier_records_the_exempt_shape(
+            self, client, monkeypatch):
+        """The reachable live miss: a second carrier appears BETWEEN the
+        pre-write probe and step 6a — the race the probe/422 boundary admits by
+        design (see ``test_a_refusal_escaping_the_precheck_is_still_a_422``).
+
+        FAIL-ON (pre-fix): step 6a omits ``mention=True``, so this records
+        ``ambiguous-entity-name`` — a NON-exempt refusal — while replay of the
+        same event records the exempt shape."""
+        from tortoise.projection import nonfolded
+        from tortoise.projection.nonfolded import (
+            SHAPE_AMBIGUOUS_ENTITY_NAME,
+            SHAPE_UNFOLDED_MENTION,
+            SHAPE_UNREGISTERED_REFERENCE,
+        )
+
+        recorded: list = []
+        real_record = nonfolded.record_non_folded
+
+        def _spy(shape, **fields):
+            entry = real_record(shape, **fields)
+            recorded.append(entry)
+            return entry
+
+        # `resolve_fold_name` imports the symbol at CALL time, so patching the
+        # module attribute is what a live commit actually sees.
+        monkeypatch.setattr(nonfolded, "record_non_folded", _spy)
+
+        real_create = TortoiseSDK.create_entity
+
+        def _create_then_split(self, kind, name, **kw):
+            """Step 6 registers the entity; the SECOND live carrier of the same
+            name lands right after it, before step 6a resolves."""
+            out = real_create(self, kind, name, **kw)
+            if name == _ABOUT_NAME:
+                self._get_proj().g.query(
+                    "CREATE (o:Object {name:$n, status:'live'})",
+                    params={"n": name})
+            return out
+
+        monkeypatch.setattr(TortoiseSDK, "create_entity", _create_then_split)
+
+        raw = _raw_payload(1, session_id="g9876-e")
+        raw["entities"] = [
+            {"name": _AMBIGUOUS_NAME, "kind": "Project",
+             "passes_frequency_gate": True},
+            {"name": _ABOUT_NAME, "kind": "core:other",
+             "passes_frequency_gate": True},
+        ]
+        raw["events"] = [{
+            "id": f"ev_{content_hash('a mention of a name two carriers hold')[:62]}",
+            "eventKind": "decision",
+            "content": "a mention of a name two carriers hold",
+            "confidence": 0.5,
+            "about_entities": [_ABOUT_NAME],
+            "source_ref": "session.md",
+        }]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+
+        mentions = [e for e in recorded
+                    if f"name={_ABOUT_NAME!r}" in (e.detail or "")]
+        assert mentions, (
+            "the live about-edge miss recorded nothing — the probe below cannot "
+            "distinguish the two dispositions if step 6a never ran")
+        shapes = {e.shape for e in mentions}
+        assert SHAPE_UNFOLDED_MENTION in shapes, (
+            "the live pass recorded the about-edge mention NON-exemptly "
+            f"({sorted(shapes)}); replay records {SHAPE_UNFOLDED_MENTION} for "
+            "the same reference — one reference, two dispositions")
+        assert SHAPE_AMBIGUOUS_ENTITY_NAME not in shapes, (
+            "an about-edge MENTION was recorded as an identity refusal — a "
+            "write that folded nothing is reported as a refused fold")
+        assert SHAPE_UNREGISTERED_REFERENCE not in shapes, (
+            "an about-edge MENTION was recorded as an identity refusal")

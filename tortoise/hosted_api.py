@@ -17854,9 +17854,22 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # #1272 P2-4 case the retired `MERGE (o:Object {name:$name})` existed to
     # cover. A name that still resolves to nothing is left UNWIRED (and recorded
     # by `resolve_fold_name`) rather than fabricated.
+    # ⛔ `mention=True` is the ATTRIBUTION classification (#9876 review). This is
+    # an about-edge NAME — one of the uses D1's `unfolded-mention` row enumerates
+    # verbatim (`identity-decision.md`: "an `EventRecorded`'s `subject` / `object`
+    # / `uses[]`, an `about_entities` status-fold target, **or an about-edge
+    # name** — resolved to no single live holder … **in its ATTRIBUTION use**").
+    # The edge is attribution: a miss drops ONE link and moves no entity's state.
+    # Without the flag this site records `unregistered-reference` /
+    # `ambiguous-entity-name` — NON-exempt — for a write where nothing was
+    # folded, while the replay pass resolves the SAME reference exemptly
+    # (`projection/entities.py:4896` status-fold target, `:5275`
+    # `EventRecorded.object`), i.e. one reference with two dispositions, the
+    # live/replay parity break R8 forbids.
     for _eid, _name in _deferred_about_objects:
         _resolved = resolve_fold_name(proj.g, "Object", _name,
-                                      context="session-commit aboutObject")
+                                      context="session-commit aboutObject",
+                                      mention=True)
         if _resolved:
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
