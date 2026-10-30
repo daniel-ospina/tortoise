@@ -13,6 +13,7 @@ import re
 import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -682,18 +683,56 @@ def _boom_with(err: int):
     return _boom
 
 
+@contextmanager
+def _patch_rmtree(err: int):
+    """Make the rmtree `TemporaryDirectory.cleanup` ACTUALLY calls raise `err`.
+
+    `tempfile` resolves rmtree ONE OF TWO WAYS, and which one depends on the
+    interpreter PATCH level — so patching `shutil.rmtree` alone is a mutation that
+    reaches the cleanup path on some stdlibs and not on others. Read from the primary
+    source on both:
+
+    * CPython **3.12.7+ / 3.12.15** — `_rmtree` calls `_shutil.rmtree(name, onexc=…)`, a
+      MODULE-ATTRIBUTE lookup at call time, so a `shutil.rmtree` patch reaches it
+      (verified against `Lib/tempfile.py` at tag `v3.12.15`).
+    * CPython **3.12.0–3.12.6** (measured on this host's 3.12.3) — the same method calls
+      the module-level `_rmtree(name, …)`, which `tempfile` bound as
+      `_rmtree = _shutil.rmtree` at IMPORT. A `shutil.rmtree` patch never reaches it:
+      the real rmtree runs, the directory is really deleted, and these tests report a
+      false red on a supported interpreter (measured: the stub was never called and
+      `assert os.path.isdir(victim)` failed with "the directory is left for the
+      reaper").
+
+    Patching BOTH makes the mutation reach on every supported 3.12.x, so the pins below
+    assert the product's behaviour rather than the host's stdlib vintage. Restores every
+    attribute it replaced, and only where the stub is still installed.
+    """
+    boom = _boom_with(err)
+    originals: list[tuple[str, object]] = []
+    for attr in ("rmtree", "_rmtree"):
+        for owner in (shutil, tempfile):
+            if hasattr(owner, attr):
+                originals.append((attr, getattr(owner, attr)))
+                setattr(owner, attr, boom)
+    try:
+        yield boom
+    finally:
+        for attr, original in reversed(originals):
+            for owner in (shutil, tempfile):
+                if getattr(owner, attr, None) is boom:
+                    setattr(owner, attr, original)
+
+
 def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
     #7735: a live server re-creates an entry during rmtree's final rmdir.
-    # `shutil.rmtree` is patched GLOBALLY, so it is restored in a `finally`
-    # BEFORE the test returns — otherwise pytest's own `tmp_path` teardown would
-    # hit the stub and ERROR the test that just passed.
+    # The stub is patched GLOBALLY — through both spellings the stdlib uses to reach it
+    # (`_patch_rmtree`) — so it is restored BEFORE the test returns; otherwise pytest's
+    # own `tmp_path` teardown would hit the stub and ERROR the test that just passed.
     import json
     import tempfile
 
     victim = None
-    real = shutil.rmtree
-    shutil.rmtree = _boom_with(errno.ENOTEMPTY)
-    try:
+    with _patch_rmtree(errno.ENOTEMPTY):
         d = tempfile.TemporaryDirectory(dir=str(tmp_path))
         victim = d.name
         with caplog.at_level(logging.WARNING):  # must NOT raise
@@ -712,12 +751,10 @@ def test_enotempty_cleanup_is_tolerated_and_STILL_REPORTED(tmp_path, caplog):
         assert victim in [
             e["path"] for e in payload["tolerated_cleanup_leaks"]], (
             "the CI-visible artifact must name the tolerated directory")
-    finally:
-        shutil.rmtree = real
-        if victim is not None:
-            # This test is a deliberate probe; keep it out of the session
-            # artifact, or every CI run would report a synthetic leak.
-            _discard_tolerated_leaks([victim])
+    if victim is not None:
+        # This test is a deliberate probe; keep it out of the session
+        # artifact, or every CI run would report a synthetic leak.
+        _discard_tolerated_leaks([victim])
 
 
 def test_write_tolerated_cleanup_report_is_silent_when_nothing_leaked(tmp_path):
@@ -1174,15 +1211,11 @@ def test_a_non_enotempty_cleanup_failure_still_raises(tmp_path, err):
     # A blanket `ignore_cleanup_errors=True` would swallow these too.
     import tempfile
 
-    real = shutil.rmtree
-    shutil.rmtree = _boom_with(err)
-    try:
+    with _patch_rmtree(err):
         d = tempfile.TemporaryDirectory(dir=str(tmp_path))
         with pytest.raises(OSError) as excinfo:
             d.cleanup()
         assert excinfo.value.errno == err
-    finally:
-        shutil.rmtree = real
 
 
 def test_tolerant_cleanup_install_is_idempotent_and_restorable():
