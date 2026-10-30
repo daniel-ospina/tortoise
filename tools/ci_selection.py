@@ -1299,6 +1299,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tool's own guard) is selected. Pinned by
              # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
              "tools/queue_resweep.py",
+             # #6388: `tools/seal_session_events.py` is the session-events seal
+             # policy, guarded by tests/test_session_events_seal.py, which is
+             # `core`-registered — but `tools/` is swallowed by
+             # NON_PYTHON_PREFIXES before the `core` fallback runs, so a
+             # tool-only diff took the docs-only early return and ran NO guard
+             # (the #1349/#3332/#3616 silent-drop class, and the same false
+             # "the core fallback covers it" claim #3261 removed). Pinned by
+             # tests/test_ci_selection.py::test_seal_session_events_tool_change_selects_core_not_tier1.
+             "tools/seal_session_events.py",
              # #6138 review P1: the queue-conflict census owns
              # tests/test_queue_conflict_census.py, which is `core`-registered,
              # but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
