@@ -286,6 +286,35 @@ def test_the_carrier_is_TOLERATED_as_a_torn_tail_and_the_DELETE_is_not():
 # ── §2 the payload is the WRITER'S, not a fixture's ────────────────────────
 
 
+def _assert_snapshot_contract(snapshot: dict, *, optional=frozenset(),
+                             context: str = "") -> None:
+    """Assert ONE journalled turn snapshot against the declared key contract.
+
+    ``TURNS_SNAPSHOT_KEYS`` is the ALWAYS set, ``TURNS_SNAPSHOT_OPTIONAL_KEYS``
+    the at-most-one-branch set, and ``TURNS_SNAPSHOT_UNATTESTABLE_KEYS`` the pair a
+    capture MAY omit TOGETHER when its prior-row read could not attest the stored
+    values (#10021 review P3). Asserting plain equality here made the
+    unattestable arm red with "the writer's per-turn snapshot changed" — a
+    message naming the wrong cause — so the pin is stated as the contract.
+    """
+    keys = set(snapshot)
+    allowed = rp.TURNS_SNAPSHOT_KEYS | optional
+    assert not (keys - allowed), (
+        f"{context}: the writer's per-turn snapshot gained {sorted(keys - allowed)}; "
+        "TURNS_SNAPSHOT_KEYS is the contract step 7 inherits, so both move together")
+    assert keys >= (rp.TURNS_SNAPSHOT_KEYS - rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS), (
+        f"{context}: the snapshot lost {sorted((rp.TURNS_SNAPSHOT_KEYS - rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS) - keys)} — "
+        "only the unattestable pair may be absent")
+    omitted = keys & rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS
+    assert omitted in (set(), set(rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS)), (
+        f"{context}: {sorted(omitted)} — the unattestable pair is omitted "
+        "TOGETHER or not at all (a half-omitted snapshot leaves one column "
+        "asserting what the other refuses to)")
+    assert not (keys & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS - optional), (
+        f"{context}: the optional branch {sorted((keys & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS) - optional)} "
+        "has no business in this snapshot")
+
+
 def test_the_carrier_payload_keys_are_the_ones_the_capture_writer_builds(sdk):
     """Read off a REAL capture: the carrier's `turns` entries are these dicts.
 
@@ -304,12 +333,7 @@ def test_the_carrier_payload_keys_are_the_ones_the_capture_writer_builds(sdk):
         f"{len(TURNS)} turn(s) — the population under test is wrong")
     for record in envelope:
         snapshot = record["point"]
-        assert set(snapshot) == rp.TURNS_SNAPSHOT_KEYS, (
-            "the writer's per-turn snapshot changed; TURNS_SNAPSHOT_KEYS is the "
-            "contract step 7 inherits, so both move together")
-        assert not set(snapshot) & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS, (
-            "a fresh capture encoded no vector and preserved none, so the "
-            "optional key has no business here")
+        _assert_snapshot_contract(snapshot, context="a fresh no-vector capture")
         assert "contains_session" not in snapshot, (
             "the session link must ride the EVENT ENVELOPE (#3947), not the "
             "point payload — a node property the live write never sets")
@@ -342,12 +366,10 @@ def test_the_encoded_vector_branch_carries_its_identity_STAMPS(sdk):
         turn_embs=[[0.1, 0.2], [0.3, 0.4]], turn_offset=2)
     encoded = _turn_snapshots(path)[-len(TURNS):]
     assert len(encoded) == len(TURNS)
-    expected = rp.TURNS_SNAPSHOT_KEYS | {
-        "embedding_model", "embedding_revision", "embedding_text_hash"}
+    expected = {"embedding_model", "embedding_revision", "embedding_text_hash"}
     for snapshot in encoded:
-        assert set(snapshot) == expected, (
-            "the encoded-vector snapshot's key set changed; step 7's carrier "
-            "contract moves with it")
+        _assert_snapshot_contract(
+            snapshot, optional=expected, context="an encoded-vector capture")
         assert snapshot["embedding"], "the encoded vector did not ride"
         assert snapshot["embedding_text_hash"], (
             "the stamp must name the text the vector describes (#4194)")
@@ -374,9 +396,11 @@ def test_a_PRESERVED_vector_carries_the_flag_and_withholds_the_identity(sdk):
     preserved = _turn_snapshots(path)[-len(TURNS):]
     assert len(preserved) == len(TURNS)
     for snapshot in preserved:
-        assert set(snapshot) == rp.TURNS_SNAPSHOT_KEYS | {"embedding_preserved"}, (
+        _assert_snapshot_contract(snapshot, optional={"embedding_preserved"},
+                                  context="a preserved-vector capture")
+        assert "embedding_preserved" in snapshot, (
             f"the preserved-vector snapshot is {sorted(snapshot)} — the flag "
-            "and the identity stamps are mutually exclusive branches")
+            "must ride; the identity stamps are the other branch")
         assert snapshot["embedding"], "the prior vector was not carried"
 
 
