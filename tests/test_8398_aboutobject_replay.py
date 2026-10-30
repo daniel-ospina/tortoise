@@ -1628,3 +1628,65 @@ def test_a_successors_OWN_confidence_wins_ACROSS_a_rebuild(wired) -> None:
         "keeps the successor's own value authoritative on both paths")
     assert _counts(proj)["aboutSubject"] == 1, (
         "the rebuild left two aboutSubject edges where live has one")
+
+def test_a_CHAINS_latest_carry_wins_ACROSS_a_rebuild(wired) -> None:
+    """A chain's LAST transfer wins, live and rebuilt (#10139 review round 3).
+
+    The single-hop case is pinned by the two tests above; a chain is a
+    different question, and the answer is not "the first descriptor to run".
+    Live is last-writer-wins: every transfer reads `properties(r)` of the edge
+    its predecessor holds AT THAT MOMENT (`sdk.supersede_point`), so X→Y
+    carries X's value, and Y→Z carries whatever Y's edge holds by then.
+
+    Measured here: X holds `0.42`, the intermediate successor Y holds its own
+    `0.91`. Live's X→Y transfer keeps Y's `0.91` (`#9417` precedence), then
+    Y→Z carries `0.91`, so Z ends at `0.91` and the journal holds descriptors
+    carrying `0.42` and then `0.91`. Both descriptors resolve onto the SAME
+    successor edge (`_final(X) == _final(Y) == Z`), so a replay that applies
+    them inline makes the FIRST one the creator and lands `0.42` — a
+    `live != rebuild` divergence on the property this PR is about, inside the
+    case it claims to have closed. The replay aggregates per resolved edge and
+    applies the LAST payload instead, which is why the assertion below is
+    equality and not a documented divergence.
+    """
+    sdk, proj, events, journal = wired
+    x = _nid(sdk.create_point("statement", "X: original claim"))
+    y = _nid(sdk.create_point("statement", "Y: first restatement"))
+    z = _nid(sdk.create_point("statement", "Z: second restatement"))
+    subj = _nid(sdk.create_subject("TheChainedSubject"))
+    _bind(proj, sdk, x, subj, 0.42)
+    _bind(proj, sdk, y, subj, 0.91)
+
+    sdk.supersede_point(x, y)
+    mid = _about_confidence(proj, y, subj)
+    assert mid == pytest.approx(0.91), (
+        f"the LIVE X→Y transfer did not keep Y's own confidence: {mid}")
+    sdk.supersede_point(y, z)
+
+    live = _about_confidence(proj, z, subj)
+    assert live == pytest.approx(0.91), (
+        f"live's chain did not end at the latest carried value: {live}")
+
+    # Both descriptors must journal their payload, and BOTH must land on the
+    # final successor — that collision is what this test is about.
+    payloads = [
+        r.get("confidence") for r in _records(journal)
+        if r.get("type") == "DirectEdgeRepoint"
+        and r.get("edge_type") == "aboutSubject"
+        and r.get("target_label") == "Subject"
+    ]
+    assert payloads == [pytest.approx(0.42), pytest.approx(0.91)], (
+        f"the chain's descriptors do not carry their own transfer values: "
+        f"{payloads}")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    replay = _about_confidence(proj, z, subj)
+    assert replay == pytest.approx(0.91), (
+        "live != rebuild on a CHAIN (#10139): live ended at "
+        f"{live} and the rebuild produced {replay} — the first descriptor to "
+        "create the successor edge must not win over the last transfer")
+    assert _about_confidence(proj, y, subj) is None, (
+        "the intermediate successor kept an edge live transferred away")
+    assert _counts(proj)["aboutSubject"] == 1, (
+        "the rebuild left more than the single transferred aboutSubject edge")
