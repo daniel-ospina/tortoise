@@ -3200,6 +3200,106 @@ def test_the_installers_own_self_citations_land_on_the_line_they_name():
     )
 
 
+# ── 8c-ii. the call graph the prose DESCRIBES must be the one the script RUNS ───────────────
+def test_the_os_label_resolvers_documented_call_graph_matches_its_real_call_sites():
+    """⛔ A SCRIPT WHOSE DESIGN ARGUMENT IS ITS COMMENTS MAY NOT SHIP A FALSE CALL-GRAPH CLAIM.
+
+    Two surfaces in the installer (the §*THE FLAG HAS TWO SIDES* reach list and the
+    "validated ONCE" rationale above the `case`) stated that `resolve_os_label` is "reached only
+    from `resolve_labels`" and that "`--status` never calls it". Both are FALSE at this head and
+    always were: `--status` calls the resolver DIRECTLY for its intent read (`:511`, inside the
+    `$MODE = status` block), which is why `resolve_os_label` prints its `os-label: auto DECLINED …`
+    line in `--status` at all. The same claim sat in the runbook's WRITERS sentence.
+
+    WHY IT MATTERED ENOUGH TO PIN: that sentence is the file's ONLY explanation of why the
+    `CI_RUNNER_OS_LABEL` value is validated before the mode dispatch instead of inside the
+    resolver — a reader who believes `--status` never reaches the resolver draws the wrong
+    conclusion about the check's placement AND about the resolver's missing `*)` arm. This PR is
+    what introduced both the direct call and the prose, so the premise was inverted inside the
+    change that shipped it.
+
+    NOT A TEXT SCRAPE (agent-infra#1426). The claim is checked against the MEASURED call graph:
+    the call sites are read from non-comment lines, the enclosing region of each is derived from
+    the file's own mode dispatch, and the resolver's arm set is read from its body. The prose is
+    then required to AGREE with whatever was measured — in BOTH directions, so the pin still bites
+    if the direct call is ever removed and the paragraphs keep asserting it.
+
+    Non-vacuity (measured against the pre-fix file): the banned-phrase arm reds on the old
+    `:296-297` ("reached only from") and the agreement arm reds on the old §*TWO SIDES* paragraph
+    and the old runbook WRITERS paragraph (both reach lists omit `--status`), while the direct
+    `--status` call site already exists in the code they describe.
+    """
+    src = INSTALLER.read_text().splitlines()
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    # non-comment lines only: a `resolve_os_label` inside a `#` explanation is not a call site
+    code = [(i, ln) for i, ln in enumerate(src, 1) if not ln.lstrip().startswith("#")]
+
+    def first(pattern: str) -> int:
+        for i, ln in code:
+            if re.match(pattern, ln):
+                return i
+        raise AssertionError(f"the installer no longer has a line matching {pattern!r}")
+
+    resolver_def = first(r"^resolve_os_label\(\)\s*\{")
+    labels_def = first(r"^resolve_labels\(\)\s*\{")
+    status_open = first(r'^if \[ "\$MODE" = status \]; then$')
+    status_close = next(
+        i for i, ln in code if i > status_open and ln == "fi"
+    )
+
+    calls = [i for i, ln in code if re.match(r"^\s*resolve_os_label\s*$", ln)]
+    assert calls, "`resolve_os_label` is defined but never called — this pin would be vacuous"
+    in_labels = [i for i in calls if labels_def < i < status_open]
+    in_status = [i for i in calls if status_open < i < status_close]
+    assert in_labels, (
+        "`resolve_labels` no longer calls `resolve_os_label` — the install/repair/--print-labels "
+        "reach the comments describe is gone, so re-derive this pin instead of deleting it"
+    )
+    direct = bool(in_status)
+
+    # ── the other half of the corrected rationale: the resolver has no `*)` arm to complain with,
+    # which is WHY the unknown-value refusal has to live above the mode dispatch.
+    resolver_body = [ln for i, ln in code if resolver_def < i < labels_def]
+    assert not [ln for ln in resolver_body if re.match(r"^\s*\*\)", ln)], (
+        "`resolve_os_label` now carries a `*)` arm — the 'validated ONCE, before the dispatch' "
+        "rationale in the installer was written for a resolver that cannot refuse an unknown "
+        "value on its own; re-derive the comment and this pin"
+    )
+
+    # ── (1) the false statement itself, on every comment line in the installer
+    banned = (r"reached only from `resolve_labels`", r"`--status` never calls it")
+    for i, ln in enumerate(src, 1):
+        for pat in banned:
+            assert not re.search(pat, ln), (
+                f"install-ci-runner-x64.sh:{i} claims {pat!r}, but the measured call sites are "
+                f"{calls} with {in_status} inside the `$MODE = status` block ({status_open}-{status_close})"
+                " — a false call-graph claim, in the one file whose design argument IS its comments"
+            )
+
+    # ── (2) the reach SENTENCE must AGREE with the measured graph, both ways. Scoped to the
+    # sentence that names the reach (`reached from `resolve_labels``) plus the two lines it may
+    # wrap onto, so a `--status` elsewhere in the header cannot satisfy it by accident.
+    def reach_sentence(lines: list[str], artifact: str) -> str:
+        hits = [j for j, ln in enumerate(lines) if "reached from `resolve_labels`" in ln]
+        assert len(hits) == 1, (
+            f"{artifact} should carry exactly ONE sentence stating `resolve_os_label`'s reach — "
+            f"found {len(hits)}; re-derive this pin rather than deleting it"
+        )
+        return "\n".join(lines[hits[0] : hits[0] + 3])
+
+    for artifact, lines in (
+        ("tools/install-ci-runner-x64.sh", src),
+        ("docs/ops/ci-runner-x64.md", runbook.splitlines()),
+    ):
+        text = reach_sentence(lines, artifact)
+        assert ("`--status`" in text) is direct, (
+            f"{artifact}'s reach sentence for `resolve_os_label` "
+            f"{'OMITS' if direct else 'still CLAIMS'} `--status`, but the script's measured call "
+            f"sites are {calls} — inside the `$MODE = status` block ({status_open}-{status_close}) "
+            f"the calls are {in_status}. The prose and the code must agree in both directions."
+        )
+
+
 # ── 8d. the label assertion FIVE OTHER FILES send a reader to ───────────────────────────────
 def test_the_label_assertion_other_files_cite_lands_on_it():
     """⛔ THIS FILE'S OWN LINE NUMBERS ARE CITED FROM OUTSIDE IT, AND NOTHING PINNED THEM.

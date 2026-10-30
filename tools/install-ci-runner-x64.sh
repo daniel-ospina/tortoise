@@ -64,8 +64,8 @@
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
 #   `resolve_os_label` (`:306`), reached from `resolve_labels` — i.e. from install, repair and
-#   `--print-labels` — so a runner this script registers under `on|auto` carries `ubuntu-24.04`; the
-#   autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
+#   `--print-labels` — and called by `--status` to READ the intent (it registers nothing) — so
+#   a runner this script registers under `on|auto` carries `ubuntu-24.04`; the autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
 #   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
 #   timer so a scheduled fill inherits the box's choice. The READER that decides the carve-out is the
 #   `case` in the repair block below. So an UNSET flag still takes the `off` arm and DROPS the pin
@@ -293,11 +293,11 @@ fallback_engaged() {
 # remove. Nothing has been installed at this point, so the exit is 1 (usage).
 #
 # ⛔ AND IT IS VALIDATED HERE, NOT ONLY IN `resolve_labels`. The check used to live inside
-# `resolve_os_label`, which is reached only from `resolve_labels` — i.e. from install / repair /
-# --print-labels. `--status` never calls it, so `CI_RUNNER_OS_LABEL=true --status` exited 0 with no
-# complaint, and `--status` is the mode an operator runs to VERIFY the escape is applied: a typo was
-# silent in exactly the one place it is looked for. `--uninstall` never called it either. Same
-# pattern as `--count` and the sizing units above: read once, before the mode dispatch.
+# `resolve_os_label` — which `--status` DOES reach (its intent read), but whose `case` carries no
+# `*)` arm to complain with, so `CI_RUNNER_OS_LABEL=true --status` fell through it and exited 0 with
+# no complaint; `--uninstall` never calls the resolver at all. `--status` is the mode an operator
+# runs to VERIFY the escape is applied, so a typo was silent in exactly the one place it is looked
+# for. Same pattern as `--count` and the sizing units above: read once, before the mode dispatch.
 case "${CI_RUNNER_OS_LABEL:-off}" in
   on|off|auto) : ;;
   *) die "CI_RUNNER_OS_LABEL must be off|on|auto (got '$CI_RUNNER_OS_LABEL')" 1 ;;

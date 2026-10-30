@@ -776,8 +776,8 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
 One flag decides whether a box claims a version-pinned hosted label (`ubuntu-24.04`). **Both sides
 now live in this tree and read the same three values.** The WRITERS: `resolve_os_label` in
 `tools/install-ci-runner-x64.sh` (`:306`), reached from `resolve_labels` — so install, repair and
-`--print-labels` all emit it — plus `runner_autoscale.py::_os_labels` for the ORPHANED
-re-registration path, and `tools/install-runner-autoscale-schedule.sh`, which renders the value into
+`--print-labels` all emit it, and `--status` calls it to READ the intent (it registers nothing) —
+plus `runner_autoscale.py::_os_labels` for the ORPHANED re-registration path, and `tools/install-runner-autoscale-schedule.sh`, which renders the value into
 the timer so a scheduled fill inherits the box's choice. The READER that decides the version-pin
 carve-out is the `case` in the repair block. An unexported shell therefore still takes the `off` row
 below — which is #6897's recorded revert, not a no-op. ⛔ WHICH ROW IS LIVE IS A MEASUREMENT, not a
