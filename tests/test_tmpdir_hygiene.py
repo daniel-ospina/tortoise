@@ -992,7 +992,19 @@ _PYTEST_LOG_MIGRATED_JOBS = (
 
 # A host-global artifact path: `/tmp/pytest.log`, or any other bare `/tmp/...`
 # spelling. The runner's per-job temp dir is `$RUNNER_TEMP` / `${{ runner.temp }}`.
-_HOST_TMP_PATH_RE = re.compile(r"(?:^|[\s=]>'\"])(/tmp/[A-Za-z0-9._-]+)")
+#
+# ⛔ THE PREFIX IS ONE CHARACTER CLASS — `[\s=>'"]` — not a class followed by
+# three literals. It was written `[\s=]>'\"`, where the `]` closes the class
+# after `\s` and `=`, so the prefix demanded the literal four-character run
+# `<space-or-=> > ' "` before every `/tmp/…`. Nothing in any workflow contains
+# that run, so `findall` returned `[]` for all 50 `/tmp/<path>` occurrences in
+# `origin/main:.github/workflows/python-ci.yml` — half 2 of
+# `test_migrated_legs_read_their_OWN_pytest_log` could never fail, which is the
+# `#10280` mixed-state regression it exists to catch (resolver step still
+# published, one reader reverted to a host-global path).
+# `test_the_host_tmp_prefix_matches_every_measured_reader_shape` below pins the
+# class form against those measured shapes, so a re-broken prefix reds there.
+_HOST_TMP_PATH_RE = re.compile(r"(?:^|[\s=>'\"])(/tmp/[A-Za-z0-9._-]+)")
 
 
 def _code_lines(text: str) -> list[str]:
@@ -1003,6 +1015,42 @@ def _code_lines(text: str) -> list[str]:
     """
     return [ln for ln in text.splitlines()
             if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def _migrated_leg_problems(entry: str, job: dict | None) -> list[str]:
+    """The three checks `test_migrated_legs_read_their_OWN_pytest_log` applies.
+
+    Factored out so a SYNTHETIC job can be put through the same code the real
+    pin runs — the only way `test_a_migrated_leg_whose_reader_is_reverted_to_
+    host_tmp_reds` can prove the pin is non-vacuous without editing the workflow.
+    """
+    problems: list[str] = []
+    if job is None:
+        return [f"{entry} (no such job)"]
+    steps = job.get("steps") or []
+    # One step must both bound the path to `$RUNNER_TEMP`, failing closed on
+    # a missing one (`${RUNNER_TEMP:?...}`), and publish `PYTEST_LOG` from
+    # it. Checked per STEP, not per line — the delivered shape assigns
+    # `base="${RUNNER_TEMP:?…}"` on one line and `echo "PYTEST_LOG=$base/…"`
+    # on the next, so a same-line rule would false-reject it.
+    resolves = any(
+        "${RUNNER_TEMP:?" in body and "PYTEST_LOG=" in body
+        for body in (s.get("run") or "" for s in steps))
+    if not resolves:
+        problems.append(
+            f"{entry} (no step resolves PYTEST_LOG from $RUNNER_TEMP, failing "
+            "closed on a missing one)")
+    for s in steps:
+        body = s.get("run") or ""
+        named = sorted(set(_HOST_TMP_PATH_RE.findall("\n".join(_code_lines(body)))))
+        if named:
+            problems.append(
+                f"{entry} step {s.get('name')!r} names host-global {named}")
+        path = ((s.get("with") or {}).get("path"))
+        if isinstance(path, str) and path.startswith("/tmp/"):
+            problems.append(
+                f"{entry} step {s.get('name')!r} uploads from host-global {path}")
+    return problems
 
 
 def test_migrated_legs_read_their_OWN_pytest_log():
@@ -1018,6 +1066,12 @@ def test_migrated_legs_read_their_OWN_pytest_log():
     Read by parsing the workflow, not by trusting the comment that describes it,
     and it reds on the pre-#10280 text (half 2: five `/tmp/pytest.log` lines in
     `test-concurrency-falkor`'s pytest step alone).
+
+    ⛔ Half 2 is only load-bearing because `_HOST_TMP_PATH_RE` can MATCH: it read
+    `[\\s=]>'\"` until the #10280 review (the `]` closed the class early), so it
+    found 0 of the 50 `/tmp/<path>` occurrences in this workflow and this pin
+    went green on the mixed state below. Both non-vacuity probes are the two
+    tests that follow it.
     """
     import yaml
 
@@ -1028,36 +1082,87 @@ def test_migrated_legs_read_their_OWN_pytest_log():
         wf = yaml.load(
             (root / ".github" / "workflows" / wf_name).read_text(),
             Loader=_actions_yaml())
-        job = (wf.get("jobs") or {}).get(job_name)
-        if job is None:
-            problems.append(f"{entry} (no such job in {wf_name})")
-            continue
-        steps = job.get("steps") or []
-        # One step must both bound the path to `$RUNNER_TEMP`, failing closed on
-        # a missing one (`${RUNNER_TEMP:?...}`), and publish `PYTEST_LOG` from
-        # it. Checked per STEP, not per line — the delivered shape assigns
-        # `base="${RUNNER_TEMP:?…}"` on one line and `echo "PYTEST_LOG=$base/…"`
-        # on the next, so a same-line rule would false-reject it.
-        resolves = any(
-            "${RUNNER_TEMP:?" in body and "PYTEST_LOG=" in body
-            for body in (s.get("run") or "" for s in steps))
-        if not resolves:
-            problems.append(
-                f"{entry} (no step resolves PYTEST_LOG from $RUNNER_TEMP, failing "
-                "closed on a missing one)")
-        for s in steps:
-            body = s.get("run") or ""
-            named = sorted(set(_HOST_TMP_PATH_RE.findall("\n".join(_code_lines(body)))))
-            if named:
-                problems.append(
-                    f"{entry} step {s.get('name')!r} names host-global {named}")
-            path = ((s.get("with") or {}).get("path"))
-            if isinstance(path, str) and path.startswith("/tmp/"):
-                problems.append(
-                    f"{entry} step {s.get('name')!r} uploads from host-global {path}")
+        problems.extend(_migrated_leg_problems(
+            entry, (wf.get("jobs") or {}).get(job_name)))
     assert problems == [], (
         "these legs still read or write the host-shared /tmp pytest artifact, so "
         f"their verdict can be another job's (#10280): {problems}")
+
+
+# The five reader shapes measured against `origin/main:.github/workflows/python-ci.yml`
+# during the #10280 review — every one of them is a real line of that workflow. The
+# shipped `[\s=]>'\"` prefix matched NONE of them (all `[]`); the class form matches
+# each. Keep the shapes verbatim: they are the evidence, not an illustration.
+_MEASURED_HOST_TMP_SHAPES = {
+    "> /tmp/pytest.log 2>&1": "/tmp/pytest.log",
+    "p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)": "/tmp/pytest.log",
+    "tail -n 120 /tmp/pytest.log": "/tmp/pytest.log",
+    'bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"':
+        "/tmp/pytest.log",
+    "tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml "
+    "--manifest /tmp/expected-nodeids.txt":
+        "/tmp/expected-nodeids.txt",
+}
+
+
+def test_the_host_tmp_prefix_matches_every_measured_reader_shape():
+    """#10280 review: the prefix is ONE character class, and it MATCHES.
+
+    Non-vacuity for half 2 of the pin above. The shipped regex
+    `(?:^|[\\s=]>'\")(/tmp/...)` let the `]` close the class after `\\s` and `=`,
+    so its prefix demanded the literal run `<space-or-=> > ' "` — a shape no
+    workflow contains. Measured over `origin/main:.github/workflows/python-ci.yml`:
+    50 `/tmp/<path>` occurrences, `findall` = `[]` as shipped, 50 with the class
+    form. This asserts the MATCH, per measured shape, so a prefix that closes its
+    class early reds here by name instead of silently disarming the pin.
+    """
+    for line, expected in _MEASURED_HOST_TMP_SHAPES.items():
+        found = _HOST_TMP_PATH_RE.findall(line)
+        assert expected in found, (
+            f"_HOST_TMP_PATH_RE does not match {expected!r} in the measured reader "
+            f"shape {line!r} — got {found}. The prefix class must be "
+            "`[\\s=>'\"]`, one class: with the class closed early it demands the "
+            "literal run `<space>= > ' \"` and matches nothing (#10280 review)."
+        )
+
+
+def test_a_migrated_leg_whose_reader_is_reverted_to_host_tmp_reds():
+    """#10280 review: the REALISTIC regression must be RED, not green.
+
+    The mixed state this pin exists to catch is half-migrated, not un-migrated:
+    the resolver step survives (so half 1 sees `PYTEST_LOG` published from
+    `$RUNNER_TEMP`) while ONE reader is reverted to the host-global literal.
+    That is exactly what produced `test-slow (a)`'s `850 expected nodeid(s)
+    absent` from a co-tenant's manifest.
+
+    Runs through `_migrated_leg_problems`, i.e. the same code the live pin runs,
+    so this cannot pass while the live pin is vacuous: with the pre-fix prefix
+    the problems list is empty here and this test fails.
+    """
+    resolver = {
+        "name": "Resolve per-job pytest artifact paths",
+        "run": (
+            'base="${RUNNER_TEMP:?RUNNER_TEMP is not set}"\n'
+            'echo "PYTEST_LOG=$base/pytest.log" >> "$GITHUB_ENV"\n'
+        ),
+    }
+    migrated = _migrated_leg_problems(
+        "synthetic.yml::leg",
+        {"steps": [resolver,
+                   {"name": "Skip-fail guard", "run": 'guard "$PYTEST_LOG"'}]},
+    )
+    assert migrated == [], f"the control case must be clean, got {migrated}"
+    reverted = _migrated_leg_problems(
+        "synthetic.yml::leg",
+        {"steps": [resolver,
+                   {"name": "Skip-fail guard", "run": "tail -n 120 /tmp/pytest.log"}]},
+    )
+    assert reverted, (
+        "a half-migrated leg (resolver present, one reader back on the host-global "
+        "`/tmp/pytest.log`) must RED — an empty list means the no-literal half is "
+        "inert (#10280 review)"
+    )
+    assert "/tmp/pytest.log" in reverted[0], reverted
 
 
 @pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.EBUSY, errno.EROFS])
