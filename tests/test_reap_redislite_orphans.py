@@ -202,6 +202,35 @@ def test_an_unlistable_proc_is_exit_2_too(reaper, monkeypatch):
     assert reaper._iter_proc_inventory() is None
 
 
+def test_a_ps_that_runs_and_fails_is_exit_2_too(reaper, monkeypatch):
+    """NON-VACUOUS: this reds on the pre-fix `ps` branch, which read stdout only.
+
+    `ps` EXISTS and EXITS NON-ZERO — denied, a broken binary, an unsupported
+    `-eo` — is the third shape of "never saw the host", and it was the one arm
+    the round-13 fix left open: the branch passed `check=False` and read
+    `.stdout` without ever inspecting `returncode`, so a failing `ps` produced
+    `rows == []`, `run()` printed `0 candidate(s), 0 reaped`, and `main()` exited
+    **0** — the exact `[]`-for-both-cases confusion that the None/exit-2
+    distinction was introduced to remove (PR #10254 review, P3).
+    """
+    monkeypatch.setattr(reaper.os.path, "isdir", lambda _p: False)
+
+    def _ps_fails(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=["ps", "-eo", "pid=,args="],
+            returncode=1,
+            stdout="",
+            stderr="ps: illegal option -- e",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _ps_fails)
+    assert reaper._iter_proc_inventory() is None, (
+        "a `ps` that ran and FAILED measured nothing, so the inventory must be "
+        "None (exit 2) — never an empty list, which reports as 'measured, no litter'"
+    )
+    assert reaper.main([]) == 2, "the documented failure signal must reach the exit code"
+
+
 def test_a_measured_empty_host_is_still_exit_0(reaper, tmp_path):
     """The other direction: an inventory that WAS read and held no litter is exit 0."""
     inventory = tmp_path / "proc.json"

@@ -55,9 +55,10 @@ Usage:
 
 Exit codes: 0 = ran (dry or apply) — INCLUDING when it found nothing to look at;
 2 = something this tool was told to read could not be read (`--proc-json`, or the
-process inventory itself: neither `/proc` nor `ps` answered, so NOTHING was
-measured and nothing was reaped). Every other unmeasurable case is per-row and
-KEEPS its process with a printed reason, which is still exit 0.
+process inventory itself: neither `/proc` nor `ps` answered — `ps` missing AND
+`ps` exiting non-zero are the same fact — so NOTHING was measured and nothing was
+reaped). Every other unmeasurable case is per-row and KEEPS its process with a
+printed reason, which is still exit 0.
 """
 
 from __future__ import annotations
@@ -168,9 +169,10 @@ def _iter_proc_inventory() -> list[dict] | None:
     rather than silently dropping it.
 
     `None` — not `[]` — when the inventory could not be read AT ALL: /proc
-    unlistable, or absent with `ps` unavailable/failing. The distinction is the
-    documented exit 2, and it is the difference between "measured the host and
-    found no litter" and "never saw the host": returning `[]` for both printed
+    unlistable, or absent with `ps` unavailable or exiting non-zero. The
+    distinction is the documented exit 2, and it is the difference between
+    "measured the host and found no litter" and "never saw the host":
+    returning `[]` for both printed
     `0 candidate(s), 0 reaped` and exited 0, so the tool's one failure signal
     could not fire where it was meant to (PR #10254 review, round 13). A single
     unreadable `/proc/<pid>/cmdline` is NOT this case — that pid simply
@@ -211,15 +213,22 @@ def _iter_proc_inventory() -> list[dict] | None:
     import subprocess
 
     try:
-        out = subprocess.run(
+        result = subprocess.run(
             ["ps", "-eo", "pid=,args="],
             capture_output=True,
             text=True,
             timeout=20,
             check=False,
-        ).stdout
+        )
     except (OSError, subprocess.SubprocessError):
         return None
+    if result.returncode:
+        # `ps` RAN and FAILED — denied, a broken binary, an unsupported `-eo`.
+        # Its empty stdout is not a measurement, and this is the exact case the
+        # None/exit-2 distinction exists for: a host that was never read must
+        # not report `0 candidate(s)` as if it had been (PR #10254 review, P3).
+        return None
+    out = result.stdout
     for line in out.splitlines():
         line = line.strip()
         if not line:
