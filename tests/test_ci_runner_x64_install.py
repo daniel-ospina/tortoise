@@ -1946,9 +1946,23 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
     tree exports none", "the unit is not readable from here"); asserting the box's state is how the
     page sent an operator to a heal that reverts #6897's departure while saying it was protected.
 
+    ⛔ AND TWICE THE PHRASE LIST WAS CLOSED ON THE SENTENCES, NOT THE CLASS (review of `4cfdb8a72`,
+    P2-1). The section preamble — the artifact an operator reads FIRST, and the one that draws the
+    operational conclusion — said "the flag is unset on every box here and every row below that says
+    `off`/unset is the live one", which is the same unreadable claim in fresh words, 150 lines above
+    the page's own "CANNOT BE READ OFF THIS PAGE" and its "Re-measure, never assume" block. A
+    blacklist cannot close a class on its own, so it is closed from BOTH ends: the surviving
+    phrasings are in `forbidden` below, AND the tree-scoped disclosure is in `required` — deleting
+    the paragraph instead of restating it reds too. The external take (rung 3, GitHub REST docs for
+    self-hosted runners) is why the fix is a MEASUREMENT pointer and not a different assertion: a
+    runner's labels and its registered state are SERVER-side, read back through
+    `gh api repos/<owner>/<repo>/actions/runners`, so no checkout can hold them.
+
     Non-vacuity (measured): with the pre-fix wording restored, "BOTH writers read it", "the live
     pool's own state", "cannot revert an APPLIED owner departure with no switch involved", "— what
-    this fleet's", "so nothing exports it there" and "nothing exports it yet" each red on their own.
+    this fleet's", "so nothing exports it there", "nothing exports it yet", "unset on every box" and
+    "every row below that says" each red on their own; deleting the required disclosure reds on
+    "not a fact this page holds".
     """
     def flat(text: str) -> str:
         return re.sub(r"\s+", " ", text)
@@ -1974,6 +1988,16 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
         "nothing exports it yet": (
             "the tree exports none; whether the unit does is a measurement, not a fact this page holds"
         ),
+        "unset on every box": (
+            "a checkout cannot read a box's unit — `systemctl show -p Environment "
+            "runner-autoscale.service` is the measurement, so the page may only say what the TREE "
+            "exports"
+        ),
+        "every row below that says": (
+            "which row is LIVE is per-box state, so the page may only say which row an unexported "
+            "repair takes — the fleet is read back through `gh api …/actions/runners` (I took this "
+            "from the REST docs for self-hosted runners: registered labels are server-side state)"
+        ),
     }
     for artifact, text in (("docs/ops/ci-runner-x64.md", runbook), ("tools/install-ci-runner-x64.sh", installer)):
         for claim, why in forbidden.items():
@@ -1994,6 +2018,7 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
                 "and nothing WRITES it",
                 "has ONE reader in this tree (this repair) and NO writer",
                 "nothing in this tree exports it",
+                "not a fact this page holds",
             ),
         ),
     }

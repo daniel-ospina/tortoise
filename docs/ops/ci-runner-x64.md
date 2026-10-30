@@ -203,7 +203,7 @@ falls back.
   `foreign-arch` is ALWAYS dropped; the version pin only under `CI_RUNNER_OS_LABEL=off`/unset, so
   under `on|auto` it JOINS the union (printed `version-pinned, kept=[…]`, see sub-bullet 1). Both are
   PRINTED, never silently skipped — keeping either makes a false PASS permanent — and both are what
-  `_preserve_labels` drops on re-registration, except that it reads NO flag yet: ONE writer here:
+  `_preserve_labels` drops both, reads NO flag: ONE reader here (this repair), no writer (#10275).
   1. **`ubuntu-<version>`** (`ubuntu-24.04`, `ubuntu-22.04-arm`, …): the label a leg pins to ESCAPE
      this pool. Preserving it would un-pin `test-slow` / `workflow-lint` / `finding-provenance` /
      `mirror-images` onto a bare box whose `PATH` lacks their tools — the measured 2026-10-24
@@ -363,12 +363,12 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
 
 ## The box's own choice: `CI_RUNNER_OS_LABEL`
 
-One flag decides whether a box claims a version-pinned hosted label (`ubuntu-24.04`). **ONE writer
-reads it in this tree — the repair's version-pin carve-out (`tools/install-ci-runner-x64.sh`, the
-repair block) — and nothing WRITES it:** the install-side emitter is open PR #10275's half, so until
-that lands the flag is unset on every box here and every row below that says `off`/unset is the live
-one. When #10275 lands both writers read the same three values and cannot disagree about what the box
-is supposed to carry.
+One flag decides whether a box claims a version-pinned hosted label (`ubuntu-24.04`). **It has ONE
+reader in this tree — the repair's version-pin carve-out (`tools/install-ci-runner-x64.sh`, the
+repair block) — and nothing WRITES it:** the install-side emitter is open PR #10275's half, so
+nothing in this tree exports it, and an unexported repair therefore takes the `off` row below. WHICH
+ROW IS LIVE IS A MEASUREMENT, not a fact this page holds (see *Re-measure, never assume*): a box
+whose unit carries `on` KEEPS the pin. When #10275 lands both writers read the same three values.
 
 | `CI_RUNNER_OS_LABEL` | the box claims `ubuntu-24.04` | `--repair-labels` on a runner that carries it |
 | --- | --- | --- |
