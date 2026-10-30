@@ -371,8 +371,8 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
    its own section, with an `OVERRIDES:` line (`→ The fast-matrix split is OPT-IN`). In one line:
    under `pool-split`, `test (b)`, `(d)`, `(f)` and `(h)` name `[self-hosted, self-hosted-x64]`, so a
    pool outage or a contended box holds those required checks **pending** rather than answering them
-   from GitHub-hosted — the exact trade the `never to self-hosted` rule refuses, taken deliberately
-   for those four rows and nowhere else.
+   from GitHub-hosted — the exact trade the "any POOL-ONLY label" rule refuses, taken
+   deliberately for those four rows and nowhere else.
 
 ## The box's own choice: `CI_RUNNER_OS_LABEL`
 
@@ -450,7 +450,7 @@ now forbids the job-scope form, so "put it back on the job" is a red check, not 
 
 ### Residual: under `pool-split` the pool is a PIN on 4 of 9 required legs
 
-**OVERRIDES:** the "never to `self-hosted`" rule recorded above — `pool-split` names
+**OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `pool-split` names
 `[self-hosted, self-hosted-x64]` on the odd rows (`test (b)`, `(d)`, `(f)`, `(h)`), because a mode
 whose odd rows still raced for a hosted label would not route at all; the departure is OPT-IN, off by
 default, and its cost is stated here rather than inherited silently.
