@@ -565,6 +565,7 @@ def _poolable_label(text: str) -> bool:
 
     RESIDUAL — shapes this reader still does not see, all returning False (the same
     silent skip, one shape further out): a YAML ALIAS (`runs-on: *pool_labels`), a
+    BLOCK SCALAR (`runs-on: >-` or `runs-on: |` with the label on the next line), a
     next-line plain scalar or FLOW list (`runs-on:` then `  ubuntu-latest` /
     `  [self-hosted, ubuntu-latest]`), and a `<<:` merge-key line. None is used in the
     tree today — all 86 `runs-on:` keys are inline scalars, so the miss is latent, not
