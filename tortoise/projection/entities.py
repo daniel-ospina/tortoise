@@ -3238,6 +3238,27 @@ class _EntityHandlers:
             if val is not None and _annotator_value_ok(val):
                 sets.append(f"s.{prop}=$v_{prop}")
                 params[f"v_{prop}"] = val
+        # #10000: the turn ID-SPACE end. It is NOT `turn_count`'s sibling
+        # (`turn_count` is a WINDOW LENGTH: an APPEND at `turn_offset=2` writes
+        # `_t2`/`_t3` while the count reads 2), and the stale-turn sweep is
+        # bounded by it — so a journal-only rebuild that dropped it left
+        # `_rebuild_all_replay`'s `coalesce(s.turn_max_index, s.turn_count, 0)`
+        # fallback substituting a WINDOW LENGTH for the mark, i.e. re-opening the
+        # #1920 residue this property exists to close (#10000 review P1).
+        #
+        # The fold MIRRORS the live clause exactly — a PLAIN assignment, and that
+        # is the point: the live write stores the session's LIVE id-space end
+        # (`sdk._write_session_and_turns`, which LOWERS it on a shorter
+        # re-capture after sweeping the surplus that re-capture leaves behind), so
+        # a replay in journal order must leave the same value the live node has.
+        # A monotone-up CASE here was the first shape and it DIVERGES: replaying
+        # `tmi=3` then `tmi=0` put 3 on a node the live write left at 0 — the
+        # reader's tail witness (`record_read._shortfall`) then reports a healthy
+        # shrunk session as truncated, but only after a rebuild (#10000 review P2).
+        _tmi = ev.get("turn_max_index")
+        if _tmi is not None and _annotator_value_ok(_tmi):
+            sets.append("s.turn_max_index=$v_turn_max_index")
+            params["v_turn_max_index"] = _tmi
         # #9206 (review P1): the two ATTRIBUTION props the same session MERGE
         # writes. Set-if-absent on BOTH sides (the live clause is a `coalesce`),
         # so a later producer cannot relabel the machine/model that captured the

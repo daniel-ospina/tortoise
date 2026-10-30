@@ -91,7 +91,13 @@
       // and has no need for two new globals.
       // /admin is the console SUBTREE (its gate serves the shell at any depth);
       // /welcome and /team are single pages, so a deeper path is not a route.
-      var APP_RETURN_ROUTES = ["/welcome", "/team", "/admin"];
+      // /api/consent/start (#3524) is the ONE API path admitted, EXACTLY — a
+      // navigational GET (validate → record → 302 to the AS), the only way a visitor
+      // who signs in MID-CONSENT gets returned to the flow. Dropping it here abandons
+      // the consent flow on every cold browser, which is the failure #3524 was reopened
+      // for. The mint (`/api/consent/token`) stays unnameable: POST-only, so a
+      // return-to could never reach it, and naming it would widen this list for nothing.
+      var APP_RETURN_ROUTES = ["/welcome", "/team", "/admin", "/api/consent/start"];
       var APP_SUBTREE_ROUTES = ["/admin"];
       try {
         var raw = new URLSearchParams(window.location.search).get("next");
@@ -132,8 +138,9 @@
         // same-origin (so the origin check passes) but serialises to a
         // network-path reference, which the BROWSER then re-interprets as
         // `https://evil.example/`. NOTE: THIS LINE CANNOT FIRE while the
-        // allowlist above admits only `/welcome`, `/team` and `/admin[/…]` — no
-        // routed path begins with `//`, so `ret` cannot either (`/..//evil.example`
+        // allowlist above admits only `/welcome`, `/team`, `/admin[/…]` and the
+        // EXACT path `/api/consent/start` (#3524) — no routed path begins with
+        // `//`, so `ret` cannot either (`/..//evil.example`
         // normalises to `//evil.example` first and is rejected there). It is kept
         // as belt-and-braces so the invariant survives a future loosening of the
         // allowlist; the allowlist is the
