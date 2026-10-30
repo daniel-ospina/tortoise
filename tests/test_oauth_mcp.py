@@ -504,6 +504,45 @@ class TestAuthorizePage:
         assert "error=invalid_request" in location, location
         assert "state=st-1" in location, location
 
+    def test_an_unknown_client_cannot_reach_an_unregistered_redirect(self, api_client):
+        """THE OPEN-REDIRECT GUARD, on the input that has no registered URI at all.
+
+        `test_an_invalid_authorize_request_still_gets_its_oauth_error_not_a_bounce`
+        (`test_oauth_consent_page_step4.py`) proves the refuse-to-navigate arm for a
+        REGISTERED client whose `redirect_uri` is unregistered. The other input to the
+        same decision is an UNRESOLVABLE `client_id` — the one shape where nothing at
+        all is registered for anyone to rebuild a destination from
+        (`canonical_redirect_target(None, …) is None`, `hosted_api.oauth_authorize`'s
+        except-block). `tests/test_oauth_consent_pkce.py` carried this case as
+        `test_authorize_invalid_client_no_open_redirect` and was deleted wholesale with
+        the inline client it pinned, so nothing in the tree covered it (#10346 review 1,
+        finding 2).
+
+        Stricter than the test it restores: that one tolerated a `Location` which merely
+        did not *contain* `evil.example`, which an empty or wrong-host Location
+        satisfies. Any Location at all is the defect — RFC 6749 §4.1.2.1 has the AS
+        answer a malformed request itself, and it may not send the browser to a
+        destination the client never proved it owns.
+        """
+        tc, _ = api_client
+        _verifier, challenge = _pkce()
+        evil = "https://evil.example/cb"
+        r = tc.get("/oauth/authorize", params={
+            "client_id": "ct_this_client_was_never_registered",
+            "redirect_uri": evil,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "attempt_key": "ak-1"},
+            follow_redirects=False)
+        assert r.status_code == 400, r.text
+        assert "location" not in {k.lower() for k in r.headers}, (
+            "an unknown client_id must not produce ANY navigation — the raw "
+            f"redirect_uri reached the browser as {r.headers.get('location')!r}")
+        assert r.json()["error"] == "invalid_request", r.text
+        # …and the attacker's destination is not smuggled in the error body either.
+        assert evil not in r.text, r.text
+
+
 class TestLoopbackPortAgnostic:
     """#2846 — RFC 8252 §7.3: for loopback redirect URIs the AS must ignore the
     port, because a native client (Claude Code CLI) binds an ephemeral port at
