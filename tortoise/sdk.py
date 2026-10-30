@@ -3072,7 +3072,7 @@ def _write_capture_turns(
     # nothing, and the surplus turn nodes stayed `CONTAINS`-wired forever, with
     # the read side then publishing a body that contradicts itself (#8447).
     # Main's monotone-up mark bounded that exposure to one cycle; the live mark
-    # (decision (c), `sdk.py:3280-3303`) is right and stays — so the bound has to
+    # (decision (c), `sdk.py:3431`) is right and stays — so the bound has to
     # come from something the statement cannot overwrite. `CONTAINS`-wired turn
     # nodes ARE that thing (`_capture_turn_ids` is the same witness
     # `record_read.turn_high_water` keeps for the record), read by the caller in
@@ -3191,8 +3191,8 @@ def _write_capture_turns(
         # where every other writer guarantees a value — the graph path
         # (`_TURN_WRITE_CYPHER`'s coalesce, above), the fresh-turn branch below,
         # and `projection/entities.py`'s replay fold
-        # (`n.createdAt=coalesce($ca, n.createdAt, $now)`,
-        # `n.status=coalesce($st, n.status, 'live')`, :2104-2105). `record_read`
+        # (`n.createdAt=coalesce($ca, n.createdAt, $now)`, :2104;
+        # `n.status=coalesce($st, n.status, 'live')`, :2088). `record_read`
         # then serves `"created_at": null` for those turns. The trigger is narrow
         # — `_prior_unknown` needs the prior READ to raise while the subsequent
         # turn WRITES succeed — and the capture warns; it is recorded here rather
