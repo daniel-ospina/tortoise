@@ -432,17 +432,77 @@ def _measure_key_row(page: Page) -> dict:
     }""")
 
 
-def _wait_until(fn, *, timeout_ms: int = 5_000, message: str = "") -> None:
+def _wait_until(fn, *, page: Page, timeout_ms: int = 5_000, message: str = "") -> None:
     """Bounded poll (the sync Playwright API's expect.poll is unavailable in
-    this env) — replaces instantaneous reads that can race a React effect."""
+    this env) — replaces instantaneous reads that can race a React effect.
+
+    ⛔ `page` IS REQUIRED, AND THE WAIT IS `page.wait_for_timeout()` — NEVER
+    `time.sleep()`. Playwright's SYNC api runs the event loop on a DISPATCHER
+    FIBER and switches into the caller's greenlet only while a Playwright call
+    is in flight (`SyncBase._sync` → `wait_for_future(loop,
+    self._dispatcher_fiber, task)`); route handlers run on the CALLER's
+    greenlet, so they are dispatched only during a Playwright call. A
+    `time.sleep()` poll holds that greenlet for the whole budget, so a request
+    that lands mid-wait is never handled and the predicate can never observe it
+    — no timeout value fixes it.
+
+    That is what red-ed `dashboard-e2e` at `2963b8a44` (and passed the five
+    heads before it): the capabilities poll below reads a HOST-side counter that
+    only a route handler advances, so it returned immediately when the fetch had
+    already been dispatched by the preceding `expect(...)` and span the full 5 s
+    reporting `False` when it had not. Measured on playwright 1.62: a page fetch
+    issued 1 s after the click was still uncounted after `time.sleep(3)`, and
+    was counted after `page.wait_for_timeout(300)`.
+
+    Making `page` required makes the unsafe spelling unrepresentable. Callers
+    whose `fn` is itself a `page.evaluate(...)` are unaffected — an evaluate
+    pumps too — but they pass `page` like everyone else so no call site can
+    silently drift back to the dead-poll shape.
+    """
     deadline = time.time() + timeout_ms / 1000
     last = None
     while time.time() < deadline:
         last = fn()
         if last:
             return
-        time.sleep(0.1)
+        page.wait_for_timeout(50)  # PUMPS the dispatcher: route handlers run here
     raise AssertionError(f"timed out after {timeout_ms}ms waiting for {message}: {last!r}")
+
+
+def test_wait_until_pumps_the_dispatcher_so_a_late_route_handler_is_observed() -> None:
+    """The HELPER's contract, with no browser — the `_wait_until` half of the
+    `dashboard-e2e` red at `2963b8a44`.
+
+    A route handler fires on the caller's greenlet, so a request that lands while
+    `_wait_until` is polling is dispatched only on the next Playwright call. The
+    stub page models exactly that: its `wait_for_timeout` is the pump, and the
+    counter advances on the second pump — never before it. So this fails on a
+    `time.sleep()` poll in BOTH directions: pre-fix the `page=` kwarg does not
+    exist (TypeError), and a body reverted to `time.sleep` leaves `handled` at 0
+    and times out. The browser half — the fork card's real fetch — stays in
+    `test_first_timer_wizard_build_fork_records_no_catalog_presented`.
+    """
+
+    class _StubPage:
+        """Stands in for a `Page`: `wait_for_timeout` IS the dispatcher pump."""
+
+        def __init__(self) -> None:
+            self.pumps = 0
+            self.handled = 0
+
+        def wait_for_timeout(self, ms: int) -> None:
+            assert ms > 0, "a zero-length pump would not dispatch a pending handler"
+            self.pumps += 1
+            if self.pumps >= 2:  # the handler queued mid-wait runs HERE
+                self.handled = 1
+
+    stub = _StubPage()
+    _wait_until(lambda: stub.handled == 1, page=stub, timeout_ms=2_000,
+                message="a host-side counter that only a route handler advances")
+    assert stub.handled == 1, "the poll returned without the handler ever running"
+    assert stub.pumps >= 2, (
+        "the poll must PUMP (page.wait_for_timeout) — a sleeping poll can never "
+        "observe a handler that fires while it waits")
 
 
 def _mint_from_connect(page: Page) -> None:
@@ -671,6 +731,7 @@ def test_coming_soon_modal_dialog_contract_and_skip_reaches_done(page: Page) -> 
     expect(dialog).to_have_count(0)
     _wait_until(lambda: page.evaluate(
         "() => document.activeElement && document.activeElement.dataset.integrationKey") is not None,
+        page=page,
         message="focus returned to the tile that opened the dialog, never <body>")
     # Skip reaches done
     page.get_by_role("button", name="Skip", exact=True).click()
@@ -1272,7 +1333,7 @@ def test_connect_prompt_card_has_no_nested_interactive_and_dragselect_is_safe(pa
     card_text = card.inner_text()
     card.locator("button").last.click()
     _wait_until(lambda: page.evaluate("() => navigator.clipboard.readText()") != sentinel,
-                timeout_ms=5_000, message="the explicit copy to resolve")
+                page=page, timeout_ms=5_000, message="the explicit copy to resolve")
     copied = page.evaluate("() => navigator.clipboard.readText()")
     assert card_text.startswith(copied), \
         ("#2755: the copy control must copy the FULL prompt (the card's text "
@@ -1634,17 +1695,30 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     page.get_by_role("button", name=re.compile("Build an application on top")).click()
     expect(page.locator("body")).to_contain_text("Build catalog", timeout=10_000)
     # The fetch is issued by a passive effect when the card mounts — poll
-    # instead of snapshotting immediately after the text appears.
-    _wait_until(lambda: cap["capabilities"] == 1, timeout_ms=5_000,
-                message="the registry catalog fetch (exactly once, from the fork card)")
+    # instead of snapshotting immediately after the text appears. ⛔ `page=page`
+    # is the FIX for the red at 2963b8a44: `cap` is a HOST-side counter advanced
+    # by the route handler, and a route handler is dispatched only while the
+    # calling thread is inside a Playwright call — a `time.sleep` poll could
+    # never see it (see `_wait_until`). The wait is for "at least one"; the
+    # EXACTLY ONCE pin is the assert below, so a double fetch still reds.
+    _wait_until(lambda: cap["capabilities"] > 0, page=page, timeout_ms=10_000,
+                message="the registry catalog fetch from the fork card")  # a PUMPED poll only needs CI-load margin
+    assert cap["capabilities"] == 1, (
+        "#2004 (W8): the registry catalog must be fetched exactly once, from the "
+        f"fork card — observed {cap['capabilities']}")
     expect(page.locator("body")).to_contain_text("Registry-only module", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Session recorder")
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
     # #2763: the fetch is once per session and the gate no longer names the
     # connect step at all — advancing past the card must not add a request.
-    assert cap["capabilities"] == 1, \
-        f"#2004 (W8): the registry catalog must be fetched exactly once, from the fork card: {cap['capabilities']}"
+    # This is the SECOND half of the exactly-once pin, so its message names the
+    # stage: the failure that red-ed 2963b8a44 was at THIS card's fetch, and a
+    # message that cannot say which stage was checked sends the next reader back
+    # to the wrong end of the test (it reported `False`, i.e. neither 0 nor 2).
+    assert cap["capabilities"] == 1, (
+        "#2004 (W8): advancing past the fork card must NOT add a registry fetch — "
+        f"the journey must carry exactly one, observed {cap['capabilities']}")
     # #3913: the fork is the ONLY checkpoint the dashboard writes. The old
     # assertion here was the opposite — it required the catalog-presented mark;
     # that write is deleted, so the meaningful pin is now its ABSENCE, and the
