@@ -865,9 +865,10 @@ def record_tenant_effective(
 
     ⚠️ VALIDITY IS NOT THIS FUNCTION'S JOB. A HALF or non-string pair is still
     refused at the seam as it always was (``no_tenant``, #9188 review F4), with
-    its own specific warning. A caller that needs "would the seam ACCEPT this"
-    asks :func:`is_usable_tenant` as well — precedence and validity are two
-    questions, and merging them would weaken the seam's refusal.
+    its own specific warning. The seam asks :func:`is_usable_tenant` itself — so
+    "would the seam ACCEPT this" is answered by ONE declaration rather than by a
+    copy in each caller (#10199 review P3: this sentence promised a call that did
+    not exist, while the seam carried a second copy of the predicate).
     """
     return carried if carried is not None else record_tenant()
 
@@ -875,11 +876,13 @@ def record_tenant_effective(
 def is_usable_tenant(tenant: object) -> bool:
     """Is *tenant* a ``(org_id, graph_id)`` pair of NON-EMPTY strings?
 
-    The seam's own admissibility test, extracted so the capability read that
-    decides WHETHER to hand the record a write cannot believe a shape the seam
-    will refuse (a half pair, a list, an empty id): believing it would skip the
-    graph write for a write the record declines, i.e. the transcript in neither
-    store — the #10067 defect itself.
+    The seam's own admissibility test — asked by :func:`_live_write_verdict`
+    itself, so the capability read that decides WHETHER to hand the record a
+    write cannot believe a shape the seam will refuse (a half pair, a list, an
+    empty id): believing it would skip the graph write for a write the record
+    declines, i.e. the transcript in neither store — the #10067 defect itself.
+    Exported because the precedence and validity questions are two, and a caller
+    that resolves its own pair needs the same answer the seam will give.
     """
     return (isinstance(tenant, tuple) and len(tenant) == 2
             and all(isinstance(part, str) and part for part in tenant))
@@ -1264,9 +1267,15 @@ def _live_write_verdict(
     # a second copy is what #10067 exists to end (#10067 review P1: the producer
     # and the seam disagreed and the transcript went to neither store).
     resolved = record_tenant_effective(tenant)
-    if resolved is not None and not (
-            isinstance(resolved, tuple) and len(resolved) == 2
-            and all(isinstance(part, str) and part for part in resolved)):
+    # ⛔ The VALIDITY half is asked of the module's own declaration, not respelled
+    # here. It was an inline copy of `is_usable_tenant`'s predicate until the
+    # #10199 review pointed out that the export, its docstring ("a caller that
+    # needs 'would the seam ACCEPT this' asks it") and the PR's own "one
+    # declaration, no second copy" argument all described a call site that did
+    # not exist — a second copy of a validity rule in the function that DECIDES,
+    # which is the failure mode this PR exists to end for the precedence rule.
+    # Value-identical: the two spellings accept exactly the same pairs.
+    if resolved is not None and not is_usable_tenant(resolved):
         # The seam's ONLY injection point must not be its weakest carrier: an
         # empty/half pair would be unpacked straight into `write_records` and
         # file the row under a tenant nobody named (#9188 review F4).
@@ -1328,10 +1337,11 @@ def record_holds_turns(*, journal_configured: bool, durable: bool = True,
     puts the transcript in Postgres, so nothing here may be a toggle that sends
     it back):
 
-    * ``journal_configured`` — the turns reach the record ONLY through the
-      per-turn `PointAdded` records (`_write_capture_turns` emits them when the
-      SDK has a journal), so without one the record cannot be where they are,
-      whatever its DSN says. ``durable`` is the same fact one step in: a scratch
+    * ``journal_configured`` — the turns reach the record only through a journal:
+      one `TurnsRecorded` CARRIER per capture (#10067 — the record-only lane),
+      or the per-turn `PointAdded` records when the SDK is not on that lane. So
+      without a journal the record cannot be where they are, whatever its DSN
+      says. ``durable`` is the same fact one step in: a scratch
       buffer is not a journal and the seam declines it.
     * :func:`live_write_refusal` — the write door's own preconditions (armed
       DSN, a tenant, a closed connect breaker). A reason it names is a write this

@@ -1187,8 +1187,10 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     TURNS_RECORD_TYPE: Mutation(
         NoRecordEffect(
             "#10017 — §9.1's raw-turn carrier: one capture's turn set on ONE "
-            "record, where the capture writer emits one `PointAdded` per turn "
-            "today. It materialises NO node, and that is the ruling rather than "
+            "record. #10067 moved the capture writer onto THIS type: the "
+            "record-only lane now journals one `TurnsRecorded` carrier and no "
+            "per-turn `PointAdded` (those are the non-record-only lane's rows). "
+            "It materialises NO node, and that is the ruling rather than "
             "an omission: §9.1's D1 places the raw transcript 'not in the "
             "graph, not a `Document` node, not a `Point`' (owner, 2026-09-23: "
             "the same rule applies to raw turns). Its RECORD home is "

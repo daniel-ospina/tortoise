@@ -2728,6 +2728,62 @@ def test_the_seam_refuses_a_malformed_carried_tenant(monkeypatch):
         f"a malformed carried tenant was not counted as a refusal: {before} → {after}")
 
 
+def test_the_seam_asks_the_one_tenant_validity_declaration(monkeypatch):
+    """⛔ #10199 review P3: the validity rule had TWO copies and ONE of them unused.
+
+    ``is_usable_tenant`` was declared, exported (``__all__``), documented — and
+    called by NOTHING, tree-wide. The seam that decides the write instead
+    respelled its predicate inline, so the same question had two answers that
+    could disagree, which is the failure mode this PR exists to end for the
+    *precedence* rule and had left standing for *validity*.
+
+    The pin is the only one that can distinguish the two states: it flips the
+    DECLARATION and requires the SEAM's verdict to follow. With a second copy in
+    ``_live_write_verdict`` the flip is invisible, so this reddens on the pre-fix
+    code (measured: the first assertion alone fails there, because the seam still
+    refuses a pair the declaration now says is fine).
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    good = ("org-a", "g_row")
+    # Baseline: the declaration accepts the pair, so the seam has no refusal for it.
+    assert record_writer.is_usable_tenant(good) is True
+    assert record_writer._live_write_verdict(
+        tenant=good, consult_breaker=False)[0] is None
+
+    # The seam's verdict follows the DECLARATION — a malformed pair the
+    # declaration blesses is NOT refused by a second copy of the rule.
+    monkeypatch.setattr(record_writer, "is_usable_tenant", lambda _t: True)
+    assert record_writer._live_write_verdict(
+        tenant=("org-a", ""), consult_breaker=False)[0] is None, (
+        "`_live_write_verdict` refused a pair its own declaration accepts — the "
+        "validity rule has a second copy in the seam (#10199 review P3)")
+
+    # ... and a pair the declaration REFUSES is refused by the seam, with the
+    # carrier reported so the warning can name it.
+    monkeypatch.setattr(record_writer, "is_usable_tenant", lambda _t: False)
+    reason, resolved, carried = record_writer._live_write_verdict(
+        tenant=good, consult_breaker=False)
+    assert reason == "no_tenant_carried", (
+        f"the seam ignored its declaration and accepted {good!r} ({reason!r})")
+    assert resolved is None and carried == good, (reason, resolved, carried)
+
+
+def test_is_usable_tenant_refuses_every_shape_the_fold_would_misfile():
+    """The declaration itself, pinned to the shapes that must never reach the fold.
+
+    A second copy in the seam was value-identical only by luck; this keeps the
+    single declaration honest so the equivalence argument does not rest on
+    inspection (#10199 review P3).
+    """
+    usable = record_writer.is_usable_tenant
+    assert usable(("org-a", "g_row")) is True
+    for bad in (("", "g_row"), ("org-a", ""), ("", ""), ("org-a",),
+                ("org-a", "g_row", "extra"), ("org-a", None), (None, "g_row"),
+                "org-a", 7, None, [], {"org_id": "org-a"}):
+        assert usable(bad) is False, f"{bad!r} would be unfiled by the fold"
+
+
 def test_a_refused_live_write_is_visible_to_its_caller(monkeypatch):
     """#8447: a REFUSAL must not return the value an UNARMED deployment returns.
 
