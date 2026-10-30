@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-runner-pool, ci-headroom-guards
 aboutObjects: tortoise, tools/install-ci-runner-x64.sh, scripts/ci_runner_gate.sh
 created: 2026-10-22
-updated: 2026-10-23
+updated: 2026-10-30
 ---
 
 # x86_64 CI runners — the fallback pool's second architecture
@@ -34,12 +34,18 @@ The architecture labels are **derived by GitHub from the host at registration** 
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
 and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
 
-- `ARM64`/`X64` are **ornaments** — no job matches on them, and none can (a `runs-on` naming
-  either would have to name `self-hosted` too, which the repo forbids: `.github/workflows/python-ci.yml:1556`
-  is "Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`", and the reason is
-  recorded at `:1544-1546` — a `self-hosted` pin removes the GitHub-hosted half of the race, so
-  during a hosted outage the required leg WAITS and "the aggregate stays pending — not answered
-  yet" instead of being answered by the pool).
+- `ARM64`/`X64` are **ornaments in DEFAULT routing** — no job in the default tree requests them, so
+  nothing distinguishes the classes today. They are NOT unroutable: labels match cumulatively and a
+  custom label routes on its own (that is how `ubuntu-latest` reaches the pool, next bullet), so a
+  bare `runs-on: self-hosted-x64` DOES select this box. What the repo refuses **as a default** is
+  not a spelling but a CLASS — any POOL-ONLY label: `self-hosted`, and equally the bare custom
+  `self-hosted-x64` above, since no GitHub-hosted runner carries either. The `test-slow` pin's
+  header in `.github/workflows/python-ci.yml` names the spelling ("Do NOT change it back to
+  `ubuntu-latest`, and never to `self-hosted`"), and the reason it gives covers both: a pool-only
+  pin removes the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS
+  and "the aggregate stays pending — not answered yet" instead of being answered by the pool.
+  **One opt-in departure exists and is recorded below** — `CI_SHARD_ROUTING=pool-split` names
+  `[self-hosted, self-hosted-x64]` on the ODD rows (`OVERRIDES:` + outage-wait exposure in that section).
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
   (`fallback_on`) attaches it, `:290` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
@@ -360,6 +366,13 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
 3. **`ubuntu-latest` remains ambiguous by design.** Any job asking for it can land on
    GitHub-hosted, an ARM64 runner, or one of these — that ambiguity is what the fallback is
    for, and why the legs that need a specific class are version-pinned.
+4. **The OPT-IN split (`CI_SHARD_ROUTING=pool-split`) makes the pool a PIN on 4 of 9 required legs,
+   and that exposure is deliberate but uncomfortable.** It is off by default and it is recorded in
+   its own section, with an `OVERRIDES:` line (`→ The fast-matrix split is OPT-IN`). In one line:
+   under `pool-split`, `test (b)`, `(d)`, `(f)` and `(h)` name `[self-hosted, self-hosted-x64]`, so a
+   pool outage or a contended box holds those required checks **pending** rather than answering them
+   from GitHub-hosted — the exact trade the "any POOL-ONLY label" rule refuses, taken
+   deliberately for those four rows and nowhere else.
 
 ## The box's own choice: `CI_RUNNER_OS_LABEL`
 
@@ -399,3 +412,65 @@ whose unit carries `on` KEEPS the pin. When #10275 lands both writers read the s
   `grep -n CI_RUNNER_OS_LABEL /etc/systemd/system/runner-autoscale.service` (the systemd path — an
   empty answer is the expected one today, since nothing in this tree writes the flag), then
   `gh api repos/<owner>/<repo>/actions/runners --jq '.runners[]|select(.name|startswith("pi-runner-x64"))|{name,labels:[.labels[].name]}'`.
+
+## The fast-matrix split is OPT-IN (`CI_SHARD_ROUTING=pool-split`)
+
+**Decision relay (PR #10186, 2026-10-30).** #6897's ruling is *use the compute capacity wherever
+it is, throughput first*. An earlier cut of #10186 read that as *route 4 of 9 gated fast shards to
+the pool by default* — which is an adoption over the `fallback-only` decision above, and not a
+lane's to take. It was rejected on measurement, not on taste:
+
+| run | what ran | result |
+| --- | --- | --- |
+| `40981781885` (`main`, plain `ubuntu-latest`) | pool won 5 of 9 legs by the fallback race | **5 of 5 pool legs killed**; 4 of 4 hosted legs passed in 10-12 m of a 20 m budget |
+| `40986603502` (head `5a2ae6aa1`, split ON) | odd → `self-hosted-x64`, even/canary → `ubuntu-latest` | 3 of 4 pool legs failed — two on `redis ConnectionError 111 localhost:6379`, not on the budget; `test (i)` (**the canary**) was taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s |
+
+So the split ships **available and off**: `tools/ci_selection.py::resolve_shard_routing()` is the one
+decision point, `CI_SHARD_ROUTING=pool-split` opts in, and **unset / empty / `hosted-only` / any
+other value resolves to hosted-only** — every fast row back on `ubuntu-latest`, exactly what main
+does. A typo or a fork with no `vars` therefore fails SAFE, never onto the contended class.
+`python-ci.yml`'s `test` job takes its class from `matrix.runner` only, so there is no second copy
+of the mode to drift.
+
+The lever is carried by **both emitter STEPS** on `python-ci.yml`'s `changes` job — `push-matrix`
+(`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs, where its output OVERRIDES
+the push matrix) — and by nothing else. Scoped to ONE step the variable is silently absent on the
+other and the PR surface never splits (measured on head `3db8f7d78`, where only the push step
+carried it); `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`
+discovers the emitters from their `run:` commands, so a third one cannot miss the lever either.
+
+⛔ **Not job scope, and that is a pin, not a preference.** An earlier cut of this lever sat on the
+`changes` JOB; that job also owns the capstone pre-registration gate step, and
+`tests/test_capstone_preregistration_9075.py` allow-lists the `env:` keys above that step with an
+EMPTY job allow-list (any key there can hook the gate's interpreter — `BASH_ENV`, a `PYTHONPATH`
+`sitecustomize.py`, `LD_PRELOAD`, `PATH` — so `python3` exits 0 with the real check never running).
+Measured at head `3eaf43fda`, job scope returned one `ci_ordering_half_violations` finding and red
+a REQUIRED fast shard (run `41002293616`, `test (e)`). `tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`
+now forbids the job-scope form, so "put it back on the job" is a red check, not a simplification.
+
+### Residual: under `pool-split` the pool is a PIN on 4 of 9 required legs
+
+**OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `pool-split` names
+`[self-hosted, self-hosted-x64]` on the odd rows (`test (b)`, `(d)`, `(f)`, `(h)`), because a mode
+whose odd rows still raced for a hosted label would not route at all; the departure is OPT-IN, off by
+default, and its cost is stated here rather than inherited silently.
+
+Label matching is cumulative — a runner must carry EVERY label named in `runs-on` — so the pair
+`[self-hosted, self-hosted-x64]` matches only these x64 runners, which carry both; a bare
+`self-hosted-x64` would select them too. What that costs is exactly the trade the rule refuses:
+
+- **No hosted half on those four legs.** With the gate in `fallback_off` (the normal state on a
+  healthy day), or the box simply down, a `self-hosted` pin does not degrade to anything — it
+  WAITS. `test (b)`, `(d)`, `(f)`, `(h)` sit `queued`/`pending` with no GitHub-hosted runner able to
+  answer them, so `python-ci-gate` stays pending and the PR does not merge until the pool is back.
+  This is what turns "the pool is slower" (residual 2 above) into "the gate is blocked": measured
+  2026-10-27..30, three pool legs were killed at their own watchdogs while hosted legs finished in
+  10-12 m of a 20 m budget (the table above).
+- **The even rows keep the opposite residual.** `ubuntu-latest` is answered by GitHub-hosted *or* by
+  the pool while the gate carries the fallback label, so a pool runner can take an even shard:
+  `test (i)` — the canary — was taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s in run
+  `40986603502`. Neither half is class-safe in either mode; that is why the split is off.
+
+Changing the DEFAULT is a decision, and its home is #6897: it needs idle pool capacity at schedule
+time **and** a pool job wall within ~1.2x hosted on these rows, neither of which the runs above
+show. Do not set `pool-split` to "try it out" — a killed leg is a required check.

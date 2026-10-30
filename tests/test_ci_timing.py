@@ -5953,6 +5953,54 @@ def test_the_unmeasured_note_repair_is_not_vacuous() -> None:
         f"the legitimate counterfactual was cut with the stale claim: {flat}")
 
 
+def test_a_durations_note_states_ONE_count_for_the_head_it_was_read_at() -> None:
+    """#10021 review P3: one row, one file, ONE count for ONE head.
+
+    The `test_10000_turns_record_only.py` row was corrected round after round and
+    kept the SUPERSEDED number beside the current one every time: it carried 33,
+    then 31, 34, 39 and 41 at five earlier heads (each right where it was read,
+    each stale one head later), and at `31dfd9532` it carried a `45 … 44 … 41 …
+    23+18` TRIPLE in a single note — three different counts for one file at one
+    tree, which is the same "a PAST state quoted as a current one" defect the
+    row's own prose argues against.
+
+    The rule this pins: the note states the collected count as `<N> tests`
+    exactly once, and historical counts are written in HYPHENATED form
+    (`23-test revision`) so they cannot be read as this head's. Cheap, mechanical,
+    and it is what stops the next re-derivation from leaving the previous number
+    behind.
+
+    Why it is scoped to this row rather than every durations row: 35 rows in the
+    manifest already quote a count that does not match the file they weigh
+    (pre-existing and unrelated to this PR — filed rather than silently swept by
+    a lane that cannot verify them). This one is the row the defect recurs on.
+
+    Non-vacuity: on the pre-fix row `re.findall(r"(\\d+)\\s+tests\\b", note)`
+    returns `['45', '44']`, so the distinctness assertion reds; the shipped-count
+    assertion then reds with the `44`/`41` residue against a 45-def file.
+    """
+    row = next((ln for ln in
+                (REPO_ROOT / "config" / "ci-surfaces.yml").read_text().splitlines()
+                if ln.startswith("  test_10000_turns_record_only.py: ")), None)
+    assert row is not None, "the durations row is the weight this test guards"
+    note = row.split("#", 1)[1] if "#" in row else ""
+    counts = re.findall(r"(\d+)\s+tests\b", note)
+    assert counts, (
+        "the note must quote the collected count it was read at (or lead with "
+        f"`unmeasured`, which the refresher owns): {row[:160]}")
+    assert len(set(counts)) == 1, (
+        f"the note states {sorted(set(counts))} different counts for ONE file at "
+        "ONE head; keep only the one read at this head and write historical "
+        f"counts hyphenated (`23-test revision`): {row[:240]}")
+    shipped = len(re.findall(
+        r"^def test_",
+        (REPO_ROOT / "tests" / "test_10000_turns_record_only.py").read_text(),
+        re.MULTILINE))
+    assert int(counts[0]) == shipped, (
+        f"the durations row quotes {counts[0]} tests; the file ships {shipped} — "
+        "re-derive the count at THIS head and move the weight with it")
+
+
 def test_the_held_equal_pin_takes_the_larger_reading_for_both_rows() -> None:
     """#3400: a declared pin survives a sweep that measures the two rows apart.
 
