@@ -5857,26 +5857,52 @@ def _step_embed_counts(block) -> dict[str, int]:
 
 
 def _gate_counts(surface) -> dict:
-    """The COUNTS out of a VET / classify pass surface (``{}`` when nothing ran).
+    """The COUNTS out of a VET or classify pass surface (``{}`` when nothing ran).
 
-    ``_run_vet_pass`` returns ``{"stats": …, "batch": …, "decisions": …}`` and
-    the classify passes return their stats dict directly. ``decisions`` is NOT a
-    stats block: ``vet_gate.vet_candidates`` builds one row PER CANDIDATE
+    TWO SHAPES, and both are handled — reading only the first is what made this a
+    trap for the next caller (PR #10214 review, P3):
+
+    * ``_run_vet_pass`` returns ``{"stats": …, "batch": …, "decisions": …}``, so
+      the counts are NESTED under ``stats``.
+    * a classify pass returns its stats dict DIRECTLY — a bare counts dict with no
+      ``stats`` key at all (``extractor_v2``: ``s2_classify_stats = out["stats"]``,
+      then ``"s2": s2_classify_stats``). An earlier revision of this helper read
+      only the nested shape, so ``_gate_counts(<bare classify block>)`` answered
+      ``{}`` — a pass that DID work reported as idle, which is the misattribution
+      the three-state G5 split exists to prevent, one layer below where it was
+      fixed. It caused no wrong verdict only because ``_capture_step_witness``
+      forwards ``classify_later`` RAW; the docstring said otherwise, so the next
+      caller who trusted it would have got the silent zeros.
+
+    ``decisions``/``batch`` are never forwarded, in either shape: ``decisions`` is
+    not a stats block — ``vet_gate.vet_candidates`` builds one row PER CANDIDATE
     carrying that candidate's own ``text`` (and, on a discard, a
-    ``counterfactual`` quoting it) — so forwarding the surface whole would put
-    extraction-proportional content on a receipt that is serialized on the
-    hosted lane and returned to every SDK caller, which is exactly what this
-    seam's bound forbids.
+    ``counterfactual`` quoting it) — so forwarding a VET surface whole would put
+    extraction-proportional content on a receipt that is serialized on the hosted
+    lane and returned to every SDK caller, which is exactly what this seam's bound
+    forbids. ``batch`` rides the same candidate-level material.
 
-    ``stats`` is the pass's own counts and is non-empty exactly when the pass
-    did work, which is the whole question a witness asks it. The raw decisions
-    stay on the extractor's own return (``result["vet"]``), where the eval lane
-    already reads them.
+    ``stats`` is the pass's own counts and is non-empty exactly when the pass did
+    work, which is the whole question a witness asks it. The raw decisions stay on
+    the extractor's own return (``result["vet"]``), where the eval lane already
+    reads them.
     """
     if not isinstance(surface, dict):
         return {}
     stats = surface.get("stats")
-    return stats if isinstance(stats, dict) else {}
+    if isinstance(stats, dict):
+        return stats
+    # The BARE shape: a classify pass's own stats dict, which is counts only. Strip
+    # the candidate-level keys anyway — a surface that carried either one is a VET
+    # surface whose ``stats`` is missing, and forwarding it would breach the bound.
+    return {key: value for key, value in surface.items()
+            if key not in _NON_COUNT_GATE_KEYS}
+
+
+#: Keys that are NOT counts on a gate surface: ``decisions``/``batch`` carry
+#: per-candidate material (candidate ``text``, counterfactuals), ``stats`` is the
+#: nesting marker of the VET shape.
+_NON_COUNT_GATE_KEYS = frozenset({"stats", "batch", "decisions"})
 
 
 def _capture_step_witness(out: dict, *, committed: int) -> dict:

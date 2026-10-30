@@ -6655,7 +6655,97 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert (job["strategy"]["matrix"]
             == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
         "the carve-out matrix must come from the selector's carve_matrix output"
-    assert "--junitxml=/tmp/junit.xml" in run["run"]
+    assert '--junitxml="$PYTEST_JUNIT"' in run["run"], \
+        "the shard's junit must be the per-job $PYTEST_JUNIT, not the host-global " \
+        "`/tmp/junit.xml` (see test_carve_out_shards_write_per_job_pytest_artifacts)"
+
+
+def test_carve_out_shards_write_per_job_pytest_artifacts():
+    """#10280 (PR #10214 review, P2): the `test-carve-out` SHARDS must write their
+    pytest artifacts to the PER-JOB path, never the host-global `/tmp/...` literals.
+
+    WHY THIS JOB SPECIFICALLY. It is a MATRIX (`carve_matrix`, `fail-fast: false`),
+    so its shards run CONCURRENTLY — and on the self-hosted pool several runner
+    installs share ONE `/tmp`, which run 40985248910 shows directly: in one attempt
+    `test (b)`/`test (h)`/`test (c)` and `test-concurrency-falkor` landed on different
+    `pi-runner-vm-*`/`pi-runner-x64-*` installs of the same host. A shard writing
+    `/tmp/pytest.log` is therefore sharing a file not with a sibling JOB but with its
+    own SIBLING SHARDS, a collision no job-name-keyed ownership check can even see
+    (every shard is the string `test-carve-out`). The consequence is the measured one:
+    a truncated log makes `pytest-attribution.sh` fall closed (`INCOMPLETE`), and the
+    `grep '^(FAILED|ERROR) '` the admin rail derives the failure SET from names a
+    sibling shard's nodeids. The `junit.xml`/`expected-nodeids.txt` pair collides the
+    same way and is worse — a sibling's junit is what `skip-guard.py` compares the
+    collected set against, i.e. a false PASS is reachable, not just a false red.
+
+    Non-vacuous on the pre-fix workflow: each assertion below is false of the
+    literals that stood there (`--junitxml=/tmp/junit.xml`, `> /tmp/pytest.log`,
+    `--output /tmp/expected-nodeids.txt`, and an upload `path:` naming the three
+    `/tmp` files), so restoring any one of them reds this test.
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test-carve-out"]
+    steps = job["steps"]
+
+    # (1) the paths are resolved FIRST, from RUNNER_TEMP, and fail closed —
+    # `$GITHUB_ENV` only reaches SUBSEQUENT steps.
+    resolve = steps[0]
+    assert resolve.get("name") == "Resolve per-job pytest artifact paths (#10028)", \
+        "the artifact paths must be resolved in the FIRST step of test-carve-out"
+    rrun = resolve["run"]
+    assert "${RUNNER_TEMP:?" in rrun, \
+        "RUNNER_TEMP must fail closed — a silent /tmp fallback is the bug itself"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"),
+                      ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'{var}=$base/{leaf}' in rrun, f"{var} must resolve under $base"
+
+    # (2) NO executable line of the job may name the host-global literals. Comments
+    # are exempt on purpose: the migration's own rationale quotes them.
+    globals_ = ("/tmp/pytest.log", "/tmp/junit.xml", "/tmp/expected-nodeids.txt")
+    offenders = []
+    for step in steps:
+        body = step.get("run")
+        if not isinstance(body, str):
+            continue
+        for line in body.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            offenders += [f"{step.get('name')}: {line.strip()}"
+                          for lit in globals_ if lit in line]
+    assert not offenders, (
+        "test-carve-out shards must not write or read the host-global /tmp pytest "
+        "artifacts — concurrent shards share one /tmp (a false verdict on a required "
+        "check, and a junit a sibling shard owns): " + "; ".join(offenders)
+    )
+
+    # (3) the run step routes pytest AND the readers through the vars.
+    run = next(s for s in steps
+               if s.get("name", "").startswith("Run carve-out suite"))
+    cmdline = next(line for line in run["run"].splitlines()
+                   if "python -m pytest" in line)
+    assert '-o junit_family=xunit1 > "$PYTEST_LOG" 2>&1' in cmdline, \
+        "the shard's pytest stdout must land in $PYTEST_LOG"
+    for reader in ('tail -n 200 "$PYTEST_LOG"',
+                   '--log "$PYTEST_LOG"',
+                   "grep -E '^(FAILED|ERROR) ' \"$PYTEST_LOG\""):
+        assert reader in run["run"], f"the run step must read the log via {reader!r}"
+    # The guard/enforcing steps are further STEPS, and they read the log too.
+    guard = next(s for s in steps
+                 if s.get("name", "").startswith("Skip-fail guard"))
+    assert 'skip-guard.py "$PYTEST_LOG"' in guard["run"], \
+        "the skip-fail guard must read this shard's own log"
+    assert '--manifest "$PYTEST_MANIFEST"' in guard["run"], \
+        "the skip-fail guard must compare against this shard's own collected set"
+
+    # (4) the uploaded artifact is the per-job file. `steps.<id>.with` DOES allow the
+    # `runner` context (a job-level `env:` does not — #6253).
+    upload = next(s for s in steps
+                  if str(s.get("uses") or "").startswith("actions/upload-artifact"))
+    paths = upload["with"]["path"]
+    for leaf in ("pytest.log", "junit.xml", "expected-nodeids.txt"):
+        assert f"${{{{ runner.temp }}}}/{leaf}" in paths, \
+            f"the upload must name {{{{ runner.temp }}}}/{leaf}, not the /tmp literal"
 
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────

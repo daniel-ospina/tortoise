@@ -2415,21 +2415,32 @@ jobs:
       # job at a time — so it is per-JOB unique even though several runner installs
       # on this host share one `/tmp`. That is exactly the property this leg lacked.
       #
-      # Measured, run 40985248910 (PR #10214), this job on runner `gh-runner-x64-4`:
-      # a co-tenant leg on `gh-runner-x64-8` was writing the SAME host-global
-      # `/tmp/pytest.log` for 19 minutes, so this leg's `tail`, its attribution read
-      # and its `grep '^(FAILED|ERROR) '` all described the OTHER leg's session
-      # (288 passed / `test_smoke_embedded` / `test_eval_ingest_retry`, none of them
-      # this job's tests). The reporter said so out loud — `test leg INCOMPLETE — no
-      # pytest summary; failure set unobservable` — and `ci-introduced-failure` then
-      # blocked this PR on three nodeids THIS leg had not run. A leg whose verdict is
-      # another leg's is not a red or a green: it is nothing.
+      # Measured — run 40985248910 (PR #10214), **ATTEMPT 3**, this job on runner
+      # `cmux`. The attempt number is load-bearing: that run has four, attempt 1 was a
+      # hosted run that passed, and attempt 4 was CANCELLED with zero steps and no job
+      # log at all (400/404 on `jobs/<id>/logs`), so citing the run alone sends the
+      # next lane to a log that cannot show this.
+      #
+      # In attempt 3 a CO-TENANT leg was writing the SAME host-global `/tmp/pytest.log`
+      # for 19 minutes, so this leg's `tail`, its attribution read and its
+      # `grep '^(FAILED|ERROR) '` all described the OTHER leg's session (288 passed /
+      # `test_smoke_embedded` / `test_eval_ingest_retry`, none of them this job's
+      # tests). The reporter said so out loud — `test leg INCOMPLETE — no pytest
+      # summary; failure set unobservable` — and `ci-introduced-failure` then blocked
+      # this PR on three nodeids THIS leg had not run. A leg whose verdict is another
+      # leg's is not a red or a green: it is nothing.
+      #
+      # ⛔ WHICH leg wrote it is an INFERENCE, not a measurement, and the co-tenant's
+      # own runner is not observable at all: a truncated log cannot name its other
+      # writer. `test-carve-out` is named because this file's own inventory makes it
+      # the only other leg still on the literal AND a matrix whose shards run
+      # concurrently — not because the log names it. What IS measured: this leg's
+      # runner, the window, and the content of the log it read.
       #
       # The same migration #10028 applied to `test` and to `test-slow`; `test-carve-out`
-      # still writes the shared path and is the co-tenant measured above, so migrating
-      # this leg is what makes the two stop colliding. The rest of #10280's scope
-      # (`test-track-b`, `test-carve-out`, `test-d14-hosted-api`, `validate`) is
-      # unchanged by this step.
+      # is migrated in this change too, so no matrix job in this workflow writes a
+      # host-global pytest artifact any more. The rest of #10280's scope
+      # (`test-track-b`, `test-d14-hosted-api`, `validate`) is unchanged by this step.
       #
       # ⛔ NOT a job-level `env:` block: `runner` is not an allowed context at
       # `jobs.<job_id>.env`, and `${{ runner.temp }}` there makes actionlint reject the
@@ -2878,6 +2889,39 @@ jobs:
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
+      # ⛔ FIRST STEP ON PURPOSE — the migration #10028 gave `test` and `test-slow`,
+      # and the last leg of #10280's MATRIX half. `RUNNER_TEMP` is
+      # `<runner_install>/_work/_temp`, and a runner executes ONE job at a time, so
+      # it is per-JOB unique even though several runner installs on this host share
+      # one `/tmp`. That matters HERE more than anywhere else: this job is a MATRIX
+      # (#6263) whose shards run CONCURRENTLY, so a `/tmp/pytest.log` literal means
+      # two shards truncate each other's log mid-run — and every reader of that path
+      # (the `tail`, `pytest-attribution.sh`'s session-ownership check, and the
+      # `grep '^(FAILED|ERROR) '` the admin rail derives a failure SET from) then
+      # describes a SIBLING shard's session. That is the failure measured on this
+      # branch: run 40985248910 attempt 3, where `test-concurrency-falkor`'s log on
+      # runner `cmux` was a 19-minute carve-out session (`288 passed`,
+      # `test_smoke_embedded`, `test_eval_ingest_retry`) and the reporter correctly
+      # concluded `INCOMPLETE`. The three artifacts move together — a per-shard log
+      # beside a shared `junit.xml` would leave the skip-guard reading a sibling's
+      # collected set.
+      #
+      # ⛔ NOT a job-level `env:` block: `runner` is not an allowed context at
+      # `jobs.<job_id>.env`, and `${{ runner.temp }}` there makes actionlint reject
+      # the WHOLE file (#6253: zero jobs, zero check-runs, and the required
+      # `python-ci-gate` ABSENT rather than red). The upload below uses
+      # `${{ runner.temp }}` directly because `steps.<id>.with` DOES allow the
+      # context.
+      - name: Resolve per-job pytest artifact paths (#10028)
+        run: |
+          set -euo pipefail
+          base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"
+          {
+            echo "PYTEST_LOG=$base/pytest.log"
+            echo "PYTEST_JUNIT=$base/junit.xml"
+            echo "PYTEST_MANIFEST=$base/expected-nodeids.txt"
+          } >> "$GITHUB_ENV"
+          echo "pytest artifacts for this shard are under $base (per-job, not the host /tmp)"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -2951,7 +2995,7 @@ jobs:
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live and not integration" --output "$PYTEST_MANIFEST"
       - name: Run carve-out suite (embedded, URI unset — E2E-4)
         # The embedded carve-out. Deliberately NO TORTOISE_DB_URI:
         # the carve-out's embedded-specific assertions (recovery, busy-error,
@@ -2987,8 +3031,8 @@ jobs:
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           ( while true; do
               sleep 300
-              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
-              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              p=$(grep -c ' PASSED' "$PYTEST_LOG" 2>/dev/null || true)
+              f=$(grep -c ' FAILED' "$PYTEST_LOG" 2>/dev/null || true)
               echo "HEARTBEAT: carve-out pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
@@ -3008,13 +3052,13 @@ jobs:
           # to remove. The outer `timeout-minutes` stays a literal and must
           # clear this value — `test_every_bounded_pytest_job_caps_above_its_
           # watchdog` re-derives that from the emitted matrix.
-          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
-          tail -n 200 /tmp/pytest.log
+          tail -n 200 "$PYTEST_LOG"
           # #3470: the `tail -n` above is a LINE-COUNT window, not a result —
           # post-summary interpreter-exit noise fills it and pushes BOTH the
           # session summary and the `-r fEs` report above the cut, so the log
@@ -3022,7 +3066,7 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest.log --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -3031,11 +3075,11 @@ jobs:
           # THIS job log, so without the nodeids it sees an unattributable
           # failure and refuses — a refusal, not a comparison (#4453).
           echo "==================== pytest failure nodeids ===================="
-          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log || echo "(no FAILED/ERROR nodeids)"
+          grep -E '^(FAILED|ERROR) ' "$PYTEST_LOG" || echo "(no FAILED/ERROR nodeids)"
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
-            passed=$(grep -c ' PASSED' /tmp/pytest.log)
-            failed=$(grep -c ' FAILED' /tmp/pytest.log)
-            errored=$(grep -c ' ERROR' /tmp/pytest.log)
+            passed=$(grep -c ' PASSED' "$PYTEST_LOG")
+            failed=$(grep -c ' FAILED' "$PYTEST_LOG")
+            errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: carve-out shard pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
@@ -3083,9 +3127,9 @@ jobs:
             # passed). Accumulate the codes and exit non-zero if EITHER failed.
             guard_rc=0
             if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
-              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt || guard_rc=1
+              python3 tools/skip-guard.py "$PYTEST_LOG" --junitxml="$PYTEST_JUNIT" --manifest "$PYTEST_MANIFEST" || guard_rc=1
             else
-              python3 tools/skip-guard.py /tmp/pytest.log || guard_rc=1
+              python3 tools/skip-guard.py "$PYTEST_LOG" || guard_rc=1
             fi
             # #4215: the runtime half of the platform-gate guard. The manifest
             # above is regenerated from THIS tree's --collect-only, so a gate that
@@ -3135,8 +3179,8 @@ jobs:
             fi
             SCOPE=""
             for f in ${{ matrix.files }}; do SCOPE="$SCOPE tests/$f.py"; done
-            python3 tools/skip-guard.py /tmp/pytest.log \
-              --junitxml=/tmp/junit.xml \
+            python3 tools/skip-guard.py "$PYTEST_LOG" \
+              --junitxml="$PYTEST_JUNIT" \
               --manifest config/ci-expected-nodeids/platform-gated.txt \
               --scope "$SCOPE" --manifest-only || guard_rc=1
             exit $guard_rc
@@ -3146,7 +3190,7 @@ jobs:
       - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
         # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
         # discarded by pytest capture (measured on the fast job's flags — 0
-        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # occurrences in this shard's pytest log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
         # so a future xdist admission cannot truncate a peer's record wholesale
@@ -3257,9 +3301,9 @@ jobs:
           # NOT `matrix.suffix` — it carries a leading space and parentheses.
           name: pytest-log-${{ github.job }}-${{ matrix.label }}
           path: |
-            /tmp/pytest.log
-            /tmp/junit.xml
-            /tmp/expected-nodeids.txt
+            ${{ runner.temp }}/pytest.log
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/expected-nodeids.txt
           if-no-files-found: ignore
 
   test-d14-hosted-api:

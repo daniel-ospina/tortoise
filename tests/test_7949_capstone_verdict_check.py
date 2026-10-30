@@ -1181,6 +1181,55 @@ def test_the_witness_forwards_the_vet_counts_and_never_its_candidate_text():
         f"{len(json.dumps(witness['vet']))} >= {len(json.dumps(out['vet']))}")
 
 
+def test_gate_counts_reads_the_bare_classify_shape_it_documents():
+    """``_gate_counts`` must answer for BOTH gate shapes it names (#10214 review, P3).
+
+    Two shapes reach this helper and they are not the same shape:
+
+      * the VET surface — ``_run_vet_pass``' ``{"stats", "batch", "decisions"}``,
+        counts NESTED under ``stats``;
+      * a classify pass's stats — the BARE dict, with no ``stats`` key at all
+        (``extractor_v2``: ``s2_classify_stats = out["stats"]``).
+
+    The docstring named both and the code implemented one, so
+    ``_gate_counts(<bare classify block>)`` answered ``{}``: a pass that DID work
+    reported as IDLE — the misattribution the three-state G5 split exists to
+    prevent, one layer below where it was fixed. No verdict shipped wrong only
+    because ``_capture_step_witness`` forwards ``classify_later`` raw; the trap was
+    armed for the next caller who read the docstring and routed a classify surface
+    through this helper.
+
+    Mutation that reds it: return ``{}`` when ``surface["stats"]`` is absent (the
+    pre-fix body) — the bare block then reads as an idle pass.
+    """
+    from tortoise.sdk import _gate_counts
+
+    # (1) the BARE classify shape: counts only, returned as they are.
+    classify_block = {"items": 7, "assigned_knn": 5, "assigned_llm": 2,
+                      "unassigned": 0}
+    assert _gate_counts(classify_block) == classify_block
+    assert _gate_counts(classify_block), (
+        "a classify pass that assigned 7 kinds was reported as an IDLE pass — "
+        "the bare shape is not read"
+    )
+
+    # (2) the NESTED VET shape: only its ``stats``, never the per-candidate block.
+    vet_surface = {"stats": {"candidates": 3, "kept": 2},
+                   "batch": {"prompt": "…"},
+                   "decisions": [{"text": "candidate text", "verdict": "keep"}]}
+    assert _gate_counts(vet_surface) == {"candidates": 3, "kept": 2}
+
+    # (3) the bound holds in the BARE shape too: a surface that carries candidate
+    # material is stripped even when it has no ``stats`` key, so the fallback can
+    # never become the leak the nested branch was written to prevent.
+    leaked = _gate_counts({"decisions": [{"text": "candidate text"}],
+                           "batch": {"prompt": "…"}, "candidates": 3})
+    assert leaked == {"candidates": 3}, leaked
+
+    # (4) a non-dict is no pass at all.
+    assert _gate_counts(None) == {}
+    assert _gate_counts([]) == {}
+
 def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch):
     """#9116, the WIRING: the real ``capture_session`` returns the seam's record.
 
