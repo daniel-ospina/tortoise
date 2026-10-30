@@ -1507,6 +1507,33 @@ def assert_seam_target(harness: str,
             f"sha256 {shipped_digest}. Move it aside, then re-run "
             f"`tortoise install {harness}` to install ours."
         )
+    # ── the REMEDY has to be a step the INSTALLER ACCEPTS ────────────────
+    # A divergence message is only as good as the repair it hands out, and for
+    # a symlinked seam the plain "re-run the installer" repair REFUSES:
+    # `_install_pi` runs `_symlink_escape` BEFORE any write, and that guard
+    # rejects a leaf link resolving outside the install home (and a symlinked
+    # intermediate directory).  That is the ordinary "I symlinked the
+    # installed extension to the copy in my repo" shape, and it is pinned as a
+    # refusal elsewhere in this suite — so recommending the installer alone
+    # drops the one step that unblocks it (`unlink`).  This is the error
+    # `hook_install.is_manual_fix` calls the expensive one: "the other one
+    # recommends a command that fails" (#5351).
+    #
+    # The guard is the INSTALLER's OWN, called here rather than re-derived, so
+    # the message and the refusal cannot drift (#4680: one declaration,
+    # consumers derive — the same rule `__main__._artifact_detail_would_refuse`
+    # applies to rendered findings).  Its text already names the user's step,
+    # so this reuses it instead of authoring a second copy of the advice.
+    refused = _symlink_escape(
+        Path(home) if home is not None else Path.home(), loaded,
+        label="install home")
+    # `via` is NOT the test for this: a symlinked ANCESTOR (macOS `/tmp` →
+    # `/private/tmp`) sets `via` while the installer accepts the install, and a
+    # symlinked leaf that resolves INSIDE the home is accepted too (the atomic
+    # write replaces the link).
+    install_step = (
+        f"{refused} Then re-run `tortoise install {harness}`" if refused
+        else f"Re-run `tortoise install {harness}`")
     found = hook_install.read_hook_version(resolved)
     expected = hook_install.read_hook_version(shipped)
     if found is not None and expected is not None and found > expected:
@@ -1520,14 +1547,17 @@ def assert_seam_target(harness: str,
             f"from the shipped {shipped}, sha256 {shipped_digest} — the "
             f"installed seam is generation {found}, NEWER than this CLI's "
             f"{expected}, so it captures with newer logic and "
-            f"`tortoise install {harness}` would replace it with {expected}."
+            + (f"`tortoise install {harness}` cannot reach it as things "
+               f"stand: {refused}" if refused
+               else f"`tortoise install {harness}` would replace it with "
+                    f"{expected}.")
         )
     return (
         f"the file {harness} LOADS is not the file this repo SHIPS: "
         f"{loaded}{via}, sha256 {loaded_digest}, differs from "
         f"the shipped {shipped}, sha256 {shipped_digest} — the installed "
-        f"capture seam would run older or locally edited logic. Re-run "
-        f"`tortoise install {harness}` to replace it."
+        f"capture seam would run older or locally edited logic. "
+        f"{install_step} to replace it."
     )
 
 

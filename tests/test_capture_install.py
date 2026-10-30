@@ -989,6 +989,38 @@ def test_pi_install_fails_when_the_write_leaves_no_file_at_all(home, monkeypatch
     assert str(dst) in res.error, res.error
 
 
+def test_pi_install_reports_the_seam_assertion_instead_of_claiming_success(
+        home, monkeypatch):
+    """The WIRING, which had no test: every assertion in
+    `test_pi_install_passes_the_resolved_target_assertion` still holds with the
+    `assert_seam_target` call DELETED from `_install_pi` (its direct calls
+    re-derive the verdict), so a divergence could stop reaching the result
+    without a single RED.  Injects a verdict and pins that `_install_pi`
+    surfaces it as the install's FAILURE, with `require_present=True`.
+
+    Mutation: drop the `if not dry_run: divergence = assert_seam_target(...)`
+    block from `_install_pi` (the injected verdict never reaches the result —
+    RED)."""
+    verdict = ("the file pi LOADS is not the file this repo SHIPS: injected "
+               "divergence")
+    seen: list[tuple[str, bool]] = []
+
+    def _fake(harness, *, home=None, require_present=False):
+        seen.append((harness, require_present))
+        return verdict
+
+    monkeypatch.setattr(capture_install, "assert_seam_target", _fake)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        "the install claimed success over the assertion's divergence: "
+        f"{res.actions}")
+    assert res.error == verdict, res.error
+    # The installer just wrote the path, so it asks the ABSENT-aware question.
+    assert seen == [("pi", True)], seen
+
+
 def test_pi_install_passes_the_resolved_target_assertion(home):
     """The passing direction: an install that DID land is asserted clean, so
     the new check cannot be satisfied by refusing everything.
@@ -996,7 +1028,10 @@ def test_pi_install_passes_the_resolved_target_assertion(home):
     Mutation: return a divergence unconditionally from `assert_seam_target`
     (every install fails) — or compare the shipped file against itself
     (every stale install passes); this pins that a real install is VERIFIED,
-    not merely assumed."""
+    not merely assumed.  It does NOT pin the WIRING (its own direct calls to
+    the assertion re-derive the verdict, so deleting the call from `_install_pi`
+    leaves this green) — `test_pi_install_reports_the_seam_assertion_instead_
+    of_claiming_success` is that test."""
     res = install_capture("pi", home=home)
 
     assert res.ok, res.error
@@ -1104,7 +1139,13 @@ def test_seam_target_assertion_names_the_resolved_target_of_a_symlink(home):
     actually read from disappears — the assertion below reds).  Hashing
     `loaded` instead of `resolved` does NOT red this test (``open`` follows the
     link, so the digest is identical); the load-bearing part is the reported
-    resolution, which is what the assertion pins."""
+    resolution, which is what the assertion pins.
+
+    The remedy here is the PLAIN one, and that is load-bearing too: this link
+    resolves INSIDE the install home, a state `_install_pi` accepts (the atomic
+    write replaces the link), so demanding an unlink would be the needless
+    manual step `is_manual_fix` records as the cheaper error.  The out-of-home
+    direction is pinned by the sibling test below."""
     real_home = home.resolve()
     ext_dir = real_home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
@@ -1121,6 +1162,101 @@ def test_seam_target_assertion_names_the_resolved_target_of_a_symlink(home):
     assert str(dst) in msg, msg
     assert f"which resolves to {old_copy}" in msg, msg
     assert str(shipped) in msg, msg
+    # The plain remedy, because the installer really does accept this state...
+    assert install_capture("pi", home=real_home, dry_run=True).ok, (
+        "the plain-remedy premise is false: this link is one the installer "
+        "refuses, so the message must name the unlink step")
+    # ...and the message says so, rather than sending the user to an unlink
+    # they do not need.
+    assert "Re-run `tortoise install pi` to replace it." in msg, msg
+    assert "unlink" not in msg, msg
+
+
+def test_seam_target_assertion_names_the_unlink_step_for_an_out_of_home_symlink(
+        home, tmp_path):
+    """#10241 review: for a seam symlinked to a checkout OUTSIDE `$HOME` — the
+    ordinary "I symlinked the installed extension to the copy in my repo"
+    shape — the installer REFUSES (`_symlink_escape`, pinned as a refusal twice
+    in this suite), so the older/edited divergence message's only remedy
+    ("Re-run `tortoise install pi` to replace it") is a dead end and the step
+    that unblocks it (unlink) is missing.  The message must name the user's
+    step first, from the installer's OWN guard rather than a re-derived one.
+
+    Mutation: emit the unconditional "Re-run `tortoise install pi` to replace
+    it." remedy (the pre-fix sentence — RED on the `unlink` assertion), or
+    condition the remedy on `via` instead of the installer's guard (a
+    symlinked ANCESTOR sets `via` while the installer accepts, which REDs the
+    in-home sibling above and does not satisfy this one's premise)."""
+    real_home = home.resolve()
+    ext_dir = real_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    # A checkout outside `$HOME`; `tmp_path` is outside `tmp_path/home`, and a
+    # resolved parent keeps `str(resolved)` equal to the path written here.
+    outside_dir = tmp_path.resolve() / "my-repo"
+    outside_dir.mkdir()
+    outside = outside_dir / capture_install.PI_EXTENSION_NAME
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    expected = hook_install.read_hook_version(shipped)
+    older = (expected - 1) if expected else 14
+    outside.write_bytes(
+        f"// tortoise-hook-version: {older}\n// tortoise session\n".encode())
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(outside)
+
+    # The fixture MUST be a state the installer refuses, or the finding (and
+    # this test) rests on a false premise.
+    refused = install_capture("pi", home=real_home, dry_run=True)
+    assert not refused.ok and "install home" in (refused.error or ""), (
+        "the fixture must be a state the installer REFUSES: "
+        f"{refused.error!r}")
+
+    msg = capture_install.assert_seam_target("pi", home=real_home)
+
+    assert msg, "a symlinked install pointing outside $HOME passed"
+    assert "older or locally edited" in msg, msg
+    assert str(dst) in msg, msg
+    assert f"which resolves to {outside}" in msg, msg
+    assert str(shipped) in msg, msg
+    # The user's step FIRST, quoting the installer's own refusal...
+    assert "unlink the symlink first" in msg, msg
+    assert msg.index("unlink the symlink first") < msg.index(
+        "tortoise install pi"), msg
+    # ...and the unconditional remedy — the pre-fix sentence — is gone.
+    assert "Re-run `tortoise install pi` to replace it." not in msg, msg
+
+
+def test_seam_target_assertion_names_the_unlink_step_for_a_newer_out_of_home_link(
+        home, tmp_path):
+    """The NEWER-branch sibling of the test above: it claims
+    "`tortoise install pi` would replace it with N", which is FALSE for a
+    symlinked seam the installer refuses — it cannot reach the file at all.
+    Same guard, same one-line consequence.
+
+    Mutation: emit the unconditional "would replace it with {expected}" clause
+    for the NEWER branch (the pre-fix sentence — RED).
+    """
+    real_home = home.resolve()
+    ext_dir = real_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    outside_dir = tmp_path.resolve() / "my-repo"
+    outside_dir.mkdir()
+    outside = outside_dir / capture_install.PI_EXTENSION_NAME
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    expected = hook_install.read_hook_version(shipped)
+    newer = (expected + 1) if expected else 16
+    outside.write_bytes(
+        f"// tortoise-hook-version: {newer}\n// tortoise session\n".encode())
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(outside)
+    assert not install_capture("pi", home=real_home, dry_run=True).ok
+
+    msg = capture_install.assert_seam_target("pi", home=real_home)
+
+    assert msg, "a NEWER symlinked install outside $HOME passed"
+    assert "NEWER" in msg, msg
+    assert "older or locally edited" not in msg, msg
+    assert "unlink the symlink first" in msg, msg
+    assert f"would replace it with {newer}." not in msg, msg
 
 
 def test_seam_target_assertion_read_side_default_does_not_fail_on_absence(home):
