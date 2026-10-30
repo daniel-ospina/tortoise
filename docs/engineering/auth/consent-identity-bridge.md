@@ -34,9 +34,15 @@ issue's tasks 2, 4 and 5.
 
 ## 1. What has to move, and why nothing smaller works
 
-Today the consent page is the **only** auth flow that works, and it works by an inline supabase-js client
-that holds a **JS-readable, parent-domain** session cookie (`sb-tortoise-auth-token`, written at
-`oauth.py:2444`, domain literal at `oauth.py:2282`). Measured state:
+> ⚠️ **Measured state — BEFORE §9 step 4, which DELETED the page this paragraph describes.**
+> The `oauth.py:<n>` anchors below are the pre-step-4 line numbers and **do not resolve at head**
+> (`oauth.py` is 2804 lines now, and the deleted block is gone) — they are kept because the
+> measurement is the evidence for the rewrite, not because a reader can follow them. At head:
+> `grep -c sb-tortoise tortoise/oauth.py` = **0**.
+
+Today, before step 4, the consent page is the **only** auth flow that works, and it works by an inline
+supabase-js client that holds a **JS-readable, parent-domain** session cookie (`sb-tortoise-auth-token`,
+written at `oauth.py:2444`, domain literal at `oauth.py:2282`). Measured state (pre-step-4):
 
 | Fact | Evidence |
 |---|---|
@@ -337,15 +343,27 @@ The mint requires the browser to reach the session origin even though the consen
   pins the same-origin, exact-path and trailing-slash cases, plus that both well-known routes still
   carry their decorator, so a future `base` change cannot silently cross the origins.
 
-## 6. Task 5 — sign-in fallback origin: **NOT allowlisted, and the record is what is wrong**
+## 6. Task 5 — sign-in fallback origin: **DISCHARGED by §9 step 4** (was: not allowlisted)
 
-The consent page's provider sign-in passes `redirectTo: authorizeReturnTo()` (`oauth.py:2830`), which is
+> ✅ **DISCHARGED.** §9 step 4 deleted the page's provider sign-in, so the consent page no longer
+> redirects anywhere for identity and makes **no** GoTrue `redirect_to` call at all: the origin
+> question this section settles has no subject left. `api.premiselabs.co/**` is therefore a recorded
+> **non-requirement**, not a missing entry — and the sibling record
+> (`docs/ops/auth-email-flows.md` §3) says so in the table row it already carries. The measurement
+> below is kept as the record of why the fallback was the wrong shape, and its `oauth.py:2830` anchor
+> is a **pre-step-4** line number that no longer resolves (`oauth.py` is 2804 lines at head).
+> The guard it names still runs: `tests/test_oauth_consent_bridge.py::
+> test_the_redirect_allowlist_record_covers_the_consent_page`.
+
+**Measured BEFORE §9 step 4.** The consent page's provider sign-in passed `redirectTo:
+authorizeReturnTo()` (pre-step-4 `oauth.py:2830`), which was
 `window.location.origin + "/oauth/authorize" + <sanitised search>` — i.e. **`https://api.premiselabs.co/
 oauth/authorize?…`**. GoTrue refuses a `redirect_to` it does not recognise, and Supabase matches
 allowlist entries by string (wildcards only where placed).
 
 `docs/ops/auth-email-flows.md` §3 is this repo's record of the required entries and calls them
-"**Required entries**" — and it does **not** contain any `api.premiselabs.co` row:
+"**Required entries**" — and at the time of measurement it did **not** contain any
+`api.premiselabs.co` row (this PR adds one, marked NO LONGER REQUIRED as of §9 step 4):
 
 | Entry (recorded) |
 |---|
@@ -357,16 +375,18 @@ allowlist entries by string (wildcards only where placed).
 
 **So one of two things is true, and neither is recorded:** either the project's Additional Redirect URLs
 carry `https://api.premiselabs.co/**` and the doc's "required entries" table is incomplete (a false
-completeness claim), or they do not, in which case **GitHub/Google sign-in on the consent page is refused
-by GoTrue today** — the only auth flow that works would be the one whose provider leg is broken. This
-cannot be settled from the repository; it needs the dashboard or the Management API (§8 checklist).
+completeness claim), or they do not, in which case **GitHub/Google sign-in on the consent page was
+refused by GoTrue** at the time of measurement — the only auth flow that works would have been the one
+whose provider leg was broken. This could not be settled from the repository; it needed the dashboard
+or the Management API (§8 checklist). **§9 step 4 removed the question with the sign-in itself.**
 
-**Recorded fix (this PR):** the missing row is added to `docs/ops/auth-email-flows.md` §3 with its
-checklist item, and `tests/test_oauth_consent_bridge.py::test_the_redirect_allowlist_record_covers_the_consent_page`
-fails if the consent page's sign-in target is ever again absent from that table. The bridge itself
-**removes** the dependency: under the bridge, provider sign-in happens on `app.*` (`/auth`), which is
-already covered by `https://app.premiselabs.co/**`, so the `api.*` entry becomes unnecessary rather than
-required. That is a second, independent reason the bridge is the right shape.
+**Recorded outcome (this PR):** the row is added to `docs/ops/auth-email-flows.md` §3 **marked NO LONGER
+REQUIRED as of §3524 §9 step 4** — provider sign-in now happens on `app.*` (`/auth`), covered by
+`https://app.premiselabs.co/**`, and the page asks for no identity redirect at all. The guard
+(`tests/test_oauth_consent_bridge.py::test_the_redirect_allowlist_record_covers_the_consent_page`) still
+fails if the record stops covering the sign-in target, so the entry cannot silently disappear. That the
+dependency is unnecessary rather than merely allowlisted is a second, independent reason the bridge is
+the right shape.
 
 ## 7. Deletion set + ordering guard
 
