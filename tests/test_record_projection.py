@@ -1535,6 +1535,28 @@ def test_the_source_version_selector_is_the_folds_own():
         {"extractedFrom": "src1", "sourceVersionTransit": []},
         {"extractedFrom": "src1", "sourceVersionTransit": "h1"},
         {"extractedFrom": "src1", "sourceVersionTransit": [["src1"]]},
+        # ── #7704: the FOLD's payload. `extractedFrom` stays the survivor's OWN
+        # creating source (it is what `query` matches by EQUALITY) and the
+        # folded set rides `extractedFromAll` beside it. Read off the scalar
+        # alone, the record kept ONE pair where the journal replay stamped two
+        # — the divergence this pin exists to make loud.
+        {"extractedFrom": "src1", "extractedFromAll": ["src1", "src2"],
+         "sourceVersionTransit": [["src1", "h1"], ["src2", "h2"]]},
+        # The folded surface is the ONLY place a held ref's key lives when the
+        # fold re-keyed the pair to the spelling its own list uses (the
+        # raw-vs-resolved case `_fold_source_evidence` names), so a
+        # scalar-only gate drops EVERY pair.
+        {"extractedFrom": "src1",
+         "extractedFromAll": ["src1", "https://example.com/a?utm_source=x"],
+         "sourceVersionTransit": [["https://example.com/a?utm_source=x", "h2"]]},
+        # An EMPTY `extractedFromAll` is not a ref set: the scalar/array is the
+        # fallback (`_point_all_source_refs`'s own rule), never `[]`.
+        {"extractedFrom": "src1", "extractedFromAll": [],
+         "sourceVersionTransit": [["src1", "h1"]]},
+        # A payload where the folded set is the ONLY ref set the carrier keys
+        # against (the survivor's scalar records no hash at all).
+        {"extractedFrom": "src1", "extractedFromAll": ["src2"],
+         "sourceVersionTransit": [["src2", "h2"]]},
     )
     for point in points:
         fold = _point_source_transit(point)
@@ -1543,6 +1565,113 @@ def test_the_source_version_selector_is_the_folds_own():
     # Non-vacuity: the table must exercise both answers.
     assert any(rp._point_source_versions(p) for p in points)
     assert not all(rp._point_source_versions(p) for p in points)
+    # AND the #7704 arm specifically must DISCRIMINATE: drop the folded surface
+    # from the same payload and the record answers with one pair fewer. Without
+    # this, the parity claim above could stay green over a table that never
+    # constructs the shape the fold's payload actually has.
+    folded = {"extractedFrom": "src1", "extractedFromAll": ["src1", "src2"],
+              "sourceVersionTransit": [["src1", "h1"], ["src2", "h2"]]}
+    assert rp._point_source_versions(dict(folded, extractedFromAll=None)) == {
+        "src1": "h1"}, "the folded surface must be what carries src2's pair"
+    assert rp._point_source_versions(folded) == {"src1": "h1", "src2": "h2"}
+
+
+def test_the_fold_ref_selector_is_the_records_own():
+    """Parity pin for `_point_all_source_refs`, the selector behind both legs.
+
+    `_point_source_versions`' ref GATE and `_point_property_relation_statements`'
+    FAN-OUT both read the fold's full ref set, and the fold's own
+    `_upsert_point_edges` reads the SAME set through its own restatement. A
+    drift between the two spellings re-opens the split this change closes: the
+    record derives a different edge set than the journal replay of one payload.
+    """
+    from tortoise.projection.entities import _point_all_source_refs as fold_selector
+
+    payloads = (
+        {"extractedFrom": "src1"},
+        {"extractedFrom": ["src1", "src2"]},
+        {"extractedFrom": "src1", "extractedFromAll": ["src1", "src2"]},
+        {"extractedFrom": "src1", "extractedFromAll": []},
+        {"extractedFrom": "src1", "extractedFromAll": None},
+        {"extractedFrom": "src1", "extractedFromAll": ["src1", "", None]},
+        {"extractedFrom": [], "extractedFromAll": ["src2"]},
+        {"extractedFrom": "src1", "extractedFromAll": "src2"},
+        {},
+    )
+    for payload in payloads:
+        assert rp._point_all_source_refs(payload) == list(
+            fold_selector(payload)), payload
+    # NO divergence, including on the case #8171 measured. A non-series
+    # `extractedFrom` (a dict) is `list()`-ed into its KEYS by a bare `list()`
+    # call, and #8171 measured what that minted: one `:Source` per key, i.e.
+    # invented provenance. BOTH selectors now carry the same CONTAINER gate —
+    # the fold side in `_point_source_refs` (`projection/entities.py:1079-1086`:
+    # `str` is one ref, `list`/`tuple` is that series, anything else `[]`), the
+    # record side in `_point_raw_refs` (`record_projection.py:3064`, the
+    # container gate itself at `:3076-3081`). So the
+    # dict fans out to NOTHING on either lane and lands no row rather than a row
+    # for a key nobody named as a source. The assertion below is the pin that it
+    # STAYS that way on both — a reader who believed the fold side still
+    # `list()`-es a mapping would have a stated reason to delete the record's
+    # gate "to match the fold", re-opening the #8171 path.
+    assert rp._point_all_source_refs({"extractedFrom": {"a": "b"}}) == []
+    # ...and the SAME on the fold lane, asserted rather than merely described:
+    # the comment above is only worth reading if the two answers agree. At
+    # `6b1f151db` this line reds — `fold_selector` returned `['a', 'b']` there
+    # (one invented `:Source` per key), which is the regression the container
+    # gate in `_point_source_refs` closed.
+    assert list(fold_selector({"extractedFrom": {"a": "b"}})) == []
+    # Non-vacuity: the table must reach BOTH branches of the fallback.
+    assert rp._point_all_source_refs({"extractedFrom": "s",
+                                      "extractedFromAll": ["s", "t"]}) == ["s", "t"]
+    assert rp._point_all_source_refs({"extractedFrom": "s"}) == ["s"]
+
+
+def test_a_folded_records_set_reaches_the_relation_rows():
+    """#7704 review P1: a fold's record must not be POORER than its graph.
+
+    `_fold_source_evidence` journals its `PointAdded` through
+    `_write_record_projection`, so a fold IS a record. It keeps `extractedFrom`
+    as the survivor's own creating source and carries the folded refs on
+    `extractedFromAll`, which the journal replay already reads. Derived off the
+    scalar alone, this lane landed ONE `relation` row for a claim the graph
+    holds N edges for — so `rebuild_from_record` (#9556) materialised N-1 fewer
+    `extractedFrom` edges than `live` and than `rebuild_all`, the direction this
+    module's own docstring forbids, with nothing to report it:
+    `check_consistency` compares graph against JOURNAL, never graph against
+    record.
+    """
+    fold = {**_EXTRACTED_RECORD, "point": dict(
+        _SNAPSHOT, extractedFrom="src1",
+        extractedFromAll=["src1", "src2"],
+        sourceVersionTransit=[["src1", "h1"], ["src2", "h2"]])}
+    statements = _relation_statements(fold)
+    assert len(statements) == 2, [s.sql for s in statements]
+    # One row per FOLDED ref, and the union — not the scalar — is what lands.
+    assert sorted(s.params[-3] for s in statements) == ["src1", "src2"]
+    # The folded ref's recorded read-version rides its row too (#5256):
+    # `_point_source_versions` gates the carrier on the same ref set.
+    anchors = {s.params[-3]: s.params[6] for s in statements
+               if "source_version" in s.sql.split("FROM", 1)[0]}
+    assert anchors == {"src1": "h1", "src2": "h2"}, anchors
+    # Non-vacuity: the SAME record read off the scalar alone lands one row.
+    scalar_only = {**_EXTRACTED_RECORD, "point": dict(
+        _SNAPSHOT, extractedFrom="src1",
+        sourceVersionTransit=[["src1", "h1"], ["src2", "h2"]])}
+    assert len(_relation_statements(scalar_only)) == 1
+    # AND the folded set also survives into the record's `point.props` tail, so
+    # a record→cache round trip restores the node PROPERTY as well as the edges
+    # (`04-projection.md` §3 states it — this is what stops the sentence from
+    # going false silently: a name added to `chk_point_props_no_derived`'s
+    # refused list, or to `_RECORD_ONLY_KEYS`, would strip it here). The refs
+    # are refused as CALLER props at every door (`sdk._sanitize_props`,
+    # `api.add_point`, `mcp_server._SERVER_MANAGED_PROPS`), so the fold is the
+    # one producer and this tail is its own declaration coming back.
+    point_row = next(
+        s for s in rp.mutations_for(fold, org_id="org-a", graph_id="g1")
+        if s.sql.startswith("INSERT INTO public.point"))
+    assert json.loads(point_row.params[-1])["extractedFromAll"] == ["src1", "src2"], \
+        point_row.params[-1]
 
 
 def test_a_record_sourced_rebuild_materialises_the_provenance_edge():

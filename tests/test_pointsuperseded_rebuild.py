@@ -1552,6 +1552,161 @@ def test_plan_point_restamp_folds_pins_the_shared_selection(caplog):
     assert fold_seq == {"a": 2}
 
 
+def test_plan_keeps_the_stamp_a_fold_re_emit_would_otherwise_drop():
+    """#10010 review P1 — a dedup FOLD's record is not a recreate BOUNDARY.
+
+    ``_fold_source_evidence`` journals its work by re-emitting a ``PointAdded``
+    for an id that ALREADY EXISTS, and every creation record advances the
+    recreate anchor ("a terminalizer at or before it died with the replaced
+    node"). A fold replaces nothing — that is why it is the first producer to
+    land a re-emit on an ordinary, routinely-superseded claim, and why the
+    anchor has to be able to tell the two apart. Without the record's own flag
+    the plan dropped the stamp half for a dead claim's own terminalizer, and a
+    ``rebuild_all`` served it with ``status='superseded'``/``validTo`` (from the
+    fold's snapshot) but no ``outdated``/``expiredAt`` (``_POINT_DENY`` — only
+    the stamp writes them).
+
+    Pinned on the PLAN rather than on one engine: the plan is the single
+    selection every replay path obeys (``rebuild_all``'s sweep,
+    ``rebuild(log)``, ``recover_from_log``, ``backup.restore``), so this
+    assertion covers all four.
+    """
+    from tortoise.projection import EVIDENCE_FOLD_KEY, plan_point_restamp_folds
+
+    _folded = {"id": "a", "content": "A", EVIDENCE_FOLD_KEY: True}
+
+    # Supersede + a FOLD re-emit: the stamp half survives (the bare re-emit case
+    # WITHOUT the flag is pinned above and must keep dropping it).
+    decisions, fold_seq = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointAdded", "point": {"id": "b", "content": "B"}},
+        {"type": "PointSuperseded", "id": "a", "new_id": "b"},
+        {"type": "PointAdded", "point": dict(_folded)},
+    ])
+    assert decisions[2] == (True, True), (
+        "the fold's record advanced the recreate anchor, so the terminalizer "
+        "that killed this id lost its stamp AND its decay")
+    assert fold_seq == {"a": 2}
+
+    # An INVALIDATE (no canonicalization) is the same class.
+    decisions, _ = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "PointAdded", "point": dict(_folded)},
+    ])
+    assert decisions[1] == (True, True)
+
+    # A fold creates NOTHING, so it must not CONSUME a pending delete either:
+    # the recreate anchor belongs to the record that actually materializes an
+    # incarnation. If the fold consumed it, the REAL recreate would stop being
+    # the delete→recreate boundary and resurrect the dead incarnation's folds.
+    #
+    # #10010 review P2: the terminalizer sits BETWEEN the fold and the real
+    # re-create, and that placement is what makes the arm DISCRIMINATING. The
+    # earlier shape below ([added, invalidate, delete, fold, recreate]) is
+    # VACUOUS for this claim: the invalidate is at or before BOTH candidate
+    # anchors (the fold's seq 3 or the recreate's 4), so the assertion holds
+    # whether or not the fold consumed the delete, and removing the guard never
+    # reds it here. With the fold at seq 2 and the terminalizer at seq 3, a
+    # consuming fold makes ``last_drop`` the fold's own seq, so seq 3 is AFTER
+    # it and the decay lands — ``(True, False)``. A non-consuming fold keeps
+    # ``last_drop`` at the recreate's seq 4, so seq 3 <= 4 refuses the decay:
+    # ``(False, False)``. The second assertion is the discriminating one; the
+    # first is kept because the ordering it describes is a real shape.
+    decisions, _ = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "EntityMutated", "id": "a", "op": "delete",
+         "label": "Point"},
+        {"type": "PointAdded", "point": dict(_folded)},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
+    ])
+    assert decisions[1] == (False, False)
+    decisions, _ = plan_point_restamp_folds([
+        {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
+        {"type": "EntityMutated", "id": "a", "op": "delete",
+         "label": "Point"},
+        {"type": "PointAdded", "point": dict(_folded)},
+        {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
+        {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
+    ])
+    assert decisions[3] == (False, False), (
+        "a fold consumed the pending delete, so the real delete→recreate no "
+        "longer bounds the dead incarnation")
+
+
+def test_rebuild_does_not_read_a_fold_as_the_delete_recreate(sup):
+    """#10010 review P2 — the rebuild's own chronology pass must exclude a FOLD
+    from its delete→recreate anchor too, not only from ``last_recreate_seq``.
+
+    ``plan_point_restamp_folds`` skips a fold BEFORE its
+    ``pending_deleted.discard``, and ``_rebuild_all_replay`` guards
+    ``last_recreate_seq`` with the same predicate — but it computed
+    ``is_recreate`` from ``pending_deleted`` alone. A journal whose delete
+    PRECEDES a fold record for the same id (the cross-file ordering the plan's
+    own docstring names as live) therefore let the fold (a) move
+    ``last_ann_drop_seq`` — documented as the id's last REAL delete→recreate —
+    onto a record that materialised no incarnation, resurrecting a belief write
+    that belongs to the dead one, and (b) run the #4042 recreate wipe on a
+    record whose payload cannot restore ``content_hash``. The two engines read
+    one record two ways, which is exactly what the guard's own comment claims
+    cannot happen.
+
+    Observable pinned here: the belief write at seq 3 sits BETWEEN the fold and
+    the REAL re-create. Post-fix ``last_ann_drop_seq`` is the re-create's seq 4,
+    so ``seq <= anchor`` refuses the fold. Pre-fix it is the fold's seq 2, so
+    ``3 > 2`` applies the dead incarnation's confidence to the new one.
+    """
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A")["id"]
+    ts = "2026-01-01T00:00:00+00:00"
+    synth_dir = events.parent / "synth-fold-after-delete"
+    synth_dir.mkdir()
+
+    def _rec(type_, **kw):
+        return {"event_id": sdk.ulid(), "ts": ts,
+                "initiated_by": "raw-producer", "projection_version": 2,
+                "type": type_, **kw}
+
+    _synthesize_journal(synth_dir / "events.jsonl", [
+        _rec("PointAdded", point={"id": a, "label": "statement",
+                                  "content": "A", "status": "live",
+                                  "confidence": 0.1}),
+        _rec("EntityMutated", id=a, op="delete", label="Point"),
+        # The FOLD: a re-emit of an existing id's snapshot.
+        _rec("PointAdded", point={"id": a, "label": "statement",
+                                  "content": "A", "status": "live",
+                                  "confidence": 0.1, "evidence_fold": True}),
+        # A belief write the DEAD incarnation recorded — the fold must not
+        # become its drop boundary.
+        _rec("ConfidenceChanged", id=a, confidence=0.99),
+        # The REAL delete→recreate.
+        _rec("PointAdded", point={"id": a, "label": "statement",
+                                  "content": "A2", "status": "live",
+                                  "confidence": 0.1}),
+    ])
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj.rebuild_all(str(synth_dir), confirm_destructive=True)
+    got = sdk.get_point(a) or {}
+    # ⛔ The existence assertion is not decoration: a rebuild that produced NO
+    # node makes `got` the empty dict, `got.get("confidence")` None, and
+    # `None != 0.99` TRUE — so the comparison below would pass on the exact
+    # reconstruction failure this pin exists to defend (a replay that drops the
+    # id instead of re-creating it). Measured: with the node deleted after the
+    # rebuild, the confidence assertion alone stayed green (#10010 review, P3).
+    assert got, (
+        "the rebuild lost Point a entirely, so the confidence comparison below "
+        "cannot distinguish 'the fold no longer consumes the delete' from 'this "
+        "rebuild produced nothing'")
+    assert got.get("confidence") == 0.1, (
+        "the fold consumed the pending delete, so the rebuild's "
+        "last_ann_drop_seq anchor moved onto a record that replaced nothing "
+        "and a belief write from the DEAD incarnation folded onto the "
+        "re-created node; the REAL re-create's payload states confidence 0.1, "
+        f"so anything else is the dead incarnation's write: {got!r}")
+
+
 # ══════════════════════════════════════════════════════════════════════
 # #3305 — the SUCCESSOR arm of the fold's existence gate
 #

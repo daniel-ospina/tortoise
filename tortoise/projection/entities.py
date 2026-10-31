@@ -1043,13 +1043,45 @@ def _valid_transit_pairs(value):
 def _point_source_refs(extracted_from) -> list:
     """The Point's OWN ``extractedFrom`` refs, normalized exactly as
     ``_link_source`` fans them out: a bare ``str`` is ONE ref (never iterated
-    character-wise), any other value is a sequence, and falsy members are
-    skipped. ``[]`` when the Point has no ``extractedFrom`` at all."""
-    if not extracted_from:
+    character-wise), a ``list``/``tuple`` is that series, falsy members are
+    skipped, and **any other container fans out to NOTHING** (#8171). ``[]``
+    when the Point has no ``extractedFrom`` at all.
+
+    That last clause is `_link_source`'s CONTAINER gate, restated rather than
+    left to the choke point — because this function runs BEFORE it. ``list()``
+    on a mapping yields its KEYS, each a legal-looking string, so a
+    ``{"url": ..., "kind": ...}`` value became ``["url", "kind"]`` and each
+    key was minted as its own ``:Source`` — INVENTED provenance, which is
+    "worse than none" (design contract #3). `_upsert_point_edges` hands
+    `_link_source` the result of THIS function, so the gate at the choke point
+    never sees the container it would have refused; the replay/apply lane lost
+    the guarantee `origin/main` still had (it passed the payload value through
+    unmodified). ``record_projection._point_raw_refs`` carries the identical
+    gate for the record lane, which is why only that lane was safe."""
+    if isinstance(extracted_from, str):
+        refs = [extracted_from]
+    elif isinstance(extracted_from, (list, tuple)):
+        refs = list(extracted_from)
+    else:
         return []
-    refs = ([extracted_from] if isinstance(extracted_from, str)
-            else list(extracted_from))
     return [r for r in refs if r]
+
+
+def _point_all_source_refs(p: dict) -> list:
+    """The Point's FULL held ref set for a journal payload (#7704).
+
+    A dedup fold keeps the convenience property a SCALAR (the survivor's own
+    creating source) and carries the folded set on ``extractedFromAll``, so the
+    writers that must see every ref — the ``#5256`` carrier filter and the edge
+    fold — read THIS, and a payload from before that split (no
+    ``extractedFromAll``) still reads its refs off ``extractedFrom``. Returning
+    the convenience refs as the fallback rather than ``[]`` is what keeps a
+    scalar-prop record whose carrier is intact from silently losing it.
+    """
+    all_refs = p.get("extractedFromAll")
+    if isinstance(all_refs, (list, tuple)) and all_refs:
+        return [r for r in all_refs if r]
+    return _point_source_refs(p.get("extractedFrom"))
 
 
 def _point_source_transit(p: dict):
@@ -1078,7 +1110,7 @@ def _point_source_transit(p: dict):
     pairs = _valid_transit_pairs(p.get("sourceVersionTransit"))
     if pairs is None:
         return None
-    refs = _point_source_refs(p.get("extractedFrom"))
+    refs = _point_all_source_refs(p)
     if not refs:
         return None
     kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]
@@ -1969,6 +2001,13 @@ class _EntityHandlers:
         # ACTIVE model as its origin (`stamp_journal_embedding`). Never a node
         # property — the node's vector identity is not a fact about the node.
         "embedding_preserved",
+        # #10010 review P1: journal-payload metadata (`_fold_source_evidence`).
+        # States that this creation-shaped record FOLDED evidence into an
+        # EXISTING Point instead of creating one, which is what the replay's
+        # recreate anchor reads (`projection.record_is_evidence_fold`). Never a
+        # node property: the flag describes the RECORD, and a node carrying it
+        # would be live state the fold never wrote.
+        "evidence_fold",
         # A10 operator-scoped replay extension
         "direction", "label",
         # #7852 W1: the basis the direction chain used. Written by
@@ -1978,7 +2017,8 @@ class _EntityHandlers:
         "direction_basis",
         # structural / edge-carried — never node props via passthrough
         "operator", "provenance", "about_entities", "aboutEntities",
-        "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        "extractedFrom", "extractedFromAll", "is_episodic",
+        "_nid", "_graph_id",
         # #2897 (OD-4 disposition #3856: ADOPT — a Tag is first-class data by
         # construction: a SHARED, MERGEd node is data. The ontology specifies
         # an `:Object` subclass while the code creates a bare `:Tag`; that
@@ -2613,8 +2653,22 @@ class _EntityHandlers:
         # an earlier version of this comment said "the single-source case",
         # which wrongly implied one-element sequences collapse.)
         source_ref = p.get("extractedFrom")
+        # #7704: the folded ref SET, beside the convenience scalar — a LIST by
+        # contract, so it is written by an explicit clause here rather than by
+        # the open-set passthrough (`_POINT_LIST_PROPS` is deliberately EMPTY,
+        # and the list policy would drop it before the declared-key check).
+        all_refs = p.get("extractedFromAll")
+        _ef_clauses: list[str] = []
+        _ef_params: dict = {"id": p["id"]}
         if source_ref:
-            self.g.query("MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref", params={"id": p["id"], "ref": source_ref})
+            _ef_clauses.append("n.extractedFrom = $ref")
+            _ef_params["ref"] = source_ref
+        if isinstance(all_refs, (list, tuple)) and all_refs:
+            _ef_clauses.append("n.extractedFromAll = $all")
+            _ef_params["all"] = list(all_refs)
+        if _ef_clauses:
+            self.g.query("MATCH (n:Point {id:$id}) SET " + ", ".join(_ef_clauses),
+                         params=_ef_params)
         # P1-2: Temporal — also store provenance source_id
         if prov.get("source_id"):
             self.g.query(
@@ -2780,7 +2834,7 @@ class _EntityHandlers:
         # `s.contentHash` (the Source may have advanced since live time). A
         # malformed/falsy payload contributes NO anchor rather than crashing
         # `dict(...)` or stamping a non-str value.
-        source_ref = p.get("extractedFrom")
+        source_ref = _point_all_source_refs(p) or None
         if source_ref:
             # The SHARED `_point_source_transit` selector: the all-or-nothing
             # `_valid_transit_pairs` shape check — a non-empty list of

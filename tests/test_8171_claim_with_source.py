@@ -389,6 +389,48 @@ def test_a_dict_source_ref_fabricates_no_source(tmp_path):
             f"invented source is worse than none (design contract #3)")
 
 
+def test_a_dict_source_ref_in_a_journal_payload_fabricates_no_source(tmp_path):
+    """The REPLAY lane must keep the same container gate as the choke point.
+
+    `_upsert_point_edges` hands `_link_source` the output of
+    `_point_all_source_refs` → `_point_source_refs`, and that normalisation runs
+    BEFORE the choke point sees anything. While it `list()`-ed a mapping into
+    its KEYS, a `PointAdded` payload carrying
+    `"extractedFrom": {"url": ..., "kind": ...}` minted one `:Source` per key
+    and one `extractedFrom` edge per key — invented provenance, on the lane
+    `rebuild_all` / `apply()` uses for every replayed journal (and the lane
+    `EventAPI.add_point` reaches, which has no type gate on the field).
+    `origin/main` minted NOTHING here: it passed the payload value through
+    unmodified and `_link_source`'s own gate returned early.
+
+    MUTATION THAT MUST RED: drop the container gate from
+    `entities._point_source_refs` (normalise with a bare `list(...)` again).
+    """
+    sdk = _sdk(tmp_path)
+    proj = sdk._get_proj()
+
+    proj._upsert({
+        "id": "forged-payload-point",
+        "content": "a replayed payload must not invent its provenance",
+        "context": "ctx",
+        "extractedFrom": {"url": "corpus://forged", "kind": "forged"},
+    })
+
+    # Non-vacuity: the payload must actually have been replayed, or the
+    # assertions below would hold for a write that never ran.
+    assert _scalar(proj, "MATCH (n) WHERE n.id = $i RETURN count(n)",
+                   i="forged-payload-point") == 1, (
+        "the replay did not land the point, so this pin proves nothing")
+
+    for forged in ("url", "kind", "corpus://forged", "forged"):
+        assert _source_count(proj, forged) == 0, (
+            f"the replay lane fabricated a :Source named {forged!r} — a "
+            f"mapping is not a ref collection, and its KEYS are not refs "
+            f"(#8171; an invented source is worse than none)")
+    assert _any_edge_count(proj, "corpus://forged") == 0, (
+        "an invented :Source must not be reachable by an extractedFrom edge")
+
+
 def test_a_list_source_ref_with_a_bad_member_is_refused(tmp_path):
     """A list is legal; a list with a non-string member is not.
 

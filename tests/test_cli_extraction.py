@@ -424,22 +424,26 @@ class TestWriterValidation(unittest.TestCase):
         self.assertEqual(partial["made_count"], 1)
         self.assertEqual(partial["made_ids"], ["p1"])
 
-    def test_dedup_hit_warning_is_classified_as_fold(self):
-        # the SDK's dedup-hit warning (cross-source fold) is a REPORT of
-        # correct behavior, not write-path drift: it must be classified as
-        # a fold, never fatal — and an all-fold batch exits 0
-        import logging
+    def test_cross_source_fold_is_classified_from_the_write_result(self):
+        # A cross-source fold is a REPORT of correct behavior, not write-path
+        # drift: it must be classified as a fold, never fatal — and an all-fold
+        # batch exits 0. The signal is the SURVIVOR the write returns (a dedup
+        # hit returns the existing point's id, and #7704's fold wires this run's
+        # source onto it), NOT the SDK's log line — #7704 moved that report from
+        # WARNING to INFO, and the message-keyed classifier this replaces then
+        # saw nothing: `folded_onto_other_sources` disappeared from the receipt
+        # and CI reddened on the KeyError. The fake below emits NO log at all,
+        # so this pin cannot be satisfied by a template.
         class _FoldingSDK:
             def __init__(self, **kw):
                 pass
             def query(self, **kw):
                 return []
             def create_point(self, kind, content, **kw):
-                logging.getLogger("tortoise.sdk").warning(
-                    "create_point dedup hit on %s: extractedFrom %r not "
-                    "applied — those refs are absent from the Point's "
-                    "Source edges", "p-existing", ["s://other"])
-                return {"id": "p-existing", "status": "live"}
+                # the survivor already carried another source; this write
+                # folded onto it and the fold wired `extractedFrom` too
+                return {"id": "p-existing", "status": "live",
+                        "extractedFrom": ["s://other", kw.get("extractedFrom")]}
             def close(self):
                 pass
         with self.assertRaises(SystemExit) as cm:
@@ -449,6 +453,83 @@ class TestWriterValidation(unittest.TestCase):
         receipt = json.loads(self.captured_stdout.strip().splitlines()[-1])
         self.assertEqual(receipt["folded_onto_existing"], 1)
         self.assertNotIn("ep", receipt)
+
+    def test_a_sequence_born_survivor_fold_is_not_SDK_drift(self):
+        # The fold arm a "names a ref OTHER than ours" classifier CANNOT see
+        # (#10010 review P2). A survivor born from a ref SEQUENCE (a caller
+        # passing a list — ingest bundles do) carries `extractedFrom` as an
+        # ARRAY, so `query(extractedFrom=…)` (property EQUALITY) cannot match it
+        # and the read-back is empty. The classifier then read "no ref in the
+        # list differs from ours" as "this run minted it", the fold count stayed
+        # 0, and the drift guard refused a HEALTHY all-fold batch as "SDK
+        # drift" — naming the wrong component. Sticky by construction: the point
+        # exists, so every rerun takes the same path and can never heal.
+        #   * mutation: delete the `isinstance(_refs, (list, tuple))` arm -> the
+        #     scalar-only classifier reds this with the RuntimeError.
+        class _ArrayPropSurvivorSDK:
+            def __init__(self, **kw):
+                pass
+            def query(self, **kw):
+                # an ARRAY prop is not equality-matchable: this read cannot see
+                # the survivor — the shape that made the misclassification fatal
+                return []
+            def create_point(self, kind, content, **kw):
+                return {"id": "p-array", "status": "live",
+                        "extractedFrom": [kw.get("extractedFrom")],
+                        "extractedFromAll": [kw.get("extractedFrom")]}
+            def close(self):
+                pass
+        with self.assertRaises(SystemExit) as cm:
+            self._exec([{"kind": "fact", "content": "known under a ref list"}],
+                       sdk_cls=_ArrayPropSurvivorSDK)
+        self.assertEqual(cm.exception.code, 0)
+        receipt = json.loads(self.captured_stdout.strip().splitlines()[-1])
+        self.assertEqual(receipt["folded_onto_existing"], 1)
+        self.assertNotIn("ep", receipt)
+
+    def test_a_sequence_born_survivor_fold_counts_in_a_mixed_batch(self):
+        # The same blind spot does not RAISE in a mixed batch (`after > 0`, so
+        # the drift guard is never reached) — it silently UNDER-REPORTS:
+        # `folded_onto_other_sources` omitted the fold while `written` counted
+        # it, so a consumer keying on new/folded/written saw three numbers that
+        # do not describe the same batch.
+        class _MixedSDK:
+            def __init__(self, **kw):
+                self.n = 0
+            def query(self, **kw):
+                # the baseline read (before the loop) finds nothing under this
+                # fresh source; the read-back finds the point this run minted
+                if not self.n:
+                    return []
+                return [{"id": "p-minted", "domain": "d", "status": "live"}]
+            def create_point(self, kind, content, **kw):
+                self.n += 1
+                if self.n == 1:
+                    # minted by THIS run: the SCALAR ref this writer passed
+                    return {"id": "p-minted", "status": "live",
+                            "extractedFrom": kw.get("extractedFrom")}
+                # an existing survivor whose prop is an ARRAY (born from a ref
+                # sequence) — invisible to the equality-matched read-back
+                return {"id": "p-array", "status": "live",
+                        "extractedFrom": [kw.get("extractedFrom")],
+                        "extractedFromAll": [kw.get("extractedFrom")]}
+            def set_source_tier(self, url, tier):
+                pass
+            def get_source_reliability(self, url):
+                return {"url": url, "reliability": 0.9}
+            def compute_confidence(self, anchors=None, **kw):
+                return {"converged": True, "iterations": 1,
+                        "diagnostic": None, "truncated": False}
+            def close(self):
+                pass
+        self._exec([{"kind": "fact", "content": "minted"},
+                    {"kind": "fact", "content": "known under a ref list"}],
+                   sdk_cls=_MixedSDK)
+        receipt = json.loads(self.captured_stdout.strip().splitlines()[-1])
+        self.assertEqual(receipt["written"], 2)
+        self.assertEqual(receipt["new"], 1)
+        self.assertEqual(receipt["folded_onto_other_sources"], 1,
+                         "a fold onto a sequence-born survivor was not counted")
 
     def test_non_live_hit_is_reported_and_never_force_promoted(self):
         # The README's published guarantee: "Retracted points stay retracted.
@@ -751,12 +832,98 @@ class TestWriterContract(unittest.TestCase):
         receipt = json.loads(out.strip().splitlines()[-1])
         self.assertEqual(receipt["new"], 1)
         self.assertEqual(receipt["folded_onto_other_sources"], 1)
+        # #7704: the fold KEEPS the new source instead of dropping it. Two
+        # surfaces, pinned separately: the `extractedFrom` property stays the
+        # survivor's OWN creating source — a SCALAR, so the equality-filtered
+        # read-back keeps answering for it — and the folded SET rides
+        # `extractedFromAll` (#7704 review P1; writing the set into the
+        # equality-matched property hid the survivor from the read door, which
+        # is why `folded_onto_other_sources` is derived from the write result).
+        check = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            hits = check.query(content=shared, include_retracted=True)
+        finally:
+            check.close()
+        self.assertEqual(len(hits), 1, hits)
+        self.assertEqual(hits[0].get("extractedFrom"), other,
+                         "the convenience property must stay the survivor's own "
+                         "creating source — the pre-existing point was created "
+                         "under `other` before this writer folded onto it")
+        self.assertEqual(sorted(hits[0].get("extractedFromAll") or []),
+                         sorted([other, self.source]),
+                         "the fold lost the claim's new source")
         # all-fold batch on a FRESH source: exits 0 via the
         # folded_onto_existing path (this source has no points of its own)
         code, out, _ = self._exec(self._payload(
             [{"kind": "fact", "content": shared}],
             source=f"session://allfold-{os.urandom(4).hex()}"))
         self.assertEqual(code, 0)
+        receipt = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(receipt["folded_onto_existing"], 1)
+        self.assertNotIn("ep", receipt)
+
+    def test_sourceless_survivor_fold_exits_zero_on_the_real_sdk(self):
+        # END-TO-END on the REAL SDK: a claim minted by another door with NO
+        # provenance (`create_point(dedup=True)` and no `extractedFrom` — an
+        # ordinary door; `tortoise_create_point` takes no provenance at all) is
+        # the survivor this run folds onto. Before #7704's read-door fix the
+        # fold wrote the accumulated LIST into `extractedFrom`, `query()` matches
+        # that property by EQUALITY, and the equality-filtered read-back was
+        # empty with no fold counted — so a HEALTHY batch was refused as "SDK
+        # drift" (sticky: the prop was already written, so a rerun took the same
+        # path). The fold now adopts this source as the survivor's creating
+        # source, so the survivor IS under it and the batch reports it as `new`
+        # (the README's own definition: points under this source that were not
+        # there before) — never a drift error.
+        shared = f"sourceless contract fact {os.urandom(4).hex()}"
+        from tortoise.sdk import TortoiseSDK
+        pre = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            r = pre.create_point("statement", shared, dedup=True)
+            self.assertTrue(r.get("id"))
+            self.assertIsNone(r.get("extractedFrom"))
+        finally:
+            pre.close()
+        code, out, _ = self._exec(self._payload(
+            [{"kind": "fact", "content": shared}]))
+        self.assertEqual(code, 0, out + self.last_err)
+        receipt = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(receipt["written"], 1)
+        self.assertEqual(receipt["new"], 1)
+        self.assertEqual(receipt["total_for_source"], 1)
+        self.assertNotIn("folded_onto_existing", receipt)
+        # the claim is now readable through the writer's ONLY population read
+        check = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            hits = check.query(extractedFrom=self.source, include_retracted=True)
+        finally:
+            check.close()
+        self.assertEqual([h.get("content") for h in hits], [shared])
+
+    def test_a_sequence_born_survivor_fold_exits_zero_on_the_real_sdk(self):
+        # END-TO-END on the REAL SDK for the ARRAY arm: the survivor was minted
+        # from a ref SEQUENCE (a list — ingest bundles do) under THIS source, so
+        # it already holds this source's edge and its `extractedFrom` is an
+        # ARRAY. The fold then has nothing to wire (`missing` is empty, the
+        # helper returns before any write), so the node keeps the ARRAY — which
+        # no equality-filtered read can match: the read-back is empty AND a
+        # scalar-only classifier finds no ref other than ours, i.e. the batch was
+        # refused as "SDK drift" and NO rerun could ever heal it. Every call
+        # here folded, so the run must exit 0 through `folded_onto_existing`.
+        shared = f"ref-list contract fact {os.urandom(4).hex()}"
+        from tortoise.sdk import TortoiseSDK
+        pre = TortoiseSDK(namespace=self.NS, event_log_path=self.log)
+        try:
+            r = pre.create_point("statement", shared,
+                                 extractedFrom=[self.source], dedup=True)
+            self.assertTrue(r.get("id"))
+            self.assertIsInstance(r.get("extractedFrom"), list,
+                                  "guard: the survivor's prop must be an ARRAY")
+        finally:
+            pre.close()
+        code, out, _ = self._exec(self._payload(
+            [{"kind": "fact", "content": shared}]))
+        self.assertEqual(code, 0, out + self.last_err)
         receipt = json.loads(out.strip().splitlines()[-1])
         self.assertEqual(receipt["folded_onto_existing"], 1)
         self.assertNotIn("ep", receipt)

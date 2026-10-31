@@ -366,11 +366,340 @@ def test_embedder_constants():
 # ── runner ───────────────────────────────────────────────────────────
 
 def _run_all():
+    ran = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
-    print("\nall embedding tests passed")
+            ran += 1
+    # The COUNT is printed, not just "passed": most tests in this file print
+    # their own `PASS` line but the `#10296` block does not (it only prints on
+    # SKIP), so a runner that lost half the file still ended on the same
+    # sentence. A number that moves when a block is added is what makes the
+    # loss visible in this mode rather than only under pytest.
+    print(f"\nall embedding tests passed ({ran} tests)")
 
+
+# ⛔ The guard sits at EOF, NOT here, and that placement is load-bearing (#10010
+# review F3): `_run_all` discovers tests from `globals()` at CALL time, so a guard
+# placed above any `def test_` makes `python3 tests/test_embeddings.py` print
+# "all embedding tests passed" having run none of the tests defined below it. It
+# sat above the whole `#10296` block and silently lost all seven of those pins in
+# the file's own documented second execution mode — the mode the PR body cites as
+# evidence. Keep it last.
+
+
+# ── 14. #10296: the intra-op thread pin ───────────────────────────────
+#
+# torch's intra-op pool defaults to nproc, and for the short-text calls this
+# module makes that default is ~35x SLOWER per call than a single thread (the
+# table is on ``EMBED_DEFAULT_INTRA_OP_THREADS``). On the contended self-hosted
+# pool it reached 40-90s per ``tests/test_capture_session.py`` item, and the
+# REQUIRED ``test-slow (e)`` leg spent its whole 40m watchdog inside the
+# embedding forward pass.
+#
+# These are the pins for the DECISION (one thread by default), the OPERATOR
+# LEVER (``TORTOISE_EMBED_THREADS``), and the WIRING (the load applies it —
+# a helper nobody calls would leave every one of them green).
+
+def _saved_env(names):
+    return {name: os.environ.get(name) for name in names}
+
+
+def _restore_env(saved):
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+def _embed_module():
+    import tortoise.embeddings as mod
+    return mod
+
+
+def test_embed_threads_default_is_the_measured_single_thread():
+    """One thread is the default BECAUSE it was measured, not assumed."""
+    mod = _embed_module()
+    saved = _saved_env([mod.EMBED_THREADS_ENV])
+    os.environ.pop(mod.EMBED_THREADS_ENV, None)
+    try:
+        assert mod.EMBED_DEFAULT_INTRA_OP_THREADS == 1, (
+            "the measured default is one intra-op thread; widening it re-opens "
+            "#10296 (a single short call is 126x slower at nproc)")
+        assert mod.resolve_embed_threads() == (1, "default")
+    finally:
+        _restore_env(saved)
+
+
+def test_embed_threads_env_is_read_per_call_and_refuses_junk():
+    """The operator lever works, is re-read each time, and fails CLOSED to the
+    default rather than to ``nproc`` for an unparseable value."""
+    mod = _embed_module()
+    saved = _saved_env([mod.EMBED_THREADS_ENV])
+    try:
+        os.environ[mod.EMBED_THREADS_ENV] = "4"
+        assert mod.resolve_embed_threads() == (4, "env")
+        os.environ[mod.EMBED_THREADS_ENV] = "2"
+        assert mod.resolve_embed_threads() == (2, "env"), "the pin is read per call"
+        for junk in ("0", "-2", "abc", "1.5", "  "):
+            os.environ[mod.EMBED_THREADS_ENV] = junk
+            assert mod.resolve_embed_threads() == (1, "default"), (
+                f"{junk!r} must fall back to the measured default, not to nproc")
+    finally:
+        _restore_env(saved)
+
+
+def test_pin_embed_threads_bounds_torch_and_is_observable():
+    """``pin_embed_threads`` bounds the REAL torch pool and records it.
+
+    The record is what ``EmbeddingModel.status()`` publishes (#10296 asks for
+    the pin to be observable) — a pin that nobody can read is the state that
+    made this a 3-day mystery on a required leg.
+    """
+    try:
+        import torch
+    except Exception:  # the designed zero-dependency path
+        print("SKIP test_pin_embed_threads_bounds_torch_and_is_observable")
+        return
+    mod = _embed_module()
+    saved = _saved_env([mod.EMBED_THREADS_ENV, *mod._EMBED_THREAD_ENV_VARS])
+    saved_threads = torch.get_num_threads()
+    try:
+        for name in [mod.EMBED_THREADS_ENV, *mod._EMBED_THREAD_ENV_VARS]:
+            os.environ.pop(name, None)
+        start = 2 if (os.cpu_count() or 1) >= 2 else 1
+        torch.set_num_threads(start)
+        record = mod.pin_embed_threads()
+        assert record["applied"] is True, record
+        assert record["threads"] == 1 and record["source"] == "default", record
+        assert record["previous"] == start, (
+            f"the pin must record what it replaced, got {record!r}")
+        assert torch.get_num_threads() == 1, (
+            "torch's intra-op pool is still unbounded — every short embedding "
+            "pays the barrier cost (#10296)")
+        assert mod.embed_thread_pin() == record
+        assert mod.EmbeddingModel.status()["threads"] == record, (
+            "status() must publish the applied pin")
+        for name in mod._EMBED_THREAD_ENV_VARS:
+            assert os.environ.get(name) == "1", (
+                f"{name} must be bounded too — it sizes the BLAS pools and any "
+                f"child process, which torch.set_num_threads cannot reach")
+        # Second call is idempotent, not a re-pin of something else.
+        again = mod.pin_embed_threads()
+        assert again["threads"] == 1 and again["previous"] == 1, again
+    finally:
+        torch.set_num_threads(saved_threads)
+        _restore_env(saved)
+
+
+def test_pin_env_leaves_an_operator_value_alone():
+    """``setdefault`` semantics: an explicit env is the operator's call."""
+    mod = _embed_module()
+    saved = _saved_env(list(mod._EMBED_THREAD_ENV_VARS))
+    try:
+        os.environ["OMP_NUM_THREADS"] = "2"
+        for name in mod._EMBED_THREAD_ENV_VARS[1:]:
+            os.environ.pop(name, None)
+        record = mod.pin_embed_threads()
+        assert os.environ["OMP_NUM_THREADS"] == "2", (
+            "an operator-set OMP_NUM_THREADS must not be overwritten")
+        assert "OMP_NUM_THREADS" not in record["env_vars"]
+        for name in mod._EMBED_THREAD_ENV_VARS[1:]:
+            assert os.environ.get(name) == str(record["threads"])
+    finally:
+        _restore_env(saved)
+
+
+def test_the_embedder_load_applies_the_pin():
+    """The WIRING: the pin is applied by ``EmbeddingModel``'s load, not only by
+    the helper. A load path that forgot to call it leaves every test above
+    green and CI exactly as slow as before."""
+    mod = _embed_module()
+    try:
+        import torch
+    except Exception:
+        print("SKIP test_the_embedder_load_applies_the_pin")
+        return
+    saved = _saved_env([mod.EMBED_THREADS_ENV, *mod._EMBED_THREAD_ENV_VARS])
+    saved_threads = torch.get_num_threads()
+    real_import = mod.import_sentence_transformer
+    seen = {"imported": False}
+
+    def _raise_import_error():
+        seen["imported"] = True
+        raise ImportError("test double — do not load the real encoder")
+
+    try:
+        for name in [mod.EMBED_THREADS_ENV, *mod._EMBED_THREAD_ENV_VARS]:
+            os.environ.pop(name, None)
+        mod.EmbeddingModel._reset()
+        mod._embed_thread_pin = None
+        torch.set_num_threads(2 if (os.cpu_count() or 1) >= 2 else 1)
+        mod.import_sentence_transformer = _raise_import_error
+        mod.EmbeddingModel(load_timeout=5.0)
+        assert seen["imported"], (
+            "the load never reached the encoder import — this pin is vacuous")
+        assert mod.embed_thread_pin() is not None, (
+            "EmbeddingModel's load did not pin the intra-op pool (#10296)")
+        # ⛔ The load runs on a WORKER thread, and torch's per-thread override
+        # survives: this thread still reads its own count. That is why every
+        # encode site re-asserts the pin — assert the re-assert here, not the
+        # load thread's private view.
+        mod.ensure_embed_threads()
+        assert torch.get_num_threads() == 1, (
+            "the encode path left torch at its default thread count")
+    finally:
+        mod.import_sentence_transformer = real_import
+        torch.set_num_threads(saved_threads)
+        _restore_env(saved)
+        # The failed load armed the negative cache; clear it so later tests in
+        # this file (and this file's own no-pytest runner) still see a real
+        # embedder.
+        mod.EmbeddingModel._reset()
+        mod._embed_thread_pin = None
+
+def test_ensure_embed_threads_rebounds_a_thread_that_set_its_own_count():
+    """The trap ``pin_embed_threads`` alone does not close.
+
+    ``torch.set_num_threads`` is not fully process-global: a thread that set its
+    own count keeps it (measured — a worker's ``set_num_threads(1)`` is visible
+    to that worker while the main thread still reads ``2``). The load runs on a
+    worker thread, and the forward pass runs on whichever thread calls
+    ``encode`` — so bounding only at load time leaves the actual encode
+    unbounded, which is exactly a fix that is applied but not where it matters.
+    """
+    try:
+        import torch
+    except Exception:
+        print("SKIP test_ensure_embed_threads_rebounds_a_thread_that_set_its_own_count")
+        return
+    mod = _embed_module()
+    saved = _saved_env([mod.EMBED_THREADS_ENV, *mod._EMBED_THREAD_ENV_VARS])
+    saved_threads = torch.get_num_threads()
+    try:
+        os.environ.pop(mod.EMBED_THREADS_ENV, None)
+        if (os.cpu_count() or 1) >= 2:
+            torch.set_num_threads(2)
+            assert torch.get_num_threads() == 2, "precondition: this thread is wide"
+        mod.ensure_embed_threads()
+        assert torch.get_num_threads() == 1, (
+            "ensure_embed_threads must re-bound THIS thread before a forward "
+            "pass, not rely on the load thread's private view (#10296)")
+        mod.ensure_embed_threads()  # idempotent, still 1
+        assert torch.get_num_threads() == 1
+    finally:
+        torch.set_num_threads(saved_threads)
+        _restore_env(saved)
+
+
+def test_the_thread_pin_is_not_one_process_wide_scalar():
+    """The MEASURED premise ``ensure_embed_threads`` exists for (#10010 review).
+
+    The re-assert is only worth its two C calls if the intra-op count is not one
+    process-wide value, and PyTorch's own ``set_num_threads`` page promises no
+    scope at all — it states *"Sets the number of threads used for intraop
+    parallelism on CPU"* and that it *"must be called before running eager, JIT
+    or autograd code"*, and nothing about which threads see the change
+    (<https://docs.pytorch.org/docs/2.15/generated/torch.set_num_threads.html>).
+    So the scope is asserted here rather than described in a docstring — a
+    docstring the next reader cannot falsify is how the previous, partially
+    wrong premise survived review.
+
+    Measured (torch 2.13.0+cu130, this file): main set to 2, then a worker that
+    sets 1 reads 1, a NEW thread spawned inside that worker also reads 1, and
+    main still reads 2. Two claims, both load-bearing:
+
+    * a thread that set its own count keeps it -> a load-time pin on a worker
+      does not reach the encode thread, hence the per-encode re-assert;
+    * a new thread inherits its CREATOR's count, not the process-global one ->
+      there is no single "correct" value to write once at load time.
+
+    A future torch that really does make this one process-wide scalar fails this
+    test, which is the point: the premise is then stale and the re-assert can be
+    reconsidered, instead of both being silently wrong.
+    """
+    try:
+        import torch
+    except Exception:  # the designed zero-dependency path
+        print("SKIP test_the_thread_pin_is_not_one_process_wide_scalar")
+        return
+    import threading
+
+    saved_threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(1)
+        if torch.get_num_threads() != 1:
+            print("SKIP test_the_thread_pin_is_not_one_process_wide_scalar "
+                  "(this build cannot reach 1 thread)")
+            return
+        torch.set_num_threads(2)
+        if torch.get_num_threads() != 2:
+            print("SKIP test_the_thread_pin_is_not_one_process_wide_scalar "
+                  "(this build cannot reach 2 threads)")
+            return
+        seen: dict[str, int] = {}
+
+        def _worker() -> None:
+            torch.set_num_threads(1)
+            seen["worker"] = torch.get_num_threads()
+
+            def _child() -> None:
+                seen["child_of_worker"] = torch.get_num_threads()
+
+            t = threading.Thread(target=_child)
+            t.start()
+            t.join()
+
+        w = threading.Thread(target=_worker)
+        w.start()
+        w.join()
+        seen["main"] = torch.get_num_threads()
+        assert seen["worker"] == 1, (
+            f"a thread's own set_num_threads must stick on that thread, got {seen}")
+        assert seen["child_of_worker"] == 1, (
+            "a new thread inherits its CREATOR's intra-op count, not the "
+            f"process-global one — got {seen}; if torch made the count one "
+            "process-wide scalar this premise is stale (see the docstring)")
+        assert seen["main"] == 2, (
+            "the process-wide reading is wrong: the worker's set_num_threads(1) "
+            f"must NOT reach the main thread, got {seen} — if it now does, "
+            "torch changed and ensure_embed_threads' premise needs revisiting")
+    finally:
+        torch.set_num_threads(saved_threads)
+
+
+def test_the_standalone_runner_cannot_lose_a_test_defined_below_it():
+    """#10010 review F3 — the file's second execution mode must not silently skip.
+
+    ``_run_all()`` discovers tests from ``globals()`` at CALL time, so the
+    ``if __name__ == "__main__"`` guard is only correct at the END of the file:
+    placed above any ``def test_`` it prints *"all embedding tests passed"*
+    having run none of the tests below that line. It sat above the whole
+    ``#10296`` block, so ``python3 tests/test_embeddings.py`` ran 14 of 21 and
+    reported success — and that mode is cited as evidence in PR #10010's body.
+
+    Asserted STATICALLY, because the property is about source ORDER, not
+    behaviour: a runtime check inside ``_run_all`` cannot see a test that was
+    never defined at the moment it ran. Pre-fix this fails with guard at line
+    375 and the last test at 581.
+    """
+    from pathlib import Path
+
+    src = Path(__file__).resolve().read_text(encoding="utf-8").splitlines()
+    guards = [i for i, line in enumerate(src) if line.startswith("if __name__")]
+    assert len(guards) == 1, (
+        f"expected exactly one `if __name__` guard, found {len(guards)} at "
+        f"lines {[g + 1 for g in guards]}")
+    last_test = max(i for i, line in enumerate(src) if line.startswith("def test_"))
+    assert guards[0] > last_test, (
+        f"the `if __name__ == '__main__'` guard (line {guards[0] + 1}) sits "
+        f"ABOVE the last test (line {last_test + 1}), so "
+        f"`python3 tests/test_embeddings.py` silently runs none of the tests "
+        f"defined below it — move the guard to EOF")
+
+
+# ── runner (LAST — see the note on `_run_all`) ────────────────────────────
 
 if __name__ == "__main__":
     _run_all()
