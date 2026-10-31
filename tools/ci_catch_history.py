@@ -53,7 +53,15 @@ Three facts decide it, and each is a defect in a naive reading:
    attempt's, so re-running the only failing job turns the whole run `success` and the red
    disappears from any failure-only sample. `success`-conclusion runs are therefore read
    too (`--max-success-runs`), and the report states how many of them are re-runs
-   (`run_attempt > 1`) — the only shape that can carry a cleared red.
+   (`run_attempt > 1`) — the only shape that can carry a cleared red. A cleared red is
+   rendered per row (`cleared by a re-run`), not only counted: the row it belongs to reads
+   `NEVER` ("attested clean"), so the column is what keeps the markdown report honest.
+6. **`NEVER` is licensed by a PR-HEAD attestation ONLY.** Every `push` runs the whole gating
+   pool while the PR legs are diff-scoped, so the two populations are not interchangeable: a
+   file with zero PR-head runs and clean main runs is ``UNKNOWN`` with a reason naming that,
+   never ``NEVER``. Licensing it from either population folded "never ran on a PR head at
+   all" into "ran pre-merge and was clean" — the same clean bill of health, by a different
+   route.
 
 WHAT "THE 74" ACTUALLY SPLIT INTO (DERIVED, never hardcoded)
 -------------------------------------------------------------
@@ -489,6 +497,20 @@ class JobAttempts:
     superseded: tuple[Attempt, ...] = ()
 
 
+def _check_id(value: Any) -> int:
+    """A check-run id as an int, or ``-1`` when it is not one.
+
+    ⛔ Same coercion as `ci_verdict._as_int`, and deliberately not "isinstance(int) else -1":
+    the Jobs API returns integers, but if an id ever arrives as a numeric STRING, `-1` makes
+    `attempt.check_id < latest.check_id` unconditionally true and a red NEWER than its
+    "clearing" attempt is emitted as `flake_cleared` — a fabricated clean re-measurement.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
 def _family_attempts(
     check_runs: Iterable[Mapping[str, Any]],
 ) -> list[tuple[Attempt, str]]:
@@ -510,7 +532,7 @@ def _family_attempts(
         out.append(
             (
                 Attempt(
-                    check_id=raw_id if isinstance(raw_id, int) else -1,
+                    check_id=_check_id(raw_id),
                     run_id=run_id,
                     conclusion=str(conclusion) if conclusion is not None else None,
                     state=ci_verdict.group_state(check_run.get("status"), conclusion),
@@ -755,11 +777,17 @@ class FileHistory:
     #: A non-zero count is what licences ``NEVER`` ("we ran it and it caught nothing").
     pr_runs_attested: int = 0
     push_runs_attested: int = 0
-    #: How many times this file's leg RAN without the artifact naming this file — the
-    #: diff-scoped-selection shape (a leg that ran can execute 2 of its 13 files). Not
-    #: coverage: the leg running says nothing about this file.
+    #: How many times this file's leg RAN, its artifact was READ, and the artifact did not
+    #: name this file — the diff-scoped-selection shape (a leg that ran can execute 2 of its
+    #: 13 files). Not coverage: the leg running says nothing about this file.
     pr_leg_runs_unattested: int = 0
     push_leg_runs_unattested: int = 0
+    #: How many times this file's leg ran and its artifact could NOT be READ (expired past
+    #: retention, an unreadable listing, a bad zip). A DIFFERENT fact from the one above: a
+    #: read gap is not a diff-scoped miss, and a row must not claim the selection excluded a
+    #: file whose artifact was simply unreadable.
+    pr_leg_runs_unread: int = 0
+    push_leg_runs_unread: int = 0
 
     @property
     def status(self) -> str:
@@ -770,8 +798,13 @@ class FileHistory:
             return CATCH_PUSH_ONLY
         if self.unknowns:
             return UNKNOWN
-        if self.pr_runs_attested or self.push_runs_attested:
-            # ⛔ Per-FILE evidence, not "its leg ran": the leg is diff-SCOPED on tier-2.
+        if self.pr_runs_attested:
+            # ⛔ PR-HEAD attestation ONLY, and per FILE (never "its leg ran": the leg is
+            # diff-SCOPED on tier-2). The two populations are not symmetric: every `push`
+            # runs the WHOLE gating pool, so `push_runs_attested` says nothing about a PR
+            # head. Licensing NEVER from it folded "never ran on a PR head at all" into
+            # "ran pre-merge and was clean" — the clean bill of health #10131 forbids, and
+            # exactly the reading a `slow_files` reopen would be argued from.
             return NEVER
         if self.lane == LANE_NON_GATING:
             # Excluded by decision, not unmeasured — see NON_GATING_DECISION.
@@ -786,15 +819,37 @@ class FileHistory:
             # UNKNOWN is never a blank cell: "no artifact" and "no run ever measured this
             # file" are different facts, and both must be readable off the row.
             unattested = self.pr_leg_runs_unattested + self.push_leg_runs_unattested
+            unread = self.pr_leg_runs_unread + self.push_leg_runs_unread
+            #: Every fact that explains the gap is named, and each is named for what it is:
+            #: "the selection ran other files", "the artifact could not be read" and "it ran
+            #: on main but never on a PR head" are three different reasons and a reader
+            #: acting on the row must be able to tell them apart.
+            parts: list[str] = []
+            if unattested:
+                parts.append(
+                    f"its leg ran {unattested} time(s) and its artifact named none of it (a "
+                    f"diff-scoped selection runs only the surfaces a PR touched)"
+                )
+            if unread:
+                parts.append(
+                    f"its leg ran {unread} time(s) and the artifact could not be read "
+                    f"(expired past retention, an unreadable listing or a bad zip — see "
+                    f"window.api_notes), so nothing is known about it"
+                )
+            if self.push_runs_attested and not self.pr_runs_attested:
+                parts.append(
+                    f"it is attested clean on {self.push_runs_attested} main push run(s) but "
+                    f"on NO PR head — a push runs the whole gating pool, so that is not "
+                    f"evidence about a PR head (an UNKNOWN, never NEVER)"
+                )
             unknown.append(
                 {
                     "kind": "window",
                     "reason": (
                         "no per-file evidence in the window that this FILE executed"
                         + (
-                            f" — its leg ran {unattested} time(s) naming none of it (a "
-                            f"diff-scoped selection runs only the surfaces a PR touched)"
-                            if unattested
+                            " — " + "; ".join(parts)
+                            if parts
                             else " — its job never ran, or the window does not reach a run "
                             "that did"
                         )
@@ -817,6 +872,8 @@ class FileHistory:
             "push_runs_attested": self.push_runs_attested,
             "pr_leg_runs_unattested": self.pr_leg_runs_unattested,
             "push_leg_runs_unattested": self.push_leg_runs_unattested,
+            "pr_leg_runs_unread": self.pr_leg_runs_unread,
+            "push_leg_runs_unread": self.push_leg_runs_unread,
         }
 
     def _note(self) -> str | None:
@@ -864,11 +921,27 @@ class GhClient:
     RUNS_URL = "repos/{repo}/actions/runs?event={event}&per_page=100{extra}"
     ARTIFACTS_URL = "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
 
+    #: ⛔ A per-CALL wall bound. `--max-seconds` is only consulted BETWEEN calls, so without
+    #: this one stalled relayed `gh` blocks the walk forever and the report that is supposed
+    #: to say "the walk stopped at the bound" is never produced. ``RETRIES`` bounds the NUMBER
+    #: of attempts, not their duration. 300 s is well above a healthy `gh api` call (measured
+    #: p100 ≈ 12 s on this repo) and well below the default 1500 s walk bound.
+    CALL_TIMEOUT_SECONDS = 300
+
     def __init__(self, repo: str, max_calls: int = DEFAULT_MAX_API_CALLS) -> None:
         self.repo = repo
         self.max_calls = max_calls
         self.calls = 0
         self.truncation: str | None = None
+        #: EVERY cut, not just the last one. ``truncation`` is a single field, so a walk whose
+        #: six populations each stopped early reported only the sixth — the other five cuts
+        #: vanished, which is the same "quietly shrunk" failure the pager fix above closes.
+        self.truncations: list[str] = []
+
+    def note_truncation(self, fact: str) -> None:
+        """Record a cut and keep it visible in the rendered ``window.truncation``."""
+        self.truncations.append(fact)
+        self.truncation = " · ".join(self.truncations)
 
     def _spend(self, count: int = 1) -> None:
         if self.calls + count > self.max_calls:
@@ -891,9 +964,19 @@ class GhClient:
             if attempt:  # back off only between attempts; the first call is immediate
                 time.sleep(min(2**attempt, 15))
             try:
-                proc = subprocess.run(["gh", *args], capture_output=True)
+                proc = subprocess.run(
+                    ["gh", *args], capture_output=True, timeout=self.CALL_TIMEOUT_SECONDS
+                )
             except FileNotFoundError as exc:  # pragma: no cover - environment-dependent
                 raise ReadError(f"gh CLI not found: {exc}") from exc
+            except subprocess.TimeoutExpired:
+                # A hung call is a failed ATTEMPT, not an unbounded wait: the retry loop (and
+                # then `main`'s exit 2) must get control back.
+                last = ReadError(
+                    f"gh api {args[1] if len(args) > 1 else ''} timed out after "
+                    f"{self.CALL_TIMEOUT_SECONDS}s"
+                )
+                continue
             if proc.returncode == 0:
                 return proc.stdout if binary else proc.stdout.decode("utf-8", "replace")
             detail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
@@ -947,10 +1030,20 @@ class GhClient:
                 raw = self._gh(["api", url])
             except BudgetExhausted:
                 return runs
-            except ReadError:
+            except ReadError as exc:
                 if page == 1:
                     raise
-                break  # the listing ended or the page cap refused it; keep what we read
+                # ⛔ Recorded, never silently shrunk. `_gh` has already spent every attempt,
+                # so this is a PERSISTENT transport/API failure (or the documented page-cap
+                # refusal) — not the benign end-of-listing, which the short/empty page
+                # branches below already handle. Leaving it silent made a cut population read
+                # as a small one (`read: 100, requested: 500` with no truncation), and fewer
+                # runs under-report `CATCH-PR` — the direction that argues for taking a file
+                # off the pre-merge gate.
+                self.note_truncation(
+                    f"{event}/{conclusion} listing stopped after page {page - 1}: {exc}"
+                )
+                break  # keep what was read; the cut is recorded above
             assert isinstance(raw, str)
             try:
                 payload = json.loads(raw) if raw.strip() else {}
@@ -965,6 +1058,12 @@ class GhClient:
                     raise ReadError(
                         f"gh api {url} carried no workflow_runs list — not a runs listing"
                     )
+                # Same rule as the ReadError branch: an unreadable page after page 1 is a
+                # TRUNCATION, and a truncation is reported.
+                self.note_truncation(
+                    f"{event}/{conclusion} listing stopped after page {page - 1}: page "
+                    f"{page} carried no workflow_runs list — not a runs listing"
+                )
                 break
             if not batch:
                 break  # an empty page is the end of the listing, not an unreadable surface
@@ -1014,7 +1113,10 @@ class GhClient:
             raw = self._gh(
                 ["api", f"repos/{self.repo}/actions/permissions/artifact-and-log-retention"]
             )
-        except ReadError:
+        except (ReadError, BudgetExhausted):
+            # ⛔ `BudgetExhausted` is a bare RuntimeError, so catching only `ReadError` let it
+            # escape `main`'s handler as a traceback + exit 1 — outside the documented exits.
+            # An unknown retention is not fatal: the window falls back to `--days`.
             return None
         try:
             data = json.loads(str(raw))
@@ -1234,8 +1336,11 @@ def build_history(
     window_days = min(days, retention) if retention else days
     since = now - timedelta(days=window_days)
 
-    # The populations that are read. `failure` carries the reds; `cancelled` measured nothing
-    # (neither a catch nor a clean miss); **`success` is read because a red a re-run CLEARED
+    # The populations that are read. `failure` carries the reds; `cancelled` can carry a red
+    # ON ITS JOBS — a cancelled RUN whose job already completed red is a catch, so "cancelled"
+    # is a run-level conclusion, not an absence of measurement (an earlier version of this
+    # comment said "cancelled measured nothing", which the per-JOB reduction contradicts);
+    # **`success` is read because a red a re-run CLEARED
     # lives inside a green run** — a run's conclusion is its newest attempt's, so re-running
     # the only failing job flips the whole run to `success` and a failure-only sample could
     # never see the red that was cleared (`flake_cleared` would be unreachable live). The
@@ -1409,6 +1514,15 @@ def build_history(
                             history.pr_runs_attested += 1
                         else:
                             history.push_runs_attested += 1
+                    elif evidence is None:
+                        # ⛔ The leg ran and its artifact could NOT be read — that is a READ
+                        # gap, not the diff-scoped shape. Counting it as "the selection ran
+                        # only the surfaces this PR touched" put a false reason in the row
+                        # (and inflated that column) for a file whose leg simply expired.
+                        if ref.event == "pull_request":
+                            history.pr_leg_runs_unread += 1
+                        else:
+                            history.push_leg_runs_unread += 1
                     elif ref.event == "pull_request":
                         history.pr_leg_runs_unattested += 1
                     else:
@@ -1437,9 +1551,10 @@ def build_history(
                                 f"artifact {name} is absent or unreadable on run {ref.run_id} "
                                 f"({ref.created_at or 'unknown date'}) — "
                                 + (
-                                    f"it could not be READ ({artifacts.unread}), so nothing is "
-                                    f"known about it — UNKNOWN, not an expired artifact"
-                                    if artifacts.unread
+                                    f"it could not be READ ({artifacts.unread_for(name)}), so "
+                                    f"nothing is known about it — UNKNOWN, not an expired "
+                                    f"artifact"
+                                    if artifacts.unread_for(name)
                                     else (
                                         f"expired past the repo's "
                                         f"{retention or DEFAULT_RETENTION_DAYS}-day retention, "
@@ -1731,14 +1846,16 @@ class RunArtifacts:
         #: is not in the listing", which is what an expired/absent artifact looks like. A row
         #: reason must not claim expiry when the listing was never read.
         self.listing_failed: str | None = None
-        #: Why the artifact's BYTES could not be read (a budget-exhausted or failed download,
-        #: a bad zip). Same rule one level down: an unread download is not an expired artifact.
-        self.download_failed: str | None = None
+        #: Why a NAMED artifact's BYTES could not be read (a budget-exhausted or failed
+        #: download, a bad zip). ⛔ Keyed by artifact name on purpose: this instance is ONE PER
+        #: RUN and is shared by every leg of that run, so a single field let leg (a)'s failed
+        #: download be quoted as leg (b)'s reason — two contradictory statements in one
+        #: sentence, in the field a reviewer auditing the rows follows.
+        self.download_failed: dict[str, str] = {}
 
-    @property
-    def unread(self) -> str | None:
-        """The reason nothing is known about this leg's artifact, or None if it was looked at."""
-        return self.listing_failed or self.download_failed
+    def unread_for(self, name: str) -> str | None:
+        """Why nothing is known about THIS leg's artifact, or None if it was looked at."""
+        return self.listing_failed or self.download_failed.get(name)
 
     def get(self, name: str) -> Mapping[str, Any] | None:
         if self._items is None:
@@ -1749,6 +1866,15 @@ class RunArtifacts:
                 self._notes.append(
                     f"artifact listing for run {self._run_id} not read — budget exhausted"
                 )
+                self._items = {}
+            except ReadError as exc:
+                # ⛔ A persistent transport failure on ONE run's listing must not discard a
+                # walk bounded at 1500 s: it degrades exactly like the budget case (and like
+                # the same run's `jobs` read, which already does), leaving the legs UNKNOWN.
+                # Only the budget variant used to be caught, so a flaky listing escaped
+                # `build_history` entirely and `main` exited 2 with NO report at all.
+                self.listing_failed = f"the listing could not be read: {exc}"
+                self._notes.append(f"artifact listing for run {self._run_id} unreadable: {exc}")
                 self._items = {}
         artifact = self._items.get(name)
         if artifact is None or artifact.get("expired"):
@@ -1777,7 +1903,7 @@ def _leg_evidence(
         data = client.artifact_zip(artifact_id)
     except (BudgetExhausted, ReadError, TypeError, ValueError) as exc:
         notes.append(f"artifact {name} could not be downloaded: {exc}")
-        artifacts.download_failed = f"artifact {name} could not be downloaded: {exc}"
+        artifacts.download_failed[name] = f"artifact {name} could not be downloaded: {exc}"
         return None
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -1817,7 +1943,7 @@ def _leg_evidence(
             )
     except (zipfile.BadZipFile, OSError) as exc:
         notes.append(f"artifact {name} is not a readable zip: {exc}")
-        artifacts.download_failed = f"artifact {name} is not a readable zip: {exc}"
+        artifacts.download_failed[name] = f"artifact {name} is not a readable zip: {exc}"
         return None
 
 
@@ -1879,7 +2005,8 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
     wanted = alias.get(only, only)
     rows = [
         "| file | status | lane | PR runs (attested) | main runs (attested) "
-        "| leg runs w/o this file | PR-head catches | main catches | UNKNOWN |",
+        "| leg runs w/o this file | PR-head catches | main catches | cleared by a re-run "
+        "| UNKNOWN |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for row in report["files"]:
@@ -1887,6 +2014,12 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
             continue
         prs = "; ".join(citation_label(c) for c in row["pr_head_catches"]) or "-"
         pushes = "; ".join(citation_label(c) for c in row["push_main_catches"]) or "-"
+        # ⛔ Rendered, not JSON-only. A red that a LATER attempt in the same run re-measured
+        # green leaves the row reading NEVER ("attested clean"), so this column is the only
+        # place the committed report can say the file did go red on that PR head — hiding it
+        # in `flake_cleared` alone made the --md-out deliverable, the PR's primary artifact,
+        # silent about the one fact that undercuts its own headline number.
+        cleared = "; ".join(citation_label(c) for c in row.get("flake_cleared") or []) or "-"
         # A by-decision exclusion has no UNKNOWN reason and no citation — without the note
         # the cell would read "-", which is exactly the blank that hides the decision.
         unknown = (
@@ -1899,7 +2032,7 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
             f"| `{row['file']}` | {row['status']} | {row.get('lane', '-')} "
             f"| {row.get('pr_runs_attested', 0)} | {row.get('push_runs_attested', 0)} "
             f"| {unattested} "
-            f"| {prs} | {pushes} | {unknown} |"
+            f"| {prs} | {pushes} | {cleared} | {unknown} |"
         )
     return "\n".join(rows)
 
@@ -1928,8 +2061,10 @@ def render_report(report: Mapping[str, Any]) -> str:
         "Coverage is counted per FILE from that artifact, never from the leg's partition: "
         "the `test-slow` legs are diff-SCOPED on tier-2, so a leg that ran may have executed "
         "two of its thirteen files. A file the artifact does not name is `UNKNOWN`.",
-        f"`NEVER` therefore means *attested clean at least once* ({coverage['status_' + NEVER]} "
-        f"rows), not \"the leg ran somewhere\". `UNKNOWN` "
+        f"`NEVER` therefore means *attested clean on a PR HEAD at least once* "
+        f"({coverage['status_' + NEVER]} rows), not \"the leg ran somewhere\" and not "
+        f"\"main was clean\" — a push runs the whole gating pool, so a push-only attestation "
+        f"leaves the row `UNKNOWN`. `UNKNOWN` "
         f"({coverage['status_' + UNKNOWN]}) is a measurement gap, never a clean bill of health; "
         f"`NOT-PREMERGE` ({coverage['status_' + NOT_PREMERGE]}) is a RECORDED DECISION "
         f"({NON_GATING_DECISION}), not a gap.",

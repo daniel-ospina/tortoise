@@ -251,6 +251,14 @@ def test_the_newest_attempt_decides_and_the_older_red_is_cited_as_cleared(tmp_pa
     assert row["pr_head_catches"] == []
     assert [c["run_id"] for c in row["flake_cleared"]] == [str(RUN_PR)]
     assert row["flake_cleared"][0]["files"] == ["test_billing.py"]
+    # ⛔ And it reaches the COMMITTED deliverable, not only the JSON: the row reads NEVER
+    # ("attested clean"), so this column is the only place the markdown report can say the
+    # file did go red on that very PR head. Pre-fix `flake_cleared` appeared nowhere in
+    # `render_table`, i.e. the docs/ report this PR exists to produce was silent about it.
+    table = catch.render_table(report)
+    assert "cleared by a re-run" in table
+    cleared_row = next(line for line in table.splitlines() if "`test_billing.py`" in line)
+    assert f"run {RUN_PR}" in cleared_row
     # A red a SUCCESS re-measured is cleared — not "superseded", which is the bucket for a
     # red nothing cleared. The two must not collapse into one number.
     assert report["coverage"]["older_reds_superseded"] == 0
@@ -514,15 +522,18 @@ def test_the_74_rows_are_fully_partitioned_by_the_lanes_ci_selection_derives(tmp
     """
     root = _world(tmp_path, runs=[])
     report = _report(root)
-    assert len(report["files"]) == 74
-    assert len(catch.manifest_index(MANIFEST)) == 74
+    # ⛔ DERIVED, not the literal 74: a snapshot of the live config reds on any legitimate
+    # `slow_files` edit with no update guidance, and it is redundant with the manifest read
+    # right below it.
+    assert len(report["files"]) == len(MANIFEST["slow_files"])
+    assert len(catch.manifest_index(MANIFEST)) == len(MANIFEST["slow_files"])
 
     lanes = catch.slow_lane(MANIFEST)
     slow_legs = {f for legs in LEGS[catch.JOB_SLOW].values() for f in legs}
     carve_legs = {f for legs in LEGS[catch.JOB_CARVE].values() for f in legs}
     non_gating = {catch.to_observed(f) for f in ci_selection.on_demand_files(MANIFEST)}
 
-    assert len(lanes) == 74
+    assert len(lanes) == len(MANIFEST["slow_files"])
     assert report["coverage"]["lane_" + catch.LANE_ORPHAN] == 0, (
         "a slow file is in no gating leg and not on the declared non-gating lane"
     )
@@ -726,7 +737,13 @@ def test_a_green_leg_with_no_artifact_attests_nothing(tmp_path):
     row = _row(_report(root), "test_billing.py")
     assert row["status"] == catch.UNKNOWN
     assert row["pr_runs_attested"] == 0
-    assert row["pr_leg_runs_unattested"] == 1
+    # ⛔ An UNREAD artifact is not the diff-scoped shape: counting it as "the selection ran
+    # other files" put a false reason in the row (and inflated that column) for a file whose
+    # leg simply expired. It gets its own counter and its own wording.
+    assert row["pr_leg_runs_unread"] == 1
+    assert row["pr_leg_runs_unattested"] == 0
+    assert any("could not be read" in u["reason"] for u in row["unknown"])
+    assert not any("diff-scoped" in u["reason"] for u in row["unknown"])
 
 
 # --- 6. a red a re-run cleared is inside a GREEN run ------------------------
@@ -1144,3 +1161,278 @@ def test_a_wall_bound_that_expires_while_listing_stops_and_says_so(tmp_path, mon
     # And the consequence: nothing was attested, so no file may claim a clean bill of health.
     assert any(row["status"] == catch.UNKNOWN for row in report["files"])
     assert not [row for row in report["files"] if row["status"] == catch.NEVER]
+
+
+# --- 9. NEVER is licensed by a PR-HEAD attestation only ---------------------
+
+
+def test_a_push_only_clean_run_does_not_license_never(tmp_path):
+    """A file attested clean on a MAIN PUSH but never run on a PR head is UNKNOWN.
+
+    ⛔ `pr_runs_attested or push_runs_attested` licensed `NEVER` from either population, so
+    "never ran on a PR head at all" and "ran pre-merge and was clean" collapsed into one
+    bucket. The populations are not interchangeable: every push runs the WHOLE gating pool
+    while the PR legs are diff-scoped, so a push attestation says nothing about a PR head —
+    and `NEVER` here is exactly the clean bill of health a `slow_files` reopen would argue
+    from.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PUSH, SHA, "push")],
+        jobs={RUN_PUSH: [_check(100, RUN_PUSH, f"{family} ({leg})", "success")]},
+        artifacts={
+            (RUN_PUSH, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", False)])
+            )
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+    assert row["push_runs_attested"] == 1 and row["pr_runs_attested"] == 0
+    assert row["status"] != catch.NEVER, "a push attestation is not PR-head evidence"
+    assert row["status"] == catch.UNKNOWN
+    assert any("NO PR head" in u["reason"] for u in row["unknown"])
+    assert report["coverage"]["status_" + catch.NEVER] == 0
+
+
+# --- 10. the live transport: a cut listing is REPORTED ----------------------
+
+
+def _pager(*, fail_page: int, per_page: int = 100) -> catch.GhClient:
+    """A `GhClient` whose `_gh` serves `per_page` runs per page and fails from `fail_page`."""
+
+    client = catch.GhClient("o/r", max_calls=10_000)
+
+    def _gh(args, binary=False):
+        page = int(args[1].rsplit("page=", 1)[1])
+        if page >= fail_page:
+            raise catch.ReadError(
+                "gh api repos/o/r/actions/runs failed (rc=1): check your internet connection"
+            )
+        return json.dumps(
+            {
+                "total_count": 1000,
+                "workflow_runs": [
+                    _run(page * 1000 + i, SHA, "pull_request", pr=1) for i in range(per_page)
+                ],
+            }
+        )
+
+    client._gh = _gh  # type: ignore[method-assign]
+    return client
+
+
+def test_a_page_two_read_failure_is_a_reported_truncation_not_a_smaller_population():
+    """`_gh` has already spent every retry, so a page>1 failure is PERSISTENT — not the end.
+
+    ⛔ Pre-fix the branch was `if page == 1: raise` / `break` with nothing recorded, so
+    `window.populations` reported `read: 100, requested: 500` as an ordinary read under a
+    caption that only flags the at-requested case — inviting the reader to conclude 100 was
+    the population's size. Fewer runs cannot mint a false `NEVER` (coverage is per FILE and
+    attested), but they under-report `CATCH-PR`, which is the direction that argues for
+    taking a file off the pre-merge gate.
+    """
+    client = _pager(fail_page=2)
+    runs = client.list_runs("pull_request", None, "failure", 500)
+    assert len(runs) == 100, "the pages that WERE read are kept"
+    assert client.truncation is not None, "the cut was silent"
+    assert "pull_request/failure" in client.truncation
+    assert "page 1" in client.truncation
+    assert "internet connection" in client.truncation
+
+
+def test_a_cut_listing_reaches_the_report_window(tmp_path):
+    """The truncation travels: `window["truncation"]` is what `render_summary` prints."""
+    seed = _world(tmp_path, runs=[])
+    client = catch.OfflineClient(seed)
+    pager = _pager(fail_page=2)
+
+    def _list_runs(event, branch, conclusion, limit):
+        runs = pager.list_runs(event, branch, conclusion, limit)
+        client.truncation = pager.truncation
+        return runs
+
+    client.list_runs = _list_runs  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, client)
+    truncation = report["window"]["truncation"]
+    # ⛔ EVERY cut, not just the last: `truncation` was a single field, so six cut populations
+    # reported only the sixth and the other five vanished.
+    assert truncation and "pull_request/failure" in truncation and "push/success" in truncation
+    # Every population whose requested count exceeds one page was cut, and each cut is named
+    # (the `cancelled` populations ask for 60, so page 1 IS their whole read).
+    long_reads = [v for v in report["window"]["populations"].values() if v["requested"] > 100]
+    assert long_reads
+    assert truncation.count("listing stopped after page 1") == len(long_reads)
+    assert "TRUNCATED" in catch.render_summary(report)
+
+
+# --- 11. one bad READ of a run must not discard the walk --------------------
+
+
+def test_an_unreadable_artifact_listing_degrades_to_unknown_instead_of_aborting(tmp_path):
+    """`RunArtifacts.get` caught only `BudgetExhausted`, so a `ReadError` escaped `build_history`.
+
+    The same run's JOBS read already degrades to `api_notes` + UNKNOWN, and so does the
+    DOWNLOAD one level below. Only the listing was fatal — `main` exited 2 with no report at
+    all, discarding a walk bounded at 1500 s, which is the outcome `GhClient.RETRIES` exists
+    to prevent.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=61)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")]},
+    )
+    client = catch.OfflineClient(root)
+
+    def _unreadable(run_id: str) -> dict:
+        raise catch.ReadError("gh api repos/o/r/actions/runs/1001/artifacts failed (rc=1): boom")
+
+    client.artifacts = _unreadable  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, client)  # pre-fix: raises out of build_history
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    assert any("unreadable" in note for note in report["window"]["api_notes"])
+    reason = row["unknown"][0]["reason"]
+    assert "the listing could not be read" in reason
+    assert "retention" not in reason, "the artifact may exist — the listing was never read"
+
+
+def test_a_failed_download_is_not_quoted_as_another_legs_reason(tmp_path):
+    """`download_failed` was per RUN, so leg (a)'s failure was printed as leg (b)'s reason.
+
+    ⛔ The reproduced shape: row (b) read *"artifact pytest-log-test-slow-b is absent or
+    unreadable … it could not be READ (artifact pytest-log-test-slow-a could not be
+    downloaded: boom)"* — two contradictory statements in one sentence, in the field a
+    reviewer auditing the rows follows.
+    """
+    first, second = sorted(LEGS[catch.JOB_SLOW])[:2]
+    a_path = sorted(LEGS[catch.JOB_SLOW][first])[0]
+    b_path = sorted(LEGS[catch.JOB_SLOW][second])[0]
+    a_name = catch.artifact_name(catch.JOB_SLOW, first)
+    b_name = catch.artifact_name(catch.JOB_SLOW, second)
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=62)],
+        jobs={
+            RUN_PR: [
+                _check(100, RUN_PR, f"{catch.JOB_SLOW} ({first})", "failure"),
+                _check(200, RUN_PR, f"{catch.JOB_SLOW} ({second})", "failure"),
+            ]
+        },
+        # Leg (a)'s artifact IS in the listing (so its download is attempted and fails);
+        # leg (b)'s is simply absent — the expired/never-produced shape.
+        artifacts={(RUN_PR, a_name): _zip(_junit([(a_path, "t", True)]))},
+    )
+    client = catch.OfflineClient(root)
+    real = client.artifact_zip
+
+    def _broke(artifact_id):
+        if str(artifact_id) == a_name:
+            raise catch.ReadError("boom")
+        return real(artifact_id)
+
+    client.artifact_zip = _broke  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, client)
+    index = catch.manifest_index(MANIFEST)
+
+    def _reasons(row: dict) -> str:
+        return " ".join(u["reason"] for u in row["unknown"])
+
+    row_a, row_b = _row(report, index[a_path]), _row(report, index[b_path])
+    assert row_a["status"] == catch.UNKNOWN and row_b["status"] == catch.UNKNOWN
+    assert a_name in _reasons(row_a), "the leg that failed must name its own artifact"
+    assert a_name not in _reasons(row_b), "another leg's failure is not this row's reason"
+    assert b_name in _reasons(row_b)
+
+
+# --- 12. the transport is bounded per call, and its exits are documented -----
+
+
+def test_a_stalled_gh_call_is_bounded_by_a_timeout(monkeypatch):
+    """`--max-seconds` is consulted BETWEEN calls, so one stalled `gh` blocks the walk forever."""
+    seen: list[float | None] = []
+
+    def _timeout(cmd, capture_output=False, timeout=None):
+        seen.append(timeout)
+        raise catch.subprocess.TimeoutExpired(cmd, timeout or 0)
+
+    monkeypatch.setattr(catch.subprocess, "run", _timeout)
+    monkeypatch.setattr(catch.time, "sleep", lambda _s: None)
+    client = catch.GhClient("o/r", max_calls=100)
+    with pytest.raises(catch.ReadError) as excinfo:
+        client._gh(["api", "repos/o/r/actions/runs"])
+    assert len(seen) == catch.GhClient.RETRIES, "a timeout is a failed ATTEMPT, not a wait"
+    assert all(t for t in seen), "subprocess.run was called with no timeout"
+    assert "timed out" in str(excinfo.value)
+
+
+def test_an_exhausted_budget_leaves_retention_unknown_instead_of_escaping():
+    """`BudgetExhausted` is a bare RuntimeError and escaped `main`'s handler as a traceback."""
+    client = catch.GhClient("o/r", max_calls=1)
+
+    def _spent(args, binary=False):
+        raise catch.BudgetExhausted("API-call bound reached (1)")
+
+    client._gh = _spent  # type: ignore[method-assign]
+    assert client.retention_days() is None
+
+
+def test_a_numeric_string_check_id_does_not_mint_a_phantom_superseded_red():
+    """`-1` for a non-int id made `attempt.check_id < latest.check_id` unconditionally true.
+
+    The Jobs API returns integers, so this is low-reachability — but it is the one place this
+    module and `ci_verdict._as_int` could disagree, and the disagreement emits a red NEWER
+    than its "clearing" attempt as `flake_cleared` (a fabricated clean re-measurement).
+    """
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    red = _check("900", RUN_PR, job, "failure")  # the id arrives as a STRING
+    green = _check(600, RUN_PR, job, "success")
+
+    attempts = catch._family_attempts([red])
+    assert attempts and attempts[0][0].check_id == 900, "a numeric string is not -1"
+
+    groups = catch.reduce_attempts([red, green], {str(RUN_PR): ("111", "python-ci")})
+    # 900 is the NEWEST attempt, so the group is RED and nothing is superseded. Pre-fix the
+    # red carried -1, matched no group and was re-emitted as a phantom superseded leftover.
+    assert len(groups) == 1
+    assert groups[0].latest is not None and groups[0].latest.state == "red"
+    assert groups[0].superseded == ()
+
+
+# --- 13. the lane split is DERIVED, not a constant --------------------------
+
+
+def test_the_lane_split_follows_ci_selection_instead_of_a_constant(tmp_path, monkeypatch):
+    """Shift one file between lanes and every row moves with it.
+
+    ⛔ The 74-row test compares `report[...]` against `catch.slow_lane()`, so a hardcoded dict
+    equal to today's split satisfies every one of its assertions — the property #10194 already
+    broke once was still only pinned against a stale constant.
+    """
+    moved = catch.to_observed("test_billing.py")
+    real_slow = ci_selection.slow_shard_entries
+    real_on_demand = ci_selection.on_demand_files
+
+    def _slow(manifest):
+        return [
+            {
+                **entry,
+                "files": [f for f in entry["files"] if catch.to_observed(str(f)) != moved],
+            }
+            for entry in real_slow(manifest)
+        ]
+
+    monkeypatch.setattr(ci_selection, "slow_shard_entries", _slow)
+    monkeypatch.setattr(
+        ci_selection,
+        "on_demand_files",
+        lambda manifest: set(real_on_demand(manifest)) | {"test_billing.py"},
+    )
+    assert catch.slow_lane(MANIFEST)[moved] == catch.LANE_NON_GATING
+    report = _report(_world(tmp_path, runs=[]))
+    row = _row(report, "test_billing.py")
+    assert row["lane"] == catch.LANE_NON_GATING
+    assert row["status"] == catch.NOT_PREMERGE, "a by-decision exclusion, not a gap"
