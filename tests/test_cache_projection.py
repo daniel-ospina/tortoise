@@ -1161,15 +1161,24 @@ def test_an_empty_carrier_is_not_a_supersession():
     `public.object_current_status` reads the carriers with `IS NOT NULL`, so a
     row whose `superseded_by` is `''` answers `'superseded'` there. The GRAPH
     does not agree, and the graph is what this cache is a cache OF. Measured on
-    a live engine at this head:
+    a live engine:
 
         update_entity(obj, supersededBy="")   ->  status='live',  supersededBy=''
         update_entity(obj, supersededBy="v2") ->  status='live',  supersededBy='v2'
 
-    So truthiness — not `IS NOT NULL` — is what agrees with the live node, and
-    the record VIEW is the side that over-reports on this edge (a defect in the
-    view, named in `DERIVED_FROM_RECORD`'s bound). Deriving on an empty carrier
-    would resurrect a node as TERMINAL that the graph holds LIVE.
+    ⚠️ #10192 CLOSED that write door — both shapes are now REFUSED unless the
+    same call supplies `status='superseded'` (`sdk._refuse_bare_lifecycle_
+    carrier`), so a NEW row cannot be minted this way. That refusal keys on the
+    record's carrier COLUMN (`record_projection.snake`), so it covers the snake
+    spelling of the same column too — a prop-name list of the camelCase pair
+    left `update_entity(obj, superseded_by="")` open (PR #10379 review P1). The
+    row is still
+    reachable (one written before the guard, and the record's own legacy
+    id-only `ObjectSuperseded`), which is why this reading is unchanged: truthiness
+    — not `IS NOT NULL` — is what agrees with the graph, and the record VIEW is
+    the side that over-reports on this edge (a defect in the view, named in
+    `DERIVED_FROM_RECORD`'s bound). Deriving on an empty carrier would
+    resurrect a node as TERMINAL that the graph holds LIVE.
     """
     for label in ("Object", "Subject"):
         node = _node(label, {"id": "e-1", "name": "epsilon",
