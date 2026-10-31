@@ -2704,6 +2704,59 @@ def _candidate_query_text(entity_type: str, raw: str) -> str:
     return text[:width] if width else text
 
 
+#: The field each candidate class carries its claim text in — the field
+#: `execute_embed` reads to decide whether an item is writable at all.
+_CANDIDATE_TEXT_FIELD: dict[str, str] = {
+    "object": "name",
+    "event": "content",
+    "point": "content",
+}
+
+
+def _candidate_admitted(entity_type: str, item: object) -> bool:
+    """Is this item a CANDIDATE — will `execute_embed` emit any record for it?
+
+    ⛔ The write path DROPS an item whose COERCED text is empty, before it can
+    produce a `link_before_create` record for it: the entity gate is
+    ``name = str(e.get("name", "")).strip()`` / ``if not name: continue``, and
+    the event/point gate is ``str(ev.get("content", "")).strip()`` /
+    ``if not content: continue``. Such an item is an entry in the model's list and
+    nothing more — nothing is created and **no record names it** — so the run's
+    report must not count it as a candidate. Counting it produced a warning that
+    said *"N of M candidate(s) were never checked … their record says
+    UNRESOLVED"* about records that do not exist, and (because `plan_identity`
+    elevates a `resolved` lookup on any non-zero `unresolved` sum) one
+    whitespace-only Point was enough to turn a fully-covered run into a warned
+    `partial` one (#5095 review round 3, finding 2).
+
+    The convergent shape is *three* populations, not two: CMS's eCQM logic removes
+    a case excluded by the measure's own rules **from the denominator** instead of
+    counting it as a failure, and AAPOR's Standard Definitions keeps *unknown
+    eligibility* distinct from *ineligible* — an item the procedure never even
+    admitted is not evidence about the procedure. So the exclusion is here, at
+    admission, and NOT in the sentence: what the sentence reports stays true of
+    everything it counts.
+
+    ⚠️ The coercion is ``str(...)``, not ``str(... or "")``, and that distinction
+    is load-bearing in the OTHER direction: a non-string falsy (``None`` / ``0`` /
+    ``False``) coerces to its TEXT (``"None"``), so `execute_embed` WRITES it
+    (#5060) and the report must count it as an unchecked candidate, never drop it
+    (#5095 review B1). Only a value that coerces to whitespace is "never a
+    candidate".
+
+    ⚠️ A same-session DUPLICATE is still a candidate, deliberately. It folds onto
+    its survivor rather than being dropped at admission, and its content — the key
+    its identity query is built from — is exactly the survivor's, so the record the
+    sentence points at EXISTS and its answer is true of both. Counting proposals
+    rather than distinct claims is also the recorded intent of the denominator
+    ("the run's PROPOSED candidate list, before S5's own dedup drops any of it").
+    """
+    field = _CANDIDATE_TEXT_FIELD.get(entity_type)
+    if field is None or not isinstance(item, dict):
+        return False
+    return bool(str(item.get(field, "")).strip())
+
+
 def _sanitise_query_text(raw: str) -> str:
     """The searchable form of one derived query — sanitised, truncated to 160.
 
@@ -3085,6 +3138,14 @@ def _identity_report(search: dict, candidates: dict) -> dict:
     I2's *"never silently"* is the whole point: nothing here drops or suppresses
     anything. It makes the run's own record say which part of what it committed
     was never checked against the graph.
+
+    ⛔ The POPULATION is the attributed classes' real candidates — the items
+    `execute_embed` will emit a record for (`_candidate_admitted`). An item whose
+    coerced text is whitespace is an entry in the model's list, not a candidate:
+    the write path drops it WHOLE (`if not name: continue` / `if not content:
+    continue`), so counting it here published a numerator of *"never checked"*
+    over records that do not exist, and elevated a fully-covered run to `partial`
+    (#5095 review round 3, finding 2).
     """
     if not isinstance(candidates, dict):
         candidates = {}
@@ -3092,7 +3153,7 @@ def _identity_report(search: dict, candidates: dict) -> dict:
     unresolved: dict[str, int] = {}
     for section, leg in _failure_policy.LEG_BY_SECTION.items():
         items = [item for item in (candidates.get(section) or [])
-                 if isinstance(item, dict)]
+                 if _candidate_admitted(leg, item)]
         counts[section] = len(items)
         text_key = {"entities": "name", "events": "content", "points": "content"}[section]
         missing = 0
@@ -3101,13 +3162,15 @@ def _identity_report(search: dict, candidates: dict) -> dict:
             # a second width applied to a differently-stripped string — that
             # drift is what made a ran query read as unrun (#5095 review B2).
             raw = _candidate_query_text(leg, str(item.get(text_key) or ""))
-            # ⛔ NO `continue` on empty text: `execute_embed` COERCES a non-string
-            # falsy (`None` / `0` / `False`) to its text and writes it ("None"),
-            # while the derivation skipped it as falsy — so such a candidate is
-            # committed and was never checked. Skipping it here reported the run
-            # `resolved` beside a record that says `found: null`, which is the
-            # contradiction this report exists to prevent (#5095 review B1). An
-            # empty-text candidate is UNRESOLVED, not exempt.
+            # ⛔ NO `continue` on a candidate that HAS text: `execute_embed`
+            # COERCES a non-string falsy (`None` / `0` / `False`) to its text and
+            # writes it ("None"), while the derivation skipped it as falsy — so
+            # such a candidate is committed and was never checked. Skipping it
+            # here reported the run `resolved` beside a record that says
+            # `found: null`, which is the contradiction this report exists to
+            # prevent (#5095 review B1). It is NOT the same shape as the
+            # whitespace-only one: that item is dropped whole and has no record at
+            # all, which `_candidate_admitted` has already removed above.
             if not _candidate_covered(search, leg, raw):
                 missing += 1
         unresolved[section] = missing

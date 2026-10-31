@@ -480,7 +480,7 @@ class TestCandidateCovered:
 
 
 class TestTheReportCannotContradictItself:
-    """Two ways the run's report could contradict the run's own records.
+    """Three ways the run's report could contradict the run's own records.
 
     *(review B1)* `execute_embed` COERCES a non-string falsy content (`None`,
     `0`, `False`) to its text and writes it, while the query derivation skipped
@@ -492,7 +492,76 @@ class TestTheReportCannotContradictItself:
     every candidate query, so `partial` with NOTHING unchecked is the ordinary
     shape — and a warning that then says candidates "were recorded as
     UNRESOLVED" is false about that run's records.
+
+    *(review round 3, finding 2)* the mirror of B1, and the reason it is not the
+    same shape: an item whose COERCED text is whitespace is DROPPED WHOLE by the
+    write path (`if not name: continue` / `if not content: continue`), so it has
+    no record at all. Counting it published a numerator of "never checked" over
+    records that do not exist, and `plan_identity`'s elevation turned a
+    fully-covered run into a warned `partial` one.
     """
+
+    def test_an_item_the_write_path_drops_whole_is_not_a_candidate(self):
+        """A whitespace-only name/content is never admitted, so it is not counted.
+
+        Non-vacuity: before the fix these counts are 2/1/2 and the state is
+        `partial` with `unresolved_total == 3` — a warned run, over records that
+        `execute_embed` never emits. Each entry below is one of the write path's
+        own drop doors (`:7582-7584` for the entity, `:7721` / `:7841-7850` for
+        the text legs), so the assertion is that the report's population is the
+        write path's, not the model's list length.
+        """
+        candidates = {"entities": [{"name": "   "}, {"name": ""}],
+                      "events": [{"content": "\t\n"}],
+                      "points": [{"content": ""}, {"content": "  \n "}]}
+        report = v2._identity_report(_search(), candidates)
+        assert report["candidates"] == {"entities": 0, "events": 0, "points": 0,
+                                       "operators": 0, "retractions": 0}, report
+        assert report["unresolved_total"] == 0, report
+        assert report["state"] == fp.LOOKUP_RESOLVED, (
+            "an item the write path drops whole must not turn a COMPLETE lookup "
+            "into a warned `partial` run")
+
+    def test_a_dropped_entry_does_not_hide_a_real_candidate_beside_it(self):
+        """The exclusion is per ENTRY, not per class.
+
+        The cheap wrong fix is a class-level "all empty" test; a real candidate
+        sitting next to a dropped one must still be counted (and still be
+        checked), or the report would understate the run.
+        """
+        candidates = {"points": [{"content": "   "},
+                                 {"content": "the budget is 40k"}]}
+        ran = [v2._query_key("point", v2._candidate_query_text(
+            "point", "the budget is 40k"))]
+        report = v2._identity_report(
+            _search(query_coverage={"derived": {"point": 1},
+                                    "ran": {"point": 1},
+                                    "failed": {"point": 0}},
+                   query_results={"ran": ran, "failed": []}),
+            candidates)
+        assert report["candidates"]["points"] == 1, report
+        assert report["unresolved"]["points"] == 0, report
+        assert report["state"] == fp.LOOKUP_RESOLVED, report
+
+    def test_the_admission_test_is_the_write_path_s_own_coercion(self):
+        """`str(...)` and not `str(... or "")` — the whole B1 distinction.
+
+        A non-string falsy coerces to its TEXT, which `execute_embed` writes
+        (#5060), so it IS a candidate; only whitespace-coercing values are not.
+        Getting this backwards re-opens B1 (the `found: null` record that no
+        counter admitted to), so the boundary is pinned on both sides.
+        """
+        for value in (None, 0, False):
+            assert v2._candidate_admitted("point", {"content": value}) is True, value
+            assert v2._candidate_admitted("object", {"name": value}) is True, value
+        for value in ("", "   ", "\t\n "):
+            assert v2._candidate_admitted("point", {"content": value}) is False, value
+            assert v2._candidate_admitted("event", {"content": value}) is False, value
+            assert v2._candidate_admitted("object", {"name": value}) is False, value
+        # a missing field reads as "" — the same door the write path takes
+        assert v2._candidate_admitted("point", {}) is False
+        # a non-dict entry is dropped by the write path outright
+        assert v2._candidate_admitted("point", "nope") is False
 
     def test_a_coerced_falsy_candidate_is_reported_unresolved(self):
         candidates = {"entities": [{"name": "ACME Corp"}],
