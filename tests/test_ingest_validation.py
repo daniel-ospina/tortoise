@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import TortoiseSDK
 
 
@@ -782,19 +783,24 @@ class TestTerminalStatusGuard:
         # cycle-17/18: a bundle-local point item whose (content_hash, kind)
         # dedup-hits an EXISTING terminal point.
         #
-        # ⛔ #9173 FLIPPED THIS TEST, and the flip IS the finding: a `points`
-        # ref endpoint is Point-bearing BY CONSTRUCTION, so the endpoint-kind
-        # gate (#8499) writes that connection as an operator and
+        # ⛔ #9173 FLIPPED THIS TEST to ACCEPT, on the reasoning that a
+        # `points` ref endpoint is Point-bearing BY CONSTRUCTION, so the
+        # endpoint-kind gate (#8499) writes that connection as an operator and
         # `create_direct_edge` — the only primitive that refuses a terminal
-        # endpoint — is never reached. Asserting a refusal here was asserting
-        # the over-refusal the #8623 class is made of (measured: the plain
-        # spelling refused, the identical connection with `reify: true`
-        # accepted and committed). The dedup-hit mechanism is Point-specific
-        # (content_hash), so it cannot be re-spelled as an Object pair: what
-        # this test now pins is that the promoted pair is ACCEPTED end-to-end
-        # and commits, with the point items written — i.e. no partial write and
-        # no dead-operator (`SAME_AS`/supersession) surprise.
-        sdk.create_point("statement", "same content", status="superseded")
+        # endpoint — is never reached. ⛔ #9819 FLIPPED IT BACK, and the two
+        # flips are about DIFFERENT axes: #9173 scoped the EDGE prediction
+        # (operator-mediated wiring to a terminal point stays legal), but the
+        # content dedup ALSO makes the write FOLD onto the terminal point —
+        # `create_point`'s content resolution is unconditional, so the fold
+        # reaches `_stamp_batch_id` and mutates the retracted/superseded node
+        # (`batch_id` stamped, `updatedAt` moved, `status` still `retracted`)
+        # on the operator route exactly as on the direct route. The point WRITE
+        # is a separate axis #9173 never decided. What this test now pins is
+        # that the bundle is refused in Phase 1 with ZERO mutation, so the
+        # terminal point is not rewritten and no earlier item is committed.
+        terminal = sdk.create_point("statement", "same content",
+                                    status="superseded")["id"]
+        before = sdk.get_point(terminal)
         bundle = {
             "points": [
                 {"ref": "p1", "kind": "statement", "content": "other"},
@@ -802,14 +808,16 @@ class TestTerminalStatusGuard:
             ],
             "connections": [{"from": "p1", "to": "pT", "operator": "IMPL"}],
         }
-        assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
-        assert res["created"]["connections"] == 1
-        # reified, not written operator-less: the positional
-        # `ids["connections"]` entry is the OPERATOR id, not the
-        # `{direct_edge, from, to}` descriptor a direct edge returns (§6.1)
-        assert isinstance(res["ids"]["connections"][0], str)
-        assert _operator_count(sdk) == 1
+        viols = sdk._validate_bundle(bundle)
+        assert any("#9819" in v["message"] for v in viols), viols
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest(bundle)
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "the content fold stamped the retracted point (#9819)")
+        assert after.get("updatedAt") == before.get("updatedAt")
+        assert _operator_count(sdk) == 0, (
+            "Phase-1 must reject BEFORE any write — no operator was wired")
 
     def test_bundle_local_terminal_dedup_after_rebuild(self, sdk):
         # #2971: a Point can carry `content_hash = NULL` — a crash between the
@@ -862,11 +870,16 @@ class TestTerminalStatusGuard:
             ],
             "connections": [{"from": "p1", "to": "pT", "operator": "IMPL"}],
         }
-        assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
-        assert res["created"]["connections"] == 1
-        assert isinstance(res["ids"]["connections"][0], str)  # operator id
-        assert _operator_count(sdk) == 1
+        # ⛔ #9819 FLIPPED THIS BACK: the guard MATCHING is now an ingest-level
+        # REFUSAL, because the content fold MUTATES the terminal point it
+        # resolves ("#9819" in the violation names that arm). The hash-less
+        # fallback the test is about is still what makes the guard MATCH —
+        # asserted above — and the refusal is the consequence.
+        viols = sdk._validate_bundle(bundle)
+        assert any("#9819" in v["message"] for v in viols), viols
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest(bundle)
+        assert _operator_count(sdk) == 0, "Phase-1 must reject before any write"
 
     def test_terminal_dedup_hit_mirrors_create_point_dedup_predicate(self, sdk):
         # #2971 predicate leg: the guard exists to catch a bundle-local ref

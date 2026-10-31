@@ -429,6 +429,101 @@ class TestPhase1GuardSeesTheKeyIdentity:
         assert sdk.get_point(res["ids"]["points"][0]).get("status") == "retracted"
 
 
+class TestPhase1GuardSeesTheContentIdentity:
+    """#9819: the Phase-1 ingest guard must resolve the CONTENT identity with
+    the SAME unconditional order the writer uses. ``create_point``'s dedup is
+    key-first-then-content, so an item with no key (or a key MISS) folds onto a
+    point that matches by CONTENT — on every route, and whether or not any
+    connection references it. Before #9819 that fold stamped ``batch_id`` on a
+    retracted/superseded point (and moved ``updatedAt`` when the item carried
+    props), leaving ``status`` terminal — the #8400 "terminal point mutated"
+    hazard, reached through the content half the #9818 key guard did not cover.
+    """
+
+    def test_content_matching_a_terminal_point_is_a_phase1_violation(self, sdk):
+        terminal = sdk.create_point("statement", "ORIGINAL-CONTENT")["id"]
+        sdk.retract_point(terminal)
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "ORIGINAL-CONTENT"}]})
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "the content fold stamped the retracted point (#9819)")
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_content_matching_a_terminal_point_with_a_fresh_key_is_a_violation(
+            self, sdk):
+        """A fresh key does NOT avoid the content fold: the writer's key-first
+        resolution MISSES the fresh key and falls through to content (#6110),
+        so the fold still lands on the terminal point."""
+        terminal = sdk.create_point("statement", "ORIGINAL-FRESHKEY")["id"]
+        sdk.retract_point(terminal)
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "ORIGINAL-FRESHKEY",
+                                     "key": "brand-new-key-9819"}]})
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_content_matching_a_live_point_folds(self, sdk):
+        """The guard must NOT over-reject: content matching a LIVE point is a
+        legal dedup hit — the writer folds onto it and the bundle commits."""
+        live = sdk.create_point("statement", "LIVE-CONTENT-9819")["id"]
+        res = sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                       "content": "LIVE-CONTENT-9819"}]})
+        assert res["deduped"]["points"] == 1
+        assert res["created"]["points"] == 0
+        assert res["ids"]["points"] == [live]
+
+    def test_intra_bundle_content_fold_onto_a_self_minted_terminal_point(
+            self, sdk):
+        """The graph read alone cannot see a terminal point the SAME bundle is
+        about to mint by CONTENT (the sibling of the key-order arm). Bundle
+        order: item 0 mints content "A" terminal, item 1 reuses content "A"
+        and would content-fold onto it — ``_stamp_batch_id`` has no terminal
+        exclusion. Refused by ``minted_terminal_content`` (bundle-order, not a
+        graph read)."""
+        with pytest.raises(BundleValidationError, match="reuses content"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p1", "kind": "statement", "content": "A",
+                     "status": "retracted"},
+                    {"ref": "p2", "kind": "statement", "content": "A"},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'A' RETURN n.id"
+        ).result_set == [], (
+            "Phase-1 must reject BEFORE any write — the bundle minted a point "
+            "and folded onto the terminal one it had just created (#9819)")
+
+    def test_intra_bundle_content_guard_does_not_over_reject(self, sdk):
+        """A terminal item followed by an item with DIFFERENT content is the
+        writer's legal path and must commit."""
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "A-DISTINCT",
+                 "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "B-DISTINCT"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 2
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['A-DISTINCT','B-DISTINCT'] "
+            "RETURN n.status"
+        ).result_set
+        assert {r[0] for r in rows} == {"retracted", "live"}
+
+
 class TestNoInBundleDedupEscape:
     """#8400 review P2: the refusal told callers to "pass a fresh key with
     dedup=False", which is not reachable through ``ingest``.
