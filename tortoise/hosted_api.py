@@ -17102,7 +17102,8 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
     * ``"nowhere"`` — neither store holds the text.
 
     ⛔ WHY THIS REPORTS RATHER THAN FAILING THE COMMIT. The graph writes of
-    steps 1-3 above have already committed, so a 5xx here would answer a
+    steps 1-2 above have already committed when this runs (step 3's `:Event`
+    MERGE is BELOW this carrier, not above it), so a 5xx here would answer a
     SUCCESSFUL write with a failure and invite a same-payload retry that lands
     the same nodes again — and the two lanes that reach ``"nowhere"`` (no
     journal configured; a non-durable one) are DEPLOYMENT-level shapes, so
@@ -17488,10 +17489,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # read here (`record_sink`, the mechanism `_write_capture_turns` already
     # gates its own store decision on) and `_report_narrative_home` turns it
     # into an ERROR log plus a `narrative_not_recorded` advisory on the receipt.
-    # ⚠️ THE OTHER HALF OF THE APPLY-FIRST RULE IS UNCHANGED: the carrier is
-    # still emitted AFTER the writes it describes, and the `:Source`/`:Event`
-    # writes above are still fail-closed, so a record can never outlive a CHAIN
-    # write that did not land.
+    # ⚠️ WHAT IS STILL TRUE, AND WHAT IS NOT (#10000). The `:Source` write ABOVE
+    # is fail-closed before this carrier, so a record can never outlive THAT
+    # write. It no longer states a NODE write at all — the key it carries is read
+    # from `payload.story_arc` — and step 3's `:Event` MERGE comes AFTER this
+    # emit, so there is no apply-first ordering to claim for it; what makes a
+    # retry harmless is the content-addressed `id=event_id` (see
+    # `_narrative_carrier`'s docstring), not a write order the code does not have.
     #
     # WHY A DEDICATED TYPE RATHER THAN `SourceCreated`/`EventRecorded`. §9.1
     # places the narrative *outside* the graph — "not in the graph, not a
