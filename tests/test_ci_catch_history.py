@@ -63,6 +63,13 @@ properties. Each has a test here that FAILS when the property is broken:
     `test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main` and
     `test_a_zip_that_lacks_the_members_is_a_READ_gap_not_an_expired_artifact` fail if either
     reading returns.
+12. **A bound (or transport) failure while LISTING cuts the SAMPLE, never the REPORT** —
+    `list_runs` re-raises a page-1 failure, and that error reached `main`, which exited 2
+    before writing `--json-out`/`--md-out`: the one state `--max-seconds` exists for produced
+    no artifact at all, instead of the truncated report `listing_stop` discloses.
+    `test_a_listing_read_failure_cuts_the_sample_instead_of_discarding_the_report` and
+    `test_the_walk_bound_while_listing_still_writes_the_report` fail if the listing call is
+    unguarded (both raise where they expect a report).
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -1355,6 +1362,115 @@ def test_a_wall_bound_that_expires_while_listing_stops_and_says_so(tmp_path, mon
     assert not [row for row in report["files"] if row["status"] == catch.NEVER]
 
 
+class _FailingListing(catch.OfflineClient):
+    """An offline client whose Nth population listing is cut by the WALK BOUND."""
+
+    def __init__(self, root: Path, *, fail_at: int) -> None:
+        super().__init__(root)
+        self.fail_at = fail_at
+        self.listed: list[tuple[str, str | None, str]] = []
+
+    def list_runs(self, event, branch, conclusion, limit):
+        self.listed.append((event, branch, conclusion))
+        if len(self.listed) == self.fail_at:
+            raise catch.WalkBoundReached(
+                "gh api repos/o/r/actions/runs not attempted — the walk's wall-clock bound "
+                "was reached"
+            )
+        return super().list_runs(event, branch, conclusion, limit)
+
+
+def test_a_walk_bound_while_listing_cuts_the_sample_instead_of_discarding_the_report(tmp_path):
+    """⛔ `main` exited 2 with NO report when the walk bound fired DURING a listing.
+
+    `list_runs` re-raises a page-1 failure by design (a page-2+ cut is a recorded truncation,
+    page 1 leaves that population unusable) — and `build_history`'s listing loop had no
+    handler, so the error reached `main`, which returns 2 BEFORE writing `--json-out` /
+    `--md-out`. The one state `--max-seconds` exists for therefore produced nothing at all:
+    not the truncated sample `listing_stop`/`window.truncation` exist to describe, and not
+    even the `UNKNOWN` rows the module promises. The bound must cut the SAMPLE.
+
+    Reachable by arithmetic, not by contrivance: the per-population check is
+    `elapsed > max_seconds`, so a population entered with a few seconds of budget left passes
+    it, its attempt is clamped to those seconds (measured p100 ≈ 12 s on this repo), and the
+    retry's own deadline check then raises exactly this error.
+    """
+    family, _leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=7)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} (a)", "failure")]},
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, "a")): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            )
+        },
+    )
+    # pull_request/failure is read; push-main/failure is then cut by the walk's bound.
+    client = _FailingListing(root, fail_at=2)
+    report = catch.build_history(MANIFEST, client, max_seconds=90)  # pre-fix: raises
+
+    key = catch.population_key("pull_request", "failure")
+    assert len(client.listed) == 2, f"the walk kept listing past the bound: {client.listed}"
+    populations = report["window"]["populations"]
+    assert len(populations) == 6, "every population must be accounted for, read or not"
+    assert populations[key]["listed"] is True and populations[key]["read"] == 1
+    unlisted = [k for k, info in populations.items() if info["listed"] is False]
+    assert len(unlisted) == 5
+    assert all(populations[k]["read"] == 0 for k in unlisted)
+    assert all(populations[k]["hit_bound"] is False for k in unlisted)
+
+    # The cut NAMES the population it stopped at and the reason, in the paragraph a reader
+    # uses to judge how much of the sample the numbers rest on.
+    truncation = report["window"]["truncation"] or ""
+    assert "listing stopped at push-main/failure" in truncation, truncation
+    assert "wall-clock bound was reached" in truncation, truncation
+    assert "NEVER listed" in truncation, truncation
+
+    # And the consequence: an unlisted population attests NOTHING, so no row may read NEVER.
+    assert report["coverage"]["status_" + catch.NEVER] == 0
+    assert not [row for row in report["files"] if row["status"] == catch.NEVER]
+    assert any(row["status"] == catch.UNKNOWN for row in report["files"])
+
+
+def test_the_walk_bound_while_listing_still_writes_the_report(tmp_path, monkeypatch):
+    """`main` must EXIT 0 and leave the artifact when the bound fires mid-listing.
+
+    ⛔ The handler above is only half the contract: the finding's OUTCOME was "exits 2 with no
+    report at all", and `main` writes `--json-out`/`--md-out` AFTER its
+    `except ReadError: return 2`. So this drives the real `GhClient` (whose `_gh` is the thing
+    that raises) through the CLI and pins the artifact — a report per file is what those flags
+    exist for, and a bound the caller asked for must not destroy it.
+
+    ⛔ Deliberately `WalkBoundReached`, not any `ReadError`: a runs payload that IS a response
+    but is not a runs listing stays exit 2 (see
+    `test_a_runs_file_that_is_not_a_runs_listing_is_a_read_failure_not_an_empty_window`).
+    """
+    monkeypatch.setattr(catch.ci_selection, "load_manifest", lambda: MANIFEST)
+
+    def _gh(self, args, binary=False):
+        raise catch.WalkBoundReached(
+            "gh api repos/o/r/actions/runs not attempted — the walk's wall-clock bound "
+            "was reached"
+        )
+
+    monkeypatch.setattr(catch.GhClient, "_gh", _gh)
+    out = tmp_path / "catch-history.md"
+    assert catch.main(["--repo", "o/r", "--md-out", str(out)]) == 0, (
+        "pre-fix: exit 2 and no artifact"
+    )
+    text = out.read_text(encoding="utf-8")
+    assert "TRUNCATED" in text, text[:400]
+    assert "wall-clock bound was reached" in text
+
+    # The shape failure is NOT folded into this: the same transport, a payload that is not a
+    # runs listing, is still exit 2 (the guard against catching every `ReadError` here).
+    monkeypatch.setattr(
+        catch.GhClient, "_gh", lambda self, args, binary=False: '{"message": "Not Found"}'
+    )
+    assert catch.main(["--repo", "o/r"]) == 2, "a non-listing response is a read failure"
+
+
 # --- 9. NEVER is licensed by a PR-HEAD attestation only ---------------------
 
 
@@ -1824,7 +1940,11 @@ def test_no_attempt_is_spent_once_the_walk_bound_has_passed(monkeypatch):
     monkeypatch.setattr(catch.time, "sleep", lambda _s: None)
     client = catch.GhClient("o/r", max_calls=100, max_seconds=90)
     client.deadline = catch.time.monotonic() - 1  # the walk is already out of time
-    with pytest.raises(catch.ReadError) as excinfo:
+    # ⛔ The exact TYPE, not just `ReadError`: `build_history`'s listing loop distinguishes a
+    # caller-requested CUT (`WalkBoundReached` → truncated report) from a surface that could
+    # not be read (`ReadError` → exit 2). If `_gh` raised the base class, a bound reached
+    # mid-listing would discard the whole report again.
+    with pytest.raises(catch.WalkBoundReached) as excinfo:
         client._gh(["api", "repos/o/r/actions/runs"])
     assert ran == [], "an attempt was made with no walk budget left"
     assert client.calls == 0, "a call that was never made must not be spent"

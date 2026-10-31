@@ -224,6 +224,21 @@ class ReadError(RuntimeError):
     """A surface could not be read. Never a value in the table."""
 
 
+class WalkBoundReached(ReadError):
+    """The walk's own ``--max-seconds`` bound stopped a read — a CUT, not a failed surface.
+
+    ⛔ A distinct type, because the two meanings have different contracts. A payload the
+    service returned but that cannot be read as a surface (an error body, a wrong
+    ``workflow_runs`` type, undecodable JSON) is exit 2 — "the report could not be read",
+    pinned by `test_an_unparseable_offline_listing_exits_2` and
+    `test_a_runs_file_that_is_not_a_runs_listing_is_a_read_failure_not_an_empty_window`.
+    A bound the CALLER asked for stopping the walk is the state `listing_stop` /
+    `window.truncation` exist to disclose, so it must cut the sample and still produce the
+    report. Collapsing the two into `ReadError` is what made a `--max-seconds` expiry during
+    the listing phase discard the whole report (exit 2, no artifact, nothing marked UNKNOWN).
+    """
+
+
 class BudgetExhausted(RuntimeError):
     """The API-call bound was reached. Truncation, reported — not a silent shrink."""
 
@@ -1030,7 +1045,7 @@ class GhClient:
             # to be killed still overruns the bound the report was asked to honour.
             left = self._seconds_left()
             if left is not None and left <= 0:
-                raise ReadError(
+                raise WalkBoundReached(
                     f"gh api {target} not attempted — the walk's wall-clock bound was reached"
                     + (f" while retrying: {last}" if last else "")
                 )
@@ -1398,6 +1413,17 @@ def normalise_job(job: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def population_key(event: str, conclusion: str) -> str:
+    """The report's name for ONE listing population — one spelling, everywhere.
+
+    ⛔ THREE places name a population (`window.populations` on the time-based stop, on a
+    listing read failure, and on a successful read). A second spelling of the same key is how
+    a cut ends up naming a population that does not appear in the report, and a reader
+    reconciling `requested` against `read` would then miss the cut population entirely.
+    """
+    return f"{event}/{conclusion}" if event == "pull_request" else f"push-main/{conclusion}"
+
+
 def build_history(
     manifest: Mapping[str, Any],
     client: Any,
@@ -1456,6 +1482,7 @@ def build_history(
     read_of: dict[str, dict[str, Any]] = {}
     listing_stop: str | None = None
     for position, (event, branch, conclusion, limit) in enumerate(populations):
+        key = population_key(event, conclusion)
         # ⛔ The LISTING is where a slow cell spends its time, so the wall bound is checked
         # HERE and not only in the detail loop below. Measured 2026-10-31 on this fleet: six
         # populations / 278 runs cost ~350 s of wall clock for 10 calls, so a bound checked
@@ -1465,11 +1492,10 @@ def build_history(
         # attested, so the only reachable verdict for those files is UNKNOWN — never NEVER.
         if max_seconds and time.monotonic() - started > max_seconds:
             never_listed = [
-                f"{e}/{c}" if e == "pull_request" else f"push-main/{c}"
-                for e, _branch, c, _limit in populations[position:]
+                population_key(e, c) for e, _branch, c, _limit in populations[position:]
             ]
             for e, _branch, c, lim in populations[position:]:
-                read_of[f"{e}/{c}" if e == "pull_request" else f"push-main/{c}"] = {
+                read_of[population_key(e, c)] = {
                     "read": 0,
                     "requested": lim,
                     "hit_bound": False,
@@ -1483,9 +1509,49 @@ def build_history(
                 "nothing and the files only they could have covered stay UNKNOWN"
             )
             break
-        raw = client.list_runs(event, branch, conclusion, limit)
+        try:
+            raw = client.list_runs(event, branch, conclusion, limit)
+        except (WalkBoundReached, BudgetExhausted) as exc:
+            # ⛔ A WALK-BOUND failure used to be FATAL here. `list_runs` re-raises a page-1
+            # read failure (by design: a page-2+ cut is a recorded truncation, page 1 leaves
+            # that population unusable), and `main` turned the uncaught error into exit 2
+            # BEFORE it wrote `--json-out`/`--md-out`. So the ONE state `--max-seconds`
+            # exists for — the bound firing — discarded the whole report, after a walk that
+            # may already have spent hundreds of seconds: neither the disclosed gap
+            # `listing_stop` renders nor the truncated sample it describes.
+            #
+            # The path is arithmetic, not hypothetical: `GhClient`'s deadline is set at
+            # construction and the per-population check above is `elapsed > max_seconds`, so
+            # a population entered with a few seconds left PASSES that check, its first
+            # attempt is clamped to those seconds (p100 on this repo is ~12 s), and the
+            # retry's own deadline check then raises. The bound must cut the SAMPLE, never
+            # the REPORT — this population and every one after it were never listed, so their
+            # runs attest nothing and their files can only be UNKNOWN, exactly as the
+            # time-based stop above records them.
+            #
+            # ⛔ Deliberately NOT a bare `except ReadError`: a payload the service DID return
+            # that cannot be read as a runs listing (an API error body, a mis-typed
+            # `workflow_runs`, undecodable JSON) is still `main`'s exit 2 — pinned by
+            # `test_an_unparseable_offline_listing_exits_2` and
+            # `test_a_runs_file_that_is_not_a_runs_listing_is_a_read_failure_not_an_empty_window`.
+            # `WalkBoundReached` is the caller-requested-cut spelling, and `BudgetExhausted`
+            # is the same kind of cut on the API-call bound (a bare `RuntimeError`, so a
+            # client that does not swallow it in `list_runs` would otherwise escape `main`
+            # as an uncaught traceback rather than a report).
+            for e, _branch, c, lim in populations[position:]:
+                read_of[population_key(e, c)] = {
+                    "read": 0,
+                    "requested": lim,
+                    "hit_bound": False,
+                    "listed": False,
+                }
+            listing_stop = (
+                f"listing stopped at {key}: {exc} — that population and "
+                f"{len(populations) - position - 1} after it were NEVER listed, so their "
+                "runs attest nothing and those files stay UNKNOWN"
+            )
+            break
         picked = runs_to_refs(raw, event, since)
-        key = f"{event}/{conclusion}" if event == "pull_request" else f"push-main/{conclusion}"
         read_of[key] = {
             "read": len(picked),
             "requested": limit,
