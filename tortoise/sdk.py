@@ -6378,6 +6378,45 @@ _POINT_ITEM_FLATTEN_DEPTH = 2
 _POINT_ITEM_MINT_STATUS_DEPTH = 1
 
 
+def _item_stored_point_kind(item: dict) -> str | None:
+    """The ``pointKind`` PROPERTY a minted ``points`` node will CARRY — which
+    is NOT always the positional answer :func:`_item_point_kind` gives (#9819
+    review P2, round 5).
+
+    ``create_point`` maps the positional kind into its CREATE map and then
+    applies the caller's props over it — ``_create_map[_key] = f"${_pname}"``
+    for every prop — so a ``pointKind`` prop WINS and is the value the node
+    stores (#5475/#9287; pinned by
+    ``tests/test_kind_layer_partition_9964.py``). The depth is the MINT's own
+    single fold, the same ``_POINT_ITEM_MINT_STATUS_DEPTH`` the sibling status
+    record reads and for the same reason: a deeper spelling is a fold
+    ``create_point`` never performs before its dedup branch.
+
+    ⛔ THIS IS NOT A REPLACEMENT FOR ``_item_point_kind`` — the two answer
+    different questions and the guard needs BOTH. The writer's dedup QUERY
+    scopes by the POSITIONAL kind (``_resolve_dedup_hit(content,
+    pointKind=kind)`` -> ``_find_point_by_content``'s ``n.pointKind = $kind``,
+    and ``_find_points_by_key(key, pointKind=kind)``), so every LOOKUP and
+    every graph read keeps the positional kind. Only the bundle-order RECORD
+    of a node this bundle MINTS is keyed by the STORED one, because that is
+    the value a LATER item's dedup query compares against. Keying the record
+    by the positional kind instead failed OPEN (a later item whose positional
+    kind equals this item's STORED kind resolves the minted node and the
+    simulation never recorded it) and over-rejected the mirror — measured, and
+    pinned by ``TestTheMintRecordIsKeyedByTheSTOREDKind``.
+
+    ``None`` for a declared non-string ``pointKind``: ``n.pointKind = $kind``
+    can match no string kind, so nobody can fold onto that mint. (The write
+    door refuses that shape anyway — ``_refuse_invisible_point_kinds`` — so
+    this only stops the guard claiming an identity the graph will not hold.)
+    """
+    declares, value = _item_prop_at_depth(
+        item, "pointKind", _POINT_ITEM_MINT_STATUS_DEPTH)
+    if declares:
+        return value if isinstance(value, str) else None
+    return _item_point_kind(item)
+
+
 def _item_flatten_depth(item: dict, section: str) -> int:
     """How many times the item's write door applies ``_coerce_props``."""
     if section == "points":
@@ -23801,6 +23840,12 @@ class TortoiseSDK:
         # mints — without this map the later item is recorded as a terminal
         # mint it never performs and the bundle is refused for a fold onto a
         # mint that does not happen (#9819 review P2).
+        # ⛔ ALL THREE maps below are keyed by the STORED `pointKind`
+        # (`mkind`) and queried by the item's POSITIONAL one (`pkind`): the
+        # writer's dedup query scopes by the positional kind, so that is the
+        # value a LATER item compares against, while the node a mint creates
+        # carries the stored one. One kind for both sides is the drift
+        # `_item_stored_point_kind` and `_item_point_kind` exist to stop.
         minted_content: dict[tuple[str, str], int] = {}
         # #9819 review P2: the CONTENT identity is now resolved in ONE query for
         # the whole bundle instead of three per item (`_find_terminal_dedup_hit`
@@ -23820,7 +23865,17 @@ class TortoiseSDK:
                 continue
             pkey = _item_dedup_key(pitem)
             _has_pkey = isinstance(pkey, str) and bool(pkey.strip())
+            # ⛔ TWO kinds, deliberately (#9819 review P2, round 5): `pkind` is
+            # the item's POSITIONAL kind — the value the writer hands its dedup
+            # query (`_resolve_dedup_hit(content, pointKind=kind)` /
+            # `_find_points_by_key(key, pointKind=kind)`), so it is what every
+            # LOOKUP and the batched graph read below use. `mkind` is the
+            # `pointKind` the minted NODE will store (a props `pointKind` WINS
+            # over the positional one — `_item_stored_point_kind`), and it is
+            # what the bundle-order RECORDS are keyed by, because that is the
+            # value a LATER item's dedup query compares against.
             pkind = _item_point_kind(pitem)
+            mkind = _item_stored_point_kind(pitem)
             holders: list[str] = []
             if _has_pkey:
                 holders, holder = self._key_holder_state(pkind, pkey)
@@ -23953,10 +24008,11 @@ class TortoiseSDK:
             # (`minted_content`), exactly as the key simulation does: the
             # record below must describe the write, not the graph read.
             # ⛔ The TERMINAL record is still written by the FIRST minting item,
-            # so a fold onto an intra-bundle TERMINAL point stays refused.
+            # so a fold onto an intra-bundle TERMINAL point stays refused. Its
+            # key is the STORED kind (`mkind`) — see the map declarations.
             _mints_here = _mints and (pkind, _content_id) not in minted_content
-            if _mints_here:
-                minted_content[(pkind, _content_id)] = j
+            if _mints_here and mkind is not None:
+                minted_content[(mkind, _content_id)] = j
             if (isinstance(mint_status, str)
                     and mint_status in TERMINAL_EXCLUDED_STATUSES):
                 # Conservative in the FAIL-CLOSED direction, stated so it is
@@ -23967,8 +24023,8 @@ class TortoiseSDK:
                 # on a key which content-folds onto a live point and then
                 # reuses the key — is preferred to letting a fold land on a
                 # terminal mint.
-                if _has_pkey:
-                    minted_terminal[(pkind, pkey)] = (j, mint_status)
+                if _has_pkey and mkind is not None:
+                    minted_terminal[(mkind, pkey)] = (j, mint_status)
                 # Content is an identity too, so the same simulation covers a
                 # later item with the SAME content under a DIFFERENT (or no)
                 # key. Only record when this item actually MINTS
@@ -23976,8 +24032,8 @@ class TortoiseSDK:
                 # graph point, OR a point minted by an EARLIER ITEM of this
                 # bundle, content-folds and mints nothing terminal (its
                 # declared status is popped by the dedup branch).
-                if _content_id is not None and _mints_here:
-                    minted_terminal_content[(pkind, _content_id)] = (j, mint_status)
+                if _content_id is not None and _mints_here and mkind is not None:
+                    minted_terminal_content[(mkind, _content_id)] = (j, mint_status)
 
     def _check_endpoint_race(self, index: int, conn: dict,
                              refs: dict[str, str], violations: list[dict],

@@ -787,6 +787,166 @@ class TestPhase1GuardSeesTheContentIdentity:
             "in this bundle mounts a terminal mint")
 
 
+class TestTheMintRecordIsKeyedByTheSTOREDKind:
+    """#9819 review P2 (round 5): the bundle-order mint record must be keyed by
+    the ``pointKind`` the node is STORED with — which is NOT always the item's
+    positional ``kind``.
+
+    ``create_point``'s free-form props passthrough can carry ``pointKind``
+    itself and it WINS over the positional kind: the create map's
+    ``"pointKind": "$k"`` entry is overwritten by the props loop
+    (``_create_map[_key] = f"${_pname}"``), which
+    ``tests/test_kind_layer_partition_9964.py`` pins as a fact. So a ``points``
+    item that expresses its kind through ``props`` mints a node whose graph
+    identity is ``(props pointKind, content_hash)``.
+
+    The writer's DEDUP query is the mirror case: ``_resolve_dedup_hit(content,
+    pointKind=kind)`` scopes by the POSITIONAL kind — so the guard's two sides
+    are deliberately ASYMMETRIC. The mint RECORD must carry the STORED kind,
+    because that is the value a LATER item's dedup query compares against; the
+    LOOKUP must use the later item's POSITIONAL kind, because that is the
+    value the writer passes. A guard that used one kind for both failed open
+    (record by positional, a later item whose positional kind equals the first
+    item's STORED kind resolves a node the simulation never recorded) and
+    over-rejected the mirror (record by positional, a later item whose
+    positional kind differs folds onto nothing but is refused anyway).
+
+    Both directions are driven below, on the CONTENT and the KEY identity:
+    every existing arm of these identities used items whose positional and
+    stored kinds agree, so the drift was invisible to them.
+    """
+
+    def test_a_content_mint_under_a_props_kind_is_still_refused(self, sdk):
+        """FAIL-OPEN direction. points[0] STORES ``pointKind='decision'``
+        (props wins) and is born ``retracted``; points[1]'s positional kind is
+        ``decision``, so the writer's content dedup resolves points[0] and
+        folds — stamping ``batch_id`` on a terminal point. Keying the record by
+        the positional ``statement`` made points[1] miss it and Phase 1 certify
+        the bundle.
+
+        Discriminating: pre-fix the ingest is ACCEPTED (no
+        ``BundleValidationError``) and the point is written.
+        """
+        with pytest.raises(BundleValidationError, match="reuses content"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p1", "kind": "statement",
+                     "content": "PROPS-KIND-CONTENT-9819",
+                     "status": "retracted",
+                     "props": {"pointKind": "decision"}},
+                    {"ref": "p2", "kind": "decision",
+                     "content": "PROPS-KIND-CONTENT-9819"},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'PROPS-KIND-CONTENT-9819' "
+            "RETURN n.id"
+        ).result_set == [], (
+            "Phase-1 must reject BEFORE any write — the props-kind mint was "
+            "recorded under the positional kind, so points[1] folded onto the "
+            "terminal node it had just created (#9819)")
+
+    def test_a_content_mint_whose_positional_kind_differs_is_not_over_rejected(
+            self, sdk):
+        """the MIRROR direction: recorded by the positional kind, this bundle
+        is refused for a fold the writer never performs.
+
+        points[0] STORES ``pointKind='core:deployment'`` (props wins) and is
+        ``retracted``; points[1]'s positional kind is ``statement``, so the
+        writer's dedup query (``n.pointKind = 'statement'``) MISSES points[0]'s
+        node and points[1] mints a fresh point. ``origin/main`` commits this
+        bundle.
+
+        Discriminating: pre-fix this raises ``BundleValidationError`` matching
+        "reuses content" and no point is written at all.
+        """
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement",
+                 "content": "PROPS-KIND-MIRROR-9819",
+                 "status": "retracted",
+                 "props": {"pointKind": "core:deployment"}},
+                {"ref": "p2", "kind": "statement",
+                 "content": "PROPS-KIND-MIRROR-9819"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 2, (
+            "both items mint — the second item's dedup query scopes by its "
+            f"POSITIONAL kind and cannot resolve the first (got {res})")
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'PROPS-KIND-MIRROR-9819' "
+            "RETURN n.pointKind, n.status, n.id"
+        ).result_set
+        assert len(rows) == 2, f"two distinct points, got {rows}"
+        assert {(r[0], r[1]) for r in rows} == {
+            ("core:deployment", "retracted"), ("statement", "live")}, (
+            "the props spelling WINS on the stored node, and the second item "
+            f"mints under its own positional kind (got {rows})")
+
+    def test_a_key_mint_under_a_props_kind_is_still_refused(self, sdk):
+        """the KEY identity has the same asymmetry (``_find_points_by_key``
+        scopes by ``pointKind`` too), so the bundle-order key record needs the
+        same correction.
+
+        points[0] mints key K with a STORED ``pointKind='decision'`` and is
+        ``retracted``; points[1] re-uses K under the positional kind
+        ``decision``, so the writer's key-first fold lands on the terminal
+        node. Recorded by the positional ``statement``, the guard missed it.
+
+        Discriminating: pre-fix the ingest is ACCEPTED and the terminal point
+        comes back with ``batch_id`` stamped.
+        """
+        with pytest.raises(BundleValidationError, match="reuses key"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p1", "kind": "statement", "key": "K-PROPS-9819",
+                     "content": "KEY-PROPS-CONTENT-A",
+                     "status": "retracted",
+                     "props": {"pointKind": "decision"}},
+                    {"ref": "p2", "kind": "decision", "key": "K-PROPS-9819",
+                     "content": "KEY-PROPS-CONTENT-B"},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.key = 'K-PROPS-9819' RETURN n.id"
+        ).result_set == [], (
+            "Phase-1 must reject BEFORE any write — the key-first fold would "
+            "have landed on a terminal point this bundle mints (#8400/#9819)")
+
+    def test_a_key_mint_whose_positional_kind_differs_is_not_over_rejected(
+            self, sdk):
+        """the KEY mirror: points[0] stores ``pointKind='core:deployment'``
+        under key K, points[1] re-uses K with the positional kind
+        ``statement`` — the writer's key lookup is per-``pointKind`` (#6110),
+        so it MISSES and points[1] mints its own point.
+
+        Discriminating: pre-fix this raises ``BundleValidationError`` matching
+        "reuses key" and nothing is written.
+        """
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "key": "K-MIRROR-9819",
+                 "content": "KEY-MIRROR-CONTENT-A", "status": "retracted",
+                 "props": {"pointKind": "core:deployment"}},
+                {"ref": "p2", "kind": "statement", "key": "K-MIRROR-9819",
+                 "content": "KEY-MIRROR-CONTENT-B"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 2, (
+            f"both items mint their own point (got {res})")
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.key = 'K-MIRROR-9819' "
+            "RETURN n.pointKind, n.status"
+        ).result_set
+        assert len(rows) == 2, f"two carriers, one per pointKind — got {rows}"
+        assert {r[0] for r in rows} == {"core:deployment", "statement"}, (
+            f"each point keeps its own kind scope (got {rows})")
+
+
 def _leg_kind_comes_from_the_single_home(source: str) -> bool:
     """True when every ``_find_terminal_dedup_hit`` call in ``source`` is handed
     a NAME whose assignment is a ``_item_point_kind(...)`` call (#9819 P3).
