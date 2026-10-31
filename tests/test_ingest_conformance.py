@@ -21,6 +21,7 @@ the file/markers are absent so CI stays green until #1057 lands).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -259,3 +260,102 @@ def test_skill_markers_contract():
     assert "migration" in text.lower(), "§6.6 migration-line marker"
     for key in sorted(WARNING_KEYS):
         assert key in text, f"skill warnings section missing {key!r}"
+
+
+# ── the OTHER direction: mirror → product (#10438) ────────────────────
+# `test_skill_markers_contract` above asks “does the mirror carry every key the
+# product owns”, which is containment only — a mirror that advertises a key the
+# product does NOT emit passes it in silence. That gap is what let the
+# 2026-10-30 upstream sync (#7, upstream 5c8d99c) serve a THIRTEEN-key table
+# naming `duplicate_target_deduped`, a key emitted by nothing at that head (the
+# emitting fix, #10305, was still open and #9750 leaves the mechanism undecided).
+# The served file is what integrators read, so an advertised-but-absent key is a
+# behavior claim, not a typo: it says “the engine deduplicates a repeated target
+# for you” in the very case where the engine double-counts EP.
+#
+# Both arms are needed because the mirror is DERIVED (upstream authors it, this
+# repo pins the bytes — `config/served-skills-upstream.yml`), so neither side can
+# be trusted to describe the other.
+
+_NUMBER_WORDS = {word: value for value, word in enumerate(
+    "ZERO ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ELEVEN TWELVE "
+    "THIRTEEN FOURTEEN FIFTEEN SIXTEEN SEVENTEEN EIGHTEEN NINETEEN TWENTY"
+    .split())}
+_WARNINGS_SECTION = re.compile(r"^## Warnings\b.*?(?=^## |\Z)", re.M | re.S)
+_DECLARED_COUNT = re.compile(r"\bthe ([A-Z]+)(?:-key table| keys)\b")
+_KEY_TOKEN = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
+
+
+def _declared_key_count(section: str) -> list[int]:
+    """Every cardinality the mirror states for the key set, as integers."""
+    return [_NUMBER_WORDS[word] for word in _DECLARED_COUNT.findall(section)]
+
+
+def _listed_keys(section: str) -> list[str]:
+    """The keys the mirror enumerates, in the list that follows “report it”.
+
+    Anchored on the prose line that introduces the list and then on the first
+    blank line after it, so it reads the ENUMERATION and not the whole section
+    (a section may legitimately *mention* a reserved key in prose without
+    claiming it is in the set)."""
+    lines = section.splitlines()
+    start = next((i + 1 for i, line in enumerate(lines)
+                  if "divergence" in line), None)
+    assert start is not None, (
+        "could not find the mirror's key-list anchor “divergence” in the "
+        "warnings section — re-anchor this gate rather than dropping it")
+    block: list[str] = []
+    for line in lines[start:]:
+        if not line.strip():
+            if block:
+                break
+            continue
+        block.append(line)
+    return _KEY_TOKEN.findall("\n".join(block))
+
+
+def test_served_skill_advertises_only_keys_the_product_emits():
+    """mirror → product (#10438): the served skill's warnings section must
+    enumerate EXACTLY the product's closed set, and must state that set's size
+    correctly.
+
+    Two arms, because each fails where the other cannot:
+      * the enumeration must be a SUBSET of `WARNING_KEYS` — a doc may not
+        advertise a key nothing emits (the 2026-10-30 regression);
+      * every cardinality the mirror declares (“the TWELVE keys”, the
+        “TWELVE-key table”) must EQUAL `len(WARNING_KEYS)` — so the count and
+        the list cannot drift apart, and extending the set still costs the
+        contract amendment #8499 requires (`docs/INGEST_CONTRACT.md` §3.2)
+        instead of being a docs-only edit nobody notices.
+    """
+    text = _skill_text()
+    if text is None or "promotion_policy" not in text:
+        pytest.skip("J8 skill section (#1057) not yet landed — markers "
+                    "absent/untracked")
+    match = _WARNINGS_SECTION.search(text)
+    assert match is not None, "the served skill has no “## Warnings” section"
+    section = match.group(0)
+
+    advertised = [key for key in _listed_keys(section)
+                  if key not in WARNING_KEYS]
+    assert not advertised, (
+        f"the served skill advertises warning keys the product does not "
+        f"emit: {sorted(set(advertised))}. The closed set is §3.2's "
+        f"{len(WARNING_KEYS)} keys (#8499); a key becomes servable only in the "
+        f"same change that emits it. If it is merely PLANNED, keep it out of "
+        f"the enumeration and say in prose that it is reserved/not emitted yet "
+        f"— do not count it (see specs upstream, not this mirror, which is "
+        f"derived: `tools/served_skills_parity.py --sync`).")
+
+    declared = _declared_key_count(section)
+    assert declared, (
+        "the served skill no longer states how many keys the closed set has — "
+        "re-anchor this gate: the declaration is what a reader uses to tell a "
+        "complete enumeration from a truncated one")
+    assert set(declared) == {len(WARNING_KEYS)}, (
+        f"the served skill states the warnings set has "
+        f"{sorted(set(declared))} keys but the product's closed set has "
+        f"{len(WARNING_KEYS)} (docs/INGEST_CONTRACT.md §3.2, #8499). Either the "
+        f"enumeration above is missing a key the product emits, or the mirror "
+        f"is ahead of it — and an integrator reading the served copy has no way "
+        f"to tell which.")
