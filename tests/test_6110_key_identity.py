@@ -22,18 +22,25 @@ Runnable with:
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import logging
 import os
 import shutil
 import sys
 import tempfile
+import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
 from tortoise.exceptions import BundleValidationError
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import (
+    TortoiseSDK,
+    _content_candidate_resolution,
+    _content_hash,
+)
 
 
 @pytest.fixture
@@ -329,6 +336,44 @@ class TestPhase1GuardSeesTheKeyIdentity:
         )
         assert after.get("updatedAt") == before.get("updatedAt")
 
+    def test_the_key_refusal_does_not_offer_a_supersede_as_the_remedy(
+            self, sdk):
+        """#9819 review P2 (round 3), key-leg half: the KEY refusal carried the
+        same dead clause (``Supersede-transfer the key first``, and
+        ``docs/INGEST_CONTRACT.md`` row 7's ``or a supersede-transfer that moves
+        the key first``).
+
+        No Point ``key`` transfer exists on that door: ``supersede_point``
+        transfers edges and stamps terminal status/validity and never writes
+        ``key``, and ``create_point`` explicitly refuses to reassign a key on a
+        dedup hit (#6110). So the retired holder keeps the key and the key-first
+        fold resolves it again — superseding is not an escape.
+        """
+        k = "#9819-terminal-key-retired"
+        terminal = sdk.create_point("statement", "KEY-ORIGINAL", key=k,
+                                    dedup=True)["id"]
+        successor = sdk.create_point("statement", "KEY-SUCCESSOR")["id"]
+        sdk.supersede_point(terminal, successor)
+        assert sdk.get_point(terminal).get("key") == k, (
+            "supersede_point must not move the key off the retired row")
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError) as excinfo:
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "KEY-CHANGED", "key": k}]})
+
+        message = str(excinfo.value)
+        assert "dedup hit" in message
+        assert "supersede-transfer" not in message.lower(), (
+            "the key refusal still offers a supersede-transfer as the remedy, "
+            "but no Point key transfer exists (#9819 review P2)")
+        assert "FRESH key" in message, (
+            "the refusal must still name the remedy that DOES work")
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None
+        assert after.get("updatedAt") == before.get("updatedAt")
+
     def test_key_held_by_terminal_point_is_a_violation_with_no_connection(self, sdk):
         """#8400/#9173: step 3 writes EVERY `points` item, so the fold onto a
         terminal key holder happens with NO connection in the bundle.
@@ -429,6 +474,465 @@ class TestPhase1GuardSeesTheKeyIdentity:
         assert sdk.get_point(res["ids"]["points"][0]).get("status") == "retracted"
 
 
+class TestPhase1GuardSeesTheContentIdentity:
+    """#9819: the Phase-1 ingest guard must resolve the CONTENT identity with
+    the SAME unconditional order the writer uses. ``create_point``'s dedup is
+    key-first-then-content, so an item with no key (or a key MISS) folds onto a
+    point that matches by CONTENT — on every route, and whether or not any
+    connection references it. Before #9819 that fold stamped ``batch_id`` on a
+    retracted/superseded point (and moved ``updatedAt`` when the item carried
+    props), leaving ``status`` terminal — the #8400 "terminal point mutated"
+    hazard, reached through the content half the #9818 key guard did not cover.
+    """
+
+    def test_content_matching_a_terminal_point_is_a_phase1_violation(self, sdk):
+        terminal = sdk.create_point("statement", "ORIGINAL-CONTENT")["id"]
+        sdk.retract_point(terminal)
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "ORIGINAL-CONTENT"}]})
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "the content fold stamped the retracted point (#9819)")
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_content_matching_a_terminal_point_with_a_fresh_key_is_a_violation(
+            self, sdk):
+        """A fresh key does NOT avoid the content fold: the writer's key-first
+        resolution MISSES the fresh key and falls through to content (#6110),
+        so the fold still lands on the terminal point."""
+        terminal = sdk.create_point("statement", "ORIGINAL-FRESHKEY")["id"]
+        sdk.retract_point(terminal)
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "ORIGINAL-FRESHKEY",
+                                     "key": "brand-new-key-9819"}]})
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_content_matching_a_live_point_folds(self, sdk):
+        """The guard must NOT over-reject: content matching a LIVE point is a
+        legal dedup hit — the writer folds onto it and the bundle commits."""
+        live = sdk.create_point("statement", "LIVE-CONTENT-9819")["id"]
+        res = sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                       "content": "LIVE-CONTENT-9819"}]})
+        assert res["deduped"]["points"] == 1
+        assert res["created"]["points"] == 0
+        assert res["ids"]["points"] == [live]
+
+    def test_intra_bundle_content_fold_onto_a_self_minted_terminal_point(
+            self, sdk):
+        """The graph read alone cannot see a terminal point the SAME bundle is
+        about to mint by CONTENT (the sibling of the key-order arm). Bundle
+        order: item 0 mints content "A" terminal, item 1 reuses content "A"
+        and would content-fold onto it — ``_stamp_batch_id`` has no terminal
+        exclusion. Refused by ``minted_terminal_content`` (bundle-order, not a
+        graph read)."""
+        with pytest.raises(BundleValidationError, match="reuses content"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p1", "kind": "statement", "content": "A",
+                     "status": "retracted"},
+                    {"ref": "p2", "kind": "statement", "content": "A"},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'A' RETURN n.id"
+        ).result_set == [], (
+            "Phase-1 must reject BEFORE any write — the bundle minted a point "
+            "and folded onto the terminal one it had just created (#9819)")
+
+    def test_intra_bundle_content_guard_does_not_over_reject(self, sdk):
+        """A terminal item followed by an item with DIFFERENT content is the
+        writer's legal path and must commit."""
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "A-DISTINCT",
+                 "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "B-DISTINCT"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 2
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['A-DISTINCT','B-DISTINCT'] "
+            "RETURN n.status"
+        ).result_set
+        assert {r[0] for r in rows} == {"retracted", "live"}
+
+    def test_a_live_twin_of_a_terminal_point_is_refused(self, sdk):
+        """fix-round-2 P2.3 (the behaviour ``docs/INGEST_CONTRACT.md`` row 7
+        now DISCLOSES, and which nothing pinned): when two points share one
+        content and only ONE is terminal, the guard hits the TERMINAL one while
+        the writer could resolve the LIVE one — so the bundle is refused though
+        the fold it predicts would have been harmless.
+
+        Kept fail-closed on purpose: the writer's pick among duplicates carries
+        no ``ORDER BY`` (``_find_point_by_content`` returns its first row), so
+        WHICH twin a fold lands on is not decidable from the bundle. Pinning it
+        here means a later narrowing is a decision, not a silent drift.
+        """
+        live = sdk.create_point("statement", "TWIN-CONTENT")["id"]
+        terminal = sdk.create_point("statement", "TWIN-CONTENT")["id"]
+        assert live != terminal
+        sdk.retract_point(terminal)
+        before_terminal = sdk.get_point(terminal)
+        before_live = sdk.get_point(live)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "TWIN-CONTENT"}]})
+
+        after_terminal = sdk.get_point(terminal)
+        assert after_terminal.get("batch_id") is None
+        assert after_terminal.get("updatedAt") == before_terminal.get("updatedAt")
+        assert sdk.get_point(live).get("batch_id") is None, (
+            "Phase-1 must reject before ANY write — neither twin was touched "
+            f"(live point was {before_live.get('batch_id')!r})")
+
+    def test_empty_content_matching_a_terminal_point_is_a_phase1_violation(
+            self, sdk):
+        """#9819 review P1: the content leg must NOT gate on TRUTHINESS.
+
+        ``""`` is CONTENT to the writer, not "absent": ``_check_item_shape``
+        admits it (only ``None``/non-str is refused) and ``create_point``'s only
+        content boundary is ``isinstance(content, str)`` — so
+        ``create_point("statement", "")`` mints a real point with
+        ``content_hash = sha256("")``, and once retracted it is a terminal
+        point like any other. Reading the item's content with ``and content``
+        skipped the graph read AND the ``minted_terminal_content`` record, so
+        this bundle FOLDED onto the retracted point and ``_stamp_batch_id``
+        rewrote it — the #9819 hazard through a legal bundle item.
+
+        Discriminating: pre-fix the ``pytest.raises`` fails (the ingest is
+        ACCEPTED and the assertions below see a stamped ``batch_id``).
+        """
+        terminal = sdk.create_point("statement", "")["id"]
+        sdk.retract_point(terminal)
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": ""}]})
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "the content fold stamped the retracted empty-content point "
+            "(#9819 P1 — the leg gated on truthiness)")
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_retiring_the_collided_row_does_not_clear_the_content_identity(
+            self, sdk):
+        """#9819 review P2 (round 3): the refusal must not name a remediation
+        that does not remediate.
+
+        The content-leg message used to offer ``or supersede-transfer it first``
+        (and ``docs/INGEST_CONTRACT.md`` row 7 the same). It is dead: the dedup
+        predicate (``_dedup_match_clauses``) carries NO status/validity
+        conjunct, and ``supersede_point`` transfers EDGES and stamps
+        ``status``/``outdated``/``validTo``/``expiredAt``/``decay`` — it never
+        rewrites ``content`` or ``content_hash``. So after a supersede the old
+        row is still the hash-present holder of that content identity, still
+        terminal, and the very next ingest of the same content is refused
+        again: the caller follows the advice, gets the identical refusal, and
+        is told the same dead remedy.
+
+        Asserted in both directions, so this is a behaviour pin and a message
+        pin at once: the re-ingest is STILL refused, the collided row is
+        unmoved, and the message no longer advertises ``supersede-transfer``
+        while still naming the remedy that does work (DIFFERENT content).
+        Discriminating: pre-fix the message assertion fails (the refusal said
+        ``or supersede-transfer it first``).
+        """
+        content = "RETIRED-BUT-STILL-THE-HOLDER-9819"
+        terminal = sdk.create_point("statement", content)["id"]
+        successor = sdk.create_point("statement",
+                                     "SUCCESSOR-OF-THE-RETIRED-9819")["id"]
+        sdk.supersede_point(terminal, successor)
+        before = sdk.get_point(terminal)
+
+        # The premise of the finding, asserted rather than assumed: the
+        # supersede did NOT move the content identity off the retired row.
+        assert before.get("status") == "superseded"
+        assert before.get("content") == content
+        assert before.get("content_hash") == _content_hash(content)
+
+        with pytest.raises(BundleValidationError) as excinfo:
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": content}]})
+
+        message = str(excinfo.value)
+        assert "dedup hit" in message
+        assert "supersede-transfer" not in message, (
+            "the refusal still advertises supersede-transfer as the remedy, "
+            "but superseding does not clear the collided row's content — the "
+            "caller would get this same refusal again (#9819 review P2)")
+        assert "DIFFERENT content" in message, (
+            "the refusal must still name the remedy that DOES work")
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "Phase-1 must reject before ANY write — the post-supersede fold "
+            "stamped the retired point (#9819)")
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_double_wrapped_status_is_not_recorded_as_a_terminal_mint(self, sdk):
+        """#9819 review P2: the bundle-order record predicts a MINT, and a mint
+        stores the status after ``create_point``'s ONE fold.
+
+        ``create_point`` pops ``status`` BEFORE its dedup branch (a dedup hit
+        must never forward the caller's status into ``update_point``, #1905),
+        so a status nested TWO ``props`` deep is never stored: measured,
+        ``{"props": {"props": {"status": "retracted"}}}`` lands ``status='live'``.
+        Reading the recorded status at ``_POINT_ITEM_FLATTEN_DEPTH`` (2) saw the
+        unwritten ``retracted`` and refused the NEXT item under the same content
+        with "mints with status 'retracted'" — a wrong message on a bundle the
+        writer completes.
+
+        Discriminating: pre-fix the bundle is REFUSED with `reuses content`.
+        """
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "DW-STATUS",
+                 "props": {"props": {"status": "retracted"}}},
+                {"ref": "p2", "kind": "statement", "content": "DW-STATUS"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 1
+        assert res["deduped"]["points"] == 1
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'DW-STATUS' RETURN n.status"
+        ).result_set
+        assert [r[0] for r in rows] == ["live"], (
+            "the double-wrapped status was never stored, so nothing minted "
+            "terminal (#9819 P2)")
+
+    def test_a_real_one_fold_terminal_mint_is_still_recorded(self, sdk):
+        """NEGATIVE CONTROL for the test above: reading the recorded status at
+        the MINT depth (1) must not have dropped the record for a status the
+        writer really stores. A single-wrapped (`props: {"status": ...}`) or a
+        top-level terminal declaration IS one fold, so the next same-content
+        item is still refused — without this pair, `test_double_wrapped...`
+        would also pass if the record had been deleted outright."""
+        for j, extra in enumerate(({"props": {"status": "retracted"}},
+                                   {"status": "retracted"})):
+            content = f"ONE-FOLD-{j}"
+            with pytest.raises(BundleValidationError, match="mints with status"):
+                sdk.ingest(
+                    {"points": [
+                        {"ref": "p1", "kind": "statement",
+                         "content": content, **extra},
+                        {"ref": "p2", "kind": "statement", "content": content},
+                    ]},
+                    promotion_policy="auto",
+                )
+            assert sdk._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
+                params={"c": content},
+            ).result_set == [], (
+                f"Phase-1 must reject before any write for {extra!r}")
+
+    def test_a_terminal_declaration_after_an_in_bundle_live_mint_is_not_a_mint(
+            self, sdk):
+        """#9819 review P2 (round 4): ``_mints`` is a GRAPH read, so it cannot
+        see a point an EARLIER item of the same bundle mints.
+
+        Bundle order: item 0 mints content "SEQ-LIVE" LIVE; item 1 re-declares
+        the same content with ``status='retracted'``; item 2 re-states it once
+        more. The writer content-folds items 1 and 2 onto item 0's LIVE node
+        (``create_point`` pops the declared status BEFORE its dedup branch, so
+        the fold stores nothing terminal), i.e. item 1 MINTS NOTHING — yet the
+        record saw it as a terminal mint and refused item 2 with "reuses
+        content that points[1] … mints with status 'retracted'", a statement
+        that is false about the write. ``origin/main`` commits this bundle.
+
+        Discriminating: pre-fix this raises ``BundleValidationError`` and no
+        point is written at all; post-fix it commits (created=1, deduped=2).
+        The sibling arm — an earlier item that mints TERMINAL — is still
+        refused, pinned by
+        ``test_intra_bundle_content_fold_onto_a_self_minted_terminal_point``
+        and ``test_a_real_one_fold_terminal_mint_is_still_recorded`` above.
+        """
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "SEQ-LIVE"},
+                {"ref": "p2", "kind": "statement", "content": "SEQ-LIVE",
+                 "status": "retracted"},
+                {"ref": "p3", "kind": "statement", "content": "SEQ-LIVE"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 1
+        assert res["deduped"]["points"] == 2
+        assert len(set(res["ids"]["points"])) == 1, (
+            "both re-statements must fold onto the ONE point the bundle minted")
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'SEQ-LIVE' "
+            "RETURN n.status, n.id"
+        ).result_set
+        assert len(rows) == 1, (
+            f"exactly one point — the two later items FOLD, they do not mint "
+            f"(got {rows})")
+        assert rows[0][0] == "live", (
+            "the declared 'retracted' was popped by the dedup fold, so nothing "
+            "in this bundle mounts a terminal mint")
+
+
+def _leg_kind_comes_from_the_single_home(source: str) -> bool:
+    """True when every ``_find_terminal_dedup_hit`` call in ``source`` is handed
+    a NAME whose assignment is a ``_item_point_kind(...)`` call (#9819 P3).
+
+    ``_item_point_kind`` exists so the Phase-1 readers of an item\'s
+    ``pointKind`` cannot drift apart; a reader that re-derives the default
+    inline is a third copy. This predicate is the structural form of that
+    claim: it looks at the ARGUMENT the call is handed and at the assignment
+    that produced it, so prose, comments and docstrings mentioning the helper
+    prove nothing. No call site at all returns ``False`` — a pin that cannot
+    find what it pins must red, not pass.
+    """
+    tree = ast.parse(source)
+    homes = {
+        target.id
+        for node in ast.walk(tree) if isinstance(node, ast.Assign)
+        if isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_item_point_kind"
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_find_terminal_dedup_hit"
+    ]
+    if not calls:
+        return False
+    for call in calls:
+        if len(call.args) < 2 or not isinstance(call.args[1], ast.Name):
+            return False
+        if call.args[1].id not in homes:
+            return False
+    return True
+
+
+class TestTheRetainedConnectionLegReadsTheSingleKindHome:
+    """#9819 review P3: the retained per-connection content leg must not be a
+    THIRD, drifted reader of an item\'s ``pointKind``.
+
+    The leg is the pre-#9173 ``create_direct_edge`` prediction. It is DEAD by
+    construction today — a bundle-local ``points`` ref makes the pair
+    Point-bearing, so ``_effective_connection_routes`` answers ``operator`` and
+    the leg\'s ``route != "direct"`` skip keeps it out — which is exactly why a
+    private copy of the kind default survived there: nothing exercises it.
+    ``_item_point_kind`` is the declared single home for that value (its own
+    docstring says so, and the write loop reads the item\'s ``kind`` the same
+    way), so the leg must resolve it there rather than re-deriving
+    ``item.get("kind") or "statement"`` inline.
+
+    ⚠️ WHY A SOURCE PIN AND NOT A BEHAVIOURAL ONE, measured rather than
+    assumed: the two spellings differ ONLY for a truthy non-``str`` kind, and
+    such a kind is itself a Phase-1 violation (``_check_kind``) that
+    ``create_point`` refuses — so no bundle can commit through either spelling,
+    and the live `points` loop refuses it on its own. A behavioural test is
+    therefore vacuous here: it passes on BOTH spellings (measured — the driver
+    accepts the dict as a bound parameter and simply matches no row, so even
+    the "raw driver error" shape does not surface). The drift is a STRUCTURAL
+    claim, so it is pinned structurally, with a negative control that reds on
+    the pre-fix spelling.
+    """
+
+    def test_the_leg_resolves_kind_through_the_single_home(self):
+        source = textwrap.dedent(inspect.getsource(TortoiseSDK._check_endpoints))
+        assert _leg_kind_comes_from_the_single_home(source), (
+            "the per-connection content leg resolves ``pointKind`` inline "
+            "instead of through ``_item_point_kind`` — a third reader of a "
+            "value that already has one home, so a #8499 narrowing that "
+            "re-arms the leg would resolve a different kind than the write "
+            "loop (#9819 review P3)")
+
+    def test_the_pin_reads_the_call_site_not_the_docstring(self):
+        """NON-VACUITY: the pre-fix spelling must fail the pin.
+
+        The predicate looks at the ARGUMENT the retained
+        ``_find_terminal_dedup_hit`` call is handed and at the assignment that
+        produced it — not at prose. Driven here on the exact drifted shape, so
+        a pin that quietly stopped looking (or that accepted any mention of the
+        helper) would red rather than pass.
+        """
+        drifted = textwrap.dedent(
+            """
+            def _check_endpoints(self, item):
+                global _item_point_kind
+                kind = item.get("kind") or "statement"
+                hit = self._find_terminal_dedup_hit(content, kind, key=None)
+                return hit
+            """
+        )
+        assert not _leg_kind_comes_from_the_single_home(drifted), (
+            "the pin accepts the pre-fix spelling (`item.get(\"kind\") or "
+            "\"statement\"`), so it proves nothing")
+
+
+class TestContentIdentityReadIsBatched:
+    """#9819 review P2: the content identity must not cost a graph read PER
+    ITEM.
+
+    ``_find_terminal_dedup_hit`` is THREE queries (terminal-hash,
+    unfiltered-hash, hash-less A10 fallback) and ``_check_endpoints`` called it
+    once per ``points`` item, so ``_validate_bundle`` went linear in bundle
+    size on the common ingest path — measured on the pre-batch head: 200
+    fresh-content points 3.01 s vs 0.00 s on ``origin/main``; 200 live-content
+    hits 2.08 s; a 200-item ingest 19.89 s.
+
+    Pinned as a COUNT, not a timing: a duration assertion on embedded FalkorDB
+    is machine-dependent and would flake, while the query count IS the defect.
+    """
+
+    @staticmethod
+    def _count_queries(sdk, bundle):
+        """(all graph queries, content-identity queries) for one bundle.
+
+        Patches the ``_GuardedGraph`` CLASS, not the instance: the handle
+        declares ``__slots__``, so an instance attribute is read-only.
+        """
+        import unittest.mock as mock
+
+        proj = sdk._get_proj()
+        calls: list[str] = []
+        real = type(proj.g).query
+
+        def spy(self, q, **kwargs):
+            calls.append(q)
+            return real(self, q, **kwargs)
+
+        with mock.patch.object(type(proj.g), "query", spy):
+            sdk._validate_bundle(bundle)
+        return len(calls), sum(1 for q in calls if "content_hash" in q)
+
+    def test_bundle_query_count_does_not_grow_with_item_count(self, sdk):
+        one = {"points": [{"ref": "p1", "kind": "statement",
+                           "content": "BATCH-FRESH-1"}]}
+        many = {"points": [{"ref": f"p{i}", "kind": "statement",
+                            "content": f"BATCH-FRESH-{i}"} for i in range(6)]}
+        one_total, one_content = self._count_queries(sdk, one)
+        many_total, many_content = self._count_queries(sdk, many)
+        assert many_content == one_content == 1, (
+            "the content identity is read per item, not once per bundle: "
+            f"1 item -> {one_content}, 6 items -> {many_content} (#9819 P2)")
+        assert many_total == one_total, (
+            f"_validate_bundle cost scales with bundle size: {one_total} -> "
+            f"{many_total} queries (#9819 P2)")
+
+
 class TestNoInBundleDedupEscape:
     """#8400 review P2: the refusal told callers to "pass a fresh key with
     dedup=False", which is not reachable through ``ingest``.
@@ -513,3 +1017,111 @@ def test_key_is_declared_for_point_replay():
     either way), so this pins the declaration, not the persistence."""
     from tortoise.projection.entities import _EntityHandlers
     assert "key" in _EntityHandlers._POINT_DECLARED_PROPS
+
+
+class TestContentCandidateReadMatchesThePerItemHelpers:
+    """#9819 review P2 — the SAFETY NET for the batched content read.
+
+    ``_terminal_content_candidates`` + ``_content_candidate_resolution``
+    replaced, in ONE query, what two per-item helpers answered with four graph
+    reads (``_find_terminal_dedup_hit``'s three tiers, and
+    ``_find_point_by_content``'s "does this item mint?"). ``TestContentIdentity-
+    ReadIsBatched`` pins the COST (the query count) and therefore says nothing
+    about the ANSWERS; a batched read that resolved a different node set would
+    silently move the guard's radius — fail-open on one shape, over-reject on
+    another.
+
+    So this class pins EQUALITY, on the shapes each tier and each arm exists
+    for, against the per-item helpers themselves. `per-item` is the definition;
+    `batched` must agree with it on every pair. Mutation-checked: dropping the
+    #2971 "no hash-present sibling" gate from ``_content_candidate_resolution``
+    reds both tests, naming the disagreeing pair (``T2-shadows-T3``).
+    """
+
+    def _states(self, sdk) -> list[tuple[str, str]]:
+        """One point per tier/leg shape, then the pairs to compare."""
+        # tier 1 — terminal + hash present, in both terminal vocabularies.
+        sdk.create_point("statement", "T1-retracted", status="retracted")
+        sdk.create_point("statement", "T1-superseded", status="superseded")
+        flagged = sdk.create_point("statement", "T1-invalidated")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.outdated = true", params={"id": flagged})
+        # tier 2 — a LIVE hash-present point: no hit, and it must also SUPPRESS
+        # the hash-less scan for the same content (#2971's gate).
+        sdk.create_point("statement", "T2-live")
+        # tier 2 shadowing tier 3: a live hashed point AND a terminal hash-less
+        # twin — the writer resolves the hashed one, so NO hit.
+        sdk.create_point("statement", "T2-shadows-T3")
+        hashless_twin = sdk.create_point("statement", "T2-shadows-T3")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', "
+            "n.content_hash = NULL", params={"id": hashless_twin})
+        # tier 3 — hash-less terminal, no hashed sibling at all; and a hash-less
+        # LIVE one that must stay a miss.
+        for content, status in (("T3-hashless-retracted", "retracted"),
+                                ("T3-hashless-live", "live")):
+            pid = sdk.create_point("statement", content)["id"]
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) SET n.status = $st, "
+                "n.content_hash = NULL", params={"id": pid, "st": status})
+        # kind scoping — same content, terminal point in ANOTHER kind.
+        sdk.create_point("decision", "KIND-scoped", status="retracted")
+        # an operator is not a point-dedup candidate.
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'op-9819-cand', content:'OP-scoped', "
+            "content_hash:$ch, pointKind:'statement', is_operator:true, "
+            "op_type:'IMPL', status:'retracted'})",
+            params={"ch": _content_hash("OP-scoped")})
+
+        pairs = [("statement", c) for c in
+                 ("T1-retracted", "T1-superseded", "T1-invalidated", "T2-live",
+                  "T2-shadows-T3", "T3-hashless-retracted", "T3-hashless-live",
+                  "ABSENT-9819", "KIND-scoped", "OP-scoped")]
+        pairs.append(("decision", "KIND-scoped"))
+        pairs.append(("observation", "T1-retracted"))
+        return pairs
+
+    def _batched(self, sdk, pairs):
+        cands = sdk._terminal_content_candidates(
+            [(content, kind) for kind, content in pairs])
+        return {pair: _content_candidate_resolution(
+            cands, pair[1], pair[0]) for pair in pairs}
+
+    def test_batched_resolution_equals_the_per_item_helpers(self, sdk):
+        pairs = self._states(sdk)
+        batched = self._batched(sdk, pairs)
+        per_item = {
+            pair: (sdk._find_terminal_dedup_hit(pair[1], pair[0]),
+                   sdk._find_point_by_content(pair[1], pointKind=pair[0]) is None)
+            for pair in pairs
+        }
+        diff = {p: (per_item[p], batched[p]) for p in per_item
+                if per_item[p] != batched[p]}
+        assert not diff, (
+            "the batched content read disagrees with the per-item helpers it "
+            f"replaced — the guard's radius moved (per-item, batched): {diff}")
+
+    def test_the_comparison_is_discriminating(self, sdk):
+        """NEGATIVE CONTROL: the equality above would also hold if BOTH sides
+        returned "no hit, mints" everywhere. Pin the answers the shapes exist
+        to produce."""
+        pairs = self._states(sdk)
+        batched = self._batched(sdk, pairs)
+        must_miss = [("statement", c) for c in
+                     ("T2-live", "T2-shadows-T3", "T3-hashless-live",
+                      "ABSENT-9819", "OP-scoped", "KIND-scoped")]
+        for pair in must_miss:
+            assert batched[pair][0] is None, f"{pair} must not be a terminal hit"
+        for pair in [("statement", c) for c in
+                     ("T1-retracted", "T1-superseded", "T1-invalidated",
+                      "T3-hashless-retracted")] + [("decision", "KIND-scoped")]:
+            assert isinstance(batched[pair][0], str), (
+                f"{pair} must resolve to a terminal point id")
+        # `would_mint` — the writer's own answer, which gates the bundle-order
+        # record. Only ABSENT mints; every shape with a hash-present or
+        # hash-less holder does not.
+        assert batched[("statement", "ABSENT-9819")][1] is True
+        for pair in [("statement", c) for c in
+                     ("T1-retracted", "T2-live", "T3-hashless-retracted",
+                      "T3-hashless-live", "T2-shadows-T3")]:
+            assert batched[pair][1] is False, f"{pair} must not mint"
