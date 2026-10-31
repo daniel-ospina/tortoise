@@ -943,11 +943,32 @@ class GhClient:
     #: to say "the walk stopped at the bound" is never produced. ``RETRIES`` bounds the NUMBER
     #: of attempts, not their duration. 300 s is well above a healthy `gh api` call (measured
     #: p100 ≈ 12 s on this repo) and well below the default 1500 s walk bound.
+    #:
+    #: ⛔ But a per-attempt bound does NOT by itself bound the WALK: 4 × 300 s plus backoff is
+    #: ≈1214 s, 13× a `--max-seconds 90` request. That is the same "a bound that does not
+    #: bound the thing it names" shape this walk closed for the LISTING phase, so the walk's
+    #: deadline is propagated INTO this loop (`deadline`): each attempt's timeout is clamped
+    #: to the time left, the backoff is clamped to it, and an attempt that would begin after
+    #: it is not made at all.
     CALL_TIMEOUT_SECONDS = 300
 
-    def __init__(self, repo: str, max_calls: int = DEFAULT_MAX_API_CALLS) -> None:
+    #: The floor for a deadline-clamped attempt (a `timeout` of 0 is incoherent, and nothing
+    #: below this can complete a real call). A call clamped here is the last one the walk had
+    #: time for; the loop's own deadline check ends the retries.
+    MIN_ATTEMPT_TIMEOUT_SECONDS = 0.1
+
+    def __init__(
+        self,
+        repo: str,
+        max_calls: int = DEFAULT_MAX_API_CALLS,
+        max_seconds: float | None = None,
+    ) -> None:
         self.repo = repo
         self.max_calls = max_calls
+        #: The walk's wall-clock deadline as a `time.monotonic()` stamp, or None when
+        #: `--max-seconds` is disabled. `build_history` enforces the same bound BETWEEN runs;
+        #: this copy is what keeps a call already in flight from outliving it.
+        self.deadline = time.monotonic() + max_seconds if max_seconds else None
         self.calls = 0
         self.truncation: str | None = None
         #: EVERY cut, not just the last one. ``truncation`` is a single field, so a walk whose
@@ -987,25 +1008,47 @@ class GhClient:
     #: attempt died on page 1 of the push listing with "check your internet connection").
     RETRIES = 4
 
+    def _seconds_left(self) -> float | None:
+        """Time left before the walk's wall-clock bound, or None when it is disabled."""
+        if self.deadline is None:
+            return None
+        return self.deadline - time.monotonic()
+
+    def _attempt_timeout(self) -> float:
+        """This attempt's bound: ``CALL_TIMEOUT_SECONDS``, clamped to the walk's deadline."""
+        left = self._seconds_left()
+        if left is None:
+            return self.CALL_TIMEOUT_SECONDS
+        return max(self.MIN_ATTEMPT_TIMEOUT_SECONDS, min(self.CALL_TIMEOUT_SECONDS, left))
+
     def _gh(self, args: Sequence[str], binary: bool = False) -> bytes | str:
         last: ReadError | None = None
+        target = args[1] if len(args) > 1 else ""
         for attempt in range(self.RETRIES):
+            # ⛔ Checked BEFORE the spend and before the backoff: past the walk's deadline an
+            # attempt must not be made at all — a retry that spends a call and then sleeps 8 s
+            # to be killed still overruns the bound the report was asked to honour.
+            left = self._seconds_left()
+            if left is not None and left <= 0:
+                raise ReadError(
+                    f"gh api {target} not attempted — the walk's wall-clock bound was reached"
+                    + (f" while retrying: {last}" if last else "")
+                )
             self._spend(1)
             if attempt:  # back off only between attempts; the first call is immediate
-                time.sleep(min(2**attempt, 15))
+                delay = min(2**attempt, 15)
+                if left is not None:
+                    delay = max(0.0, min(delay, left))
+                time.sleep(delay)
+            timeout = self._attempt_timeout()
             try:
-                proc = subprocess.run(
-                    ["gh", *args], capture_output=True, timeout=self.CALL_TIMEOUT_SECONDS
-                )
+                proc = subprocess.run(["gh", *args], capture_output=True, timeout=timeout)
             except FileNotFoundError as exc:  # pragma: no cover - environment-dependent
                 raise ReadError(f"gh CLI not found: {exc}") from exc
             except subprocess.TimeoutExpired:
                 # A hung call is a failed ATTEMPT, not an unbounded wait: the retry loop (and
                 # then `main`'s exit 2) must get control back.
-                last = ReadError(
-                    f"gh api {args[1] if len(args) > 1 else ''} timed out after "
-                    f"{self.CALL_TIMEOUT_SECONDS}s"
-                )
+                last = ReadError(f"gh api {target} timed out after {timeout:g}s")
                 continue
             if proc.returncode == 0:
                 return proc.stdout if binary else proc.stdout.decode("utf-8", "replace")
@@ -1020,7 +1063,21 @@ class GhClient:
     def _paginated(self, url: str, items_key: str) -> list[Mapping[str, Any]]:
         raw = self._gh(["api", url, "--paginate"])
         assert isinstance(raw, str)
-        pages = decode_pages(raw)
+        try:
+            pages = decode_pages(raw)
+        except ValueError as exc:
+            # ⛔ `json.JSONDecodeError` IS a `ValueError`, and it is NOT a `ReadError` — so
+            # untranslated it escaped BOTH handlers that exist to degrade a run instead of
+            # discarding the walk: `RunArtifacts.get`'s ReadError arm and the detail loop's
+            # per-run `except ReadError`, taking a walk that may already have spent ~1500 s
+            # and ~2000 API calls to `main`'s exit 2 with NO report at all. The sibling read
+            # on this same transport (`list_runs`) already translates it, which is why a
+            # malformed RUNS page is a recorded truncation and this one was fatal. The shape
+            # is real, not hypothetical: every `gh` call here is relayed through the fleet's
+            # rate-limit wrapper, so a prose line can precede (or replace) the payload — and
+            # `gh api --paginate` emits concatenated pages, whose decoder fails on any
+            # trailing non-JSON text.
+            raise ReadError(f"gh api {url} returned unparseable JSON: {exc}") from exc
         self._spend(max(len(pages) - 1, 0))
         try:
             return ci_verdict.collect_items(pages, items_key, url)
@@ -2265,7 +2322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         client = (
             OfflineClient(args.offline_dir)
             if args.offline_dir
-            else GhClient(args.repo, max_calls=args.max_api_calls)
+            else GhClient(args.repo, max_calls=args.max_api_calls, max_seconds=args.max_seconds)
         )
         report = build_history(
             manifest,

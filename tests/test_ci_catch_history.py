@@ -1707,6 +1707,131 @@ def test_the_lane_split_follows_ci_selection_instead_of_a_constant(tmp_path, mon
     assert row["status"] == catch.NOT_PREMERGE, "a by-decision exclusion, not a gap"
 
 
+# --- 12. a malformed page body is a READ failure, never a discarded walk ---
+
+
+def _relayed_client(*, malformed: str) -> catch.GhClient:
+    """A live `GhClient` whose `_gh` answers every surface, but with a NON-JSON body on one.
+
+    ⛔ The body shape is the module's own documented hazard, not a contrivance: every `gh`
+    call here is relayed through the fleet's rate-limit wrapper, so a prose line can precede
+    (or replace) the payload — and `gh api --paginate` emits CONCATENATED page objects, whose
+    decoder fails on any trailing non-JSON text (cli/cli#8419 is the same shape from the
+    other side). `list_runs` already translates that decode failure; `_paginated` did not.
+    """
+    family, leg = _leg_of("test_billing.py")
+    client = catch.GhClient("o/r", max_calls=10_000)
+    poisoned = "warning: rate-limit guard engaged\nnot json"
+
+    def _gh(args, binary=False):
+        url = args[1]
+        if binary:  # pragma: no cover - the listing never resolves in these fixtures
+            raise catch.ReadError("no artifact bytes in this fixture")
+        if "/jobs?" in url:
+            if malformed == "jobs":
+                return poisoned
+            return json.dumps(
+                {
+                    "total_count": 1,
+                    "jobs": [_check(100, RUN_PR, f"{family} ({leg})", "failure")],
+                }
+            )
+        if "/artifacts?" in url:
+            if malformed == "artifacts":
+                return poisoned
+            return json.dumps({"total_count": 0, "artifacts": []})
+        if "retention" in url:
+            return json.dumps({"days": 90})
+        event = "pull_request" if "event=pull_request" in url else "push"
+        conclusion = url.rsplit("status=", 1)[1].split("&")[0]
+        page = int(url.rsplit("page=", 1)[1]) if "page=" in url else 1
+        if page > 1 or (event, conclusion) != ("pull_request", "failure"):
+            return json.dumps({"total_count": 0, "workflow_runs": []})
+        return json.dumps(
+            {"total_count": 1, "workflow_runs": [_run(RUN_PR, SHA, "pull_request", pr=61)]}
+        )
+
+    client._gh = _gh  # type: ignore[method-assign]
+    return client
+
+
+def test_a_non_json_jobs_page_is_a_read_failure_not_an_escape():
+    """`decode_pages` raises `JSONDecodeError`, which is neither `ReadError` nor budget.
+
+    ⛔ It was decoded OUTSIDE `_paginated`'s translation, so it escaped BOTH handlers that
+    exist to degrade one run instead of discarding the walk — the detail loop's per-run
+    `except ReadError` and `main`'s honest exit 2 — and a walk that may already have spent
+    ~1500 s / ~2000 API calls produced NO report at all. The ReadError spelling of the same
+    failure degrades correctly, so the walk's survival depended on which error type the
+    transport happened to raise.
+    """
+    client = _relayed_client(malformed="jobs")
+    with pytest.raises(catch.ReadError) as excinfo:  # pre-fix: json.JSONDecodeError
+        client.jobs(str(RUN_PR))
+    assert "unparseable JSON" in str(excinfo.value)
+
+    report = catch.build_history(MANIFEST, _relayed_client(malformed="jobs"))  # pre-fix: raises
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN, "an unread run is a gap, never a clean bill"
+    assert report["coverage"]["status_" + catch.NEVER] == 0
+    assert any("unparseable JSON" in note for note in report["window"]["api_notes"])
+
+
+def test_a_non_json_artifact_listing_degrades_to_unknown_instead_of_aborting():
+    """The `ReadError` spelling of this failure already degraded; the decode one did not."""
+    report = catch.build_history(MANIFEST, _relayed_client(malformed="artifacts"))
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    reason = row["unknown"][0]["reason"]
+    assert "the listing could not be read" in reason
+    assert "unparseable JSON" in reason, reason
+    assert "retention" not in reason, "the artifact may exist — the listing was never read"
+
+
+# --- 13. the walk's own bound bounds the CALLS, not just the loop ------------
+
+
+def test_a_stalled_call_cannot_outlive_the_walk_bound(monkeypatch):
+    """4 × `CALL_TIMEOUT_SECONDS` + backoff ≈ 1214 s — 13× a `--max-seconds 90` request.
+
+    ⛔ The per-attempt bound is right (one stalled relayed `gh` must not hang the walk), but
+    on its own it does not bound the thing it names: `--max-seconds` was consulted only
+    BETWEEN calls, so every retry took the full 300 s no matter how little of the walk's
+    budget was left. That is the same "a bound that does not bound the thing it names" shape
+    this module closed for the LISTING phase — so the deadline is propagated into the loop.
+    """
+    seen: list[float] = []
+
+    def _timeout(cmd, capture_output=False, timeout=None):
+        seen.append(timeout)
+        raise catch.subprocess.TimeoutExpired(cmd, timeout or 0)
+
+    monkeypatch.setattr(catch.subprocess, "run", _timeout)
+    monkeypatch.setattr(catch.time, "sleep", lambda _s: None)
+    client = catch.GhClient("o/r", max_calls=100, max_seconds=90)
+    with pytest.raises(catch.ReadError) as excinfo:
+        client._gh(["api", "repos/o/r/actions/runs"])
+    assert seen, "the first attempt is made"
+    assert seen[0] <= 90, f"the attempt was bounded at {seen[0]}s, not the 90 s left"
+    assert seen[0] < catch.GhClient.CALL_TIMEOUT_SECONDS
+    assert "timed out" in str(excinfo.value)
+
+
+def test_no_attempt_is_spent_once_the_walk_bound_has_passed(monkeypatch):
+    """A retry starting after the deadline would spend a call and wait to be killed."""
+    ran: list[object] = []
+    monkeypatch.setattr(catch.subprocess, "run", lambda *args, **kwargs: ran.append(args))
+    monkeypatch.setattr(catch.time, "sleep", lambda _s: None)
+    client = catch.GhClient("o/r", max_calls=100, max_seconds=90)
+    client.deadline = catch.time.monotonic() - 1  # the walk is already out of time
+    with pytest.raises(catch.ReadError) as excinfo:
+        client._gh(["api", "repos/o/r/actions/runs"])
+    assert ran == [], "an attempt was made with no walk budget left"
+    assert client.calls == 0, "a call that was never made must not be spent"
+    assert "wall-clock bound" in str(excinfo.value)
+    assert catch.GhClient("o/r", max_seconds=0).deadline is None, "0 disables the bound"
+
+
 # --- the `durations` note re-derives its own count --------------------------
 
 
