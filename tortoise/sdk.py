@@ -17749,13 +17749,23 @@ class TortoiseSDK:
                 # measured fail-open in one direction (source DERIVED at ``'1'``,
                 # predecessor at ``0`` — the door passed the supersede and the load
                 # side immediately reported ``derived_over_asserted``) and
-                # over-refusal in the mirror. So the layout is orderable ONLY when
+                # over-refusal in the mirror. So the layout is ordered ONLY when
                 # EVERY slot idx is a real ``int`` (``bool`` excluded — it is an
-                # ``int`` SUBCLASS in Python yet a separate type to the engine); any
-                # other type mix takes the candidate arm below, which is
-                # engine-agnostic and fail-CLOSED. Modelling the engine's type-group
-                # order instead would be a second copy of engine-defined behaviour,
-                # wrong the day that engine changes.
+                # ``int`` SUBCLASS in Python yet a separate type to the engine); every
+                # other layout takes the candidate arm below, which is engine-agnostic
+                # and fail-CLOSED. Modelling the engine's type-group order instead
+                # would be a second copy of engine-defined behaviour, wrong the day
+                # that engine changes.
+                # ⚠️ WHAT THAT COSTS, recorded rather than left to be discovered: a
+                # layout whose idx are ALL one NON-``int`` type (every slot written
+                # ``'0'`` / ``'1'``) IS ordered by the engine — inside one type group
+                # the comparison is type-local — yet this door takes the candidate arm
+                # for it too, because it does not re-implement that per-type order. So
+                # it can refuse a supersede the loader would keep. That is the SAFE
+                # direction (a false refusal, never an exemption), the shape is
+                # reachable only by a raw write (``create_operator`` stamps ints), and
+                # the refusal names a real remedy — while a stand-down here is exactly
+                # the #10195 fail-open one property of a schemaless graph defeated.
                 _uniform_int = all(
                     isinstance(_sidx, int) and not isinstance(_sidx, bool)
                     for _sidx, _ in _srows)
@@ -17771,9 +17781,11 @@ class TortoiseSDK:
                     _candidate_sources = [min(
                         {i for _sidx, i in _slots if _sidx == _low}, key=str)]
                 else:
-                    # UNORDERABLE, not unjudgeable: no position is provably the
-                    # SOURCE, so EVERY input is a candidate source and the wiring is
-                    # refused if ANY candidate would override. Fail CLOSED, because
+                    # UNORDERABLE, not unjudgeable: the door can NAME no SOURCE
+                    # position here (a mixed layout has no provable order, and a
+                    # uniformly non-int one it declines to re-order — see above), so
+                    # EVERY input is a candidate source and the wiring is refused if
+                    # ANY candidate would override. Fail CLOSED, because
                     # the load side keeps judging this factor — the fallback belongs
                     # to the load side's strictness, never to a silent exemption.
                     _candidate_sources = [i for _, i in _slots]

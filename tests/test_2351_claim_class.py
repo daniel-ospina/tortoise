@@ -521,6 +521,49 @@ def test_supersede_repoint_refuses_when_a_string_idx_outranks_the_source(lane):
     assert _operator_rows(lane, new) == []
 
 
+def test_supersede_repoint_refuses_a_uniformly_non_int_slot_layout(lane):
+    """A layout with NO ``int`` idx at all is still JUDGED — fail CLOSED.
+
+    The siblings above pin the MIXED layouts; this pins the homogeneous
+    NON-``int`` one, which the door also declines to order (``sdk.py``: slot
+    order is re-implemented for an all-``int`` layout only, so every other
+    layout takes the candidate arm — a recorded, deliberately fail-closed
+    trade-off: a false refusal, never an exemption).
+
+    It is the safe arm because the wiring is illegal under EITHER reading: all
+    strings, the engine orders ``'0'`` before ``'1'``, so the load side reads the
+    DERIVED claim as the source of ``derived --IMPL--> asserted`` and skips the
+    factor — so refusing it is PARITY with the loader, not over-refusal.
+
+    Pre-fix (any non-``int`` ``idx`` ⇒ blanket stand-down) this supersede went
+    through and minted exactly that factor with no verdict, no warning, no
+    record (#10195 review P2).
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # BOTH slots re-stamped as strings — the door's ordered set is all-int only.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->() SET r.idx = '1'",
+        params={"op": op["id"]})
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->(n:Point {id:$src}) SET r.idx = '0'",
+        params={"op": op["id"], "src": src})
+    # The successor is AUTHORED — issue #10195's reproduction, plus the layout.
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    # Refused BEFORE any mutation, and the refused wiring is not in the graph.
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", "1"]]
+    assert _operator_rows(lane, new) == []
+
+
 def test_supersede_repoint_judges_a_duplicated_slot_idx(lane):
     """One ``idx`` carried by TWO inputs is judged on the loader's own tie-break.
 
