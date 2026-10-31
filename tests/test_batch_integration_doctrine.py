@@ -135,6 +135,13 @@ def _halts(code: str) -> bool:
     """
     if "|| true" in code:
         return False
+    # A halt in a SUBSHELL is not a halt: `… || { echo x; exit 1; } &` and
+    # `… | cat` put the brace in a child, so `exit 1` ends the child and the fence
+    # continues (bash-verified: `false || { echo g; exit 1; } & echo AFTER` prints
+    # AFTER with rc=0). The guard would then certify a landing on a moved `main`,
+    # or a baseline measured on the operator's lane.
+    if re.search(r"&\s*$", code) or re.search(r"\}\s*\|\s*\S", code):
+        return False
     return re.search(r"\|\|\s*(exit\s+[1-9]|\{[^}]*exit\s+[1-9])", code) is not None
 
 
@@ -604,6 +611,19 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     defines = [
         cmd for cmd in landing[0] if re.match(r'(?:export\s+)?PINNED=', cmd)
     ]
+    # EXACTLY ONE definition, and it must READ THE PR BODY: `any()` let a second
+    # definition rewrite the pin — appending `PINNED="$(git rev-parse origin/main)"`
+    # makes the assertion compare `main` to itself (always true) and makes the
+    # `[ -n "$PINNED" ]` fail-closed guard inert; `${PINNED:-$(git rev-parse
+    # origin/main)}` turns that fail-closed path fail-open.
+    assert len(defines) == 1, (
+        "the landing fence must define $PINNED exactly once, from the batch PR "
+        f"body; these definitions rewrite it: {defines}"
+    )
+    assert "gh pr view" in defines[0], (
+        "the landing pin must be read from the batch PR body Phase 1 recorded it "
+        f"to — a value taken from the local repo tests `main` against itself: {defines[0]}"
+    )
     assert defines, (
         "the landing fence uses $PINNED without defining it: Phase 1 set it in a "
         "DIFFERENT shell, so here it is empty and the assertion reports "
@@ -631,9 +651,26 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     # `if [ … = "$PINNED" ]; then … exit 1; fi` refuses an UNMOVED main and lands
     # a MOVED one (the document's headline failure), and `bash -c '…'`,
     # `{ ! [ … ]; }`, `command [ … ]` and `sh -c '…'` all do the same, all green.
+    # A STALE remote-tracking ref compares equal to itself: without a fetch, a
+    # `main` that moved since the last one satisfies the assertion, which then
+    # certifies a tree no run has seen.
+    fetches = [
+        i
+        for i, c in enumerate(landing[0])
+        if re.match(r"git\s+fetch\b", _code(c)) and "origin" in _code(c)
+    ]
+    assert fetches, (
+        "the landing fence must fetch origin before comparing: `$(git rev-parse "
+        "origin/main)` reads the LOCAL remote-tracking ref, so without a fetch a "
+        "moved main compares equal and the assertion passes"
+    )
     carriers = [
         i for i, c in enumerate(landing[0]) if _PINNED_MAIN_ASSERTION.search(_code(c))
     ]
+    assert carriers and min(fetches) < min(carriers), (
+        "the fetch must precede the base assertion; these assertions read a ref "
+        "no fetch in this fence has refreshed"
+    )
     wrapped = [
         landing[0][i]
         for i in carriers
@@ -666,7 +703,7 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
         'the landing fence must guard the pin with `[ -n "$PINNED" ]`: a `-z` '
         "guard refuses every real sha, so the landing step can never pass"
     )
-    assert any("--jq" in cmd or "--template" in cmd for cmd in defines), (
+    assert all("--jq" in cmd or "--template" in cmd for cmd in defines), (
         "the landing pin must read the batch PR body through `--jq '.body'` or "
         "`--template '{{.body}}'` — that is the only mechanical enforcement of "
         "the tested-tree==landed-tree invariant"
