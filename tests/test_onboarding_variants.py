@@ -534,8 +534,8 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
         "a CHOOSER (and no named organization) when the account has more than "
         "one selectable org, and Authorize stays disabled until one is picked")
     # …and the pick must be placed BEFORE Authorize: on the chooser branch the
-    # button is disabled until a value is chosen (tortoise/oauth.py
-    # `disableAuthorize()`, re-enabled only by the select's onchange), so
+    # button is disabled until a value is chosen (tortoise/oauth.py sets
+    # `authBtn().disabled = true`; only the select's onchange re-arms it), so
     # "click Authorize, then pick" names an inert control. Bounded to the ChatGPT
     # NOTE: measured over the whole document, any bolded `**Authorize**` elsewhere
     # would red this with a message blaming the ChatGPT recipe (#9660 review).
