@@ -40,6 +40,18 @@ below are measured against a prior that the echo wall OUTRANKS, so the fixture's
 prior must be the WEAKEST lexical match, which is what ``_PRIOR_TEXT`` constructs
 and documents. The assertions themselves are unchanged: what the arm re-ordered
 is which prior sits outside the window, never the seam or the bound.
+
+The arm is also PINNED ON in the autouse fixture (#10446), and the pin is
+asserted IN EFFECT by ``test_the_lexical_arm_pin_is_in_effect`` — the arm is
+ON by default since #10240, so a pin that silently stopped taking effect would
+leave every test below green while they measured whatever a caller's shell
+selected. `test_the_pool_bound_starves_the_prior_in_either_arm_state` EXECUTES
+the other state instead of only claiming it, which is why the pin may be ON
+here: the bound belongs to the WINDOW, not to the scorer, so pinning the arm a
+read actually uses costs no coverage. A peer PR (#10424) pins this same fixture
+the OTHER way (``TORTOISE_BM25_LEXICAL=0``); that hunk is SUPERSEDED — if you
+are resolving a conflict at the pin, keep it ON. ``=0`` would re-point every
+number this file documents at a scorer the product does not ship by default.
 """
 from __future__ import annotations
 
@@ -49,6 +61,7 @@ import tempfile
 
 import pytest
 
+from tortoise.bm25 import BM25_ENV
 from tortoise.retrieval import DEFAULT_POOL_SIZE, is_turn_echo_row
 from tortoise.sdk import TortoiseSDK
 
@@ -122,12 +135,22 @@ _PRIOR_TEXT = _weak_prior("noted")
 
 @pytest.fixture(autouse=True)
 def _hermetic_pool_and_legs(monkeypatch):
-    """Pin BOTH knobs this module's bound depends on.
+    """Pin ALL THREE knobs this module's bound depends on.
 
     The sparse leg: with ``EmbeddingModel.get`` → None the vector strategy is
     never submitted, so FTS is the only leg and the ordering is deterministic
     without a model download — and the fused set is then one leg's window, which
     is what makes the residual pin's bound a single number.
+
+    The lexical arm: ``TORTOISE_BM25_LEXICAL`` decides which ORDERING the sparse
+    leg applies — BM25 relevance when ON (the default since #10240) or the
+    tie-broken order when ``=0`` — so an ambient value in a developer's shell
+    changes what these bounds are measured against, the same harness-defect
+    reason the pool floor below gives. Pinned ON explicitly (#10446): the
+    numbers below are the DEFAULT arm's, and a future flip of
+    ``BM25_DEFAULT_ENABLED`` must not silently re-point them. The pin is
+    ASSERTED IN EFFECT by ``test_the_lexical_arm_pin_is_in_effect`` — a pin
+    nothing checks is a comment.
 
     The pool floor: ``resolve_pool_size`` honours ``TORTOISE_POOL_FLOOR``, so an
     ambient value in a developer's shell moves the very window the residual pin
@@ -137,9 +160,34 @@ def _hermetic_pool_and_legs(monkeypatch):
     deletes the variable and measures the product default it documents.
     """
     monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
+    monkeypatch.setenv(BM25_ENV, "1")
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get",
                         staticmethod(lambda load_timeout=None: None))
+
+
+def test_the_lexical_arm_pin_is_in_effect(_hermetic_pool_and_legs):
+    """The pin above must be IN EFFECT — through the constant
+    ``tortoise.bm25.BM25_ENV``, never a literal, so a rename cannot quietly
+    restore an ambient ordering (#10436's pattern).
+
+    Without this the pin is unfalsifiable and therefore untested: the arm is ON
+    by DEFAULT since #10240, so a ``setenv`` that stopped taking effect would
+    keep every test below green while they measured whatever the caller's shell
+    selected. The exposure is narrow (``from tortoise.bm25 import BM25_ENV``
+    fails loudly if the constant is removed), but a lever no test reads is a
+    comment — and this module's docstrings quote numbers as "the DEFAULT arm's".
+
+    Deliberately NOT an ``assert`` inside the fixture: a hard-failing fixture
+    would turn a mutation of the LEVER into an ERROR for every test in the
+    module, hiding the assertions those tests exist to discriminate.
+    """
+    from tortoise.bm25 import bm25_enabled
+
+    assert bm25_enabled() is True, (
+        "the BM25-arm pin did not take — this module's numbers are documented "
+        "as the DEFAULT arm's, so a pin that resolves OFF (or not at all) means "
+        "the ordering under test is not the one the docstrings measure")
 
 
 @pytest.fixture
@@ -440,6 +488,79 @@ def test_production_pool_bound_still_starves_the_prior(sdk):
         f"DEFAULT_POOL_SIZE changed. Update the bound documented in "
         f"tortoise/extractor_v2.py and tortoise/sdk.py. rows={prod}")
     assert prod == [], prod
+
+
+@pytest.mark.parametrize("arm,arm_on", [("1", True), ("0", False)],
+                         ids=["arm-on", "arm-off"])
+def test_the_pool_bound_starves_the_prior_in_either_arm_state(
+        sdk, monkeypatch, arm, arm_on):
+    """The residual bound belongs to the WINDOW, not to the scorer: the prior is
+    starved with the arm ON and with it OFF.
+
+    ON, the order is BM25 relevance and the lexically weakest row — the prior
+    seeded first, carrying the query once behind 40 filler tokens — sorts last.
+    OFF, every row ties, the shared recency-then-id tie orders the window, and
+    the prior is the OLDEST row, so it sorts last again. Same bound, different
+    reason — which is what makes the bound a property of ``DEFAULT_POOL_SIZE``
+    rather than an artefact of which scorer ran.
+
+    WHY this test exists (#10460 review, ISSUE 1). A peer PR (#10424) repairs the
+    pre-#10240 reds in this module by pinning the arm OFF in the same autouse
+    fixture — i.e. by measuring the tie instead of the shipped default. This test
+    is the evidence that the pin DIRECTION buys nothing: the bound holds either
+    way, so this module can pin the arm a read actually uses and still keep the
+    arm-OFF guarantee. It also ENFORCES a property the docstrings previously only
+    CLAIMED ("the ``=0`` state was also measured green") — a promise no test
+    executes is how such a claim goes stale.
+
+    It doubles as cover for the ``TORTOISE_BM25_LEXICAL=0`` OPT-OUT, which is a
+    shipped, supported reading path — the ``=0`` half is exactly the order that
+    documented opt-out produces.
+
+    ⚠️ It is NOT cover for a docker-URI / ``full: true`` lane, and an earlier
+    revision of this docstring wrongly claimed it was. The arm is gated on
+    ``is_embedded`` (``sdk.py``), and this module's ``sdk`` fixture constructs
+    ``TortoiseSDK(<tmpdir>/test.db)`` — an explicitly-provided ``db_path`` wins
+    over ``TORTOISE_DB_URI`` (``sdk.py``, #139) — so the store is EMBEDDED BY
+    CONSTRUCTION and ``is_embedded`` is True whatever the ambient URI is. MEASURED
+    with an ambient ``TORTOISE_DB_URI=docker://…``: ``s._db_uri is None`` and
+    ``proj._is_embedded is True``. The arm is therefore engaged here on every
+    lane shape, and no test in this module can reach the inert state; a run with
+    an ambient docker URI is a TRUE green, not a false one. ``TORTOISE_TEST_CARVE_OUT``
+    is what the URI-less session-start gate requires (epic #1647 P4), NOT what
+    wakes the arm.
+
+    FALSIFIER — (1) *what value makes this test fail?* ``zz_pt_real``'s presence
+    in the production page, in EITHER state; or an arm pin that does not resolve
+    to the state the parameter names. (2) *reachable?* Yes: the prior is seeded
+    first and the echoes outnumber the documented pool (130 vs 120), so the prior
+    is a candidate of a wider pool and outside the production window — the
+    starvation is measured against the window, not against absence.
+    """
+    from tortoise.bm25 import bm25_enabled
+
+    monkeypatch.setenv(BM25_ENV, arm)
+    assert bm25_enabled() is arm_on, (
+        f"the arm state under test is not the one requested ({BM25_ENV}={arm})")
+
+    _seed_echo_wall_production(sdk, "s1", "zz_pt_real",
+                               _DOCUMENTED_PROD_POOL + 10)
+
+    # Candidate, not merely absent: with a pool wider than the corpus the prior
+    # IS in the fused set, so what the production window does to it is what this
+    # measures.
+    deep = _ids(sdk.tortoise_fts_query(
+        QUERY, entity_type="point", limit=_POOL, pool_size=_POOL))
+    assert "zz_pt_real" in deep, (
+        f"fixture invalid: the prior is not a fused-pool candidate at all "
+        f"(arm={arm}, depth={len(deep)})")
+
+    prod = _ids(sdk.tortoise_fts_query(
+        QUERY, entity_type="point", limit=_OLD_LIMIT,
+        exclude_turn_echo_session="s1"))
+    assert "zz_pt_real" not in prod, (
+        f"the residual bound does not hold with {BM25_ENV}={arm}: the prior "
+        f"came back through the production call shape. rows={prod}")
 
 
 def test_within_the_pool_the_exclusion_recovers_the_prior_in_production_shape(sdk):
