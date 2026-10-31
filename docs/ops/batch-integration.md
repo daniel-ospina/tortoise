@@ -114,7 +114,13 @@ uv sync --extra embeddings --extra parity    # ONE command — see the extras tr
 # "The ledger is per-batch, not per-box" below). The NAME is required (`:?`): an unset one would put
 # the artifacts at a bare /tmp path that every batch on this box writes, so the poll could read a
 # PEER batch's status and the count could read its report.
-BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
+# ⛔ `export`, not a bare assignment — the NAME is a CARRIER, and this is the one fence that can
+# export it. Phases 1 and 3 are usually LATER shells, where a plain assignment made here has not
+# survived; there `BATCH="${BATCH:?…}"` then HALTS the fence before anything runs — so the
+# "needs no carrier" claim would be false in exactly the normal case, and the operator would be
+# told to set a name the doctrine never asked them to carry. A later PLAIN re-assignment PRESERVES
+# the export attribute in bash, so the three fences below re-derive it with `:?` and stay exported.
+export BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
 B="/tmp/batch-$BATCH"
 mkdir -p "$B" || exit 1
 ```
@@ -213,7 +219,7 @@ rm -f "$B/baseline-junit.xml" "$B/baseline.total" "$B/baseline.skipped" "$B/base
 # BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
 # `--junitxml` is not decoration: Phase 3 compares the gate run's test COUNT to this file,
 # because a run the kernel killed reports no summary and would otherwise read as green.
-uv run pytest tests/ -q --junitxml="$B/baseline-junit.xml" -m 'not track_b and not live and not integration'
+uv run pytest tests/ -q --junitxml="$B/baseline-junit.xml" -m 'not track_b and not live and not integration' --ignore=tests/e2e
 BASELINE_RC=$?
 # ⛔ COMPLETED is not merely finished. pytest exits 0 (passed) or 1 (tests failed) on a COMPLETED
 # run, and 2/3/4/5 — or 128+N — when it was interrupted, misconfigured or KILLED. A killed baseline
@@ -303,12 +309,28 @@ junit file only in `pytest_sessionfinish`, so a run killed mid-flight (measured 
 are a COMPLETED run. A baseline that is stale or killed is worse than no baseline — it is a
 confident ledger of the wrong tree.
 
-**The marker filter is not decoration.** `python-ci.yml`'s deterministic lanes run the suite with
-`-m 'not track_b and not live and not integration'`. `live` marks live-API probes and `integration`
-marks opt-in tests needing live credentials or production access (`pyproject.toml`). A bare
-`pytest tests/` therefore runs tests that cannot pass on a lane without those credentials — and by the
-Baseline rule every such failure becomes a `BASELINE(<ids>)` id, or convicts an innocent PR. The filter
-is what makes the run comparable to CI at all.
+**The marker filter is not decoration — and it is not the whole of what makes a run comparable.**
+`python-ci.yml`'s deterministic lanes run the suite with `-m 'not track_b and not live and not
+integration'` **over a file list, not over `tests/`**: `tools/ci_selection.py` excludes the
+`tests/e2e/` prefix **by path** (#1349), and `python-ci.yml` records why — *"Without browsers they
+only ever ERROR here"*. So the population has to match too, and `--ignore=tests/e2e` is that second
+half; the marker filter alone is not what makes the run comparable to CI at all. Neither selector is
+cosmetic:
+
+- `live` marks live-API probes and `integration` marks opt-in tests needing live credentials or
+  production access (`pyproject.toml`). A bare `pytest tests/` runs tests that cannot pass on a lane
+  without those credentials — and by the Baseline rule every such failure becomes a `BASELINE(<ids>)`
+  id, or convicts an innocent PR.
+- `tests/e2e/` is a population **no CI lane runs**. On a lane without browsers, every module there
+  ERRORs at import, so a healthy batch can never print plain `BATCH-GREEN` — only
+  `BATCH-GREEN(BASELINE(<dozens of e2e ids>))`, with the Phase 4 id diff dominated by noise. On a box
+  where the browsers *are* installed (this fleet installs them for `app-test`), those tests actually
+  run and default to **live targets** — `tests/e2e/test_welcome_page.py` points `WELCOME_URL` at the
+  deployed site — so one network-dependent id that is not in the baseline is NEW, convicts an
+  innocent PR, and the prescribed remedy is to drop it.
+
+`--ignore=tests/e2e` moves the run **toward** CI's population, which is why it is the one selector
+argv this doctrine admits: `--co`, `--lf`, `-k` and `--deselect` move it away.
 
 Two corrections to the quantifier, because both decide whether the batch is a gate or a gesture:
 
@@ -460,7 +482,7 @@ B="/tmp/batch-$BATCH"
 # explicit opt-in whose verdict is UNPROVEN-FULL-SUITE.
 [ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
 rm -f "$B/batch.rc" "$B/batch-junit.xml"   # a stale status/report from an earlier run must not decide this one
-( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
+( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' --ignore=tests/e2e > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
 # ⛔ WAIT before the poll, and BOUND the wait. The suite is detached (the `&` above), so a one-shot
 # read on the very next line is not a poll — it is a race this fence loses every time: the block would
 # print RUNNING and the halt below would then report "never launched in this shell" about a run it
@@ -524,7 +546,9 @@ table and the `UNPROVEN-FULL-SUITE(<lane>)` rule.
 - **The id sets are the junit reports, one per half**: `$B/batch-junit.xml` **and**
   `$B/batch-trackb.xml`, against `$B/baseline-junit.xml` **and** `$B/baseline-trackb.xml`.
   Diffing the deterministic half alone leaves every `track_b` id in neither set — which is how a red
-  MUST-PASS gate member reads as green.
+  MUST-PASS gate member reads as green. **After a drop, those two files hold the post-revert
+  re-check** — the fence below CLEARS and rewrites both, so the diff can never be against the tree
+  that still contained the culprit.
 - **A failure id that is in the baseline set is a `BASELINE(<ids>)` failure.** Not a PR's fault. Do not
   drop a PR for it, and do not fix it inside the batch. One line on whether the batch makes it worse.
 - **A failure id that is NOT in the baseline set is NEW** and convicts a PR. Find which one:
@@ -602,8 +626,53 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   ```
 
   Then re-run **only the failed files**, then **one more full suite run — both halves** (a green that
-  excludes `-m track_b` is not a green). A batch that cannot be made green ships without the culprit,
-  never with it.
+  excludes `-m track_b` is not a green). ⛔ That re-run is not a sentence: it is the run whose result
+  is read into the Phase 5 verdict row, so it carries **every** detector Phase 3 carries. A bare
+  `pytest tests/` here would have no lane assertion, no tree assertion, no COMPLETED predicate, no
+  count and no skip check — the same fail-open this doctrine already closed for the baseline and for
+  the `track_b` half, one run further on. And it writes Phase 3's **own** report paths, cleared
+  first: `pytest` truncates a junit file only in `pytest_sessionfinish`, so without the clear the
+  Phase 4 diff would compare the baseline against the report of the tree that still contained the
+  culprit.
+
+  ```bash
+  # ⛔ Same tree assertion as Phase 3. The revert just committed ON integration/batch-1, so this
+  # fence is usually a LATER shell again — and a run on any other branch measures a tree nobody
+  # drops from and nobody lands.
+  [ -z "$(git status --porcelain)" ] || { echo "dirty tree — the re-check would measure it, not the reverted batch"; exit 1; }
+  [ "$(git rev-parse --abbrev-ref HEAD)" = integration/batch-1 ] || { echo "not on integration/batch-1 (HEAD is $(git rev-parse --abbrev-ref HEAD)) — the re-check would measure that tree, not the reverted batch: switch to the batch branch and re-run"; exit 1; }
+  BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
+  B="/tmp/batch-$BATCH"
+  [ -d "$B" ] || { echo "no ledger directory $B — Phase 0 creates it, per batch; absent means BATCH is unset or names another batch"; exit 1; }
+  [ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
+  # ⛔ CLEAR BOTH halves first: these are Phase 3's paths, so a stale report from the PRE-revert run
+  # would be diffed as if it were this one.
+  rm -f "$B/batch.rc" "$B/batch-junit.xml" "$B/batch-trackb.xml" "$B/batch.skipped-reasons" "$B/new-skip-reasons"
+  ( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' --ignore=tests/e2e > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
+  for _ in $(seq 1 240); do [ -f "$B/batch.rc" ] && break; sleep 15; done
+  [ -f "$B/batch.rc" ] && echo 'RECHECK DONE — read $B/batch.rc' || echo RUNNING
+  [ -f "$B/batch.rc" ] || { echo "no $B/batch.rc after the bounded wait — the re-check did not finish within 60 min (read $B/batch.log for where it stopped), or this shell never launched it"; exit 1; }
+  RC="$(cat "$B/batch.rc")"
+  [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || { echo "the re-check run did not COMPLETE (rc=$RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+  [ -s "$B/baseline.total" ] || { echo "no $B/baseline.total — Phase 1 never recorded the baseline count; re-run Phase 1 (Landing route 1)"; exit 1; }
+  BASELINE_TOTAL="$(cat "$B/baseline.total")"
+  BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/batch-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
+  [ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the re-check reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — SHORTER than the baseline: investigate (a killed run, or a diff that legitimately removes or moves tests) — and never call it green: UNPROVEN-FULL-SUITE(<lane>)"; exit 1; }
+  [ -s "$B/baseline.skipped" ] || { echo "no $B/baseline.skipped — Phase 1 never recorded the baseline's skips; re-run Phase 1 (Landing route 1)"; exit 1; }
+  BASELINE_SKIPPED="$(cat "$B/baseline.skipped")"
+  BATCH_SKIPPED="$(grep -o 'skipped="[0-9]*"' "$B/batch-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
+  [ -n "$BATCH_SKIPPED" ] && [ "$BATCH_SKIPPED" -le "$BASELINE_SKIPPED" ] || { echo "the re-check SKIPPED $BATCH_SKIPPED tests against a baseline of $BASELINE_SKIPPED — a skip carries no failure id, so the id diff cannot see it: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+  grep -o '<skipped [^>]*' "$B/batch-junit.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/batch.skipped-reasons"
+  comm -13 "$B/baseline.skipped-reasons" "$B/batch.skipped-reasons" > "$B/new-skip-reasons"
+  [ -s "$B/new-skip-reasons" ] && { echo "the re-check has SKIP REASONS the baseline did not (listed in $B/new-skip-reasons) — a test that must run did not, and no failure id records it: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+  # Half 2, instrumented exactly as in Phase 3 — a green that excludes `-m track_b` is not a green.
+  rm -f "$B/batch-trackb.xml"
+  uv run pytest tests/test_ingest_safety.py -q --junitxml="$B/batch-trackb.xml" -m track_b
+  TRACK_B_RC=$?
+  [ "$TRACK_B_RC" -eq 0 ] || [ "$TRACK_B_RC" -eq 1 ] || { echo "the re-check's track_b half did not COMPLETE (rc=$TRACK_B_RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+  ```
+
+  A batch that cannot be made green ships without the culprit, never with it.
 
 ### 5. Verdict — and it must be honest about what ran
 

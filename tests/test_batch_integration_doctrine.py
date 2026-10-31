@@ -488,6 +488,14 @@ _PIN_DEF = re.compile(
 _SUITE_DIR_TARGETS = {"tests", "tests/", "./tests/"}
 _SUITE_FILE_TARGETS = {"tests/test_ingest_safety.py"}
 
+#: The ONE path exclusion a `tests/` run may (and must) carry. CI's deterministic lanes do not run
+#: `tests/` — they run a FILE LIST, and `tools/ci_selection.py` skips the `tests/e2e/` prefix by path
+#: (#1349) because those browser tests *"only ever ERROR here"* without browsers. So the marker
+#: filter alone does NOT make a batch run comparable to CI: the POPULATION has to match too, and
+#: `--ignore=tests/e2e` is the only argv that moves a bare `pytest tests/` toward that population.
+#: `--co`/`--lf`/`-k`/`--deselect` move it away and stay refused.
+_SUITE_DIR_EXCLUSIONS = ("tests/e2e",)
+
 #: The VERB, with no opinion about the target. Every population this module
 #: quantifies over ("every fence that runs the full suite", "every fence that runs
 #: both halves") is derived from THIS: keying them on the target instead let one
@@ -519,7 +527,11 @@ _HALF2_TERMS = ("track_b",)
 
 
 def _suite_argv_ok(cmd: str) -> bool:
-    """Is this suite command `uv run pytest <target> [-q] [-m FILTER] [--junitxml=…]`?"""
+    """Is this suite command `uv run pytest <target> [-q] [-m FILTER] [--junitxml=…] [--ignore=tests/e2e]`?
+
+    The path exclusion is allowed ONLY on the `tests/` half and is REQUIRED there: that half is the
+    one a bare `pytest tests/` population inflates with `tests/e2e/`, which no CI lane runs.
+    """
     wrapped = _STATUS_WRAPPER.match(cmd.strip())
     if wrapped is not None:
         # The detached form: the argv check must see through the status writer, or the gate command
@@ -559,6 +571,7 @@ def _suite_argv_ok(cmd: str) -> bool:
     filters: list[str] = []
     rest = tokens[3:]
     i = 0
+    ignores: list[str] = []
     while i < len(rest):
         token = rest[i]
         if token == "-q":
@@ -567,6 +580,11 @@ def _suite_argv_ok(cmd: str) -> bool:
             filters.append(rest[i + 1])
             i += 2
         elif token.startswith("--junitxml=") and token != "--junitxml=":
+            i += 1
+        elif token.startswith("--ignore=") and token != "--ignore=":
+            # The ONE admitted selector — see `_SUITE_DIR_EXCLUSIONS`. It NARROWS the run toward
+            # CI's population, which is the opposite of what `--co`/`--lf`/`-k` do.
+            ignores.append(token.split("=", 1)[1])
             i += 1
         elif token in _SUITE_DIR_TARGETS | _SUITE_FILE_TARGETS and target is None:
             target = token
@@ -578,10 +596,12 @@ def _suite_argv_ok(cmd: str) -> bool:
         return False
     terms = tuple(term for term in shlex.split(filters[0]) if term != "and")
     if sorted(terms) == sorted(_HALF2_TERMS):
-        return target in _SUITE_FILE_TARGETS
+        # One file, no directory prefix — an e2e exclusion here would be a no-op that reads as
+        # diligence, so it is refused rather than ignored.
+        return target in _SUITE_FILE_TARGETS and not ignores
     if sorted(terms) != sorted(_HALF1_TERMS):
         return False
-    return target in _SUITE_DIR_TARGETS
+    return target in _SUITE_DIR_TARGETS and sorted(ignores) == sorted(_SUITE_DIR_EXCLUSIONS)
 
 
 #: The only honest shape of the gate's poll line: it must read the STATUS FILE the run's own shell
@@ -1633,7 +1653,14 @@ def test_a_fence_that_launches_the_suite_waits_before_it_reads_the_status() -> N
 #: The per-batch ledger directory. `BATCH` is REQUIRED (`:?` halts on an empty one — an empty name
 #: addresses a bare /tmp path every batch on the box writes), and `$B` is DERIVED from it, so every
 #: fence and every later shell reproduces the same directory without carrying anything.
-_LEDGER_NAME = re.compile(r'^BATCH="\$\{BATCH:\?[^}]*\}"$')
+#: The declarator prefix is part of the shape on purpose: `BATCH` IS a carrier (Phases 1 and 3 are
+#: usually later shells), so Phase 0 has to `export` it — and anchoring at `^BATCH="` made the honest
+#: `export BATCH="…"` INEXPRESSIBLE, the "the guard refuses its own remedy" shape this file has
+#: fixed three times. A later plain re-assignment preserves the export attribute.
+_LEDGER_NAME = re.compile(
+    r'^(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?'
+    r'BATCH="\$\{BATCH:\?[^}]*\}"$'
+)
 _LEDGER_DIR = re.compile(r'^B="/tmp/batch-\$\{?BATCH\}?"$')
 _LEDGER_CREATE = re.compile(r'^mkdir\s+-p\s+"?\$\{?B\}?"?\s*\|\|\s*exit\s+[1-9]\d*$')
 _LEDGER_PRESENT = re.compile(
@@ -3377,4 +3404,191 @@ def test_no_hand_counted_literals_of_live_repo_properties() -> None:
         "the doctrine must say a second concurrent batch is out of scope (its own clone/worktree and "
         "a branch named after `$BATCH`) — otherwise the per-batch ledger reads as if two batches "
         "could share one checkout"
+    )
+
+
+#: The claim the doctrine made about comparability, verbatim. It is FALSE while the population
+#: differs, and a false sentence is what an operator reasons from — so it is refused by shape.
+_FALSE_COMPARABILITY_CLAIM = re.compile(
+    r"The filter\s+is what makes the run comparable to CI at all", re.S
+)
+
+#: CI's own path exclusion, as the argv spells it.
+_SUITE_E2E_ARGV = "--ignore=tests/e2e"
+
+
+def test_the_documented_suite_is_the_population_ci_runs() -> None:
+    """#10400 review P1: the marker filter is not the whole of "comparable to CI".
+
+    `:216` and `:463` ran `pytest tests/` with the marker filter and `:308-311` claimed *"The marker
+    filter is what makes the run comparable to CI at all."* It is not: CI's deterministic lanes run a
+    **file list** (`tools/ci_selection.py`), and that selector drops the `tests/e2e/` prefix **by
+    path** (#1349) — `python-ci.yml` says why in as many words: those browser tests *"only ever
+    ERROR here"* without browsers. So `tests/` is a SUPERSET of what CI runs, and the difference is
+    the one directory with the worst failure modes for a ledger built from failure IDs:
+
+    * no browsers → every `tests/e2e/` module ERRORs at import, so a healthy batch can never print
+      plain `BATCH-GREEN`, only `BATCH-GREEN(BASELINE(<dozens of e2e ids>))`;
+    * browsers installed (this fleet installs them for `app-test`) → those tests RUN, and they
+      default to LIVE targets (`tests/e2e/test_welcome_page.py` points `WELCOME_URL` at the deployed
+      site), so one network-dependent id that is not in the baseline is NEW, convicts an innocent
+      PR, and the doctrine's own remedy is to drop it.
+
+    Both halves are pinned: every `tests/` run carries CI's exclusion, and the comparability claim
+    names the path selection instead of crediting the marker filter alone.
+
+    Non-vacuity, measured at the pre-fix head: dropping `--ignore=tests/e2e` from either command reds
+    this check (and `_suite_argv_ok` independently), and restoring the sentence *"The filter is what
+    makes the run comparable to CI at all."* reds it on its own.
+    """
+    dir_halves = [
+        cmd
+        for cmd in _fenced_commands()
+        if _deterministic_half(cmd)
+        and any(token in _SUITE_DIR_TARGETS for token in shlex.split(_code(cmd)))
+    ]
+    assert len(dir_halves) >= 2, (
+        "expected at least the baseline and gate deterministic halves, parsed "
+        f"{len(dir_halves)} — re-point this guard"
+    )
+    missing = [cmd for cmd in dir_halves if _SUITE_E2E_ARGV not in cmd]
+    assert not missing, (
+        "a `pytest tests/` run does not carry CI's own path exclusion: CI's deterministic lanes run a "
+        "FILE LIST and `tools/ci_selection.py` skips the `tests/e2e/` prefix by path (#1349), so this "
+        "run's population is a superset of the gate's. Without browsers every e2e module ERRORs (so "
+        "the batch can never print plain BATCH-GREEN), and with browsers they RUN against live "
+        f"targets and one flaky id convicts an innocent PR: {missing}"
+    )
+    text = _text()
+    assert _FALSE_COMPARABILITY_CLAIM.search(text) is None, (
+        "the doctrine still credits the MARKER FILTER alone with making the run comparable to CI: the "
+        "population has to match too. Name the path selection (`tests/e2e/` excluded by "
+        "`tools/ci_selection.py`, #1349) beside the filter"
+    )
+    for needle in ("tests/e2e", "tools/ci_selection.py", "#1349"):
+        assert needle in text, (
+            f"the comparability paragraph must name {needle!r}: it is the second half of what makes "
+            "a batch run CI's population, and an unstated selector reads as decoration"
+        )
+
+
+def test_the_ledger_name_is_exported_not_merely_assigned() -> None:
+    """#10400 review P2: `$BATCH` was the one carrier the doctrine claimed "needs no carrier".
+
+    All three occurrences were PLAIN assignments (`BATCH="${BATCH:?…}"`), and a plain assignment is
+    not in the environment a new shell inherits (measured: `BATCH=1 sh -c 'B=2; sh -c "echo ${B:-UNSET}"'`
+    → `UNSET`). The doctrine's own premise is that Phases 1 and 3 are LATER shells, so in the normal
+    case the name is empty there and Phase 1 halts at its own `:?` line before anything runs — a
+    fail-closed halt, but the claim *"without carrying anything"* is exactly what the run does not do.
+    It is the same shell-local class the doctrine spends twenty lines on for `TORTOISE_DB_URI`.
+
+    So Phase 0 — the one fence that can export it — must, and the doc must say that a later plain
+    re-assignment PRESERVES the export attribute (otherwise the three fences below look like they
+    undo it).
+    """
+    exported = [
+        cmd
+        for cmd in _fenced_commands()
+        if _LEDGER_NAME.match(_code(cmd)) and re.match(r"^(?:export|readonly|declare|typeset)\b", _code(cmd))
+    ]
+    assert exported, (
+        "the per-batch ledger NAME is only ever ASSIGNED, never EXPORTED: a plain assignment does not "
+        "cross a shell boundary, and Phases 1 and 3 are usually later shells — there the name is "
+        f"empty and Phase 1 halts at its own `:?` line. Export it in Phase 0: {exported}"
+    )
+    # …and it must be the DEFINING fence (the one that creates the directory), not some later
+    # re-derivation: an export after the mkdir is an export after the operator already needed it.
+    defining = [
+        fence
+        for fence in _fences()
+        if any(_LEDGER_CREATE.match(_code(c)) for c in fence)
+    ]
+    assert defining, "no fence creates the ledger directory — re-point this guard"
+    for fence in defining:
+        codes = [_code(c) for c in fence]
+        assert any(
+            _LEDGER_NAME.match(c) and re.match(r"^(?:export|readonly|declare|typeset)\b", c)
+            for c in codes
+        ), (
+            "the fence that CREATES the ledger directory does not export the name it requires: the "
+            "operator is told to set a name nothing carries to the phases that use it"
+        )
+    assert "PRESERVES" in _text() and "export attribute" in _text(), (
+        "the doctrine must say that a later PLAIN re-assignment preserves the export attribute — "
+        "otherwise the three `BATCH=\"${BATCH:?…}\"` re-derivations read as undoing the export"
+    )
+
+
+#: The revert line itself, as the blame section spells it (`-m 1` is pinned by its own check).
+_REVERT_COMMAND = re.compile(r"^git\s+revert\b")
+
+
+def test_the_post_revert_re_run_is_a_fenced_run_with_every_detector() -> None:
+    """#10400 review P2: the run that ISSUES the verdict after a drop carried none of the detectors.
+
+    `:604` said *"Then re-run only the failed files, then one more full suite run — both halves."*
+    That is prose. Every detector this doctrine insists on lives in a fence and is enumerated by the
+    guard's `_SUITE_CMD` population, so the one run whose result is read into the Phase 5 verdict row
+    had: no lane assertion, no clean-tree/tree assertion, no detached status with the
+    `rc ∈ {0,1}` COMPLETED predicate, no `tests=` count against the baseline, and no skip carriers.
+    That is verbatim the fail-open this branch already fixed for the baseline (`a12792afe`) and for
+    the `track_b` half (`a6a71c1e5`), one run further on.
+
+    The id source was ambiguous too: Phase 4 tells the operator the id sets ARE `$B/batch-junit.xml`
+    and `$B/batch-trackb.xml`, but after a revert those files still hold the PRE-revert run — so the
+    diff a reader is told to perform compares the baseline against the tree that still contained the
+    culprit. The re-check therefore writes those same paths, CLEARED first.
+
+    Non-vacuity, measured at the pre-fix head: no full-suite fence exists after the revert, so this
+    check reds on its first assert and on nothing else.
+    """
+    fences = _fences()
+    revert_at = _fence_index(lambda fence: any(_REVERT_COMMAND.match(_code(c)) for c in fence))
+    assert revert_at >= 0, "the doctrine no longer documents the culprit revert — re-point this guard"
+    after = [
+        (i, fence)
+        for i, fence in enumerate(fences)
+        if i > revert_at and any(_SUITE_CMD.match(_code(c)) for c in fence)
+    ]
+    assert after, (
+        "the doctrine drops the culprit and then describes the re-run in PROSE: the run whose result "
+        "is read into the verdict row has no fence, so it has none of the detectors this doctrine "
+        "requires of every other suite run (lane, tree, COMPLETED status, count, skips). Give it its "
+        "own fenced both-halves commands"
+    )
+    _index, fence = after[0]
+    codes = [_code(c) for c in fence]
+    runs = [i for i, c in enumerate(codes) if _SUITE_CMD.match(c)]
+    assert any(TRACK_B_FILTER in codes[i] for i in runs), (
+        "the post-revert re-check runs only the deterministic half every full-suite fence must run "
+        "BOTH — a green that excludes `-m track_b` is not a green"
+    )
+    assert any(_LANE_ASSERT.match(c) for c in codes), (
+        "the post-revert re-check does not assert a lane: an unexported run ERRORs every item and "
+        "exits 1, which its own COMPLETED predicate accepts — so the re-check certifies a tree on "
+        "which nothing ran, and it is the run the VERDICT is read from"
+    )
+    assert any("git rev-parse --abbrev-ref HEAD" in c for c in codes), (
+        "the post-revert re-check never names the tree it runs on: the revert commits on "
+        "integration/batch-1, and a later shell can be anywhere — a run on another branch measures a "
+        "tree nobody drops from and nobody lands"
+    )
+    assert any(_STATUS_WRAPPER.match(c) for c in codes), (
+        "the post-revert re-check takes no durable exit status: a killed run prints no summary and "
+        "carries no failure ids, so it reads as BATCH-GREEN"
+    )
+    assert any(re.match(r'^\[\s+-n\s+"\$BATCH_TOTAL"', c) for c in codes), (
+        "the post-revert re-check does not compare its test COUNT against the baseline's"
+    )
+    assert any(_SKIP_COUNT_SUBJECT.search(c) for c in codes), (
+        "the post-revert re-check does not diff SKIPS against the baseline: a skip carries no failure "
+        "id, so neither the status nor the count can see the live suite silently not running"
+    )
+    # …and both report paths the Phase 4 diff reads are CLEARED before the recheck runs, or the diff
+    # compares the baseline against the tree that still contained the culprit.
+    cleared = _cleared(codes)
+    assert {"batch-junit.xml", "batch-trackb.xml"} <= {p.rsplit("/", 1)[-1] for p in cleared}, (
+        "the post-revert re-check does not clear the two reports Phase 4 diffs: `pytest` truncates a "
+        "junit file only in `pytest_sessionfinish`, so the PRE-revert report survives the recheck and "
+        f"the verdict is computed from the tree that still contained the culprit: {sorted(cleared)}"
     )
