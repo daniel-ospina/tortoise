@@ -410,6 +410,27 @@ non-zero status that is not `1` (error), and a timeout is not a git status at
 all, so scoring it as drift would hand an operator *"the document and the tree
 disagree"* about a correct document.
 
+**Status `1` is therefore CORROBORATED, because git's contract assumes a complete
+history and a shallow clone does not have one.** When the
+`measured_at_commit` object is present but graft-unreachable, `--is-ancestor`
+walks the truncated history, finds no path, and exits `1` — the identical status
+an unrelated tree produces. Measured on #10406 (2026-10-31, head `d0cd6c38c`):
+the depth-1 `test` shard of the Python CI run 41183423096 (`test (e)`) reported
+*"`measured_at_commit` … is not an ancestor of `HEAD`"* and reded two required
+tests, while the `fetch-depth: 0` `docs` job of the sibling `CI` run 41183423210
+passed the same claim on the same head — the merge commit IS a descendant of it.
+Reproduced in a real depth-1 clone of this repo: write the
+object into the clone and `git cat-file -t` answers `commit` while
+`--is-ancestor` still exits `1`. So `1` is read as drift only where the
+repository reports its own history as complete
+(`git rev-parse --is-shallow-repository` → `false`); a shallow — or **unresolvable**
+(git cannot say) — checkout gets the `UNVERIFIED` state error above, and the
+`docs` job proves the claim. The `git rev-parse` probe is asked on every status-1
+answer, and only a positive `false` may certify drift: an answer that could not
+be obtained fails **closed** into `UNVERIFIED`, never open into drift. The same
+defect was found and fixed independently on `main` as #10356; this tree carries
+that fix plus the unresolvable arm.
+
 ### Where the guard runs, and which half runs where
 
 Dual-registered on purpose, because the two halves need different checkouts:
