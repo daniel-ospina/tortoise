@@ -5489,12 +5489,16 @@ def _refuse_unpaired_narrative(props: dict, *, door: str,
         `hosted_api._report_narrative_home`, the tenant doors have no receipt
         channel).
 
-    ⚠️ THE REMAINING HOLE, NAMED AND NOT ABSORBED: `create_point`/`update_point`
-    reach the passthrough WITHOUT passing this helper (their own funnels are
-    separate), so `create_point(..., story_arc=…)` still stores the prose on a
-    `:Point` — measured, and it predates this change. Filed as its own issue
-    rather than half-closed here; this helper's message no longer claims
-    otherwise.
+    ⚠️ THE POINT DOORS CALL IT TOO (#10389 review cycle 3): `create_point` and
+    `update_point` have their own funnels, and NEITHER could be left to the fold
+    — the `:Point` fold does not refuse the key, and `update_point` writes raw
+    `SET n += $props` and journals `PointRevised`, so a fold-only deny would make
+    a rebuild DELETE a property the live write accepted (live ≠ replay). Both
+    pass `label="Point"`, which is outside `_NARRATIVE_LABELS`.
+    The residual that REMAINS is a LEGACY one and is #10429's: a journal that
+    already carries `story_arc` for a Point replays through `_upsert_point_props`,
+    which this helper never sees (it is the fold). No new write lands the key
+    on any node after this change.
     """
     if not isinstance(props, dict):
         return
@@ -10986,6 +10990,13 @@ class TortoiseSDK:
         # as the entity funnel (`_refuse_unapproved_kind`).
         self._refuse_unapproved_kind("pointKind", kind)
         _coerce_props(props)
+        # #10000 / §9.1: the POINT door is closed too (#10389 review cycle 3).
+        # The Point fold does not refuse `story_arc`, so this door persisted
+        # §9.1's prose on a node (measured: `create_point("statement",
+        # "a claim", story_arc=<prose>)` → `(:Point {story_arc: <the prose>})`).
+        # `"Point"` is outside `_NARRATIVE_LABELS`, so this refuses on the label.
+        _refuse_unpaired_narrative(props, door="create_point", label="Point",
+                                   journal_armed=bool(self._event_log_path))
         # #9287: the props passthrough can carry `pointKind` itself and it WINS
         # over the positional kind (measured: `create_point("statement", …,
         # pointKind="\u2003statement\u2003")` stored the padded value), so the same
@@ -15884,6 +15895,13 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #10000 / §9.1: `update_point` writes with a raw `SET n += $props` and
+        # consults no point deny-set, so it accepted the narrative and journalled
+        # it as `PointRevised` — measured at #10389 review cycle 3, which is also
+        # why this cannot be left to the fold's `_POINT_DENY` alone: a rebuild
+        # would then DELETE a property the live write accepted (live ≠ replay).
+        _refuse_unpaired_narrative(props, door="update_point", label="Point",
+                                   journal_armed=bool(self._event_log_path))
         # #9287: an UPDATE is a WRITE, and ``pointKind`` is writable through it
         # (measured: ``update_point(id, pointKind='\u2003observation\u2003')``
         # stored the padded value and the gate never demanded it) — the same

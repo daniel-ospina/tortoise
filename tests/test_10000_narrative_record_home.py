@@ -59,7 +59,7 @@ def sdk(tmp_path, monkeypatch):
 
 
 def _prose_on_nodes(sdk) -> list:
-    return sdk._proj.g.query(
+    return sdk._get_proj().g.query(
         "MATCH (n) WHERE (n.story_arc CONTAINS $a) OR (n.content CONTAINS $a) "
         "OR (n.summary CONTAINS $a) RETURN labels(n), n.id",
         params={"a": MARKER}).result_set
@@ -131,6 +131,24 @@ def test_an_empty_journal_path_is_not_an_armed_journal(tmp_path, monkeypatch):
                            story_arc=PROSE, sessionId=SESSION)
     assert "no record to be filed in" in str(exc.value)
     assert _prose_on_nodes(empty) == []
+
+
+@pytest.mark.parametrize("door", ["create_point", "update_point"])
+def test_the_point_doors_refuse_the_narrative(sdk, door):
+    """§9.1 says "not a `Point`", and neither Point door consults a deny-set —
+    `update_point` writes raw `SET n += $props` and journals `PointRevised`
+    (measured, review cycle 3), so a fold-only deny would make live ≠ replay."""
+    if door == "create_point":
+        with pytest.raises(ValueError) as exc:
+            sdk.create_point("statement", "a claim", story_arc=PROSE)
+        assert "cannot be written on a Point" in str(exc.value)
+    else:
+        point = sdk.create_point("statement", "a claim for the update door")
+        pid = point.get("id") or point.get("pointId")
+        with pytest.raises(ValueError) as exc:
+            sdk.update_point(pid, story_arc=PROSE, sessionId=SESSION)
+        assert "cannot be written on a Point" in str(exc.value)
+    assert _prose_on_nodes(sdk) == []
 
 
 def test_a_paired_narrative_with_no_journal_is_refused(tmp_path, monkeypatch):
