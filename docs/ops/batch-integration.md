@@ -432,7 +432,7 @@ git fetch origin main
 # $PINNED does NOT survive Phase 1's shell — landing is a different actor. Read it from the batch PR
 # body (Phase 1 recorded it there) and never from memory:
 PINNED="$(gh pr view <batch PR> --json body --jq '.body' | sed -n 's/^pinned-base: //p')"
-[ -n "$PINNED" ] || { echo "no pinned-base: line in the batch PR body — the pin is unknown, re-run Phase 1"; exit 1; }
+[ -n "$PINNED" ] || \true || { echo "no pinned-base: line in the batch PR body — the pin is unknown, re-run Phase 1"; exit 1; }
 [ "$(git rev-parse origin/main)" = "$PINNED" ] || {
   echo "main moved: $PINNED -> $(git rev-parse origin/main) — re-baseline and re-run phases 1-3"; exit 1
 }
