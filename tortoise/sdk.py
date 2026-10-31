@@ -17519,9 +17519,15 @@ class TortoiseSDK:
             # ONE statement for every affected operator's slots. ``op.op_type``
             # / ``op.direction`` are the node's own record; ``sr.idx`` is the
             # slot position EP reads (``ORDER BY coalesce(r.idx, 0)``).
+            # ⛔ ``WITH op`` between the predicate and the following MATCH is
+            # load-bearing, not style: on the canonical engine a variable
+            # filtered in one clause and re-bound by a LATER clause has its
+            # predicate DROPPED, so the slot rows would come back for OTHER
+            # operators' points (#6976; ``test_no_query_loses_its_id_predicate``).
             _slot_rows = proj.g.query(
                 "MATCH (op:Point) WHERE op.id IN $op_ids "
                 "AND coalesce(op.is_operator, false) = true "
+                "WITH op "
                 "MATCH (op)-[sr:IMPL|NAND]->(inp) "
                 "RETURN op.id, op.op_type, op.direction, sr.idx, inp.id",
                 params={"op_ids": sorted(_repoint_ops)},
@@ -17542,7 +17548,18 @@ class TortoiseSDK:
                 # evidence (``op_idx_known``, #943-review). A door refusing a
                 # shape the load side keeps is the divergence this module warns
                 # against, so the same evidence silences both.
-                if not _srows or any(_sidx is None for _sidx, _ in _srows):
+                # ⛔ The type leg is the SAME stand-down, not a new rule: `idx`
+                # is a GRAPH-SUPPLIED property on a schemaless store, so nothing
+                # constrains it to an int — `record_projection.py` forwards
+                # `payload.get("idx", 0)` uncoerced, so `"idx": "1"` is a live
+                # ingress. A non-int `idx` makes `sorted(_rebuilt)` raise
+                # `TypeError` (int vs str) BEFORE any mutation, turning a legal
+                # supersede into a traceback the guard is not even about. Such a
+                # layout is unprovable exactly like a missing one: stand down.
+                # (`isinstance(True, int)` is True, so a boolean `idx` still
+                # sorts harmlessly with ints.)
+                if not _srows or any(
+                        not isinstance(_sidx, int) for _sidx, _ in _srows):
                     continue
                 _rebuilt: dict[int, set] = {}
                 for _sidx, _sinp in _srows:

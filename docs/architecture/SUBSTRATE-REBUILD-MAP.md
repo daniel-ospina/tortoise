@@ -125,7 +125,7 @@ open **code** family in this workstream with no owner:
 | # | the defect | door |
 |---|---|---|
 | **#9417** | `supersede_point` transfers the **structural** set (`SUPERSEDE_STRUCTURAL_RELS` — the `about*` edges) with a bare `MERGE`, so the binder's confidence is **dropped, not moved** | supersede |
-| **#9727** | the same method re-points the predecessor's **direct** `IMPL|NAND` edges onto the successor with a raw edge `MERGE` that never consults the **targets'** claim classes, minting `derived -[IMPL]-> asserted` (the **operator**-edge arm of the same door is **#10195**) | supersede |
+| **#9727** | the same method re-points the predecessor's **direct** `IMPL`/`NAND` edges onto the successor with a raw edge `MERGE` that never consults the **targets'** claim classes, minting `derived -[IMPL]-> asserted` (the **operator**-edge arm of the same door is **#10195**) | supersede |
 | **#9819** | an `ingest` can **mutate a TERMINAL (retracted/superseded) point** through the content dedup fold — `create_point(dedup=True)` resolves a content match unconditionally | ingest |
 
 **Why they are one lane and not three issues in three epics:** one file

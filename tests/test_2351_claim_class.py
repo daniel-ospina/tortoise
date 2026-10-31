@@ -381,6 +381,42 @@ def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
     assert _operator_rows(lane, old) == []
 
 
+def test_supersede_repoint_leaves_a_non_int_idx_alone(lane):
+    """A slot ``idx`` stored as a STRING stands down too — it must not crash.
+
+    ``idx`` is a graph-supplied property on a schemaless store, so nothing
+    constrains it to an int: ``record_projection.py`` forwards
+    ``payload.get("idx", 0)`` uncoerced, so a record carrying ``"idx": "1"``
+    lands a string slot in a live graph. The guard rebuilds its slots by
+    SORTING ``idx``, and Python ordering is total only within one type —
+    ``sorted({0: ..., "1": ...})`` raises
+    ``TypeError: '<' not supported between instances of 'int' and 'str'``
+    BEFORE any mutation.
+
+    So a legal derived→derived supersede was turned into a traceback by a door
+    whose own contract is "an UNPROVABLE layout is not judged". A non-int
+    ``idx`` is that same class of layout (it names no position any more than a
+    missing one does), so the door stands down exactly as it does for the
+    idx-less shape — and the supersede proceeds, which is what base did.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL|NAND]->(n:Point {id:$old}) "
+        "SET r.idx='1'",
+        params={"op": op["id"], "old": old})
+
+    # Pre-fix this raised ``TypeError`` out of ``sorted(_rebuilt)``.
+    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert _operator_rows(lane, new) == [[op["id"], "IMPL", "1"]]
+    assert _operator_rows(lane, old) == []
+
+
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
 
 def _raw_direct_edge(lane, src, tgt, *, direction):
