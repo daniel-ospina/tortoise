@@ -832,14 +832,27 @@ def test_10437_dry_run_names_the_archives_the_real_run_rewrites(
         assert payload != stale[name], f"{name}.skill was not rebuilt"
 
 
+@pytest.mark.parametrize("drop", [None, "tortoise-decide"])
 def test_10437_the_cli_reports_the_archives_and_dry_run_writes_none(
-        monkeypatch, tmp_path, capsys):
+        monkeypatch, tmp_path, capsys, drop):
     """The operator has to SEE the archive change: an unreported derived artifact
-    is one a reviewer of the diff does not know to look at."""
+    is one a reviewer of the diff does not know to look at.
+
+    ``drop`` makes the pin serve a SUBSET (2 skills instead of 3), which is a
+    shape `_rebuild_archives` supports on purpose and which no other CLI case
+    here covers. It is also what makes this case's derived-count assertion
+    NON-VACUOUS: at the full pin the count is 3, so the literal `3` the review
+    found was indistinguishable from a correct fix. At two skills a literal reds
+    and the derived count does not — the proof the fix could not have when it
+    was written, and the reason the assertion must never go back to a literal.
+    """
     src = REPO / sp.MANIFEST_REL
     pin = tmp_path / "pin.yml"
     shutil.copyfile(src, pin)
     manifest = sp.load_manifest(pin)
+    if drop is not None:
+        del manifest["skills"][drop]
+        pin.write_text(sp.dump_manifest(manifest), encoding="utf-8")
     root = tmp_path / "root"
     _seed_mirror_and_stale_archives(root, manifest)
     upstream_bytes = {entry["upstream_path"]: f"# fresh upstream — {name}\n".encode()
@@ -860,6 +873,14 @@ def test_10437_the_cli_reports_the_archives_and_dry_run_writes_none(
     # converted the `changed` assertions to this rule and left these two.
     archivable = [name for name in sp._build_skill_archives().SKILL_NAMES
                   if name in manifest["skills"]]
+    if drop is not None:
+        # The control that gives the assertion above its teeth: if the count is
+        # spelled as a literal rather than read from the archivable set, it is
+        # WRONG at this pin and the next line says so instead of the failure
+        # surfacing on a future tree.
+        assert len(archivable) != len(sp._build_skill_archives().SKILL_NAMES), (
+            "the subset parametrisation must actually shrink the archivable set, "
+            "otherwise it proves nothing about a literal count")
     assert f"would re-derive {len(archivable)} .skill archive(s)" in out, out
     assert "how-to-use-tortoise.skill" in out, out
     for name, payload in sentinel.items():
