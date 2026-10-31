@@ -749,6 +749,14 @@ def _build_master_from_brief(brief: dict,
         # declares neither, which is still every shipped pack today.
         "pack_hints": {ns: dict(h) for ns, h in
                        (brief.get("pack_hints") or {}).items()},
+        # #9733: the packs' declared relation endpoints, carried on the
+        # master so compact-mode story selection co-selects the kinds a
+        # SELECTED pack's own relations name (``_select_pack_kinds``). Foreign
+        # AND same-namespace partners both ride it (a namespace can be selected
+        # partially). Absent for every pack that declares no endpoint.
+        "pack_refs": {ns: list(r) for ns, r in
+                      (brief.get("pack_refs") or {}).items()
+                      if isinstance(r, (list, tuple))},
         # E2 (#1534): user-personal-state vocabulary — the Tier-A classification
         # hint criterion. NOT kinds (master_kind_forms' section tuple excludes
         # it); rendered into S2/S4 prompt context only.
@@ -955,11 +963,63 @@ def _needs_gloss(kind: str, desc: str) -> bool:
     return False
 
 
-def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
+def _select_pack_kinds(story: str | None, pack_kinds: dict,
+                       pack_refs: dict | None = None) -> dict:
     """Selective pack injection: only sections whose domain words appear in
     the story. Conservative fallback — if nothing matches, return all so no
     needed kind is ever dropped (the flag-on path never calls this — the
-    pack vocabulary is owned by ``_render_master_core_only``)."""
+    pack vocabulary is owned by ``_render_master_core_only``).
+
+    **#9733 — a selected pack's declared REFERENCES come with it.** The result
+    is rendered under "EVERY kind you emit MUST come from this list", so a
+    namespace that selected on its own trigger words but whose relations name
+    ANOTHER namespace's kind offered a closed vocabulary its own declarations
+    could not be spelled in: `packs/investment-portfolio-manager` declares
+    `depends_on: [venture]` and its `marks`/`constrainedBy` endpoints are
+    `venture:investment`, while three of the four `portfolio:` trigger words are
+    not also `venture:` triggers (only the bare `portfolio` one is, and it is
+    also a `pm:` trigger) — a portfolio story therefore lost the position kind
+    its valuation mark exists to value.
+
+    ``pack_refs`` is the brief's reserved ``pack_refs`` section
+    (``{kind: [every kind its own declared relations pair it with]}``, built by
+    ``value_extractor._relation_endpoint_refs``). A partner is added IFF the
+    story already selected a kind that declares the pairing AND the partner is
+    in ``pack_kinds``, and the closure is iterated to a FIXPOINT over the kinds
+    it just added — a foreign kind arrives with the kinds its OWN declarations
+    point at, or the list offers a kind and forbids every kind its declared
+    edges name (the defect this fix exists to remove, one namespace deeper). A
+    graph-gated brief that does not install the dependency simply has nothing to
+    add (fail-open, the same direction as every other branch here). The
+    all-packs fallback returns before this runs: it is already the whole
+    vocabulary.
+
+    ⚠️ Why the CLOSURE OVER REFERENCES and not over the manifest's
+    `depends_on` list, which is how #9733 was filed. Measured at this head, the
+    filing's premise ("only `portfolio` declares `depends_on` today") no longer
+    holds: `dev: [product-strategy, pm]`, `marketing: [product-strategy]`,
+    `product-strategy: [dev]` and `portfolio: [venture]` all declare one. Two
+    of them form a CYCLE (`dev` ↔ `product-strategy`), so transitively
+    co-selecting whole dependency NAMESPACES collapses the narrowing this
+    function exists for — a `marketing:` story would pull
+    marketing+product-strategy+dev+pm (33 of the 47 shipped kinds), and every
+    `dev:` story would pull dev+product-strategy+pm (29). The kinds a selected
+    pack actually references are the ones whose absence makes a declared
+    relation unemittable, and they are named by the declarations themselves — so
+    the closure is taken over THOSE. Measured over the real catalog, the
+    fixpoint leaves every story narrow and leaves ZERO half-offered relations
+    AMONG THE ENDPOINTS THE BRIEF CARRIES — measured 1-24 of the 47 shipped kinds
+    across all 53 trigger words, i.e. never the all-packs set. Both qualifiers are
+    measurements, not hedges: the count is over the endpoints `pack_kinds` holds
+    (a declared endpoint with no `kindDef` never reaches the catalog brief — the
+    narrow-prompt gap recorded in `docs/EXPANSION_PACKS.md` — so no closure can
+    offer it), and the residual set is pinned by
+    `TestCompactReferenceClosure::test_declared_endpoints_absent_from_the_brief_are_known`.
+    A relation is half-offered when exactly one of its two namespaced endpoints is
+    in the list, i.e. exactly the unspellable state this fix exists to remove;
+    `TestCompactReferenceClosure::test_no_relation_is_left_half_offered` pins the
+    metric.
+    """
     if not story:
         return dict(pack_kinds)
     low = story.lower()
@@ -979,7 +1039,33 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
         # a deliberate, fail-open one).
         if triggers is None or any(t in low for t in triggers):
             selected[k] = v
-    return selected or dict(pack_kinds)  # nothing matched → all (safe)
+    if not selected:
+        return dict(pack_kinds)  # nothing matched → all (safe)
+    # #9733: reference closure over the SELECTED kinds' declared pairings,
+    # iterated to a fixpoint — a kind added by the closure brings the kinds ITS
+    # declarations name, or the list offers a kind and forbids the partners of
+    # its own declared edges (the same defect, one namespace deeper: before the
+    # fixpoint, a `dev` story gained `product-strategy:feature` and none of that
+    # namespace's edgemates, taking half-offered relations 2 → 6).
+    refs = pack_refs if isinstance(pack_refs, dict) else {}
+    if refs:
+        worklist = list(selected)
+        while worklist:
+            row = refs.get(worklist.pop())
+            for partner in (row if isinstance(row, (list, tuple)) else ()):
+                # a row built by hand or from JSON may carry garbage: a truthy
+                # non-iterable ROW (`{"a:one": 7}`) raises on the `for` itself,
+                # before any element test runs — and a nested list is
+                # unhashable, an int is not a kind. The RENDER path must never
+                # raise on a malformed master, so the row and each element are
+                # guarded separately — same direction as
+                # `value_extractor._relation_endpoint_refs`' own shape guard,
+                # and as `_values_suffixes`' "the render path must never raise"
+                if (isinstance(partner, str) and partner in pack_kinds
+                        and partner not in selected):
+                    selected[partner] = pack_kinds[partner]
+                    worklist.append(partner)
+    return selected
 
 
 def _stable_hash(s: str) -> int:
@@ -1021,11 +1107,13 @@ def _classify_later_enabled() -> bool:
     callers (sdk, hosted_api, ingest_v2, run_v2_pipeline) inherit it without
     threading a param. Unset/0 → the legacy pipeline: the classify-later
     machinery is entirely off-path and the flag-off renders are
-    byte-identical to main — scoped to the DEFAULT (verbose) render (the
-    compact-mode S2 story-threading is pre-existing and identical to main;
-    the chain enforcer runs unconditionally on every arm and its result key
-    reflects that run; only the additive ``classify_later`` result key is
-    an empty block when the flag is off — see ``extract_session_v2``).
+    byte-identical to main — scoped to the DEFAULT (verbose) render. Compact
+    mode's S2 story-threading is NOT main-identical since #9733: it co-selects
+    the kinds a selected pack's own declared relations pair with, so a flags-off
+    ``TORTOISE_EXTRACTOR_PROMPT=compact`` render differs from main by exactly the
+    closure kinds (the chain enforcer runs unconditionally on every arm and its
+    result key reflects that run; only the additive ``classify_later`` result key
+    is an empty block when the flag is off — see ``extract_session_v2``).
     Value matching is case-insensitive (True/TRUE/ON/yes all enable —
     review FIX B) and goes through the declared truthy contract (#4097)."""
     return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))
@@ -1202,7 +1290,8 @@ def _render_master_compact(master: dict, story: str | None,
     lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
     lines.append(_group("POINTS", master["points"], shuffle=True))
     lines.append(_group("EVENTS", master["events"], shuffle=True))
-    selected = _select_pack_kinds(story, master["pack_kinds"])
+    selected = _select_pack_kinds(story, master["pack_kinds"],
+                                  master.get("pack_refs"))
     lines.append(_group("PACK KINDS", selected, shuffle=True,
                         suffixes=_values))
     # THE COMPACTION RULE — story selection may drop HINTS, never the GUARANTEE
@@ -8674,10 +8763,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     runs UNCONDITIONALLY on every arm (the A/B holds it constant) and may
     deterministically rewire about_entities on the flag-off path — its
     result key reflects that run (``items_checked`` >= 1 whenever
-    about_entities exist on any arm); (b) compact mode keeps its
-    pre-existing story-threaded pack selection (``_select_pack_kinds``,
-    identical in main) — the byte-identity guarantee is pinned to the
-    default verbose render; (c) two ADDITIVE result keys (``chain_enforcer``
+    about_entities exist on any arm); (b) compact mode's story-threaded
+    pack selection (``_select_pack_kinds``) is deliberately NOT main-identical
+    since #9733: it co-selects the kinds a selected pack's own declared
+    relations pair with, to a fixpoint, so a compact render of a story that
+    selects a ref-declaring pack differs from main by those kinds. The
+    byte-identity guarantee stated above is pinned to the DEFAULT VERBOSE
+    render, which is unchanged; (c) two ADDITIVE result keys (``chain_enforcer``
     / ``classify_later``) are always present — only ``classify_later`` is
     an empty block when the flag is off.
     When set (or the env toggle is on), the stage order becomes

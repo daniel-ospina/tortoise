@@ -1544,7 +1544,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     return scope is None or bool(scope.search(line))
 
 # `tortoise/sdk.py:14725`, ``tortoise/projection/edges.py:2832-2857``, `edges.py:747`,
-# ``tortoise/extractor_v2.py:8975-8979``
+# ``tortoise/extractor_v2.py:9062-9066``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
@@ -1912,6 +1912,87 @@ def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     assert owned, "no cite in docs/00_index.md is in scope — the index row is unwatched"
     assert all("#7949" in shipped_rows[shipped.count("\n", 0, m.start())]
                for m in owned)
+
+
+#: A BARE line cite — `` `:NNNN` `` / `` `:NNNN-NNNN` `` with no file in front of
+#: it. `_BUNDLE_CITE` cannot match it (a bare number names no tree to look in), so
+#: the sweep below cannot resolve it: that is the blind spot this leg covers from
+#: the other side, and it is how 20 bare cites rotted at `7b6b2180f` — the commit
+#: set out to re-derive this bundle's cites, re-derived the ones with a `file.py:`
+#: prefix, and left the continuations pointing at unrelated code while the cite
+#: gate stayed green.
+_BARE_CITE = re.compile(r"(?<![\w:./])`(:\d+(?:-\d+)?)`")
+
+#: The documents whose prose prints the per-surface numbers. `E1-E5-PROOFS.md`,
+#: the probes and `EXTRACTOR-V4-ARCHITECTURE.md` do not restate the flag/gate set,
+#: so they are not this leg's business (their own cites are swept above).
+_BARE_CITE_DOCS = (
+    ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+    ("docs/00_index.md", _REPO / "docs/00_index.md"),
+)
+
+
+def _cited_spans(doc_name: str, path: Path) -> set[str]:
+    """Every `:N` / `:N-M` this bundle's rows cite, bare OR prefixed.
+
+    Prefixed cites are normalised to the same ``:N`` shape so one assertion can
+    read both: the prose writes `extractor_v2.py:8683` and `:8703` in the same
+    sentence, and the question here is only WHICH LINES the document names.
+    """
+    text = path.read_text(encoding="utf-8")
+    rows = text.splitlines()
+    spans: set[str] = set()
+
+    def owned(pos: int) -> bool:
+        return _bundle_in_scope(doc_name, rows[text.count("\n", 0, pos)])
+
+    for m in _BUNDLE_CITE.finditer(text):
+        if owned(m.start()):
+            spans.add(":" + m.group(2) + ("-" + m.group(3) if m.group(3) else ""))
+    for m in _BARE_CITE.finditer(text):
+        if owned(m.start()):
+            spans.add(m.group(1))
+    return spans
+
+
+def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
+    """The S2.2/S2.3 prose prints the numbers `_EXTRACTOR_SITES` DERIVES — or reds.
+
+    `README.md` states the rule this pins: *"The cites now live in ONE table keyed
+    by the surface (`_IDLE_CITES`)"*. That claim is only true if moving a gate in
+    `extractor_v2.py` moves the prose with it, and nothing enforced it: the table
+    was re-derived for the flag-on cause while the paragraph around it kept the
+    pre-insertion numbers, so the bundle argued from `vet_enabled` at `:8683` and
+    then cited `:8684`/`:8806` for gates that had moved to `:8771`/`:8893`.
+
+    Each site is read out of the TREE by `_EXTRACTOR_SITES` (`_extractor_cite` /
+    `_extractor_items_gate`), so this is a cross-artifact check between two things
+    that must agree — never a third typed table. Non-vacuity, measured at
+    `7b6b2180f`: the pre-fix README carried `:8565`/`:8616`/`:8684`/`:8806` and
+    `:8965`/`:8975`, and this leg reds on every one of them, because the derived
+    numbers (`:8652`, `:8703`, `:8771`, `:8893`, `:9052`, `:9062`) appear nowhere
+    in it. It also reds if a site is cited by its RANGE START only while the
+    document prints the wrong half of the span, which is how `:8478-8481` (a
+    docstring) survived a `:8562-8565` (the fail-open `except`) re-derivation.
+    """
+    for surface, sites in _EXTRACTOR_SITES.items():
+        for name, site in sites.items():
+            if name == "init_fail":
+                # named only by `_IDLE_CITES`, which `_EXTRACTOR_SITES` pins
+                # directly; the prose never prints this one.
+                continue
+            start = site.split("-", 1)[0]
+            for doc_name, path in _BARE_CITE_DOCS:
+                spans = _cited_spans(doc_name, path)
+                # a single-line site is cited as-is; a range is cited either
+                # whole or by its start line (`:9052` for `:9052-9058`)
+                assert site in spans or start in spans, (
+                    f"{doc_name} does not cite `{site}` "
+                    f"(`{surface}.{name}`), which extractor_v2.py carries at "
+                    f"{site} — the prose's per-surface numbers and the probe's "
+                    f"tree-derived table have drifted apart. Re-derive the "
+                    f"document's cites; do not relax this leg. "
+                    f"cited spans: {sorted(spans)}")
 
 
 # ── E2's blocker names the LIVE half, not the closed render issue ─────────

@@ -52,7 +52,13 @@ NOT promised:
   carried a line per reader because it was re-derived at a pin); `#7948`
   symbol-keyed it, because a pinned line reds every unrelated code move in six
   large files and its test could not tell a correct line from a wrong one that
-  stayed inside the span.
+  stayed inside the span. **`#10410` adds a second, narrower exception** —
+  `_PIN_RELATIVE_CITES` below pins the ten numbers whose passage declares a
+  revision pin, and it exists for the one failure this file's design cannot
+  see (see that test's docstring): a number relative to a *pin* is wrong the
+  moment it is swept with the `main→head` line delta, and the symbol it names
+  is still resolvable at HEAD the whole time, so every symbol-keyed check here
+  stays green over a citation that lands on a docstring.
 - Citations whose passage quotes no symbol are out of scope (the document
   carries ~30 of those); this pins the class the issue described.
 - Issue-state claims (`#NNNN` open/closed) are NOT resolved over the network —
@@ -1342,4 +1348,73 @@ def test_the_carrier_entry_claims_91_only_for_what_91_carries():
     assert not missing, (
         f"the entry no longer reports {missing} at all — the repair is to say "
         "WHERE those statements live, not to stop recording them"
+    )
+
+
+# ── the numbers a `main→head` delta sweep must never touch (#10410) ──────────
+
+#: `(the pin the passage declares, the number as the document spells it, a
+#: phrase the SAME line must carry)`. The third field is what stops a row being
+#: satisfied by the number landing on some unrelated line.
+#:
+#: Every number here was verified **against the pin blob**, not against `main`:
+#: `git show <pin>:tortoise/extractor_v2.py | sed -n '<N>p'` names the symbol
+#: the passage names, at the pin the passage declares. That is the whole point —
+#: these are the values the document's own header rule promises, and the third
+#: field is the symbol they resolve to there.
+#:
+#: ⚠️ **Re-pinning the document means re-deriving this table**, with the same
+#: command. Do not "fix" a red here by copying the number out of the document:
+#: the document is what is being checked.
+_PIN_RELATIVE_CITES = (
+    # §4.4's `_render_search_results` — the string the renderer actually emits.
+    ("7d348d351", "extractor_v2.py:2353", "`_render_search_results`"),
+    # §10's transcript citations, all three at the same `653980445` pin.
+    ("653980445", "extractor_v2.py:1755", "the `render_s2_prompt` call"),
+    ("653980445", ":1775", 'the `+ ("\\n\\n" + transcript)` tail'),
+    ("653980445", ":1738", 'the over-cap `return ""`'),
+    # Default-pin (`c79ba1cf2`) numbers under the header's base rule.
+    ("c79ba1cf2", "extractor_v2.py:4845", "`merge_embed_lists(embed_list, s4)` runs at"),
+    ("c79ba1cf2", "extractor_v2.py:4467", "`_collect_classify_items(embed_list)`"),
+    ("c79ba1cf2", "extractor_v2.py:3967-3969", "`execute_embed`"),
+    ("c79ba1cf2", "extractor_v2.py:3021+", "`classify_consolidation`"),
+    ("c79ba1cf2", "extractor_v2.py:1744-1778", "`_derive_queries`"),
+    ("c79ba1cf2", "extractor_v2.py:2284", "`merge_embed_lists` (def"),
+)
+
+
+def test_the_pin_relative_cites_are_not_swept_with_a_main_to_head_delta():
+    """The one failure this file's symbol-keyed design cannot see (#10410).
+
+    A number relative to a **pin** is not a `main` number, so sweeping it with
+    this branch's own `main→head` line delta corrupts it — and nothing else here
+    notices, because the symbol each passage quotes still resolves at HEAD (it
+    is `extractor_v2.py` that moved, not the doc). Measured on `4bbdbb710`: all
+    ten pin-relative numbers had been shifted by the branch's insertion delta,
+    landing the §4.4 and §10 promises on docstrings, the §D table's rows on a
+    comment and a blank line, and leaving §5 saying a call `runs at :4930` while
+    the table said it is `called at :4845`.
+
+    The domain, not the delta, is the discriminator: these passages declare a
+    revision pin, so their numbers belong to that revision. `:555`'s
+    `run_s2(...)` cite is deliberately NOT here — its own passage says it is
+    cited *HEAD-relative*, and `tests/test_7949_capstone_measure.py` sweeps it.
+
+    Non-vacuity: on `4bbdbb710` eight of these ten rows fail (the two
+    `653980445` rows below were never touched, and are pinned so the next sweep
+    of that group is visible too).
+    """
+    lines = _doc_text().splitlines()
+    moved = [
+        f"`{cite}` (exact at `{pin}`) is gone from every line that also names "
+        f"{anchor} — a pin-relative number swept with a `main→head` delta"
+        for pin, cite, anchor in _PIN_RELATIVE_CITES
+        if not any(cite in line and anchor in line for line in lines)
+    ]
+    assert not moved, (
+        "the document's pin-relative citations were re-derived against the wrong "
+        "revision. Restore the value that is exact at the pin each passage "
+        "declares, or re-pin the document and re-derive this table — do not "
+        "carry a `main` number into a passage that names a pin:\n  "
+        + "\n  ".join(moved)
     )
