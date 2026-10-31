@@ -2903,7 +2903,53 @@ try {
       + 'graph rebuilds lose');
   }
 
-  // (17) #9836 review (P2) — the NO-SELF-EDGE guard's descriptor, on the RECORD
+  // (19) #9836 review — an `Event` target is keyed by its `eventId`, NOT by its
+  //      `id`. This is the one label whose two candidate identities DIVERGE in a
+  //      live-reachable shape: `entities._event_guarded_merge`'s SUFFIX branch
+  //      MERGEs on the suffixed `eventId` while the props it writes keep
+  //      `id = <candidate>` (`live.py::EPISTEMIC_ID_KEYS` states it and forbids
+  //      using the coalesced value as an identity). The record files and resolves
+  //      an Event under `node_key` = `event_id`, so a descriptor carrying the
+  //      graph's `id` would resolve a DIFFERENT Event than the one the edge
+  //      points at — the record richer than the graph, the one direction
+  //      Interface A forbids. The descriptor here carries `eventId`
+  //      (`cand-9836`), and the Event row below is filed under it; `id` is the
+  //      shared candidate and must NOT be what resolves.
+  //      The record below is the SDK PRODUCER's own shape — a flat `eventId` and
+  //      NO `id` (`sdk.py`: `payload = {**inner, "eventId": resolved}` with `id`
+  //      dropped) — so `node_key` is the resolved `eventId`. That is what makes
+  //      this case discriminate: a resolver that reached for the node's `id`
+  //      finds no `id` here at all (0 rows) instead of the row the graph points at.
+  const eventTarget = {
+    type: 'EventRecorded', ts: '2026-10-25T00:17:01Z',
+    eventId: 'cand-9836-abcd1234', eventKind: 'meeting',
+  };
+  const eventMoved = await run('9836-wasderivedfrom-event',
+    supersedeRecords('p1', 'p2', 'cand-9836-abcd1234', {
+      preamble: [eventTarget],
+      edgeType: 'wasDerivedFrom',
+      targetLabel: 'Event',
+      link: { type: 'DirectEdgeCreated', ts: '2026-10-25T00:17:02Z',
+        id: 'p1:wasDerivedFrom:cand-9836-abcd1234',
+        edge_type: 'wasDerivedFrom', src: 'p1', tgt: 'cand-9836-abcd1234',
+        source_label: 'Point', target_label: 'Event' },
+    }));
+  if (eventMoved.length !== 1 || eventMoved[0].src_key !== 'p2'
+      || eventMoved[0].tgt_label !== 'Event'
+      || eventMoved[0].tgt_key !== 'cand-9836-abcd1234') {
+    throw new Error('#9836 Event target: rows = '
+      + `${JSON.stringify(eventMoved)} — an Event target is addressed by its `
+      + '`eventId` (what this route files it under) and must MOVE to the '
+      + 'successor filed as Event/<eventId>. 0 rows is the arm resolving nothing; '
+      + 'a tgt_key that is not the eventId is the arm resolving by `id`'
+    );
+  }
+
+  // (18) the SAME descriptor with the PRE-FIX journal beside it. The pair is the
+  //      point: the `deleteOnly` flag is the only difference, so this case proves
+  //      the (17) assertion above is not vacuous — without the descriptor the row
+  //      the pre-supersede `DirectEdgeCreated` wrote stays at the retired point.
+  //      The NO-SELF-EDGE guard's descriptor, on the RECORD
   //      route. When the structural target IS the successor the live leg deletes
   //      the edge and transfers nothing, and it journals a `delete_only`
   //      `DirectEdgeRepoint`. For the RECORD that descriptor is not a no-op — it
