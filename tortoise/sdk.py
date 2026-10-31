@@ -4468,6 +4468,173 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     return out
 
 
+# ── #10192: a lifecycle CARRIER requires the STATUS it implies ─────────────
+#
+# An ``:Object`` / ``:Subject`` carries TWO PRIMARY lifecycle carriers
+# (``supersededBy``, ``supersededAt``) and a ``status`` that is DERIVED — the
+# record never stores it (``record_projection``'s ``never_store`` for both layer
+# tables; the schema refuses the name in ``props``, #8179/#8263). The record's
+# procedural fold (``public.object_current_status`` /
+# ``public.subject_current_status``, ``20261012000004_record_procedural.sql``)
+# therefore derives that status from the CARRIERS ALONE:
+#
+#     CASE WHEN superseded_by IS NOT NULL OR superseded_at IS NOT NULL
+#          THEN 'superseded' ELSE 'live' END
+#
+# So a carrier written WITHOUT the status IS persisted, and the record answers
+# ``'superseded'`` for a node the graph holds ``'live'``. Every consumer of that
+# fold then treats a LIVE entity as TERMINAL: the record-sourced rebuild derives
+# ``'superseded'`` from the same carriers
+# (``cache_projection.DERIVED_FROM_RECORD``, #9974), ``live._terminal_excluded``
+# drops the node from recall, and ``entity_identity.resolve_entity_id`` refuses
+# its name. Measured before this guard (and re-measured in
+# ``tests/test_status_projection.py``): ``update_entity(o, supersededBy='v2')``,
+# ``update_entity(o, supersededAt='…')``, ``update_entity(o, supersededBy='')``
+# and ``create_object('eta', props={'supersededBy': 'eta-v2'})`` were ALL
+# accepted, each journalling ``EntityMutated op=supersede`` with the carrier and
+# nothing else — ``classify_entity_mutation_op`` reads a record carrying
+# ``supersededBy`` as a supersession "whatever else it carries", which is
+# precisely why the door must require the pair to be coherent.
+#
+# The same holds for the SNAKE spelling of the same column — measured on this
+# guard's first head, which listed the camelCase pair only and was therefore
+# INERT against ``update_entity(o, superseded_by='v2')`` and
+# ``create_object('eta', superseded_by='eta-v2')`` (both ACCEPTED, both writing
+# ``public.object.superseded_by``). Hence the derived surface below:
+# _LIFECYCLE_CARRIER_COLUMNS + ``_lifecycle_carrier_keys``.
+#
+# ⛔ The coherence belongs at the WRITE DOOR — not in the record's fold and not
+# in a CHECK constraint:
+#   * The record CANNOT enforce it: ``status`` is not a column there (that IS
+#     §2.6's DERIVED half), so the only relational check available would be on
+#     the carriers — and BOTH half-populated shapes are legitimate record rows
+#     (a legacy id-only ``ObjectSuperseded`` writes ``superseded_at`` alone and
+#     folds ``supersededBy=''``; an ``op=supersede`` mutation may write
+#     ``superseded_by`` with no instant). A ``CHECK`` on the pair would refuse
+#     rows the record still mints, and no constraint can relate the carriers to
+#     a value that is never stored.
+#   * The fold cannot: it is a view over ``public.object`` and cannot see the
+#     graph, and a second rule there would give the cache and the record two
+#     different folds — the defect #9974 exists to remove.
+# The invariant the fold ASSERTS is therefore enforced where the write is
+# COMPOSED: these carriers may not be written unless the node is (or already
+# is) ``'superseded'``. That is the fold's own premise — ``_fold_object_
+# superseded`` writes ``status`` + both carriers in ONE statement
+# (``projection/entities.py``) and ``commit_ops._apply_subject_supersession``
+# does the same in one state map — so the coherent form is the only form any
+# shipped producer writes; the generic entity doors were the one way to write
+# a bare carrier.
+#
+# ⛔ The MIRROR shape (``status='superseded'`` with NO carrier) is deliberately
+# OUT of this guard: it makes a rebuild REVIVE a node rather than bury a live
+# one, it is a shape in use (``update_entity(subject, status='superseded')``),
+# and it is already named as #9974's window. Refusing it would be an over-block.
+#
+# ⛔ THE GUARDED SURFACE IS THE RECORD'S CARRIER *COLUMNS*, NOT A HAND-WRITTEN
+# PAIR OF PROP NAMES (review P1 — measured on the pre-fix head: the camel-only
+# tuple was INERT against the snake spelling). ``_split_properties`` assigns a
+# props key to a record COLUMN through ``record_projection.snake``, so
+# ``supersededBy``, ``superseded_by`` and ``SupersededBy`` all land in the SAME
+# ``superseded_by`` column and feed the SAME ``IS NOT NULL`` fold — while the
+# guard, listing only the camelCase pair, refused just the first of the three:
+#
+#     update_entity(obj, supersededBy="v2")   -> REFUSED
+#     update_entity(obj, superseded_by="v2")  -> ACCEPTED  (record column written)
+#     create_object("eta", superseded_by="eta-v2") -> ACCEPTED
+#
+# A refusal only holds if it covers EVERY channel that can put a value in the
+# guarded column (the same reading the PostgreSQL CHECK-constraint semantics
+# give a multi-column constraint), so the predicate is derived: a props key is a
+# carrier iff ``snake(key)`` is one of the record's carrier columns.
+_LIFECYCLE_CARRIER_COLUMNS = frozenset({"superseded_by", "superseded_at"})
+
+#: The labels the carriers gate (the two whose record tables carry
+#: ``superseded_by``/``superseded_at`` PRIMARY columns — ``20261012000002_record
+#: _semantic.sql`` :31-32 / :82-83; no other layer table has them).
+_LIFECYCLE_CARRIER_LABELS = ("Object", "Subject")
+
+#: The ONE status value that makes a carrier coherent — the record fold's own
+#: literal, so the door and the view cannot be spelled differently.
+_SUPERSEDED_STATUS = "superseded"
+
+
+def _lifecycle_carrier_keys(props: dict) -> dict[str, str]:
+    """The lifecycle CARRIERS this write carries, as ``{spelling: column}``.
+
+    #10192 review P1. The membership test is the RECORD's own prop→column rule
+    (``record_projection.snake``), imported here rather than restated: a local
+    copy of the camel→snake rule would be a second spelling of the surface the
+    guard is supposed to mirror, and the two would drift exactly as the
+    camel-only tuple drifted from ``_split_properties``.
+
+    A present ``None`` is not a carrier (the documented CLEAR), and an empty
+    string IS one — the record view reads it with ``IS NOT NULL``.
+    """
+    from tortoise.record_projection import snake  # local: avoids import weight
+
+    out: dict[str, str] = {}
+    for key, value in props.items():
+        if value is None:
+            continue
+        column = snake(key)
+        if column in _LIFECYCLE_CARRIER_COLUMNS:
+            out[key] = column
+    return out
+
+
+def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
+                                   stored_status: str | None = None) -> None:
+    """Refuse a lifecycle CARRIER whose node is not (becoming) ``superseded``.
+
+    #10192. The predicate is the RESULT of the write, not the presence of a
+    ``status`` key: ``props['status']`` when the caller supplies one, otherwise
+    the node's STORED status (``stored_status`` — probed by the caller; ``None``
+    on the create door, where the fold's ``'live'`` seed is what the write will
+    leave). A carrier is a key the write CARRIES — a present ``None`` is the
+    documented CLEAR (``supersededBy=None``), not a carrier, so clearing stays
+    writable.
+
+    Reading the RESULT rather than demanding a ``status`` argument is what keeps
+    this a coherence guard and not a blanket ban: writing a stamp onto a node
+    that is ALREADY ``'superseded'`` leaves the graph and the record agreeing
+    (the record's fold is carrier-based and monotone), so it stays writable.
+    Anything that would leave a carrier on a node the graph does not call
+    ``'superseded'`` is refused — the state the record's ``IS NOT NULL`` fold
+    would misread as terminal.
+
+    WHICH KEYS COUNT is decided by ``_lifecycle_carrier_keys`` — i.e. by the
+    record's own prop→column mapping, so the snake spellings are refused exactly
+    as the camelCase ones are (review P1; the camel-only list was inert against
+    them).
+
+    The refusal is a ``ValueError`` raised BEFORE the caller's first write, so a
+    refused call leaves the graph byte-identical and appends no journal record
+    (the journal is the record's only producer, so no carrier can reach
+    ``public.object``/``public.subject``).
+    """
+    carriers = sorted(_lifecycle_carrier_keys(props).items())
+    if not carriers:
+        return
+    status = props.get("status", stored_status)
+    if status == _SUPERSEDED_STATUS:
+        return
+    named = ", ".join(f"{key!r} (record column {column!r})"
+                     for key, column in carriers)
+    raise ValueError(
+        f"{named} on a :{label} is a lifecycle CARRIER and cannot be "
+        f"written with status={status!r} (through {surface}). The record "
+        f"derives an Object's/Subject's status from the carriers ALONE "
+        f"(public.object_current_status: superseded_by IS NOT NULL OR "
+        f"superseded_at IS NOT NULL -> 'superseded'), so a carrier written "
+        f"without status='superseded' makes the record report a LIVE node as "
+        f"'superseded' -- and a record-sourced rebuild then rebuilds it "
+        f"TERMINAL, dropping it from recall and refusing its name (#10192). "
+        f"Write the coherent triple -- status='superseded' together with the "
+        f"carrier(s) -- or CLEAR the carriers with supersededBy=None / "
+        f"supersededAt=None."
+    )
+
+
 # ── #9964: the kind decides the layer ──────────────────────────────────────
 #
 # ONE authority answers "which layer does this kind belong to?"
@@ -37381,6 +37548,19 @@ class TortoiseSDK:
                                     reject_belief_props=True)
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
+        # #10192: the CREATE door is the SECOND way to write a lifecycle CARRIER
+        # without its status, and it is not merely a shape of its own: the fold
+        # behind it (`_upsert_object` / `_upsert_subject`) MERGEs, so an
+        # ON-MATCH re-create reaches an EXISTING node too — a guard on
+        # `update_entity` alone is bypassable in one call. `_entity_door_props`
+        # has already seeded `status='live'`, so a caller-supplied carrier is
+        # refused here unless the same call supplies `status='superseded'`;
+        # there is no stored status to consult (a born-superseded create that
+        # names the status stays writable). Nothing is written yet, so the
+        # refusal leaves the graph untouched and journals nothing.
+        if label in _LIFECYCLE_CARRIER_LABELS:
+            _refuse_bare_lifecycle_carrier(
+                props, label=label, surface="create_entity")
         proj = self._get_proj()
         # Build event dict. (#2296 review) The ENVELOPE owns `type`: the
         # `**props` splat would otherwise let a caller prop of that name become
@@ -38418,6 +38598,32 @@ class TortoiseSDK:
         #
         # A union vocabulary would close the validation half and leave the
         # journal half: journaling is what decides this mechanism.
+        #
+        # ── #10192: a lifecycle CARRIER requires the STATUS it implies ──
+        # Placed HERE, ahead of the Point `status` arm below, because that arm is
+        # this method's FIRST WRITE: a refusal after it would tell the caller the
+        # call failed while the status change had already landed and been
+        # journaled (the atomicity rule #9287 established for the sibling gate).
+        # Target-aware by two indexed id probes, and only when this call is
+        # actually WRITING a carrier (`_lifecycle_carrier_keys` skips a `None`
+        # CLEAR — which is not a carrier — and tests the key through the
+        # record's own prop→column rule, so `superseded_by` is caught exactly
+        # as `supersededBy` is: review P1). The RESULT status is what decides —
+        # `props['status']` when supplied, else the node's stored one — so
+        # adding a stamp to an ALREADY superseded node stays writable while a
+        # carrier that the record's `IS NOT NULL` fold would misread as terminal
+        # does not. See `_refuse_bare_lifecycle_carrier` for the mechanism.
+        if _lifecycle_carrier_keys(props):
+            for _carrier_label in _LIFECYCLE_CARRIER_LABELS:
+                _carrier_rows = proj.g.query(
+                    f"MATCH (n:{_carrier_label} {{id:$id}}) RETURN n.status",
+                    params={"id": id_val}).result_set
+                if not _carrier_rows:
+                    continue
+                _refuse_bare_lifecycle_carrier(
+                    props, label=_carrier_label, surface="update_entity",
+                    stored_status=_carrier_rows[0][0])
+                break
         if "status" in props:
             _pt_hits = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN count(n)",
