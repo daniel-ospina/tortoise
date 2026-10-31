@@ -52,11 +52,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: cannot disagree with either. A third copy under `website/skills/` was tried
 #: and removed: it added a hand-kept duplicate of every skill's markdown, which
 #: the `docs` lint gate then flagged per new file, for no consumer.
-SERVED_SKILLS = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "skills"
+SERVED_SKILLS_REL = (Path("website") / "apps" / "dashboard" / "public"
+                     / "skills")
+SERVED_SKILLS = REPO_ROOT / SERVED_SKILLS_REL
 
 #: The docs origin serves the built archives at
 #: https://tortoise.premiselabs.co/skills/<name>.skill.
-SKILLS_DIR = REPO_ROOT / "website" / "skills"
+SKILLS_DIR_REL = Path("website") / "skills"
+SKILLS_DIR = REPO_ROOT / SKILLS_DIR_REL
 
 #: Every skill the ChatGPT card hands over. Keep in step with
 #: website/apps/dashboard/src/harnesses.js (SKILL_ARCHIVE_NAMES) and
@@ -83,17 +86,17 @@ _ALLOWED_ARGV = frozenset({(), ("--check",)})
 _FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 
 
-def archive_path(name: str) -> Path:
-    return SKILLS_DIR / f"{name}.skill"
+def archive_path(name: str, root: Path = REPO_ROOT) -> Path:
+    return root / SKILLS_DIR_REL / f"{name}.skill"
 
 
-def source_path(name: str) -> Path:
-    return SERVED_SKILLS / name / "SKILL.md"
+def source_path(name: str, root: Path = REPO_ROOT) -> Path:
+    return root / SERVED_SKILLS_REL / name / "SKILL.md"
 
 
-def build(name: str) -> bytes:
+def build(name: str, root: Path = REPO_ROOT) -> bytes:
     """Bytes of the `.skill` archive for `name` (a zip with ONE entry)."""
-    src = source_path(name)
+    src = source_path(name, root)
     if not src.is_file():
         raise SystemExit(f"missing source skill: {src}")
     import io
@@ -105,6 +108,39 @@ def build(name: str) -> bytes:
         info.compress_type = zipfile.ZIP_DEFLATED
         zf.writestr(info, src.read_bytes())
     return buf.getvalue()
+
+
+def rebuild(root: Path = REPO_ROOT, names=None) -> list[str]:
+    """Write every STALE archive under `root`; return the names written.
+
+    The callable half of the `--check`/write pair, so the step that INVALIDATES
+    an archive can re-cut it without shelling out. That is the whole point
+    (#10423): `tools/served_skills_parity.py --sync` re-derives the SERVED copy
+    — the archive's only source — and used to leave the archive stale, so the
+    documented remedy for mirror drift produced a tree that reds
+    `test_9660_skill_archive_holds_exactly_its_own_skill`. Twice in two days:
+    cd7410b80 (#9750 round 3) and f045ac953 (#10423), same test, same rebuild.
+
+    Byte-stable: `_FIXED_DATE` plus the source bytes alone decide the archive,
+    so rebuilding an already-current archive writes nothing and reports nothing.
+    A name with no served source under `root` is SKIPPED rather than raising —
+    a caller may be driving a partial tree, and the archive of a skill that
+    does not exist there is not this function's verdict to give (the parity
+    gate reports a missing served copy).
+    """
+    wanted_names = SKILL_NAMES if names is None else tuple(names)
+    written: list[str] = []
+    for name in wanted_names:
+        if not source_path(name, root).is_file():
+            continue
+        target = archive_path(name, root)
+        payload = build(name, root)
+        if target.is_file() and target.read_bytes() == payload:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        written.append(name)
+    return written
 
 
 def main(argv: list[str]) -> int:

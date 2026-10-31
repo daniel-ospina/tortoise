@@ -57,6 +57,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -588,6 +589,72 @@ def _sync_fixture(tmp_path, monkeypatch, head: str, upstream_bytes: dict[str, by
     root = tmp_path / "root"
     _pin_upstream(monkeypatch, manifest, head, upstream_bytes)
     return pin, manifest, root
+
+
+def test_4643_sync_re_cuts_the_derived_skill_archives_it_invalidates(monkeypatch, tmp_path):
+    """`--sync` must leave a tree that passes EVERY gate its own bytes feed.
+
+    The served copy is the `.skill` archive's only source, so a re-derivation
+    that does not re-cut the archive leaves a stale derived artifact behind —
+    and the operator followed the documented remedy, so nothing in the output
+    said so. Measured twice in two days, same test each time: cd7410b80 (#9750
+    round 3) and f045ac953 (#10423).
+
+    Vacuity: pre-fix `sync()` never touched `website/skills/*.skill`, so the
+    archive below keeps the bytes of the OLD served copy and both assertions
+    fail. The archive is created from the stale copy BEFORE the sync, which is
+    what makes this a real drift rather than a missing file.
+    """
+    sys.path.insert(0, str(REPO))
+    from tools import build_skill_archives as bsa
+
+    src = REPO / sp.MANIFEST_REL
+    pin = tmp_path / "pin.yml"
+    shutil.copyfile(src, pin)
+    manifest = sp.load_manifest(pin)
+    root = tmp_path / "root"
+    for entry in manifest["skills"].values():
+        dest = root / entry["served_path"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"---\nname: stale\n---\n# the OLD served copy\n")
+    # The archives exist and are CURRENT for the old copy — the state a previous
+    # sync (or a previous commit) leaves behind.
+    assert sorted(bsa.rebuild(root)) == sorted(bsa.SKILL_NAMES), "fixture archives"
+
+    upstream_bytes = {e["upstream_path"]: b"---\nname: shipped\n---\n# NEW upstream\n"
+                      for e in manifest["skills"].values()}
+    _pin_upstream(monkeypatch, manifest, "c" * 40, upstream_bytes)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert sorted(result.archives) == sorted(bsa.SKILL_NAMES), (
+        "sync re-derived every served copy, so every archive is stale: "
+        f"rebuilt {result.archives!r}")
+    for name in bsa.SKILL_NAMES:
+        served = bsa.source_path(name, root).read_bytes()
+        with zipfile.ZipFile(bsa.archive_path(name, root)) as zf:
+            payload = zf.read(f"{name}/SKILL.md")
+        assert payload == served, f"{name}.skill still holds the pre-sync bytes"
+    # Both gates the tree ships with now agree — the actual defect was that
+    # `--check` (parity) was green while the archive arm was red.
+    assert sp.check_local(sp.load_manifest(pin), root) == [], "sync output must pass parity"
+    assert bsa.rebuild(root) == [], "sync output must leave no stale archive"
+
+
+def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
+    """`--dry-run` wrote nothing, so it re-cuts nothing — including archives."""
+    sys.path.insert(0, str(REPO))
+    from tools import build_skill_archives as bsa
+
+    pin, manifest, root = _sync_fixture(
+        tmp_path, monkeypatch, "d" * 40,
+        {e["upstream_path"]: b"# fresh upstream\n"
+         for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+    result = sp.sync(root, pin, attempts=1, backoff=0, dry_run=True)
+
+    assert result.archives == (), f"--dry-run rebuilt {result.archives!r}"
+    assert not (root / bsa.SKILLS_DIR_REL).exists(), (
+        "--dry-run must not create the docs-origin archive directory")
 
 
 def test_4643_sync_to_a_non_head_commit_is_not_a_pin_its_own_check_rejects(

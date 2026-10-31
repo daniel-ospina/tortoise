@@ -94,9 +94,12 @@ USAGE
   uv run python tools/served_skills_parity.py --sync --commit <sha>
 
 ``--sync`` is the DERIVATION: it fetches upstream (HEAD, or ``--commit``),
-writes each served copy byte-for-byte and re-cuts
-`config/served-skills-upstream.yml`. Run it after editing a skill upstream,
-then commit the changed skills + the pin together.
+writes each served copy byte-for-byte, re-cuts
+`config/served-skills-upstream.yml`, and **re-cuts the derived
+`website/skills/<name>.skill` archives** for the skills it wrote (the archive is
+built from the served copy, so re-deriving the source invalidates it — see
+`tools/build_skill_archives.py`). Run it after editing a skill upstream, then
+commit the changed skills + the pin + the archives together.
 
 ``--sync --commit <sha>`` is for pinning a specific upstream commit. It is not
 silently equivalent to HEAD: the currency arm compares the pinned bytes against
@@ -738,6 +741,76 @@ class SyncResult(NamedTuple):
     target: str
     previous: str
     at_head: bool | None  # None = could not be read (the note is still printed)
+    #: Derived `.skill` archives re-cut because this sync changed their source.
+    archives: tuple[str, ...] = ()
+
+
+def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
+    """Re-cut the derived `.skill` archives for the served copies just written.
+
+    ⛔ The served copy is the archive's ONLY source (`build_skill_archives.py`),
+    so re-deriving it without re-cutting the archive leaves the tree RED on
+    `test_9660_skill_archive_holds_exactly_its_own_skill` — the documented
+    remedy for mirror drift produced a stale archive every time. Measured twice
+    in two days: cd7410b80 (#9750 round 3) and f045ac953 (#10423), same test,
+    same one-line remedy, two lanes spent finding it. Generating the output as
+    part of the step that invalidates it is the standard treatment for a checked-
+    in derived artifact (Go's `go generate`: run before the build, never left to
+    a second tool the operator has to know about).
+
+    Only the skills THIS sync wrote are rebuilt — the archives of untouched
+    skills are already a function of bytes that did not change, and rebuilding
+    them would report churn that did not happen (the archive is byte-stable via
+    `_FIXED_DATE`).
+
+    Best-effort by design: the archive builder is imported from `tools/`, and a
+    checkout that cannot supply it must not make `--sync` fail AFTER it has
+    already written the served copies and the pin — that would leave a half-done
+    sync behind a non-zero exit. The staleness is still caught by the gate
+    (`build_skill_archives.py --check`, and the 9660 test).
+    """
+    wanted = [n for n in names if n in _ARCHIVE_SKILL_NAMES()]
+    if not wanted:
+        return ()
+    try:
+        builder = _archive_builder()
+    except Exception:  # noqa: BLE001 — a missing builder must not fail the sync
+        return ()
+    if builder is None:
+        return ()
+    return tuple(builder.rebuild(root, wanted))
+
+
+_ARCHIVE_BUILDER: list[object] = []
+
+
+def _archive_builder():
+    """`tools/build_skill_archives.py` as a module, or None if unavailable.
+
+    Two import contexts to satisfy: a test does `from tools import
+    served_skills_parity`, where `tools` is a package; the CLI runs the file as
+    a SCRIPT, where `tools/` itself is `sys.path[0]`. Try both, never guess.
+    """
+    if _ARCHIVE_BUILDER:
+        return _ARCHIVE_BUILDER[0]
+    module = None
+    try:
+        import build_skill_archives as module  # script context
+    except ImportError:
+        try:
+            from tools import build_skill_archives as module  # package context
+        except ImportError:
+            module = None
+    _ARCHIVE_BUILDER.append(module)
+    return module
+
+
+def _ARCHIVE_SKILL_NAMES() -> tuple[str, ...]:
+    """The skills the builder ships an archive for (its own `SKILL_NAMES`)."""
+    builder = _archive_builder()
+    if builder is None:
+        return ()
+    return tuple(getattr(builder, "SKILL_NAMES", ()))
 
 
 def sync(root: Path, manifest_path: Path, commit: str | None = None,
@@ -784,8 +857,13 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
     manifest["upstream"]["commit"] = target
     if not dry_run:
         manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+    # The served copy is the archive's only source, so the archives of the
+    # skills this sync WROTE are stale as of the lines above and are re-cut here
+    # — in the same command, not in a second tool the operator has to know about
+    # (#10423). `--dry-run` wrote nothing, so it rebuilds nothing.
+    archives = _rebuilt_archives(root, sorted(manifest["skills"])) if not dry_run else ()
     return SyncResult(changed=changed, target=target, previous=previous,
-                      at_head=at_head)
+                      at_head=at_head, archives=archives)
 
 
 # ── report + CLI ───────────────────────────────────────────────────────────
@@ -900,6 +978,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  pin moved {result.previous[:12]} -> {result.target[:12]}")
             for line in result.changed:
                 print(f"  ~ {line}")
+            for name in result.archives:
+                print(f"  ~ rebuilt derived archive: {name}.skill")
             if result.at_head is False:
                 _note(
                     f"{result.target[:12]} is NOT upstream HEAD: the currency arm "
