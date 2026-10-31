@@ -100,6 +100,9 @@ USAGE
     uv run python tools/ci_catch_history.py --repo daniel-ospina/tortoise \\
         --json-out docs/ci-slow-catch-history.json --md-out docs/ci-slow-catch-history.md
 
+``--md-out`` writes the REPORT — summary/window, method and table in ONE generated file —
+because the table alone cannot tell a reader what window it covers or how to re-derive it.
+
     # offline (tests, or a reviewer re-reading an archived payload set):
     uv run python tools/ci_catch_history.py --offline-dir /tmp/catch-fixture --md-out /tmp/t.md
 
@@ -1249,11 +1252,44 @@ def build_history(
     ]
     refs: list[RunRef] = []
     read_of: dict[str, dict[str, Any]] = {}
-    for event, branch, conclusion, limit in populations:
+    listing_stop: str | None = None
+    for position, (event, branch, conclusion, limit) in enumerate(populations):
+        # ⛔ The LISTING is where a slow cell spends its time, so the wall bound is checked
+        # HERE and not only in the detail loop below. Measured 2026-10-31 on this fleet: six
+        # populations / 278 runs cost ~350 s of wall clock for 10 calls, so a bound checked
+        # only after the loop let `--max-seconds 120` run to 350 s and then report
+        # "wall-clock bound reached (120s)" as if it had stopped on time. A population that
+        # was never listed leaves its runs out of the sample, and coverage is per-FILE and
+        # attested, so the only reachable verdict for those files is UNKNOWN — never NEVER.
+        if max_seconds and time.monotonic() - started > max_seconds:
+            never_listed = [
+                f"{e}/{c}" if e == "pull_request" else f"push-main/{c}"
+                for e, _branch, c, _limit in populations[position:]
+            ]
+            for e, _branch, c, lim in populations[position:]:
+                read_of[f"{e}/{c}" if e == "pull_request" else f"push-main/{c}"] = {
+                    "read": 0,
+                    "requested": lim,
+                    "hit_bound": False,
+                    "listed": False,
+                }
+            listing_stop = (
+                f"wall-clock bound reached ({int(max_seconds)}s, "
+                f"{int(time.monotonic() - started)}s elapsed) while LISTING — "
+                f"{position} of {len(populations)} populations were read and "
+                f"{', '.join(never_listed)} were NEVER listed, so their runs attest "
+                "nothing and the files only they could have covered stay UNKNOWN"
+            )
+            break
         raw = client.list_runs(event, branch, conclusion, limit)
         picked = runs_to_refs(raw, event, since)
         key = f"{event}/{conclusion}" if event == "pull_request" else f"push-main/{conclusion}"
-        read_of[key] = {"read": len(picked), "requested": limit, "hit_bound": len(picked) >= limit}
+        read_of[key] = {
+            "read": len(picked),
+            "requested": limit,
+            "hit_bound": len(picked) >= limit,
+            "listed": True,
+        }
         refs.extend(picked)
     refs = list({ref.run_id: ref for ref in refs}.values())
 
@@ -1282,7 +1318,8 @@ def build_history(
     for position, ref in enumerate(ordered, start=1):
         if max_seconds and time.monotonic() - started > max_seconds:
             stopped_on_time = (
-                f"wall-clock bound reached ({int(max_seconds)}s) after {detailed} of "
+                f"wall-clock bound reached ({int(max_seconds)}s, "
+                f"{int(time.monotonic() - started)}s elapsed) after {detailed} of "
                 f"{len(ordered)} runs — the sample below is the prefix that was read"
             )
             break
@@ -1634,7 +1671,12 @@ def build_history(
             ),
             "oldest_run": oldest,
             "newest_run": newest,
-            "truncation": getattr(client, "truncation", None) or stopped_on_time,
+            "truncation": " · ".join(
+                fact
+                for fact in (getattr(client, "truncation", None), listing_stop, stopped_on_time)
+                if fact
+            )
+            or None,
             "max_seconds": max_seconds,
             "wall_clock_seconds": round(time.monotonic() - started, 1),
             "api_calls": getattr(client, "calls", 0),
@@ -1959,7 +2001,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--offline-dir", default=None, help="read an archived payload set instead of the API")
     parser.add_argument("--json-out", default=None, help="write the full report (JSON) here")
-    parser.add_argument("--md-out", default=None, help="write the 74-row markdown table here")
+    parser.add_argument("--md-out", default=None, help="write the REPORT here (window + method + the 74-row table, one file)")
     parser.add_argument(
         "--only",
         default=None,

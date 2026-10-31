@@ -39,6 +39,12 @@ properties. Each has a test here that FAILS when the property is broken:
    non-gating lane is disk-derived, so a partial tree must not produce a report.
    `test_a_tree_without_the_subtree_lane_directories_fails_closed` fails if that read fails
    open.
+8. **A wall bound that expires while LISTING stops the listing** — a measured live walk spent
+   ~350 s listing six populations before the detail loop's first check, so a bound consulted
+   only there bounded nothing, and a population that was never listed must leave its files
+   UNKNOWN rather than answering them from an empty sample.
+   `test_a_wall_bound_that_expires_while_listing_stops_and_says_so` fails if the bound is
+   checked only inside the detail loop (it then lists all six populations).
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -51,6 +57,7 @@ import json
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1063,3 +1070,77 @@ def test_the_registered_test_file_is_classified(tmp_path):
     asserts the registration this PR adds rather than a property of this module.
     """
     assert ci_selection.classify_test_file("test_ci_catch_history.py", MANIFEST) is not None
+
+
+# --- the wall bound bounds the LISTING, not just the detail loop -------------
+
+
+class _Stopwatch:
+    """A monotonic clock that ADVANCES on every read.
+
+    A wall bound is otherwise untestable without sleeping for it — and a test that sleeps
+    is a test nobody runs. Every `monotonic()` read spends `step` seconds, so the bound
+    trips at a deterministic point in the walk.
+    """
+
+    def __init__(self, step: float) -> None:
+        self.step = step
+        self.elapsed = 0.0
+
+    def monotonic(self) -> float:
+        self.elapsed += self.step
+        return self.elapsed
+
+
+class _ListingRecorder(catch.OfflineClient):
+    """An offline client that records WHICH populations were listed."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.listed: list[tuple[str, str | None, str]] = []
+
+    def list_runs(self, event, branch, conclusion, limit):
+        self.listed.append((event, branch, conclusion))
+        return super().list_runs(event, branch, conclusion, limit)
+
+
+def test_a_wall_bound_that_expires_while_listing_stops_and_says_so(tmp_path, monkeypatch):
+    """⛔ The bound must bound the LISTING too — a measured 350 s for 120 s of bound.
+
+    On this fleet a live walk spent ~350 s of wall clock listing six populations (10 API
+    calls) before the DETAIL loop ran its first `monotonic()` check — so `--max-seconds 120`
+    ran to 350 s and then reported "wall-clock bound reached (120s)" as though it had
+    stopped on time. The bound is now checked per population, the populations that were
+    never listed are NAMED, and their absence can only leave files UNKNOWN — never NEVER.
+    """
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=7)],
+        jobs={RUN_PR: [_check(100, RUN_PR, "test-slow (a)", "failure")]},
+        artifacts={(RUN_PR, catch.artifact_name("test-slow", "a")): _zip(_junit([("tests/test_billing.py", "t", True)]))},
+    )
+    client = _ListingRecorder(root)
+    clock = _Stopwatch(step=100.0)
+    monkeypatch.setattr(catch, "time", SimpleNamespace(monotonic=clock.monotonic))
+    report = catch.build_history(MANIFEST, client, max_seconds=120)
+
+    # The listing STOPPED: pre-fix it read all six populations (the bound was only consulted
+    # in the detail loop, which never ran), so this is the discriminating assertion.
+    assert len(client.listed) == 1, f"the bound did not stop the listing: {client.listed}"
+    window = report["window"]
+    populations = window["populations"]
+    assert len(populations) == 6, "every population must be accounted for, read or not"
+    unlisted = [key for key, info in populations.items() if info["listed"] is False]
+    assert len(unlisted) == 5
+    assert all(info["read"] == 0 for key, info in populations.items() if key in unlisted)
+
+    # The truncation NAMES the elapsed time and the populations it never read — a disclosure
+    # that reads "bound reached" while 350 s had already elapsed is not a disclosure.
+    truncation = window["truncation"]
+    assert truncation and "while LISTING" in truncation
+    assert "s elapsed" in truncation
+    assert "push-main/failure" in truncation and "pull_request/success" in truncation
+
+    # And the consequence: nothing was attested, so no file may claim a clean bill of health.
+    assert any(row["status"] == catch.UNKNOWN for row in report["files"])
+    assert not [row for row in report["files"] if row["status"] == catch.NEVER]
