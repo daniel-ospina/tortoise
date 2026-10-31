@@ -400,6 +400,21 @@ def _is_blame_binding(code: str) -> bool:
     return bool(_READ_ONLY_CAPTURE.match(code) or _MERGE_ASSERT.match(code))
 
 
+# A halt must be REACHABLE from the failing subject, which the text does not carry:
+# `{ …; (exit 1); }` exits a CHILD (these fences have no `set -e`), and a decoy group
+# before the real halt leaves it as dead code. So the halt is the LAST thing on the line
+# and a `{…}` body holds only plain segments before its final non-zero `exit` — no
+# `(`/`)`, `|`, `&`, nested braces, and nothing after the `exit`. Measured: this is the
+# difference between `{ echo g; exit 1; }` (halts) and `{ echo g; (exit 1); }` (continues).
+_REACHABLE_HALT = re.compile(r"\|\|\s*(?:(?P<grp>\{[^}]*\})|exit\s+[1-9]\d*)\s*$")
+_GROUP_BODY = re.compile(r"\s*(?:[^;{}()|&]*;\s*)*exit\s+[1-9]\d*\s*;?\s*$")
+
+
+def _reachable_code(code: str) -> str:
+    """``code`` with quoted spans blanked — a `(` inside a MESSAGE is not a subshell."""
+    return _unquoted(code)
+
+
 def _halts(code: str) -> bool:
     """Does this command stop the fence on failure?
 
@@ -419,7 +434,11 @@ def _halts(code: str) -> bool:
     # or a baseline measured on the operator's lane.
     if re.search(r"&\s*$", code) or re.search(r"\}\s*\|\s*\S", code):
         return False
-    return re.search(r"\|\|\s*(exit\s+[1-9]|\{[^}]*exit\s+[1-9])", code) is not None
+    match = _REACHABLE_HALT.search(_reachable_code(code))
+    if match is None:
+        return False
+    group = match.group("grp")
+    return group is None or _GROUP_BODY.fullmatch(group[1:-1]) is not None
 
 
 def _block(fence: list[str], i: int) -> str:
@@ -590,10 +609,16 @@ def _ends_at_halt(code: str, allow=_allows_pin_segment, subject=_pin_subject) ->
     legal: their failure is harmless, since the subject is still halted.
     """
     halt = re.fullmatch(
-        r"(?P<head>.*?)\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\})\s*",
-        _unquoted(code),
+        r"(?P<head>.*?)\|\|\s*(?P<halt>\{[^}]*\}|exit\s+[1-9]\d*)\s*",
+        _reachable_code(code),
     )
     if halt is None:
+        return False
+    # The group body must be plain segments then the exit — `(exit 1)` exits a CHILD,
+    # and anything after the `exit` cannot be reached.
+    if halt.group("halt").startswith("{") and not _GROUP_BODY.fullmatch(
+        halt.group("halt")[1:-1]
+    ):
         return False
     # Slice the head from the ORIGINAL text: the subject predicates need to see
     # `"$PINNED"`, which the blanking removed.
