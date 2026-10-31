@@ -4925,12 +4925,20 @@ def test_granularity_sweep_ci(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
 
+    _pin_no_embedder(monkeypatch)  # #4821: the waived-leg status must be fixed
+
     def _run():
         return run_sweep(
             _mini(), chunk_turns_values=(1, 2, 4), context_cap=8000,
             max_chunks_per_session=2, ingest_mode="v2",
             reader=MockReader(), judge=MockJudge(),
             ks=(5, 10, 20), work_dir=str(tmp_path),
+            # #4821: the sweep takes the SAME explicit waiver the rest of the
+            # suite takes (``--skip-preflight``) — its subject is the wiring +
+            # the D2 selection rule, not the dense leg. The env is PINNED below
+            # so the recorded status is deterministic either way: a waiver on a
+            # host WITH an embedder records 'enabled', not 'unavailable'.
+            dense_leg_required=False,
         )
 
     results, winner = _run()
@@ -4939,6 +4947,8 @@ def test_granularity_sweep_ci(tmp_path, monkeypatch):
     assert all(r["context_tokens_mean"] <= 8000 for r in results)
     assert winner is not None
     assert winner["chunk_turns"] in (1, 2, 4)
+    # #4821: the waived leg is RECORDED on every cell (never silent)
+    assert all(r["vector_strategy"] == "unavailable" for r in results)
     # determinism: two consecutive runs select the same winner
     _, winner2 = _run()
     assert winner2["chunk_turns"] == winner["chunk_turns"]
@@ -4957,6 +4967,651 @@ def test_granularity_sweep_ci(tmp_path, monkeypatch):
         assert all(v <= 2 for v in per_session.values())
     finally:
         sdk.close()
+
+
+# ── #4821: the sweep cannot bypass the dense-leg gate ─────────────────────
+#
+# `sweep_granularity.py` was a SECOND CLI entry point into the harness that
+# called `run_evaluation(...)` directly (line 105), so it never ran the
+# dense-leg pre-flight that `run.py`'s `run_main` gates every run with
+# (R3 #1542, fail-closed since #4718). In an env with no embedder it
+# completed KEYWORD-ONLY and printed `SELECTED granularity: chunk_turns = X`
+# — the only artifact an operator sees, since per-cell reports are not saved
+# — handing a degraded instrument's choice to the pilot (step 3) and the
+# 500-Q run (step 5).
+#
+# The gate now runs in `run_sweep` through the SAME seam `run_main` uses
+# (`gate_dense_leg` → `run_measured_evaluation`), so there is one path to a
+# measurement and one place the dense-leg status is threaded from. A THIRD
+# entry point cannot quietly re-introduce the class:
+# `test_no_entry_point_bypasses_the_dense_leg_gate` fails if any module in
+# the package calls `run_evaluation` directly.
+
+
+def _pin_no_embedder(monkeypatch):
+    """The env #4718 makes fatal: the pinned model cannot load."""
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
+
+
+def test_sweep_granularity_requires_dense_leg_by_default(monkeypatch, capsys):
+    """#4821 (a) THE BYPASS: a sweep with the default posture and no
+    embedder fails closed BEFORE any cell runs, with the gate's own
+    attributable message — no keyword-only table, no selected granularity.
+
+    RED when the fix is deleted: pre-fix, ``run_sweep`` called
+    ``run_evaluation`` directly, so no SystemExit happened and every cell
+    completed keyword-only."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    _pin_no_embedder(monkeypatch)
+    cells: list[int] = []
+    monkeypatch.setattr(sg, "run_measured_evaluation",
+                        lambda *a, **k: cells.append(1))
+    with pytest.raises(SystemExit) as ei:
+        sg.run_sweep(_mini(), chunk_turns_values=(1,), ingest_mode="v2",
+                     reader=MockReader(), judge=MockJudge(), limit=1)
+    assert ei.value.code == 1
+    err = capsys.readouterr().err
+    assert "EMBEDDER PRE-FLIGHT FAILED" in err
+    assert "no_embedder" in err
+    assert "NO measurement" in err
+    assert cells == [], "a cell ran despite the failed gate"
+
+
+# ── #4821 review P2 (cycle 3): the SEAM's refusals are the mechanism ──────
+#
+# `run_measured_evaluation` is the durable half of this PR: it is what makes
+# a FUTURE entry point — one nobody has written yet — unable to reach a
+# measurement by forgetting the gate (`gate_dense_leg`'s docstring advertises
+# exactly that, `run.py`: "an entry point **cannot forget the gate**"), and it
+# is what the description reports as asserted. It was not: `rg` found ZERO
+# references to `run_measured_evaluation` outside `run.py` except two
+# `monkeypatch.setattr` sites that REPLACE the seam — so its body was
+# unreachable from the suite, and both `ValueError` branches could be deleted
+# with every test still green (PIT's `Remove Conditionals`/`Empty returns`
+# class: a deleted validation branch that no test reds on is unpinned, however
+# correct it reads).
+
+
+def test_run_measured_evaluation_refuses_a_forgotten_gate(monkeypatch):
+    """#4821 review P2 — the seam refuses a forgotten gate, and still permits
+    a real gate answer.
+
+    RED when either `ValueError` branch in `run_measured_evaluation` is
+    deleted: the refusal becomes `run_evaluation(...,
+    embedder_status=None)`, which is R3 #1542 D5's *programmatic*
+    `reason="not_checked"` default — i.e. #4821's exact posture (a
+    keyword-only run with no gate) restored silently for every entry point
+    that does not exist yet. RED-as-`DID-NOT-RAISE` for the branch under test.
+
+    Hermetic: `run_evaluation` is replaced with a recorder, so this exercises
+    the seam's own validation only — no dataset, DB, embedder or network.
+    """
+    import tools.longmem_eval.run as runner
+
+    calls: list[dict] = []
+
+    def _recording_run_evaluation(instances, **kwargs):
+        calls.append(kwargs)
+        return [], {}
+
+    monkeypatch.setattr(runner, "run_evaluation", _recording_run_evaluation)
+
+    # (1) THE omission #4821 is about: the gate never ran, so there is no
+    #     status to hand on. `None` must not fall through to D5's default.
+    with pytest.raises(ValueError, match="requires the status dict returned by"):
+        runner.run_measured_evaluation([], embedder_status=None)
+
+    # (2) a status that was not produced by the gate is refused for its SHAPE,
+    #     not crashed on via `.get()` — `reason` is the key the D5 arm reads.
+    with pytest.raises(ValueError, match="requires the status dict returned by"):
+        runner.run_measured_evaluation([], embedder_status={"available": True})
+    with pytest.raises(ValueError, match="requires the status dict returned by"):
+        runner.run_measured_evaluation([], embedder_status="available")
+
+    # (3) R3 #1542 D5's `not_checked` marker is the PROGRAMMATIC posture, not
+    #     a measurement posture — the seam refuses it by name.
+    with pytest.raises(ValueError, match="not_checked"):
+        runner.run_measured_evaluation(
+            [], embedder_status={"available": False, "reason": "not_checked"})
+
+    assert calls == [], "a refused status still reached run_evaluation"
+
+    # (4) … and the seam is not a blanket refusal: a real gate answer reaches
+    #     the runner, threaded as `embedder_status`. Without this arm, a seam
+    #     mutated to always raise would satisfy every assertion above.
+    status = {"available": True, "reason": None, "model": "pinned"}
+    assert runner.run_measured_evaluation([], embedder_status=status) == ([], {})
+    assert calls == [{"embedder_status": status}]
+
+
+def test_sweep_granularity_waiver_labels_but_never_selects(
+        monkeypatch, tmp_path, capsys):
+    """#4821 (b)+(c): the ``--skip-preflight`` waiver still lets the sweep
+    run (the documented debugging/offline escape hatch), but the receipt can
+    never read as a measurement — each cell's ``vector_strategy`` /
+    ``embedding_coverage`` rolled up from that cell's per-question outcomes,
+    and the winner line never uses the SELECTED vocabulary.
+
+    RED when the fix is deleted: pre-fix the cells carried no dense-leg
+    fields at all and the winner was printed as ``SELECTED granularity``
+    from a keyword-only run."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    _pin_no_embedder(monkeypatch)
+    results, _winner = sg.run_sweep(
+        _mini(), chunk_turns_values=(1,), context_cap=8000,
+        ingest_mode="deterministic", reader=MockReader(), judge=MockJudge(),
+        limit=1, work_dir=str(tmp_path), dense_leg_required=False)
+    assert results
+    # (c) the receipt cannot claim density it did not measure
+    assert results[0]["vector_strategy"] == "unavailable"
+    # The coverage witness is DETERMINISTIC here, not a disjunction: the
+    # pinned no-embedder env writes every point without an embedding, so the
+    # cell's rolled-up write-time coverage is exactly 0.0. `in (None, 0.0)`
+    # was satisfied by a permanently-None field and could not fail (#4821
+    # review P1): `embedding_coverage` is a PER-QUESTION metric, so reading
+    # it off the aggregate `report["retrieval"]` always produced None.
+    assert results[0]["embedding_coverage"] == 0.0
+    assert results[0]["points_total"] > 0
+    assert results[0]["points_embedded"] == 0
+    assert sg._dense_leg_verified(results) is False
+    capsys.readouterr()
+    # (b) ... and the artifact says so, in the operator's own vocabulary
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000, measured=False)
+    out = capsys.readouterr()
+    assert "SELECTED granularity" not in out.out
+    assert "NOT A MEASUREMENT" in out.err
+    assert "UNMEASURED candidate granularity" in out.out
+    # The evidence flag is a REQUIRED keyword (PEP 3102) with no default: a
+    # caller that forgets it must fail loudly instead of being handed the
+    # SELECTED vocabulary by omission — the same permissive-default shape
+    # this module exists to remove. #4821 review P2. RED pre-fix (the old
+    # signature defaulted `measured=True` and printed SELECTED).
+    with pytest.raises(TypeError):
+        sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                          "context_tokens_mean": 10.0},
+                         ingest_mode="v2", context_cap=8000)
+    # ... and the permissive path is gone: SELECTED is unreachable by omission.
+    assert "SELECTED granularity" not in capsys.readouterr().out
+
+
+def test_sweep_granularity_cli_waiver_is_the_only_way_through(
+        monkeypatch, tmp_path):
+    """#4821 (a) at the CLI: the entry point refuses before loading the
+    dataset (no output file), and the waiver is the only route through —
+    which then records the dense leg as waived + unmeasured in the JSON.
+
+    RED when the fix is deleted: ``main`` had no gate at all, so the first
+    invocation exited 0 and wrote a payload with no ``dense_leg`` block."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    _pin_no_embedder(monkeypatch)
+    # #4821 review P2: pin the ORDER the comment claims — the gate refuses
+    # BEFORE the dataset load (fail before the ~tens-of-MB download). Without
+    # this spy the test passes for the OPPOSITE order too: the fixture is a
+    # local --data path so it loads fine, run_sweep then hits the same gate
+    # and raises the same SystemExit(1), and out.exists() is still False.
+    loaded = []
+    _real_load = sg.ds.load_dataset
+
+    def _spy_load(*a, **k):
+        loaded.append((a, k))
+        return _real_load(*a, **k)
+
+    monkeypatch.setattr(sg.ds, "load_dataset", _spy_load)
+    out = tmp_path / "sweep.json"
+    argv = ["--data", str(MINI), "--mock", "--limit", "1",
+            "--output", str(out)]
+    with pytest.raises(SystemExit) as ei:
+        sg.main(argv)
+    assert ei.value.code == 1
+    assert not out.exists(), "a receipt was written by a refused sweep"
+    assert not loaded, "the dataset was loaded before the dense-leg gate"
+    assert sg.main([*argv, "--skip-preflight"]) == 0
+    # non-vacuity: the spy really does intercept the loader on the waived path
+    assert loaded, "the waiver never reached the loader — the spy is inert"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["dense_leg"]["waived"] is True
+    assert payload["dense_leg"]["required"] is False
+    assert payload["dense_leg"]["measured"] is False
+    assert payload["dense_leg"]["embedder"]["reason"] == "no_embedder"
+    assert all(r["vector_strategy"] == "unavailable"
+               for r in payload["results"])
+    # ... and the coverage witness in the WRITTEN receipt is a number, not a
+    # permanently-None field (#4821 review P1).
+    assert all(r["embedding_coverage"] == 0.0 for r in payload["results"])
+
+
+def _option_help_block(help_text, flag):
+    """The de-wrapped help text of ONE argparse option (its continuation
+    lines are indented past the option column, so the block ends at the next
+    line that starts a new option)."""
+    lines = help_text.splitlines()
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.startswith("  " + flag + " ")), None)
+    if start is None:
+        return ""
+    block = [lines[start]]
+    for ln in lines[start + 1:]:
+        if ln.startswith("  -"):
+            break
+        block.append(ln)
+    return " ".join(" ".join(block).split())
+
+
+def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys):
+    """#4821 (`--mock` contract): since the sweep gates the dense leg BEFORE the
+    dataset load, `--mock` is no longer an offline-only run — a mock sweep on a
+    host with no loadable embedder refuses unless `--skip-preflight` is passed.
+    Both the module docstring and `--mock`'s `--help` said "a mock run must be
+    fully offline" and named no waiver, which is the contract this PR makes
+    false; `--help` is the surface an operator consults first, and the module
+    docstring is where this PR moved the sweep's contract.
+
+    Non-vacuity: on the pre-fix strings ("must be fully offline", no waiver
+    sentence) every assertion below reds — the docstring paragraph and the
+    `--mock` help both still carry the claim. `--skip-preflight` is asserted
+    inside the `--mock` block, not merely anywhere in `--help`, where its own
+    option would satisfy it for free."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    doc = sg.__doc__ or ""
+    assert "``--mock``" in doc, "the mock paragraph moved — re-anchor this test"
+    mock_para = doc.split("``--mock``", 1)[1].split("\n\n", 1)[0]
+    assert "fully offline" not in mock_para, (
+        "the docstring still promises a fully-offline mock run, which the "
+        "dense-leg gate makes false")
+    assert "does **NOT** waive the dense-leg gate" in mock_para, (
+        "the docstring never says the mock run does not waive the gate")
+
+    with pytest.raises(SystemExit) as ei:
+        sg.main(["--help"])
+    assert ei.value.code == 0
+    help_text = capsys.readouterr().out
+    # argparse wraps each option's help, and `--mock` is also mentioned by the
+    # usage line AND by `--ingest-mode`'s help, so slice the `--mock` option's
+    # own two-column block (it starts at the option column; every following
+    # line is indented deeper) rather than a bare substring search.
+    mock_help = _option_help_block(help_text, "--mock")
+    assert mock_help, "`--mock` has no help block — re-anchor this test"
+    assert "fully offline" not in mock_help, (
+        "`--mock --help` still promises a fully-offline run")
+    assert "Does NOT waive the dense-leg gate" in mock_help, (
+        "`--mock --help` does not say the gate survives the mock run")
+    assert "--skip-preflight" in mock_help, (
+        "`--mock --help` names no way to actually run offline")
+
+
+# ── #4821 review P2: the PERMITTING direction must be proven too ──────────
+#
+# The contract has two directions and only the refusing one was pinned: every
+# assertion on `_dense_leg_verified` was `is False`, the `SELECTED granularity`
+# line was only ever asserted ABSENT, `_print_table` was called by no test at
+# all, and `main`'s v2 branch was unreachable from the suite (every `main()`
+# call passed `--mock`, which forces deterministic ingest). A suite that
+# EXECUTES a branch without discriminating its outcomes still lets the branch
+# be rewritten — a surviving mutant is a test gap, not an opinion:
+#   M-A `_dense_leg_verified` → `return False` — every legitimate hybrid sweep
+#       falsely blocked. Killed by the positive controls in
+#       `test_dense_leg_verified_consumes_the_write_time_witness` and by this
+#       test's exit-0 arm.
+#   M-B `main`: drop `or not measured` from the step-2 gate — killed by
+#       `test_sweep_granularity_v2_waived_sweep_never_exits_zero`.
+#   M-C `_print_winner`: `if not measured:` → `if True:` — NOT discriminated by
+#       either: every other assertion on the winner line is an ABSENCE, and
+#       the exit code does not depend on that print. That is what the test
+#       below pins, together with `_print_table`'s `MEASURED` label (only the
+#       `NOT MEASURED` side was asserted) and the measured receipt + exit code
+#       end-to-end through `main`.
+
+_ENABLED_STATUS = {"available": True, "reason": None, "model": "pinned",
+                   "sentence_transformers_version": "x"}
+
+
+def test_sweep_main_selects_and_exits_zero_when_measured(
+        monkeypatch, tmp_path, capsys):
+    """#4821 review P2 — the direction that PERMITS a sweep (M-A + M-C).
+
+    A v2 sweep whose cells recorded ``vector_strategy=enabled`` with real
+    coverage IS a measurement: the table says ``MEASURED``, the winner line
+    says ``SELECTED granularity``, the receipt says ``measured: true``, and
+    ``main`` exits 0. RED when ``_dense_leg_verified`` is `return False` (M-A:
+    the whole legitimate hybrid path is falsely blocked — the PR's own claimed
+    behaviour "(b) the legitimate path still works") and RED when
+    ``_print_winner`` prints the unmeasured vocabulary unconditionally (M-C);
+    both were green before this test existed.
+
+    Hermetic — no DB, embedder, network or model. The gate, the reader/judge,
+    the extractor builder and the sweep are supplied; the measured
+    derivation, the table's label, the winner vocabulary, the receipt and the
+    exit code are the real code.
+    """
+    import tests.model_adapters as _ma
+    import tools.longmem_eval.sweep_granularity as sg
+
+    winner = {"chunk_turns": 1, "evidence_recall@10": 0.9,
+              "context_tokens_mean": 100.0}
+    results = [_sweep_cell()]  # enabled, coverage 1.0, 40/40 points embedded
+    gate_calls: dict = {}
+
+    def _gate(*, dense_leg_required):
+        gate_calls["required"] = dense_leg_required
+        return _ENABLED_STATUS
+
+    # The gate is patched rather than `run_sweep`'s `dense_leg_required`
+    # driven, because a supplied `embedder_status` silently WINS over
+    # `dense_leg_required` in `run_sweep` — a test that drove the requirement
+    # alone would prove nothing.
+    monkeypatch.setattr(sg, "gate_dense_leg", _gate)
+    monkeypatch.setattr(sg, "build_reader", lambda *a, **k: MockReader())
+    monkeypatch.setattr(sg, "build_judge", lambda *a, **k: MockJudge())
+    # `main` imports the extractor builder locally; a real v2 run would put a
+    # provider on the wire, and nothing downstream of the build is under test.
+    monkeypatch.setattr(_ma, "build_extractor_model", lambda *a, **k: object())
+    monkeypatch.setattr(sg, "run_sweep", lambda *a, **k: (results, winner))
+
+    out = tmp_path / "measured-v2.json"
+    rc = sg.main(["--data", str(MINI), "--ingest-mode", "v2", "--limit", "1",
+                  "--chunk-turns", "1", "--output", str(out)])
+    printed = capsys.readouterr()
+    assert gate_calls["required"] is True, (
+        "a sweep without --skip-preflight must ask the gate for a REQUIRED leg")
+    assert rc == 0, "a MEASURED v2 sweep exited non-zero (M-A)"
+    assert "dense leg: vector_strategy=enabled" in printed.out
+    assert "(MEASURED)" in printed.out, (
+        "_print_table mislabelled a measured leg")
+    assert "SELECTED granularity" in printed.out, (
+        "a measured sweep never printed the SELECTED vocabulary (M-C)")
+    assert "NOT A MEASUREMENT" not in printed.err
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["dense_leg"]["measured"] is True
+    assert payload["dense_leg"]["required"] is True
+    assert payload["dense_leg"]["waived"] is False
+
+
+# ── #4821 review P1: the coverage witness must actually testify ───────────
+
+def _cell_report(*, points_total, points_embedded, per_q):
+    """A ``run_evaluation``-shaped report whose coverage lives WHERE R3 D3
+    puts it — per question, in ``report["outcomes"]`` — and NOT in the
+    ``retrieval`` aggregate (which is left empty here on purpose: reading a
+    nonexistent aggregate key is exactly the defect this pins)."""
+    outcomes = [{"question_id": f"q{i}",
+                 "points_total": points_total,
+                 "points_embedded": points_embedded,
+                 "embedding_coverage": per_q} for i in range(2)]
+    return outcomes, {"retrieval": {},
+                      "methodology": {"vector_strategy": "enabled"},
+                      "outcomes": outcomes}
+
+
+def test_sweep_granularity_rolls_up_per_question_embedding_coverage(monkeypatch):
+    """#4821 review P1: a MEASURED hybrid cell reports its REAL write-time
+    coverage. The sweep advertises two per-cell dense-leg witnesses; before
+    this fix ``embedding_coverage`` was read off ``report["retrieval"]``,
+    which never carries it, so it was ``None`` for every cell — a witness
+    that could not tell coverage ``1.0`` from ``0.0``.
+
+    RED on the pre-fix code: all four cases read ``None``, while three of
+    them must be a number. The embedder is not involved — the cell's report
+    is supplied, so this runs (and fails) in any environment."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    cases = [
+        # (points_total/q, points_embedded/q, per-q coverage, expected cell)
+        (10, 10, 1.0, 1.0),      # every point embedded
+        (10, 0, 0.0, 0.0),       # keyword-only — the #4718 failure mode
+        (10, 5, 0.5, 0.5),       # partial
+        (None, None, None, None),  # pre-R3 resume: unknown, never a fake 0
+    ]
+    for points_total, points_embedded, per_q, expected in cases:
+        outcomes, report = _cell_report(points_total=points_total,
+                                       points_embedded=points_embedded,
+                                       per_q=per_q)
+        monkeypatch.setattr(sg, "run_measured_evaluation",
+                            lambda *a, _o=outcomes, _r=report, **k: (_o, _r))
+        results, _winner = sg.run_sweep(
+            _mini(), chunk_turns_values=(1,), ingest_mode="v2",
+            reader=MockReader(), judge=MockJudge(), limit=1,
+            embedder_status={"available": True, "reason": None,
+                             "model": "pinned"})
+        assert results[0]["embedding_coverage"] == expected, (
+            f"total={points_total} embedded={points_embedded}: the cell's "
+            f"coverage witness did not testify")
+        # the census travels with the number so it stays auditable
+        expected_total = 20 if points_total is not None else None
+        assert results[0]["points_total"] == expected_total
+        # #4821 review P2: BOTH halves read None when the cell knows nothing
+        # about its points. `points_embedded: 0` beside `points_total: None`
+        # reads as "0 embedded" for an unknown population — indistinguishable
+        # from "N points, none embedded", which is the ambiguity the census
+        # exists to remove.
+        assert results[0]["points_embedded"] == (
+            2 * points_embedded if points_embedded is not None else None)
+        assert (results[0]["points_total"] is None) is (
+            results[0]["points_embedded"] is None), (
+            "the census pair must be known or unknown TOGETHER — a None "
+            "total beside a 0 embedded is an invented zero")
+        assert results[0]["vector_strategy"] == "enabled"
+
+
+def test_embedding_coverage_is_never_on_the_retrieval_aggregate(
+        tmp_path, monkeypatch):
+    """#4821 review P1 root cause, pinned against the REAL report: the sweep's
+    coverage witness lives per question (D3), and the aggregate
+    ``report["retrieval"]`` does not carry it — its dense-adjacent key is
+    ``evidence_coverage``, a different (M6/D6 ingest) metric. A future
+    reader of the aggregate is reading a key that does not exist."""
+    _pin_no_embedder(monkeypatch)
+    _outcomes, report = run_evaluation(
+        _mini()[:1], reader=MockReader(), judge=MockJudge(), ks=(5,),
+        top_k=5, split="s", work_dir=str(tmp_path),
+        ingest_mode="deterministic", chunk_turns=2)
+    assert "embedding_coverage" not in report["retrieval"]
+    assert "evidence_coverage" in report["retrieval"]  # the key that IS there
+    per_q = [o.get("embedding_coverage") for o in report["outcomes"]]
+    assert per_q and all(c is not None for c in per_q), per_q
+    # ... and the sweep's roll-up reads exactly that per-question list
+    from tools.longmem_eval.sweep_granularity import (
+        _aggregate_embedding_coverage,
+    )
+    assert _aggregate_embedding_coverage(report["outcomes"]) == 0.0
+
+
+def _sweep_cell(**over):
+    """One ``run_sweep`` result row, complete enough for ``_print_table``."""
+    row = {
+        "chunk_turns": 1,
+        "evidence_recall@10": 0.9,
+        "chunk_evidence_recall@10": 0.9,
+        "session_recall@10": 0.9,
+        "turn_recall@10": 0.9,
+        "context_tokens_mean": 100.0,
+        "context_point_count_mean": 4.0,
+        "n_completed": 1,
+        "vector_strategy": "enabled",
+        "embedding_coverage": 1.0,
+        "points_total": 40,
+        "points_embedded": 40,
+    }
+    row.update(over)
+    return row
+
+
+def test_dense_leg_verified_consumes_the_write_time_witness(capsys):
+    """#4821 review P1: ``vector_strategy`` alone is NOT a measurement
+    verdict — it is a PRE-FLIGHT answer (``report.py`` derives it as
+    ``"enabled" if embedder_status.get("available")``), so an embedder that
+    loads and then writes NOTHING still reads ``enabled``. The write-time
+    ``embedding_coverage`` is the witness that catches it, and the predicate
+    must consume it: otherwise the table prints
+    ``vector_strategy=enabled  embedding_coverage=[0.0]  (MEASURED)`` and the
+    winner is handed on as SELECTED — #4821's exact failure mode re-entering
+    through the field added to prevent it.
+
+    RED when the witness is dropped from the predicate: the zero-of-N cell
+    reads measured, the table says MEASURED, and ``_print_winner`` selects."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    # Positive control: a real hybrid cell is MEASURED (so the new arm is not
+    # a blanket refusal).
+    assert sg._dense_leg_verified([_sweep_cell()]) is True
+    # Partial coverage is still a real hybrid run — MEASURED, number shown.
+    assert sg._dense_leg_verified(
+        [_sweep_cell(embedding_coverage=0.5, points_embedded=20)]) is True
+
+    # The arm under test: the pre-flight succeeded, the write wrote nothing.
+    zero = [_sweep_cell(embedding_coverage=0.0, points_embedded=0)]
+    assert sg._dense_leg_verified(zero) is False
+
+    capsys.readouterr()
+    sg._print_table(zero, ingest_mode="v2", context_cap=8000,
+                    max_chunks_per_session=2)
+    out = capsys.readouterr().out
+    line = [ln for ln in out.splitlines() if ln.startswith("dense leg:")]
+    assert line, out
+    assert "NOT MEASURED" in line[0], line[0]
+    assert "MEASURED" not in line[0].replace("NOT MEASURED", ""), line[0]
+
+    # ... and the winner line cannot reach the SELECTED vocabulary.
+    sg._print_winner({"chunk_turns": 1, "evidence_recall@10": 0.9,
+                      "context_tokens_mean": 100.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(zero))
+    assert "SELECTED granularity" not in capsys.readouterr().out
+
+    # An UNKNOWN point population is not a miss — the coverage arm must not
+    # refuse a pre-R3 resume (the vector_strategy arm still governs it).
+    assert sg._dense_leg_verified(
+        [_sweep_cell(embedding_coverage=None, points_total=None,
+                     points_embedded=None)]) is True
+
+
+def test_sweep_granularity_v2_waived_sweep_never_exits_zero(
+        monkeypatch, tmp_path):
+    """#4821 review P2: ``main``'s step-2 gate is
+    ``ingest_mode == "v2" and (winner is None or not measured)``, and the
+    ``or not measured`` half is the ENTIRE "no script may land a waived sweep
+    as a result" enforcement — with no test. Every existing ``main()`` case
+    passes ``--mock``, which forces deterministic ingest, so the branch never
+    executed and deleting ``or not measured`` left the suite green.
+
+    RED when that clause is deleted: the waived v2 sweep returns 0."""
+    import tools.longmem_eval.sweep_granularity as sg
+    from tests import model_adapters
+
+    monkeypatch.setattr(model_adapters, "build_extractor_model",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(sg, "build_reader", lambda *a, **k: MockReader())
+    monkeypatch.setattr(sg, "build_judge", lambda *a, **k: MockJudge())
+    _pin_no_embedder(monkeypatch)
+
+    winner = {"chunk_turns": 1, "evidence_recall@10": 0.9,
+              "context_tokens_mean": 100.0}
+    unmeasured = [_sweep_cell(vector_strategy="unavailable",
+                              embedding_coverage=0.0, points_embedded=0)]
+    monkeypatch.setattr(sg, "run_sweep",
+                        lambda *a, **k: (unmeasured, winner))
+
+    out = tmp_path / "waived-v2.json"
+    argv = ["--data", str(MINI), "--ingest-mode", "v2", "--skip-preflight",
+            "--limit", "1", "--chunk-turns", "1", "--output", str(out)]
+    assert sg.main(argv) == 1, (
+        "a v2 sweep whose dense leg was NOT measured returned 0 — a script "
+        "could land a keyword-only sweep as a step-2 result")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["dense_leg"]["measured"] is False
+    # #4821 review P3: the MACHINE-readable artifact must not hand out a knob
+    # for a run it labels not-a-measurement. `payload.winner.chunk_turns` is
+    # the machine equivalent of an operator reading SELECTED.
+    assert payload["winner"] is None
+    assert payload["unmeasured_candidate"]["chunk_turns"] == 1
+
+    # NON-VACUITY: the same argv with a MEASURED cell returns 0, so the 1
+    # above is caused by `not measured` and by nothing else on the path.
+    monkeypatch.setattr(sg, "run_sweep",
+                        lambda *a, **k: ([_sweep_cell()], winner))
+    assert sg.main(argv) == 0
+    measured_payload = json.loads(out.read_text(encoding="utf-8"))
+    assert measured_payload["winner"] == winner
+    assert "unmeasured_candidate" not in measured_payload
+
+
+def test_no_entry_point_bypasses_the_dense_leg_gate():
+    """#4821 structural guard: within the LongMemEval package, a reference to
+    ``run_evaluation`` is allowed ONLY in ``run.py``, where the gate lives and
+    where ``run_measured_evaluation`` is defined.
+
+    This is what makes the fix hold for entry points that do not exist yet:
+    a third CLI module that reaches ``run_evaluation`` turns this RED instead
+    of landing a second silent bypass. The fix is to route it through
+    ``run_measured_evaluation(..., embedder_status=gate_dense_leg(...))``
+    (as ``sweep_granularity.run_sweep`` now does), not to add a name here.
+
+    ⛔ THE GUARD MATCHES *REFERENCES*, NOT CALLS (#4821 review P2). It used to
+    look only at ``ast.Call`` func names and ``ImportFrom`` — so
+    ``import tools.longmem_eval.run as R`` + ``_EVALUATE = R.run_evaluation`` +
+    ``fn = _EVALUATE`` + ``fn(...)`` stayed green: the ``Attribute`` sat in an
+    ``Assign`` value, where no call-shaped rule looks. A guard that is "one
+    alias away from green" is one alias away whichever alias has not been
+    thought of yet, so the rule is now the NAME: any ``ast.Name`` whose id is
+    ``run_evaluation``, any ``ast.Attribute`` whose attr is, any ``import``
+    that binds it, and ``getattr(<anything>, "run_evaluation")``.
+
+    ⛔ AND IT WALKS SUBPACKAGES. ``pkg.glob("*.py")`` made a future
+    ``tools/longmem_eval/<sub>/entry.py`` invisible to the guard while still
+    letting it reach the measurement.
+
+    SCOPE AND RESIDUAL, stated so the promise is not read wider than it is
+    (#4821 review P3). The rule is "the NAME" only for a STATICALLY SPELLED
+    name: a dynamic reach such as ``operator.attrgetter("run_evaluation")``,
+    ``vars(R)["run_evaluation"]``, or ``getattr`` bound to a local first
+    (``g = getattr; g(R, ...)``) is not seen. None of those is reachable by
+    accident — the plain alias/import/call forms the guard exists for ARE
+    caught — so this is a deliberate bound, not a hole in the covered class.
+    The walk is also bounded to ``tools/longmem_eval``: an entry point added
+    under ``tools/*.py`` or ``graph-scripts/`` is out of scope (no such caller
+    of ``run_evaluation`` exists today).
+    """
+    import ast
+
+    pkg = Path(__file__).resolve().parent.parent / "tools/longmem_eval"
+    offenders: dict[str, int] = {}
+    for path in sorted(pkg.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        hits = 0
+        for node in ast.walk(tree):
+            # A reference is as good as a call: `R.run_evaluation` assigned to
+            # a local, then called through that local, is the same bypass.
+            if ((isinstance(node, ast.Name) and node.id == "run_evaluation")
+                    or (isinstance(node, ast.Attribute)
+                        and node.attr == "run_evaluation")):
+                hits += 1
+            # An import is as good as a call: `from .run import run_evaluation
+            # as _x` is the same bypass under a different name.
+            elif isinstance(node, ast.ImportFrom) and (
+                    (node.module or "").endswith("run")):
+                hits += sum(1 for a in node.names
+                            if a.name == "run_evaluation")
+            # A dynamic reach for the name, which no static name match sees.
+            elif isinstance(node, ast.Call) and (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"):
+                hits += sum(
+                    1 for a in node.args
+                    if isinstance(a, ast.Constant)
+                    and a.value == "run_evaluation")
+        if hits:
+            offenders[str(path.relative_to(pkg))] = hits
+    assert set(offenders) == {"run.py"}, (
+        "an entry point reaches run_evaluation() directly, bypassing the "
+        f"dense-leg gate (#4821): {offenders!r} — route it through "
+        "run_measured_evaluation(embedder_status=gate_dense_leg(...))")
 
 
 # ── R1 #1540: E2E-1/E2E-10 integration scenarios + robustness ─────────────

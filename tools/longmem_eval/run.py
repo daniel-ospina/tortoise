@@ -704,6 +704,75 @@ def _finalize_embedder_preflight(status: dict, *,
     raise SystemExit(1)
 
 
+def gate_dense_leg(*, dense_leg_required: bool) -> dict:
+    """THE dense-leg gate — the one call an entry point makes before a
+    measurement (#4821).
+
+    ``_preflight_embedder`` is the implementation (R3 #1542 D2, fail-closed
+    since #4718); this name exists so an entry point depends on the *gate*
+    rather than on a private helper, and so the inventory guard
+    (``tests/test_longmem_runner.py::
+    test_no_entry_point_bypasses_the_dense_leg_gate``) has one name to point
+    a new entry point at.
+
+    The contract is #4718's: the dense leg is REQUIRED unless
+    ``dense_leg_required=False`` explicitly waives it, and a waiver is
+    RECORDED in the returned status (never silent).
+
+    What the seam actually guarantees, stated exactly (#4821 review P2). An
+    entry point **cannot forget the gate**: :func:`run_measured_evaluation`
+    has no default for ``embedder_status`` and refuses ``None``, so the
+    omission that let ``sweep_granularity.py`` reach a keyword-only receipt is
+    a ``TypeError``/``ValueError`` rather than a silently-permitted posture.
+    It also refuses the D5 ``reason="not_checked"`` marker, which is the
+    *programmatic* ``run_evaluation`` default and not a measurement posture.
+
+    It does NOT authenticate provenance: the validation is on the dict's
+    SHAPE (``available`` + ``reason`` present, ``reason != "not_checked"``),
+    so a caller that deliberately constructs ``{"available": True,
+    "reason": None}`` reaches a measurement with no gate having run. That is
+    a deliberate hand-rolled dict, not a forgotten gate, and the inventory
+    guard (``tests/test_longmem_runner.py::
+    test_no_entry_point_bypasses_the_dense_leg_gate``) is what covers the
+    entry-point class. Do not read this docstring as a cryptographic claim.
+    """
+    return _preflight_embedder(dense_leg_required=dense_leg_required)
+
+
+def run_measured_evaluation(
+    instances: list[dict], *, embedder_status: dict, **kwargs,
+) -> tuple[list[dict], dict]:
+    """The ONE seam from an entry point to :func:`run_evaluation` (#4821).
+
+    ``embedder_status`` must be what :func:`gate_dense_leg` returned for THIS
+    run. There is no default and ``None`` is refused, because a default is
+    exactly what let ``sweep_granularity.py`` reach a keyword-only receipt:
+    ``run_evaluation``'s ``embedder_status=None`` is the R3 #1542 D5
+    *programmatic* default (``reason="not_checked"``), and it is correct for
+    tests/battery/parity/the capstone harness — but it is not a posture an
+    entry point may adopt by forgetting.
+
+    Programmatic callers therefore keep calling ``run_evaluation`` directly
+    and keep D5 unchanged; entry points call this. ``embedder_status`` is a
+    DECLARED keyword parameter HERE, so a caller that also forwards it inside
+    ``**kwargs`` raises Python's own ``TypeError`` (multiple values for keyword
+    argument) — the gate argument cannot be shadowed by a permissive default.
+    """
+    status = embedder_status
+    if (not isinstance(status, dict) or "available" not in status
+            or "reason" not in status):
+        raise ValueError(
+            "run_measured_evaluation requires the status dict returned by "
+            f"gate_dense_leg (got {status!r}) — an entry point reaches a "
+            "measurement only through the dense-leg gate (#4821)")
+    if status.get("reason") == "not_checked":
+        raise ValueError(
+            "run_measured_evaluation refuses the D5 'not_checked' default: "
+            "that is the PROGRAMMATIC run_evaluation path (R3 #1542 D5), not "
+            "a measurement posture — call gate_dense_leg first (#4821)")
+    return run_evaluation(instances, embedder_status=status, **kwargs)
+
+
 def _resolved_graph_read_timeout() -> float | None:
     """The graph-client READ bound the eval lane will ACTUALLY use (#2969).
 
@@ -7341,7 +7410,7 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # (#4718: `--retrieval-only --mock` is a measurement, and a loaded host
     # used to turn it keyword-only). The status flows into the report
     # methodology (D5: embedder + vector_strategy always emitted).
-    embedder_status = _preflight_embedder(
+    embedder_status = gate_dense_leg(
         dense_leg_required=not args.skip_preflight)
 
     instances = ds.load_dataset(
@@ -7478,7 +7547,7 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 raise SystemExit(1) from e
 
         try:
-            outcomes, report = run_evaluation(  # noqa: RUF059
+            outcomes, report = run_measured_evaluation(  # noqa: RUF059
                 instances, reader=reader, judge=judge, ks=ks, top_k=top_k,
                 work_dir=args.work_dir, split=args.split,
                 checkpoint=args.checkpoint, max_retries=args.max_retries,

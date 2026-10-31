@@ -4240,8 +4240,9 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
 # the same thing, because an overstated guarantee is how the next lane talks
 # itself out of the pin. As measured 2026-10-27 with the fallback engaged, all
 # nine runners advertised `ubuntu-latest` and none advertised `ubuntu-24.04`
-# (with the fallback disengaged, none carries either). The installer cannot emit
-# it (`tests/test_ci_runner_x64_install.py:181`) and the re-registration path
+# (with the fallback disengaged, none carries either). The installer emits it only under
+# `CI_RUNNER_OS_LABEL=on|auto` — the shipped default is `off`, which is what
+# `tests/test_ci_runner_x64_install.py:230` pins — and the re-registration path
 # strips it (`tools/runner_autoscale.py::_preserve_labels`, pinned by
 # `tests/test_runner_autoscale.py`), but NO test here reads the LIVE label set,
 # and the pool HAS served this very label: 2026-10-24's `finding-provenance`
@@ -4334,10 +4335,17 @@ def test_no_observer_job_keeps_the_pools_fallback_label_in_any_runs_on_form() ->
     removes, however it is spelled.
     """
     pool_fallback_label = "ubuntu-latest"
-    # The pin's whole value is that the POOL cannot be the runner serving it. `ubuntu-latest` is
-    # the label the fallback attaches (`resolve_labels()` → `self-hosted-x64,ubuntu-latest`), so a
-    # pin to it puts the observer straight back on the starved arm; a `ubuntu-<version>` label is
-    # the recorded decision (`docs/ops/ci-runner-x64.md:25-26`). Asserting the SHAPE is the only
+    # The pin's value is that the observer does not ride the pool's FALLBACK label; ⛔ it is NOT a
+    # guarantee that the pool cannot serve the pinned label any more. Since the 2026-10-29
+    # mitigation (#6897 suspended; `docs/ops/ci-runner-x64.md`, the label contract) the installer
+    # CAN attach `ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`, and `_preserve_labels` DROPS it
+    # on every re-registration (`tools/runner_autoscale.py:1547-1551`; a deliberate `--repair-labels`
+    # pass with the flag set is what re-attaches it), so the four observers are pool-eligible while
+    # the mitigation is engaged — an accepted cost
+    # recorded in the runbook, not a property this test can assert. `ubuntu-latest` is a different
+    # case: it is the label the fallback attaches, so a pin to it puts the observer straight onto
+    # the starved arm, and a `ubuntu-<version>` label is the recorded decision
+    # (`docs/ops/ci-runner-x64.md:25-26`). Asserting the SHAPE is the only
     # check of `HOSTED_ONLY_PIN` itself that can fail — the loop below reads the workflows.
     assert re.fullmatch(r"ubuntu-\d+\.\d+", HOSTED_ONLY_PIN), (
         f"HOSTED_ONLY_PIN={HOSTED_ONLY_PIN!r} is not a version-pinned hosted label — "
