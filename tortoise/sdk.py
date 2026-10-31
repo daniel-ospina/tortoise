@@ -165,6 +165,12 @@ from .projection.entities import (
     append_identifier_aliases,
     point_identifier_aliases,
 )
+# #10010 review P2 / #8171: the ONE ``extractedFrom`` ref normalizer. The dedup
+# fold reads the survivor's PROPERTY and must apply the same container/scalar
+# gate the replay lane already applies (`_upsert_point_edges` hands this very
+# helper to `_link_source`), or a stored non-iterable raises inside the fold and
+# a stored mapping fans out invented refs.
+from .projection.entities import _point_source_refs
 from .sparse import identifier_tokens_enabled as _identifier_tokens_enabled
 # #10122: the FULLTEXT index FIELD TABLE (the one that CREATES the indexes).
 # The Point `name` advisory below reads the Point's fields OFF it rather than
@@ -30590,9 +30596,21 @@ class TortoiseSDK:
         # (`_point_source_transit`, `_point_source_versions`), so writing the
         # resolved url here would rewrite the caller's provenance spelling AND
         # strand the pair that spelling was the key of.
-        _prop_refs = existing.get("extractedFrom")
-        if isinstance(_prop_refs, str):
-            _prop_refs = [_prop_refs]
+        # ⛔ NORMALIZED through the shared helper, never iterated raw: the
+        # property is written by doors that do not validate it
+        # (`update_point(extractedFrom=…)` sets the prop and checks nothing,
+        # and an int/float/bool IS a legal Cypher property value — the engine
+        # reference admits scalars, and this repo measured the same), so
+        # ``for _ref in <int>`` raised ``TypeError: 'int' object is not
+        # iterable`` on the first dedup hit against such a point — BEFORE the
+        # journal append, i.e. ``create_point(..., dedup=True)`` failed with an
+        # error naming neither the prop nor the door. That is a regression
+        # against ``origin/main``, which popped the incoming ref and only
+        # warned. And a MAPPING would have fanned out to its KEYS, each a
+        # legal-looking string, i.e. INVENTED provenance — exactly the #8171
+        # defect this same PR closed one file over, which is why the fold
+        # reuses that gate instead of restating it (#10010 review P2).
+        _prop_refs = _point_source_refs(existing.get("extractedFrom"))
         # RESOLVED s.url → the spelling the node already uses for it. Only a
         # spelling that RESOLVES to the same identity is adopted, so this
         # cannot merge two identities or invent one.

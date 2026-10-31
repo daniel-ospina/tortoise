@@ -808,6 +808,112 @@ def test_a_fold_adopts_and_WIRES_a_prop_only_ref(prov):
         f"replayed={_render_row(proj, pid)!r}")
 
 
+def test_a_fold_survives_a_non_iterable_stored_prop(prov):
+    """#10010 review P2: a stored scalar that is not a ``str`` must not CRASH
+    the fold.
+
+    ``update_point(extractedFrom=…)`` sets the property and validates nothing
+    (``_validate_extracted_from`` is called only from ``create_point``,
+    ``create_entity`` and ``create_document``), and an ``int`` is a LEGAL
+    Cypher property value (the reference lists scalars — strings, integers,
+    floats, booleans, temporals, points — and homogeneous lists as the
+    storable types). So this shape is reachable from a public writer.
+
+    Pre-fix, ``_fold_source_evidence`` special-cased only ``str`` and then ran
+    ``for _ref in _prop_refs or []``, which raises
+    ``TypeError: 'int' object is not iterable`` — BEFORE the journal append, so
+    every subsequent ``create_point(..., dedup=True)`` against that point
+    failed with an error naming neither the prop nor the door. ``origin/main``
+    tolerated it (the dedup branch popped the incoming ref and warned), so this
+    was a regression introduced by the fold.
+
+    MUTATION: iterate the raw property again (``_prop_refs =
+    existing.get("extractedFrom")`` with only ``str`` special-cased) and this
+    test errors with that TypeError; the fold's own evidence must still land, so
+    returning early instead of normalizing reds the ``_sources_of`` assertion.
+    """
+    sdk, events = prov
+    proj = sdk._get_proj()
+    held = "https://example.com/held"
+    second = "https://example.com/second"
+    content = "a non-iterable stored property must not break the fold"
+    pid = sdk.create_point("statement", content, extractedFrom=held,
+                           dedup=True)["id"]
+    sdk.update_point(pid, extractedFrom=123)
+    assert _prop_refs(proj, pid) == 123, (
+        "guard: the writer really stored the non-string scalar: "
+        f"{_prop_refs(proj, pid)!r}")
+
+    folded = sdk.create_point("statement", content, extractedFrom=second,
+                              dedup=True)
+    assert folded["id"] == pid, "guard: this must be a dedup HIT"
+    assert _sources_of(proj, pid) == {held, second}, (
+        "the fold did not keep the survivor's evidence (or crashed and landed "
+        f"nothing): {_sources_of(proj, pid)}")
+    live = _render_row(proj, pid)
+    assert set(live["extractedFromAll"]) == {held, second}, live
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _render_row(proj, pid) == live, (
+        "live != replay after folding onto a non-string prop: "
+        f"live={live!r} replayed={_render_row(proj, pid)!r}")
+
+
+def test_a_fold_does_not_invent_refs_from_a_container_prop(prov, monkeypatch):
+    """#10010 review P2 / #8171: a container-shaped prop must fan out to
+    NOTHING, not to its keys.
+
+    The fold re-implemented ref extraction instead of reusing
+    ``projection.entities._point_source_refs`` — the helper whose docstring
+    records the defect ("``list()`` on a mapping yields its KEYS, each a
+    legal-looking string" → one invented ``:Source`` per key). The ``_adopted``
+    arm then WIRES whatever it extracted, so an invented key became an invented
+    provenance edge — "worse than none" (design contract #3).
+
+    A mapping is not storable on this engine, so the shape is injected at the
+    read boundary the fold uses (``get_point``), which is the only place it can
+    arrive from — a legacy or record-sourced value the fold must not trust.
+    The str/list/tuple arms are asserted alongside so the gate cannot be
+    satisfied by refusing everything.
+
+    MUTATION: iterate the raw property and the two invented keys appear in
+    ``_sources_of`` (and as ``:Source`` nodes in ``_provenance``).
+    """
+    from tortoise.projection.entities import _point_source_refs
+
+    sdk, _events = prov
+    proj = sdk._get_proj()
+    held = "https://example.com/held"
+    second = "https://example.com/second"
+    content = "a container-shaped prop must not invent sources"
+    pid = sdk.create_point("statement", content, extractedFrom=held,
+                           dedup=True)["id"]
+
+    real_get_point = sdk.get_point
+    poisoned = {"url": "https://invented.example/key", "kind": "invented"}
+
+    def _get_point(point_id):
+        point = real_get_point(point_id)
+        if point is not None and point_id == pid:
+            point = dict(point)
+            point["extractedFrom"] = poisoned
+        return point
+
+    monkeypatch.setattr(sdk, "get_point", _get_point)
+    sdk.create_point("statement", content, extractedFrom=second, dedup=True)
+
+    invented = _sources_of(proj, pid) - {held, second}
+    assert not invented, (
+        "the fold wired refs that were only KEYS of a stored container — "
+        f"invented provenance: {sorted(invented)}")
+    assert _sources_of(proj, pid) == {held, second}, (
+        f"the fold's real work must still land: {_sources_of(proj, pid)}")
+    # The gate itself, on the shared helper the fold now calls.
+    assert _point_source_refs(poisoned) == []
+    assert _point_source_refs(200) == [] and _point_source_refs(True) == []
+    assert _point_source_refs(held) == [held]
+    assert _point_source_refs([held, None, ""]) == [held]
+
+
 def _install_store_width_encoder(monkeypatch, sdk) -> int:
     """A deterministic encoder of the STORE's declared width, over the seam.
 
