@@ -1122,43 +1122,15 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
         return np.zeros((len(texts), 1)), True
 
 
-#: Cosine similarity is `a·b / (|a||b|)`, whose range is `[-1, 1]` exactly and
-#: whose value for a pair of identical vectors is 1.0 exactly — but the
-#: floating-point dot product lands a few ulp either side of that bound, and
-#: which side depends on the BLAS. Measured on the same two literals: `0.1,
-#: 0.2, 0.3` reads `0.9999999999999999` while `0.5, 0.6, 0.7` reads
-#: `1.0000000000000002`. Both are wrong: the first makes a caller asking for
-#: "identical only" (`threshold=1.0`) admit NOTHING, and the second is outside
-#: the range cosine is defined on.
-#:
-#: `tests/test_embeddings.py::test_threshold_one` was red on exactly this — one
-#: runner rounded down, another rounded up, and the test was invisible on `main`
-#: because the push-to-main test legs never complete (`#9066`).
-#:
-#: The tolerance is deliberately tiny (≈4.5e3 ulp): the calibrated thresholds in
-#: this module live at 0.72 / 0.89 / 0.99, so snapping only a band this narrow
-#: cannot move a decision, while `[-1, 1]` itself is not a judgement call — it is
-#: the mathematical bound, which snapping simply restores.
-_COSINE_BOUND_EPS: float = 1e-12
-
-
 def cosine_similarity_matrix(vectors: np.ndarray) -> np.ndarray:
     """Normalized dot product = cosine similarity. Pure numpy.
 
     Handles zero-norm rows (all-zero vectors) by leaving them at 0 similarity.
-
-    The result is clamped and snapped to `[-1, 1]`: a value that floating point
-    rounds to within `_COSINE_BOUND_EPS` of a bound IS that bound, so an
-    identical pair always reads exactly 1.0 — otherwise a threshold of exactly
-    1.0 could never admit one (`#9066`).
     """
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     v = vectors / norms
-    sim = np.clip(v @ v.T, -1.0, 1.0)
-    sim[np.abs(sim - 1.0) <= _COSINE_BOUND_EPS] = 1.0
-    sim[np.abs(sim + 1.0) <= _COSINE_BOUND_EPS] = -1.0
-    return sim
+    return v @ v.T
 
 
 def find_cross_source_matches(

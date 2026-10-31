@@ -1782,15 +1782,15 @@ What the design document now says in that place, as design:
 - **The change feed.** The carrier is deliberately NOT in `sdk._GRAPH_EVENT_TYPES`, so an armed
   capture's turns leave `poll_events`: a `:GraphEvent` for a turn the writer deliberately skipped
   would advertise an entity the graph does not have. The capture sweep's `PointRetracted` row is
-  suppressed on the same lane for the same reason (decided on `#10325`), and that asymmetry — a
-  pre-change turn's creation row with no matching retraction — is accepted rather than repaired by
-  re-announcing turns. The `EntityMutated` op=delete record the replay folds is kept, so a shorter
-  re-capture is durable even though the feed is one-sided.
+  suppressed on the same lane for the same reason, and whether that asymmetry — a pre-change turn's
+  creation row with no matching retraction — is the repair or should be accepted permanently is the
+  open decision on `#10325`, not a settled one. The `EntityMutated` op=delete record the replay folds
+  is kept, so a shorter re-capture is durable even though the feed is one-sided.
 - **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:204`, step 7's settled answer
   to `#10129`'s placeholder): `_emit_event` returns on an append failure BEFORE the record write, so
-  that capture's rows reached the record either way and refusing the tail would cost the whole
-  journal while recovering nothing. The R1 removal record (`EntityMutated` op=delete) stays REFUSED,
-  because a tolerated torn delete is a resurrection.
+  that capture's turn rows **never reached the record either** — its transcript is already lost, and
+  refusing the tail would cost the whole journal while recovering nothing. The R1 removal record
+  (`EntityMutated` op=delete) stays REFUSED, because a tolerated torn delete is a resurrection.
 - **The tenant.** The store decision asks the tenant the SEAM will file under, not the ambient one:
   `record_tenant_effective` (`tortoise/record_writer.py:842`) is **carried > scope > env pair**, and
   `is_usable_tenant` (`tortoise/record_writer.py:875`) is the seam's own admissibility test, so the

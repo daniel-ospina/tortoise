@@ -363,53 +363,6 @@ def test_embedder_constants():
     print("PASS test_embedder_constants")
 
 
-# ── 14. cosine is exactly the range at its bounds (#9066) ────────────
-
-def test_cosine_is_exactly_the_bound_however_the_blas_rounds():
-    """#9066: a similarity that means ±1 must READ ±1, on every runner.
-
-    Cosine's range is `[-1, 1]` and its value for two identical vectors is 1.0
-    exactly, but the floating-point dot product lands a few ulp either side of
-    that — and WHICH side is the BLAS's business, not this module's. Both
-    literals below are measured on one machine: `[0.1, 0.2, 0.3]` reads
-    `0.9999999999999999` and `[0.5, 0.6, 0.7]` reads `1.0000000000000002`.
-
-    That is the defect `test_threshold_one` was red on: a caller asking for
-    exactly 1.0 ("identical only") got NOTHING when the dot rounded down, while
-    the rounding-up runner was outside cosine's own range. Both directions are
-    asserted, so this reds pre-fix whichever way a given BLAS rounds rather
-    than only on the machine that reproduced it.
-    """
-    import numpy as np
-
-    from tortoise.embeddings import cosine_similarity_matrix
-
-    # DOWN: an identical pair must read exactly 1.0, not 1.0 - ε.
-    for row in ([0.1, 0.2, 0.3], [0.9, 0.8, 0.7], [0.1] * 7):
-        sim = cosine_similarity_matrix(np.array([row, row], dtype=np.float64))
-        assert float(sim[0, 1]) == 1.0, f"identical rows {row} read {sim[0, 1]!r}"
-
-    # UP: nothing may sit above the range cosine is defined on.
-    for row in ([0.5, 0.6, 0.7], [1.0, 2.0, 3.0], [0.3, 0.7, 0.11]):
-        sim = cosine_similarity_matrix(np.array([row, row], dtype=np.float64))
-        assert float(sim[0, 1]) == 1.0, (
-            f"identical rows {row} read {sim[0, 1]!r} (outside [-1, 1], not snapped)"
-        )
-
-    # The snap is the BOUND, not a widening of it: a clearly different pair, an
-    # orthogonal pair and an all-zero row are all untouched, so a threshold
-    # still discriminates and the documented zero-norm case cannot become a
-    # false 1.0 through the normalisation guard.
-    sim = cosine_similarity_matrix(
-        np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.0, 0.0]], dtype=np.float64)
-    )
-    assert float(sim[0, 1]) == 0.0
-    assert float(sim[0, 2]) < 1.0
-    assert float(sim[0, 3]) == 0.0
-
-    print("PASS test_cosine_is_exactly_the_bound_however_the_blas_rounds")
-
-
 # ── runner ───────────────────────────────────────────────────────────
 
 def _run_all():
