@@ -765,9 +765,12 @@ def test_the_mcp_lane_is_unchanged_for_an_unpromoted_org(monkeypatch):
 # historical. A new one fails here, so the class cannot silently re-open.
 
 _ORG_WIDE_OPENER_ALLOWLIST = {
-    # → the resolvers' own historical arm (the definition of "not moved");
+    # → the resolvers' own historical arm (the definition of "not moved").
+    #   `_org_sdk` now delegates to `_org_sdk_from_name` (split so a background
+    #   job can resolve the name in a WORKER and still construct on the loop,
+    #   tortoise#7500), so that split's construction is the historical arm too;
     #   `_org_sdk_for_credential` is the credential-shaped twin the quota gate uses.
-    "_org_sdk": 1,
+    "_org_sdk_from_name": 1,
     "_org_sdk_for_credential": 1,
     # → the credential path's historical arm; the moved arm calls
     #   `_make_sdk(graph_name=...)` above it.
@@ -1114,16 +1117,46 @@ def test_every_hosted_auth_seam_stamps_the_same_field():
             "the demoted graph after a promotion")
 
 
-def test_the_mcp_capture_bridge_carries_the_default_namespace():
-    """The MCP capture tool hands `_capture_session_impl` a dict it BUILDS, not
-    the resolved credential — and an org-wide MCP credential has no `graph_id`,
-    so gating the namespace on `graph_id` (as that bridge used to) dropped it on
-    exactly the class a promotion moves. The capture then wrote the DEMOTED
-    graph while the ambient `_record_tenant_scope` filed its record rows under
-    the promoted one.
+def test_the_mcp_capture_lane_resolves_the_default_namespace_itself(monkeypatch):
+    """The MCP `tortoise_session_capture` tool builds its own credential dict and
+    (because that file is a FROZEN served surface — `tools/surface-guard.py`)
+    cannot be changed to carry the default namespace. So the shared impl hydrates
+    it: an org-wide caller whose dict lacks the field resolves it there.
 
-    FAIL-ON: move the stamp back inside `if _gid:` (indent it one level) and this
-    goes red — the MCP lane, which is the surface agents write through."""
+    BEHAVIOURAL, not a source grep: the assertions below run the resolver the
+    capture impl calls and check the dict it hands the data plane.
+
+    FAIL-ON: without the hydration, an org-wide MCP capture opens
+    `org_{org_id}` — the graph a promotion DEMOTED — while its record rows
+    (tenant = the credential's `default_graph_id`) name the promoted one: the
+    record/data split #10025 exists to remove, on the surface agents write
+    through. The guard half below makes sure the fix is NOT put back into the
+    frozen file."""
+    import asyncio
+
+    _fake_org_row(monkeypatch, f"org_{TEAM}_{NEW_ID}")
+
+    # 1. An org-wide dict with NO namespace (what the MCP tool builds) resolves
+    #    the PROMOTED graph — the one the record tenant names.
+    got = asyncio.run(ha._hydrate_default_namespace({"org_id": TEAM}))
+    assert got["graph_namespace"] == f"org_{TEAM}_{NEW_ID}", (
+        "an org-wide capture with no namespace in its dict must resolve the "
+        "DEFAULT graph — otherwise it writes the graph a promotion demoted")
+    assert got["org_id"] == TEAM  # the rest of the dict is untouched
+
+    # 2. A dict that ALREADY carries one is returned untouched — the REST lanes
+    #    are not re-resolved (and pay no read).
+    carried = {"org_id": TEAM, "graph_namespace": f"org_{TEAM}"}
+    assert asyncio.run(ha._hydrate_default_namespace(dict(carried))) == carried
+
+    # 3. A GRAPH-BOUND dict is untouched: its namespace is a CUSTOM graph's, and
+    #    "the default graph" is not the question it asks.
+    bound = {"org_id": TEAM, "graph_id": NEW_ID,
+             "graph_namespace": f"org_{TEAM}_{NEW_ID}"}
+    assert asyncio.run(ha._hydrate_default_namespace(dict(bound))) == bound
+
+    # 4. The fix must NOT live in the frozen file: an unconditional stamp there
+    #    is a surface change needing owner approval (#3863/#4282).
     from pathlib import Path
 
     src = (Path(__file__).resolve().parent.parent / "tortoise"
@@ -1132,12 +1165,15 @@ def test_the_mcp_capture_bridge_carries_the_default_namespace():
         'if limits.get("max_points")', 1)[0]
     stamps = [ln for ln in bridge.splitlines()
               if 'org["graph_namespace"]' in ln]
-    assert stamps, "the MCP capture bridge no longer carries graph_namespace"
-    assert stamps[0].startswith('    org["graph_namespace"]'), (
-        "the stamp must be UNCONDITIONAL (4-space body indent), not nested "
-        f"under `if _gid:`: {stamps[0]!r}")
-    # …and the graph-bound half still carries the scope fields.
-    assert 'org["graph_id"] = _gid' in bridge
+    assert stamps, (
+        "the MCP capture bridge stopped stamping `graph_namespace` at all — "
+        "that is the graph-BOUND half the frozen tool served before #10180")
+    assert all(ln.startswith("        ") for ln in stamps), (
+        "tortoise/mcp_server.py serves frozen tools — a top-level (4-space, "
+        "UNCONDITIONAL) `org[\"graph_namespace\"]` stamp there is a surface "
+        "change needing owner approval (#3863/#4282, tools/surface-guard.py). "
+        "It must stay nested under `if _gid:`; put the org-wide fix in "
+        "`_hydrate_default_namespace` instead.")
 
 
 # ── 13. The org-id-only lanes reuse the credential — no read, one answer ────
