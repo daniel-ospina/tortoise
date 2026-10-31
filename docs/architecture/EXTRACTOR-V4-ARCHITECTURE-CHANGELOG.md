@@ -1378,10 +1378,12 @@ the real closing marker **inside** the body, and the candidate-absent rule rejec
 the boundary never depends on the session text's cooperation. The ladder tries up to eight candidates
 (each a different 64-bit nonce, one sha256 each); exhausting it needs the body to contain all eight at
 once. That is a **fixed-point** requirement, not eight independent preimages: the nonce hashes the
-body, so each attempt an attacker "wins" changes the body they must win against next — the chain has
-no step that can be forced (three rounds of `body += marker(nonce(body))` walk
-`56a0407a… → 3bf09b03… → 721327c4… → c9608f4f…`), so landing on the fixed point is a search over
-~`len(body)/16¹⁶` ≈ **4.3e-16** for an 8,009 B body. The exhaustion path is defined
+body, and the body is **never rewritten between attempts**, so every one of the eight candidates is a
+hash of that same unchanged body — what the body must defeat is all eight SIMULTANEOUSLY. There is no
+`body += marker(nonce(body))` chain to walk: the render has never done that, and a chained ladder
+would be WEAKER (it would make the attacker's job SEQUENTIAL — defeat attempt *n*, then *n+1* against
+a body they already influenced — instead of simultaneous). Landing on the fixed point is therefore a
+search over ~`len(body)/16¹⁶` ≈ **4.3e-16** for an 8,009 B body. The exhaustion path is defined
 anyway, because a render path must not raise: it emits the clause **without** a marker, since a
 boundary the content can forge is worse than none — it invites the model to trust a border the
 attacker drew.
@@ -1441,13 +1443,13 @@ the class this entry frames everywhere *else* — so "applied to every region th
 was a claim the diff did not pay for. It is scoped to the renderers instead, and S1's exposure is
 named rather than implied.
 
-**Cost, measured at this head.** The clause is **218 B** for the transcript region and **209 B** for
+**Cost, measured at this head.** The clause is **216 B** for the transcript region and **207 B** for
 the story; a region's two markers are **56 B + 54 B** (the `SOURCE-TRANSCRIPT` slug) and **47 B +
 45 B** (the `S1-STORY` slug), and the framing contributes three newlines — so a framed transcript
-region adds exactly **331 B** and a framed story region exactly **304 B**, independent of the body.
+region adds exactly **329 B** and a framed story region exactly **302 B**, independent of the body.
 Measured with the transcript body at exactly the **8,000 B** cap (the region's own budget) and a
-2,000 B story: S2 renders **45,771 B** (+331 B on a **45,440 B** unframed base, **+0.73%**) and S4
-**44,358 B** (+635 B on **43,723 B**, **+1.45%**). The bodies themselves are unchanged, so nothing
+2,000 B story: S2 renders **45,769 B** (+329 B on a **45,440 B** unframed base, **+0.72%**) and S4
+**44,354 B** (+631 B on **43,723 B**, **+1.44%**). The bodies themselves are unchanged, so nothing
 re-tokenises: the delta is the clause and the markers, exactly.
 
 **Tests.** `tests/test_extractor_prompt_framing_10311.py` asserts the clause, its three properties, and
