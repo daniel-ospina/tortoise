@@ -205,8 +205,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:9227-9231` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:14765`), so this ❌ is the frozen run's answer, not the seam's reachability |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:9217-9223` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:14765`) |
+| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:9227-9231` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:14878`), so this ❌ is the frozen run's answer, not the seam's reachability |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:9217-9223` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:14878`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -636,7 +636,7 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 ## The entry point the run drives (and the receipt the #9116 seam opened)
 
 The pipeline's OWN path is `TortoiseSDK.capture_session` →
-`sdk._extract_session_v2` (`sdk.py:13937`; called at `:12974`) →
+`sdk._extract_session_v2` (`sdk.py:14050`; called at `:13087`) →
 `extractor_v2.extract_session_v2` (`extractor_v2.py:8733`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
