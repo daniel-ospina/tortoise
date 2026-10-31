@@ -1989,6 +1989,69 @@ def test_an_exhausted_budget_leaves_retention_unknown_instead_of_escaping():
     assert client.retention_days() is None
 
 
+def test_a_rerun_artifact_is_reduced_by_created_at_not_by_listing_order():
+    """A re-run is a NEW ATTEMPT of the SAME run id, so both artifacts share `(run_id, name)`.
+
+    ⛔ `{name: item for item in items}` kept whichever the API returned LAST — not the newest
+    — so which attempt's JUnit a red was attributed from was decided by response order. The
+    listing is run-scoped with no attempt-specific sibling, so `created_at` is the only
+    ordering available, and the same attempt-identity rule the check-run reduction delegates
+    to `ci_verdict.group_latest_attempts` has to hold here too.
+    """
+    name = "pytest-log-test-slow-a"
+    older = {
+        "id": 11,
+        "name": name,
+        "created_at": "2026-10-30T00:00:00Z",
+        "expired": False,
+    }
+    newer = {
+        "id": 22,
+        "name": name,
+        "created_at": "2026-10-31T00:00:00Z",
+        "expired": False,
+    }
+    client = catch.GhClient("o/r", max_calls=100)
+
+    # The NEWEST arrives FIRST — last-wins would hand back `older`.
+    client._paginated = lambda url, key: [newer, older]  # type: ignore[method-assign]
+    assert client.artifacts("1")[name]["id"] == 22
+
+    # A LIVE older artifact beats an EXPIRED newer one: `RunArtifacts.get` drops an expired
+    # hit to UNKNOWN, so letting expiry win discards evidence that still exists.
+    expired = {**newer, "expired": True}
+    client._paginated = lambda url, key: [expired, older]  # type: ignore[method-assign]
+    assert client.artifacts("1")[name]["id"] == 11
+
+    # When EVERY copy is expired the winner is still expired — the row must then say so,
+    # rather than read as an artifact that was never produced.
+    client._paginated = lambda url, key: [{**older, "expired": True}]  # type: ignore[method-assign]
+    assert client.artifacts("1")[name]["expired"] is True
+
+
+def test_a_zip_download_that_is_not_bytes_is_a_READ_failure_not_a_traceback(monkeypatch):
+    """`assert isinstance(raw, bytes)` is ELIDED under `python -O`, and the guard is load-bearing.
+
+    ⛔ With it elided, a `gh` that hands back a str reaches `zipfile.ZipFile(BytesIO(data))`,
+    whose `TypeError` is not one of `_leg_evidence`'s handlers — so it escaped `main` as a
+    traceback (exit 1, no report) instead of the documented exit 2 / UNKNOWN row. The raise
+    also has to be `ReadError`, which IS handled: pre-fix this test sees `AssertionError`
+    under a normal interpreter and nothing at all under `-O`.
+    """
+    client = catch.GhClient("o/r", max_calls=10)
+    monkeypatch.setattr(client, "_gh", lambda args, binary=False: "not-bytes")
+    with pytest.raises(catch.ReadError, match="not bytes"):
+        client.artifact_zip(1234)
+
+
+def test_a_retry_loop_that_never_ran_is_a_READ_failure_not_an_assert(monkeypatch):
+    """`assert last is not None` at the bottom of `_gh` is the same elidable-guard defect."""
+    client = catch.GhClient("o/r", max_calls=10)
+    monkeypatch.setattr(catch.GhClient, "RETRIES", 0)
+    with pytest.raises(catch.ReadError, match="never attempted"):
+        client._gh(["api", "repos/o/r/actions/runs"])
+
+
 def test_a_numeric_string_check_id_does_not_mint_a_phantom_superseded_red():
     """`-1` for a non-int id made `attempt.check_id < latest.check_id` unconditionally true.
 
@@ -2010,6 +2073,29 @@ def test_a_numeric_string_check_id_does_not_mint_a_phantom_superseded_red():
     assert len(groups) == 1
     assert groups[0].latest is not None and groups[0].latest.state == "red"
     assert groups[0].superseded == ()
+
+
+def test_an_unorderable_red_is_carried_as_superseded_never_as_cleared():
+    """`_check_id` maps an unparseable id to `-1`, and `-1 < latest.check_id` for EVERY latest.
+
+    ⛔ So a red of UNKNOWN AGE was emitted as `cleared` — "a clean re-measurement happened" —
+    on no evidence of order at all: the same fabricated clean the numeric-string coercion
+    above exists to prevent, reached from the other side. Nothing about it is orderable, so it
+    is left unaccounted and lands in `superseded`: the red is still COUNTED (it happened), it
+    is just never called cleared.
+    """
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    red = _check("not-a-number", RUN_PR, job, "failure")
+    green = _check(600, RUN_PR, job, "success")
+
+    groups = catch.reduce_attempts([red, green], {str(RUN_PR): ("111", "python-ci")})
+    cleared = [attempt for group in groups for attempt in group.cleared]
+    assert all(a.check_id >= 0 for a in cleared), (
+        f"an unorderable red cannot be 'cleared': {[a.check_id for a in cleared]}"
+    )
+    carried = [attempt for group in groups for attempt in group.superseded]
+    assert [a.check_id for a in carried] == [-1], "it is still counted, as superseded"
 
 
 # --- 13. the lane split is DERIVED, not a constant --------------------------
