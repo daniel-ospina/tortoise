@@ -241,15 +241,32 @@ resolved in two unrelated ways — and that is why no verb exists.
 | 9 | `ensure_default_graph_row` (`:4046`) / `_mint_default_graph_row_best_effort` (`:4249`) | who WRITES the default row | creation/provisioning only |
 | 10 | `set_graph_name` (`:4484`) / `set_graph_recording` (`:4609`) | rename / recording override on the default | read the `kind='default'` row |
 | 11 | `20261028000001` §3 (§2 above) | the default row's namespace must equal `organizations.graph_name` | the column |
+| 12 | `hosted_api._sweep_events` (`:1496`) — the boot + hourly event-retention purge | **which graph's events get expired / overflow-capped** | `_make_sdk(namespace=org["org_id"])` — **the derivation**; the row and the column are both ignored (its registry-mode pre-filter, `:1492`, keys on the same `org_{org_id}` literal). Under a promotion the NEW default's events are never purged or capped: `TORTOISE_EVENT_MAX_PER_TEAM` silently unenforced |
+| 13 | `hosted_api._dream_worker._open_sdk` (`:3383`), org-keyed branch | **which graph the background dream WRITES** | the queue key, not the control plane: an org-wide credential enqueues with no graph (`:9797-9803`), so `gns is None` → `_make_sdk(namespace=org_id)` — **the derivation**. Splits from the RECORD tenant the same pass binds (row-resolved: `_bind_dream_record_tenant` `:7086`) |
+| 14 | `hosted_api._dispatch_webhooks` (`:3410`) → `_dispatch_webhooks_sync` (`:2938`), dream-triggered | **which graph's pending events are pushed** | the same queue key: both `graph_name` and `graph_namespace` are `None`, so `_make_sdk(namespace=org_id)` — **the derivation**. Under a promotion new events go undelivered until the scheduled sweep (#8098), which does resolve the row |
+| 15 | `hosted_api.org_info` (`:10519`) — the Overview "Count REAL Points in default graph" | **what the dashboard's memory count reports** | `_make_sdk(namespace=org["org_id"])` — **the derivation**, on a route that already refuses graph-bound credentials (`_reject_graph_bound_org_surface`). Under a promotion the Overview counts the DEMOTED graph |
+| 16 | `hosted_api` pack catalog (`:10992`) / manifest pre-check + install (`:11097`) | **which graph holds the team's `PackInstall` / `:PackManifest` state** | the same derivation, behind the same org-wide rejection. Under a promotion installs land on — and are read from — the DEMOTED graph (its own docstring, `:10973`, already names `org_{org_id}` as the install location) |
+| 17 | `hosted_api` background indexing + seed lanes — `_run_indexing` (`:36797`), `_relink_sessions_after_index` (`:37147`), `_run_docs_indexing` (`:37370`), `_run_onboarding_seed` (`:32952`), `_run_starter_seed` (`:33129`) | **which graph their writes land in — versus which graph their emitted records are FILED under** | the two facts, one lane: the graph is the derivation, the record tenant is the row (`_bind_default_graph_record_tenant`, `:7014`, → `default_graph_id_for`). Its own docstring (`:7026-7030`) states the equality out loud: *"`namespace=org_id` is the org's DEFAULT graph, BY CONSTRUCTION"* |
+
+Rows 12–17 are **consumers of Fact B, not of the agreement**: each computes
+`org_{org_id}` from the org id and never asks which `public.graphs` row is the
+default. Measured at this head by AST over `tortoise/hosted_api.py`, the class is
+**27 `_make_sdk(namespace=<org id>)` call sites** (88 registry opens and 2
+`namespace=None` opens excluded); the rest are provisioning / seed / onboarding /
+graph-lifecycle helpers (`:5004`, `:11521`, `:11560`, `:11635`, `:21283`,
+`:21305`, `:26763`, `:27487`, `:31378`, `:31942`, `:31953`, `:32000`, `:32434`,
+`:33464`). Rows 12–17 are the ones whose post-promotion consequence is not just
+"the old graph is still used" but a named operational defect — #13 and #17 the
+record/data SPLIT, the others a named reader answering from the demoted graph.
 
 **Fact A — the control-plane fact** (#1, #6, #9–#11): *which `public.graphs` row
 carries `kind='default'`*. It answers the RECORD tenant, the dashboard slot, the
 backup slot and the `"default"` sentinel — and it is the fact #10025 gave a
 stable id.
 
-**Fact B — the derivation fact** (#4, #5): *an org-wide credential opens
-`org_{org_id}`*. Both data-plane lanes compute it from the org ID and
-deliberately ignore the control plane. That is a recorded decision, not an
+**Fact B — the derivation fact** (#4, #5, and the background/auxiliary readers in
+#12–#17): *an org-wide credential opens `org_{org_id}`*. Both data-plane lanes
+compute it from the org ID and deliberately ignore the control plane. That is a recorded decision, not an
 oversight: `_data_sdk`'s docstring says `graph_namespace` (`t.graph_name`) is
 **NOT** used for the org-wide open because "the selfhost legacy lane
 (`sdk.org_create org_{name}`, #2023) diverges and flipping would silently move
@@ -261,9 +278,15 @@ drives that derivation against the real `_get_proj`.
 The two facts agree today **only because provisioning makes them agree by
 construction**: all five hosted provisioning sites write
 `graph_name = f"org_{org_id}"` (`hosted_api.py:4885`, `:11498`, `:21274`,
-`:28349`, `:33378`) — exactly what the derivation produces. Nothing tests,
-constrains or observes that equality (**#10361** — filed from this
-measurement).
+`:28349`, `:33378`) — exactly what the derivation produces. ⚠️ That is a
+statement about the five **writers**, not about the rows that already exist:
+`:33378`'s own inline note marks `org_{org_id}` as **#1903-era parity**, so a row
+provisioned before #1903 carries `org_{name}` and would move its data access
+under a promotion — the #2023 class, not a hypothetical. One count checks a live
+deployment: `SELECT count(*) FROM organizations WHERE graph_name <> 'org_' || id`
+(0 = every existing row agrees with the derivation; anything above 0 names orgs a
+promotion would move). Nothing tests, constrains or observes that equality
+(**#10361** — filed from this measurement).
 
 ### Why no verb can be written as "flip a row"
 
@@ -276,17 +299,32 @@ decision reopens #2023's pin.
 
 ### The options (owner decision on #10180)
 
-1. **The row becomes the single authority** *(recommended)*. The org-wide
-   branches of `_data_graph_name`/`_data_sdk` and `mcp_auth._get_org_sdk` open
-   the default ROW's namespace instead of the derivation; `graph_metadata`'s
-   default `namespace` reads the row rather than the column; promotion = swap
-   `kind` + move `organizations.graph_name` (which keeps §3's invariant true).
-   Byte-identical today for every hosted org (the five literals above) and for
-   every registry/selfhost org (an org-wide registry credential carries
-   `graph_namespace = None`, so the fallback IS the derivation) — but it
-   re-expresses the E2E-5 "byte-identical" gate as "byte-identical for every org
-   whose default row names `org_{org_id}`", and the derivation/column equality
-   must be pinned by a test or a constraint first.
+1. **The row becomes the single authority** *(recommended)*. **The change set is
+the whole class — every `_make_sdk(namespace=<org id>)` default-graph open, 27
+call sites at this head — not three functions.** That means the org-wide branches
+of `_data_graph_name`/`_data_sdk` and `mcp_auth._get_org_sdk`, **and** the six
+readers in #12–#17 (retention sweep, dream drain, dream-triggered webhook
+dispatch, Overview count, pack catalog/install, and the indexing/seed lanes whose
+record tenant already comes from the row); `graph_metadata`'s default
+`namespace` reads the row rather than the column; promotion = swap `kind` + move
+`organizations.graph_name` (which keeps §3's invariant true). Byte-identical
+today **for every org the five current provisioning sites created** (the literals
+above) and for every registry/selfhost org (an org-wide registry credential
+carries `graph_namespace = None`, so the fallback IS the derivation) — but it
+re-expresses the E2E-5 "byte-identical" gate as "byte-identical for every org
+whose default row names `org_{org_id}`", and the derivation/column equality must
+be pinned by a test or a constraint first (the count above is how to find the
+orgs that already fail it).
+   ⚠️ **The in-tree proof that a partial change set splits the org**, and the
+   reason #12–#17 must be in it: `hosted_api.py:9788-9793` says *"An org-wide API
+   KEY is NOT that shape — its drain opens `_make_sdk(namespace=org_id)`, the
+   same graph `_data_sdk` opened for this request"* (the same equality is
+   restated at `:7023` and `:7102-7103`, and #17's `:7026-7030` states it for five
+   more lanes). That sentence is TRUE only because the derivation and the row
+   agree today. Convert `_data_sdk` alone and it becomes false:
+   `_bind_dream_record_tenant` files the pass's records under the NEW default
+   while the drain at #13 writes the OLD one — the record/data split §6 exists to
+   prevent, on a lane outside the "three functions" reading.
 2. **Promote the record only.** Rejected: splits the record from the data plane
    (above).
 3. **Copy on promote.** A data migration that duplicates a team's records across
