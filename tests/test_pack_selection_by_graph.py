@@ -460,16 +460,29 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     measured against `redislite/client.py`). It said the rows were lost because
     "`_cleanup` removes the store's `.settings` and reclaims its socket dir".
     Both halves fail: `_cleanup` also issues `shutdown(save=True, now=True,
-    force=True)` (`:112`), and for a store constructed with an explicit db path
-    the RDB lives in `dbdir` = `dirname(db_filename)` (`:157-158`), which is
-    OUTSIDE the `redis_dir` that gets `rmtree`'d (`:161-164`) — `dbdir` equals
-    `redis_dir` only in the no-filename branch (`:455-458`). Measured inside
+    force=True)`, and for a store constructed with an explicit db path the RDB
+    lives in `dbdir` = `dirname(db_filename)` (the `if db_filename:` branch of
+    `RedisMixin.__init__`), which is OUTSIDE the `redis_dir` that
+    `RedisMixin._cleanup` `rmtree`s — `dbdir` equals `redis_dir` only through
+    `__init__`'s `if not self.dbdir:` fallback, which no explicit filename can
+    reach. Measured inside
     pytest, the pre-fix shape reds with `.settings` STILL PRESENT and no RDB
     written at all, i.e. `_cleanup` had not run at that moment. So the failure
     is not a teardown artifact, it is the ROWS: read them. The 404 that reddened
-    CI `test (c)` of run `41210146871` at `:957`
+    CI `test (c)` of run `41210146871`
     (`TestGraphPacksRest::test_graph_bound_key_reads_only_its_own_graph`) is the
     same symptom.
+
+    ⛔ NO LINE NUMBERS INTO `redislite` HERE, ON PURPOSE (#10424 review P3).
+    `redislite` is pinned by a FLOOR (`falkordblite>=0.10`), so an offset into
+    `client.py` is a claim that re-stales on any lock bump — and the offsets this
+    paragraph used to carry were already wrong when written: the one given for
+    the `dbdir` assignment actually named `os.kill(pid, SIGKILL)`. The
+    statements are named instead — `RedisMixin._cleanup` and
+    `RedisMixin.__init__` — which is the same rule this PR applies to
+    `tortoise/sdk.py` in `tests/test_a4_instrument_input.py`: cite the symbol, or
+    delete the claim. Not extended into a prose-regex guard, because a regex
+    over another file's docstring catches this one instance and nothing else.
     `tests/_embedded.py:204-207` names the contract: redislite's "`_cleanup()`
     last-client branch … shuts the daemon down", so "callers that need more than
     the lock must therefore ALSO verify visibility at seed time".
@@ -490,10 +503,10 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     lifetime escapes the fixture.
 
     THE MECHANISM IS THE CO-TENANT GUARD, NOT A SNAPSHOT (#10424 review P3,
-    re-measured at `redislite/client.py:112` on this head): `RedisMixin._cleanup()`
+    re-measured against `RedisMixin._cleanup` on this head): `RedisMixin._cleanup()`
     — the ONE teardown both paths reach — issues `shutdown(save=True, now=True,
     force=True)`, so "an explicit SAVE instead of a GC-timed NOSAVE teardown" is
-    false in BOTH halves, and `RedisMixin.__del__` (`:473`) calls that same
+    false in BOTH halves, and `RedisMixin.__del__` calls that same
     `_cleanup`. With no co-tenant the guard does not fire, so `sdk.close()` is
     exactly as destructive as dropping the handle: this close is safe HERE
     because the store already has a second client, and it is not a standing fix
