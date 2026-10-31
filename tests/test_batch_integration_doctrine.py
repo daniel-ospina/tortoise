@@ -153,7 +153,8 @@ def _re_runnable(code: str) -> bool:
     if branch == "$PINNED":
         # pin as the BRANCH NAME -> creates from HEAD, rc=0, HEAD never moves
         return False
-    return "$PINNED" in code[create.end():]  # the pin must be the START POINT
+    rest = code[create.end():].split()
+    return bool(rest) and rest[0].strip('"').strip("'") == "$PINNED"  # START POINT, first token
 
 
 #: The test target a marker-scoped run names (``tests/test_ingest_safety.py``).
@@ -427,6 +428,19 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     # keeps going and the pytest lines measure whatever tree HEAD is on. Any
     # re-runnable spelling satisfies this; the one-shot form does not.
     moves = [c for c in baseline if _MOVES_HEAD.search(_code(c)) and "$PINNED" in _code(c)]
+
+    # ...and HEAD must still be on the pin when the suite STARTS. A reorder of
+    # this fence's own trailing `git switch -` (or any stray `git switch main`)
+    # between the pin switch and the first pytest line satisfies every check
+    # above while the suite measures the operator's lane — verbatim the P1 this
+    # file exists to prevent.
+    run = [i for i, c in enumerate(baseline) if _FULL_SUITE.search(c)]
+    assert run, "the baseline fence no longer runs the suite — re-point this guard"
+    before = [c for c in baseline[: min(run)] if _MOVES_HEAD.search(_code(c))]
+    assert all('"$PINNED"' in _code(c) and _re_runnable(_code(c)) for c in before), (
+        "every HEAD-moving command before the baseline suite must switch to "
+        f"$PINNED; these do not: {before}"
+    )
     assert moves, "the baseline fence no longer switches to the pinned base — re-point this guard"
     assert all(_re_runnable(_code(c)) for c in moves), (
         "a re-baseline must be re-runnable: a one-shot create dies with 'a branch "
