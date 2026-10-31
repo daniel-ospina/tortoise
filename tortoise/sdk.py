@@ -5416,7 +5416,9 @@ _NARRATIVE_PROP = "story_arc"
 _NARRATIVE_SESSION_KEYS: tuple[str, ...] = ("sessionId", "session_id")
 
 
-def _refuse_unpaired_narrative(props: dict, *, door: str) -> None:
+def _refuse_unpaired_narrative(props: dict, *, door: str,
+                              label: str | None = None,
+                              journal_armed: bool = True) -> None:
     """§9.1's narrative must NAME its session, or it has no home at all (#10000).
 
     THE RULE, verbatim (`docs/architecture/STORAGE-ARCHITECTURE.md` §9.1/D1):
@@ -5454,25 +5456,96 @@ def _refuse_unpaired_narrative(props: dict, *, door: str) -> None:
     `story_arc` line. A legacy line replays to the fold's named warning, which
     is the declared trade; a NEW write is refused before anything is written.
 
-    ⚠️ Scope: it refuses the KEY when it is unpaired. A paired narrative is
-    untouched and takes the record seam unchanged — this adds no writer, no
-    record type, and no SDK/MCP surface.
+    ⚠️ Scope: it refuses `story_arc` on every shape that would NOT land in
+    §9.1's home, and accepts only the one that does. Three refusals, one rule —
+    the prose must be in Postgres-with-its-session and on NO node:
+
+      * an UPDATE door (`label is None`) — an update writes caller props straight
+        onto the node (`SET n += $props`), so on `:Point`/`:Object`/`:Subject` it
+        would carry the prose into the graph, and on `:Event`/`:Source` it is
+        refused one frame later by the server-managed set, so either way it
+        cannot file §9.1's row. Measured at #10389's head: `update_entity(<object>,
+        story_arc=…, sessionId=…)` wrote the prose onto the `:Object` node AND
+        (once the record names the session) into `public.session_narrative` — two
+        drifting homes, the duplicate §9.1(b)/R7 exists to remove.
+      * a label whose fold does NOT refuse the key (`:Point`, `:Object`,
+        `:Subject`) — the open `#228` passthrough persists it, so a PAIRED write
+        would put the prose on a node while the record files it, and an UNPAIRED
+        one would store a graph copy of §9.1's text. `_NARRATIVE_LABELS` is the
+        closed set whose folds DO refuse it (measured: `create_object(...)`, and
+        `create_point("statement", "a claim", story_arc=…)` which persisted
+        `(:Point {story_arc: <the prose>})`).
+      * a create with NO JOURNAL — `sdk._emit_event` returns before the record
+        leg when no log is configured, so the record home is unreachable and the
+        prose is in no store, with a 2xx and no advisory (the exact class this
+        change closes; the commit path already reports it via
+        `hosted_api._report_narrative_home`, the tenant doors have no receipt
+        channel).
+
+    ⚠️ THE REMAINING HOLE, NAMED AND NOT ABSORBED: `create_point`/`update_point`
+    reach the passthrough WITHOUT passing this helper (their own funnels are
+    separate), so `create_point(..., story_arc=…)` still stores the prose on a
+    `:Point` — measured, and it predates this change. Filed as its own issue
+    rather than half-closed here; this helper's message no longer claims
+    otherwise.
     """
     if not isinstance(props, dict) or not props.get(_NARRATIVE_PROP):
         return
-    if any(isinstance(props.get(k), str) and props[k].strip()
-           for k in _NARRATIVE_SESSION_KEYS):
-        return
-    raise ValueError(
-        f"{_NARRATIVE_PROP!r} names no session, so §9.1's narrative has nowhere "
-        f"to go (#10000): the record files it under its session "
-        f"(`public.session_narrative`, keyed by session_id) and the graph "
-        f"refuses the key on every fold, so {door} would store the prose in no "
-        f"store at all. Pass {' or '.join(_NARRATIVE_SESSION_KEYS)!r} naming the "
-        f"session this narrative was distilled from (that is the transcript it "
-        f"is paired with, §9.1), or write the narrative through the capture / "
-        f"commit path that carries its own session."
-    )
+    if label is None:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} cannot be written through {door}: §9.1/D1 puts "
+            f"the S1 narrative in `public.session_narrative` (filed by its "
+            f"session), and an update writes caller props straight onto the "
+            f"node — so this call would either duplicate the prose into the "
+            f"graph or be refused one frame later by the label's server-managed "
+            f"set, and in neither case does it file §9.1's row. Write the "
+            f"narrative through the capture / commit path (it carries its own "
+            f"session), or create the carrier with `sessionId=`."
+        )
+    if label not in _NARRATIVE_LABELS:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} cannot be written on a {label} (#10000): "
+            f"§9.1/D1 puts the S1 narrative in `public.session_narrative` and "
+            f"NOT on a node, but the {label} fold does not refuse the key — its "
+            f"open passthrough would persist the prose on the node, so this "
+            f"write would store §9.1's text in the graph whether or not it also "
+            f"reached the record. The labels whose folds refuse it are "
+            f"{sorted(_NARRATIVE_LABELS)}; for anything else, keep the prose out "
+            f"of a node payload and file it through the capture / commit path."
+        )
+    if not any(isinstance(props.get(k), str) and props[k].strip()
+               for k in _NARRATIVE_SESSION_KEYS):
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} names no session, so §9.1's narrative has "
+            f"nowhere to go (#10000): the record files it under its session "
+            f"(`public.session_narrative`, keyed by session_id) and the graph "
+            f"refuses the key on the {label} fold, so {door} would store the "
+            f"prose in no store at all. Pass {' or '.join(_NARRATIVE_SESSION_KEYS)!r} "
+            f"naming the session this narrative was distilled from (that is the "
+            f"transcript it is paired with, §9.1), or write the narrative through "
+            f"the capture / commit path that carries its own session."
+        )
+    if not journal_armed:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} has no record to be filed in (#10000): this "
+            f"SDK was built without an `event_log_path` (no journal), so the "
+            f"record leg is unreachable — `sdk._emit_event` returns before it — "
+            f"and §9.1's narrative would be stored NOWHERE while {door} answered "
+            f"success. Configure `event_log_path` (and `TORTOISE_RECORD_DSN`) so "
+            f"the record can hold it, or write the narrative through the capture "
+            f"/ commit path."
+        )
+
+
+#: The labels whose projection fold REFUSES `story_arc` (`_EVENT_HANDLED`,
+#: `_DOC_PASSTHROUGH_HANDLED`, `_SOURCE_SERVER_MANAGED_PROPS`) — i.e. the only
+#: labels on which a paired narrative is guaranteed to land in the RECORD and
+#: on NO node. Closed set, not a denylist: a label that grows a refusal belongs
+#: here deliberately, and one that does not (`:Point`, `:Object`, `:Subject`)
+#: stays out — measured, `create_object`/`create_subject`/`create_point` all
+#: persist the key through the open `#228` passthrough.
+_NARRATIVE_LABELS: frozenset = frozenset({"Event", "Source", "Document"})
+
 
 
 def _sanitize_props(props: dict, *, reject_id: bool = False,
@@ -37698,7 +37771,9 @@ class TortoiseSDK:
         # create door MEETS (`create_entity`, `create_event`, `create_document`,
         # `create_source`), and the refusal runs BEFORE any write, so nothing is
         # applied and nothing is journalled.
-        _refuse_unpaired_narrative(props, door=f"create_{label.lower()}")
+        _refuse_unpaired_narrative(props, door=f"create_{label.lower()}",
+                                   label=label,
+                                   journal_armed=self._event_log_path is not None)
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
         # ``create_entity("Point", …)`` raises `unknown type`
@@ -38495,7 +38570,7 @@ class TortoiseSDK:
         # is dropped by `_EVENT_SERVER_MANAGED_PROPS` (the prose is refused, and
         # rightly) while the record gets nothing, because the write names no
         # session. Same rule, same refusal, same helper.
-        _refuse_unpaired_narrative(props, door="update_entity")
+        _refuse_unpaired_narrative(props, door="update_entity", label=None)
         # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
         # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
         # ``_update_entity``) and it writes caller props with a live

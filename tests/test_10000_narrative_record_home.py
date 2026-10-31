@@ -80,11 +80,43 @@ def test_an_unpaired_narrative_is_refused_rather_than_stored_nowhere(sdk):
 
 
 def test_the_update_door_refuses_it_too(sdk):
-    """`update_entity` is the second write door onto the same key (measured at #10389)."""
+    """`update_entity` is the second write door onto the same key (measured at #10389).
+
+    ⚠️ ASSERT THE MESSAGE, not just the exception: an `:Event` update raises a
+    `ValueError` from `_EVENT_SERVER_MANAGED_PROPS` one frame later even WITHOUT
+    this guard (measured pre-fix), so `pytest.raises(ValueError)` alone would pin
+    nothing about this change.
+    """
     event = sdk.create_event("probe-update-door", "AgentSession")
     event_id = event.get("eventId") or event.get("id")
-    with pytest.raises(ValueError):
-        sdk.update_entity(event_id, story_arc=PROSE)
+    with pytest.raises(ValueError) as exc:
+        sdk.update_entity(event_id, story_arc=PROSE, sessionId=SESSION)
+    assert "cannot be written through update_entity" in str(exc.value), (
+        "the UPDATE door's own refusal must fire — a paired narrative is still "
+        "unfileable through an update, which writes caller props onto the node")
+
+
+def test_a_label_whose_fold_does_not_refuse_the_key_is_refused(sdk):
+    """`:Object`/`:Subject` carry `story_arc` through #228 — a paired write there
+    duplicates the prose into the graph (measured at #10389's head)."""
+    with pytest.raises(ValueError) as exc:
+        sdk.create_object("probe-object", story_arc=PROSE, sessionId=SESSION)
+    message = str(exc.value)
+    assert "cannot be written on a Object" in message
+    assert "Object fold does not refuse the key" in message
+    assert _prose_on_nodes(sdk) == []
+
+
+def test_a_paired_narrative_with_no_journal_is_refused(tmp_path, monkeypatch):
+    """No journal ⇒ `_emit_event` returns before the record leg, so the prose is
+    in no store and the caller gets a 2xx (measured: no journal file created)."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    journal_less = TortoiseSDK(str(tmp_path / "graph-nojournal.db"))
+    with pytest.raises(ValueError) as exc:
+        journal_less.create_event("probe-no-journal", "AgentSession",
+                                  story_arc=PROSE, sessionId=SESSION)
+    assert "no record to be filed in" in str(exc.value)
+    assert _prose_on_nodes(journal_less) == []
 
 
 def test_a_paired_narrative_is_journalled_and_files_its_record_row(sdk, tmp_path):
