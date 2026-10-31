@@ -1953,6 +1953,14 @@ class _EntityHandlers:
         # so the two folds answered the same question differently, which is the
         # drift class a shared key must not have.
         #
+        # ⚠️ This NARROWS #228 on this route, deliberately, and the departure is
+        # marked on the issue (an `OVERRIDES:` line, `#issuecomment-6540959107`)
+        # so a later reader cannot mistake it for legacy and tidy it away.
+        # Scope: ONE key. #228's passthrough is intact — `_upsert_document`
+        # still passes NO `allow_keys` and every OTHER arbitrary prop lands
+        # (`tests/test_projection.py -k "arbitrary_props or document"`, and this
+        # key's own pin also asserts `project="kept-228"` survives).
+        #
         # ⚠️ Deliberate trade, stated: a legacy JOURNAL whose `DocumentCreated`
         # carried `story_arc` now replays without it, so a rebuild of a graph
         # holding that property no longer reproduces it. Accepted because the
