@@ -300,21 +300,45 @@ def test_hold_is_not_a_new_vet_outcome_and_the_doc_says_so():
     )
 
 
-def test_the_shipped_code_still_matches_the_documented_warning():
-    """The spec-change warning must not outlive the inverted behaviour.
+def test_the_state_of_code_paragraph_tracks_what_runs():
+    """The spec-change warning must not outlive the behaviour it describes.
 
-    §4.4 says the shipped renderer invites *"assume everything is new"*. If the
-    code is fixed, this reds and the doc must stop claiming the inverted policy
-    runs.
+    This guard was written to red the day the renderer was fixed: while
+    `extractor_v2.py` still said *"assume everything is new"*, §4.4 had to keep
+    saying the code implemented the inverted policy. **`#5095` fixed the render
+    and the record**, so the pair is now asserted in the other polarity — the
+    instruction is gone from the code, the document says so, and the document
+    names what is STILL absent (the mint gate and the carry-forward store) so a
+    reader does not mistake the record half for the whole mechanism.
     """
     section = _policy_section()
-    assert "assume everything is new" in section, (
-        "§4.4 no longer quotes the shipped renderer's inverted instruction (#8495)."
+    code = EXTRACTOR.read_text(encoding="utf-8")
+    assert "assume everything is new" not in code, (
+        "`tortoise/extractor_v2.py` invites the model to treat every candidate "
+        "as new again — §4.4 I1 forbids it, and this change's record half "
+        "(#5095) removed it. If that was deliberate, this pin and the doc's "
+        "state-of-code paragraph both have to change with it."
     )
-    assert "assume everything is new" in EXTRACTOR.read_text(encoding="utf-8"), (
-        "`tortoise/extractor_v2.py` no longer says 'assume everything is new' — "
-        "the §4.4 state-of-code warning is now stale; update it to describe what "
-        "the code does instead (#8495)."
+    assert "the INVERTED policy" not in section, (
+        "§4.4 still claims the code implements the inverted policy, but the "
+        "renderer no longer invites `new` (#5095) — the paragraph is stale in "
+        "the direction that makes a fixed defect read as open."
+    )
+    assert "NEVER asserted" in section or "never mint it" in section or \
+        "never mint it" in section, (
+        "§4.4 lost the invariant the state-of-code paragraph is about"
+    )
+    # What runs now, and what remains: BOTH halves must be stated, or the
+    # paragraph over-claims in one direction or the other.
+    assert "identity" in section, (
+        "§4.4's state-of-code paragraph does not name the `identity` block / "
+        "record half that #5095 landed — a reader would read the remaining "
+        "absence as if nothing had landed."
+    )
+    assert "never mint it" in section.lower() or "still not enforced" in section.lower() \
+        or "still absent" in section.lower(), (
+        "§4.4 does not say the MINT half is still absent — the record half "
+        "would then read as the whole of I1 (#5095)."
     )
 
 

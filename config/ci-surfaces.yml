@@ -3870,6 +3870,13 @@ surfaces:
   # subject is `tortoise/extractor_v2.py`. Hermetic (no DB read of its own, no
   # network, no real model).
   - test_extractor_prompt_framing_10311.py
+  # #5095 (§4.4 G3): S3's FAILURE POLICY — the identity disposition, the
+  # truthful render and the per-candidate `link_before_create` record. Its
+  # subject is `tortoise/extractor_v2.py` + `tortoise/failure_policy.py`, so it
+  # belongs wherever a code change to that family is selected. Hermetic: a
+  # fake model, a stub `_fts_rows`, `sdk=None`; no DB read of its own, no
+  # network, no real model.
+  - test_5095_s3_identity_policy.py
   - test_extractor_v2.py
   # #2684 (Slice B): the value-span census — the wave's per-question T leg
   # ("the value-bearing evidence is verbatim-present") measured over the
@@ -6907,6 +6914,10 @@ tier1:
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or
 # contradict the declared policy.
 - test_extractor_v4_failure_policy.py
+# #5095: the same document's §4.4 state-of-code paragraph now claims the RECORD
+# half landed (render + record + `identity` block) and the MINT half did not.
+# A docs-only PR is exactly what can drop that distinction, so it rides here too.
+- test_5095_s3_identity_policy.py
 # #5333 review (P1, twice): the SAME document's *G5's destructive half* guards now
 # live in `test_definite_description_backfill_5059.py` (`core` above) — FOUR of
 # them BIND the passage and THREE read the document: the load-bearing share
@@ -8582,6 +8593,11 @@ durations:
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 3.2  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_extractor_v4_s4_stage_claims.py: 3.0  # #8500: `ast` walks over two source files + doc-text scans, plus THREE in-process behavioural tests (`vet_gate.check_batch`/`apply_vet`, `kind_classifier`/`_apply_classify_kinds`) and a row-scoped read of §4.0; no DB. Measured 2026-10-18 with `--durations=0`: 3.96–6.97 s of call time over three runs (one `ast.parse` of the 9.5k-line `extractor_v2.py` is 0.44 s and the mutation fixtures reparse it), so the previous `0.1` under-declared ~50x (#8955 review, UNVERIFIED item) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.9
+  test_5095_s3_identity_policy.py: 4.7  # #5095: 41 hermetic tests — a fake model, a
+  # stub `_fts_rows`, `sdk=None`; no DB, no network, no real model. Measured
+  # locally: 4.70 s of test body for the whole file (`pytest -q`, private lane).
+  # A file a PR ADDS cannot carry a CI junit reading, so this is the local
+  # measurement, not the header's flat default.
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.1  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.3
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
