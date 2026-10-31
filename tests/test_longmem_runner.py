@@ -5908,6 +5908,87 @@ def test_print_winner_names_the_refused_census_cause(capsys):
     assert sg._unmeasured_causes([]) == set()
 
 
+def test_print_winner_claims_numeric_coverage_only_when_it_is(capsys):
+    """#10355 review P3 (optional): the census-only branch told the operator
+    "its coverage is numeric" as fact, and that is FALSE of a cell whose only
+    record was refused.
+
+    The cause set cannot tell the two shapes apart: a mixed cell that dropped
+    one bad record still publishes a numeric ratio, and a cell whose ONLY
+    record was impossible publishes ``None/None`` — both have
+    ``_unmeasured_causes(...) == {UNMEASURED_CENSUS}``, because the predicate
+    refuses the cell on ``records_refused`` without looking at coverage. So
+    the number is the operator's one cue for "look at the census producer"
+    vs "this cell has no ratio at all", and the sentence must not assert it.
+
+    RED on the pre-fix line: it prints "its coverage is numeric" for the
+    refused-only cell below, whose coverage is ``None``."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    refused_only = [_sweep_cell(points_total=None, points_embedded=None,
+                                embedding_coverage=None, records_refused=1)]
+    assert refused_only[0]["vector_strategy"] == "enabled"
+    assert sg._dense_leg_verified(refused_only) is False
+    assert sg._unmeasured_causes(refused_only) == {sg.UNMEASURED_CENSUS}
+    assert sg._published_coverage_is_numeric(refused_only) is False
+
+    capsys.readouterr()
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(refused_only),
+                     results=refused_only)
+    out = capsys.readouterr()
+    flat = " ".join(out.err.split())
+    # The census cause is still named, and the remedy is still the producer.
+    assert "REFUSED a census record" in flat
+    assert "Fix the census producer" in flat
+    assert "coverage is numeric" not in flat, flat
+    assert "NO ratio at all" in flat, flat
+
+    # Contrast — the shape the sentence IS true of keeps it (a mixed cell that
+    # dropped one bad record and still publishes a real ratio).
+    mixed = [_sweep_cell(points_total=3, points_embedded=0,
+                         records_refused=1)]
+    assert sg._published_coverage_is_numeric(mixed) is True
+    capsys.readouterr()
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(mixed), results=mixed)
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "coverage is numeric" in flat, flat
+    assert "NO ratio at all" not in flat, flat
+
+
+def test_sweep_readme_enumerates_the_census_refusal_case():
+    """#10355 review P3: the README is the surface a producer's author reads
+    first, and its "why did my sweep say NOT MEASURED?" enumeration stopped at
+    three cases — so a healthy host with numeric coverage could not produce
+    NOT MEASURED, by that text, and the reader was pointed back at the
+    embedder. It also never named the operator-visible ``records_refused``
+    token that the ``dense leg:`` line now prints.
+
+    The census-refusal arm (``UNMEASURED_CENSUS``) is a FOURTH case with the
+    opposite remedy — "a third surface nobody pinned" is the same class as the
+    ``--mock`` contract this PR already pins. RED on the pre-fix README: it has
+    no fourth bullet and no mention of ``records_refused`` anywhere."""
+    readme = (Path(__file__).resolve().parent.parent / "tools"
+              / "longmem_eval" / "README.md").read_text(encoding="utf-8")
+    flat = " ".join(readme.split())
+    assert "records_refused" in flat, (
+        "the operator reference never names the records_refused token the "
+        "dense leg: line prints")
+    assert "fourth case" in flat, (
+        "the NOT-MEASURED enumeration still stops at the three cases that "
+        "predate the census-refusal arm")
+    # The fourth case must be scoped to the census producer, not the embedder:
+    # that inversion is the defect the winner line fix removed.
+    fourth = flat.split("fourth case", 1)[1][:700]
+    assert "CENSUS refused a record" in fourth, fourth
+    assert "census PRODUCER" in fourth, fourth
+
+
 def test_sweep_granularity_v2_waived_sweep_never_exits_zero(
         monkeypatch, tmp_path):
     """#4821 review P2: ``main``'s step-2 gate is

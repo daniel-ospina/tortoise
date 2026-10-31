@@ -491,6 +491,29 @@ def _unmeasured_causes(results: list[dict]) -> set[str]:
     return causes
 
 
+def _published_coverage_is_numeric(results: list[dict]) -> bool:
+    """Does EVERY cell publish a real ratio on the ``dense leg:`` line?
+
+    A DIFFERENT question from "did the embedder run" (#10355 review P3,
+    optional). A cell whose only census record was refused publishes NO ratio
+    at all (``points_total=None`` ⇒ ``embedding_coverage=None``), so its cause
+    set can be ``{UNMEASURED_CENSUS}`` alone — exactly the cause set of the
+    common shape, a mixed cell that dropped one bad record and still publishes
+    a numeric ratio. The winner line used to assert "its coverage is numeric"
+    on that cause set unconditionally, which is false for the refused-only
+    cell and is the operator's one cue for telling the two shapes apart.
+
+    Empty is vacuously True (there is no non-numeric ratio to point at), and
+    the caller only reads it under ``not measured`` with a named census cause,
+    which a row-less sweep cannot produce.
+    """
+    return all(
+        isinstance(r.get("embedding_coverage"), (int, float))
+        and not isinstance(r.get("embedding_coverage"), bool)
+        for r in results
+    )
+
+
 def _print_winner(winner: dict | None, *, ingest_mode: str,
                   context_cap: int, measured: bool,
                   results: list[dict]) -> None:
@@ -561,11 +584,23 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
                   file=sys.stderr)
             if UNMEASURED_EMBEDDER not in causes \
                     and UNMEASURED_ZERO_COVERAGE not in causes:
+                # "its coverage is numeric" is NOT implied by the cause set
+                # (#10355 review P3, optional): a cell whose ONLY record was
+                # refused publishes no ratio at all, and its cause is this
+                # same one. Claim exactly what the cause set proves, and say
+                # the numeric half only where it holds.
                 print("   the other two causes do NOT hold here: the "
-                      "embedder ran for every cell and its coverage is "
-                      "numeric, so these recall values ARE a hybrid run's "
+                      "embedder ran for every cell and no cell wrote zero "
+                      "vectors, so these recall values ARE a hybrid run's "
                       "— they are refused because the census contradicts "
-                      "itself, not because the leg was missing.",
+                      "itself, not because the leg was missing. "
+                      + ("Its coverage is numeric, so what is "
+                         "contradicted is the census, never the leg."
+                         if _published_coverage_is_numeric(results) else
+                         "A cell whose only record was refused publishes "
+                         "NO ratio at all (embedding_coverage=None), so "
+                         "read records_refused rather than "
+                         "embedding_coverage for it."),
                       file=sys.stderr)
         remedy = ("→ NOT selected: do NOT feed this to the pilot (step 3) or "
                   "the 500-Q run (step 5).")
