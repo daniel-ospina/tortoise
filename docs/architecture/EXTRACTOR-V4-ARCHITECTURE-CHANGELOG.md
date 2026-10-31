@@ -1306,7 +1306,7 @@ visible in the text itself: S2's Tier-A rule instructs the mapper to see *"the U
 VOCABULARY in the master list"*, and the compact prompt did not carry that section at all.
 
 **The decision, and the rule it rests on.** The compact render is a *presentation* compaction (pilot
-#1549: kind names only, pack sections chosen by the story, the granularity hint reduced to matched
+`#1549`: kind names only, pack sections chosen by the story, the granularity hint reduced to matched
 domains). A compaction may drop a HINT — a block whose absence costs precision in one story. It may
 not drop the GUARANTEE, which is unconditional by declaration. So both blocks are now appended
 unconditionally, **outside** the render's `if story:` gate, and last, so the carve-out stays the final
