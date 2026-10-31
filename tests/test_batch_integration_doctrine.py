@@ -191,6 +191,23 @@ def _is_refusal(fence: list[str], i: int) -> bool:
     return _halts(_block(fence, i))
 
 
+def _ends_at_halt(code: str) -> bool:
+    """Does the command STOP at its halt — nothing appended after it?
+
+    ``A || exit 1 && C`` parses as ``(A || B) && C``: the halt is on the left of
+    ``&&``, so it never stops the fence, and ``git switch -C … "$PINNED" ||
+    exit 1 && git switch -`` returns to the LANE before the suite runs — under a
+    heading promising ``origin/main`` ALONE. Three substring predicates could not
+    see it; the whole command has to end at the halt.
+    """
+    return (
+        re.fullmatch(
+            r".*?\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\})\s*", code
+        )
+        is not None
+    )
+
+
 def _re_runnable(code: str) -> bool:
     """Is this move command idempotent — safe on a RE-baseline / RE-build?
 
@@ -527,6 +544,11 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
         f"$PINNED; these do not: {before}"
     )
     assert moves, "the baseline fence no longer switches to the pinned base — re-point this guard"
+    assert all(_ends_at_halt(_code(c)) for c in moves), (
+        "a pin create must END at its halt: `… || exit 1 && git switch -` parses "
+        "as `(A || exit 1) && …`, so the halt never fires and the fence leaves the "
+        f"pinned tree before the suite: {moves}"
+    )
     assert all(_halts(_code(c)) for c in moves), (
         "a pin create must HALT on failure (`|| exit 1`): unhalted, a refused "
         f"switch leaves the fence running on the operator's branch: {moves}"
@@ -563,6 +585,10 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
         "no re-runnable-spelling check target — a trailing comment nominated the "
         "fence, and all([]) would pass vacuously"
     )
+    assert all(_ends_at_halt(_code(c)) for c in flat), (
+        "the batch pin create must END at its halt; a suffix such as "
+        f"`&& git switch -` leaves the merges on another branch: {flat}"
+    )
     assert all(_re_runnable(_code(c)) for c in flat), (
         "rebuilding the batch must reset the branch to the pin; a one-shot create "
         f"leaves the following --no-ff merge on the wrong branch: {flat}"
@@ -579,7 +605,10 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     assert merges, "the batch fence no longer merges anything — re-point this guard"
     before_merge = [c for c in fence[: min(merges)] if _MOVES_HEAD.search(_code(c))]
     assert all(
-        '"$PINNED"' in _code(c) and _re_runnable(_code(c)) and _halts(_code(c))
+        '"$PINNED"' in _code(c)
+        and _re_runnable(_code(c))
+        and _halts(_code(c))
+        and _ends_at_halt(_code(c))
         for c in before_merge
     ), (
         "every HEAD-moving command before the batch's first merge must be the pin "
@@ -608,8 +637,18 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
         '`[ "$(git rev-parse origin/main)" = "$PINNED" ]` as an executable '
         "command; without it a batch can land a tree no run has seen"
     )
+    # Count ASSIGNMENTS, not physical lines: `PINNED="$(gh pr view …)"; PINNED="$
+    # (git rev-parse origin/main)"` is one line with two assignments, and the
+    # second one makes the assertion compare `main` to itself. The prefix set is
+    # every declarator bash accepts, since each one misses a narrower anchor.
+    pin_def = re.compile(
+        r"^(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?PINNED="
+    )
     defines = [
-        cmd for cmd in landing[0] if re.match(r'(?:export\s+)?PINNED=', cmd)
+        segment.strip()
+        for cmd in landing[0]
+        for segment in re.split(r";|&&|\|\|", _code(cmd))
+        if pin_def.match(segment.strip())
     ]
     # EXACTLY ONE definition, and it must READ THE PR BODY: `any()` let a second
     # definition rewrite the pin — appending `PINNED="$(git rev-parse origin/main)"`
@@ -654,10 +693,14 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     # A STALE remote-tracking ref compares equal to itself: without a fetch, a
     # `main` that moved since the last one satisfies the assertion, which then
     # certifies a tree no run has seen.
+    # WHOLE-COMMAND allowlist: `git fetch origin main || true`, `--dry-run`, and
+    # `origin main:refs/remotes/origin/stale` all start with `git fetch` and
+    # contain `origin` while leaving the ref STALE — which then compares equal to
+    # the pin, certifying a tree no run has seen.
     fetches = [
         i
         for i, c in enumerate(landing[0])
-        if re.match(r"git\s+fetch\b", _code(c)) and "origin" in _code(c)
+        if re.fullmatch(r"git\s+fetch\s+origin(?:\s+main)?", _code(c))
     ]
     assert fetches, (
         "the landing fence must fetch origin before comparing: `$(git rev-parse "
