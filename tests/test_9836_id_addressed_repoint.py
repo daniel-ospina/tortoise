@@ -53,6 +53,7 @@ cannot assert a row count, and a plan-text assertion cannot see one.
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -205,7 +206,7 @@ def test_the_descriptor_is_NOT_emitted_when_the_target_cannot_be_addressed(
 
 
 @pytest.mark.parametrize("rel", FAMILY)
-def test_the_no_self_edge_guard_JOURNALS_a_delete_only_descriptor(edge_sdk, rel):
+def test_the_no_self_edge_guard_JOURNALS_a_delete_only_descriptor(edge_sdk, rel, caplog):
     """⛔ #9836 review (P2): the guard arm must emit for THIS family too.
 
     When the target IS the successor the 2b leg DELETEs the edge and transfers
@@ -226,6 +227,13 @@ def test_the_no_self_edge_guard_JOURNALS_a_delete_only_descriptor(edge_sdk, rel)
 
     Both routes must still hold NO edge afterwards — the delete-only descriptor
     exists to remove the record's row, never to mint anything.
+
+    ⛔ The REPLAY half is the recognition, not a delete: nothing resurrects an
+    ID-ADDRESSED old-side edge, so the graph's delete leg is a constrained no-op.
+    What the widened `STRUCTURAL_REPOINT_RELS` gate buys there is that the
+    descriptor is READ as this shape instead of falling through the
+    "malformed delete_only" skip — so the assertion is the absence of that
+    warning, which is the one observable difference on this route.
     """
     sdk, journal, tmp_path = edge_sdk
     ids = _world(sdk)
@@ -249,7 +257,14 @@ def test_the_no_self_edge_guard_JOURNALS_a_delete_only_descriptor(edge_sdk, rel)
 
     rebuilt = FalkorProjection(str(tmp_path / "rebuilt.db"))
     try:
-        rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
+        with caplog.at_level(logging.WARNING):
+            rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
+        skipped = [r.getMessage() for r in caplog.records
+                   if "malformed delete_only" in r.getMessage()]
+        assert skipped == [], (
+            f"{rel}: the replay REFUSED the descriptor as malformed ({skipped}) — "
+            "narrowing the delete_only gate to `DERIVABLE_STRUCTURAL_RELS` puts "
+            "this family back on that skip while the producer keeps emitting it")
         assert _edges(rebuilt, rel) == set(), (
             "a rebuild minted the no-self-edge phantom (E2E-11.6)")
     finally:
@@ -574,9 +589,9 @@ def test_the_identity_property_is_the_labels_CANONICAL_one():
     `chk_event_node_key_is_contract_key`, and `_ENTITY_MATCH_COLUMNS['event']`
     resolves by `node_key`).
     """
-    from tortoise.projection import FalkorProjection
+    from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
 
-    canonical = dict(FalkorProjection._CANONICAL_ENTITY_ID_PROPS)
+    canonical = dict(_CANONICAL_ENTITY_ID_PROPS)
     assert set(ID_ADDRESSED_TARGET_ID_PROPS) == set(RECORD_ADDRESSABLE_EDGE_LABELS)
     for label, prop in ID_ADDRESSED_TARGET_ID_PROPS.items():
         assert prop == canonical[label], (
@@ -636,7 +651,7 @@ def test_the_guarded_meeting_shape_really_does_share_one_id(edge_sdk):
     pointed the two routes at DIFFERENT Events. This asserts the shape exists and
     that keying on `eventId` names one node per descriptor.
     """
-    sdk, journal, _tmp = edge_sdk
+    sdk, _journal, _tmp = edge_sdk
     _world(sdk)  # materialises the projection
     ids = _guarded_meeting_events(sdk, "evt-cand-9836",
                                  ["/caps/a.jsonl", "/caps/b.jsonl"])

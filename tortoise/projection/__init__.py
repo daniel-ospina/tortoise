@@ -16513,7 +16513,6 @@ class FalkorProjection(
             from tortoise.security import validate_rel_type
 
             from .edges import (
-                DERIVABLE_STRUCTURAL_RELS,
                 DIRECT_EDGE_ATTR_KEYS,
                 ID_ADDRESSED_STRUCTURAL_RELS,
                 RECORD_ADDRESSABLE_EDGE_LABELS,
