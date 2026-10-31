@@ -17790,9 +17790,22 @@ class TortoiseSDK:
                 # arm rather than the candidate one — which is the loader's own
                 # reading (``coalesce(r.idx, 0)``), not a leniency: an all-NULL
                 # layout is exactly the duplicated-``idx`` shape handled below.
-                _uniform_int = all(
-                    isinstance(_sidx, int) and not isinstance(_sidx, bool)
-                    for _sidx, _ in _slots)
+                # ⛔ ONE pass decides orderability AND collects the positions as
+                # ``int``. ``_slots`` is typed ``tuple[object, str]`` ON PURPOSE
+                # (a raw-written ``idx`` may hold any type), so the ordered arm
+                # below needs a list it can prove orderable — ``min()`` over
+                # ``object`` is a mypy ``type-var`` error (#10418 typecheck), and
+                # a ``cast()`` after an ``all()`` would ASSERT exactly what this
+                # loop PROVES: ``_ordered_slot_idxs`` is complete precisely when
+                # ``_uniform_int`` holds, which is the only branch that reads it.
+                _ordered_slot_idxs: list[int] = []
+                _uniform_int = True
+                for _slot_idx, _ in _slots:
+                    if isinstance(_slot_idx, int) and not isinstance(
+                            _slot_idx, bool):
+                        _ordered_slot_idxs.append(_slot_idx)
+                    else:
+                        _uniform_int = False
                 _unorderable = not _uniform_int
                 if _uniform_int:
                     # The load side's own rule: the source is the input at the
@@ -17801,7 +17814,7 @@ class TortoiseSDK:
                     # the SAME single candidate rather than judging every tied one —
                     # judging them all would refuse a shape the load side keeps,
                     # the divergence `claim_class` warns against (#10195 review P3).
-                    _low = min(_sidx for _sidx, _ in _slots)
+                    _low = min(_ordered_slot_idxs)
                     _candidate_sources = [min(
                         {i for _sidx, i in _slots if _sidx == _low}, key=str)]
                 else:
