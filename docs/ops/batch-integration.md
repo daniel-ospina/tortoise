@@ -142,8 +142,12 @@ git switch -C integration/base-check "$PINNED" || exit 1   # ⛔ SWITCH, not `gi
 # in a fence with no `set -e`, the pytest lines below run on whatever tree HEAD happens to be on.
 # `|| exit 1` makes that impossible: the fence stops instead of measuring the wrong tree.
 # BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
-uv run pytest tests/ -q -m 'not track_b and not live and not integration'
+# `--junitxml` is not decoration: Phase 3 compares the gate run's test COUNT to this file,
+# because a run the kernel killed reports no summary and would otherwise read as green.
+uv run pytest tests/ -q --junitxml=/tmp/baseline-junit.xml -m 'not track_b and not live and not integration'
 uv run pytest tests/test_ingest_safety.py -q -m track_b
+BASELINE_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/baseline-junit.xml | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
+[ -n "$BASELINE_TOTAL" ] && [ "$BASELINE_TOTAL" -gt 0 ] || { echo "no baseline junit total — the baseline run wrote no report"; exit 1; }
 git switch -                                      # back to the lane you came from
 ```
 
@@ -202,10 +206,15 @@ And the gate has legs a pytest run does **not** reproduce, in two kinds — so n
 as "`python-ci-gate` passed":
 
 - **Non-test legs**, which no pytest run can reproduce at all: `packs-compile` (whole-registry
-  `PackRegistry.load_all()`), `manifest-integrity`, `workflow-lint`, `surface-guard`, and
+  `PackRegistry.load_all()`), `manifest-integrity`, `workflow-lint`, `surface-guard`,
   `ci-introduced-failure` — the #9984 predicate, which reads the run's own jobs and step logs through
   the GitHub API to separate a failure **introduced by this change** from `main`'s own pre-existing
-  red. It is the rail's automated version of Phase 1 above, so no local run stands in for it.
+  red. It is the rail's automated version of Phase 1 above, so no local run stands in for it — and
+  `changes`, the diff selector itself: it is not in `DEFERRABLE_LEGS`, so a failure there reds the
+  required check by name, and it is the one leg whose failure makes every other leg SKIP, i.e. exactly
+  the selection a batch's pytest run cannot exercise. Do not trust a count of these members written
+  here — the authority is the leg table in `.github/workflows/python-ci.yml`
+  (`python-ci-gate`'s `LEGS_FILE`), and it grows.
 - **Two test legs the batch's lane SKIPS rather than runs.** `test-d14-hosted-api` runs
   `pytest tests/ -m embedded_only` **URI-less** (with `TORTOISE_TEST_CARVE_OUT=1`) and fail-closes on an
   all-skip floor precisely because those tests run in no other job — while Phase 0 above *mandates* a
@@ -240,8 +249,11 @@ git merge --no-ff --no-edit -m "batch: merge PR #<N> (<sha>)" refs/tmp/pr-<N>
 git log --oneline -1                                    # after EVERY merge
 ```
 
-Each merge is a real `--no-ff` merge commit naming its PR, so `git log origin/main..integration/batch-1`
-is the batch's record of **merges attempted**. It is *not* the landed manifest once Phase 4 reverts a
+Each merge is a real `--no-ff` merge commit naming its PR, so
+`git log --first-parent --merges origin/main..integration/batch-1` is the batch's record of **merges
+attempted**. Both flags are load-bearing: a batch carries each PR's own commits too, so the bare
+`git log origin/main..integration/batch-1` lists commits *inside* the PRs as well as the merges, and a
+reader who takes it as the merge list will hand a PR-internal sha to the revert below. It is *not* the landed manifest once Phase 4 reverts a
 culprit: a revert adds `Revert "batch: merge PR #<N>"`, so the log then names a PR whose content is
 **not** in the tree. Read it as attempted-and-maybe-dropped — the landed content is the **tree**, and
 the dropped PR is the one with a matching revert line (a re-run of the Phase 4 bisect that ignores
@@ -269,6 +281,15 @@ uv run pytest tests/ -q --junitxml=/tmp/batch-junit.xml -m 'not track_b and not 
 echo $! > /tmp/batch.pid
 kill -0 "$(cat /tmp/batch.pid)" 2>/dev/null && echo RUNNING || echo 'DONE — read /tmp/batch.log'   # repeat until DONE
 
+# ⛔ DONE is not PASSED. `kill -0` fails exactly as fast for a run the kernel OOM-killed as for one
+# that finished — measured on #10399, five `python` processes were killed in 23 minutes — and a killed
+# run prints no summary, hence carries no failure ids, so Phase 4 would diff it straight to
+# BATCH-GREEN. Wait for the job, keep its status, and require a COMPLETED report:
+wait "$(cat /tmp/batch.pid)"; RC=$?
+[ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || { echo "the gate run did not COMPLETE (rc=$RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/batch-junit.xml | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
+[ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the gate run reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — a short run is the signature of a KILLED run: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+
 # Half 2 — the track_b leg CI runs as its own MUST-PASS, gate-member job (`-m track_b`).
 uv run pytest tests/test_ingest_safety.py -q -m track_b
 ```
@@ -283,8 +304,8 @@ table and the `UNPROVEN-FULL-SUITE(<lane>)` rule.
 - **A failure id that is NOT in the baseline set is NEW** and convicts a PR. Find which one:
 
 ```bash
-git log --oneline origin/main..integration/batch-1        # merges ATTEMPTED — skip any with a matching Revert
-git bisect start integration/batch-1 origin/main          # or, cheaper, walk the merges
+git log --first-parent --merges --oneline origin/main..integration/batch-1   # merges ATTEMPTED — skip any with a matching Revert
+git bisect start --first-parent integration/batch-1 origin/main   # or, cheaper, walk the merges
 #   at each step: run ONLY the failing files (not the whole suite)
 #   git bisect good <merge sha> / git bisect bad <merge sha>
 uv run pytest <the failing file(s)> -q
@@ -294,6 +315,12 @@ uv run pytest <the failing file(s)> -q
 
 ```bash
 git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1 || exit 1'
+BAD="$(git rev-parse HEAD)"            # the first bad commit — capture it BEFORE the reset moves HEAD back
+                                       # (walking the merges by hand instead? set BAD to that merge's sha)
+# ⛔ `--first-parent` on the `start` above is what makes this sha a MERGE: by default `git bisect`
+# walks EVERY commit in origin/main..integration/batch-1, so the "exact commit" it reports can be a
+# commit INSIDE a PR (reproduced in a scratch repo against this doctrine's own --no-ff shape: the
+# blame stopped at `PR1 commit 2`, not at `batch: merge PR #1`).
 git bisect reset integration/batch-1   # ⛔ REQUIRED: `bisect run` leaves HEAD DETACHED at the first bad commit
 git switch integration/batch-1 || exit 1   # the cheaper route leaves it detached too — HALT, or the revert commits detached
 git log --oneline -1                   # must name integration/batch-1's tip, never a bisect probe
@@ -307,7 +334,9 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   a tree nobody lands, which is the tested-tree≠landed-tree failure arriving before the Landing section
   can catch it.
 
-  Attribute to the **merge commit's PR** — the log line names it.
+  Attribute to the **merge commit's PR** — with `--first-parent` the blame stops on a batch merge, and
+  its log line names the PR. Without it the blame can stop on a commit inside a PR, which has no merge
+  to attribute and no merge to revert (the merge-ness assert above is the mechanical check).
 
 - **Drop the culprit**, do not fix it inside the batch. Every merge in the batch is a merge commit **by
   construction**, and Git refuses to revert a merge without a mainline: a bare `git revert <sha>` exits
@@ -315,7 +344,12 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   the first parent is the batch's own history, the second is the PR — so:
 
   ```bash
-  git revert --no-edit -m 1 <merge sha>
+  # ⛔ The sha must be a batch MERGE. `git revert -m 1` on a NON-merge IGNORES the mainline and
+  # exits 0 (git-verified), reverting ONE COMMIT of the PR instead of the PR: the rest of it still
+  # lands unreviewed, and the re-blame rule below cannot see it — the subject becomes
+  # `Revert "PR1 commit 2"`, which matches no `batch: merge PR #<N>` line.
+  [ -n "$(git rev-list --no-walk --merges "$BAD")" ] || { echo "$BAD is not a batch merge — re-blame with --first-parent; never revert a non-merge"; exit 1; }
+  git revert --no-edit -m 1 "$BAD"                     # the sha whose merge-ness was just asserted
   ```
 
   Then re-run **only the failed files**, then **one more full suite run — both halves** (a green that
@@ -329,7 +363,7 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
 | `BATCH-GREEN` | Full suite ran on the batched tree, no NEW failures vs baseline. It does **not** mean `python-ci-gate` passed: the `embedded_only` and record-postgres test legs, and the non-test legs, are skipped rather than reproduced (see the gate-legs list above). |
 | `BATCH-GREEN(BASELINE(<ids>))` | Green *relative to baseline*; the listed ids were already red on main. |
 | `BATCH-RED(<ids>)` | New failures remain after dropping the culprit(s). Do not merge. |
-| `UNPROVEN-FULL-SUITE(<lane>)` | **The full suite did not run.** Only the embedded carve-out or a subset ran. This is never "green". |
+| `UNPROVEN-FULL-SUITE(<lane>)` | **The full suite did not run, or did not COMPLETE.** Only the embedded carve-out or a subset ran; or the gate run was killed / interrupted and reported no final summary, so it has no failure set to diff. This is never "green". |
 
 ⛔ **A batch is never green on a partial lane.** If docker/FalkorDB was unavailable and only the
 embedded carve-out ran, the verdict is `UNPROVEN-FULL-SUITE(embedded-carve-out)`. Say that in those

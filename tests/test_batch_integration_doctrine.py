@@ -46,8 +46,24 @@ or facts that were false against the tree they describe:
   (``-m embedded_only``, URI-less) and ``test-record-postgres``
   (``[postgres]`` + ``TEST_RECORD_DB_URI``) are ``python-ci-gate`` members the
   batch's URI lane *skips* rather than reproduces — and the list named only four of
-  the gate's **five** non-test members, omitting ``ci-introduced-failure`` (the #9984
-  predicate, the rail's own automated version of Phase 1);
+  the gate's **six** non-test members, omitting ``ci-introduced-failure`` (the #9984
+  predicate, the rail's own automated version of Phase 1) and then ``changes`` (the diff
+  selector — non-deferrable, and the one leg whose failure makes every other leg skip);
+* **the blame step assumed its bisect result was a merge**: ``git bisect`` walks *every*
+  commit in ``origin/main..integration/batch-1`` (``--first-parent`` is opt-in), so in a
+  ``--no-ff`` batch the "first bad commit" can be one of a PR's own commits — and
+  ``git revert --no-edit -m 1`` on a **non-merge** IGNORES the mainline and exits ``0``
+  (git-verified), reverting ONE COMMIT of the PR instead of the PR: the rest of it still
+  lands unreviewed, and the re-blame rule cannot see it, because the subject becomes
+  ``Revert "PR1 commit 2"``, which matches no ``batch: merge PR #<N>`` line. Reproduced
+  in a scratch repo against this doctrine's own assembly shape (blame stopped at
+  ``PR1 commit 2``; the revert of it exited 0);
+* **the gate's poll reported ``DONE`` for a run that was KILLED**: ``kill -0`` fails just
+  as fast for a process the kernel OOM-killed (measured on #10399: five ``python``
+  processes in 23 minutes), a killed run writes no summary, and Phase 4 diffs failure
+  *ids* — so a run that died carried no NEW ids and read as ``BATCH-GREEN``.
+  ``UNPROVEN-FULL-SUITE`` was keyed only on "a subset ran", never on "the run never
+  finished";
 * **Phase 0 made the SHARED FalkorDB instance the default** under a ``docker ps``
   precondition that is always true in this fleet, demoting ``tools/test_lane.py`` to a
   fallback — inverting the repo's recorded #5084 rule for the very measurement the
@@ -70,13 +86,13 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-tes
 would make the reproduced/not-reproduced list read as a complete partition.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — 16 checks at this head: **13 of 16 red** at
-``a17576c43``, **10 of 16** at ``f3c6c803b``, **7 of 16** at ``a8be548762``, **5 of 16**
-at ``295d6d385``, **3 of 16** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, and
-**2 of 16** at ``ed1c03b82`` (this round's pre-fix head) — and those last two are
-exactly the findings that head's review raised: the
-``ci-introduced-failure`` member missing from the leg list, and the shared FalkorDB
-instance as the default lane. Each round's head is red on its own round's findings and
+revision rather than asserted — **18 checks** at this head, **0 red**: **15 of 18** at
+``a17576c43``, **12 of 18** at ``f3c6c803b``, **9 of 18** at ``a8be548762``, **7 of 18** at
+``295d6d385``, **5 of 18** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **4 of 18** at
+``ed1c03b82`` and ``c50628450``, and **3 of 18** at ``a888c6980`` / ``aede4190f`` — where the
+three are exactly this round's findings (the bisect attribution, the gate run's
+completion, and the omitted ``changes`` member), so the last two heads are red on this
+round's findings and on nothing else. Each round's head is red on its own round's findings and
 on nothing that a later round introduced, so no check reds on a revision that did not
 raise it. Three checks the revision matrix alone cannot red are named rather than left
 implied: the parser-sanity check and the contract sentences (green by design — they
@@ -113,12 +129,21 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **117 mutants are
-measured across the rounds; 116 are killed** (109 measured at ``c50628450``, plus the two this
-round added) — the two this round added are the omitted
-``ci-introduced-failure`` member and a fence that executes the SHARED instance as
-the lane, each killed by its own check, measured — and the honest document is
-0 of 16 red.
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **The ledger, by
+provenance**: 109 mutants accumulated through ``c50628450``, 8 added in round 27 (its
+own ledger), and **14 measured here, 14 killed** — drop ``--first-parent`` from the
+bisect start, revert an independently-typed ``<merge sha>``, a merge-ness assert that
+only PRINTS instead of halting, delete the ``wait``/``RC`` capture, widen the status
+predicate to accept a signal kill (``-ne 0``), replace the count comparison with
+``true`` and flip it so it cannot fail, delete the verdict row's "did not COMPLETE"
+clause, delete ``changes`` from the leg bullet, and the four round-27 re-measurements
+(poll / merge / after-merge-log / revert each with an appended mover) — plus the
+guard-internal pair: restoring the quote-blind ``_code`` lets a ``&& git switch main``
+suffix on the merge line pass GREEN, which is exactly what the quote-aware cut kills.
+The one named survivor is unchanged from earlier rounds:
+``git switch --detach -C <branch> "$PINNED"``, which git refuses outright (rc=128) and
+whose ``|| exit 1`` halts — a predicate-tightness miss, not a broken invariant — and
+the honest document is 0 of 18 red.
 
 Two more classes belong to that list: an append-a-mover SUFFIX on any of
 those lines — `git bisect reset <branch> && git switch main`, `git log --oneline -1
@@ -350,6 +375,25 @@ def _code(line: str) -> str:
     if match:
         stripped = stripped[: match.start()].rstrip()
     return stripped
+
+
+#: A variable bound to a READ-ONLY git query — `BAD="$(git rev-parse HEAD)"`, the blame sha the
+#: revert must be bound to. It is ONE command and it cannot move HEAD, so the phase-4 window may
+#: carry it without loosening "benign lines must BE one command".
+_READ_ONLY_CAPTURE = re.compile(r'^[A-Za-z_]\w*="\$\(\s*git\s+rev-parse\s+HEAD\s*\)"$')
+
+#: The merge-ness assertion on the blame sha. `git revert -m 1` on a NON-merge IGNORES the
+#: mainline and exits 0, so a bisect result that is a commit inside a PR silently reverts ONE
+#: COMMIT of that PR — the rest of it still lands, and the re-blame rule cannot see it because
+#: the subject is `Revert "PR commit 2"`. This line is the mechanical check, and it must halt.
+_MERGE_ASSERT = re.compile(
+    r'^\[\s*-n\s+"\$\(\s*git\s+rev-list\s+--no-walk\s+--merges\s+"?\$\{?BAD\}?"?\s*\)"\s*\]\s*\|\|'
+)
+
+
+def _is_blame_binding(code: str) -> bool:
+    """A READ-ONLY line binding/asserting the blame sha (the phase-4 window allows these)."""
+    return bool(_READ_ONLY_CAPTURE.match(code) or _MERGE_ASSERT.match(code))
 
 
 def _halts(code: str) -> bool:
@@ -927,7 +971,7 @@ def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
     # `integration/base-check` (which Phase 1 is required to create, so it always
     # exists), to `main`, or to `-`, left this green while the revert committed
     # onto the wrong branch and the batch that landed still carried the culprit.
-    started = re.search(r"git\s+bisect\s+start\s+(\S+)", _text())
+    started = re.search(r"git\s+bisect\s+start\s+(?:--?[\w-]+\s+)*(\S+)", _text())
     assert started, "no `git bisect start <branch>` found — re-point this guard"
     batch_branch = started.group(1)
     assert re.search(
@@ -957,6 +1001,7 @@ def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
         if min(bisects) < i < min(reverts)
         and not (
             _lands_on_branch(c, batch_branch)
+            or _is_blame_binding(_code(c))
             or (
                 benign.match(_code(c))
                 # ...checked on the UNQUOTED text, so `git bisect run sh -c '… || exit 1'`
@@ -1015,6 +1060,134 @@ def test_reverting_a_batch_culprit_passes_a_mainline() -> None:
         "the revert must COMMIT (`git revert --no-edit -m 1 <merge sha>`): with "
         "`-n`/`--no-commit`/`--squash` the change never lands on the batch branch, "
         f"which then still contains the culprit: {uncommitted}"
+    )
+
+
+def test_the_blame_sha_is_bound_to_a_batch_merge() -> None:
+    """the ``a888c6980`` P2: a bisect result can be a commit INSIDE a PR, and the drop is silent.
+
+    ``git bisect`` walks **every** commit in ``origin/main..integration/batch-1`` —
+    ``--first-parent`` is opt-in — so in a ``--no-ff`` batch the "exact commit" it reports can be one
+    of a PR's own commits. ``git revert --no-edit -m 1 <a non-merge>`` then IGNORES the mainline and
+    exits **0** (git-verified), reverting ONE COMMIT of that PR instead of the PR: the rest of it
+    still lands unreviewed, and the re-blame rule ("the dropped PR is the one with a matching revert
+    line") cannot fire, because the subject becomes ``Revert "PR1 commit 2"``, which matches no
+    ``batch: merge PR #<N>`` line. Reproduced in a scratch repo against this doctrine's own shape:
+    plain bisect blamed ``PR1 commit 2`` (not a merge) and the revert of it exited 0.
+
+    Both halves are pinned: the bisect is scoped to the batch's merge chain, and the sha handed to
+    ``git revert`` is the one whose merge-ness was asserted.
+    """
+    text = _text()
+    assert re.search(r"git\s+bisect\s+start\s+--first-parent\b", text), (
+        "`git bisect start` must carry `--first-parent`: without it the blame can stop on a commit "
+        "INSIDE a PR, which has no merge to attribute and none to revert"
+    )
+    enumerations = [
+        cmd
+        for cmd in _fenced_commands()
+        if cmd.startswith("git log")
+        and "origin/main..integration/batch-" in cmd
+    ]
+    assert enumerations, "the doctrine no longer enumerates the batch's merges — re-point this guard"
+    for cmd in enumerations:
+        assert "--first-parent" in cmd and "--merges" in cmd, (
+            "the 'merges ATTEMPTED' enumeration must be "
+            "`git log --first-parent --merges …`: the bare form also lists the commits inside each "
+            f"PR, so a reader takes a PR-internal sha for a merge: {cmd}"
+        )
+    reverts = [cmd for cmd in _fenced_commands() if "git revert" in cmd]
+    assert reverts, "the doctrine no longer documents dropping a culprit — re-point this guard"
+    for cmd in reverts:
+        assert '"$BAD"' in cmd or "${BAD}" in cmd, (
+            "the revert must target the sha whose merge-ness was ASSERTED (`$BAD`), not an "
+            f"independently-typed `<merge sha>`: {cmd}"
+        )
+    captures = [
+        (i, _code(c))
+        for i, c in enumerate(_fenced_commands())
+        if _READ_ONLY_CAPTURE.match(_code(c))
+    ]
+    assert captures, (
+        "the blame sha is never captured before the return — `BAD=\"$(git rev-parse HEAD)\"` must sit "
+        "BEFORE `git bisect reset`, which moves HEAD back to the batch tip"
+    )
+    for fence in _fences():
+        codes = [_code(c) for c in fence]
+        if not any("git revert" in c for c in codes):
+            continue
+        asserts = [c for c in codes if _MERGE_ASSERT.match(c)]
+        assert asserts, (
+            "the fence that drops the culprit carries no merge-ness assertion: ``git revert -m 1`` "
+            "on a non-merge exits 0 and reverts one COMMIT of the PR"
+        )
+        for cmd in asserts:
+            assert _halts(cmd), (
+                "the merge-ness assertion must HALT the fence: a failed non-merge check that only "
+                f"prints still lets the silent single-commit revert run: {cmd}"
+            )
+    capture_at = [i for i, c in enumerate(_fenced_commands()) if _READ_ONLY_CAPTURE.match(_code(c))]
+    reset_at = [
+        i for i, c in enumerate(_fenced_commands()) if _code(c).startswith("git bisect reset")
+    ]
+    assert reset_at and min(capture_at) < min(reset_at), (
+        "the blame sha must be captured while HEAD is still the first bad commit — a capture after "
+        "`git bisect reset` records the batch tip, and the revert then drops the wrong thing"
+    )
+
+
+def test_the_gate_run_must_complete_before_any_verdict() -> None:
+    """the ``c50628450`` P2: ``kill -0`` failing is not a PASS — a killed run reads as BATCH-GREEN.
+
+    The poll prints ``DONE`` whenever the pid is gone, which is equally true of a run the kernel
+    OOM-killed (measured on #10399: five ``python`` processes killed in 23 minutes). A killed run
+    writes no summary, so it carries no failure ids; Phase 4 diffs ids, so it certifies `BATCH-GREEN`
+    for a tree no run ever finished — and `UNPROVEN-FULL-SUITE` was keyed only on "a subset ran".
+    """
+    gates = [
+        fence
+        for fence in _fences()
+        if any("--junitxml=/tmp/batch-junit" in _code(c) for c in fence)
+    ]
+    assert gates, "the gate run no longer writes a junit report — re-point this guard"
+    codes = [code for fence in gates for code in (_code(c) for c in fence)]
+    assert any(
+        re.search(r'^wait\s+"\$\(cat\s+/tmp/batch\.pid\)"\s*;\s*RC=\$\?$', c) for c in codes
+    ), (
+        "the gate fence must WAIT for the run and keep its status (`wait \"$(cat "
+        "/tmp/batch.pid)\"; RC=$?`): without a status a killed run is indistinguishable from a "
+        "finished one"
+    )
+    status_checks = [c for c in codes if "$RC" in c and "-eq" in c]
+    assert status_checks, (
+        "no exit-status predicate on `$RC`: pytest exits 0 (passed) or 1 (tests failed) on a "
+        "COMPLETED run, and 2/3/4/5 — or 128+N — when it was interrupted, misconfigured or KILLED"
+    )
+    assert any("$RC" in c and "-eq 0" in c and "-eq 1" in c and _halts(c) for c in status_checks), (
+        "the status predicate must accept exactly 0 and 1 and HALT on anything else: "
+        f"{status_checks}"
+    )
+    # The SUBJECT must be the comparison, not a message about it: pinning `$BATCH_TOTAL`
+    # anywhere in the line was satisfied by the echo INSIDE the halt, so replacing the
+    # comparison with `true` left the check green (measured — that mutant survived).
+    counts = [c for c in codes if re.match(r'^\[\s+-n\s+"\$BATCH_TOTAL"', c)]
+    assert counts, (
+        "the gate fence must compare the run's own test COUNT against the baseline's: a killed run "
+        "reports fewer (or no) tests, and that is the detector a status code alone can miss"
+    )
+    for cmd in counts:
+        assert '-ge "$BASELINE_TOTAL"' in cmd, (
+            f"the count must be compared to the BASELINE total, not merely mentioned: {cmd}"
+        )
+        assert _halts(cmd), (
+            f"a short count must HALT the fence, or the verdict proceeds on a killed run: {cmd}"
+        )
+    verdict_rows = [line for line in _text().splitlines() if line.startswith("| `UNPROVEN-FULL-SUITE")]
+    assert verdict_rows, "the verdict table no longer carries an UNPROVEN-FULL-SUITE row"
+    assert any("did not COMPLETE" in row for row in verdict_rows), (
+        "the verdict table's UNPROVEN-FULL-SUITE row must carry the 'did not COMPLETE' clause — a "
+        "killed or interrupted run has no failure set to diff and is never BATCH-GREEN "
+        f"(row: {verdict_rows})"
     )
 
 
@@ -1443,6 +1616,15 @@ def test_the_unreproduced_gate_legs_are_named() -> None:
         "workflow-lint",
         "surface-guard",
         "ci-introduced-failure",
+        # `changes` is the diff SELECTOR: a non-deferrable row of the gate's own leg
+        # table (`.github/workflows/python-ci.yml:4484`, not in `DEFERRABLE_LEGS`),
+        # and the one leg whose failure makes every other leg skip — the selection a
+        # batch's pytest run cannot exercise (#10400 P3).
+        "`changes`",
+        "DEFERRABLE_LEGS",
+        # …and the authority for the SET is the leg table, never a count written here:
+        # a hand-maintained ordinal is how the last two members went missing.
+        "LEGS_FILE",
     ):
         assert needle in text, (
             f"the doctrine must name {needle!r} where it lists the legs a pytest run "
