@@ -284,19 +284,21 @@ def test_the_shipped_map_is_clean() -> None:
     any one of them (e.g. unregistering the doc from the index) reds this.
 
     ⚠️ The ancestry claim is the ONE exception and it is stated, not silently
-    skipped: a `fetch-depth: 1` checkout (the CI `test` job's) cannot adjudicate
-    it — the object may be ABSENT (an empty history answers 128) or PRESENT but
-    graft-unreachable (a truncated walk answers **1**, the status that otherwise
-    means drift), so the question is unanswerable THERE. The offline half is
-    asserted FIRST — in a shallow clone a real drift of any OTHER claim still
-    reds this — and only then is the ancestry half handed to the job that has the
+    skipped: a `fetch-depth: 1` checkout (the CI `test` job's) cannot walk the
+    history, so the question is unanswerable THERE — the object may be ABSENT
+    (`git` exits 128) or PRESENT but graft-unreachable under the shallow graft
+    (`git` exits **1** about a real ancestor, the status that otherwise means
+    drift, so it is NOT drift there — #10356). The offline half is asserted
+    FIRST — in a shallow clone a real offline drift still reds this — and only
+    then is the ancestry half handed to the job that has the
     history.
 
     The unverified arm accepts EITHER wording the tool uses for "this checkout
-    cannot answer": the absent-object status arm and the bounded-probe timeout
-    arm. Both are one verdict, so they carry one token — before that they did
-    not, and this test FAILED (rather than skipped) whenever the bound tripped
-    (#5086 review P2, cycle 6).
+    cannot answer": the absent-object status arm, the shallow status-1 arm (a
+    grafted graph answers "not an ancestor" about a real ancestor — #10356), and
+    the bounded-probe timeout arm. All three are one verdict, so they carry one
+    token — before that they did not, and this test FAILED (rather than skipped)
+    whenever the bound tripped (#5086 review P2, cycle 6).
     """
     result = smc.measure()
     assert result["problems"] == [], result["problems"]
@@ -696,7 +698,8 @@ def test_a_sha_that_is_not_an_ancestor_is_drift(monkeypatch) -> None:
 
     The completeness stub states the premise the status alone cannot carry: this
     answer only means drift in a clone that CAN walk its whole history (see
-    `test_a_truncated_history_cannot_certify_drift` for the other half).
+    `test_a_truncated_history_cannot_certify_drift` for the other half — the
+    control `main` landed independently as #10356 asserts the same premise).
     """
     monkeypatch.setattr(
         smc.subprocess,
@@ -712,28 +715,31 @@ def test_a_sha_that_is_not_an_ancestor_is_drift(monkeypatch) -> None:
 def test_a_truncated_history_cannot_certify_drift(monkeypatch) -> None:
     """Fails if a SHALLOW clone's status-1 answer is scored as document drift.
 
-    ⛔ MEASURED on #10406 (`test (e)`, run 41183423096, 2026-10-31): the depth-1
-    `test` job reported `measured_at_commit 4f68a2aa7… is not an ancestor of HEAD`
-    and reded two required tests, while the REQUIRED `docs` job — the same check at
-    `fetch-depth: 0`, on the same head — passed, because the merge commit IS a
-    descendant of that commit. The object was present in the shallow clone
-    (`git cat-file -t` answers `commit`) and `--is-ancestor` exits **1** anyway:
-    the graft boundary cuts the walk, so a truncated history answers with the same
-    status an unrelated tree produces. The instruction that status carries — "the
-    document and the tree disagree — do not delete the row to make this green" —
-    is then wrong about a document that is right.
+    ⛔ MEASURED twice, independently. On #10406 (`test (e)`, run 41183423096,
+    2026-10-31): the depth-1 `test` job reported `measured_at_commit
+    4f68a2aa7… is not an ancestor of HEAD` and reded two required tests, while
+    the REQUIRED `docs` job — the same check at `fetch-depth: 0`, on the same
+    head — passed, because the merge commit IS a descendant of that commit. The
+    object was present in the shallow clone (`git cat-file -t` answers `commit`)
+    and `--is-ancestor` exits **1** anyway: the graft boundary cuts the walk, so
+    a truncated history answers with the same status an unrelated tree produces.
+    The instruction that status carries — "the document and the tree disagree —
+    do not delete the row to make this green" — is then wrong about a document
+    that is right. The same defect redded a different PR (`test`, run
+    41167511516) and was fixed on `main` as #10356.
 
     Reproduced in a real depth-1 clone of this repo: writing the object into the
-    clone's object DB makes `cat-file -t` succeed and `--is-ancestor` still exit 1
-    with `rev-parse --is-shallow-repository` answering `true`.
+    clone's object DB makes `cat-file -t` succeed and `--is-ancestor` still exit
+    1 with `rev-parse --is-shallow-repository` answering `true`.
 
     ⛔ Non-vacuous: on the pre-fix tool this test FAILS — the drift problem comes
     back and `unverified` is empty. The fix corroborates status 1 with the
     repository's own completeness and defers the claim to the `docs` job.
 
     The unresolvable arm (`_is_shallow_clone()` → None: git answered the ancestry
-    probe but not this one) is asserted too — it cannot certify drift either, and
-    it must not claim the checkout IS shallow.
+    probe but not this one) is asserted too, and it is the arm `main`'s #10356
+    control does not cover: it cannot certify drift either, and it must not claim
+    the checkout IS shallow. Only a positive `False` may accuse the document.
     """
     monkeypatch.setattr(
         smc.subprocess,
@@ -795,6 +801,7 @@ def test_status_1_for_a_PRESENT_yet_grafted_commit_is_the_real_git_verdict(
     assert len(unverified) == 1, unverified
     assert "cannot be verified here" in unverified[0], unverified
     assert "SHALLOW" in unverified[0], unverified
+    assert "not an ancestor" in unverified[0], unverified
 
 
 def test_an_unbounded_ancestry_probe_cannot_hang_the_gate(monkeypatch) -> None:
@@ -1383,8 +1390,9 @@ def test_cli_exit_codes() -> None:
 
     `_ancestry_is_verifiable_here()` is bounded with the tool's own bound, so the
     expectation and the tool cannot disagree about which arm this is; the
-    unverified assertion accepts either unverified wording because both carry the
-    same token (#5086 review P2, cycle 6).
+    unverified assertion accepts either unverified wording because all carry the
+    same token (#5086 review P2, cycle 6; the shallow status-1 arm joined them in
+    #10356).
     """
     tool = REPO / "tools" / "substrate_map_check.py"
     clean = subprocess.run(

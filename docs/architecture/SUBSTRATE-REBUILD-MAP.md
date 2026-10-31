@@ -422,9 +422,13 @@ descendant of it. Reproduced in a real depth-1 clone of this repo: write the
 object into the clone and `git cat-file -t` answers `commit` while
 `--is-ancestor` still exits `1`. So `1` is read as drift only where the
 repository reports its own history as complete
-(`git rev-parse --is-shallow-repository` → `false`); a shallow — or unresolvable —
-checkout gets the `UNVERIFIED` state error above, and the `docs` job proves the
-claim.
+(`git rev-parse --is-shallow-repository` → `false`); a shallow — or **unresolvable**
+(git cannot say) — checkout gets the `UNVERIFIED` state error above, and the
+`docs` job proves the claim. The `git rev-parse` probe is asked on every status-1
+answer, and only a positive `false` may certify drift: an answer that could not
+be obtained fails **closed** into `UNVERIFIED`, never open into drift. The same
+defect was found and fixed independently on `main` as #10356; this tree carries
+that fix plus the unresolvable arm.
 
 ### Where the guard runs, and which half runs where
 
@@ -433,7 +437,7 @@ Dual-registered on purpose, because the two halves need different checkouts:
 | home | what it proves | why there |
 |---|---|---|
 | `core` + `tier1` (`config/ci-surfaces.yml`) → the `test` shards | everything except the ancestry claim | a **docs-only** edit of this file selects no surface at all and runs `tier1` only, so a `core`-only row would never fire on the diff that actually staled three times |
-| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all six claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where no walk of the history can reach the object) |
+| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all five claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where the object is absent — or present-and-unreachable under the graft, which git answers as "not an ancestor" about a real ancestor, so neither status is drift there — #10356) |
 | `CORE_ALSO` (`tools/ci_selection.py`) | the same `test`-shard set, on a **tool-only** edit | `tools/` is a flat non-python prefix and matches no `SOURCE_PATTERNS` row, so without that entry an edit to the tool itself selected nothing |
 
 What it checks, and deliberately does not:

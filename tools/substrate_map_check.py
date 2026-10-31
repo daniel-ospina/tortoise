@@ -535,9 +535,9 @@ def _is_shallow_clone() -> bool | None:
     failure paths, to say WHY in the report instead of blaming the document:
     when the probe could not resolve the object at all (exit 128, a missing
     object), and when it resolved it yet answered "not an ancestor" (exit 1),
-    which a truncated history produces for a commit that is present. In the
-    second case this answer is what separates "the document is wrong" from
-    "this checkout cannot tell".
+    which a truncated history produces for a commit that is present (#10356).
+    In the second case this answer is what separates "the document is wrong"
+    from "this checkout cannot tell".
     """
     try:
         proc = subprocess.run(
@@ -581,18 +581,31 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     operator told "the document and the tree disagree" on a slow clone is handed
     a wrong instruction about a correct document.
 
-    ⛔ **Status 1 is CORROBORATED, because that contract assumes a COMPLETE
-    history and a shallow checkout does not have one.** When the object is present
-    but graft-unreachable, `--is-ancestor` walks the truncated history, finds no
-    path, and exits 1 — the identical status a genuinely unrelated tree produces.
-    Measured on #10406 (`test (e)`, run 41183423096): the depth-1 `test` job
-    reported `measured_at_commit … is not an ancestor of HEAD` for a claim the
-    fetch-depth: 0 `docs` job passed on the same head; reproduced in a real
-    depth-1 clone carrying the object — `git cat-file -t` answers `commit` and
-    `--is-ancestor` still exits 1. So drift is claimed ONLY where the repository
-    says its history is complete (`--is-shallow-repository` → `false`); a shallow
-    — or unresolvable — checkout cannot tell drift from truncation and gets the
-    state error above, exit 2, with the `docs` job as the home that proves it.
+    ⛔ **Status 1 is only DRIFT when this checkout can actually walk the
+    history** (#10356, #10420). A SHALLOW clone truncates the graph at its
+    boundary, so a commit that IS an ancestor can still come back "no" whenever
+    its object happens to be present (a deep-enough depth, a partial fetch, a
+    pack that carried it) while the commits between it and the tip are grafted
+    away.
+
+    Measured in a real depth-1 clone of a 4-commit repo: with the target object
+    absent, `--is-ancestor` exits 128 ("Not a valid commit name"); after the same
+    object is fetched explicitly so it is present but unreachable under the
+    graft, the same call exits **1** with no error text at all. That is also what
+    happened in CI: on #10406 (`test (e)`, run 41183423096) the depth-1 `test`
+    job reported `measured_at_commit … is not an ancestor of HEAD` for a claim
+    the fetch-depth: 0 `docs` job passed on the same head.
+
+    So the shallow/absent-object test decides the CHANNEL and git's status only
+    decides within it: a shallow checkout cannot adjudicate ancestry, whatever
+    status it returns. ⛔ **Only a positive `false` from the completeness probe
+    may certify drift** — an answer that could not be obtained (`None`: the
+    probe timed out or errored) is NOT evidence of a complete history, so it
+    falls to the state error with the shallow case rather than through to drift.
+    Failing closed here matters because the two mistakes are not symmetric: a
+    false `UNVERIFIED` costs one deferred claim that the REQUIRED `docs` job
+    still proves at `fetch-depth: 0`, while a false `DRIFT` tells an operator to
+    distrust a document that is right.
     """
     match = _FRONTMATTER_SHA.search(doc)
     if not match:
@@ -637,16 +650,24 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
         # `--is-ancestor` still exits 1. Calling that drift hands the reader
         # "the document and the tree disagree — do not delete the row to make
         # this green" about a document that is right, so the status is
-        # corroborated with the repository's own completeness first.
+        # corroborated with the repository's own completeness first (#10356).
+        #
+        # ⛔ ONLY `False` certifies drift. `None` means the probe could not be
+        # answered — not that the history is complete — so it takes the state
+        # error with the shallow case. Letting `None` fall through to drift
+        # would make an unanswerable probe the one path that can accuse a
+        # correct document.
         shallow = _is_shallow_clone()
         if shallow is False:
             return ([f"measured_at_commit {sha} is not an ancestor of HEAD"], [])
         why = (
-            "this checkout is SHALLOW, so the graft boundary cut the path to it "
-            "and a truncated walk exits with the same status as an unrelated tree"
+            "git answered 'not an ancestor', but this checkout is SHALLOW, so "
+            "the graft boundary cut the path to it and a truncated walk exits "
+            "with the same status as an unrelated tree"
             if shallow
-            else "git could not say whether this checkout is shallow, so a "
-            "status-1 answer cannot be told apart from a truncated walk"
+            else "git answered 'not an ancestor', but git could not say whether "
+            "this checkout is shallow, so a status-1 answer cannot be told "
+            "apart from a truncated walk"
         )
         return (
             [],
