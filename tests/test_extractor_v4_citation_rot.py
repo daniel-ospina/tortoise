@@ -1467,6 +1467,26 @@ _NARRATIVE_HOME_CITATIONS = (
 _NARRATIVE_HOME_SYMBOL = "sdk.py::TortoiseSDK._emit_event"
 
 
+def _citation_path(cited_file: str) -> Path | None:
+    """The module a `module.py` citation names, or None when the tree has no such file.
+
+    The passages cite the SHORT form the repo's comments use (`entities.py::
+    _upsert_document`, `edges.py::_DERIVATION_REFERENCES_LABELS`) as well as a
+    repo-relative path, so the citation is resolved the way a READER resolves it
+    — by the module file's name under `tortoise/` — instead of by guessing one
+    prefix. A name that matches more than one module is ambiguous, and this
+    returns the first in sorted order rather than silently picking by walk order.
+    """
+    direct = ROOT / cited_file
+    if direct.exists():
+        return direct
+    prefixed = ROOT / "tortoise" / cited_file
+    if prefixed.exists():
+        return prefixed
+    matches = sorted((ROOT / "tortoise").rglob(Path(cited_file).name))
+    return matches[0] if matches else None
+
+
 def _function_texts(path: Path, names: tuple[str, ...]) -> dict[str, str]:
     """`name -> its own source text` for each named `def` in `path`.
 
@@ -1494,10 +1514,13 @@ def test_the_narrative_home_citations_are_symbol_keyed_and_resolve():
     * the authority is cited symbol-keyed (`sdk.py::TortoiseSDK._emit_event`)
       somewhere in those passages, so removing the line citations cannot be
       "fixed" by deleting the justification altogether;
-    * that symbol RESOLVES, as a METHOD OF THAT CLASS — a rename or a move out
-      of `TortoiseSDK` reds instead of leaving a citation naming something that
-      is not there (measured by re-pointing the string at
-      `sdk.py::TortoiseSDK._emit_events`).
+    * EVERY `` `module.py::symbol` `` written in those passages RESOLVES at HEAD,
+      and a dotted one resolves as a member of ITS CLASS — a rename, or a move
+      out of `TortoiseSDK`, reds instead of leaving a citation naming something
+      that is not there (measured both ways: `sdk.py::TortoiseSDK._emit_events`
+      in `hosted_api.py` reds naming that citation, and
+      `sdk.py::TortoiseSDX._emit_event` reds as a different authority wearing
+      the same method name).
     """
     sources: dict[str, dict[str, str]] = {}
     for rel, names in _NARRATIVE_HOME_CITATIONS:
@@ -1541,20 +1564,53 @@ def test_the_narrative_home_citations_are_symbol_keyed_and_resolve():
         "best-effort contract, not just the module: " + ", ".join(sorted(sources))
     )
 
-    cited_file, _, cited_symbol = _NARRATIVE_HOME_SYMBOL.partition("::")
-    cls_name, _, method = cited_symbol.rpartition(".")
-    sdk_path = ROOT / "tortoise" / cited_file
-    tree = ast.parse(sdk_path.read_text(encoding="utf-8"))
-    holders = [
-        node.name for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef)
-        and node.name == cls_name
-        and any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and child.name == method for child in node.body)
+    citations = [
+        (rel, name, match.group(1), match.group(2))
+        for rel, texts in sources.items()
+        for name, text in texts.items()
+        for match in _SYMBOL_CITATION.finditer(text)
     ]
-    assert holders, (
-        f"`{_NARRATIVE_HOME_SYMBOL}` does not resolve at HEAD — `{cls_name}` "
-        f"defines no `{method}` (or the class/method moved). The citation has "
-        "rotted: re-verify the best-effort contract and re-point it to the "
-        "symbol that now carries it, rather than to a line."
+    assert citations, (
+        "no `module.py::symbol` citation parses in the narrative-home passages "
+        "at all — this guard's resolution arm would otherwise pass vacuously "
+        "while the passages cite nothing a reader can open"
+    )
+
+    unresolved = []
+    for rel, fn, cited_file, symbol in citations:
+        path = _citation_path(cited_file)
+        if path is None:
+            unresolved.append((rel, fn, cited_file, symbol, "file not found"))
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        holder, _, leaf = symbol.rpartition(".")
+        if holder:
+            # Dotted: the LEAF must be a method OF THAT CLASS. `_emit_event` on
+            # another class, or at module level, is a different authority.
+            resolved = any(
+                isinstance(node, ast.ClassDef)
+                and node.name == holder.rsplit(".", 1)[-1]
+                and any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and child.name == leaf for child in node.body)
+                for node in ast.walk(tree)
+            )
+        else:
+            # Bare: any definition, or a word occurrence (modules/consts).
+            resolved = any(
+                getattr(node, "name", None) == leaf for node in ast.walk(tree)
+            ) or bool(re.search(rf"\b{re.escape(leaf)}\b",
+                                path.read_text(encoding="utf-8")))
+        if not resolved:
+            unresolved.append((rel, fn, cited_file, symbol,
+                               "symbol does not resolve at HEAD"))
+
+    assert not unresolved, (
+        "the narrative-home passages cite these symbols as living in these "
+        "modules, and they do not — the citation has rotted (re-verify the "
+        "best-effort contract and re-point it at the symbol that now carries "
+        "it, never at a line):\n  - "
+        + "\n  - ".join(
+            f"`{rel}::{fn}` cites `{cited_file}::{sym}` ({why})"
+            for rel, fn, cited_file, sym, why in unresolved
+        )
     )
