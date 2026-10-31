@@ -184,16 +184,18 @@ def _calendar_date(value: object) -> str | None:
 
 def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
                         session_dates: dict[str, str] | None = None,
+                        *, anchor: str | None = None,
                         ) -> tuple[str, str] | None:
     """Resolve a detected date bound into an inclusive ISO ``(lo, hi)``
-    window — THE single source of truth for the CENSUS's window arithmetic
-    (:func:`facet_census` and everything it date-qualifies).
+    window — THE single source of truth for the temporal facet's window
+    arithmetic (:func:`facet_census` and everything it date-qualifies).
 
-    :func:`_span_in_window` is its ONLY consumer in ``tortoise/`` — the
-    routed point-level twin on the eval seam
-    (``tools/longmem_eval/retrieve.py::_apply_time_window``) does NOT resolve
-    through it and still compares RAW session dates, so that half of the
-    temporal facet stays dead on the producer's date shape (#9182).
+    :func:`_span_in_window` is its consumer in ``tortoise/``; the routed
+    point-level twin on the eval seam
+    (``tools/longmem_eval/retrieve.py::_apply_time_window``) resolves through
+    it too, passing ``anchor`` — so BOTH halves of the temporal facet read the
+    producer's ``2023/04/10 (Mon) 17:50`` shape instead of comparing raw
+    strings (#8710, #9182).
 
     * ``interval`` — ``(start, end)`` as calendar dates, ordered (a reversed
       "between A and B" still means the window the question named rather
@@ -207,10 +209,18 @@ def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
       "now" (the eval passes the question's ``haystack_dates``; unchanged from
       the pre-#8710 rule).
 
+    ``anchor`` (keyword-only) is the RECENCY clock. ``None`` — the census
+    rule, and the default — uses the latest parseable date in
+    ``session_dates`` (the graph carries no global clock). The eval seam
+    passes the question's own ``question_date``: there the question date IS
+    the clock, so an ``anchor`` that cannot be resolved returns ``None`` (the
+    caller's defensive fallback) rather than silently substituting a
+    different one.
+
     ``None`` means NO BOUND: the caller keeps its unqualified input. Every
     unresolvable input degrades here rather than raising — an unknown kind, a
     missing/unparseable bound, a recency day count that is not an integer, a
-    recency bound with no parseable session date. That is the #8710 rule and
+    recency bound with no parseable session date (or unresolvable anchor). That is the #8710 rule and
     it is structural: a date that cannot be resolved can only ever mean
     "unbounded", NEVER "matches nothing", because a degenerate hard filter
     silently kills the facet (the pre-#8710 recency branch raised ``TypeError``
@@ -230,10 +240,19 @@ def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
         # "never matches-nothing" failure the rule above forbids.
         if start is None or not str(start).strip():
             return None
-        known = [d for d in (_calendar_date(v)
-                             for v in (session_dates or {}).values()) if d]
-        if not known:
-            return None
+        if anchor is not None:
+            # An explicit clock is authoritative; unresolvable means NO BOUND,
+            # never a substitution (the census's latest-known rule would be a
+            # different question's clock on the eval seam).
+            resolved_anchor = _calendar_date(anchor)
+            if resolved_anchor is None:
+                return None
+        else:
+            known = [d for d in (_calendar_date(v)
+                                 for v in (session_dates or {}).values()) if d]
+            if not known:
+                return None
+            resolved_anchor = max(known)
         try:
             # A negative count is clamped to 0 so it can never INVERT the
             # window (the product path cannot emit one: ``_DATE_RECENCY_RE``
@@ -243,7 +262,7 @@ def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
             # same guard ``assembly.resolve_relative_anchor`` applies to the
             # same input).
             n_days = max(0, int(start))
-            qdate = date.fromisoformat(max(known))
+            qdate = date.fromisoformat(resolved_anchor)
             return ((qdate - timedelta(days=n_days)).isoformat(),
                     qdate.isoformat())
         except (OverflowError, TypeError, ValueError):

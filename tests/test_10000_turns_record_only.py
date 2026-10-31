@@ -2238,6 +2238,153 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
         "a turn's text is in the graph while the record was armed")
 
 
+def test_an_armed_record_that_cannot_name_a_tenant_keeps_the_turns_in_the_graph(
+        sdk, monkeypatch):
+    """#10067 — the third conjunct of the capability, and the one that lost data.
+
+    `TORTOISE_RECORD_DSN` + a journal is NOT "the record holds the turns": the
+    seam refuses an armed write it cannot attribute (`no_tenant`, #9188 F4), and
+    on a multi-tenant process with no request scope that is every write. Before
+    this pin the capture read the capability as true, skipped the graph write,
+    and journalled per-turn `PointAdded` records the record never materialised —
+    the transcript in NEITHER store, the capture reporting success.
+
+    The assertion is on the STORE the read path serves, not on a flag: the turn
+    nodes are in the graph and the record seam was handed no turn record.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    # Deliberately NOT declared single-tenant, and no request scope: the process
+    # cannot say whose rows these would be, which is the production shape
+    # `record_tenant()` refuses (`.` -> `None`).
+    monkeypatch.delenv(record_writer.RECORD_SINGLE_TENANT_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_ORG_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_GRAPH_ENV, raising=False)
+    seam = _RecordingSeam()
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    proj = sdk._get_proj()
+    _capture(sdk, "no-tenant-session", [{"role": "user", "content": "a"},
+                                        {"role": "assistant", "content": "b"}])
+    assert sorted(sdk_mod._capture_turn_ids(proj, "no-tenant-session")) == [
+        "no-tenant-session_t0", "no-tenant-session_t1"], (
+        "the record could not be told whose turn these are, so the graph is the "
+        "only store that can hold them — and it did not get them either")
+    assert [r for r in seam.records
+            if r.get("type") == "TurnsRecorded"] == [], (
+        "a record-only carrier was journalled for a record write that cannot "
+        "land — its rows would never exist, so the journal would name a home "
+        "that is not there")
+    assert seam.point_contents() == ["[user] a", "[assistant] b"], (
+        "the fallback must journal the NODE-CREATING record, because the graph "
+        "is the store that holds these turns")
+
+
+def test_a_tenant_CARRIED_on_the_sdk_arms_the_record_only_lane(sdk, monkeypatch):
+    """#10067 review P1 — the HOSTED REST shape: by-value tenant, no scope.
+
+    The capability read used to ask `record_writer.record_tenant()`, which sees
+    the ambient scope and the declared single-tenant env pair and NOTHING else —
+    while the seam applies the CARRIED tenant first (it is handed
+    `tenant=self._record_tenant`). The hosted REST lane carries by value and
+    enters no ambient scope by design (`_bind_record_tenant`, `_data_sdk`), so on
+    that lane the read answered "no tenant" and the writer kept the turns in the
+    GRAPH for a record that was accepting every row: the record-only tier
+    silently reverted on the one multi-tenant capture lane, re-creating exactly
+    what #10067 exists to end.
+
+    This fixture is the production shape — DSN set, journal set, NO scope and NO
+    declared pair — and the only arming is `_bind_record_tenant`. Every assertion
+    is on a STORE, so the test cannot be satisfied by a flag: the graph holds no
+    turn node, the journal carries the carrier (and no per-turn `PointAdded`),
+    and the seam was really handed the transcript.
+    """
+    from tortoise import record_writer
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.delenv(record_writer.RECORD_SINGLE_TENANT_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_ORG_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_GRAPH_ENV, raising=False)
+    # Non-vacuity: the AMBIENT question really is unanswered here, so the only
+    # thing that can arm the record-only lane is the carrier on the SDK.
+    assert record_writer.record_tenant() is None
+
+    seam = _RecordingSeam()
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    sdk._bind_record_tenant("org-10067", "graph-10067")
+    proj = sdk._get_proj()
+    _capture(sdk, "carried-tenant-session", [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"}])
+
+    assert sdk_mod._capture_turn_ids(proj, "carried-tenant-session") == [], (
+        "the record CAN attribute this write (the tenant is carried on the SDK), "
+        "so the graph must keep no turn node — otherwise the record-only tier "
+        "does not reach the hosted REST lane at all")
+    assert [r for r in seam.records if r.get("type") == "TurnsRecorded"], (
+        "the capture journalled no record carrier, so the record holds no turn "
+        "rows and the transcript lives nowhere")
+    assert not [r for r in seam.records if r.get("type") == "PointAdded"], (
+        "a NODE-CREATING per-turn record was journalled on the record-only lane "
+        "— the #10067 defect")
+    assert seam.point_contents() == ["[user] a", "[assistant] b"]
+
+
+def test_a_SCRATCH_log_is_not_a_journal_so_the_turns_stay_in_the_graph(
+        sdk, monkeypatch, tmp_path):
+    """#10067 review — the journal conjunct is DURABILITY, not mere presence.
+
+    `write_live_record` asks two questions about the log before it asks anything
+    else: is there one at all, and does it declare itself a JOURNAL
+    (``durable``)? A scratch buffer answers the first `True` and the second
+    `False`, and the seam DECLINES it (`no_durable_journal`) on the recorded
+    ground that nothing could ever reproduce the row — `EventLog.scratch` exists
+    to mark exactly that lane. The capability read tested only presence, so a
+    scratch-backed capture skipped the graph write for a record that was
+    declining every row: the transcript in NEITHER store, the capture reporting
+    success. That is the #10067 defect one conjunct further out, and the
+    docstrings this PR edits already describe it in those words ("JOURNALING is
+    load-bearing … without it the write door declines `no_durable_journal` and
+    the GRAPH keeps the turns").
+
+    Both assertions are on a STORE: the graph has the turn nodes, and the record
+    seam was handed the node-creating records instead of a carrier.
+    """
+    from tortoise.log import EventLog
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-10000")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "graph-10000")
+    seam = _RecordingSeam()
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    # The SDK builds a durable `EventLog` for a configured path; a scratch buffer
+    # is the shape that answers "journal present" and "journal" differently.
+    sdk._event_log = EventLog.scratch(tmp_path / "scratch.jsonl")
+    assert sdk._get_event_log() is not None, (
+        "vacuity guard: the capability's journal conjunct must be answered True "
+        "by PRESENCE here, so the only thing refusing the record-only lane is "
+        "durability")
+    assert sdk._get_event_log().durable is False
+
+    proj = sdk._get_proj()
+    _capture(sdk, "scratch-log-session", [{"role": "user", "content": "a"},
+                                         {"role": "assistant", "content": "b"}])
+
+    assert sorted(sdk_mod._capture_turn_ids(proj, "scratch-log-session")) == [
+        "scratch-log-session_t0", "scratch-log-session_t1"], (
+        "a scratch log is not a journal, so no replay could ever restore a "
+        "record row from it — the graph is the only store that can hold these "
+        "turns, and it did not get them")
+    assert [r for r in seam.records
+            if r.get("type") == "TurnsRecorded"] == [], (
+        "a record carrier was journalled for a write the seam DECLINES "
+        "(`no_durable_journal`) — its rows would never exist")
+    assert seam.point_contents() == ["[user] a", "[assistant] b"], (
+        "the fallback must journal the NODE-CREATING record, because the graph "
+        "is the store that holds these turns")
+
+
 def test_a_record_with_no_account_is_not_narrated_as_a_divergence(
         sdk, monkeypatch, caplog):
     """⛔ P2 (#10021 review): the migrate-phase state must not fill the

@@ -239,6 +239,14 @@ Also fail-closed by design:
 
 USAGE
 -----
+    uv run python tools/test_lane.py run -- tests/ -q   # start + export + run
+    uv run python tools/test_lane.py down               # remove it
+
+``run`` is the spelling to prefer: it is the one place the three seam variables
+(#5084) are APPLIED rather than printed, so no caller has to remember them, and
+bare ``run`` targets ``tests/`` rather than the rootdir. The two-step form below
+is for a shell that wants the variables itself:
+
     uri="$(uv run python tools/test_lane.py uri)" || exit 1
     eval "$uri"
     uv run pytest tests/ -q
@@ -2173,6 +2181,30 @@ def stop() -> str:
     return "removed"
 
 
+def lane_seam_env(port: int, graph: str) -> dict[str, str]:
+    """The THREE seam variables that actually make this lane the target.
+
+    ONE definition, two consumers: ``cmd_up`` PRINTS these (so a shell can
+    ``eval`` them) and ``cmd_run`` EXPORTS them to a pytest child. They must
+    never drift apart — the tool's own SCOPE section records what happens when
+    only the URI is exported: tests that build their target through
+    ``tests/_live_utils.py`` key on ``TORTOISE_TEST_DOCKER_PORT`` and a
+    password, so they silently address the SHARED instance instead, and the
+    probe against a passwordless private container raises
+    ``AuthenticationError`` (which an ``except Exception`` turns into "Live
+    FalkorDB (Docker) not available" → 14 skipped, rc=0).
+
+    ``''`` is a MEANINGFUL password there ("no ``requirepass`` configured"),
+    distinct from ``None`` (no userinfo at all), which is why the value is a
+    literal empty string and not an omission.
+    """
+    return {
+        "TORTOISE_DB_URI": uri_for(port, graph),
+        "TORTOISE_TEST_DOCKER_PORT": str(port),
+        "TORTOISE_TEST_DOCKER_PASSWORD": "",
+    }
+
+
 def cmd_up(args: argparse.Namespace) -> int:
     _validate_graph(args.graph)      # refuse BEFORE a container exists
     name, port = start(args.port)
@@ -2180,20 +2212,149 @@ def cmd_up(args: argparse.Namespace) -> int:
     shown = "unknown" if graphs is None else str(graphs)
     print(f"test-lane: {name} on 127.0.0.1:{port} (graphs={shown})",
           file=sys.stderr)
-    print(f"export TORTOISE_DB_URI='{uri_for(port, args.graph)}'")
-    # The other half of the same seam (#5084's recorded remaining work): tests
-    # that build a URI through `tests/_live_utils.py` key on
-    # TORTOISE_TEST_DOCKER_PORT and a password, and this container runs without
-    # `requirepass` — so without these two lines the private lane is invisible
-    # to them and they fall back to the SHARED instance (or skip). `''` is the
-    # contract for "no password configured"; `docker_password()` reads it.
-    print(f"export TORTOISE_TEST_DOCKER_PORT='{port}'")
-    print("export TORTOISE_TEST_DOCKER_PASSWORD=''")
+    for key, value in lane_seam_env(port, args.graph).items():
+        print(f"export {key}='{value}'")
     return 0
 
 
 def cmd_uri(args: argparse.Namespace) -> int:
     return cmd_up(args)
+
+
+def _names_a_pytest_path(token: str) -> bool:
+    """Does this token LOOK like a test path (a file, dir, or node id)?
+
+    Deliberately syntactic and conservative — anything that could be a path
+    counts as one:
+
+      * starts with ``-``   -> a flag, not a path
+      * contains ``::``     -> a node id
+      * contains ``/``      -> a repo-relative path
+      * ends with ``.py``   -> a file
+      * EXISTS on disk      -> a path, whatever it looks like
+    """
+    if not token or token.startswith("-"):
+        return False
+    if "::" in token or "/" in token or token.endswith(".py"):
+        return True
+    try:
+        return Path(token).exists()
+    except OSError:      # a token too long/illegal to be a path is not one
+        return False
+
+
+def _argv_names_a_target(argv: list[str]) -> bool:
+    """Would pytest treat any of these tokens as a positional TARGET?
+
+    A token that LOOKS like a path is still not a target when the token BEFORE
+    it is an option: pytest's grammar lets an option consume the next argument,
+    so ``--deselect tests/x.py::t`` and ``-k tests`` carry a PATH-SHAPED VALUE,
+    not a target. Treating those as targets handed pytest a pathless command ->
+    pytest collects from the ROOTDIR (no ``testpaths`` in pyproject.toml) -> a
+    module-level assertion in ``graph-scripts/test_6707_shock.py`` interrupts
+    collection (``42099 tests collected, 1 error``, exit 2) -> zero of the
+    suite's tests run. That is the exact failure this subcommand exists to
+    remove, so the rule is "an option eats the next token", NOT "looks like a
+    path".
+
+    KNOWN, DELIBERATE over-inclusion: a BOOLEAN flag also "eats" its next token
+    here, so ``run -- -q tests/foo.py`` appends ``tests/`` and runs the suite
+    PLUS that file (a superset, announced on stderr). The documented spelling
+    puts the target first (``run -- tests/foo.py -q``), and the asymmetry is the
+    right way round: over-running costs wall time, under-running costs the
+    verdict — a run that tested nothing reads exactly like a run where nothing
+    failed.
+    """
+    previous: str | None = None
+    for token in argv:
+        if ((previous is None or not previous.startswith("-"))
+                and _names_a_pytest_path(token)):
+            return True
+        previous = token
+    return False
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Run pytest against THIS lane's container — the invocation that cannot
+    be mis-spelled by hand.
+
+    WHY (#10399, measured): a full-suite run on a cell is routinely started
+    with the invocation AGENTS.md used to document
+    (``TORTOISE_DB_URI='docker://:falkordb@localhost:6379/…' pytest tests/``),
+    and on a cell nothing listens on 6379 — the services lanes publish on
+    EPHEMERAL ports (#6673) and a private lane on its own. The session-start
+    gate then refuses ONCE PER COLLECTED TEST, so a full run reports a wall of
+    `E`s and no verdict (the population is not a fixed number: `tests/` collects
+    41,842 tests at #10399's head, and a run that is killed mid-flight shows
+    only as many as it reached — the batch's own log held 405 before its process
+    died). Hand-``eval``-ing the three exports works but is a step every caller
+    can forget (and one did).
+
+    This runs the child with ``sys.executable -m pytest`` — the interpreter
+    that is already RUNNING this tool, i.e. the lane's venv — rather than a
+    bare ``pytest`` from PATH, which on a box with several worktrees resolves
+    to whichever venv happens to be first (a wrong-venv run measures the wrong
+    code, and #2985 shows how quietly that degrades: a venv without the
+    ``embeddings`` extra silently runs a keyword-only product).
+
+    The resolved lane is printed to STDERR BEFORE the child starts, so a run
+    that is killed mid-flight still leaves its target behind in whatever log it
+    was redirected to.
+
+    A child killed by a signal is reported as ``128 + N`` (the shell convention)
+    instead of the negative ``returncode`` — a lane needs to tell "tests
+    failed" from "someone killed this run", and ``-9`` in an exit code reads as
+    an argparse-ish usage error.
+    """
+    _validate_graph(args.graph)      # refuse BEFORE a container exists
+    name, port = start(args.port)
+    extra = list(args.pytest_args)
+    if extra and extra[0] == "--":
+        # `run -- -q tests/` is the documented spelling (it survives the same
+        # way `cargo run --` and `docker run … --` do), so the separator is
+        # consumed here rather than handed to pytest as an unknown argument.
+        extra = extra[1:]
+    if not _argv_names_a_target(extra):
+        # No path anywhere in the argv means THE SUITE — `tests/`. This is not
+        # cosmetic: with no path pytest collects from the ROOTDIR (there is no
+        # `testpaths` in pyproject.toml), which sweeps `validation/`,
+        # `graph-scripts/`, `integrations/tests/` and emits a collection error —
+        # a run that tests none of the suite and exits 2. Flag-only calls are the
+        # common shape (`-k`, `--collect-only`, `--timeout=N`), so the check is on
+        # the whole argv, not on emptiness.
+        # PREPENDED, never appended: the rule above is "an option eats the next
+        # token", and a default appended at the END is subject to that same rule.
+        # `run -- -q -k "$EXPR"` with EXPR unset expands to a trailing `-k`, and
+        # an appended `tests/` becomes -k's VALUE — pytest then gets no positional
+        # target at all, sweeps the ROOTDIR and exits 2 having run none of the
+        # suite, while this line claims it added the suite. First position cannot
+        # be eaten by anything.
+        extra = ["tests/", *extra]
+        print(
+            "test-lane: no test TARGET in the pytest argv — adding `tests/` (the "
+            "suite). Put a path BEFORE the flags to override, e.g. "
+            "`run -- tests/test_guard.py -q`.",
+            file=sys.stderr,
+        )
+    env = {**os.environ, **lane_seam_env(port, args.graph)}
+    argv = [sys.executable, "-m", "pytest", *extra]
+    print(
+        f"test-lane: {name} on 127.0.0.1:{port} — "
+        f"TORTOISE_DB_URI={env['TORTOISE_DB_URI']} "
+        f"TORTOISE_TEST_DOCKER_PORT={env['TORTOISE_TEST_DOCKER_PORT']} "
+        f"TORTOISE_TEST_DOCKER_PASSWORD='' — invoking: {' '.join(argv)}",
+        file=sys.stderr,
+    )
+    sys.stderr.flush()
+    rc = subprocess.run(argv, env=env).returncode
+    if rc < 0:
+        print(
+            f"test-lane: pytest was KILLED by signal {-rc} (no pytest count "
+            f"line exists for a killed run — this is NOT a test failure)",
+            file=sys.stderr,
+        )
+        return 128 + (-rc)
+    return rc
 
 
 def cmd_down(args: argparse.Namespace) -> int:
@@ -2269,18 +2430,32 @@ def build_parser() -> argparse.ArgumentParser:
                         help="publish on this loopback port (default: first "
                              "free). Refused, not ignored or adopted, when "
                              "this lane's container already runs elsewhere")
+    runner = mapper   # `run` starts a container too, so it takes the same flags
     plain = argparse.ArgumentParser(add_help=False)
     sub = p.add_subparsers(dest="command", required=True)
     for name, fn, help_, parent in (
         ("up", cmd_up, "start this lane's container and print the export line",
          mapper),
         ("uri", cmd_uri, "same as `up` (reads better inside $( ))", mapper),
+        ("run", cmd_run, "run pytest against this lane's container "
+                        "(run -- <pytest args>)", runner),
         ("down", cmd_down, "remove this lane's container", plain),
         ("status", cmd_status, "is it running, and how many graphs does it hold",
          graph_only),
         ("list", cmd_list, "list every fdb-lane-* container", plain),
     ):
         sp = sub.add_parser(name, help=help_, parents=[parent])
+        if name == "run":
+            # REMAINDER, not a named option: everything after the separator is
+            # pytest's own argv and must reach it verbatim (`-q`, `-k expr`,
+            # `--timeout=900`, a path…). argparse would otherwise consume the
+            # pytest flags it recognises and reject those it does not.
+            sp.add_argument("pytest_args", nargs=argparse.REMAINDER,
+                            help="pytest argv, after `--` "
+                                 "(default target: tests/ — the suite). A "
+                                 "LEADING flag needs the `--` separator "
+                                 "(`run -- -q tests/`): without it argparse "
+                                 "treats it as the tool's own option")
         sp.set_defaults(func=fn)
     return p
 

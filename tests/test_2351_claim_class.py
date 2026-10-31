@@ -17,7 +17,9 @@ the fix, and each half has a test that REDS without it:
          wired above an ASSERTED target — for IMPL *and* NAND (a NAND attack
          lowers the target's belief: the same override, other direction).
        * ``supersede_point`` refuses a DERIVED successor replacing an ASSERTED
-         predecessor, BEFORE any mutation.
+         predecessor, BEFORE any mutation — and (the 2a OPERATOR re-point,
+         #10195) refuses a supersede whose REBUILT operator factor would be
+         derived-over-asserted, judged with the same predicate.
        * ``TortoiseEP._affected_factors`` — the BACKSTOP for edges that predate
          the guard or were bulk-written — blocks only the leg that pushes the
          computed claim's belief INTO the authored one, KEEPS the reverse leg
@@ -259,6 +261,166 @@ def test_supersede_allows_a_derived_predecessor(lane):
     new = lane.create_point("statement", "v2", claim_class="derived")["id"]
     lane.supersede_point(old, new)
     assert _props(lane, old).get("status") == "superseded"
+
+
+# ── 3b. the 2a OPERATOR re-point door (#10195) ───────────────────────────────
+#
+# ``supersede_point``'s 2a arm re-points the predecessor's OPERATOR edges
+# ``(op)-[IMPL|NAND {idx}]->(old)`` onto the successor with a raw edge MERGE +
+# delete. Operator SLOT POSITION is what ``create_operator``'s guard reads
+# (``inputs[0]`` is the factor's SOURCE slot, the rest are targets), so
+# replacing an input can move a claim across the class boundary and mint the
+# ``derived --IMPL--> asserted`` factor that door refuses. The pre-flight
+# rebuilds each affected operator's slots with old substituted by new and
+# judges them with the SAME ``direction_blocks_create`` predicate.
+
+def _operator_rows(lane, claim_id):
+    """``(op_id, rel, idx)`` for every operator edge reaching ``claim_id``."""
+    return lane._get_proj().g.query(
+        "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->"
+        "(n:Point {id:$id}) RETURN op.id, type(r), r.idx",
+        params={"id": claim_id}).result_set
+
+
+def test_supersede_repoint_refuses_a_derived_source_over_the_successor(lane):
+    """The target-slot route: the successor's CLASS flips the factor.
+
+    Legal at creation time (both endpoints computed), then the successor is
+    AUTHORED — so re-pointing makes ``src(derived) --IMPL--> new(asserted)``,
+    the exact wiring ``create_operator`` refuses. Pre-fix the supersede
+    reported success and the graph held the refused factor.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "authored v2")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    # Refused BEFORE any mutation: neither point terminalised, the edge is
+    # still at the predecessor, and nothing was created at the successor.
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", 1]]
+    assert _operator_rows(lane, new) == []
+    # The door the re-point was imitating keeps refusing the same wiring.
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_operator("IMPL", src, [new], direction="->")
+
+
+def test_supersede_repoint_refuses_a_derived_claim_in_the_source_slot(lane):
+    """The source-slot route: the predecessor itself is at ``idx 0``.
+
+    The operator was legal while the predecessor was asserted; a producer then
+    re-stamped it DERIVED (no door accepts that — ``update_point`` refuses the
+    class outright, so this is the raw producer shape). Re-pointing moves the
+    computed claim into the factor's SOURCE slot above asserted targets.
+    """
+    old = lane.create_point("statement", "v1")["id"]
+    t1 = lane.create_point("statement", "authored target 1")["id"]
+    t2 = lane.create_point("statement", "authored target 2")["id"]
+    op = lane.create_operator("IMPL", old, [t1, t2], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
+        params={"id": old})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", 0]]
+    assert _operator_rows(lane, new) == []
+
+
+def test_supersede_repoint_judges_the_leg_that_flows(lane):
+    """A one-way corroboration survives the re-point; same-class does not care.
+
+    ``asserted --NAND(->)--> derived`` flows source→target ONLY, which is the
+    CORROBORATION leg, so it is legal and a derived successor may inherit it.
+    Judging the source slot's class alone (ignoring the direction) would refuse
+    this — the inversion the predicate exists to prevent.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("NAND", src, [old], direction="->")
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert _operator_rows(lane, new) == [[op["id"], "NAND", 1]]
+    assert _operator_rows(lane, old) == []
+
+
+def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
+    """No ``idx`` on the slot edges ⇒ neither side can name the SOURCE slot.
+
+    An idx-less (legacy) operator coalesces every input to position 0 and the
+    tie breaks lexicographically, so ``input_ids[0]`` is not provably the
+    source — the same gate the EP backstop applies (``op_idx_known``). The door
+    stands down WITH the load side rather than judging a slot it cannot name,
+    because a door refusing a shape the load side keeps is its own divergence.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL|NAND]->() REMOVE r.idx",
+        params={"op": op["id"]})
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert len(_operator_rows(lane, new)) == 1
+    assert _operator_rows(lane, old) == []
+
+
+@pytest.mark.parametrize("int_slot, str_idx", [(1, "1"), (0, "0")])
+def test_supersede_repoint_stands_down_on_a_non_int_slot_idx(
+        lane, int_slot, str_idx):
+    """A slot ``idx`` stored as a STRING is an UNPROVABLE layout, not a crash.
+
+    The graph is schemaless, so any hand/foreign writer can leave
+    ``r.idx='1'`` beside an int ``idx`` on the same operator. The door sorts
+    the slot keys, and ``sorted({0: …, '1': …})`` raises ``TypeError`` — so
+    pre-fix this ENTIRELY LEGAL derived→derived supersede (nothing to do with
+    the class boundary) aborted with a traceback before any mutation, where
+    the base body simply moved the edge. Same doctrine as the ``idx is None``
+    case above: a layout that cannot prove which slot is the SOURCE is not
+    judged.
+
+    Both mixed shapes are pinned — the string in the target slot (the
+    predecessor's own, which is the edge the re-point carries) and in the
+    source slot.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # Re-stamp ONE slot's idx as a string — no door writes this shape, which is
+    # exactly why it is the raw one a foreign writer leaves behind.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = $from "
+        "SET r.idx = $to",
+        params={"op": op["id"], "from": int_slot, "to": str_idx})
+
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    # Same class on both sides: the guard has nothing to say, so the supersede
+    # must go through and carry the predecessor's slot — idx VALUE and type
+    # preserved, as 2a reads ``idx`` opaquely.
+    moved_idx = str_idx if int_slot == 1 else 1
+    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert _operator_rows(lane, new) == [[op["id"], "IMPL", moved_idx]]
+    assert _operator_rows(lane, old) == []
 
 
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
@@ -565,34 +727,225 @@ def test_ep_backstop_does_not_narrow_a_direct_edge_to_a_non_point(lane):
     )
 
 
-def test_ep_backstop_leaves_an_unprovable_source_slot_alone(lane):
-    """No idx ⇒ the source slot is NOT provable, so no class verdict (#943).
+def test_ep_backstop_judges_the_override_on_an_idx_less_operator(lane):
+    """#10364: no ``idx`` must NOT stand the OVERRIDE guard down.
 
-    ``ORDER BY coalesce(r.idx, 0), c.id`` makes every idx-less input position
-    0 and breaks the tie lexicographically on a legacy/migrated operator, so
-    ``input_ids[0]`` may be a target. Judging a class against that slot can
-    block the CORROBORATION leg and leave the override leg flowing — the exact
-    inversion of this guard. The sibling source-slot guard already refuses to
-    act when ``op_idx_known`` is false (#943 review); the class guard must do
-    the same or it acts on a guess (#2351 review P2).
+    The two guards in ``_affected_factors`` need different evidence, which is
+    why they were wrongly gated together:
+
+      * the SOURCE-SLOT guard asks *"was the idx-0 source stripped?"* — a
+        verdict that is only meaningful if idx 0 IS the source, so it must
+        stand down when ``idx`` is absent (#943 review);
+      * the OVERRIDE guard asks a **positional** question — which leg of THIS
+        factor pushes a derived claim's belief into an asserted one — and the
+        positions it judges are exactly the ``input_ids`` ``_update_factor``
+        reads (``receives = bwd if c == input_ids[0] else fwd``). Belief flow is
+        positional, so the verdict is computable with no ``idx`` at all.
+
+    Measured before the fix: the idx-less factor kept its stored ``->``
+    unchanged (``_last_skipped_factors == []``) while the identical wiring with
+    ``idx`` was dropped as ``derived_over_asserted`` — the same wiring
+    propagated or not depending only on whether the edges carry ``idx``.
+
+    The edge order is pinned by leaving ``idx`` on the target edge, so the
+    derived input is provably ``input_ids[0]``; ``op_idx_known`` is still false
+    because an operator is idx-unknown as soon as ANY input edge lacks ``idx``.
     """
-    src = lane.create_point("statement", "authored source")["id"]
-    computed = lane.create_point("statement", "computed input")["id"]
-    op = lane.create_operator("IMPL", src, [computed])  # legal: both asserted
+    src = lane.create_point("statement", "computed source")["id"]
+    tgt = lane.create_point("statement", "authored target")["id"]
+    op = lane.create_operator("IMPL", src, [tgt], direction="->")
     # The class and the missing idx are written AFTER creation — the
     # pre-guard / bulk-written / migrated shape the backstop exists for.
     lane._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
-        params={"id": computed})
+        params={"id": src})
     lane._get_proj().g.query(
-        "MATCH (o:Point {id:$oid})-[r:IMPL]->(c) REMOVE r.idx",
-        params={"oid": op["id"]})
-    factor = _factor(lane, op["id"], computed)
-    assert factor is not None, "the factor must not be dropped"
-    assert factor[5] == "bidirectional", (
-        "with no idx the source slot is unprovable, so the guard must not "
-        f"narrow the factor on a guess; got {factor[5]!r}"
+        "MATCH (o:Point {id:$oid})-[r:IMPL]->(c) "
+        "WHERE c.id=$cid REMOVE r.idx",
+        params={"oid": op["id"], "cid": src})
+    ep = TortoiseEP(lane._get_proj())
+    factors = ep._affected_factors({tgt}, skipped=ep._last_skipped_factors)
+    reasons = [sk.get("reason") for sk in ep._last_skipped_factors]
+    assert "derived_over_asserted" in reasons, (
+        "an idx-less derived->asserted factor must be dropped and reported, "
+        f"never propagated with its direction unchanged; got {reasons!r}"
     )
+    assert all(f[0] != op["id"] for f in factors), (
+        "the dropped operator must not appear in the factor list"
+    )
+
+
+def test_ep_backstop_narrows_rather_than_nukes_an_idx_less_factor(lane):
+    """#10364: the idx-less verdict NARROWS the live leg, keeping corroboration.
+
+    A guard that dropped every idx-less mixed-class factor would over-block the
+    shape the write doors keep (an authored belief corroborating a computed
+    one). On a ``<->`` factor the override leg is blocked and the reverse leg
+    survives, which is exactly the behaviour the idx-full path already has.
+    """
+    src = lane.create_point("statement", "computed source")["id"]
+    tgt = lane.create_point("statement", "authored target")["id"]
+    op = lane.create_operator("IMPL", src, [tgt])  # bidirectional
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
+        params={"id": src})
+    lane._get_proj().g.query(
+        "MATCH (o:Point {id:$oid})-[r:IMPL]->(c) "
+        "WHERE c.id=$cid REMOVE r.idx",
+        params={"oid": op["id"], "cid": src})
+    factor = _factor(lane, op["id"], tgt)
+    assert factor is not None, "the corroboration leg must survive"
+    assert factor[5] == "<-", (
+        "the derived->asserted leg must be blocked and the asserted->derived "
+        f"leg kept; got {factor[5]!r} (unchanged means the guard stood down)"
+    )
+
+
+def _flowing_legs(factor) -> set[tuple[str, str]]:
+    """The endpoint pairs a factor's RESOLVED direction lets belief flow over.
+
+    ``_update_factor`` reads ``input_ids[0]`` as the source (``ep._messages``:
+    ``receives = bwd if c == input_ids[0] else fwd``), so ``fwd`` carries
+    ``input_ids[0] -> rest`` and ``bwd`` carries ``rest -> input_ids[0]``.
+
+    A class verdict has to be read in those terms, because the SAME token names
+    a DIFFERENT leg once the slot-0 endpoint changes: on an all-idx-less
+    operator which endpoint that is depends on the ``c.id`` tie-break, so
+    asserting on the token would assert on the tie-break instead of on the
+    rule.
+    """
+    input_ids = factor[2]
+    fwd, bwd = cc.direction_flows(factor[5])
+    legs: set[tuple[str, str]] = set()
+    if fwd:
+        legs |= {(input_ids[0], other) for other in input_ids[1:]}
+    if bwd:
+        legs |= {(other, input_ids[0]) for other in input_ids[1:]}
+    return legs
+
+
+@pytest.mark.parametrize("derived_sorts_first", [True, False],
+                         ids=["derived-id-first", "asserted-id-first"])
+@pytest.mark.parametrize("edges_carry_idx", [True, False],
+                         ids=["idx-present", "idx-absent"])
+def test_ep_backstop_parity_between_idx_present_and_idx_absent(
+        lane, derived_sorts_first, edges_carry_idx):
+    """#10364 indicator (2): the verdict is the SAME verdict either way.
+
+    The two tests above strip ``idx`` from ONE edge, so the surviving ``idx``
+    still pins the order (0 < 1) and ``c.id`` never decides anything. The shape
+    #10364 actually measured is the ALL-idx-less operator: every row coalesces
+    to position 0 and the tie breaks lexicographically (``ORDER BY
+    coalesce(r.idx, 0), c.id``), so WHICH endpoint lands in the source slot —
+    and therefore which leg a given direction token names — depends on the ids.
+
+    This is the parity row of the issue's verification checklist. The ids are
+    controlled so BOTH orderings occur, and the assertion is made on the LEG
+    that flows rather than on the token, because one verdict reads as ``<-`` or
+    ``->`` depending on which endpoint the tie-break put in slot 0. In every
+    one of the four shapes exactly one leg may flow, and it must be
+    asserted -> derived: the derived claim is corroborated and never pushes
+    belief INTO the authored one.
+    """
+    derived_id = ("aaa-derived-10364" if derived_sorts_first
+                  else "zzz-derived-10364")
+    asserted_id = ("zzz-asserted-10364" if derived_sorts_first
+                   else "aaa-asserted-10364")
+    lane.create_point("statement", "computed claim", id=derived_id)
+    lane.create_point("statement", "authored claim", id=asserted_id)
+    op = lane.create_operator("IMPL", derived_id, [asserted_id],
+                              direction="<->")
+    # The class is written AFTER creation: the write door refuses this wiring
+    # outright, and the backstop exists for the shapes that predate or bypass
+    # it (#2351).
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
+        params={"id": derived_id})
+    if not edges_carry_idx:
+        lane._get_proj().g.query(
+            "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->() REMOVE r.idx",
+            params={"oid": op["id"]})
+    ep = TortoiseEP(lane._get_proj())
+    factors = ep._affected_factors({derived_id, asserted_id},
+                                   skipped=ep._last_skipped_factors)
+    mine = [f for f in factors if f[0] == op["id"]]
+    assert len(mine) == 1, (
+        "the corroboration leg must keep the factor alive; "
+        f"got {mine!r} (skipped={ep._last_skipped_factors!r})")
+    if not edges_carry_idx:
+        # The point of this shape: with NO idx anywhere, slot 0 is decided by
+        # the `c.id` tie-break — pin that, so the case cannot silently stop
+        # exercising the ordering it exists for.
+        assert mine[0][2][0] == min(derived_id, asserted_id), (
+            "the all-idx-less shape is supposed to exercise the `c.id` "
+            f"tie-break; slot 0 was {mine[0][2][0]!r}")
+    assert _flowing_legs(mine[0]) == {(asserted_id, derived_id)}, (
+        "the only leg that may flow is asserted -> derived: a bidirectional "
+        "verdict means the override guard stood down, and a derived -> "
+        f"asserted leg is the hole #10364 measures; got "
+        f"{sorted(_flowing_legs(mine[0]))!r} for direction {mine[0][5]!r}")
+
+
+def test_ep_source_slot_guard_still_stands_down_on_an_idx_less_operator(lane):
+    """#10364 checklist row 3 / #943: the OTHER guard must stay gated.
+
+    The source-slot guard asks *"was the idx-0 SOURCE stripped?"* — a verdict
+    that is only meaningful when idx 0 IS provably the source, because
+    renumbering a live target into the source slot inverts directional
+    semantics. With no ``idx`` it must stand down; this change leaves it gated.
+
+    Pinning the stand-down is not decoration: this PR changed the gating of the
+    guard immediately beside it, so "make the two consistent" is the natural
+    way in which #943's inversion could be re-introduced.
+
+    Two shapes identical but for ``idx``: with ``idx`` the stripped draft source
+    is detected and the factor is dropped as ``source_stripped``; without it the
+    guard stands down and emits no such record (the factor is kept, with a live
+    target renumbered into slot 0 — the renumbering the guard could not rule
+    out).
+    """
+    def _wire(suffix: str, *, keep_idx: bool) -> tuple[str, str, str]:
+        draft_src = lane.create_point(
+            "statement", "draft source", status="draft",
+            id=f"aaa-draft-source-{suffix}")["id"]
+        t1 = lane.create_point("statement", "target one",
+                               id=f"mmm-target-{suffix}")["id"]
+        t2 = lane.create_point("statement", "target two",
+                               id=f"zzz-target-{suffix}")["id"]
+        op = lane.create_operator("IMPL", draft_src, [t1, t2],
+                                  direction="->", promote_source=False)
+        # The operator starts draft too — stand in for the #785 promote flow
+        # making the OPERATOR live while its source stays draft.
+        lane._get_proj().g.query(
+            "MATCH (o:Point {id:$id}) SET o.status='live'",
+            params={"id": op["id"]})
+        if not keep_idx:
+            lane._get_proj().g.query(
+                "MATCH (o:Point {id:$oid})-[r:IMPL|NAND]->() REMOVE r.idx",
+                params={"oid": op["id"]})
+        return op["id"], t1, t2
+
+    with_idx, t1, t2 = _wire("idx", keep_idx=True)
+    ep = TortoiseEP(lane._get_proj())
+    skipped: list[dict] = []
+    factors = ep._affected_factors({t1, t2}, skipped=skipped)
+    assert all(f[0] != with_idx for f in factors)
+    assert [s["reason"] for s in skipped if s["operator_id"] == with_idx] == [
+        "source_stripped"], "control: with idx the source slot IS provable"
+
+    no_idx, t3, t4 = _wire("noidx", keep_idx=False)
+    ep2 = TortoiseEP(lane._get_proj())
+    skipped2: list[dict] = []
+    factors2 = ep2._affected_factors({t3, t4}, skipped=skipped2)
+    assert "source_stripped" not in [
+        s["reason"] for s in skipped2 if s["operator_id"] == no_idx], (
+        "the source-slot guard fired on an idx-less operator — the #943 "
+        "inversion: position 0 is not provably the source, so it must stand "
+        "down rather than judge a slot it cannot name")
+    assert any(f[0] == no_idx for f in factors2), (
+        "standing down means the factor is KEPT (it is the judge that is "
+        "disabled, not the factor); a drop here would mean some other arm "
+        f"removed it: skipped={skipped2!r}")
 
 
 def test_ingest_partial_absorb_canonicalizes_an_absent_nand_direction(lane):
