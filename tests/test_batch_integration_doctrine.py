@@ -2558,7 +2558,6 @@ def _track_b_skip_axis_misses(
                 misses.append(("clear", f"{path} is cleared AFTER the half-2 run, so it guards nothing"))
         return misses
     # …and the GATE side is the baseline-DIFF, asserted in this fence and AFTER the run it judges.
-    carrier = written[0] if written else ""
     binds = [
         (m.group("var"), m.group("path"))
         for c in codes
@@ -2628,7 +2627,9 @@ def _track_b_skip_axis_misses(
                 "id records it",
             )
         )
-    if carrier:
+    if absent:
+        # Every half-2 skip detector must sit AFTER the half-2 run it judges, or it reads the
+        # PREVIOUS run's report — the same later-shell hazard the report clear exists for.
         after = [
             i
             for i, c in enumerate(codes)
