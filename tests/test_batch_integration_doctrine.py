@@ -1167,9 +1167,23 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
         "no exit-status predicate on `$RC`: pytest exits 0 (passed) or 1 (tests failed) on a "
         "COMPLETED run, and 2/3/4/5 — or 128+N — when it was interrupted, misconfigured or KILLED"
     )
-    assert any("$RC" in c and "-eq 0" in c and "-eq 1" in c and _halts(c) for c in status_checks), (
-        "the status predicate must accept exactly 0 and 1 and HALT on anything else: "
-        f"{status_checks}"
+    # NOT a presence-conjunction. `-eq 0` and `-eq 1` merely APPEARING somewhere let an
+    # added accepted code through: measured at the previous head,
+    #   [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || [ "$RC" -eq 137 ] || { echo bad; exit 1; }
+    # was GREEN. 137 is the token that line's own comment names (SIGKILL/OOM), so a KILLED
+    # run read as COMPLETED — and the count line does not catch it, because it reads the
+    # fixed path /tmp/batch-junit.xml, which pytest truncates only in pytest_sessionfinish
+    # and which the fence never clears: a killed run leaves the PREVIOUS report intact, so
+    # Phase 4 would diff stale failure ids. The predicate must have exactly this shape.
+    _STATUS_RC = re.compile(
+        r'^\[\s*"\$RC"\s+-eq\s+0\s*\]\s*\|\|\s*\[\s*"\$RC"\s+-eq\s+1\s*\]'
+        r'\s*\|\|\s*\{[^}]*exit\s+[1-9][^}]*\}$'
+    )
+    bad_status = [c for c in status_checks if not _STATUS_RC.fullmatch(_code(c))]
+    assert not bad_status, (
+        "the status predicate must accept EXACTLY 0 and 1 — any additional accepted code "
+        "(137=SIGKILL/OOM, 2=interrupted) certifies a KILLED run as COMPLETED: "
+        f"{bad_status}"
     )
     # The SUBJECT must be the comparison, not a message about it: pinning `$BATCH_TOTAL`
     # anywhere in the line was satisfied by the echo INSIDE the halt, so replacing the
