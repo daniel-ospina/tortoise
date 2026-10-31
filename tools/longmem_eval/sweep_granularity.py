@@ -451,8 +451,49 @@ def _print_table(results: list[dict], *, ingest_mode: str,
           f"chunk_turns (D2 #1540)")
 
 
+# The causes of ``measured=False``, as FACTS ABOUT THE RESULT ROWS rather than
+# about the code path that produced them. They are named because the operator
+# line is built from them: before the refused-census arm landed, ``measured``
+# was False for exactly two causes and BOTH implied keyword-only recall, so the
+# line could assert that story unconditionally. The third cause (#10355 review
+# P3) implies the opposite — the embedder ran and the recall is a hybrid run's
+# — so the clauses are gated on the cause that actually holds.
+UNMEASURED_EMBEDDER = "embedder_unavailable"
+UNMEASURED_ZERO_COVERAGE = "no_vectors_written"
+UNMEASURED_CENSUS = "census_refused"
+
+
+def _unmeasured_causes(results: list[dict]) -> set[str]:
+    """Which arms of :func:`_dense_leg_verified` refuted this sweep.
+
+    Read from the SAME per-cell receipts the predicate reads and mirroring its
+    arms EXACTLY, on purpose: the reason the winner line prints must not be
+    able to drift from the verdict that produced it. If the predicate gains an
+    arm, it belongs here in the same commit or the operator is told a cause
+    that is not the one that fired.
+
+    Empty is a legitimate answer for one state — a sweep with no result rows
+    at all (``_dense_leg_verified`` refuses an empty list) — and the caller
+    then prints the cause-agnostic warning alone rather than inventing a
+    cause. A MEASURED sweep also returns no causes, which is why the caller
+    must read this only under ``not measured``.
+    """
+    causes: set[str] = set()
+    for r in results:
+        if r.get("vector_strategy") != "enabled":
+            causes.add(UNMEASURED_EMBEDDER)
+        total = r.get("points_total")
+        if r.get("embedding_coverage") == 0.0 and isinstance(total, int) \
+                and total > 0:
+            causes.add(UNMEASURED_ZERO_COVERAGE)
+        if r.get("records_refused"):
+            causes.add(UNMEASURED_CENSUS)
+    return causes
+
+
 def _print_winner(winner: dict | None, *, ingest_mode: str,
-                  context_cap: int, measured: bool) -> None:
+                  context_cap: int, measured: bool,
+                  results: list[dict]) -> None:
     """Print the winner line — the ONLY artifact an operator sees.
 
     ``measured`` is a REQUIRED keyword-only argument (PEP 3102: no default
@@ -461,6 +502,14 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
     forgets would get the SELECTED vocabulary — handing a knob to the pilot
     (step 3) and the 500-Q run (step 5) on no evidence — which is exactly the
     permissive default this module exists to remove. #4821 review P2.
+
+    ``results`` is required for the same kind of reason (#10355 review P3):
+    ``measured=False`` has THREE causes now, and they call for opposite
+    sentences and opposite remedies, so the line cannot be written from the
+    flag alone. Passing the rows the verdict was computed over is what lets
+    :func:`_unmeasured_causes` name the one that actually fired instead of
+    defaulting to the keyword-only story — a default that would tell an
+    operator their embedder is missing about a run whose embedder worked.
     """
     if ingest_mode != "v2":
         print("\nDeterministic mode: the selection metric is knob-insensitive "
@@ -478,18 +527,58 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
     # vocabulary for a run that did not measure the dense leg — otherwise a
     # keyword-only sweep hands a choice to the pilot + the 500-Q run.
     if not measured:
-        print("\n⚠ DENSE LEG NOT MEASURED (--skip-preflight waiver, or no "
-              "embedder): this sweep is NOT A MEASUREMENT — the recall "
-              "values above are keyword-only and are not comparable to a "
-              "hybrid run.", file=sys.stderr)
+        causes = _unmeasured_causes(results)
+        # The headline is cause-AGNOSTIC on purpose (#10355 review P3). It
+        # used to assert "the recall values above are keyword-only and are not
+        # comparable to a hybrid run" as fact — true for the two original
+        # causes, FALSE for a refused census, where the embedder ran and the
+        # values are a hybrid run's. The clauses that are cause-specific now
+        # follow, each gated on the cause `_dense_leg_verified` actually fired.
+        print("\n⚠ DENSE LEG NOT MEASURED: this sweep is NOT A MEASUREMENT — "
+              "do not read the recall values above as one, and do not feed "
+              "them anywhere. The `dense leg:` line above carries the "
+              "reason; the causes are a --skip-preflight waiver / no "
+              "embedder, no vectors written, or a census the producer "
+              "contradicted (records_refused).", file=sys.stderr)
         print(f"UNMEASURED candidate granularity: chunk_turns = "
               f"{winner['chunk_turns']} "
               f"(evidence_recall@10 = {winner['evidence_recall@10']:.3f}, "
               f"context_tokens_mean = {winner['context_tokens_mean']:.1f})")
-        print("→ NOT selected: do NOT feed this to the pilot (step 3) or the "
-              "500-Q run (step 5). Install the pinned embedder (uv sync "
-              "--group dev --extra embeddings) and re-run without "
-              "--skip-preflight.", file=sys.stderr)
+        if causes & {UNMEASURED_EMBEDDER, UNMEASURED_ZERO_COVERAGE}:
+            print("   the dense leg wrote no vectors for at least one cell "
+                  "(no embedder, a waived pre-flight, or a vector leg that "
+                  "was never exercised), so the recall values above are "
+                  "keyword-only and are not comparable to a hybrid run.",
+                  file=sys.stderr)
+        if UNMEASURED_CENSUS in causes:
+            print("   at least one cell REFUSED a census record "
+                  "(records_refused on the `dense leg:` line): the producer "
+                  "reported a points pair that cannot be true "
+                  "(points_embedded > points_total, a bool, a negative), so "
+                  "that cell's coverage was computed over a population the "
+                  "record was removed from. The defect is in the census "
+                  "PRODUCER, so re-running cannot change this verdict.",
+                  file=sys.stderr)
+            if UNMEASURED_EMBEDDER not in causes \
+                    and UNMEASURED_ZERO_COVERAGE not in causes:
+                print("   the other two causes do NOT hold here: the "
+                      "embedder ran for every cell and its coverage is "
+                      "numeric, so these recall values ARE a hybrid run's "
+                      "— they are refused because the census contradicts "
+                      "itself, not because the leg was missing.",
+                      file=sys.stderr)
+        remedy = ("→ NOT selected: do NOT feed this to the pilot (step 3) or "
+                  "the 500-Q run (step 5).")
+        if causes & {UNMEASURED_EMBEDDER, UNMEASURED_ZERO_COVERAGE}:
+            remedy += (" Install the pinned embedder (uv sync --group dev "
+                       "--extra embeddings) and re-run without "
+                       "--skip-preflight.")
+        if UNMEASURED_CENSUS in causes:
+            remedy += (" Fix the census producer that emitted the impossible "
+                       "pair and re-run — installing the embedder, or "
+                       "re-running as it stands, reproduces this verdict "
+                       "byte for byte.")
+        print(remedy, file=sys.stderr)
         return
     print(f"\nSELECTED granularity: chunk_turns = {winner['chunk_turns']} "
           f"(evidence_recall@10 = {winner['evidence_recall@10']:.3f}, "
@@ -594,7 +683,8 @@ def main(argv: list[str] | None = None) -> int:
                  context_cap=args.context_cap,
                  max_chunks_per_session=args.max_chunks_per_session)
     _print_winner(winner, ingest_mode=ingest_mode,
-                  context_cap=args.context_cap, measured=measured)
+                  context_cap=args.context_cap, measured=measured,
+                  results=results)
 
     payload = {
         "selection_rule": ("v2: maximize evidence_recall@10 subject to "

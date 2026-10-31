@@ -5124,7 +5124,8 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # (b) ... and the artifact says so, in the operator's own vocabulary
     sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
                       "context_tokens_mean": 10.0},
-                     ingest_mode="v2", context_cap=8000, measured=False)
+                     ingest_mode="v2", context_cap=8000, measured=False,
+                     results=results)
     out = capsys.readouterr()
     assert "SELECTED granularity" not in out.out
     assert "NOT A MEASUREMENT" in out.err
@@ -5796,7 +5797,7 @@ def test_dense_leg_verified_consumes_the_write_time_witness(capsys):
     sg._print_winner({"chunk_turns": 1, "evidence_recall@10": 0.9,
                       "context_tokens_mean": 100.0},
                      ingest_mode="v2", context_cap=8000,
-                     measured=sg._dense_leg_verified(zero))
+                     measured=sg._dense_leg_verified(zero), results=zero)
     assert "SELECTED granularity" not in capsys.readouterr().out
 
     # An UNKNOWN point population is not a miss — the coverage arm must not
@@ -5804,6 +5805,81 @@ def test_dense_leg_verified_consumes_the_write_time_witness(capsys):
     assert sg._dense_leg_verified(
         [_sweep_cell(embedding_coverage=None, points_total=None,
                      points_embedded=None)]) is True
+
+
+def test_print_winner_names_the_refused_census_cause(capsys):
+    """#10355 review P3: ``measured=False`` gained a THIRD cause, and the
+    winner line still asserted the two-cause story as fact.
+
+    ``_print_winner``'s own docstring calls its output the ONLY artifact an
+    operator sees (per-cell reports are not saved). The refused-census arm
+    makes ``measured`` False for a cell whose embedder RAN —
+    ``vector_strategy == "enabled"``, coverage numeric — so the unconditional
+    "keyword-only … not comparable to a hybrid run" sentence and the "Install
+    the pinned embedder … re-run without --skip-preflight" remedy were both
+    false of that run, and the one instruction the operator was given could
+    not move the verdict.
+
+    RED on the pre-fix code: it prints ``keyword-only`` and ``Install the
+    pinned embedder`` for the refused cell below and never names the refused
+    census at all. The second half is the contrast that keeps the fix from
+    degenerating into "never say it": a cell whose vector leg wrote nothing
+    still gets both clauses."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    # The reviewer's exact shape: an impossible pair refused, embedder fine —
+    # so the census arm is the ONLY arm that fires.
+    refused = [_sweep_cell(points_total=3, points_embedded=0,
+                           records_refused=1)]
+    assert refused[0]["vector_strategy"] == "enabled"
+    assert refused[0]["embedding_coverage"] == 1.0
+    assert sg._dense_leg_verified(refused) is False
+    assert sg._unmeasured_causes(refused) == {sg.UNMEASURED_CENSUS}
+
+    capsys.readouterr()
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(refused),
+                     results=refused)
+    out = capsys.readouterr()
+    # The vocabulary the module already pins is unchanged.
+    assert "NOT A MEASUREMENT" in out.err
+    assert "UNMEASURED candidate granularity" in out.out
+    assert "SELECTED granularity" not in out.out
+    # ... the cause that ACTUALLY fired is named, with a remedy that can move
+    # the verdict, and the two that did not are not asserted about this run.
+    assert "REFUSED a census record" in out.err
+    assert "records_refused" in out.err
+    assert "Fix the census producer" in out.err
+    assert "keyword-only" not in out.err
+    assert "Install the pinned embedder" not in out.err
+
+    # Contrast: a cell whose vector leg wrote nothing keeps the keyword-only
+    # story and the install remedy — the gate must not delete them.
+    no_vectors = [_sweep_cell(embedding_coverage=0.0, points_embedded=0,
+                              records_refused=0)]
+    assert sg._dense_leg_verified(no_vectors) is False
+    assert sg._unmeasured_causes(no_vectors) == {sg.UNMEASURED_ZERO_COVERAGE}
+    capsys.readouterr()
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(no_vectors),
+                     results=no_vectors)
+    out = capsys.readouterr()
+    assert "keyword-only" in out.err
+    assert "Install the pinned embedder" in out.err
+    assert "REFUSED a census record" not in out.err
+    # The cause helper mirrors the predicate's arms, including the pair that
+    # fires together when the embedder never loaded (so the two can never
+    # disagree about what refuted a cell).
+    assert sg._unmeasured_causes(
+        [_sweep_cell(vector_strategy="unavailable", embedding_coverage=0.0,
+                     points_embedded=0, records_refused=0)]
+    ) == {sg.UNMEASURED_EMBEDDER, sg.UNMEASURED_ZERO_COVERAGE}
+    # ... and a sweep with no rows names no cause rather than inventing one.
+    assert sg._unmeasured_causes([]) == set()
 
 
 def test_sweep_granularity_v2_waived_sweep_never_exits_zero(
