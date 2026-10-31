@@ -125,6 +125,12 @@ _PINNED_MAIN_ASSERTION = re.compile(
     r'\[\s*"\$\(git\s+rev-parse\s+origin/main\)"\s*=\s*"\$PINNED"\s*\]'
 )
 
+#: Commands that may share a line with a pin create without touching the tree it
+#: checked out. Anything else must BE a re-runnable pin create (see
+#: ``_ends_at_halt``) — an allowlist, because a hard reset moves the tree without
+#: matching ``_MOVES_HEAD``.
+_SAFE_SEGMENT = re.compile(r"^(?:git\s+fetch\b|cd\s+\S+|echo\b|printf\b|true\b|:)\s*")
+
 #: Commands that move HEAD onto a ref — what Phase 1 must do before its suite run.
 _MOVES_HEAD = re.compile(r"\bgit\s+(?:switch|checkout)\b")
 
@@ -217,11 +223,24 @@ def _ends_at_halt(code: str) -> bool:
     heading promising ``origin/main`` ALONE. Three substring predicates could not
     see it; the whole command has to end at the halt.
     """
-    return (
-        re.fullmatch(
-            r".*?\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\})\s*", code
-        )
-        is not None
+    halt = re.fullmatch(
+        r"(?P<head>.*?)\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\})\s*", code
+    )
+    if halt is None:
+        return False
+    # `A ; B || exit 1` halts only when B fails: A's pin is abandoned and the fence
+    # runs the suite (or the merges) on whatever B left checked out. So the halt
+    # must terminate the LAST segment, and every earlier segment must either be a
+    # re-runnable pin create or not move HEAD at all.
+    head = [segment.strip() for segment in re.split(r";|&&|\|\||\|", halt.group("head"))]
+    # An ALLOWLIST, not "does not look like a mover": `; git reset --hard main`
+    # moves the tree without matching `_MOVES_HEAD`, and the denylist reading is
+    # the class that keeps being wrong. A segment may be the pin create itself or
+    # one of the few commands with no effect on the checked-out tree.
+    return all(
+        _re_runnable(segment) or _SAFE_SEGMENT.match(segment)
+        for segment in head
+        if segment
     )
 
 
@@ -675,6 +694,16 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     assert len(defines) == 1, (
         "the landing fence must define $PINNED exactly once, from the batch PR "
         f"body; these definitions rewrite it: {defines}"
+    )
+    assert not re.search(r";|&&|\|\|", defines[0]) and re.fullmatch(
+        r'(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?'
+        r'PINNED="\$\(gh pr view .+--json body .+\)"',
+        defines[0],
+    ), (
+        "the landing pin must BE the PR-body read, in one substitution — a "
+        "fallback (`… || git rev-parse origin/main`) or a discarded read "
+        "(`… >/dev/null; git rev-parse origin/main`) makes $PINNED the CURRENT "
+        f"main, so the assertion compares main to itself: {defines[0]}"
     )
     assert "gh pr view" in defines[0], (
         "the landing pin must be read from the batch PR body Phase 1 recorded it "
