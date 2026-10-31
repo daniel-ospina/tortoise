@@ -438,7 +438,21 @@ def _halts(code: str) -> bool:
     if match is None:
         return False
     group = match.group("grp")
-    return group is None or _GROUP_BODY.fullmatch(group[1:-1]) is not None
+    if group is not None and not _GROUP_BODY.fullmatch(group[1:-1]):
+        return False
+    # The segment immediately before the halt must not be ALWAYS-0: `subject || : ||
+    # { …; exit 1; }` is accepted by the leftmost-`||` match above, yet bash never
+    # reaches the group (verified: `false || : || { echo HALT; exit 1; }; echo
+    # continued` prints `continued`, rc=0). `_ends_at_halt` already refuses this
+    # shape, and the four sites whose only predicate is this function are the landing
+    # base assertion — the document's ONLY mechanical enforcement of tested-tree ==
+    # landed-tree — the `[ -n "$PINNED" ]` guard, the count halt and the merge-ness
+    # assert. This subsumes the `|| true` special case above rather than sitting
+    # beside it; `echo`/`printf`/`cd .`/`git fetch` are the same family.
+    head_text = _reachable_code(code)[: match.start(0)].rstrip()
+    segments = [seg.strip() for seg in re.split(r"(;|&&|\|\||\||&)", head_text)[0::2]]
+    segments = [seg for seg in segments if seg]
+    return not (segments and _SAFE_SEGMENT.match(segments[-1]))
 
 
 def _block(fence: list[str], i: int) -> str:
