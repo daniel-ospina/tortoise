@@ -1134,13 +1134,24 @@ class GhClient:
                 # ⛔ The population's OWN cut is a separate fact from the budget sentence
                 # `_spend` just recorded: the window reports `read: N, requested: M` for this
                 # population, and a reader who sees N < M must be told that N is a prefix the
-                # bound cut, not the population's size. On page 1 there is nothing read yet to
-                # describe, and the budget sentence already discloses the cut.
-                if page > 1:
-                    self.note_truncation(
-                        f"{event}/{conclusion} listing stopped after page {page - 1}: "
-                        f"API-call bound reached ({self.max_calls})"
-                    )
+                # bound cut, not the population's size.
+                #
+                # ⛔ On PAGE 1 nothing was read at all, so this population was NEVER LISTED —
+                # the same state `WalkBoundReached` must disclose and the same reason it is
+                # re-raised here. Returning `[]` instead made it indistinguishable from an
+                # EMPTY population: `build_history` then recorded `listed: true, read: 0` for
+                # it and went on to the next population, which returned `[]` in turn, so a
+                # walk that spent its whole budget before page 1 published six populations
+                # that all read as "listed, and empty" — two meanings of `listed` in one
+                # dict. The caller's handler for `BudgetExhausted` already exists and does
+                # the honest thing: mark this population and every one after it
+                # `listed: false` and say so in `listing_stop`.
+                if page == 1:
+                    raise
+                self.note_truncation(
+                    f"{event}/{conclusion} listing stopped after page {page - 1}: "
+                    f"API-call bound reached ({self.max_calls})"
+                )
                 return runs
             except ReadError as exc:
                 if page == 1:

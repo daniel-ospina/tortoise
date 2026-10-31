@@ -1623,6 +1623,52 @@ def test_a_budget_cut_while_listing_names_the_population_it_cut():
     assert "API-call bound reached (2)" in text
 
 
+def test_a_page_one_budget_cut_marks_the_population_never_listed():
+    """A population the budget cut BEFORE page 1 published as `listed: true, read: 0`.
+
+    ⛔ `list_runs`'s `except BudgetExhausted: return runs` returned an EMPTY listing, so
+    `build_history` recorded `listed: true, read: 0` for that population and went on to the
+    next one, which returned `[]` in turn: a walk that spent its entire budget before the first
+    page published six populations that each read as *listed, and empty*. That is the opposite
+    of what happened — NOTHING was listed — and it put two meanings on `listed` in one dict.
+
+    `WalkBoundReached` is re-raised out of `list_runs` for exactly this reason (a page-1 failure
+    leaves the population unusable; only a page-2+ cut is a recorded truncation), and the
+    API-call bound is the same cut on a different counter, so it takes the same path: every
+    population the bound reached is `listed: false`, `listing_stop` names the population it
+    stopped at, every row is UNKNOWN and none is NEVER.
+    """
+    client = catch.GhClient("o/r", max_calls=1)
+
+    def _gh(args, binary=False):
+        if "actions/runs" not in args[1]:  # the retention read: not this test's surface
+            raise catch.ReadError("retention not read in this test")
+        client._spend(1)  # exactly what the real `_gh` does at the top of every attempt
+        return json.dumps({"total_count": 0, "workflow_runs": []})
+
+    client._gh = _gh  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, client)
+
+    populations = report["window"]["populations"]
+    assert len(populations) == 6, "every population must be accounted for, read or not"
+    # The first population WAS listed (an empty page is a listing, not a cut); everything the
+    # bound reached after it was never listed. Pre-fix ALL SIX read `listed: true, read: 0`.
+    assert populations["pull_request/failure"]["listed"] is True
+    reached = [k for k in populations if k != "pull_request/failure"]
+    assert all(populations[k]["listed"] is False for k in reached), populations
+    assert all(populations[k]["read"] == 0 for k in reached)
+    assert all(populations[k]["hit_bound"] is False for k in reached)
+
+    truncation = report["window"]["truncation"] or ""
+    assert "listing stopped at push-main/failure" in truncation, truncation
+    assert "API-call bound reached (1)" in truncation, truncation
+    assert "NEVER listed" in truncation, truncation
+
+    # And the consequence: nothing was attested, so no row may read a clean bill.
+    assert report["coverage"]["status_" + catch.NEVER] == 0
+    assert any(row["status"] == catch.UNKNOWN for row in report["files"])
+
+
 def test_a_budget_cut_in_the_detail_loop_keeps_the_listing_cut_in_the_window():
     """The composition travels: `window["truncation"]` is what `render_summary` prints."""
 
