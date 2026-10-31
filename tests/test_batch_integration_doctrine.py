@@ -97,7 +97,7 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **70 such mutants
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **81 such mutants
 measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
@@ -114,6 +114,7 @@ that have nothing to do with the doctrine. Name a lane:
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -149,6 +150,58 @@ _PINNED_MAIN_ASSERTION = re.compile(
 #: fence, and worktrees share an object DB, so the pin then succeeds in another repo.
 _SAFE_SEGMENT = re.compile(
     r"^(?:git\s+fetch\b|cd\s+(?:\.|-)(?=\s|$)|echo\b|printf\b|true\b|:)\s*"
+)
+
+#: The one definition prefix set — every declarator bash accepts. Used for the
+#: baseline pin AND the landing pin, so `readonly PINNED=…` cannot slip past one of
+#: them.
+_PIN_DEF = re.compile(
+    r"^(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?PINNED="
+)
+
+#: The argv a suite run may carry. `pytest tests/ --co` exits 0 having collected
+#: nothing and `--lf` exits 0 having run one test, so an UNPINNED argv certifies a
+#: green on a tree no run has seen — the document's one non-negotiable rule.
+_SUITE_TARGETS = {"tests", "tests/", "./tests/", "tests/test_ingest_safety.py"}
+_SUITE_TAIL = {">", "2>&1", "&"}
+
+
+def _suite_argv_ok(cmd: str) -> bool:
+    """Is this suite command `uv run pytest <target> [-q] [-m FILTER] [--junitxml=…]`?"""
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return False
+    for i, token in enumerate(tokens):
+        if token in _SUITE_TAIL:
+            tokens = tokens[:i]
+            break
+    if tokens[:3] != ["uv", "run", "pytest"]:
+        return False
+    target = None
+    rest = tokens[3:]
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if token == "-q":
+            i += 1
+        elif token == "-m" and i + 1 < len(rest):
+            i += 2
+        elif token.startswith("--junitxml=") and token != "--junitxml=":
+            i += 1
+        elif token in _SUITE_TARGETS and target is None:
+            target = token
+            i += 1
+        else:
+            return False
+    return target is not None
+
+
+#: The only honest shape of the gate's poll line. Without this, `true && echo DONE`
+#: reports a half-written log as a finished run.
+_POLL = re.compile(
+    r'kill\s+-0\s+"\$\(cat\s+/tmp/[\w.-]+\)"\s+2>/dev/null\s+&&\s+echo\s+RUNNING'
+    r"\s+\|\|\s+echo\s+.+"
 )
 
 #: The dirty-tree subject: the command whose failure must reach the halt.
@@ -435,6 +488,23 @@ def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
     the other, never a bare run and never a silently partial one.
     """
     full_suite = [cmd for cmd in _fenced_commands() if _FULL_SUITE.search(cmd)]
+    # The ARGV, not just the path and the filter: an appended `--co`, `--lf`, `-k`,
+    # `--ignore=`, `--deselect`, `-x` or `--maxfail=1` exits 0 on a tree no run has
+    # seen, so `BATCH-GREEN` would certify a gate that never ran.
+    unpinned_argv = [cmd for cmd in full_suite if not _suite_argv_ok(cmd)]
+    assert not unpinned_argv, (
+        "a suite command carries arguments outside the documented argv — "
+        "`uv run pytest <target> [-q] [-m FILTER] [--junitxml=…]`: a selector such "
+        f"as --co/--lf/-k/--ignore/--deselect runs nothing and still exits 0: "
+        f"{unpinned_argv}"
+    )
+    polls = [cmd for cmd in _fenced_commands() if "kill -0" in cmd]
+    assert polls, "the doctrine no longer documents a polled run — re-point this guard"
+    bad_polls = [cmd for cmd in polls if not _POLL.fullmatch(_code(cmd))]
+    assert not bad_polls, (
+        "the poll line must BE `kill -0 \"$(cat /tmp/<run>.pid)\" 2>/dev/null && echo "
+        f"RUNNING || echo ...`; anything else reads a half-written log as done: {bad_polls}"
+    )
     assert full_suite, "the doctrine no longer documents a full-suite run — re-point this guard"
 
     bare = [cmd for cmd in full_suite if "-m" not in cmd]
@@ -635,7 +705,9 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
         if re.fullmatch(r"git\s+fetch\s+origin(?:\s+main)?", _code(c))
     ]
     pins = [
-        i for i, c in enumerate(baseline) if re.match(r"^(?:export\s+)?PINNED=", _code(c))
+        i
+        for i, c in enumerate(baseline)
+        if _PIN_DEF.match(re.split(r";|&&|\|\|", _code(c))[0].strip())
     ]
     # ...and the SOURCE of the pin, not just its name: `git rev-parse HEAD` is one
     # argument away and makes `$PINNED` the LANE's tip, so the baseline measures the
@@ -800,14 +872,11 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     # (git rev-parse origin/main)"` is one line with two assignments, and the
     # second one makes the assertion compare `main` to itself. The prefix set is
     # every declarator bash accepts, since each one misses a narrower anchor.
-    pin_def = re.compile(
-        r"^(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?PINNED="
-    )
     defines = [
         segment.strip()
         for cmd in landing[0]
         for segment in re.split(r";|&&|\|\|", _code(cmd))
-        if pin_def.match(segment.strip())
+        if _PIN_DEF.match(segment.strip())
     ]
     # EXACTLY ONE definition, and it must READ THE PR BODY: `any()` let a second
     # definition rewrite the pin — appending `PINNED="$(git rev-parse origin/main)"`
