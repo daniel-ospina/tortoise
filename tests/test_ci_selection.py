@@ -6334,6 +6334,91 @@ def test_the_paren_guard_is_not_vacuous():
     assert _durations_rows_with_unbalanced_parens(legitimate) == []
 
 
+# ── the re-derivable CASE COUNT a row states (#10356 review P3-1) ─────────────
+# A durations row may state its file's case count as a MEASUREMENT, naming the
+# instrument: `# #5086: 35 cases (`grep -c '^def test_'` -> 35; pytest collects 35 …)`.
+# That is the one claim in this map a reader is told to re-derive rather than trust
+# (the row's own ⛔ ENTRY RULE), and the one that goes stale silently: a PR ADDS a
+# control to a file it also weighs, and the note keeps the count it had before.
+# Measured at the #10356 head: the `test_substrate_map.py` row stated 34 while the
+# file (and `pytest --collect-only`) said 35 — the tenth staleness in that one note.
+# ⛔ Only rows that CITE the instrument are judged. Every other count here is
+# provenance for a WEIGHT ("the module held **30** at the #9352 head, **31** after
+# #9358") — history that must NOT be re-derived, and a guard that read those would
+# red on correct notes.
+_CASE_COUNT_CLAIM_RE = re.compile(
+    r"`grep -c '\^def test_'`\s*(?:->|\u2192)\s*(?P<n>\d+)")
+
+
+def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
+    """`(key, stated, actual)` for rows whose cited `grep -c` count is wrong.
+
+    `actual` is the file's `^def test_` count — the SAME instrument the row names,
+    so a file that collects a different number through `parametrize` (none here; the
+    two rows that cite it both say so explicitly) is not silently re-based. `None`
+    means the row weighs a file that is not there, which a citation may not do.
+    """
+    out = []
+    for key, note in _durations_row_comments(text):
+        m = _CASE_COUNT_CLAIM_RE.search(note)
+        if m is None:
+            continue
+        stated = int(m.group("n"))
+        path = tests_dir / key
+        if not path.exists():
+            out.append((key, stated, None))
+            continue
+        actual = len(re.findall(
+            r"^def test_", path.read_text(encoding="utf-8"), re.M))
+        if actual != stated:
+            out.append((key, stated, actual))
+    return out
+
+
+def test_no_durations_row_states_a_stale_case_count():
+    """#10356 review P3-1: a cited `grep -c` count must match the file it weighs."""
+    offenders = _durations_rows_with_a_stale_case_count(
+        cs.MANIFEST.read_text(encoding="utf-8"), cs.TESTS_DIR)
+    assert offenders == [], (
+        "a durations row states its file's case count with the instrument the map's "
+        "ENTRY RULE tells the reader to re-derive with (`grep -c '^def test_'`) and "
+        f"the file disagrees — (key, stated, actual): {offenders}. Re-derive the "
+        "count AND extend the row's staleness chain with the cycle that moved it.")
+
+
+def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
+    """The guard above must bite on a stale citation and stay quiet on history."""
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    stale = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 3 cases (`grep -c '^def test_'` -> 3; pytest "
+        "collects 3).\n"
+        "surfaces: []\n")
+    fresh = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` \u2192 2; pytest "
+        "collects 2).\n"
+        "surfaces: []\n")
+    historical = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #9352: the module held 7 at the #9352 head and 9 after "
+        "the follow-up; no instrument is cited, so this is provenance for the WEIGHT, "
+        "not a current claim.\n"
+        "  test_other.py: 1.0  # 11 cases, re-derived by hand.\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(stale, tmp_path) == [
+        ("test_two.py", 3, 2)]
+    assert _durations_rows_with_a_stale_case_count(fresh, tmp_path) == []
+    assert _durations_rows_with_a_stale_case_count(historical, tmp_path) == []
+    gone = (
+        "durations:\n"
+        "  test_gone.py: 1.0  # (`grep -c '^def test_'` -> 4).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(gone, tmp_path) == [
+        ("test_gone.py", 4, None)]
+
+
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
 
