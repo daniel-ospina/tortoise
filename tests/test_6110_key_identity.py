@@ -853,6 +853,77 @@ class TestPhase1GuardSeesTheContentIdentity:
             "over-reject (a wrong 'mints with status retracted' refusal on a "
             "bundle the writer completes)")
 
+    def test_the_review_p1_reproducers_are_not_bundle_order_terminal_mints(
+            self, sdk):
+        """The two bundles a round-9 review named as a fail-open, MEASURED as
+        bundles the writer completes — pinned at the INGEST level so the
+        question is settled on the caller's own surface, not on ``create_point``.
+
+        The finding's model was that ``create_point`` receives the item's
+        ``props`` VALUE as ``props=``, so one ``_coerce_props`` fold would
+        surface ``item["props"]["props"]`` (depth 2) and store ``retracted``.
+        It does not: ``create_point`` has no ``props`` PARAMETER — it is
+        ``**props`` — so passing ``props={...}`` puts that dict under a KEY
+        named ``props`` and the single fold surfaces ``item["props"]``'s own
+        keys. A double-wrapped spelling therefore stores NOTHING terminal, and
+        the depth-1 mint read is the writer-parity answer.
+
+        Both arms of the finding's reproducer are driven here, because the
+        claim was that the KEY arm REGRESSED against ``origin/main`` (which
+        read this record at depth 2): item 0 mints under key ``K`` with the
+        double-wrapped status, item 1 re-states key ``K``. The writer mints
+        item 0 LIVE and folds item 1 onto it by key, so Phase 1 must CERTIFY
+        this bundle — ``origin/main`` refuses it with a wrong "mints with
+        status 'retracted'".
+
+        Discriminating: on ``origin/main`` both ingests raise
+        ``BundleValidationError``.
+        """
+        # ── CONTENT arm: the sibling pin lives in
+        # ``test_double_wrapped_status_is_not_recorded_as_a_terminal_mint``;
+        # asserted again here so the pair reads as one settling of one report.
+        content_res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "P1-DW-C",
+                 "props": {"props": {"status": "retracted"}}},
+                {"ref": "p2", "kind": "statement", "content": "P1-DW-C"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert content_res["created"]["points"] == 1
+        assert content_res["deduped"]["points"] == 1
+        assert len(set(content_res["ids"]["points"])) == 1
+        # ── KEY arm: the regression the finding claimed against origin/main.
+        key_res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "P1-DW-K",
+                 "key": "P1-DW-KEY",
+                 "props": {"props": {"status": "retracted"}}},
+                {"ref": "p2", "kind": "statement", "content": "P1-DW-K2",
+                 "key": "P1-DW-KEY"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert key_res["created"]["points"] == 1
+        assert key_res["deduped"]["points"] == 1, (
+            "item 1 re-states a key item 0 MINTED LIVE, so it folds by key")
+        assert len(set(key_res["ids"]["points"])) == 1
+        # The premise, read off the graph rather than argued: nothing in either
+        # bundle was stored terminal, which is why neither refusal is owed.
+        # Two rows, not three: item 1 of the KEY arm re-states item 0's key, so
+        # it FOLDS (keeping item 0's content — the key is the identity, #6110)
+        # and mints nothing.
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN $c "
+            "RETURN n.content, n.status, n.key",
+            params={"c": ["P1-DW-C", "P1-DW-K", "P1-DW-K2"]},
+        ).result_set
+        assert sorted(r[0] for r in rows) == ["P1-DW-C", "P1-DW-K"], (
+            f"the two minted points and nothing else: {rows}")
+        assert [r[1] for r in rows] == ["live"] * 2, (
+            "the double-wrapped status is stored by NO door here — the mint "
+            f"record must therefore not call either item terminal: {rows}")
+
     def test_the_stored_kind_read_is_at_the_same_writer_depth(self, sdk):
         """The ``pointKind`` arm of the same constant (``_item_stored_point_kind``
         uses ``_POINT_ITEM_MINT_STATUS_DEPTH``): it must be read at the SAME
