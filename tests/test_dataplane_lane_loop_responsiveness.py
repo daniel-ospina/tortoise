@@ -203,6 +203,29 @@ def _measure_idle_ticks(span_s: float = CALIBRATION_SPAN_S) -> int:
 
     return asyncio.run(_tick())
 
+# ── #10115: the WINDOW itself must be sampled, not re-read ──────────────────
+# The calibration above makes a STARVED host inconclusive. It does not touch
+# the second, independent way this count can lie: the measured window is
+# last-call-wins (`_RequestScopedProbe` mutates `entered`/`exited` on every
+# call), so a call landing after the ticker stopped rewrites it to a span the
+# ticker never sampled — 0 ticks on an IDLE host, which a healthy calibration
+# (baseline ~100 → floor 10) would then FAIL. The two fixes are complementary
+# and neither subsumes the other.
+def _ticks_in_window(ticks: list[float], t_enter: float,
+                     t_exit: float) -> list[float]:
+    """The ticks the ticker actually SAMPLED inside ``[t_enter, t_exit]``.
+
+    Takes the window as VALUES and never reads ``state``. ``_RequestScopedProbe``
+    records ``entered``/``exited`` last-call-wins (deliberately: the aggregation
+    that matters, ``ran_on_loop``, is the one that must never be erased), so a
+    call landing AFTER the ticker stopped — a pool thread finishing an
+    already-submitted dream drain is the route this file names — rewrites them
+    to a window the ticker never sampled. Reading the dict at assert time then
+    counts zero ticks and reports the full-inline RED shape on an idle machine
+    with nothing blocking the loop (#10115). The window is therefore captured
+    while the ticker is still running and passed here as a value.
+    """
+    return [t for t in ticks if t_enter < t < t_exit]
 
 _INTERNAL_KEY = "loop-responsiveness-internal-key"
 _SEEDED_SESSION = "dataplane-loop-3718-session"
@@ -545,7 +568,11 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
 
     * ``ticks_in_stall >= MIN_TICKS_IN_STALL`` — the loop kept scheduling while
       the attach was blocked (inline yields 0: the ticker's next wake-up cannot
-      run until the freeze releases).
+      run until the freeze releases). The window this counts over is
+      SNAPSHOTTED while the ticker runs, never read from the mutable probe
+      dict at assert time — a late off-loop call would otherwise manufacture
+      the inline RED shape on an idle machine (#10115,
+      ``test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict``).
     * ``/health`` answered INSIDE the blocking window — the user-visible
       consequence: a concurrent client is served DURING the graph call, not
       queued behind it. /health is pure in-memory (#2850), so a delay in it can
@@ -583,25 +610,40 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
             assert "entered" in state, (
                 "the request's graph call was never reached — this run proves "
                 "nothing")
+            # SNAPSHOT, while the ticker is still running (#10115): the probe's
+            # `entered`/`exited` are last-call-wins, so reading them AFTER the
+            # ticker stops lets a late off-loop call rewrite the window to one
+            # the ticker never sampled — a manufactured 0-tick RED. Captured
+            # here as VALUES, before `stop["done"]`.
+            t_enter = state["entered"]
             # Sampled BEFORE the probe: the assertion below rests on /health
             # being answered while the read is STILL in flight.
             read_in_flight = not read.done()
             health = await ac.get("/health")
             health_done = time.perf_counter()
             response = await read
+            # The last call the REQUEST made has returned, so its exit is
+            # inside the sampled region; a call landing after this line cannot
+            # reach the snapshot.
+            t_exit = max(state.get("exited", t_enter), t_enter)
             state["active"] = False
             stop["done"] = True
             await tick
-        return ticks, health, health_done, response, read_in_flight
+        return (ticks, health, health_done, response, read_in_flight,
+                t_enter, t_exit)
 
-    ticks, health, health_done, response, read_in_flight = asyncio.run(_drive())
+    (ticks, health, health_done, response, read_in_flight,
+     t_enter, t_exit) = asyncio.run(_drive())
 
     assert state.get("ran_on_loop") is False, (
         "delete_session ran its synchronous FalkorDB attach ON the event loop "
         "(#3718)")
 
-    entered, exited = state["entered"], state["exited"]
-    in_stall = [t for t in ticks if entered < t < exited]
+    # The window is the SAMPLED one (#10115), not `state["entered"]`/
+    # `state["exited"]` re-read here: the probe mutates those on every
+    # call, so a call that lands after the ticker stopped would hand this
+    # assertion a span the ticker never sampled — 0 ticks on an IDLE host.
+    in_stall = _ticks_in_window(ticks, t_enter, t_exit)
     # #5049 rule 1: the count is calibrated (see `_stall_tick_floor`) before it
     # may red — a wall-clock scheduling measurement alone is a statement about
     # the host, not about `delete_session`.
@@ -634,16 +676,92 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
         f"(#3718)")
 
     assert health.json()["status"] in {"ok", "degraded"}, health.text
-    assert health_done < exited, (
+    assert health_done < t_exit, (
         "the /health probe was NOT served while the graph call was blocked "
         "(answered %.0fms AFTER the block released) — a concurrent request "
         "queued behind the graph call instead of being served (#3718)"
-        % ((health_done - exited) * 1000))
+        % ((health_done - t_exit) * 1000))
     assert read_in_flight, (
         "the request had already returned before /health was issued, so this "
         "run proves nothing about a request served DURING the blocking window "
         "(#3718)")
     assert response.status_code == 200, response.text[:200]
+
+
+def test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict(
+        client, monkeypatch):
+    """#10115: the measured window is a SNAPSHOT, not the mutable probe dict.
+
+    The probe records ``entered``/``exited`` **last-call-wins** on purpose (the
+    aggregation that must never be erased is ``ran_on_loop``). That makes the
+    tick-count window overwritable: any call to the patched attach landing
+    AFTER the ticker stopped rewrites it to a window the ticker never sampled,
+    so ``in_stall`` is empty and the case reports the full-inline RED shape on
+    an idle machine with nothing blocking the loop. The route this file names
+    for it is the dream drain: ``_quiesce_dream_drain`` cancels the await and
+    cannot stop an already-submitted pool thread.
+
+    This reproduces that late call and pins the difference: the raw-dict window
+    collapses to zero ticks, the snapshot does not move.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    # Shorter stand-in than the 2.0 s used above: the assertion under test is
+    # "ticks were sampled", and 0.5 s / TICK_S still yields ~25 of them.
+    monkeypatch.setitem(globals(), "STALL_S", 0.5)
+    state: dict = {}
+    _RequestScopedProbe(monkeypatch, ha_mod, state, block=True)
+    state["active"] = True
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    state["active"] = False
+
+    async def _drive():
+        ticks: list[float] = []
+        stop = {"done": False}
+
+        async def _ticker():
+            while not stop["done"]:
+                ticks.append(time.perf_counter())
+                await asyncio.sleep(TICK_S)
+
+        tick = asyncio.create_task(_ticker())
+        await asyncio.sleep(TICK_S * 2)
+        attach = asyncio.create_task(asyncio.to_thread(sdk._get_proj))
+        for _ in range(2000):
+            if "entered" in state:
+                break
+            await asyncio.sleep(TICK_S / 2)
+        assert "entered" in state, (
+            "the blocked attach was never reached — this run proves nothing")
+        t_enter = state["entered"]
+        await attach
+        t_exit = max(state.get("exited", t_enter), t_enter)
+        stop["done"] = True
+        await tick
+        return ticks, t_enter, t_exit
+
+    ticks, t_enter, t_exit = asyncio.run(_drive())
+    assert state.get("ran_on_loop") is False, (
+        "the attach ran on the loop in the setup, not in a worker thread")
+    sampled = _ticks_in_window(ticks, t_enter, t_exit)
+    assert len(sampled) >= MIN_TICKS_IN_STALL, (
+        f"the SETUP is broken, not the fix: only {len(sampled)} tick(s) were "
+        f"sampled during a 0.5s blocked attach that did NOT block the loop")
+
+    # The late call: the ticker has stopped, exactly like a pool thread that
+    # outlived the request. It rewrites the probe's window.
+    sdk._get_proj()
+    assert state["entered"] > t_exit, (
+        "the late attach did NOT move the probe's window, so this case no "
+        "longer reproduces #10115 — the snapshot is now untested here")
+    assert [t for t in ticks
+            if state["entered"] < t < state["exited"]] == [], (
+        "the raw-dict window was expected to collapse to 0 tick(s); it did "
+        "not, so this case is no longer reproducing the manufactured RED")
+    assert len(_ticks_in_window(ticks, t_enter, t_exit)) == len(sampled), (
+        "a LATE call to the patched attach changed the measured verdict — the "
+        "window is being read from the mutable probe dict again, which is how "
+        "this file manufactures a 0-tick RED on an idle machine (#10115)")
 
 
 def test_public_demo_seed_is_serialized_per_org(client, monkeypatch):
