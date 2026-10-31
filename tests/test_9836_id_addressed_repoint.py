@@ -58,9 +58,11 @@ from tortoise.projection.edges import (
     DERIVABLE_STRUCTURAL_RELS,
     EPISTEMIC_LABEL_ORDER,
     ID_ADDRESSED_STRUCTURAL_RELS,
+    ID_ADDRESSED_TARGET_ID_PROPS,
     RECORD_ADDRESSABLE_EDGE_LABELS,
     STRUCTURAL_REPOINT_RELS,
     id_addressed_target,
+    resolve_structural_target,
 )
 from tortoise.sdk import SUPERSEDE_STRUCTURAL_RELS, TortoiseSDK
 
@@ -168,31 +170,75 @@ def test_the_descriptor_is_NOT_emitted_when_the_target_cannot_be_addressed(
     assert [r for r in _repoints(journal) if r.get("edge_type") == rel] == []
 
 
-def test_the_no_self_edge_guard_still_journals_nothing_for_this_family(edge_sdk):
-    """The transfer's existing guard, unchanged for the new members.
+@pytest.mark.parametrize("rel", FAMILY)
+def test_the_no_self_edge_guard_JOURNALS_a_delete_only_descriptor(edge_sdk, rel):
+    """⛔ #9836 review (P2): the guard arm must emit for THIS family too.
 
-    When the target IS the successor the leg DELETES the edge and transfers
-    nothing. For a derivable rel a `delete_only` descriptor is required (pass-2
-    re-mints the old edge from the point's snapshot); for this family nothing
-    ever re-creates it, so a descriptor here would be a permanent no-op
-    delete-leg. Live and rebuild must both hold NO edge.
+    When the target IS the successor the 2b leg DELETEs the edge and transfers
+    nothing. This file used to assert that no descriptor is emitted here, on the
+    reasoning that nothing ever re-creates an ID-ADDRESSED old-side edge, so a
+    delete-leg would be a permanent no-op.
+
+    That is true of the GRAPH route and FALSE of the RECORD route. The edge was
+    created through `create_edge`, which journals a flat `DirectEdgeCreated` at
+    `src=old` — so the record holds a row at the retired point BEFORE the
+    supersede. The record applies records in ORDER with no graph state, and the
+    only statement that removes a `relation` row at a retired point is a
+    descriptor's delete leg (`record_projection` honours `delete_only` for ANY
+    rel, `_relation_delete_statement`). With no descriptor the row survived at
+    p1 while live had deleted the edge: `live != record-rebuild`, a structural
+    edge incident to a superseded point, exactly what #9836 exists to close
+    (E2E-11.6).
+
+    Both routes must still hold NO edge afterwards — the delete-only descriptor
+    exists to remove the record's row, never to mint anything.
     """
     sdk, journal, tmp_path = edge_sdk
     ids = _world(sdk)
-    assert sdk.create_edge("wasDerivedFrom", ids["old"], ids["new"])["created"]
+    assert sdk.create_edge(rel, ids["old"], ids["new"])["created"]
     sdk.supersede_point(ids["old"], ids["new"])
 
-    assert _edges(sdk._proj, "wasDerivedFrom") == set()
-    assert [r for r in _repoints(journal)
-            if r.get("edge_type") == "wasDerivedFrom"] == []
+    assert _edges(sdk._proj, rel) == set()
+    reps = [r for r in _repoints(journal) if r.get("edge_type") == rel]
+    assert len(reps) == 1, (
+        f"{rel}: the guard arm emitted {reps} — with no delete-only descriptor "
+        "the record keeps the `DirectEdgeCreated` row at the superseded point "
+        "while live deleted the edge")
+    rep = reps[0]
+    assert rep.get("delete_only") is True, rep
+    assert rep["src"] == ids["old"]
+    assert rep["tgt"] == ids["new"]
+    # The record's delete keys `(Point, src) -> (Point, tgt)`; the label rides the
+    # descriptor the same way the MOVE arm's does, so the two shapes cannot
+    # disagree about the family's vocabulary.
+    assert rep["target_label"] == "Point"
 
     rebuilt = FalkorProjection(str(tmp_path / "rebuilt.db"))
     try:
         rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
-        assert _edges(rebuilt, "wasDerivedFrom") == set(), (
+        assert _edges(rebuilt, rel) == set(), (
             "a rebuild minted the no-self-edge phantom (E2E-11.6)")
     finally:
         rebuilt.close()
+
+
+def test_the_no_self_edge_guard_is_unchanged_for_the_DERIVABLE_family(edge_sdk):
+    """Anchor: the widen is scoped, not a blanket.
+
+    `aboutPoint` is snapshot-derivable, so its guard arm emits the delete-only
+    descriptor for the ORIGINAL reason (pass-2 re-mints the phantom at old from
+    the point's snapshot). Asserting it here means a future narrowing of the
+    emission back to one family reds on the other, not silently.
+    """
+    sdk, journal, _tmp = edge_sdk
+    ids = _world(sdk)
+    assert sdk._proj.create_about_edge(ids["old"], ids["new"], "aboutPoint")
+    sdk.supersede_point(ids["old"], ids["new"])
+    reps = [r for r in _repoints(journal)
+            if r.get("edge_type") == "aboutPoint"]
+    assert len(reps) == 1 and reps[0].get("delete_only") is True, reps
+    assert reps[0]["tgt"] == ids["new"]
+    assert reps[0]["target_label"] == "Point"
 
 
 @pytest.mark.parametrize("rel", FAMILY)
@@ -422,7 +468,178 @@ def test_id_addressed_target_picks_the_labels_own_key():
     subject = {"id": "sub-1", "name": "Alice"}
     assert id_addressed_target(["Subject"], subject) == ("Subject", "sub-1")
     assert id_addressed_target(["Point", "Event"], {"id": "x"}) == ("Point", "x")
+    # ⛔ #9836 review (P2): an Event is keyed by its OWN `eventId`, never by `id`.
+    # The meeting guard keeps `id = <candidate>` on the SUFFIXED Event too, so the
+    # `id` names two nodes while `eventId` names one.
+    guarded = {"id": "cand", "eventId": "cand-4a94ebe5"}
+    assert id_addressed_target(["Event"], guarded) == ("Event", "cand-4a94ebe5")
+    # An Event the journal never gave an `eventId` is unaddressable — SKIP, never
+    # a descriptor keyed on the property that is ambiguous.
+    assert id_addressed_target(["Event"], {"id": "cand"}) is None
     # A node the record cannot address → no descriptor at all.
     assert id_addressed_target(["Source"], {"url": "u"}) is None
     assert id_addressed_target(["Point"], {}) is None
     assert id_addressed_target([], {"id": "x"}) is None
+
+
+def test_the_identity_property_is_the_labels_CANONICAL_one():
+    """⛔ The key must be the identity BOTH routes already agree on.
+
+    `ID_ADDRESSED_TARGET_ID_PROPS` decides two things at once — the property the
+    graph's replay matches and the value the record resolves — so a row that
+    disagreed with the tree's canonical identity tables would put one descriptor
+    on two different nodes. Pinned to the two existing authorities rather than
+    restated from memory: the fold's `_CANONICAL_ENTITY_ID_PROPS` (Point/Subject/
+    Object → `id`, Event → `eventId`) and the record's own event key
+    (`NODE_TABLES['event']` keys on `event_id`, which `node_key` mirrors under
+    `chk_event_node_key_is_contract_key`, and `_ENTITY_MATCH_COLUMNS['event']`
+    resolves by `node_key`).
+    """
+    from tortoise.projection import FalkorProjection
+
+    canonical = dict(FalkorProjection._CANONICAL_ENTITY_ID_PROPS)
+    assert set(ID_ADDRESSED_TARGET_ID_PROPS) == set(RECORD_ADDRESSABLE_EDGE_LABELS)
+    for label, prop in ID_ADDRESSED_TARGET_ID_PROPS.items():
+        assert prop == canonical[label], (
+            f"{label} is addressed by {prop!r} here and by {canonical[label]!r} in "
+            "the fold's own identity table — one of the two replay routes would "
+            "resolve a different node")
+    # The record half of the same fact, for the one label where it is not `id`.
+    assert ID_ADDRESSED_TARGET_ID_PROPS["Event"] == "eventId"
+    assert rp.NODE_TABLES["event"] == ("Event", "event_id")
+    assert rp._ENTITY_MATCH_COLUMNS["event"] == ("node_key",)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 4. The `Event` target: its identity is `eventId`, and the tree can mint TWO
+#    Events that share one `id` (review finding 3)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _guarded_meeting_events(sdk, candidate: str, files) -> list[str]:
+    """Build the shape with the tree's OWN producer, not a hand-written fixture.
+
+    `entities._event_guarded_merge` is the only live writer that can give two
+    distinct Events the SAME `id`: statement (1) MERGEs `{eventId: candidate}` and
+    writes `id = candidate` into the props, and the SUFFIX branch (3) MERGEs
+    `{eventId: <candidate>-<sha8>}` while those props still carry `id =
+    candidate`. `_upsert_event(..., guard=True, guard_source_file=…)` is exactly
+    how the meeting ingest path reaches it, so driving it keeps this fixture
+    honest — a raw `MERGE` here would be this test inventing the shape it then
+    asserts about.
+
+    Returns the resolved `eventId`s, read back from the graph.
+    """
+    for sf in files:
+        sdk._proj._upsert_event(
+            {
+                "eventId": candidate,
+                "eventKind": "meeting",
+                "source_file": sf,
+                "name": f"meeting {sf}",
+                "startedAt": "2026-10-25T03:00:00Z",
+            },
+            guard=True,
+            guard_source_file=sf,
+        )
+    return sorted(
+        row[0] for row in sdk._proj.g.query(
+            "MATCH (e:Event) RETURN e.eventId").result_set)
+
+
+def test_the_guarded_meeting_shape_really_does_share_one_id(edge_sdk):
+    """The premise the old comment denied, measured — and what it broke.
+
+    The review's finding 3: the id arm's refusal was justified as "a live
+    producer cannot create that shape for these rels". It can, in this tree, and
+    the consequence was not the refusal alone — the record files an Event under
+    `node_key` (= `event_id` = `eventId`), so keying the descriptor on `id` also
+    pointed the two routes at DIFFERENT Events. This asserts the shape exists and
+    that keying on `eventId` names one node per descriptor.
+    """
+    sdk, journal, _tmp = edge_sdk
+    _world(sdk)  # materialises the projection
+    ids = _guarded_meeting_events(sdk, "evt-cand-9836",
+                                 ["/caps/a.jsonl", "/caps/b.jsonl"])
+    assert len(ids) == 2, ids
+    assert len(set(ids)) == 2
+    shared = sdk._proj.g.query(
+        "MATCH (e:Event) RETURN e.id, e.eventId").result_set
+    assert {row[0] for row in shared} == {"evt-cand-9836"}, (
+        "the guarded shape must give BOTH Events the same `id` — otherwise this "
+        f"leg is not measuring the shape it claims to ({shared})")
+    # `id` names two nodes: that is the ambiguity the old blanket match hit.
+    assert len(sdk._proj.g.query(
+        "MATCH (x:Event {id:$i}) RETURN ID(x)",
+        params={"i": "evt-cand-9836"}).result_set) == 2
+    # `eventId` names ONE per descriptor, and each resolves to its own node — the
+    # fix, measured on the graph the live writer produced.
+    internals = set()
+    for eid in ids:
+        resolved = resolve_structural_target(
+            sdk._proj.g, "Event", eid, "wasDerivedFrom", by_id=True)
+        assert resolved is not None, (
+            f"{eid}: the id-addressed arm resolved NOTHING — keyed on `id` this "
+            "is the ambiguity refusal, which drops the descriptor while live has "
+            "already moved the edge")
+        assert resolved["logical"] == eid
+        internals.add(resolved["internal"])
+    assert len(internals) == 2, internals
+
+
+def test_an_event_target_keeps_its_OWN_node_across_the_rebuild(edge_sdk):
+    """`live == journal-rebuild` when the target is an Event of that shape.
+
+    Both Events are targets of one `wasDerivedFrom` edge; the transfer is
+    expected to move BOTH edges to the successor and the journal to carry one
+    descriptor per target, keyed by that target's own `eventId`.
+
+    ⚠️ SCOPE, stated: the journal carries the two `EventRecorded` records with the
+    RESOLVED ids (which is what the meeting path emits), so the REBUILT Events
+    carry `id == eventId` — the guarded live shape (`id` fixed at the candidate)
+    is a live-only artefact of the suffix MERGE and is not reproduced by a
+    rebuild of the plain arm. The comparison below is therefore
+    `(successor, target eventId)`, which is the identity this family is about;
+    comparing the Events' `id` property would be measuring that pre-existing,
+    unrelated divergence instead.
+    """
+    sdk, journal, tmp_path = edge_sdk
+    ids = _world(sdk)
+    resolved = _guarded_meeting_events(sdk, "evt-cand-9836",
+                                      ["/caps/a.jsonl", "/caps/b.jsonl"])
+    assert len(resolved) == 2, resolved
+    for eid in resolved:
+        # The meeting ingest path journals the RESOLVED id, so the rebuild has
+        # both Events and the descriptors have something to resolve.
+        sdk._emit_event("EventRecorded", id=eid, eventId=eid,
+                        eventKind="meeting", name=f"meeting {eid}")
+        assert sdk.create_edge("wasDerivedFrom", ids["old"], eid)["created"]
+
+    def by_event(p):
+        return {(row[0], row[1]) for row in p.g.query(
+            "MATCH (s)-[r:wasDerivedFrom]->(t) RETURN s.id, t.eventId").result_set}
+
+    before = by_event(sdk._proj)
+    assert before == {(ids["old"], eid) for eid in resolved}, before
+
+    sdk.supersede_point(ids["old"], ids["new"])
+    live = by_event(sdk._proj)
+    assert live == {(ids["new"], eid) for eid in resolved}, (
+        f"live = {sorted(live)} — the transfer must move BOTH edges, one per "
+        "Event target")
+
+    reps = [r for r in _repoints(journal) if r.get("edge_type") == "wasDerivedFrom"]
+    assert sorted(r["tgt"] for r in reps) == resolved, (
+        f"the descriptors name {[r['tgt'] for r in reps]} but the targets are "
+        f"{resolved} — keyed on `id` BOTH descriptors would name the candidate and "
+        "one of the two Events would lose its edge at rebuild")
+    assert {r["target_label"] for r in reps} == {"Event"}
+
+    rebuilt = FalkorProjection(str(tmp_path / "rebuilt.db"))
+    try:
+        rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert by_event(rebuilt) == live, (
+            "the journal rebuild did not reproduce the move for EVERY target "
+            "Event — the id-addressed arm resolved fewer nodes than live moved")
+    finally:
+        rebuilt.close()

@@ -16861,6 +16861,26 @@ class FalkorProjection(
                     # malformed-isinstance guard: the event carries a literal
                     # LOGICAL tgt id (the direct successor), so it would survive
                     # the isinstance check — but recognition must be explicit.
+                    #
+                    # ⛔ #9836 REVIEW (P2): the rel gate is
+                    # `STRUCTURAL_REPOINT_RELS`, not the DERIVABLE family alone.
+                    # The producer emits this descriptor for EVERY rel that
+                    # carries a repoint descriptor (`sdk.supersede_point`'s
+                    # no-self-edge arm), and the two reason differently: for a
+                    # DERIVABLE rel it exists because pass-2 RE-CREATES the edge
+                    # at old from the point's snapshot, so the delete-leg must
+                    # clean that resurrection; for an ID-ADDRESSED rel
+                    # (`aboutAction`/`wasDerivedFrom`) nothing is resurrected, and
+                    # the descriptor exists for the RECORD leg — where it is the
+                    # only statement that removes the row the pre-supersede
+                    # `DirectEdgeCreated` left at the retired point. Narrowing the
+                    # gate to the derivable set sent that descriptor down the
+                    # `continue` below and the record kept a link incident to a
+                    # superseded point (`live != record-rebuild`, E2E-11.6).
+                    # The delete below is rel-scoped on `src`/`tgt`/`typedef`
+                    # alone, so it is family-agnostic by construction — the only
+                    # thing the widen changes is WHICH journalled descriptors are
+                    # recognised as this shape.
                     # Delete-leg keys the DIRECT successor (the descriptor's
                     # literal logical tgt), NOT _final(src): in a chain (guard
                     # fires supersede(X→Y), then Y→Z is superseded before
@@ -16877,7 +16897,7 @@ class FalkorProjection(
                     if ev.get("delete_only") is True:
                         if (not isinstance(src, str) or not isinstance(tgt, str)
                                 or not isinstance(etype, str)
-                                or etype not in DERIVABLE_STRUCTURAL_RELS):
+                                or etype not in STRUCTURAL_REPOINT_RELS):
                             logger.warning(
                                 "rebuild: malformed delete_only "
                                 "DirectEdgeRepoint event skipped "
