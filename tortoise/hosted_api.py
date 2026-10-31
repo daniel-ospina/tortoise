@@ -608,13 +608,141 @@ def _graph_name_for_namespace(namespace: str | None, *,
     return uri_graph or "tortoise"
 
 
+def _moved_default_namespace(org_id: str | None,
+                             namespace: str | None) -> str | None:
+    """The namespace an ORG-WIDE open must use when the default graph has MOVED
+    (#10180), or ``None`` for every organization whose default never moved.
+
+    ``None`` is the whole safety property: the caller then takes the HISTORICAL
+    open (``namespace=org_id`` → ``org_{org_id}``) EXACTLY as before, so this
+    change moves no existing organization's data access — including the SDK's
+    own ``namespace=`` shape, which ``_namespace`` and the fallback-snapshot
+    identity key depend on.
+
+    The decision itself is ONE function,
+    :func:`tortoise.supabase_control.moved_default_namespace`, shared with the
+    MCP lane (``mcp_auth._get_org_sdk``) and the quota counter so the three
+    cannot drift: hosted only, and only for a PER-GRAPH namespace of THIS org
+    (``org_{org_id}_{gid}`` — the shape ``insert_graph``/``_provision_graph``
+    mint, which only a promotion can put in ``organizations.graph_name``). The
+    untouched ``org_{org_id}``, the pre-#3543 ``team_{org_id}`` and the
+    registry's ``org_{name}`` (#2023) all keep the open they always had.
+    """
+    from tortoise.supabase_control import moved_default_namespace
+
+    return moved_default_namespace(org_id, namespace)
+
+
+def _default_graph_name(org: dict) -> str | None:
+    """The FULL DB graph name this credential's DEFAULT graph resolves to (#10180).
+
+    ``None`` means "resolve it the historical way" (``namespace=org_id``, the
+    org's graph 0) — never a guess. This is the I/O-FREE resolver: the
+    credential already carries ``graph_namespace`` (see below), so the request
+    path pays nothing for it.
+
+    WHY THIS EXISTS. Until #10180 nothing could MOVE the default graph, so
+    ``namespace=org_id`` (whose resolved name is ``org_{org_id}``) and
+    ``organizations.graph_name`` were the same string for every hosted org, and
+    ``_data_sdk`` deliberately opened the former. Promotion
+    (``POST /v1/graphs/{id}/promote``) moves BOTH the ``kind='default'`` row and
+    ``organizations.graph_name`` to the promoted graph's namespace — so from
+    then on the org's default storage is that graph, and an org-wide credential
+    must open it. Without this, an org-wide capture would keep writing into the
+    OLD namespace while its record rows were filed under the NEW graph's id: the
+    graph/record disagreement #10025 exists to remove, in the other direction.
+
+    BYTE-IDENTICAL BEFORE ANY PROMOTION, and that is the safety property —
+    enforced by `_moved_default_namespace`, not by a comment: the hosted lane
+    mints ``organizations.graph_name = org_{org_id}`` and
+    ``_graph_name_for_namespace(org_id)`` derives exactly that same string, so
+    for every org that has not promoted anything this returns ``None`` and the
+    caller opens the very graph it always opened (including the SDK's
+    ``namespace=`` shape, which ``_namespace`` and the fallback-snapshot key
+    depend on).
+
+    ``graph_namespace`` is carried on the resolved credential by every hosted
+    auth seam (``supabase_control.resolve_api_key`` for keys,
+    ``_session_user_org`` for a session) — the same field
+    ``_dispatch_webhooks_sync`` and the dream drain already open by, so this is
+    the third caller of an existing carrier, not a new resolution path.
+    """
+    return _moved_default_namespace(org.get("org_id"),
+                                    org.get("graph_namespace"))
+
+
+def _org_default_namespace(org_id: str) -> str | None:
+    """`_moved_default_namespace` for a lane that holds only an ``org_id``.
+
+    One primary-key read of ``organizations.graph_name`` — the column the
+    promotion writes and §3 of ``20261028000001`` pins to the default row's
+    namespace. It exists so the lanes that build their OWN SDK (the event
+    sweep, the dream drain, pack install, the seed/indexing runners) resolve the
+    default the same way the request path does instead of re-deriving
+    ``org_{org_id}`` and writing into the graph the promotion DEMOTED.
+
+    FAIL-SOFT, deliberately: any read failure (PostgREST down, schema behind)
+    logs a warning and returns ``None``, i.e. the historical open. Falling back
+    to a graph that is, for every org that has not promoted, the SAME graph
+    keeps these best-effort lanes working through a control-plane blip instead
+    of turning them into a new outage — and it can never make them worse than
+    the code this replaces, which always opened the historical graph.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+
+    if not is_supabase_enabled():
+        return None
+    try:
+        rows = get_control_plane().query(
+            "organizations", select=["graph_name"],
+            filters=[("id", "eq", org_id)])
+    except Exception as e:
+        _logger.warning(
+            "default-graph namespace read failed for %s — using the "
+            "historical namespace=org_id open: %s", org_id, e)
+        return None
+    return _moved_default_namespace(
+        org_id, rows[0].get("graph_name") if rows else None)
+
+
+def _org_sdk(org_id: str, *, namespace: str | None = None) -> TortoiseSDK:
+    """The SDK for the org's DEFAULT graph — the ONE way an org-wide lane opens it.
+
+    Every caller that used ``_make_sdk(namespace=org_id)`` to reach "the org's
+    graph" means *the org's default graph*, and after #10180 that is a pointer
+    that can MOVE. Routing them through one function is what keeps the graph a
+    promotion moved TO and the graph those lanes read and write the same one —
+    otherwise a promotion would leave the record tenant on the promoted graph
+    while the dream pass, the event sweep, the pack catalog, the quota counter
+    and the seed/indexing runners all kept filing into the graph it demoted
+    (the ``derived != measured`` class #10025 exists to remove).
+
+    ``namespace`` is an OPTIONAL shortcut for a caller that already holds the
+    value (the authenticated org dict carries ``graph_name``; a resolved
+    credential carries ``graph_namespace``): passing it skips the read and goes
+    through the same decision. Omitting it costs one primary-key read.
+
+    For every organization that has not promoted, this returns byte-for-byte
+    what ``_make_sdk(namespace=org_id)`` returns — same graph, same SDK
+    ``namespace=`` shape (see `_moved_default_namespace`).
+    """
+    moved = (_moved_default_namespace(org_id, namespace) if namespace is not None
+             else _org_default_namespace(org_id))
+    return _make_sdk(graph_name=moved) if moved else _make_sdk(namespace=org_id)
+
+
 def _data_graph_name(org: dict) -> str | None:
     """The FULL DB graph name this request's data path will open — #3365.
 
     It is the single value the ADMISSION GATE and the opener share. For a
     graph-bound key `_data_sdk` passes it straight through as ``graph_name=``;
-    for an org-wide key the name is decided by ``TortoiseSDK._get_proj`` from
-    ``namespace=org_id``, and this function mirrors that derivation — so the two
+    for an org-wide key the name is `_default_graph_name`'s answer when the
+    credential carries one (#10180 — a promoted default lives in another
+    namespace), else ``TortoiseSDK._get_proj``'s derivation from
+    ``namespace=org_id`` — and this function mirrors exactly that, so the two
     agree by construction on both branches. `_capture_session_key` keys the
     in-flight registry on the SAME value, so two credentials that route to the
     same physical graph share one bucket whatever ``graph_id`` shape they carry.
@@ -635,12 +763,17 @@ def _data_graph_name(org: dict) -> str | None:
     """
     if org.get("graph_id"):
         return org.get("graph_namespace") or None
-    # Org-wide key / session auth: `_data_sdk` opens `namespace=org_id`, whose
-    # resolved name is the SDK derivation. Deliberately NOT the dict's
-    # `graph_namespace`: that is `teams.graph_name`/`t.graph_name`, which
-    # `_data_sdk` ignores on purpose (the selfhost `org_{name}` lane diverges —
-    # #2023), so keying on it would bucket the request by a graph it never opens.
-    return _graph_name_for_namespace(org.get("org_id"))
+    # Org-wide key / session auth: the org's DEFAULT graph. #10180: that is the
+    # promoted graph's namespace when the org has promoted one (see
+    # `_default_graph_name`, which `_data_sdk` opens with — the two MUST agree,
+    # because this value is what the admission gate and the in-flight capture
+    # registry key on). Otherwise it is the historical `namespace=org_id`
+    # derivation, byte-for-byte as before.
+    # Deliberately not the raw `graph_namespace` on every lane: in the registry
+    # lane that field is `t.graph_name`/`org_{name}`, a graph `_data_sdk` never
+    # opened (#2023) — `_default_graph_name` returns None there for exactly that
+    # reason, so this cannot bucket a request by a graph it does not write.
+    return _default_graph_name(org) or _graph_name_for_namespace(org.get("org_id"))
 
 
 def _capture_session_key(org: dict, session_id: str | None) -> str | None:
@@ -1493,7 +1626,7 @@ def _sweep_events() -> None:
             if existing is not None and f"org_{org['org_id']}" not in existing:
                 continue
             try:
-                sdk = _make_sdk(namespace=org["org_id"])
+                sdk = _org_sdk(org["org_id"])
                 proj = sdk._get_proj()
                 purge_expired(proj, retention_days=days)
                 purge_overflow(proj, max_events=cap)
@@ -2935,7 +3068,11 @@ def _dispatch_webhooks_sync(org_id: str, graph_namespace: str | None = None,
     elif graph_namespace is not None:
         sdk = _make_sdk(graph_name=graph_namespace)
     else:
-        sdk = _make_sdk(namespace=org_id)
+        # Org-wide: the org's DEFAULT graph, through the ONE resolver (#10180).
+        # After a promotion this is the promoted graph, so the events dispatched
+        # here are the ones the request path actually emitted; before one it is
+        # byte-identical to `_make_sdk(namespace=org_id)`.
+        sdk = _org_sdk(org_id)
     try:
         return _webhook_delivery.dispatch_pending(sdk._get_proj())
     finally:
@@ -3380,7 +3517,7 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
             # failure there would DROP them (until a later sweep) while logging
             # a capacity signal as a graph failure.
             sdk = (_make_sdk(graph_name=gns) if gns is not None
-                   else _make_sdk(namespace=org_id))
+                   else _org_sdk(org_id))
             # #9188: this drain writes as the tenant the ENQUEUEING request
             # named (see `_DREAM_RECORD_TENANTS`) — otherwise every dream-
             # emitted record on an armed hosted lane is refused `no_tenant`.
@@ -6609,6 +6746,14 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         # column, in _ORG_BASE_SELECT) so /v1/team can tell the Graphs tab
         # that backups are OFF for this team rather than merely unrecorded.
         "backup_enabled": row.get("backup_enabled"),
+        # #10180: the org's DEFAULT graph namespace, carried on the credential so
+        # this lane resolves the same default `resolve_api_key` gives a
+        # key-auth request (`graph_namespace`) — including after the default has
+        # been PROMOTED into another namespace. `graph_name` rides
+        # `_QUOTA_SELECT` (base 0006), so this costs no extra read; None on a
+        # pre-graph_name row, which `_default_graph_name` reads as "fall back to
+        # the historical namespace=org_id open" rather than as a graph name.
+        "graph_namespace": row.get("graph_name"),
         # #2475: dashboard_key_login doubles as the UI state the dashboard
         # switch renders (website/apps/dashboard main.jsx: aria-checked /
         # data-on = org.dashboard_key_login !== false) — carry the REAL
@@ -7019,18 +7164,20 @@ def _bind_default_graph_record_tenant(sdk: TortoiseSDK,
     the index-completion relink, and the two seed runners. Their auth is either
     a detached ``asyncio`` task (the jobs keep only ``org_id``) or a plain
     ``org_id`` parameter (the runners), so NONE of them holds the credential
-    dict ``_data_sdk`` resolves a tenant from; they open
-    ``_make_sdk(namespace=org_id)`` and every record they emit was refused
-    ``no_tenant`` no matter which credential started them.
+    dict ``_data_sdk`` resolves a tenant from; they open ``_org_sdk(org_id)``
+    and every record they emit was refused ``no_tenant`` no matter which
+    credential started them.
 
-    What they DO share is the graph they write: ``namespace=org_id`` is the
-    org's DEFAULT graph, BY CONSTRUCTION — these lanes cannot be pointed at a
-    custom graph (adding that is a tenancy change, not a record fix). So the
-    tenant they need is exactly the one #10025 made nameable:
-    ``default_graph_id_for``'s active ``kind='default'`` ``public.graphs`` id.
-    Never a graph-bound key's id — that is a different graph from the one the
-    lane opens, and binding it would file the rows under a graph the write
-    never touched (the #9188 N3 hazard).
+    What they DO share is the graph they write: ``_org_sdk`` opens the org's
+    DEFAULT graph, **resolved the same way the request lane resolves it** (see
+    ``_org_sdk`` / ``moved_default_namespace`` — ``namespace=org_id`` for every
+    org that has not promoted, the promoted graph's namespace afterwards) — and
+    these lanes cannot be pointed at a custom graph (adding that is a tenancy
+    change, not a record fix). So the tenant they need is exactly the one #10025
+    made nameable: ``default_graph_id_for``'s active ``kind='default'``
+    ``public.graphs`` id. Never a graph-bound key's id — that is a different
+    graph from the one the lane opens, and binding it would file the rows under
+    a graph the write never touched (the #9188 N3 hazard).
 
     ONE chokepoint, no second write path: the id is put on a credential-shaped
     dict and handed to :func:`_bind_record_tenant`, so the answer still comes
@@ -7129,13 +7276,18 @@ def _data_sdk(org: dict) -> TortoiseSDK:
       resolved FULL graph name (custom org_{tid}_{gid} or a bound default)
       via the explicit graph-name seam — cross-graph denied at the app
       layer (ACL-OFF proof), never widened onto the org default.
-    - org-wide key / session auth (graph_id None): the DEFAULT graph via
-      the namespace path (namespace=org_id) — BYTE-IDENTICAL to today's
-      open (E2E-5 regression gate: existing org-key flows unchanged).
-      graph_namespace (t.graph_name) is NOT used here — the hosted lane
-      stores graph_name == org_{org_id}, but the selfhost legacy lane
-      (sdk.org_create org_{name}, #2023) diverges and flipping would
-      silently move those orgs' data access.
+    - org-wide key / session auth (graph_id None): the DEFAULT graph. Opened by
+      NAME only when the default has actually MOVED (``_default_graph_name`` on
+      the credential's ``graph_namespace``, #10180 — a promotion leaves the
+      default living in the promoted graph's namespace), else by the historical
+      namespace path (``namespace=org_id``). BYTE-IDENTICAL for every org that
+      has not promoted anything, and gated on the DATA rather than on the lane:
+      `_moved_default_namespace` returns None unless the namespace is a
+      per-graph namespace of this org, so the selfhost legacy lane
+      (``sdk.org_create org_{name}``, #2023), a pre-#3543 ``team_{org_id}`` row
+      and an untouched ``org_{org_id}`` all keep the open they always had — with
+      the SDK's own ``namespace=`` shape, which ``_namespace`` and the
+      fallback-snapshot identity key depend on.
 
     #9188: the SDK it returns also carries this request's RECORD tenant
     (``_bind_record_tenant``), resolved from the same dict by the one
@@ -7179,7 +7331,15 @@ def _data_sdk(org: dict) -> TortoiseSDK:
         _assert_graph_owned(org, gid, ns)
         sdk = _make_sdk(graph_name=ns)
     else:
-        sdk = _make_sdk(namespace=org_id)
+        # Org-wide key / session auth: the org's DEFAULT graph, opened BY NAME
+        # when the credential carries one (#10180 — a promoted default lives in
+        # another namespace; the fallback keeps the historical
+        # `namespace=org_id` open byte-identical). `_default_graph_name` is
+        # hosted-only and returns None in the registry lane, so self-host data
+        # access is unchanged by construction.
+        _default_ns = _default_graph_name(org)
+        sdk = (_make_sdk(graph_name=_default_ns) if _default_ns
+               else _make_sdk(namespace=org_id))
     # #9188: the record's tenant rides THIS SDK (see `_bind_record_tenant`).
     # After the bind and before the caller can write: an armed record on this
     # lane is otherwise refused `no_tenant` on every request.
@@ -7550,6 +7710,13 @@ def _key_limit_refusal(
         QuotaExceededError(message, resource="api_keys"))
 
 
+#: The resources `quota._count_resource` counts in the TENANT graph (as opposed
+#: to the control plane / the registry, where the graph pointer is irrelevant).
+#: #10180: these are the ones whose count must follow a promoted default — see
+#: `_check_org_limit`.
+_TENANT_GRAPH_RESOURCES = frozenset({"points", "sessions", "documents"})
+
+
 def _check_org_limit(org: dict, resource: str, *,
                      slot_credit: int = 0) -> None:
     """Enforce per-org limits. Raises 402 (payment required) when at capacity.
@@ -7559,7 +7726,6 @@ def _check_org_limit(org: dict, resource: str, *,
     primitive passes 1 so the admission check is evaluated post-release. Only
     the rotate path may pass a non-zero credit, and only after
     ``quota.api_key_occupies_slot`` proved the displaced row is counted.
-
     Fail-closed decision (#686)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~
     Counting errors raise HTTP 500 (QuotaCheckError) — never a silent pass.
@@ -7591,7 +7757,23 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        enforce_org_limit(org, resource, slot_credit=slot_credit)
+        # #10180: the points/sessions/documents counts are TENANT-graph counts, so
+        # the SDK they run against decides which graph the cap is measured on.
+        # Pass the org's DEFAULT-graph SDK explicitly (the `sdk=` arm
+        # `_count_resource` already documents for "REST callers that already hold
+        # one") so a promoted default is counted where the writes it admits
+        # actually land. Without it the gate counts the graph a promotion
+        # DEMOTED: a stale-low count admits an org past its real cap (the money
+        # gate failing OPEN) and a stale-high one refuses writes it is under.
+        # `org` carries `graph_name` (base-0006, `_ORG_BASE_SELECT`), so the
+        # resolver needs no extra read here. Scoped to the resources that ARE
+        # counted in the tenant graph — `api_keys`/`users`/`graphs` are counted
+        # from the control plane or the registry and must not pay for an SDK
+        # they never touch.
+        enforce_org_limit(
+            org, resource, slot_credit=slot_credit,
+            sdk=(_org_sdk(org_id, namespace=org.get("graph_name"))
+                 if resource in _TENANT_GRAPH_RESOURCES else None))
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
         # plus the resource/used/limit the gate actually compared — not the
@@ -9789,17 +9971,21 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # namespace is falsy is the one shape whose tenant is refused, because the
     # enqueue then falls back to the ORG-WIDE key (default graph) while its
     # tenant would name the custom graph. An org-wide API KEY is NOT that
-    # shape — its drain opens `_make_sdk(namespace=org_id)`, the same graph
-    # `_data_sdk` opened for this request, so #10025's `default_graph_id` names
-    # it and the carry is correct rather than a guess.
+    # shape — its drain opens `_org_sdk(org_id)`, the SAME resolution
+    # `_data_sdk` used for this request (both go through
+    # `moved_default_namespace`, so both the historical graph and a #10180
+    # promotion land on one graph), so #10025's `default_graph_id` names it and
+    # the carry is correct rather than a guess. ⚠️ That equality used to be
+    # quoted as "both open `_make_sdk(namespace=org_id)`"; it is now the shared
+    # RESOLVER that makes it true, which is why the two cannot drift apart.
     # (`_data_sdk` refuses the falsy-namespace org first with 403
     # GRAPH_NOT_FOUND, so that shape is latent rather than live.)
     _dream_ns = (org.get("graph_namespace") if org.get("graph_id") else None)
     _enqueue_dream(org["org_id"], list(sdk._dirty_roots),
                    # graph-bound key → ITS custom graph; org-wide/session →
-                   # the legacy org-keyed drain (graph_namespace is always
-                   # set by C1 even for org-wide keys — org_{id} or a
-                   # selfhost org_{name} — so gate on graph_id).
+                   # the org-keyed drain, which opens the org's DEFAULT graph
+                   # through `_org_sdk` (#10180) — i.e. the same graph THIS
+                   # request used, historical or promoted
                    graph_namespace=_dream_ns,
                    # #9188: the record's tenant for the SAME graph, resolved
                    # once from THIS request's credential. Nothing else in the
@@ -10516,7 +10702,7 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # to the burn-down tracker rather than left here alone: #3718,
     # issuecomment-6305730612 (DECISION RELAY).
     sdk = await _graph_offload(
-        lambda: _make_sdk(namespace=org["org_id"]), op="org_sdk")
+        lambda: _org_sdk(org["org_id"]), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
     # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
     # — the Overview memory digest (this count) presents the user's own
@@ -10989,7 +11175,7 @@ async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         raise HTTPException(status_code=401, detail="Authentication required")
     _reject_graph_bound_org_surface(org, "pack catalog")
     from tortoise.pack_state import get_tenant_packs
-    sdk = _make_sdk(namespace=org_id)
+    sdk = _org_sdk(org_id)
     try:
         # to_thread (contextvars-propagating, py3.9+) — never
         # run_in_executor (does NOT propagate; cpython#78195).
@@ -11094,7 +11280,7 @@ async def upload_pack_manifest(
     # #2781: the pre-check seeds the tenant's own installed manifests, exactly
     # as the install below does — a pre-check that could not see them would
     # refuse the very manifests it exists to admit.
-    sdk = _make_sdk(namespace=org_id)
+    sdk = _org_sdk(org_id)
     result = validate_manifest_for_tenant(sdk, manifest_yaml)
     if not result.ok:
         raise HTTPException(status_code=422,
@@ -12122,7 +12308,7 @@ def _seed_demo_graph(org_id: str) -> dict:
     filings; deleting the sentinel and re-seeding, or a one-shot backfill of
     `tags` from the existing `TAGGED` edges, closes it per graph.
     """
-    sdk = _make_sdk(namespace=org_id)
+    sdk = _org_sdk(org_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
 
@@ -16456,6 +16642,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # contract; the wording renders from
             # tortoise/config/capture_disclosure.json — #3517).
             "first_capture": bool(first_capture)}
+    # #10180: NAME THE GRAPH THIS CAPTURE LANDED IN. A capture must be
+    # answerable with "which graph did this land in?" — shown, never inferred
+    # (the UX requirement on the issue), and it stopped being inferable once the
+    # default graph could be PROMOTED: an org-wide key's default may now live in
+    # a graph whose namespace is not the org's historical one, and a graph-bound
+    # key names its own. Both halves are already resolved for this request, so
+    # this adds no read, no lookup and no guess.
+    #
+    # ADDITIVE: a new `graph` object. No existing receipt field is renamed or
+    # removed, so every current consumer (the SDK receipt's byte-parity fields,
+    # the dashboard's capture-status reader, `tortoise session verify`) keeps
+    # working untouched.
+    _receipt_tenant = _resolve_record_tenant(org)
+    resp["graph"] = {
+        # The `public.graphs` id the record files these rows under. None = this
+        # lane could not name a tenant (the record then REFUSES the write rather
+        # than filing under a guess) — reported as null, never invented.
+        "id": _receipt_tenant[1] if _receipt_tenant else None,
+        # The physical graph the nodes went to (`_data_graph_name` — the same
+        # value the admission gate and the opener share).
+        "namespace": _data_graph_name(org),
+    }
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
     # #5516: the write-time notice that a fact was written against a Source
@@ -22889,6 +23097,194 @@ async def _apply_graph_rename(
 
 
 
+class GraphPromote(BaseModel):
+    """#10180 — POST /v1/graphs/{graph_id}/promote body: DELIBERATELY EMPTY.
+
+    A promotion takes no options: the target is the path parameter and the move
+    is all-or-nothing. The model exists so an unknown field is a 422 rather
+    than a silently ignored one (a caller that sends ``{"kind": "default"}``
+    or ``{"force": true}`` must be told the verb has no such knob — ``force``
+    in particular would advertise an override the invariant must never have).
+    A body is optional, so ``POST …/promote`` with no body is valid.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+@app.post("/v1/graphs/{graph_id}/promote")
+async def promote_graph(graph_id: str, request: Request, org_id: str,
+                        body: GraphPromote | None = None,
+                        key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
+    """#10180 — make an EXISTING graph the organization's DEFAULT graph.
+
+    The gap this closes (measured 2026-10-27 on the issue): a team could create
+    graphs and mint a key bound to one, but nothing could MOVE the default —
+    every writer of ``kind='default'`` was a creation path, so the default a
+    team got was the default it kept for the life of the account, and a team
+    that outgrew a graph needed a hand-edited production row.
+
+    Auth mirrors the neighbouring PATCH/DELETE (``_apply_graph_rename``,
+    ``delete_graph``): a key carrying ``team:manage`` (or the legacy
+    full-access class), or an owner/admin session user. This is a MANAGEMENT
+    action on an ORG-WIDE pointer, so an ordinary data-plane or minted
+    ``deleg=0`` key never reaches it. Unknown/foreign org → 404, suspended org
+    → 403, unknown or foreign graph → 404, a graph in the TRASH → 409 naming
+    the restore verb, a non-active status → 409, the CURRENT default →
+    idempotent 200 (``already_default: true``: no graph row moves; a drifted
+    ``organizations.graph_name`` is REPAIRED and reported as
+    ``namespace_repaired``).
+
+    ATOMICITY: one call into ``public.promote_default_graph`` (migration
+    ``20261102000001``), i.e. ONE transaction that locks the organization row
+    AND the target graph row and demotes-then-promotes. There is never an
+    observable moment with two defaults or with none: the index
+    ``uq_graphs_org_default_active`` (``20261028000001``) forbids two, and the
+    function checks the "exactly one, and it is the target" post-condition
+    itself before returning — so a race the locks did not cover rolls the whole
+    move back and answers 409 ``PROMOTE_CONFLICT`` (retryable) instead of `ok`.
+
+    WHAT MOVES, AND WHAT THAT MEANS FOR A CAPTURE — the consequence, stated
+    because it is the point of the verb:
+
+    * The ``kind='default'`` marker moves to the target row, and so does the
+      org's default NAMESPACE (``organizations.graph_name``). ``graph_metadata``
+      (hence ``GET /v1/graphs`` and the per-graph backup sweep) derives the
+      default from that column, so without the second move the published
+      default would keep naming the OLD graph's namespace while ``stable_id``
+      named the new row — the graph and the record disagreeing about where a
+      capture went.
+
+    * An ORG-WIDE credential's record tenant is resolved through this row —
+      ``supabase_control.default_graph_id_for`` puts its id on the credential as
+      ``default_graph_id``, and ``record_writer.record_tenant_for`` (reached from
+      ``_bind_default_graph_record_tenant`` for the lanes that build their own
+      SDK and from ``_data_sdk`` for a request) names it. After the move, a
+      capture taken with an org-wide key files its record rows under the NEW
+      graph and writes its nodes into the NEW graph's namespace. A
+      graph-bound key is untouched: it already named its own graph, and
+      ``record_tenant_for`` reads that binding first.
+
+    * CAPTURES IN FLIGHT OR QUEUED AT THE MOMENT OF THE SWITCH are NOT
+      re-homed. Each request resolves its graph ONCE, at admission: the graph
+      name it opens (``_data_sdk``) and the record tenant it binds come from the
+      same credential dict, so an in-flight capture — and anything already
+      queued behind it, including the dream drain it enqueues, which carries
+      that tenant by value — finishes against the graph it started on. The
+      switch is visible to the NEXT request that resolves its credential, not to
+      work already admitted. Nothing is copied, moved or replayed: the old graph
+      keeps its own data and stays a normal custom graph (list it, read it with
+      a graph-bound key, back it up).
+
+    Response echoes the move (``graph_id``, ``name``, ``namespace``,
+    ``previous_default_graph_id``, ``already_default``) and restates the tenant
+    consequence in machine-readable fields so a client never has to infer it
+    from the prose above.
+    """
+    if key_ctx.get("org_id") != org_id:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    org = await _org_node(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Unknown organization")
+    _ensure_not_suspended(org)
+    # Auth: same class as rename/recording/delete (the management plane).
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing team:manage scope")
+    else:
+        membership = await _membership_org(
+            key_ctx.get("session_user_id") or "", org_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(status_code=403,
+                                detail="Requires owner or admin role in team")
+    from tortoise.supabase_control import (
+        PromoteDefaultGraphError,
+        default_graph_id_for,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        promote_default_graph as sb_promote,
+    )
+    if not is_supabase_enabled():
+        # The default graph is a `public.graphs` ROW with a stable id (#10025);
+        # the self-host registry lane has no such row to move, and inventing a
+        # node-level equivalent here would be a second, driftable answer to
+        # "which graph is the default". Name the boundary instead.
+        raise HTTPException(
+            status_code=501,
+            detail={"error_code": "PROMOTE_REQUIRES_HOSTED_CONTROL_PLANE",
+                    "message": ("promoting the default graph needs the hosted "
+                                "control plane (public.graphs); this deployment "
+                                "has no default-graph row to move")})
+    cp = get_control_plane()
+    target = graph_id
+    if graph_id == "default":
+        # The literal sentinel is accepted by the neighbouring endpoints
+        # (`_apply_graph_rename`, `_apply_graph_recording_override`,
+        # `delete_graph`), so accept it here too: promoting the current default
+        # is the idempotent case, and the RPC needs a real ID to say so.
+        target = await _cp_offload(
+            lambda: default_graph_id_for(cp, org_id), op="default_graph_id_for") \
+            or ""
+        if not target:
+            raise HTTPException(
+                status_code=404,
+                detail={"error_code": "GRAPH_NOT_FOUND",
+                        "message": "this organization has no default graph row"})
+    try:
+        # ONE call → ONE transaction. Deliberately no Python pre-check of the
+        # target's state: a read-then-write here would be a TOCTOU window, and
+        # the function already reads the row under the org lock and names every
+        # refusal. Its error text is mapped to the house statuses below.
+        result = await _cp_offload(
+            lambda: sb_promote(cp, org_id, target),
+            op="promote_default_graph")
+    except PromoteDefaultGraphError as e:
+        detail = {"error_code": e.code, "message": str(e)}
+        if e.code == "GRAPH_IN_TRASH":
+            detail["message"] = (
+                "this graph is in the trash — restore it first "
+                f"(POST /v1/graphs/trash/{target}/restore)")
+        raise HTTPException(status_code=e.status, detail=detail) from None
+    # Audit: an org-wide tenancy pointer moved, so it must be attributable
+    # (`graph_packs_update` is the neighbouring per-graph audit event).
+    await _async_audit(
+        request, org_id, "graph_promote_default",
+        resource_type="graph", resource_id=result.get("graph_id"),
+        actor_user_id=key_ctx.get("session_user_id"),
+        detail={"via": "session" if not key_ctx.get("key_id") else "key",
+                "already_default": bool(result.get("already_default")),
+                "namespace_repaired": bool(result.get("namespace_repaired")),
+                "previous_default_graph_id": result.get(
+                    "previous_default_graph_id"),
+                "namespace": result.get("namespace")})
+    return {
+        # The graph that is now the default (its real `public.graphs` id).
+        "graph_id": result.get("graph_id") or target,
+        "name": result.get("name"),
+        "namespace": result.get("namespace"),
+        "kind": "default",
+        # Idempotent success is 200 with `already_default: true`: no graph row
+        # moves. The ONE write it may make is the §-3 repair of a drifted
+        # `organizations.graph_name`, reported so a caller can tell the two
+        # apart (`namespace_repaired`).
+        "already_default": bool(result.get("already_default")),
+        "namespace_repaired": bool(result.get("namespace_repaired")),
+        "previous_default_graph_id": result.get("previous_default_graph_id"),
+        # The consequence, machine-readable: the record tenant an org-wide
+        # credential now resolves to, and the fact that in-flight work is not
+        # re-homed. Both mirror the docstring; neither is inferable from the id.
+        "record_tenant": {"org_id": org_id,
+                          "graph_id": result.get("graph_id") or target},
+        "org_wide_credentials_land_in": result.get("namespace"),
+        "in_flight_captures": (
+            "not re-homed — each request resolves its graph once at admission, "
+            "so work already admitted finishes against the graph it started on"),
+    }
+
+
 @app.delete("/v1/graphs/{graph_id}")
 async def delete_graph(graph_id: str, org_id: str,
                       key_ctx: dict = Depends(get_current_org_session)):  # noqa: B008
@@ -22988,8 +23384,22 @@ async def delete_graph(graph_id: str, org_id: str,
         key_ids = await _graph_offload(
             lambda: sdk.graph_key_ids(org_id, graph_id), op="graph_key_ids")
     if not deleted:
-        # Kind was non-default and present a moment ago — belt-and-
-        # suspenders only (no code path reaches here).
+        # #10180: reachable now — a promotion can commit between the kind read
+        # above and the tombstone, and `soft_delete_graph`'s PATCH is conditioned
+        # on `kind != 'default'` so it then matches nothing. Say which: the row is
+        # still there and it is now the default, so this is the same refusal as
+        # the guard above, not a 404 for a graph that exists.
+        if is_supabase_enabled():
+            rows = await _cp_offload(
+                lambda: cp.query(
+                    "graphs", select=["kind"],
+                    filters=[("id", "eq", graph_id),
+                             ("org_id", "eq", org_id)]),
+                op="query")
+            if rows and rows[0].get("kind") == "default":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cannot delete the default graph")
         raise HTTPException(status_code=404, detail="Unknown graph")
     # Cascade: revoke every key bound to the graph (401 on next use).
     # Best-effort per key (mirrors _revoke_graph_keys) — the tombstone is
@@ -26760,7 +27170,7 @@ async def import_org(org_id: str, request: Request,
             get_control_plane,
             is_supabase_enabled,
         )
-        sdk = _make_sdk(namespace=org_id)
+        sdk = _org_sdk(org_id)
         registry_sdk = None
         try:
             if is_supabase_enabled():
@@ -31375,7 +31785,7 @@ def _write_onboarding_state(org_id: str, state: dict) -> None:
 
 def _org_proj(org_id: str):
     """Tenant-graph projection handle for onboarding writes/reads."""
-    return _make_sdk(namespace=org_id)._get_proj()
+    return _org_sdk(org_id)._get_proj()
 
 
 def _maybe_apply_completion(org_id: str) -> bool:
@@ -31920,6 +32330,12 @@ def _open_org_graph_sdk(
     keepalive key and every downstream `sdk._namespace` consumer stay
     byte-identical to before this helper existed.
 
+    #10180: when the org's default graph has been PROMOTED its namespace is a
+    per-graph one (`org_{org_id}_{gid}`), so THAT is the default this helper
+    must open — resolved through `_org_default_namespace`, and still gated on
+    the listing (a name the probe did not observe is never opened). For every
+    org that has not promoted that call returns None and nothing changes.
+
     None means "not listed" OR "the registry probe failed" —
     ``_registry_existing_graphs`` returns None on a probe failure, and
     ``if not listed`` treats that the same as an empty listing, so the two
@@ -31938,6 +32354,14 @@ def _open_org_graph_sdk(
         listed = _registry_existing_graphs()
     if not listed:
         return None
+    moved = _org_default_namespace(org_id)
+    if moved is not None:
+        # #10180: this org's default graph was PROMOTED into its own namespace
+        # (`org_{org_id}_{gid}`), so that name — not `org_{org_id}` — is the
+        # default this helper is named for. Same listing guard as below: a name
+        # the probe did not observe is not opened (pin 4: the read path must not
+        # materialize).
+        return _make_sdk(graph_name=moved) if moved in listed else None
     if f"org_{org_id}" in listed:
         return _make_sdk(namespace=org_id)
     if f"team_{org_id}" in listed:
@@ -31950,7 +32374,9 @@ def _graph_available(org_id: str) -> bool:
     Biased opposite to the READ path: a connection failure → False (the
     write must not half-land jsonb-side without the graph leg)."""
     try:
-        _make_sdk(namespace=org_id)._get_proj().db.list_graphs()
+        # The graph the write will actually use — the DEFAULT one, which #10180
+        # may have moved (see `_org_sdk`).
+        _org_sdk(org_id)._get_proj().db.list_graphs()
         return True
     except Exception:
         return False
@@ -31997,7 +32423,7 @@ def _get_onboarding_projection(org_id: str) -> dict:
         # (fail-open) or neither name is listed: fall back to the inline
         # construction so the read proceeds and raises → 'unavailable'.
         proj = (_open_org_graph_sdk(org_id, listed=listed)
-                or _make_sdk(namespace=org_id))._get_proj()
+                or _org_sdk(org_id))._get_proj()
         node = _os.read_onboarding_node(proj, org_id)
         steps = _os.completed_steps(proj, org_id) if node is not None else []
     except Exception:
@@ -32431,7 +32857,7 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             # 4). None (probe failed / not listed) → the inline construction,
             # unchanged. Closed in the finally below either way.
             _node_sdk = (_open_org_graph_sdk(org["org_id"])
-                         or _make_sdk(namespace=org["org_id"]))
+                         or _org_sdk(org["org_id"]))
             # The WORKER owns the close: it runs in the worker's own
             # ``finally``, so the SDK is closed exactly once there whether the
             # read succeeds, raises, or the request is cancelled (the worker
@@ -32949,9 +33375,11 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                 "org_name_source": org_source if org_display else None,
                 "person_name_source": person_source}
 
-    sdk = _make_sdk(namespace=org_id)
-    # #10047: this runner writes the org's DEFAULT graph (`namespace=org_id`)
-    # and holds no credential dict, so name that graph's record tenant here —
+    sdk = _org_sdk(org_id)
+    # #10047: this runner writes the org's DEFAULT graph (`namespace=org_id`
+    # — or the namespace a #10180 promotion moved it to, which `_org_sdk` and
+    # `_bind_default_graph_record_tenant` resolve the SAME way) and holds no
+    # credential dict, so name that graph's record tenant here —
     # through the one chokepoint — or every Subject/edge it files is refused
     # `no_tenant` while the seed reports success.
     _bind_default_graph_record_tenant(sdk, org_id)
@@ -33126,7 +33554,7 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
     if person_user_id in (None, "api") or "@" in str(person_user_id):
         person_user_id = None
     include_person = person is not None
-    sdk = _make_sdk(namespace=org_id)
+    sdk = _org_sdk(org_id)
     # #10047: the starter seed writes the org's DEFAULT graph by construction —
     # bind that graph's record tenant (see _bind_default_graph_record_tenant).
     _bind_default_graph_record_tenant(sdk, org_id)
@@ -33461,7 +33889,7 @@ async def public_demo(org: dict = Depends(get_current_org_gated)):  # noqa: B008
     # `_org_restore_lock` pattern; #3718 round-2 review, empirically reproduced
     # with a two-party barrier on `_seed_demo_graph`).
     def _seed_demo_sync() -> dict:
-        sdk = _make_sdk(namespace=org["org_id"])
+        sdk = _org_sdk(org["org_id"])
         proj = sdk._get_proj()
         existing = proj.g.query(
             "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
@@ -36794,7 +37222,7 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     terminal_status: str | None = None
     terminal_error: str | None = None
     try:
-        org_sdk = _make_sdk(namespace=org_id)
+        org_sdk = _org_sdk(org_id)
         # #10047: the walk is a DETACHED task carrying only `org_id`, so it
         # cannot see the credential that started it; it opens the org's DEFAULT
         # graph, so that graph's record tenant is the answer for every Object /
@@ -37144,7 +37572,7 @@ def _relink_sessions_after_index(org_id: str) -> None:
         # the SDK is journal-less and ``sdk._emit_event`` is a no-op on
         # ``EntityLinked`` (JSONL-only, absent from ``_GRAPH_EVENT_TYPES``), so
         # the edges stay live-only — the documented unconfigured-lane bound.
-        _link_sdk = _make_sdk(namespace=org_id)
+        _link_sdk = _org_sdk(org_id)
         # #10047: the relink pass emits `EntityLinked` through THIS SDK on the
         # org's DEFAULT graph — the tenant must ride it, or the edges it
         # journals are refused `no_tenant`.
@@ -37367,7 +37795,7 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
               "blobs_skipped_oversized": 0, "repos_processed": 0,
               "repos_total": 0, "errors": [], "quota_hit": False}
     try:
-        org_sdk = _make_sdk(namespace=org_id)
+        org_sdk = _org_sdk(org_id)
         # #10047: same detached-task reason as `_run_indexing` — the docs walk
         # writes the org's DEFAULT graph and carries no credential to resolve a
         # tenant from.
