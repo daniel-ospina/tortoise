@@ -89,22 +89,27 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-tes
 would make the reproduced/not-reproduced list read as a complete partition.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **18 checks** at this head, **0 red**: **15 of 18** at
-``a17576c43``, **12 of 18** at ``f3c6c803b``, **9 of 18** at ``a8be548762``, **7 of 18** at
-``295d6d385``, **5 of 18** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **4 of 18** at
-``ed1c03b82`` and ``c50628450``, and **3 of 18** at ``a888c6980`` / ``aede4190f`` — where the
-three are exactly this round's findings (the bisect attribution, the gate run's
-completion, and the omitted ``changes`` member), so the last two heads are red on this
-round's findings and on nothing else. Each round's head is red on its own round's findings and
-on nothing that a later round introduced, so no check reds on a revision that did not
-raise it. Three checks the revision matrix alone cannot red are named rather than left
-implied: the parser-sanity check and the contract sentences (green by design — they
-guard against a re-pointed or deleted document, not against a bad command), and the
-``#2985`` extras trap, which every revision here already fixed and which is pinned by
-the ``uv sync`` mutants instead. The parser-sanity check is green on every revision by
-design: it guards against a re-pointed or deleted document, not against a bad command.
-The contract-sentences check is green from ``f3c6c803b`` on, which is when those
-sentences landed.
+revision rather than asserted — **19 checks** at this head, **0 red**: **15 of 19** at
+``a17576c43``, **12 of 19** at ``f3c6c803b``, **10 of 19** at ``a8be548762``, **8 of 19** at
+``295d6d385``, **6 of 19** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **5 of 19** at
+``ed1c03b82`` and ``c50628450``, and **4 of 19** at ``a888c6980`` / ``aede4190f`` — where three
+are exactly that round's findings (the bisect attribution, the gate run's completion, and
+the omitted ``changes`` member) and the fourth is the exit-status-persistence requirement,
+which landed AFTER those revisions. The fourth is the rule rather than an exception: a check
+added later reds on every revision older than it, so a revision's count is "its own round's
+findings plus the checks that did not exist yet". Every count above is measured at THIS head,
+not carried forward — a carried-forward count drifts silently as checks land (six of them
+were stale here, by exactly the check the status wrapper added), which is the same defect
+class as a hard-coded bare-run ERROR count, and it is why the numbers are re-measured when a
+check is added rather than inherited. Four checks the revision matrix alone cannot red are
+named rather than left implied: the parser-sanity check and the contract sentences (green by
+design — they guard against a re-pointed or deleted document, not against a bad command),
+the header-count check (green on every revision by construction: it reads THIS module's
+header, which a ``DOC`` re-point does not change), and the ``#2985`` extras trap, which every
+revision here already fixed and which is pinned by the ``uv sync`` mutants instead. The
+parser-sanity check is green on every revision by design: it guards against a re-pointed or
+deleted document, not against a bad command. The contract-sentences check is green from
+``f3c6c803b`` on, which is when those sentences landed.
 
 **A revision matrix is not the whole measure — MUTANTS are the other axis, and
 they are measured too.** A doc revision only proves a check reds on the *mistakes
@@ -154,13 +159,13 @@ text, so any ONE-LINE edit that changes a subject's INPUTS rather than its wordi
 leaves a textually perfect halt bash-dead. Measured witness: inserting
 ``BASELINE_TOTAL=0`` between the fence's own ``[ "$BASELINE_TOTAL" -gt 0 ]`` guard and
 the count halt makes the count halt dead (``bash`` prints CONTINUED) with the guard
-**0 of 18 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
+**0 of 19 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
 ``unset``, deleting the ``-gt 0`` line). No accumulation of spellings closes it; the
 closure is to EXECUTE the fences under a stubbed PATH and assert the fence STOPS,
 which is #10434. One instance of that class is still named explicitly below:
 ``git switch --detach -C <branch> "$PINNED"``, which git refuses outright (rc=128) and
 whose ``|| exit 1`` halts — a predicate-tightness miss, not a broken invariant — and
-the honest document is 0 of 18 red.
+the honest document is 0 of 19 red.
 
 Two more classes belong to that list: an append-a-mover SUFFIX on any of
 those lines — `git bisect reset <branch> && git switch main`, `git log --oneline -1
@@ -182,12 +187,18 @@ pid is not a child: measured ``bash: wait: pid N is not a child of this shell``,
 COMPLETED green run was declared ``UNPROVEN-FULL-SUITE``. The run's own shell now persists ``$?``.
 Measured by mutating the honest document back to each pre-fix form: the ``HEAD`` capture reds 2 checks
 and the ``wait`` form reds 1; a stale un-cleared status file, and a poll reading a file no one writes,
-red 1 each; the honest document is 18 of 18 green.
+red 1 each; the honest document is 19 of 19 green.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
 session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
-this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports 16 ERRORS
-that have nothing to do with the doctrine. Name a lane:
+this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports ONE
+ERROR PER CHECK, and none of them has anything to do with the doctrine — `conftest.py` declares
+that fixture `scope="session", autouse=True`, so pytest re-raises the session-fixture failure per
+item rather than once. The count is deliberately NOT stated as a number (#10400 review P3): the
+number is a function of how many checks this file has, so any literal is stale the moment a
+check lands — this sentence said `16` while the module had 18, and a bare bump to 18 re-stales
+the same way. `test_the_header_does_not_hard_code_the_bare_run_error_count` keeps this sentence
+count-agnostic. Name a lane:
 
     TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_integration_doctrine.py -q
 
@@ -798,6 +809,37 @@ def _fence_index(predicate) -> int:
         if predicate(fence):
             return i
     return -1
+
+
+#: A stated NUMBER of bare-run ERRORs. One ERROR lands per CHECK (`conftest.py`'s
+#: `_p4_uri_required` is `scope="session", autouse=True`, so pytest re-raises the failed session
+#: fixture per item), so a literal is stale the moment a check lands: the header said 16 with 18
+#: checks present (#10400 review P3), and a bare bump to 18 re-stales the same way.
+_ERROR_COUNT_CLAIM = re.compile(r"\b\d+\s+ERRORS?\b")
+
+
+def test_the_header_does_not_hard_code_the_bare_run_error_count() -> None:
+    """#10400 review P3: the header's own claim about this file must not be a NUMBER.
+
+    A URI-less run errors against every item, so the number of ERRORs is a function of how
+    many checks this file has, not a fact about the doctrine. Measured at this head: a bare
+    ``pytest tests/test_batch_integration_doctrine.py`` reports one ``ERROR at setup`` per
+    check, while the header stated a smaller literal — a claim with no mechanism behind it,
+    in a file whose whole subject is claims that must not go stale. The header states the
+    RULE now (one ERROR per check) and this check refuses any total, so the next check added
+    cannot re-stale it.
+
+    Non-vacuity, measured: restoring the pre-fix ``reports 16 ERRORS`` sentence reds this
+    check and nothing else; the honest header is green.
+    """
+    # `__doc__` inside a function is THIS function's docstring, not the module's — the module
+    # header is only reachable through the module namespace.
+    header = globals().get("__doc__") or ""
+    claim = _ERROR_COUNT_CLAIM.search(header)
+    assert claim is None, (
+        f"the module header hard-codes a bare-run ERROR count ({claim.group(0)!r}): one ERROR "
+        "lands per check, so any total re-stales on the next check added — state it per-check"
+    )
 
 
 def test_this_guard_parses_the_document() -> None:
