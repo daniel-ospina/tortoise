@@ -730,6 +730,23 @@ def _conv():
             {"role": "assistant", "content": "noted"}]
 
 
+class _EmptyCandidateModel(_FakeModel):
+    """A run whose S2 pass emits NOTHING — no entity, no event, no point.
+
+    `complete_list` therefore carries no ATTRIBUTED candidate, while `edus` is
+    still non-empty on `_conv()` — so `extract_session_v2` takes its MAIN path
+    (not the `if not edus:` early return) and reaches the identity block with
+    a ZERO numerator. That is the `unresolved` + `unresolved_total == 0` arm.
+    """
+
+    def complete(self, *, system, user, max_tokens=None):
+        self.last_finish_reason = "stop"
+        if "STORY SUMMARIZER" in system:
+            return "A narrative."
+        return ('{"entities": [], "events": [], "operators": [], "points": [], '
+                '"chain_notes": [], "link_before_create": []}')
+
+
 class TestIdentityOnTheResult:
     def test_an_unresolved_run_reports_and_warns(self):
         out = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
@@ -779,6 +796,30 @@ class TestIdentityOnTheResult:
         assert "cut part of the lookup" in messages[0], messages[0]
         assert "no candidate was left unchecked" in messages[0], messages[0]
         assert "did not run over the whole candidate set" not in messages[0]
+
+    def test_an_unresolved_lookup_with_nothing_to_check_claims_no_budget_cut(self):
+        """The OTHER zero-numerator shape — the arm the budget sentence stole.
+
+        `unresolved` with `unresolved_total == 0` is reachable on the MAIN path:
+        `edus` is non-empty, the lookup never ran (`sdk=None` degrades it), and
+        `complete_list` holds no attributed candidate. Nothing was CUT, so the
+        `partial` sentence asserted a cause that did not happen — contradicting
+        the `reason` printed in the same line — and a population ("every
+        committed candidate's own query ran") that is empty (#5095 review
+        round 4). The warning must still fire: I2 forbids a silent anything.
+        """
+        out = v2.extract_session_v2(_EmptyCandidateModel(), _conv(), session_id="s1")
+        block = out["identity"]
+        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
+        assert block["unresolved_total"] == 0, block
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert messages, out["warnings"]
+        assert "cut part of the lookup" not in messages[0], (
+            "the budget was not cut — nothing ran, so nothing was truncated "
+            f"({messages[0]!r})")
+        assert "every committed candidate's own query ran" not in messages[0], messages[0]
+        assert "did not run" in messages[0], messages[0]
+        assert "no candidate was left unchecked" in messages[0], messages[0]
 
     def test_a_resolved_run_reports_resolved_and_does_not_warn(self):
         """The flag-side of R1: the disposition must not fire on a healthy run.

@@ -1378,6 +1378,15 @@ _PIN_RELATIVE_CITES = (
     ("c79ba1cf2", "extractor_v2.py:4467", "`_collect_classify_items(embed_list)`"),
     ("c79ba1cf2", "extractor_v2.py:3967-3969", "`execute_embed`"),
     ("c79ba1cf2", "extractor_v2.py:3021+", "`classify_consolidation`"),
+    # §S2.3's two `classify_consolidation` passages. Added by #5095 review round 4,
+    # which found them re-derived to `:3967-3969` — the PIN-CORRECT cite for the
+    # D-b within-batch exact dedup (the row above), and therefore a DIFFERENT
+    # mechanism from the one these two sentences name. At `c79ba1cf2` the call
+    # they describe is `:3994`: `git show c79ba1cf2:tortoise/extractor_v2.py |
+    # sed -n '3994p'` → `decision = classify_consolidation(`. Without this row the
+    # passages could be re-derived onto the wrong symbol again and stay green,
+    # because the `:3967-3969` row above is satisfied by the D-b row at `:751`.
+    ("c79ba1cf2", "extractor_v2.py:3994", "`classify_consolidation`"),
     ("c79ba1cf2", "extractor_v2.py:1744-1778", "`_derive_queries`"),
     ("c79ba1cf2", "extractor_v2.py:2284", "`merge_embed_lists` (def"),
 )
@@ -1400,9 +1409,11 @@ def test_the_pin_relative_cites_are_not_swept_with_a_main_to_head_delta():
     `run_s2(...)` cite is deliberately NOT here — its own passage says it is
     cited *HEAD-relative*, and `tests/test_7949_capstone_measure.py` sweeps it.
 
-    Non-vacuity: on `4bbdbb710` eight of these ten rows fail (the two
-    `653980445` rows below were never touched, and are pinned so the next sweep
-    of that group is visible too).
+    Non-vacuity: on `4bbdbb710` eight of the ten rows the table then had fail
+    (the two `653980445` rows below were never touched, and are pinned so the
+    next sweep of that group is visible too). The §S2.3 row added by #5095
+    review round 4 reds on this PR's own pre-fix document, which had re-derived
+    those two passages onto `:3967-3969`.
     """
     lines = _doc_text().splitlines()
     moved = [

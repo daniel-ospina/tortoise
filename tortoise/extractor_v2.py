@@ -9528,7 +9528,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 f"did not run for {_id['unresolved_total']} of {_denominator} "
                 f"candidate(s) — their identity was not established from the "
                 f"lookup")
-        else:
+        elif _id["state"] == _failure_policy.LOOKUP_PARTIAL:
             # The other shape, and it is ordinary rather than broken: the budget
             # can cut only the trailing STORY-TOPIC queries, which follow every
             # candidate query. Saying "the lookup did not run over the candidate
@@ -9538,6 +9538,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 f"S3 identity {_id['state']}{_reason}: the query budget cut part "
                 f"of the lookup, but every committed candidate's own query ran — "
                 f"no candidate was left unchecked")
+        else:
+            # ⛔ `unresolved` with a ZERO numerator — the arm the budget sentence
+            # used to steal (#5095 review round 4). Nothing was CUT here: the
+            # lookup never ran (`sdk=None`, an embedded backend, a first-query
+            # raise), and `complete_list` carried no ATTRIBUTED candidate (empty,
+            # or only `operators` / `retractions`, which are counted but never
+            # attributed). The budget sentence therefore asserted a cause that
+            # did not happen — contradicting the `_reason` printed in the same
+            # line — and a population ("every committed candidate's own query
+            # ran") that may be empty. That is the defect class this change
+            # removes, so it must not reappear in the new operator-facing channel.
+            # Report the cause `_reason` carries and claim nothing the block's own
+            # counters do not hold.
+            result.setdefault("warnings", []).append(
+                f"S3 identity {_id['state']}{_reason}: the existing-item lookup "
+                f"did not run — no candidate was left unchecked, and no identity "
+                f"was established from it")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface
