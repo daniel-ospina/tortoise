@@ -125,22 +125,35 @@ def _code(line: str) -> str:
 def _re_runnable(code: str) -> bool:
     """Is this move command idempotent — safe on a RE-baseline / RE-build?
 
-    The flag is paired to the subcommand on purpose: ``git switch -B`` is not a
-    switch option, so accepting ``-B`` for a ``switch`` would bless a command
-    that does not run.
+    Two things are checked, and the second is the one that matters: the FLAGS
+    must be a combination git accepts, and the ARGUMENT SHAPE must put the pin
+    where git reads a start point. Flag presence alone is not enough —
+    ``git switch -C "$PINNED"`` has the create flag, exits 0, and never moves
+    HEAD (it creates a branch *named* the sha at the current HEAD), which would
+    leave the suite measuring the lane under a heading that promises
+    ``origin/main`` alone.
     """
     sub = re.search(r"\bgit\s+(switch|checkout)\b", code)
     if sub is None:
         return False
     if sub.group(1) == "switch":
-        creates = ("switch -C" in code) or ("--force-create" in code)
+        create = re.search(r"switch\s+(-C|--force-create)(=\S*|\s+\S+)", code)
     else:
-        creates = "-B " in code
-    detaches = "--detach" in code
-    # git refuses a create flag WITH --detach — "fatal: '--detach' cannot be used
-    # with '-b/-B/--orphan'" — so that pair is a command that does not run, and
-    # union-ing the flags (the previous form) blessed it.
-    return (creates or detaches) and not (creates and detaches)
+        create = re.search(r"checkout\s+(-B)(\s+\S+)", code)
+    # exact token, so `--detach=1` (rc=129, "option `detach' takes no value")
+    # is not mistaken for the flag
+    detaches = re.search(r"(?<!\S)--detach(?!\S)", code) is not None
+    if create and detaches:
+        return False  # fatal: '--detach' cannot be used with '-b/-B/--orphan'
+    if detaches:
+        return True
+    if create is None:
+        return False
+    branch = create.group(2).lstrip("=").strip().strip('"').strip("'")
+    if branch == "$PINNED":
+        # pin as the BRANCH NAME -> creates from HEAD, rc=0, HEAD never moves
+        return False
+    return "$PINNED" in code[create.end():]  # the pin must be the START POINT
 
 
 #: The test target a marker-scoped run names (``tests/test_ingest_safety.py``).
