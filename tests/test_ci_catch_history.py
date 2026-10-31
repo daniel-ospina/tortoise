@@ -40,11 +40,11 @@ properties. Each has a test here that FAILS when the property is broken:
    `test_a_tree_without_the_subtree_lane_directories_fails_closed` fails if that read fails
    open.
 8. **A wall bound that expires while LISTING stops the listing** — a measured live walk spent
-   ~350 s listing six populations before the detail loop's first check, so a bound consulted
-   only there bounded nothing, and a population that was never listed must leave its files
-   UNKNOWN rather than answering them from an empty sample.
+   ~350 s listing the sampled populations before the detail loop's first check, so a bound
+   consulted only there bounded nothing, and a population that was never listed must leave
+   its files UNKNOWN rather than answering them from an empty sample.
    `test_a_wall_bound_that_expires_while_listing_stops_and_says_so` fails if the bound is
-   checked only inside the detail loop (it then lists all six populations).
+   checked only inside the detail loop (it then lists every population).
 9. **The markdown report IS a table** — GFM refuses a table whose header and delimiter rows
    differ in cell count, and a cell carrying a newline (an UNKNOWN reason embeds `gh`'s
    stderr) ends its row early. `test_every_markdown_row_has_the_same_number_of_cells` and
@@ -101,6 +101,25 @@ properties. Each has a test here that FAILS when the property is broken:
     `test_the_offline_client_reads_an_artifact_from_the_run_that_listed_it` and
     `test_a_pr_row_is_attested_from_the_pr_runs_own_artifact_not_the_push_runs` fail if the
     id stops carrying the run.
+15. **A red is only visible if its RUN's conclusion is sampled** — a run's conclusion is an
+    AGGREGATE of its jobs, and the `actions/runs` listing filters ONE `status` per request
+    (there is no "any of these conclusions" form), so a conclusion left out of
+    `SAMPLED_RUN_CONCLUSIONS` is not a smaller sample: it is a population in which a red is
+    INVISIBLE — and a withheld red can only move a row toward the exclusive
+    `CATCH-PUSH-ONLY` / the `NEVER` clean bill of health, i.e. against #10131. `timed_out`
+    was exactly that omission (a timed-out JOB is a RED — `ci_verdict.group_state` is
+    fail-closed on completed checks — so a PR head whose leg timed out read NEVER).
+    `test_a_timed_out_run_carrying_a_red_leg_is_sampled` fails if that population is
+    dropped again.
+16. **The committed TABLE states why a label was withheld** — `to_dict()` synthesises a
+    `window` reason for every UNKNOWN row with no other unknown, and `render_table`
+    preferred those labels over `_note()`, so the deliverable printed the GENERIC sentence
+    ("no per-file PR-HEAD evidence that this FILE executed …") and dropped the one fact a
+    reader acting on the row needs: that the exclusive label was WITHHELD. `--md-out` IS
+    #10131's acceptance artifact, so a fact only the JSON carries is a fact the report does
+    not state. The last block of
+    `test_a_push_only_red_with_no_pr_run_at_all_is_not_called_only_on_main` reads the
+    RENDERED row and fails if a reasoning note stops reaching a cell.
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -696,6 +715,22 @@ def test_a_push_only_red_with_no_pr_run_at_all_is_not_called_only_on_main(tmp_pa
     )
     assert report["coverage"]["status_" + catch.UNKNOWN] > 0
 
+    # ⛔ And it must reach the COMMITTED table, not only the JSON. `to_dict()` synthesises a
+    # `window` reason for every UNKNOWN row with no other unknown, and `render_table`
+    # preferred those labels over `_note()` — so the deliverable printed the GENERIC sentence
+    # and dropped the one fact a reader acting on the row needs: that the exclusive label was
+    # WITHHELD. `--md-out` is #10131's acceptance artifact.
+    rendered = next(
+        line
+        for line in catch.render_table(report).splitlines()
+        if f"`{row['file']}`" in line
+    )
+    assert "withheld" in rendered, (
+        f"the table must state that the exclusive label was withheld, not just the gap: {rendered}"
+    )
+    # Nothing is dropped to make room for it: the measured gap counters still render.
+    assert "no per-file PR-HEAD evidence" in rendered, rendered
+
 
 def test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main(tmp_path):
     """`CATCH-PUSH-ONLY` asserts an EXCLUSIVE claim, so a PR-head gap must outrank it.
@@ -1212,6 +1247,67 @@ def test_a_red_cleared_by_a_rerun_is_visible_because_green_runs_are_read(tmp_pat
     assert "success-conclusion runs: 1 read (1 of them re-runs" in catch.render_summary(report)
 
 
+def test_a_timed_out_run_carrying_a_red_leg_is_sampled(tmp_path):
+    """A `timed_out` RUN is an aggregate: it can hold a leg that went RED on a PR head.
+
+    ⛔ `populations` enumerated `failure` / `cancelled` / `success` only, so a run whose own
+    conclusion was `timed_out` was never listed — and its red legs were therefore invisible.
+    The `actions/runs` listing filters ONE `status` per request (there is no "any of these
+    conclusions" form), so a conclusion that is not asked for is a conclusion never read.
+    A timed-out JOB is itself a RED (`ci_verdict.group_state` is fail-closed on completed
+    checks), so omitting the population does not shrink the sample — it HIDES a red.
+
+    The world is the shape that makes the omission WORST: a PR head whose leg timed out RED,
+    plus a green re-run of that leg. Pre-fix only the green run is listed, it attests the file,
+    and no red exists — so the row reads `NEVER`, "we ran it and it caught nothing", on a PR
+    head where it in fact went red. That is precisely the clean bill of health #10131 forbids.
+    """
+    family, leg = _leg_of("test_billing.py")
+    green = 1002  # a re-run of the same leg that ended green
+    root = _world(
+        tmp_path,
+        runs=[
+            # The red run's OWN conclusion is `timed_out`; its leg timed out too.
+            _run(RUN_PR, SHA, "pull_request", pr=31, conclusion="timed_out"),
+            _run(green, SHA, "pull_request", pr=31, conclusion="success"),
+        ],
+        jobs={
+            RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "timed_out")],
+            green: [_check(200, green, f"{family} ({leg})", "success")],
+        },
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            ),
+            (green, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", False)])
+            ),
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+
+    # ⛔ The discriminating assertion is the STATUS. Pre-fix this row is `NEVER`: the green run
+    # is listed and attests the file, the timed-out red is not listed at all, so the PR head
+    # that went red is reported as a clean bill of health.
+    assert "timed_out" in catch.SAMPLED_RUN_CONCLUSIONS, (
+        "a conclusion that can carry a red must be in the sampled population set"
+    )
+    assert report["window"]["populations"][catch.population_key("pull_request", "timed_out")] == {
+        "read": 1,
+        "requested": catch.DEFAULT_MAX_TIMED_OUT_RUNS,
+        "hit_bound": False,
+        "listed": True,
+    }, "the population must actually be listed, not merely named in the constant"
+    assert row["status"] == catch.CATCH_PR, (
+        f"a red on a PR head the sample never listed: {row['status']}"
+    )
+    assert [c["run_id"] for c in row["pr_head_catches"]] == [str(RUN_PR)], (
+        "the citation must name the run that timed out, not the green re-run"
+    )
+    assert report["coverage"]["status_" + catch.CATCH_PR] == 1
+
+
 def test_a_cleared_red_whose_attempt_artifact_is_gone_is_unknown_not_never(tmp_path):
     """The LIVE shape of a cleared red, and the one that used to be dropped silently.
 
@@ -1574,7 +1670,7 @@ class _ListingRecorder(catch.OfflineClient):
 def test_a_wall_bound_that_expires_while_listing_stops_and_says_so(tmp_path, monkeypatch):
     """⛔ The bound must bound the LISTING too — a measured 350 s for 120 s of bound.
 
-    On this fleet a live walk spent ~350 s of wall clock listing six populations (10 API
+    On this fleet a live walk spent ~350 s of wall clock listing the sampled populations (10 API
     calls) before the DETAIL loop ran its first `monotonic()` check — so `--max-seconds 120`
     ran to 350 s and then reported "wall-clock bound reached (120s)" as though it had
     stopped on time. The bound is now checked per population, the populations that were
@@ -1591,14 +1687,19 @@ def test_a_wall_bound_that_expires_while_listing_stops_and_says_so(tmp_path, mon
     monkeypatch.setattr(catch, "time", SimpleNamespace(monotonic=clock.monotonic))
     report = catch.build_history(MANIFEST, client, max_seconds=120)
 
-    # The listing STOPPED: pre-fix it read all six populations (the bound was only consulted
+    # The listing STOPPED: pre-fix it read every population (the bound was only consulted
     # in the detail loop, which never ran), so this is the discriminating assertion.
     assert len(client.listed) == 1, f"the bound did not stop the listing: {client.listed}"
     window = report["window"]
     populations = window["populations"]
-    assert len(populations) == 6, "every population must be accounted for, read or not"
+    # ⛔ Derived from the tool's own population set, never a literal: a numeral here is stale
+    # the moment a conclusion is added (this asserted `6` and drifted the day `timed_out`
+    # was sampled).
+    assert len(populations) == len(catch.SAMPLED_RUN_CONCLUSIONS) * 2, (
+        "every population must be accounted for, read or not"
+    )
     unlisted = [key for key, info in populations.items() if info["listed"] is False]
-    assert len(unlisted) == 5
+    assert len(unlisted) == len(populations) - 1
     assert all(info["read"] == 0 for key, info in populations.items() if key in unlisted)
 
     # The truncation NAMES the elapsed time and the populations it never read — a disclosure
@@ -1664,10 +1765,12 @@ def test_a_walk_bound_while_listing_cuts_the_sample_instead_of_discarding_the_re
     key = catch.population_key("pull_request", "failure")
     assert len(client.listed) == 2, f"the walk kept listing past the bound: {client.listed}"
     populations = report["window"]["populations"]
-    assert len(populations) == 6, "every population must be accounted for, read or not"
+    assert len(populations) == len(catch.SAMPLED_RUN_CONCLUSIONS) * 2, (
+        "every population must be accounted for, read or not"
+    )
     assert populations[key]["listed"] is True and populations[key]["read"] == 1
     unlisted = [k for k, info in populations.items() if info["listed"] is False]
-    assert len(unlisted) == 5
+    assert len(unlisted) == len(populations) - 1
     assert all(populations[k]["read"] == 0 for k in unlisted)
     assert all(populations[k]["hit_bound"] is False for k in unlisted)
 
@@ -1956,7 +2059,7 @@ def test_a_page_one_budget_cut_marks_the_population_never_listed():
     ⛔ `list_runs`'s `except BudgetExhausted: return runs` returned an EMPTY listing, so
     `build_history` recorded `listed: true, read: 0` for that population and went on to the
     next one, which returned `[]` in turn: a walk that spent its entire budget before the first
-    page published six populations that each read as *listed, and empty*. That is the opposite
+    page published every population as *listed, and empty*. That is the opposite
     of what happened — NOTHING was listed — and it put two meanings on `listed` in one dict.
 
     `WalkBoundReached` is re-raised out of `list_runs` for exactly this reason (a page-1 failure
@@ -1977,7 +2080,9 @@ def test_a_page_one_budget_cut_marks_the_population_never_listed():
     report = catch.build_history(MANIFEST, client)
 
     populations = report["window"]["populations"]
-    assert len(populations) == 6, "every population must be accounted for, read or not"
+    assert len(populations) == len(catch.SAMPLED_RUN_CONCLUSIONS) * 2, (
+        "every population must be accounted for, read or not"
+    )
     # The first population WAS listed (an empty page is a listing, not a cut); everything the
     # bound reached after it was never listed. Pre-fix ALL SIX read `listed: true, read: 0`.
     assert populations["pull_request/failure"]["listed"] is True

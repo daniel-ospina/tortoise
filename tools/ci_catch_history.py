@@ -101,6 +101,20 @@ therefore "the newest ``--max-pr-runs`` PR runs and ``--max-push-runs`` push run
 within ``--days``", and the API work is bounded by ``--max-api-calls``. When a bound
 actually cuts the sample it is REPORTED as a truncation, never quietly shrunk.
 
+WHICH RUNS ARE SAMPLED — one listing per conclusion, because the API takes one
+The sample is a set of ``(event, conclusion)`` populations named by
+``SAMPLED_RUN_CONCLUSIONS`` (``failure``, ``cancelled``, ``timed_out``, ``success`` for
+both ``pull_request`` and ``push``/``main``). It is a LIST of populations and not one
+listing because GitHub's ``actions/runs`` endpoint filters on ONE ``status`` value per
+request — there is no 'any of these conclusions' form — so a conclusion that is not
+asked for is a conclusion never read. That matters because a run's conclusion is an
+AGGREGATE of its jobs: a run that concluded ``timed_out`` (or ``cancelled``) routinely
+holds a job that concluded ``failure``, and a timed-out job is itself a RED
+(``ci_verdict.group_state`` is fail-closed on completed checks). Omitting a conclusion
+therefore does not take a smaller sample of the same thing — it makes those reds
+INVISIBLE, and an invisible red can only push a row AWAY from ``CATCH-PR``, toward the
+exclusive ``CATCH-PUSH-ONLY`` and the ``NEVER`` clean bill of health that #10131 forbids.
+
 PRIVACY/NETWORK: read-only. Every call is a GET; nothing is written to GitHub.
 
 USAGE
@@ -207,11 +221,33 @@ DEFAULT_DAYS = 90
 DEFAULT_MAX_PR_RUNS = 500
 DEFAULT_MAX_PUSH_RUNS = 250
 DEFAULT_MAX_CANCELLED_RUNS = 60
+#: `timed_out`-conclusion runs, same bound as `cancelled` and for a stronger reason: a
+#: timed-out JOB is a RED (`ci_verdict.group_state` is fail-closed on completed checks), so
+#: this population CARRIES reds rather than merely hiding them. It cannot be folded into the
+#: `failure` listing — the runs API's `status` filter accepts ONE conclusion per request
+#: ("Returns workflow runs with the check run status or conclusion that you specify"), so a
+#: conclusion that is not asked for is a conclusion never read.
+DEFAULT_MAX_TIMED_OUT_RUNS = 60
 #: `success`-conclusion runs are read as well, for a fact the failure sample cannot give: a
 #: red a RE-RUN cleared sits inside an otherwise-green run (see fact 5 in the module
 #: docstring), so a failure-only sample can never see one. That population is much larger
 #: than the red one, so it has its own, smaller bound — and the bound is reported.
 DEFAULT_MAX_SUCCESS_RUNS = 120
+#: ⛔ The run conclusions the walk samples, in PRIORITY order (first = listed first, so it
+#: survives a budget cut). This tuple IS the population set: `build_history` derives every
+#: `(event, conclusion)` pair from it for both events, so ADDING A CONCLUSION THAT CAN CARRY
+#: A RED IS ONE LINE HERE.
+#:
+#: ⛔ Why membership is not "the conclusions that look red": a run's conclusion is an
+#: AGGREGATE of its jobs, so a run that concluded `timed_out` (or `cancelled`) routinely holds
+#: a job that concluded `failure` — and the aggregate spelling is the only one the listing can
+#: filter on. A conclusion left out of this tuple is not a smaller sample of the same thing;
+#: it is a population in which a red is INVISIBLE, and an invisible red can only push a row
+#: away from `CATCH-PR` — toward the exclusive `CATCH-PUSH-ONLY` and the `NEVER` clean bill of
+#: health, i.e. exactly the direction #10131 forbids. `failure` first (it carries most reds),
+#: then the aggregates that carry the rest, then `success` (which carries a red a RE-RUN
+#: cleared, fact 5) — a live red outranks a cleared one.
+SAMPLED_RUN_CONCLUSIONS = ("failure", "cancelled", "timed_out", "success")
 DEFAULT_MAX_API_CALLS = 2000
 #: A wall-clock bound, because the API-call bound alone does not bound TIME: on this cell
 #: every `gh` call is relayed through the fleet's rate-limit wrapper, and a measured walk ran
@@ -1083,7 +1119,7 @@ class GhClient:
         self.calls = 0
         self.truncation: str | None = None
         #: EVERY cut, not just the last one. ``truncation`` is a single field, so a walk whose
-        #: six populations each stopped early reported only the sixth — the other five cuts
+        #: populations each stopped early reported only the LAST — the earlier cuts
         #: vanished, which is the same "quietly shrunk" failure the pager fix above closes.
         self.truncations: list[str] = []
 
@@ -1605,6 +1641,7 @@ def build_history(
     max_pr_runs: int = DEFAULT_MAX_PR_RUNS,
     max_push_runs: int = DEFAULT_MAX_PUSH_RUNS,
     max_cancelled_runs: int = DEFAULT_MAX_CANCELLED_RUNS,
+    max_timed_out_runs: int = DEFAULT_MAX_TIMED_OUT_RUNS,
     max_success_runs: int = DEFAULT_MAX_SUCCESS_RUNS,
     max_seconds: float = DEFAULT_MAX_SECONDS,
     now: datetime | None = None,
@@ -1643,13 +1680,22 @@ def build_history(
     # earlier justification here — "a green run is a complete answer for 'no catch here'" —
     # was WRONG about exactly that shape, and `RunRef.attempt` (now reported) names the runs
     # where it applies. Every bound that cuts the sample is reported, never quietly applied.
+    # ⛔ Derived from `SAMPLED_RUN_CONCLUSIONS` rather than written out: the previous literal
+    # omitted `timed_out` entirely, so a timed-out run's red legs were never listed — a red
+    # withheld from the sample, which can only push a row toward `CATCH-PUSH-ONLY`/`NEVER`.
+    # One tuple now names the population set, so a conclusion cannot be sampled for one event
+    # and forgotten for the other (or added to the comment and not to the code).
+    #: The per-event bound for each sampled conclusion.
+    bounds = {
+        "failure": (max_pr_runs, max_push_runs),
+        "cancelled": (max_cancelled_runs, max_cancelled_runs),
+        "timed_out": (max_timed_out_runs, max_timed_out_runs),
+        "success": (max_success_runs, max_success_runs),
+    }
     populations: list[tuple[str, str | None, str, int]] = [
-        ("pull_request", None, "failure", max_pr_runs),
-        ("push", "main", "failure", max_push_runs),
-        ("pull_request", None, "cancelled", max_cancelled_runs),
-        ("push", "main", "cancelled", max_cancelled_runs),
-        ("pull_request", None, "success", max_success_runs),
-        ("push", "main", "success", max_success_runs),
+        (event, branch, conclusion, bounds[conclusion][0 if event == "pull_request" else 1])
+        for conclusion in SAMPLED_RUN_CONCLUSIONS
+        for event, branch in (("pull_request", None), ("push", "main"))
     ]
     refs: list[RunRef] = []
     read_of: dict[str, dict[str, Any]] = {}
@@ -1657,12 +1703,13 @@ def build_history(
     for position, (event, branch, conclusion, limit) in enumerate(populations):
         key = population_key(event, conclusion)
         # ⛔ The LISTING is where a slow cell spends its time, so the wall bound is checked
-        # HERE and not only in the detail loop below. Measured 2026-10-31 on this fleet: six
-        # populations / 278 runs cost ~350 s of wall clock for 10 calls, so a bound checked
-        # only after the loop let `--max-seconds 120` run to 350 s and then report
-        # "wall-clock bound reached (120s)" as if it had stopped on time. A population that
-        # was never listed leaves its runs out of the sample, and coverage is per-FILE and
-        # attested, so the only reachable verdict for those files is UNKNOWN — never NEVER.
+        # HERE and not only in the detail loop below. Measured 2026-10-31 on this fleet: the
+        # then-six populations / 278 runs cost ~350 s of wall clock for 10 calls (the walk has
+        # since added the `timed_out` populations, so its listing cost rose with them), so a
+        # bound checked only after the loop let `--max-seconds 120` run to 350 s and then
+        # report "wall-clock bound reached (120s)" as if it had stopped on time. A population
+        # that was never listed leaves its runs out of the sample, and coverage is per-FILE
+        # and attested, so the only reachable verdict for those files is UNKNOWN — never NEVER.
         if max_seconds and time.monotonic() - started > max_seconds:
             never_listed = [
                 population_key(e, c) for e, _branch, c, _limit in populations[position:]
@@ -2408,9 +2455,19 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
         cleared = "; ".join(citation_label(c) for c in row.get("flake_cleared") or []) or "-"
         # A by-decision exclusion has no UNKNOWN reason and no citation — without the note
         # the cell would read "-", which is exactly the blank that hides the decision.
-        unknown = (
-            "; ".join(unknown_label(u) for u in row["unknown"]) or row.get("note") or "-"
-        )
+        #
+        # ⛔ The NOTE leads, and an UNKNOWN reason does not shadow it. `to_dict()` synthesises a
+        # `window` reason for every UNKNOWN row that carries no other unknown, so preferring
+        # the labels (the pre-fix `join(unknown) or note`) rendered the GENERIC sentence — "no
+        # per-file PR-HEAD evidence that this FILE executed …" — and dropped `_note()`, which
+        # says the one thing a reader acting on the row must know: that the exclusive
+        # `CATCH-PUSH-ONLY` label was WITHHELD, and why. The committed table is this report's
+        # primary artifact (#10131's acceptance), so a fact only the JSON carries is a fact the
+        # deliverable does not state. Both are rendered (never one instead of the other): the
+        # note names the verdict-level reason, the reasons carry the measured counters, and
+        # nothing is dropped to shorten the cell.
+        reasons = "; ".join(unknown_label(u) for u in row["unknown"])
+        unknown = "; ".join(part for part in (row.get("note"), reasons) if part) or "-"
         # ⛔ "attested" is per FILE (the artifact named it), never "its leg ran": the legs
         # are diff-SCOPED on tier-2, so the leg column counts runs that did NOT touch it.
         unattested = row.get("pr_leg_runs_unattested", 0) + row.get("push_leg_runs_unattested", 0)
@@ -2519,6 +2576,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-push-runs", type=int, default=DEFAULT_MAX_PUSH_RUNS)
     parser.add_argument("--max-cancelled-runs", type=int, default=DEFAULT_MAX_CANCELLED_RUNS)
     parser.add_argument(
+        "--max-timed-out-runs",
+        type=int,
+        default=DEFAULT_MAX_TIMED_OUT_RUNS,
+        help=(
+            "how many `timed_out`-conclusion runs to read — a timed-out JOB is a RED, and "
+            "the runs API filters one conclusion per request, so this population cannot be "
+            "folded into `--max-pr-runs`"
+        ),
+    )
+    parser.add_argument(
         "--max-success-runs",
         type=int,
         default=DEFAULT_MAX_SUCCESS_RUNS,
@@ -2575,6 +2642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_pr_runs=args.max_pr_runs,
             max_push_runs=args.max_push_runs,
             max_cancelled_runs=args.max_cancelled_runs,
+            max_timed_out_runs=args.max_timed_out_runs,
             max_success_runs=args.max_success_runs,
             max_seconds=args.max_seconds,
             progress=True,
