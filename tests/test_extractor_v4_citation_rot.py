@@ -1194,6 +1194,12 @@ _OUTSIDE_HOME_CAVEAT = re.compile(
     re.I,
 )
 _NAME_HOME = re.compile(r"((?:[\w.-]+/)*[\w-]+\.py):(\d+)")
+#: How far either side of a cited line the carried token may sit. A statement's
+#: home is a comment block or a short function, not one physical line: the
+#: torn-tail tolerance's block header is `log.py:204` and the word `torn` first
+#: appears a few lines below it, so a one-line window would red a CORRECT
+#: citation and teach the next lane to move the citation instead of the claim.
+_HOME_WINDOW = 20
 
 
 def _entry_bullet_blocks(entry: str) -> list[tuple[str, list[str]]]:
@@ -1252,7 +1258,9 @@ def test_the_carrier_entry_claims_91_only_for_what_91_carries():
 
     The statements must also still be REPORTED, with a home that resolves: the
     repair is to say where they live, not to stop recording them, and not to name
-    a file that does not carry the line.
+    a file — or a line — that does not carry the statement. The line check is
+    "the `_HOME_WINDOW` lines around the cited one carry one of the bullet's
+    tokens", because a home is a statement's block rather than one physical line.
 
     Non-vacuity: at `ccbc0339e7de` (the pre-fix head) this reds on the first
     assertion — all six bullets sit under a lead-in that names the design
@@ -1278,7 +1286,6 @@ def test_the_carrier_entry_claims_91_only_for_what_91_carries():
     assert blocks, f"the entry carries no bullet list at all:\n{entry}"
 
     offenders: list[str] = []
-    homes: dict[str, str] = {}
     for lead_in, bullets in blocks:
         claims_design_home = bool(_DESIGN_HOME_LEAD_IN.search(lead_in))
         caveated = bool(_OUTSIDE_HOME_CAVEAT.search(lead_in))
@@ -1305,13 +1312,27 @@ def test_the_carrier_entry_claims_91_only_for_what_91_carries():
                     offenders.append(f"{label} — names `{rel}`, which is not a "
                                      "file in this repo")
                     continue
-                total = len(path.read_text(encoding="utf-8").splitlines())
+                lines = path.read_text(encoding="utf-8").splitlines()
+                total = len(lines)
                 if not 1 <= int(lineno) <= total:
                     offenders.append(
                         f"{label} — `{path.name}:{lineno}` is past the end of the "
                         f"file ({total} lines)")
                     continue
-                homes[carried[0]] = f"{path.name}:{lineno}"
+                # ⛔ THE LINE MUST CARRY THE STATEMENT, not merely exist (review
+                # P3). `file.py:1` on a shebang satisfied "file exists, line in
+                # range", so a bullet could point a reader at an unrelated line
+                # and stay green — the claim-outruns-its-check class this file's
+                # own ledger records at `#10149` round 14. The window is a
+                # statement's own neighbourhood, so a correct citation into a
+                # multi-line block is not a false red.
+                window = lines[max(0, int(lineno) - 1 - _HOME_WINDOW):
+                               min(total, int(lineno) + _HOME_WINDOW)]
+                if not any(token in line for line in window for token in carried):
+                    offenders.append(
+                        f"{label} — `{path.name}:{lineno}` is in the file, but the "
+                        f"{_HOME_WINDOW} lines either side of it carry none of "
+                        f"{carried}, so a reader cannot verify the statement there")
     assert not offenders, (
         "the entry puts these statements in §9.1's home, or names no home a "
         "reader can open — `docs/architecture/STORAGE-ARCHITECTURE.md` §9.1 "
