@@ -1486,13 +1486,16 @@ jobs:
 
       # Step 3: pytest — mirroring the welcome-e2e-monitor workflow
       # conventions (checkout → setup-python 3.12 → pip install -e '.[test]' →
-      # playwright install --with-deps chromium → pytest).
+      # playwright install --with-deps chromium → pytest). The install is the
+      # shared `playwright-install` action (#10214): it makes apt WAIT for its
+      # lock, so a co-tenant job on the same runner host cannot red this one at
+      # its first step.
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
       - name: Run legal pages E2E suite
         # test_signup_form_safety_e2e.py joined here (#801): the 429-mock test
         # intercepts requests in the browser — no real signup against prod — but
