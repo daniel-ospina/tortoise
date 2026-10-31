@@ -251,6 +251,29 @@ or facts that were false against the tree they describe:
   ``switch -C`` branch where it creates one, else a real non-``main`` ref). Finally, the section that
   promises it "never restates" ``.mergify.yml``'s ``batch_size`` restated it in prose fifteen lines
   later, which the YAML-only literal could not see.
+* **the post-merge detector compared the landed tree to a ref NOTHING ever pushed, and three detectors
+  were pinned SOMEWHERE rather than in every fence that issues a verdict.** ``_LANDED_TREE_DIFF``
+  pinned ``origin/integration/batch-1`` and ``grep -n "git push" docs/ops/batch-integration.md``
+  returned **nothing**: Phase 2's ``git switch -C`` creates a LOCAL ref, and the Landing section's own
+  premise is that landing is a different shell (often a different clone). Two reachable outcomes, both
+  wrong — the fetch fails on a missing refspec (a bare ``|| exit 1``, so the operator gets git's
+  ``fatal: couldn't find remote ref`` from the one command that enforces the invariant), or, the
+  ordinary case on the drop path, the ref is stale by exactly the dropped PR and the fence reports
+  "main moved inside the queue's cycle" plus the expensive re-baseline route on a PERFECT landing,
+  which also makes the one real violation indistinguishable from a false alarm. The gate fence and the
+  post-revert re-check now PUSH the branch they judged — after every detector, so the ref holds the
+  certified tree — and the detector's fetch names its own failure instead of a bare ``exit 1``. The
+  other three are GUARD weaknesses rather than document defects:
+  ``test_a_skip_the_baseline_did_not_have_blocks_the_verdict`` ``continue``d past a ``batch-junit``
+  fence that had LOST its skip comparison, and aggregated the rest over every consumer, so five
+  measured mutants survived (Phase 3's whole half-1 skip block, its ``-le`` → ``-ge`` flip, Phase 3's
+  half-2 block, Phase 1's half-2 recording, and Phase 3's COMPLETED predicate — each satisfied by the
+  post-revert fence's copy); it and ``test_the_gate_run_must_complete_before_any_verdict`` now hold
+  the whole axis PER FENCE, and an absent comparison is a failure of that fence rather than a fence to
+  skip. The Phase 1 paragraph that said ``$BATCH`` "needs no carrier" contradicted the Phase 0 fence
+  eleven lines above it (the name IS a carrier, and ``$B`` is what derives from it); the sentence now
+  says that, and the contradiction itself is refused. Last, the header's own numbers were stale by
+  exactly the check the sibling commit added, on a PR whose subject is evidence integrity.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
@@ -283,14 +306,19 @@ property (the required contexts that ``check-required-set.py --live`` asserts, `
 ``batch_size``).
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **37 checks**, **0 red**, and the head this round's review was taken
-at (``9f8e12192``) is **3 of 37**: the three findings of that review that red a CHECK there — the
+revision rather than asserted — **37 checks**, **0 red**. The two heads the last two reviews were
+taken at, in the axis that can see each finding: ``9f8e12192`` is **5 of 37** — the three findings of
+that review that red a CHECK there — the
 ``-m track_b`` half's missing SKIP axis, the two unhalted ``git fetch origin main`` lines the pin and
 the landing gate ride on (one check, enumerated over fences) — plus the ``batch_size`` value restated
-in prose. The fourth, the tree assertion's unpinned SUBJECT, is GREEN on that document by
+in prose, and the two DOC-level findings this round added (the batch branch nothing pushed, and the
+``$BATCH`` "needs no carrier" claim). The fourth finding of THAT review, the tree assertion's unpinned
+SUBJECT, is GREEN on that document by
 construction (it asserts a non-``main`` ref), which is exactly why it is pinned by a MUTANT rather
 than by the revision axis: pasting ``main`` in as the compared ref measured 0 of 37 red. The
-P1+P2 repair head, ``c6d4c8278``, is **0 of 37**; the ``c7a772628`` / ``657a544a4`` head is
+P1+P2 repair head, ``c6d4c8278``, is **2 of 37** — exactly this round's two document defects, since
+its other two findings are a GUARD weakness (red on the MUTANT axis, not a revision axis) and a stale
+count (not a check at all); the ``c7a772628`` / ``657a544a4`` head is
 **8 of 37** (the checks that did not exist yet — the residual-window check, the ``a66387f9f``
 round's CI-population, exported-ledger-name and fenced post-revert re-run checks, the pin-reading
 fetch check, the tightened argv on ``test_every_full_suite_command_is_one_of_the_two_deliberate_halves``,
@@ -450,6 +478,22 @@ than 4" (red ``test_no_hand_counted_literals_of_live_repo_properties``). The tre
 that mattered most: the pre-fix check read only the PRESENCE of ``git rev-parse --abbrev-ref HEAD``,
 and the branch name survived in the line's ``echo`` prose, so requiring the gate to run on ``main``
 measured **0 of 37 red** — it certified exactly the failure the check was written for.
+
+**11 more measured with the ``c6d4c8278`` round, 11 killed** (each red on ONE check and on nothing
+else): delete Phase 3's whole half-1 skip block, and flip its half-1 count comparison to ``-ge`` (both
+red ``test_a_skip_the_baseline_did_not_have_blocks_the_verdict`` — the five survivors this round
+found are these two plus the next two plus the COMPLETED predicate); delete Phase 3's half-2 skip
+block, and delete Phase 1's half-2 skip recording (both red
+``test_the_track_b_half_is_completion_checked_like_the_deterministic_half``); degrade Phase 3's
+COMPLETED predicate to ``[ "$RC" -ge 0 ]`` (accept: 137, SIGKILL/OOM) and delete Phase 3's count
+comparison (both red ``test_the_gate_run_must_complete_before_any_verdict`` — per-fence now, so the
+re-check's copy no longer covers for it); un-halt the gate fence's batch-branch push with
+``|| true``, delete the re-check fence's push, move the gate push ABOVE the gate run, and un-halt the
+Landing detector's fetch (all four red
+``test_the_residual_landing_window_is_stated_and_detected``); restore the ``$BATCH`` "needs no
+carrier" sentence (red ``test_the_ledger_name_is_exported_not_merely_assigned``). The document's own
+statements were what moved: the push's PLACEMENT is pinned as well as its presence, because a push
+above the run publishes a tree no detector in that fence has judged.
 
 **The `7fb722a9a` review's P2 is recorded as MEASURED FALSE, not "fixed".** It reported that
 ``ci-introduced-failure`` and ``DEFERRABLE_LEGS`` "do not exist" and that the leg-table pointer is out
@@ -2203,29 +2247,40 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
         if any("--junitxml=" in _code(c) and "batch-junit" in _code(c) for c in fence)
     ]
     assert gates, "the gate run no longer writes a junit report — re-point this guard"
-    codes = [code for fence in gates for code in (_code(c) for c in fence)]
     # The status must come from the file the run's OWN shell wrote. `wait` cannot supply it: the poll
     # happens in a LATER shell, where the pid is not a child (measured, bash 5.2: `bash: wait: pid N
     # is not a child of this shell`, rc=127) — so `wait` reported a COMPLETED, green run as unproven.
-    rc_files = [m.group("rc") for c in codes if (m := _STATUS_WRAPPER.match(c))]
-    assert rc_files, (
-        "the gate fence must launch the run in its own shell and persist the status "
-        "(`( uv run pytest …; echo $? > /tmp/batch.rc ) &`): `wait` on a pid from a previous shell "
-        "returns 127, not the run's status"
-    )
-    assert any(
-        re.fullmatch(rf'RC="\$\(\s*cat\s+"?{re.escape(rc)}"?\s*\)"', c)
-        for c in codes
-        for rc in rc_files
-    ), (
-        "the gate fence must read the status the run wrote (`RC=\"$(cat /tmp/batch.rc)\"`): without "
-        f"a status a killed run is indistinguishable from a finished one (status files: {rc_files})"
-    )
-    status_checks = [c for c in codes if "$RC" in c and "-eq" in c]
-    assert status_checks, (
-        "no exit-status predicate on `$RC`: pytest exits 0 (passed) or 1 (tests failed) on a "
-        "COMPLETED run, and 2/3/4/5 — or 128+N — when it was interrupted, misconfigured or KILLED"
-    )
+    #
+    # ⛔ PER FENCE, never aggregated. This check used to flatten every gate fence into one `codes`
+    # list, and that made each requirement satisfiable SOMEWHERE rather than in the fence that issues
+    # the verdict: degrading Phase 3's predicate to `[ "$RC" -ge 0 ]` (rc=137 accepted) measured
+    # **0 red** because the post-revert re-check's copy satisfied the aggregate — the exact
+    # fail-open the ``c50628450`` P2 closed, restored one fence over. Each gate fence issues its own
+    # verdict, so each owes the whole predicate.
+    _STATUS_RC = _status_head("RC")
+    for number, gate in enumerate(gates, start=1):
+        codes = [_code(c) for c in gate]
+        rc_files = [m.group("rc") for c in codes if (m := _STATUS_WRAPPER.match(c))]
+        assert rc_files, (
+            f"gate fence {number} must launch the run in its own shell and persist the status "
+            "(`( uv run pytest …; echo $? > /tmp/batch.rc ) &`): `wait` on a pid from a previous shell "
+            "returns 127, not the run's status"
+        )
+        assert any(
+            re.fullmatch(rf'RC="\$\(\s*cat\s+"?{re.escape(rc)}"?\s*\)"', c)
+            for c in codes
+            for rc in rc_files
+        ), (
+            f"gate fence {number} must read the status the run wrote (`RC=\"$(cat /tmp/batch.rc)\"`): "
+            "without a status a killed run is indistinguishable from a finished one "
+            f"(status files: {rc_files})"
+        )
+        status_checks = [c for c in codes if "$RC" in c and "-eq" in c]
+        assert status_checks, (
+            f"gate fence {number} has no exit-status predicate on `$RC`: pytest exits 0 (passed) or "
+            "1 (tests failed) on a COMPLETED run, and 2/3/4/5 — or 128+N — when it was interrupted, "
+            "misconfigured or KILLED"
+        )
     # NOT a presence-conjunction. `-eq 0` and `-eq 1` merely APPEARING somewhere let an
     # added accepted code through: measured at the previous head,
     #   [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || [ "$RC" -eq 137 ] || { echo bad; exit 1; }
@@ -2249,34 +2304,41 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
     # halt is the LAST thing on the line, and a `{…}` body may hold only echo/printf
     # segments before its final non-zero `exit`.
     _STATUS_RC = _status_head("RC")
-    bad_status = [
-        c
-        for c in status_checks
-        if not (
-            (head := _STATUS_RC.match(_code(c)))
-            and _STATUS_TAIL.match(_unquoted(_code(c))[head.end() :])
+    for number, gate in enumerate(gates, start=1):
+        codes = [_code(c) for c in gate]
+        status_checks = [c for c in codes if "$RC" in c and "-eq" in c]
+        bad_status = [
+            c
+            for c in status_checks
+            if not (
+                (head := _STATUS_RC.match(_code(c)))
+                and _STATUS_TAIL.match(_unquoted(_code(c))[head.end() :])
+            )
+        ]
+        assert not bad_status, (
+            f"gate fence {number}'s status predicate must accept EXACTLY 0 and 1 — any additional "
+            "accepted code (137=SIGKILL/OOM, 2=interrupted) certifies a KILLED run as COMPLETED: "
+            f"{bad_status}"
         )
-    ]
-    assert not bad_status, (
-        "the status predicate must accept EXACTLY 0 and 1 — any additional accepted code "
-        "(137=SIGKILL/OOM, 2=interrupted) certifies a KILLED run as COMPLETED: "
-        f"{bad_status}"
-    )
-    # The SUBJECT must be the comparison, not a message about it: pinning `$BATCH_TOTAL`
-    # anywhere in the line was satisfied by the echo INSIDE the halt, so replacing the
-    # comparison with `true` left the check green (measured — that mutant survived).
-    counts = [c for c in codes if re.match(r'^\[\s+-n\s+"\$BATCH_TOTAL"', c)]
-    assert counts, (
-        "the gate fence must compare the run's own test COUNT against the baseline's: a killed run "
-        "reports fewer (or no) tests, and that is the detector a status code alone can miss"
-    )
-    for cmd in counts:
-        assert '-ge "$BASELINE_TOTAL"' in cmd, (
-            f"the count must be compared to the BASELINE total, not merely mentioned: {cmd}"
+        # The SUBJECT must be the comparison, not a message about it: pinning `$BATCH_TOTAL`
+        # anywhere in the line was satisfied by the echo INSIDE the halt, so replacing the
+        # comparison with `true` left the check green (measured — that mutant survived).
+        # …and, like the status predicate, PER FENCE: deleting Phase 3's count comparison left the
+        # re-check's copy to satisfy an aggregated list, so a gate fence could issue a verdict with
+        # no count detector at all.
+        counts = [c for c in codes if re.match(r'^\[\s+-n\s+"\$BATCH_TOTAL"', c)]
+        assert counts, (
+            f"gate fence {number} must compare the run's own test COUNT against the baseline's: a "
+            "killed run reports fewer (or no) tests, and that is the detector a status code alone "
+            "can miss"
         )
-        assert _halts(cmd, subject=_COUNT_SUBJECT), (
-            f"a short count must HALT the fence, or the verdict proceeds on a killed run: {cmd}"
-        )
+        for cmd in counts:
+            assert '-ge "$BASELINE_TOTAL"' in cmd, (
+                f"the count must be compared to the BASELINE total, not merely mentioned: {cmd}"
+            )
+            assert _halts(cmd, subject=_COUNT_SUBJECT), (
+                f"a short count must HALT the fence, or the verdict proceeds on a killed run: {cmd}"
+            )
     verdict_rows = [line for line in _text().splitlines() if line.startswith("| `UNPROVEN-FULL-SUITE")]
     assert verdict_rows, "the verdict table no longer carries an UNPROVEN-FULL-SUITE row"
     assert any("did not COMPLETE" in row for row in verdict_rows), (
@@ -3462,8 +3524,20 @@ def test_a_skip_the_baseline_did_not_have_blocks_the_verdict() -> None:
         fence_codes = [_code(c) for c in fence]
         binds = [m.group("path") for c in fence_codes if (m := _SKIP_BIND.match(c))]
         counts = [c for c in fence_codes if _SKIP_COUNT_SUBJECT.search(c)]
-        if not counts:
-            continue
+        # ⛔ `continue`-ing past a consumer that lost its skip comparison is how FIVE measured mutants
+        # survived green: deleting Phase 3's whole half-1 skip block, flipping its `-le` to `-ge`,
+        # deleting Phase 3's half-2 block, deleting Phase 1's half-2 recording, and degrading Phase
+        # 3's COMPLETED predicate all left the re-check fence to satisfy the aggregate `gated` flag.
+        # The finding is per-FENCE — every fence that writes a `batch-junit` report ISSUES a
+        # verdict, and a verdict computed without the skip axis is the fail-open this check exists
+        # for, so an absent comparison is a failure of THIS fence, not a fence to skip.
+        assert counts, (
+            "a fence that writes a `batch-junit` report and issues no skip comparison is a gate "
+            "without the `4dc214c02` P1 detector: a skipped test is COLLECTED, so it is inside "
+            "`tests=`, it adds no failure id and rc is 0 — the run reads as BATCH-GREEN with the "
+            "suite it exists to gate unrun. Every such fence owes `[ \"$BATCH_SKIPPED\" -le "
+            "\"$BASELINE_SKIPPED\" ]` or it does not gate: " + repr(fence_codes[:3])
+        )
         gated = True
         assert binds == [carrier], (
             f"the gate fence compares a skip count without binding the baseline's from {carrier}: "
@@ -3607,6 +3681,27 @@ _LANDED_TREE_DIFF = re.compile(
 
 #: The landed sha, READ in the detector's own fence (nothing is carried between shells).
 _LANDED_SHA_READ = re.compile(r'^LANDED="\$\(\s*git\s+rev-parse\s+origin/main\s*\)"$')
+
+#: The push that ESTABLISHES the ref the detector reads. `origin/integration/batch-1` exists only
+#: because some fence put it there: Phase 2 creates the branch with `git switch -C`, which is a LOCAL
+#: ref, and the landing actor is a different shell (often a different clone). `--force-with-lease` is
+#: admitted because a REBUILD (route 1) resets the branch and git refuses the resulting
+#: non-fast-forward.
+_BATCH_PUSH = re.compile(
+    r'^git\s+push\s+(?:--force-with-lease\s+)?origin\s+integration/batch-1\b'
+)
+
+#: …and the same push as the pre-halt SUBJECT `_halts` must see (the command must END there, so a
+#: push that only APPEARS before a halt owned by some other command is refused).
+_BATCH_PUSH_SUBJECT = re.compile(
+    r'^git\s+push\s+(?:--force-with-lease\s+)?origin\s+integration/batch-1$'
+)
+
+#: The detector's own fetch line, as the pre-halt SUBJECT `_halts` must see: it names TWO refspecs, so
+#: `_MAIN_FETCH` (which allows only `main` before the `||`) deliberately does not claim it.
+_LANDED_FETCH_SUBJECT = re.compile(
+    r'^git\s+fetch\s+origin\s+main\s+integration/batch-1$'
+)
 
 
 def test_the_residual_landing_window_is_stated_and_detected() -> None:
@@ -3767,13 +3862,17 @@ def test_the_residual_landing_window_is_stated_and_detected() -> None:
         "without it the comparison reads local remote-tracking refs, which a moved `main` leaves stale "
         "and an unreachable batch branch leaves absent"
     )
+    # The halt is pinned by REACHABILITY (`_halts`), not by an `|| exit 1` suffix: a halt that names
+    # the failure is the document's own shape everywhere else, and this fetch's message is what tells
+    # the operator the difference between "the batch branch was never pushed" and "main moved".
     halted_fetch = [
         fence[i]
         for i in fetches
-        if not re.search(r"\|\|\s*exit\s+[1-9]\d*\s*$", _code(fence[i]))
+        if not _halts(fence[i], subject=_LANDED_FETCH_SUBJECT)
     ]
     assert not halted_fetch, (
-        "the detector's fetch must halt on failure (`… || exit 1`): an unhalted fetch leaves both refs "
+        "the detector's fetch must halt on failure (`… || { echo …; exit 1; }`, and the halt must "
+        "be REACHABLE from the fetch's own failure): an unhalted fetch leaves both refs "
         f"stale and the diff then compares two trees nobody landed: {halted_fetch}"
     )
     unhalted = [
@@ -3792,6 +3891,57 @@ def test_the_residual_landing_window_is_stated_and_detected() -> None:
         "repeat the pre-merge `origin/main == $PINNED` assertion: after a squash that comparison is "
         "false on a perfect landing"
     )
+    # ⛔ …and the ref that detector reads must be ESTABLISHED by the doctrine. This was the review's
+    # highest-value finding at this head: `_LANDED_TREE_DIFF` pinned `origin/integration/batch-1`, and
+    # NO step in the document pushed it (`grep -n "git push"` returned nothing) — Phase 2's
+    # `git switch -C` creates a LOCAL ref, and this section's own premise is that landing is a
+    # different shell. Two reachable outcomes, both wrong: the fetch fails on a missing refspec (a
+    # bare `|| exit 1`, so the operator gets git's `fatal: couldn't find remote ref` from the one
+    # command that enforces the invariant), or — the ordinary case on the drop path — the ref is
+    # stale by exactly the dropped PR and the fence reports "main moved inside the queue's cycle"
+    # plus the expensive re-baseline route on a PERFECT landing. That also made the one real
+    # violation indistinguishable from a false alarm. So every fence that asserts the batch tree
+    # PUBLISHES it, after every detector, and the fetch reads what they pushed.
+    publishers = [
+        fence
+        for fence in _full_suite_fences()
+        if any(
+            "git rev-parse --abbrev-ref HEAD" in _code(c) and "integration/batch-1" in _code(c)
+            for c in fence
+        )
+    ]
+    assert len(publishers) >= 2, (
+        "expected the gate fence AND the post-revert re-check fence to assert the batch tree, parsed "
+        f"{len(publishers)} — re-point this guard"
+    )
+    for number, tree_fence in enumerate(publishers, start=1):
+        pushes = [i for i, c in enumerate(tree_fence) if _BATCH_PUSH.match(_code(c))]
+        assert pushes, (
+            f"the fence that judges the batch tree ({number} of {len(publishers)}) never PUSHES "
+            "`integration/batch-1`, and the Landing detector diffs the landed tree against "
+            "`origin/integration/batch-1` — a ref nothing establishes. Without the push the detector "
+            "fails on a missing refspec, or (on the drop path) compares the landed squash against "
+            "the PRE-revert head and accuses a perfect landing of a moved base: push the judged tree "
+            "(`git push origin integration/batch-1 || { … exit 1; }`)"
+        )
+        unhalted_pushes = [
+            tree_fence[i]
+            for i in pushes
+            if not _halts(tree_fence[i], subject=_BATCH_PUSH_SUBJECT)
+        ]
+        assert not unhalted_pushes, (
+            "the batch-branch push must HALT: an unhalted push leaves `origin/integration/batch-1` "
+            "stale or absent, and the detector then reads a ref that is not the tested tree: "
+            f"{unhalted_pushes}"
+        )
+        last_run = max(
+            i for i, c in enumerate(tree_fence) if _SUITE_CMD.match(_code(c))
+        )
+        assert min(pushes) > last_run, (
+            "the push must come AFTER the run it publishes: the ref the Landing detector reads is "
+            "supposed to be the tree THIS fence certified, and a push above the run publishes a "
+            "tree no detector in this fence has judged (on a halt, the uncertified one)"
+        )
 
 
 #: A stated number of the required contexts, and a stated `batch_size` value — in the YAML spelling
@@ -3968,6 +4118,18 @@ def test_the_ledger_name_is_exported_not_merely_assigned() -> None:
     assert "PRESERVES" in _text() and "export attribute" in _text(), (
         "the doctrine must say that a later PLAIN re-assignment preserves the export attribute — "
         "otherwise the three `BATCH=\"${BATCH:?…}\"` re-derivations read as undoing the export"
+    )
+    # ⛔ …and it must not still make the OPPOSITE claim somewhere else. At ``c6d4c8278`` the fence
+    # above said the name is a carrier only because a plain assignment would not survive, while a
+    # paragraph in Phase 1 said `$BATCH` "needs no carrier" because `$B` is a DERIVATION of it. Both
+    # shipped: a reader arriving at the paragraph in a later shell is told the name carries itself,
+    # and the next fence they run halts on `BATCH="${BATCH:?…}"`. Fail-closed, so it costs a round
+    # trip rather than a wrong verdict — but it is the document contradicting its own rule about
+    # itself, and only one side of it was pinned.
+    assert "needs no carrier" not in _text(), (
+        "the doctrine still says `$BATCH` 'needs no carrier': it is exported in Phase 0 precisely "
+        "because it does NOT cross a shell boundary, and every later fence re-derives it with `:?` "
+        "and halts on an empty one — the claim and the halt cannot both be true"
     )
 
 
