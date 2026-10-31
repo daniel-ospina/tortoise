@@ -672,17 +672,28 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
                 # claimed no cell wrote zero vectors about exactly that cell).
                 refused_with_ratio, refused_without_ratio = \
                     _census_refusal_coverage(results)
+                # "never the leg" is NOT implied either (#10356 review P3,
+                # second pass): a numeric coverage is computed over the
+                # population its refused record was REMOVED from, so a cell
+                # can publish a real ratio while the refused record's own
+                # points were never embedded. Claim what the arithmetic
+                # supports — the census value is contradicted — and leave the
+                # refused record's own write unwitnessed.
                 if refused_with_ratio and not refused_without_ratio:
                     coverage_note = (
                         "Each cell that refused a record still publishes a "
-                        "real ratio — its coverage is numeric — so what is "
-                        "contradicted is the census, never the leg.")
+                        "real ratio — its coverage is numeric — so the "
+                        "contradicted value is the census's, not the "
+                        "published ratio's. That ratio was computed over the "
+                        "population the refused record was removed from, so "
+                        "it does not witness what the refused record wrote.")
                 elif refused_without_ratio and not refused_with_ratio:
                     coverage_note = (
                         "A cell whose only record was refused publishes NO "
                         "ratio at all (embedding_coverage=None), so read "
                         "records_refused rather than embedding_coverage "
-                        "for it.")
+                        "for it — it has no coverage value and no "
+                        "write-time witness of its own.")
                 elif refused_without_ratio:
                     coverage_note = (
                         "The cells that refused a record are MIXED: some "
@@ -698,10 +709,15 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
                         "line to see which census was refused.")
                 print("   the other two causes do NOT hold here: the "
                       "embedder reported available for every cell and no "
-                      "cell published a zero-coverage receipt, so these "
-                      "recall values ARE a hybrid run's — they are refused "
-                      "because the census contradicts itself, not because "
-                      "the leg was missing. "
+                      "cell published a zero-coverage receipt. Those two "
+                      "facts are what the two absent arms prove — a "
+                      "pre-flight answer and the absence of a published "
+                      "zero receipt — and they do NOT witness a vector "
+                      "write for a cell whose census was refused: its "
+                      "coverage is None, so the zero-coverage arm cannot "
+                      "fire, and the refused record itself can report "
+                      "points_embedded=0. So treat these recall values as "
+                      "UNMEASURED and read the census producer. "
                       + coverage_note,
                       file=sys.stderr)
         remedy = ("→ NOT selected: do NOT feed this to the pilot (step 3) or "

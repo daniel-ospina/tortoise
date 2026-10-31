@@ -6035,6 +6035,12 @@ def test_print_winner_claims_numeric_coverage_only_when_it_is(capsys):
     flat = " ".join(capsys.readouterr().err.split())
     assert "coverage is numeric" in flat, flat
     assert "NO ratio at all" not in flat, flat
+    # #10356 review P3 (second pass): the numeric branch said "what is
+    # contradicted is the census, never the leg" — but a numeric coverage is
+    # computed over the population the refused record was REMOVED from, so it
+    # cannot witness what that record wrote either. RED on the pre-fix line.
+    assert "never the leg" not in flat, flat
+    assert "does not witness what the refused record wrote" in flat, flat
 
 
 def test_census_refusal_coverage_attributes_the_refusal_per_cell(capsys):
@@ -6154,6 +6160,18 @@ def test_print_winner_never_asserts_a_zero_vector_count_it_cannot_prove(
     assert "wrote zero vectors" not in flat, flat
     assert "no cell wrote zero" not in flat, flat
 
+    # #10356 review P3 (second pass): the CONCLUSION over-claimed too. The
+    # gate is two ABSENCES, and a refused census makes the zero-coverage arm
+    # unfireable (``None``, not ``0.0``), so the sentence cannot conclude that
+    # these recall values are a hybrid run's — that is the very cell whose
+    # write is unwitnessed, and the other cause's story with the other
+    # remedy. RED on the pre-fix line, which printed "ARE a hybrid run's".
+    assert "ARE a hybrid run's" not in flat, flat
+    assert "not because the leg was missing" not in flat, flat
+    assert "do NOT witness a vector write" in flat, flat
+    assert "treat these recall values as UNMEASURED" in flat, flat
+    assert "read the census producer" in flat, flat
+
     # The REMEDY is unaffected — the verdict is still the producer's to fix.
     assert "Fix the census producer" in flat, flat
 
@@ -6181,7 +6199,10 @@ def test_sweep_readme_enumerates_the_census_refusal_case():
         "predate the census-refusal arm")
     # The fourth case must be scoped to the census producer, not the embedder:
     # that inversion is the defect the winner line fix removed.
-    fourth = flat.split("fourth case", 1)[1][:700]
+    # The window is 900 chars (was 700 before #10356's second-pass rewrite of
+    # this bullet): the case grew by the "PRE-FLIGHT answer, not a write-time
+    # witness" clarification, which is inside the window rather than beyond it.
+    fourth = flat.split("fourth case", 1)[1][:900]
     assert "CENSUS refused a record" in fourth, fourth
     assert "census PRODUCER" in fourth, fourth
     # The case describes a run whose EMBEDDER was fine, so it must not claim
@@ -6191,6 +6212,13 @@ def test_sweep_readme_enumerates_the_census_refusal_case():
     assert "wrote zero vectors" not in fourth, fourth
     assert "reported available for every cell" in fourth, fourth
     assert "zero-coverage receipt" in fourth, fourth
+    # #10356 review P3 (second pass): "the leg ran" was the same over-claim in
+    # the reader-facing surface — the two absences above are a PRE-FLIGHT
+    # answer, and a refused cell's own ratio is absent or computed over the
+    # population its record was removed from, so neither witnesses a write.
+    assert "the leg ran" not in fourth, fourth
+    assert "PRE-FLIGHT answer" in fourth, fourth
+    assert "treat that cell's recall as" in fourth, fourth
 
 
 def test_sweep_granularity_v2_waived_sweep_never_exits_zero(

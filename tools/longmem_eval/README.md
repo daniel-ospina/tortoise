@@ -722,8 +722,11 @@ The 3-point micro-test that SELECTS the granularity knob before the pilot:
 #     points_total`, a bool, a negative, or a lone half that is itself
 #     impossible) — so that cell reads NOT MEASURED as well.
 #     The `dense leg:` line shows `records_refused=[...]` beside the verdict.
-#     The remedy is the census PRODUCER, not the embedder: the leg ran, and
-#     re-running reproduces the same verdict byte for byte.
+#     The remedy is the census PRODUCER, not the embedder. ⚠️ The two absent
+#     causes above are a PRE-FLIGHT answer, not a write-time witness (a
+#     refused cell publishes no ratio at all, or one computed over the
+#     population its record was removed from), so treat that cell's recall as
+#     unmeasured; re-running reproduces the same verdict byte for byte.
 python -m tools.longmem_eval.sweep_granularity --data tests/fixtures/longmemeval_mini.json \
     --limit 5 --mock --skip-preflight
 
