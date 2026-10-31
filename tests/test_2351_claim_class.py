@@ -961,6 +961,98 @@ def test_supersede_repoint_judges_a_stored_op_type_outside_the_pair(
     assert _operator_shaped_rows(lane, new) == []
 
 
+def test_supersede_repoint_judges_the_REL_TYPE_when_the_stored_op_type_is_weaker(
+        lane):
+    """The MECHANISM a re-pointed edge carries is judged, not just the stored one.
+
+    The door used to judge ONE mechanism per operator: the stored ``op_type``
+    when it was in the pair, else whichever rel type ``edges_result`` returned
+    FIRST (``.setdefault(...)`` over a statement with no ``ORDER BY``). The two
+    are not equivalent, and the stored one can be the WEAKER of the two —
+    ``_canonical_direction("NAND", None)`` is ``unidirectional`` (one leg),
+    while ``IMPL``'s absent default is ``bidirectional`` (both legs, which is
+    also what ``ep.py`` canonicalizes an absent direction to). Here the node
+    records ``NAND`` while the edge 2a re-points is an ``IMPL``, and the wiring
+    is derived-target-under-asserted-source — refused on IMPL's BACKWARD leg,
+    invisible to NAND's forward-only reading:
+
+        src(asserted) --IMPL(no direction, idx 1)--> old(derived)
+        supersede old -> new(derived)
+
+    Pre-fix the supersede went through with no verdict — #10195's harm on the
+    MECHANISM axis, reachable by a raw ``op_type`` write. RED pre-fix and
+    deterministic (the stored value is in the pair, so there is no row-order
+    coin flip): the union below is what makes it refuse.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    # Legal AS WRITTEN (``->`` is the corroboration leg). The absent-direction
+    # shape is then restored by the raw write below — that is the legacy form.
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # A stored mechanism the node does not actually carry, and no direction:
+    # the rel type 2a re-points is the ONLY record of the real mechanism.
+    lane._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.op_type='NAND' REMOVE n.direction",
+        params={"id": op["id"]})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="re-pointing the OPERATOR") as _exc:
+        lane.supersede_point(old, new)
+
+    # The mechanism that BLOCKS is the one the edge carries — named, so the
+    # caller is not told about a NAND they will not find.
+    assert "(IMPL," in str(_exc.value), _exc.value
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_shaped_rows(lane, old) == [[op["id"], "IMPL", 1]]
+    assert _operator_shaped_rows(lane, new) == []
+
+
+def test_supersede_repoint_judges_BOTH_mechanisms_of_a_legacy_operator(lane):
+    """Two mechanisms into the predecessor, no stored record — judge BOTH.
+
+    The shape ``.setdefault(...)`` could not handle: one operator with an
+    ``IMPL`` AND a ``NAND`` edge into the predecessor, no stored ``op_type``
+    and no stored ``direction`` (a legacy node, or the raw-write
+    ``op_type='hasPart'`` shape). 2a re-points BOTH edges, so both mechanisms
+    reach the rebuilt factor — but the door judged whichever one the
+    ``edges_result`` row order happened to hand ``setdefault`` first, and here
+    the two disagree: ``NAND``'s absent default is ``unidirectional`` (forward
+    only ⇒ the asserted source over the derived target is legal), ``IMPL``'s is
+    ``bidirectional`` (its BACKWARD leg refuses exactly that wiring). So the
+    verdict — and the refusal text — flipped between runs, which is the one
+    thing the slot query's own ``ORDER BY op.id, inp.id`` was added to prevent.
+
+    Post-fix every mechanism the re-pointed edge carries is judged, so the
+    refusal holds whichever row comes back first. RED pre-fix on the NAND-first
+    order (the assertable half): there the supersede succeeded and minted
+    ``derived --IMPL--> asserted`` with no verdict, no warning, no record.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # 2a transfers ``IMPL|NAND`` edges and nothing narrower.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op}), (old:Point {id:$old}) "
+        "MERGE (op)-[r:NAND {idx:1}]->(old)",
+        params={"op": op["id"], "old": old})
+    lane._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) REMOVE n.op_type, n.direction",
+        params={"id": op["id"]})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_shaped_rows(lane, new) == []
+
+
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
 
 def _raw_direct_edge(lane, src, tgt, *, direction):

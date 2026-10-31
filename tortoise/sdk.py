@@ -17699,11 +17699,23 @@ class TortoiseSDK:
         # and BEFORE the ``PointSuperseded`` append and every other mutation — a
         # refusal that lands after the transfer is the #329/#4021
         # partial-mutation defect no matter how good its message is.
-        _repoint_ops: dict[str, str] = {}
+        # ⛔ EVERY mechanism, not one per operator (#10418 review P2). An
+        # earlier cut kept ONE rel type per operator id —
+        # ``_repoint_ops.setdefault(op_id, type(r))`` over a statement with no
+        # ``ORDER BY`` — so which mechanism got judged was SERVER ROW ORDER,
+        # and the two picks are not equivalent: ``_canonical_direction``'s
+        # absent default is ``bidirectional`` for IMPL (both legs) and
+        # ``unidirectional`` for NAND (forward only), so a NAND pick could pass
+        # a wiring the IMPL pick refuses. That is a verdict (and a refusal
+        # message) that flips between runs — the one property the slot query's
+        # ``ORDER BY op.id, inp.id`` was added to guarantee. 2a re-points BOTH
+        # rel types, so BOTH mechanisms reach the rebuilt factor and both are
+        # judged; a set makes the collection order-independent by construction.
+        _repoint_rels: dict[str, set[str]] = {}
         for row in edges_result.result_set:
             if row[1] in ("IMPL", "NAND") and row[3] != "alreadyDecided":
-                _repoint_ops.setdefault(row[0], row[1])
-        if _repoint_ops:
+                _repoint_rels.setdefault(row[0], set()).add(row[1])
+        if _repoint_rels:
             # ONE statement for every affected operator's slots. ``op.op_type``
             # / ``op.direction`` are the node's own record; ``sr.idx`` is the
             # slot position EP reads (``ORDER BY coalesce(r.idx, 0)``).
@@ -17725,7 +17737,7 @@ class TortoiseSDK:
                 # one property that may hold MIXED types, and cross-type ordering
                 # is engine-defined — the door orders slots in Python instead.
                 "ORDER BY op.id, inp.id",
-                params={"op_ids": sorted(_repoint_ops)},
+                params={"op_ids": sorted(_repoint_rels)},
             ).result_set
             _slot_map: dict[str, list] = {}
             _op_meta: dict[str, list] = {}
@@ -17734,7 +17746,7 @@ class TortoiseSDK:
                 _sdir, _sidx, _sinp = _srow[2], _srow[3], _srow[4]
                 _op_meta.setdefault(_sid, []).append((_sop_type, _sdir))
                 _slot_map.setdefault(_sid, []).append((_sidx, _sinp))
-            for _oid in sorted(_repoint_ops):
+            for _oid in sorted(_repoint_rels):
                 _srows = _slot_map.get(_oid) or []
                 if not _srows:
                     # No slot rows at all: this operator has no ``IMPL|NAND``
@@ -17891,11 +17903,20 @@ class TortoiseSDK:
                 # loader still builds this factor and runs the #2351 backstop on
                 # it. A door that skipped it here was that backstop's only
                 # absent verdict. The mechanism to judge is therefore the REL
-                # TYPE that carried the operator into this set — the same
-                # fallback the absent-``op_type`` arm already takes.
+                # TYPE that carried the operator into this set.
+                # ⛔ And the REL TYPES are UNION'd in, not used as a fallback
+                # (#10418 review P2): these are the mechanisms 2a will actually
+                # re-point, so they are judged WHATEVER the stored record says.
+                # The stored value can be the WEAKER of the two (``NAND``'s
+                # absent default is forward-only, ``IMPL``'s is both ways), and
+                # a fallback that trusts it would pass a wiring the edge it is
+                # re-pointing refuses. Union is the conservative direction and
+                # costs nothing: when a ``direction`` IS stored,
+                # ``_canonical_direction`` returns it verbatim for every type,
+                # so the extra mechanism adds no distinct leg.
                 _op_types = sorted({
                     t for t, _ in _meta_rows
-                    if t in ("IMPL", "NAND")}) or [_repoint_ops[_oid]]
+                    if t in ("IMPL", "NAND")} | _repoint_rels[_oid])
                 for _slot_source in _candidate_sources:
                     _slot_targets = list(_slot_ids)
                     _slot_targets.remove(_slot_source)
@@ -17905,8 +17926,8 @@ class TortoiseSDK:
                         *(_slot_classes.get(_t, set()) for _t in _slot_targets))
                     for _op_type in _op_types:
                         # ``_op_types`` is provably within ``IMPL|NAND`` at this
-                        # point (the set above filters the stored value, and the
-                        # fallback is the rel type this query matched).
+                        # point (the stored value is filtered above and the
+                        # union member is the rel type this query matched).
                         if (_slot_source not in _slot_classes
                                 or not _slot_target_classes):
                             continue
@@ -17915,9 +17936,20 @@ class TortoiseSDK:
                         # non-empty whenever ``_srows`` is, so ``_dirs`` always
                         # holds at least one row's value; a ``None`` in it is
                         # canonicalized here, never skipped.
+                        # ⛔ Sorted for a STABLE refusal message, and by a
+                        # TYPE-AWARE key: ``_canonical_direction`` returns a
+                        # stored value verbatim, so a raw-written non-string
+                        # ``direction`` beside a token on another node makes a
+                        # bare ``sorted({1, "->"})`` raise ``TypeError`` — a
+                        # traceback aborting a supersede this guard is not even
+                        # about (#10418 review P3). The key is total over the
+                        # scalar types a property can hold, and the verdict
+                        # never depends on it (the loop raises on the FIRST
+                        # blocking direction).
                         _effective_dirs = sorted({
                             self._canonical_direction(_op_type, _d)
-                            for _d in _dirs})
+                            for _d in _dirs},
+                            key=lambda _d: (type(_d).__name__, str(_d)))
                         for _effective_dir in _effective_dirs:
                             if _claim_class.direction_blocks_create(
                                     _effective_dir,
@@ -18134,7 +18166,11 @@ class TortoiseSDK:
         # exerting influence through the operator. Driven by the INPUT edges
         # themselves (not by the typed-edge loop) so an operator whose
         # op_type carries no typed edge still transfers its support source,
-        # and the rebuild pass-2b leg can mirror this query exactly.
+        # and the rebuild pass-2b leg mirrors this query exactly — SAME
+        # canonical operator population since #10418 review P3, which widened
+        # the replay's two pass-2b predicates to this disjunction (a replay
+        # reading the narrower ``is_operator:true`` would have left a flag-less
+        # operator's INPUT mirror stranded on the superseded prior).
         input_rows = proj.g.query(
             "MATCH (old:Point {id:$old_id})-[ri:INPUT]->(op:Point) "
             "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
@@ -21807,7 +21843,9 @@ class TortoiseSDK:
         stable order, and an earlier ``str | None`` annotation made that read as
         a comparison of possibly-``None`` values (a ``type-var`` failure on
         ``sorted``) rather than as the true statement that every element is a
-        token."""
+        token. ⚠️ A stored value is returned VERBATIM, so a raw-written
+        non-string ``direction`` reaches the caller as-is — which is why that
+        ``sorted`` carries a type-aware key rather than comparing raw values."""
         if direction is not None:
             return direction
         return "unidirectional" if op_type == "NAND" else "bidirectional"

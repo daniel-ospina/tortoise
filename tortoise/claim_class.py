@@ -330,7 +330,7 @@ def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
                     new_id: str, source_id: str,
                     target_ids: Sequence[str],
                     direction: str,
-                    slot_order: str = "proven") -> str:
+                    slot_order: str) -> str:
     """The refusal ``supersede_point``'s OPERATOR re-point raises (#10195).
 
     A separate message from :func:`override_refusal` because the caller's ways
@@ -357,6 +357,11 @@ def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
     ``slot_order`` is one of :data:`_SLOT_ORDER_PHRASES`' keys and states WHY
     the source position is (or is not) provable — ``proven``, ``mixed`` (a
     cross-type layout), or ``uniform-non-int`` (one non-``int`` type group).
+    ⛔ It is REQUIRED, for the same reason ``direction`` is: a default of
+    ``proven`` would assert a proof no caller made, and the only caller always
+    knows the answer (``supersede_point`` derives it beside the layout it read),
+    so a default here is a silent "at the SOURCE position" for any future caller
+    that forgot to pass it — the false cause this parameter exists to end.
     ⛔ It is NOT a bool, and the candidate arm's phrase is NOT "cannot be
     ordered": a uniform non-``int`` layout IS ordered by the engine (comparison
     inside one type group is type-local) — the door declines to re-derive that
