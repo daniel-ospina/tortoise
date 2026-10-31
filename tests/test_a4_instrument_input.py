@@ -125,23 +125,23 @@ def keyword_lane(monkeypatch):
     (``sdk.py``'s ``_SDK_ANCHORS["stand_down_flag"]``), not on a replacement
     actually happening — which is exactly the open question in #10436, since on
     a store with no ``search_keys`` the expansion returns ``None`` and nothing
-    is overwritten. So ON vs OFF of
-    this file's lever changed the lexical SCORER as well as the expansion, and an
-    ordered-hit-list comparison across it stopped being an A4 measurement — it
-    measured the arm.
+    is overwritten. So ON vs OFF of this file's lever changed the lexical
+    SCORER as well as the expansion, and an ordered-hit-list comparison across
+    it stopped being an A4 measurement — it measured the arm.
 
     LANE: the divergence needs ``is_embedded`` (the arm gate is embedded-only,
-    ``sdk.py``'s ``_SDK_ANCHORS["embedded_gate"]``). In a URI-SET pytest session
-    that ``is_embedded`` comes from ``FalkorProjection``'s test redirect
-    (``explicit_path and
-    TORTOISE_DB_URI and TORTOISE_TEST_MODE == "1" and not exempt`` — see
-    ``tests/test_markers.py`` and ``tests/conftest.py``), which NULLS this
-    fixture's explicit ``db_path``; #139's path-wins precedence would otherwise
-    make the fixture embedded on every lane. This file's stem is deliberately NOT
-    in ``TEST_NO_REDIRECT_STEMS`` (``tests/_embedded.py``) — unlike
-    ``test_bm25_lexical_8488``, which is registered so its embedded constructions
-    survive an out-of-band URI run — so under a docker URI the arm never runs and
-    this pin is a NO-OP there; do not read that as the premise being false.
+    ``sdk.py``'s ``_SDK_ANCHORS["embedded_gate"]``). In a URI-SET pytest
+    session that ``is_embedded`` comes from ``FalkorProjection``'s test
+    redirect (``explicit_path and TORTOISE_DB_URI and
+    TORTOISE_TEST_MODE == "1" and not exempt`` — see ``tests/test_markers.py``
+    and ``tests/conftest.py``), which NULLS this fixture's explicit
+    ``db_path``; #139's path-wins precedence would otherwise make the fixture
+    embedded on every lane. This file's stem is deliberately NOT in
+    ``TEST_NO_REDIRECT_STEMS`` (``tests/_embedded.py``) — unlike
+    ``test_bm25_lexical_8488``, which is registered so its embedded
+    constructions survive an out-of-band URI run — so under a docker URI the
+    arm never runs and this pin is a NO-OP there; do not read that as the
+    premise being false.
 
     Reproduce it on the PRE-FIX tree (``main@2487e7e1f``; on this tree the pin
     makes it green) with:
