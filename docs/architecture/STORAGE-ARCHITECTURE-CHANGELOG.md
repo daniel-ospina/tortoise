@@ -1771,3 +1771,64 @@ reproduce the measured 0.91 → 0.42 destruction). `sourceVersion` stays uncarri
 fold drops it too — so the two routes agree by both losing that anchor rather than the record keeping
 an attribute the graph does not have. Pinned by
 `tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.
+
+## §9.1's carrier paragraph — the design stayed, the delivery state left (`#10067`, 2026-10-30)
+
+The rule in §9.1 is unchanged: the transcript lives outside the graph, the CAPABILITY decides which
+store holds a capture's turns, and where the record holds them the graph keeps no turn node. What
+left §9.1 with step 7 (`#10017`'s carrier, landed as `#10076`; the type declared by `#10129`) is the
+paragraph that said **where that rule stood**: `"nothing sets 'record_only' yet"`, closed by `"do not
+read the paragraph above as a description of current behaviour"`. That was a statement about the work's
+state, and the landing made it false; `#8542` keeps delivery state and the narrative of what changed in
+this file, so §9.1 states the rule they settled on and this entry records the move. The design that
+replaced that paragraph is below.
+
+What is stated now, in the design document and in the seams it points at — the statements this entry
+is the record for:
+
+- **The journal.** On the record-held lane a capture's turns are journalled as ONE `TurnsRecorded`
+  carrier holding the writer's per-turn snapshots verbatim, **instead of** one `PointAdded` per turn,
+  and its replay materialises no node — a `PointAdded` there re-created the turn nodes on every
+  rebuild, i.e. a rebuild that undid this placement (`#10067`).
+- **The row.** The carrier states its turn rows itself — `_turn_row_statements`
+  (`tortoise/record_projection.py:3901`), one `public.point` row per snapshot at
+  `cache_tier = 'record_only'`, the tier from the record TYPE's declaration and never from a payload.
+  Doing it in the PROJECTION rather than at the writer is what keeps `record == replay(journal)`:
+  the live write and a record rebuilt from the same journal run the same statement.
+- **The fold.** The carrier's graph fold is nothing (`_NO_PROJECTION_FOLD`,
+  `tortoise/projection/__init__.py:7492`), so neither replay engine can re-create a turn the graph
+  deliberately does not hold — the `#3316` RESURRECTION class, refused at the declaration.
+- **The change feed.** The carrier is deliberately NOT in `sdk._GRAPH_EVENT_TYPES`, so an armed
+  capture's turns leave `poll_events`: a `:GraphEvent` for a turn the writer deliberately skipped
+  would advertise an entity the graph does not have. The capture sweep's `PointRetracted` row is
+  suppressed on the same lane for the same reason, and whether that asymmetry — a pre-change turn's
+  creation row with no matching retraction — is the repair or should be accepted permanently is the
+  open decision on `#10325`, not a settled one. The `EntityMutated` op=delete record the replay folds
+  is kept, so a shorter re-capture is durable even though the feed is one-sided.
+- **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:204`, step 7's settled answer
+  to `#10129`'s placeholder): `_emit_event` returns on an append failure BEFORE the record write, so
+  that capture's turn rows **never reached the record either** — its transcript is already lost, and
+  refusing the tail would cost the whole journal while recovering nothing. The R1 removal record
+  (`EntityMutated` op=delete) stays REFUSED, because a tolerated torn delete is a resurrection.
+- **The tenant.** The store decision asks the tenant the SEAM will file under, not the ambient one:
+  `record_tenant_effective` (`tortoise/record_writer.py:842`) is **carried > scope > env pair**, and
+  `is_usable_tenant` (`tortoise/record_writer.py:875`) is the seam's own admissibility test, so the
+  decision that picks the store and the write that fills it cannot disagree about who the row
+  belongs to. A write the record cannot attribute keeps the turns in the graph, and a scratch buffer
+  is not a journal.
+
+Why it left: it spoke about where the work stood rather than about the design, and `#8542` keeps that
+in this file. Nothing mechanical forced the move — the class guard
+(`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
+refuses an issue-state claim adjacent to a `#NNN`, the narration of a change, and delivery spoken as
+delivery, and **none of its arms fires on that line** (measured on the removed text). The routing is
+the ground, and a reader should not expect a red to catch a similar sentence written again.
+
+The pins for the statements above are the carrier's own:
+`tests/test_10017_turn_carrier_replay.py::test_the_record_held_lane_journals_the_carrier_not_point_added`,
+`test_the_record_writes_one_ROW_per_turn_and_the_tier_goes_to_the_COLUMN`,
+`test_a_rebuild_from_the_carrier_journal_creates_no_turn_nodes`, the torn-tail arm
+`test_a_torn_tail_carrying_the_carrier_does_not_block_recovery`, and — for the tenant resolution that
+the store decision depends on — the capability arms in `tests/test_10000_turns_record_only.py`
+(a tenant CARRIED on the SDK arms the record-only lane; a tenant that cannot be named, and a scratch
+log, keep the turns in the graph).

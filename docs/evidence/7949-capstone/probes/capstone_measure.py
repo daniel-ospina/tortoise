@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 """The extractor-v4 capstone MEASUREMENT run (#9080 / epic #7949).
 
-⚠️ **This probe REFUSES (#4282, 2026-10-27).** Its entry point,
-``TortoiseSDK.capture_session``, was one of the 26 dead public SDK methods the owner authorised
-deleting, so ``run_corpus`` refuses BY NAME before it starts rather than raising
-``AttributeError`` on the first session. The scores below therefore stand as the last MEASURED
-reading at ``e0fc940b5``, not as a reproducible one. ⚠️ #9116's seam has since LANDED
-(``stats["step_witness"]``, copied at the ``_extract_session_v2`` meta fold), so S2.2/S2.3 are
-now observable through a receipt — but only through a receipt, and the only public producer of one
-was the deleted method. Re-registering a measurement against the surviving private door
-(``sdk._extract_session_v2``, which the hosted ``POST /v1/sessions`` handler still reaches) is a
-NEW instrument with its own pre-registration, not a re-run of this one.
-
 ``capstone_run.py`` (same directory) is the instrument that ships with PR #9089. It
 drove ``TortoiseSDK.capture_session`` — the real entry point — and then read four
 step witnesses off the RECEIPT that the receipt does not carry (#9116), so it
@@ -70,7 +59,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
 ``result["vet"]`` at ``:8975-8979``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:13438``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:13441``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -223,9 +212,9 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/projection/edges.py:2573-2598``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13724`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13727`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -239,13 +228,13 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/projection/edges.py:2573-2598 link_source_to_event, reached from "
+    "tortoise/projection/edges.py:2832-2857 link_source_to_event, reached from "
     f"the capture path at {LINK_SOURCE_CITE} "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
-    "DERIVATION LINK (tortoise/projection/edges.py:614-622 "
+    "DERIVATION LINK (tortoise/projection/edges.py:774-782 "
     "_anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels "
-    "are _DERIVATION_REFERENCES_LABELS (edges.py:587: Event, Document). A "
+    "are _DERIVATION_REFERENCES_LABELS (edges.py:747: Event, Document). A "
     "Source->Object link is identity/mention and carries none BY DESIGN (owner "
     "option A, #5199; #9736)"
 )
@@ -268,7 +257,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2401`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2404`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -811,13 +800,10 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
             "`TortoiseSDK.capture_session`, the entry point this probe drives. No pass "
             "can be driven through a deleted door, so no row may be re-measured: the "
             "scores in the bundle stand as the last MEASURED reading at `e0fc940b5`, not "
-            "as a reproducible one — and they would still read the same if re-run, "
-            "because #9116's seam (`stats[\"step_witness\"]`, copied at the "
-            "`_extract_session_v2` meta fold) is what made S2.2/S2.3 observable through "
-            "the receipt at all. The surviving in-process door is the private "
-            "`sdk._extract_session_v2(conversation, session_id, now)`, which the hosted "
-            "POST /v1/sessions handler still reaches — a measurement against THAT door "
-            "needs its own instrument and its own pre-registration.")
+            "as a reproducible one. #9116's seam (`stats[\"step_witness\"]`) survives "
+            "inside `_extract_session_v2` — the surviving in-process door, which the "
+            "hosted POST /v1/sessions handler still reaches — but a measurement against "
+            "THAT door needs its own instrument and its own pre-registration.")
     results = []
     for sid in sessions:
         fixture = load_fixture(sid)

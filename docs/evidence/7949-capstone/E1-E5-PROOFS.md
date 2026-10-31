@@ -174,10 +174,10 @@ sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`)
 here so "swept" is never read into a number nothing re-checks.
 
 The only entry point the capstone may drive WAS `TortoiseSDK.capture_session` (**DELETED by
-#4282**, 2026-10-27 — the probes refuse by name now, and the surviving in-process door is
-`sdk._extract_session_v2`, which the hosted handler still reaches). Its receipt folded the
-extractor's `stats` and `error_census` and nothing else — `tortoise/sdk.py:13438` is the meta fold
-that #9116 replaced with `_capture_stats_with_step_witness(...)` — while the extractor builds
+#4282**, 2026-10-27 — `capstone_measure.py` / `capstone_run.py` now refuse by name, and the
+surviving in-process door is `sdk._extract_session_v2`, which the hosted handler still reaches). Its
+receipt folds the extractor's `stats` and `error_census` and nothing else —
+`tortoise/sdk.py:13441` is the meta fold — while the extractor builds
 `result["classify_later"]` (`tortoise/extractor_v2.py:8965`) and `result["vet"]`
 (`tortoise/extractor_v2.py:8975`) on the extractor's OWN return.
 

@@ -40,10 +40,17 @@ def _now_iso() -> str:
 # journals as DirectEdgeRepoint descriptors because rebuild pass-2 re-creates
 # them at the OLD point from its immutable snapshot (extractedFrom prop +
 # aboutEntities list -> _upsert_point_edges / entities.py). They are the edges
-# whose resurrection the replay delete-leg must clean. aboutAction
-# (Action dissolved in Ontology v3.0), aboutSource, and wasDerivedFrom are NOT
-# derivable — never snapshot-recreated, never resurrect at old — so they get no
-# descriptor (emitting one would half-own the A10 raw-edge family by accident).
+# whose resurrection the replay delete-leg must clean. aboutSource,
+# aboutAction (Action dissolved in Ontology v3.0) and wasDerivedFrom are NOT
+# derivable — never snapshot-recreated, never resurrect at old. ⛔ Membership is
+# NOT the same question as "does 2b journal a descriptor for it": `aboutAction`
+# and `wasDerivedFrom` DO carry one since #9836, as the ID-ADDRESSED family
+# (`ID_ADDRESSED_STRUCTURAL_RELS` below — the target is keyed by its own
+# IDENTITY property, `ID_ADDRESSED_TARGET_ADDRESSING`: `id`, or `eventId` for an
+# `Event` — never by a natural key). A rel added here is one pass-2 RE-CREATES at
+# old; the
+# two properties are independent, and conflating them is what left that family
+# moved-but-unjournalled.
 DERIVABLE_STRUCTURAL_RELS = frozenset({
     'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint',
     'aboutDocument', 'extractedFrom',
@@ -139,6 +146,77 @@ def stub_key(rel: str, target: dict):
     if not isinstance(key, str) or not key:
         return None
     return (label, key)
+
+
+def id_addressed_target(labels, target: dict):
+    """The ``(label, key)`` a repoint descriptor addresses its target by.
+
+    The id-addressed twin of :func:`stub_key` (#9836). ``labels`` is the target
+    node's label list (the 2b SELECT's ``labels(target)``) and ``target`` its
+    property map; the result is the label the node is filed under on BOTH replay
+    routes and the key they address it by — which is :data:`EPISTEMIC_LABEL_ORDER`
+    for an epistemic node and ``Source`` (a URL) for a provenance/document node.
+
+    ⛔ ONE identity rule for both routes, and it is the tree's existing one, not
+    this helper's invention: the label is chosen in
+    :data:`EPISTEMIC_LABEL_ORDER` (Point-first, the fold's own sweep order, so a
+    multi-labelled node resolves the same way the 2a-DIRECT transfer resolves it)
+    and the key is that label's OWN identity property
+    (:data:`ID_ADDRESSED_TARGET_ADDRESSING`) — ``id`` for Point/Subject/Object and
+    ``eventId`` for **Event**, which is the property the record already files an
+    Event under (``public.event.node_key = event_id``
+    ``chk_event_node_key_is_contract_key``, matched by
+    ``record_projection._ENTITY_MATCH_COLUMNS['event'] = ('node_key',)``) and the
+    property the fold declares as an Event's PRIMARY identity
+    (``projection._CANONICAL_ENTITY_ID_PROPS``). The label and the key move
+    TOGETHER, exactly as :func:`stub_key`'s docstring warns for the name-keyed
+    family.
+
+    ⛔ ``eventId`` RATHER THAN ``id`` FOR EVENT, and this is not a detail. The
+    meeting guard (``entities._event_guarded_merge``) MERGEs its SUFFIX branch on
+    ``eventId`` while the props it writes keep ``id = <candidate>`` — so two
+    distinct Events of one candidate BOTH carry the candidate in ``id``
+    (``tortoise/live.py::EPISTEMIC_ID_KEYS`` states the same and forbids using
+    the coalesced value as an identity). Keying an Event descriptor on ``id``
+    therefore names no identity: the graph's replay finds 2 nodes and refuses,
+    and the record's ``node_key`` lookup names the other one. ``eventId`` is what
+    makes the two routes single-valued again, and what lets each row of the 2b
+    transfer keep its own target.
+
+    ⛔ A ``:Source`` TARGET IS ADDRESSED, BY ITS ``url`` (#9836 review P1). The
+    id sweep above is about EPISTEMIC nodes, and an earlier revision of this
+    helper refused a Source on the false premise that "not addressable by id"
+    meant "not addressable": both routes already resolve a ``:Source`` by url —
+    the graph through :func:`resolve_structural_target`'s Source arm (the one
+    ``extractedFrom``/``aboutDocument`` use), the record through
+    ``public.source.node_key``, which IS a Source's url (`chk_source_node_key_is_
+    contract_key`) and is what `relation.tgt_key` holds for a Source target. So a Source target is journalled by the SAME key live's edge
+    carries (the node's ``url`` property, observed at the transfer), and the
+    addressing is a property of the LABEL (:data:`ID_ADDRESSED_TARGET_ADDRESSING`),
+    never of the descriptor.
+
+    Returns ``None`` — the caller must SKIP emission — only when the target is
+    neither epistemic (no addressable label, or a label whose identity property
+    is missing) NOR a ``:Source`` carrying a usable ``url``. Filing a descriptor
+    for such a node would make the record RICHER than the graph, the one
+    direction Interface A forbids. Such an edge still dies at rebuild, as it does
+    today; it is NOT half-journaled.
+    """
+    held = {str(label) for label in (labels or ())}
+    props = target or {}
+    for label in EPISTEMIC_LABEL_ORDER:
+        if label in held:
+            prop = ID_ADDRESSED_TARGET_ADDRESSING.get(label)
+            ident = props.get(prop) if prop is not None else None
+            if not isinstance(ident, str) or not ident:
+                return None
+            return (label, ident)
+    if "Source" in held:
+        url = (target or {}).get('url')
+        if not isinstance(url, str) or not url:
+            return None
+        return ("Source", url)
+    return None
 
 
 def _mint_subject_stub(g, name: str) -> None:
@@ -283,8 +361,33 @@ def _mint_source_stub(
 
 
 def resolve_structural_target(g, label: str, key: str, rel: str, *,
-                              mint: bool = True):
+                              mint: bool = True, by_id: bool = False,
+                              by_url: bool = False):
     """Resolve the label-scoped structural target node by its replay key.
+
+    ``by_id=True`` (#9836) switches the match from the label's NATURAL key
+    (`name`/`url`) to the node's OWN identity property
+    (:data:`ID_ADDRESSED_TARGET_ADDRESSING` — ``id``, or ``eventId`` for Event) —
+    the addressing the id-addressed repoint family uses, and the only one that
+    resolves for a target whose rel fixes no label (`wasDerivedFrom`) or whose
+    label has no natural key at all (a Point, the `aboutAction`/`aboutPoint`
+    shape). Callers pass ``by_id=True`` for exactly
+    :data:`ID_ADDRESSED_STRUCTURAL_RELS` — the flag is a per-REL property of the
+    descriptor, never a descriptor-supplied choice, so a forged journal cannot
+    ask for a different resolution; which PROPERTY the flag then matches is a
+    per-LABEL property, so a forged ``target_label`` cannot choose it either.
+
+    ``by_url=True`` (#9836 review P1) is the OTHER addressing of that same
+    family, for a ``:Source`` target: an exact ``MATCH (s:Source {url:$url})``
+    and nothing else. It differs from the ``label == "Source"`` arms below in
+    the two ways that matter for a REPLAY of an observed edge — it never mints
+    (a phantom Source mis-points the rebuilt edge, adversarial class B1) and it
+    never canonicalises through ``resolve_source_key`` (a write lane: the
+    descriptor already carries the ``url`` the live node HAS, so resolving
+    anything else could land the edge on a different node than live's transfer
+    did). Which of ``by_id``/``by_url`` applies is decided by the target LABEL
+    (:data:`ID_ADDRESSED_TARGET_ADDRESSING`), itself a fixed vocabulary — never
+    a descriptor-supplied choice.
 
     Create-if-missing semantics survive for ONE arm — ``extractedFrom``
     (Source): it MERGEs the provenance stub by ``url`` exactly as the live
@@ -338,6 +441,63 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
         raise RuntimeError(
             f"resolve_structural_target: unsafe label {label!r} "
             "(contract: STRUCTURAL_REL_LABELS values only)")
+    if by_url:
+        # #9836 — the URL-keyed arm of the id-addressed family (a `:Source`
+        # target). RESOLVE-ONLY and EXACT: the descriptor's key is the `url`
+        # property the live target node carried, so anything but an exact match
+        # could land the rebuilt edge on a different node than live's transfer
+        # did. `LIMIT 2` + the same #5509 discipline as the other two arms: a
+        # url held by two nodes names no identity (the MERGE key makes that
+        # shape unproducible live, so this is a defensive refusal, stated as
+        # such rather than measured).
+        rows = g.query(
+            f"MATCH (x:{label} {{url:$url}}) RETURN ID(x), x.id LIMIT 2",
+            params={"url": key}).result_set
+        if len(rows) > 1:
+            return _refuse_ambiguous_target(label, key, rows, rel)
+        if not rows:
+            return None
+        return {"internal": rows[0][0], "logical": rows[0][1]}
+    if by_id:
+        # #9836 — the id-addressed arm. RESOLVE-ONLY, exactly like every
+        # non-stubbable label below: the node's identity property is one its OWN
+        # creation record registered, so a miss means the journal never created
+        # it (or hard-deleted it), and minting one here would fabricate a node
+        # the live graph does not have. `LIMIT 2` + the same #5509 discipline as
+        # the name arm: a value held by two nodes of one label names no identity,
+        # and picking one would land the edge on a different node than live's
+        # transfer did.
+        #
+        # ⛔ #9836 review (P2): the match property is the LABEL's OWN
+        # (`ID_ADDRESSED_TARGET_ADDRESSING`) — ``eventId`` for Event, ``id`` for the
+        # rest — not ``id`` for every label. The earlier blanket ``{id:$id}`` was
+        # justified as "a live producer cannot create that shape for these rels",
+        # and that premise is FALSE in this tree for Event:
+        # ``entities._event_guarded_merge``'s SUFFIX branch MERGEs on the suffixed
+        # ``eventId`` while ``id`` keeps the candidate, so two distinct meeting
+        # Events legitimately share one ``id`` (``live.py::EPISTEMIC_ID_KEYS``
+        # states it). Under the blanket match this arm hit the ambiguity refusal
+        # and DROPPED the descriptor while live had already moved every edge, and
+        # the record — which files an Event under ``node_key`` = ``event_id`` —
+        # resolved a different Event than the graph had. Keying on the label's own
+        # identity makes the refusal genuinely defensive again (the graph's MERGE
+        # key IS ``eventId``) and puts both routes on the same node.
+        prop = ID_ADDRESSED_TARGET_ADDRESSING.get(label)
+        if prop is None or prop == "url":
+            # Not an ID-addressed label. `Source` IS addressable but by its
+            # `url`, i.e. through the ``by_url`` arm above — the caller picks the
+            # arm from the SAME map (:data:`ID_ADDRESSED_TARGET_ADDRESSING`), so
+            # reaching here with a url-scheme label means the caller passed the
+            # wrong flag; refuse rather than silently resolve under it.
+            return None
+        rows = g.query(
+            f"MATCH (x:{label} {{{prop}:$id}}) RETURN ID(x), x.{prop} LIMIT 2",
+            params={"id": key}).result_set
+        if len(rows) > 1:
+            return _refuse_ambiguous_target(label, key, rows, rel)
+        if not rows:
+            return None
+        return {"internal": rows[0][0], "logical": rows[0][1]}
     if label == "Subject":
         if mint:
             _mint_subject_stub(g, key)
@@ -1007,6 +1167,14 @@ def structural_edge_carrier(rel: str) -> str | None:
 RECORD_ADDRESSABLE_EDGE_LABELS = frozenset(
     {"Point", "Subject", "Object", "Event"})
 
+#: The same four labels as an ORDERED tuple. `EPISTEMIC_LABELS`
+#: (`tortoise/live.py`) is the fold's sweep order — Point-first — and the two
+#: must agree, because a node carrying two labels must resolve to the SAME one
+#: on the write, the transfer and both replay routes (the first-wins rule
+#: `_epistemic_label` applies in `sdk.supersede_point`'s 2a leg). Pinned to the
+#: fold's own tuple by `tests/test_9836_id_addressed_repoint.py`.
+EPISTEMIC_LABEL_ORDER = ("Point", "Subject", "Object", "Event")
+
 #: The structural predicates this lane now JOURNALS a `DirectEdgeCreated` for
 #: (#9553 class 4) — the whole lane write set, as a LITERAL: derived from
 #: `STRUCTURAL_EDGE_LANE_PREDICATES`, every assertion about it would be a
@@ -1092,6 +1260,97 @@ SUPERSEDE_TRANSFERRED_RELS = frozenset({
     "aboutSubject", "aboutObject", "aboutAction", "aboutEvent",
     "aboutPoint", "aboutDocument", "extractedFrom", "wasDerivedFrom",
 })
+
+#: The structural rels a supersede TRANSFERS whose target is addressed by the
+#: node's OWN `id`, not by a name/url natural key (#9836).
+#:
+#: ⛔ WHY THIS IS A SEPARATE FAMILY, and not two more rows in
+#: :data:`STRUCTURAL_REL_LABELS`. That map is `rel -> ONE label` and
+#: :func:`stub_key` reads the label's natural key off the target's properties
+#: (`name` for Subject/Object/Event/Point, `url` for Source). Both facts hold for
+#: the snapshot-derivable family and hold for NEITHER of these two:
+#:
+#:   * `aboutAction` is `Point -> Point` (ONTOLOGY §3.2, the legacy pre-v3.0
+#:     Action edge) and a Point has no `name` — `stub_key` cannot mint a key for
+#:     it, and the graph's `MATCH (x:Point {name:$key})` arm would never resolve
+#:     one, which is the `aboutPoint` defect #10313 owns;
+#:   * `wasDerivedFrom` is `Object -> Object` per ONTOLOGY §3.2, and its writers
+#:     do NOT type-check (`create_derivation` and `create_edge` accept any
+#:     resolvable pair), so its target label is not a function of the rel at all.
+#:
+#: Both are nevertheless MOVED by `supersede_point`'s 2b leg (they are in
+#: :data:`SUPERSEDE_TRANSFERRED_RELS`) and, because they are not snapshot-
+#: recreatable, neither `rebuild_all` pass-2 nor the `DirectEdgeCreated` fold puts
+#: them back at the old point. So the whole 2b contract — journal the move,
+#: replay the move — can be extended to them by addressing the target the way the
+#: rest of the tree addresses it: by `id` for an EPISTEMIC node (the same sweep
+#: the 2a-DIRECT leg runs, `EPISTEMIC_LABELS` on `p.id`) and by `url` for a
+#: `:Source` (:data:`ID_ADDRESSED_TARGET_ADDRESSING` — a Source's identity IS its
+#: url, and BOTH replay routes already resolve one that way). The descriptor
+#: therefore carries the label it OBSERVED LIVE in `target_label`, which is the
+#: field's own meaning on the structural route.
+#:
+#: ⛔ These are NOT in :data:`DERIVABLE_STRUCTURAL_RELS` and must never be added
+#: there: that set is the snapshot-resurrection set, and a member is an edge
+#: pass-2 re-creates at OLD from the point's immutable snapshot. Neither of these
+#: is ever snapshot-recreated, so claiming membership would make the replay's
+#: delete-leg guard reason about a resurrection that does not exist.
+ID_ADDRESSED_STRUCTURAL_RELS = frozenset({"aboutAction", "wasDerivedFrom"})
+
+#: label → HOW an ID-ADDRESSED descriptor's target is addressed (#9836): the
+#: label's OWN identity property. The pair the descriptor carries is
+#: ``(label, target[prop])``, and the SAME pair decides the graph's replay match
+#: (`resolve_structural_target(..., by_id=/by_url=)`) and the key the record
+#: resolves (`record_projection._endpoint_resolution` → the label's canonical
+#: column), so a label listed here cannot be addressed one way on the graph and
+#: another way in the record.
+#:
+#: ⛔ THE ADDRESSING IS A PROPERTY OF THE LABEL, NOT OF THE DESCRIPTOR, and the
+#: label set is fixed — so a forged journal cannot ask for a resolution scheme
+#: this map does not grant. It exists because "not addressable by `id`" is NOT
+#: "not addressable": a `:Source` has no interesting `id` to match (its identity
+#: is its `url`, `chk_source_node_key_is_contract_key`) and BOTH replay routes
+#: already resolve one by url — the graph through
+#: :func:`resolve_structural_target`'s ``by_url`` arm, the record through
+#: ``relations.tgt_key``, which holds the Source's ``node_key`` (= its url). An
+#: earlier revision of this lane read the id sweep's boundary as the family's
+#: boundary and DECLINED a `:Source` target; the edge then moved live and
+#: vanished on both rebuilds, which is the divergence class this lane exists to
+#: remove (review P1, measured).
+#:
+#: ⛔ ``Event`` → ``eventId``, EVERYTHING ELSE → ``id``, and the split is the
+#: tree's own, not this table's opinion:
+#:
+#:   * ``projection._CANONICAL_ENTITY_ID_PROPS`` declares ``eventId`` as the
+#:     Event family's PRIMARY identity and ``id`` for Point/Subject/Object;
+#:   * the record files an Event under ``node_key``, and
+#:     ``public.event.node_key = event_id`` is a NOT NULL CHECK
+#:     (``chk_event_node_key_is_contract_key``), while ``node_key`` IS the id for
+#:     Point/Session and the ``id`` column is the key for Object/Subject (#9881);
+#:   * ``live.EPISTEMIC_ID_KEYS`` says the two Event keys are NOT
+#:     interchangeable and that the coalesced value is not an identity.
+#:
+#: The Event row is the one that changes behaviour, and it changes it from broken
+#: to correct: `entities._event_guarded_merge`'s SUFFIX branch MERGEs on the
+#: suffixed ``eventId`` while the props keep ``id = <candidate>`` — so two distinct
+#: Events share one ``id``. Keying by ``id`` made the graph's replay see 2 nodes
+#: (refusal → the descriptor and its edge were dropped) and pointed the record at
+#: the OTHER Event's row; keying by ``eventId`` names exactly one node on both
+#: routes.
+ID_ADDRESSED_TARGET_ADDRESSING: dict[str, str] = {
+    "Point": "id",
+    "Subject": "id",
+    "Object": "id",
+    "Event": "eventId",
+    "Source": "url",
+}
+
+#: Every structural rel whose 2b transfer carries a `DirectEdgeRepoint`
+#: descriptor — the SNAPSHOT-DERIVABLE family (key-addressed) plus the
+#: ID-ADDRESSED family (#9836). This is the REPLAY leg's discriminator: the branch
+#: that reads a descriptor's `tgt` as a target key rather than as a bare node id.
+STRUCTURAL_REPOINT_RELS = (DERIVABLE_STRUCTURAL_RELS
+                           | ID_ADDRESSED_STRUCTURAL_RELS)
 
 
 #: Logged once per relation, not once per write: the decline is a DECLARED gap
