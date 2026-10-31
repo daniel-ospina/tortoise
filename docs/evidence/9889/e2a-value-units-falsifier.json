@@ -1,0 +1,192 @@
+{
+ "as_written": {
+  "graph": "capstone_on_54922a800_1793378318",
+  "injected_anchor": false,
+  "value_units": 14,
+  "value_survived": 8,
+  "bar": ">= 13 of 14",
+  "per_session": {
+   "wp01_quarry_debug": {
+    "memory_points": 31,
+    "value_ids": [
+     "wp01_quarry_debug_u_01",
+     "wp01_quarry_debug_u_11",
+     "wp01_quarry_debug_u_15",
+     "wp01_quarry_debug_u_16"
+    ],
+    "value_survived": [
+     "wp01_quarry_debug_u_01",
+     "wp01_quarry_debug_u_15",
+     "wp01_quarry_debug_u_16"
+    ],
+    "value_lost": [
+     "wp01_quarry_debug_u_11"
+    ],
+    "strict_all": "12/16"
+   },
+   "wp02_lumen_refactor": {
+    "memory_points": 28,
+    "value_ids": [],
+    "value_survived": [],
+    "value_lost": [],
+    "strict_all": "5/13"
+   },
+   "wp03_ember_design": {
+    "memory_points": 14,
+    "value_ids": [
+     "wp03_ember_design_u_13"
+    ],
+    "value_survived": [
+     "wp03_ember_design_u_13"
+    ],
+    "value_lost": [],
+    "strict_all": "8/15"
+   },
+   "wp04_aurora_perf": {
+    "memory_points": 23,
+    "value_ids": [
+     "wp04_aurora_perf_u_01",
+     "wp04_aurora_perf_u_02",
+     "wp04_aurora_perf_u_12"
+    ],
+    "value_survived": [],
+    "value_lost": [
+     "wp04_aurora_perf_u_01",
+     "wp04_aurora_perf_u_02",
+     "wp04_aurora_perf_u_12"
+    ],
+    "strict_all": "8/13"
+   },
+   "wp05_retro_writeup": {
+    "memory_points": 23,
+    "value_ids": [
+     "wp05_retro_writeup_u_02",
+     "wp05_retro_writeup_u_03",
+     "wp05_retro_writeup_u_06",
+     "wp05_retro_writeup_u_10",
+     "wp05_retro_writeup_u_11",
+     "wp05_retro_writeup_u_12"
+    ],
+    "value_survived": [
+     "wp05_retro_writeup_u_02",
+     "wp05_retro_writeup_u_10",
+     "wp05_retro_writeup_u_11",
+     "wp05_retro_writeup_u_12"
+    ],
+    "value_lost": [
+     "wp05_retro_writeup_u_03",
+     "wp05_retro_writeup_u_06"
+    ],
+    "strict_all": "10/15"
+   },
+   "wp06_quarry_rollout": {
+    "memory_points": 16,
+    "value_ids": [],
+    "value_survived": [],
+    "value_lost": [],
+    "strict_all": "4/9"
+   },
+   "wp07_bluepeak_followup": {
+    "memory_points": 21,
+    "value_ids": [],
+    "value_survived": [],
+    "value_lost": [],
+    "strict_all": "2/9"
+   }
+  }
+ },
+ "with_anchor": {
+  "graph": "capstone_on_54922a800_1793378318",
+  "injected_anchor": true,
+  "value_units": 14,
+  "value_survived": 14,
+  "bar": ">= 13 of 14",
+  "per_session": {
+   "wp01_quarry_debug": {
+    "memory_points": 31,
+    "value_ids": [
+     "wp01_quarry_debug_u_01",
+     "wp01_quarry_debug_u_11",
+     "wp01_quarry_debug_u_15",
+     "wp01_quarry_debug_u_16"
+    ],
+    "value_survived": [
+     "wp01_quarry_debug_u_01",
+     "wp01_quarry_debug_u_11",
+     "wp01_quarry_debug_u_15",
+     "wp01_quarry_debug_u_16"
+    ],
+    "value_lost": [],
+    "strict_all": "12/16"
+   },
+   "wp02_lumen_refactor": {
+    "memory_points": 28,
+    "value_ids": [],
+    "value_survived": [],
+    "value_lost": [],
+    "strict_all": "5/13"
+   },
+   "wp03_ember_design": {
+    "memory_points": 14,
+    "value_ids": [
+     "wp03_ember_design_u_13"
+    ],
+    "value_survived": [
+     "wp03_ember_design_u_13"
+    ],
+    "value_lost": [],
+    "strict_all": "8/15"
+   },
+   "wp04_aurora_perf": {
+    "memory_points": 23,
+    "value_ids": [
+     "wp04_aurora_perf_u_01",
+     "wp04_aurora_perf_u_02",
+     "wp04_aurora_perf_u_12"
+    ],
+    "value_survived": [
+     "wp04_aurora_perf_u_01",
+     "wp04_aurora_perf_u_02",
+     "wp04_aurora_perf_u_12"
+    ],
+    "value_lost": [],
+    "strict_all": "8/13"
+   },
+   "wp05_retro_writeup": {
+    "memory_points": 23,
+    "value_ids": [
+     "wp05_retro_writeup_u_02",
+     "wp05_retro_writeup_u_03",
+     "wp05_retro_writeup_u_06",
+     "wp05_retro_writeup_u_10",
+     "wp05_retro_writeup_u_11",
+     "wp05_retro_writeup_u_12"
+    ],
+    "value_survived": [
+     "wp05_retro_writeup_u_02",
+     "wp05_retro_writeup_u_03",
+     "wp05_retro_writeup_u_06",
+     "wp05_retro_writeup_u_10",
+     "wp05_retro_writeup_u_11",
+     "wp05_retro_writeup_u_12"
+    ],
+    "value_lost": [],
+    "strict_all": "10/15"
+   },
+   "wp06_quarry_rollout": {
+    "memory_points": 16,
+    "value_ids": [],
+    "value_survived": [],
+    "value_lost": [],
+    "strict_all": "4/9"
+   },
+   "wp07_bluepeak_followup": {
+    "memory_points": 21,
+    "value_ids": [],
+    "value_survived": [],
+    "value_lost": [],
+    "strict_all": "2/9"
+   }
+  }
+ }
+}

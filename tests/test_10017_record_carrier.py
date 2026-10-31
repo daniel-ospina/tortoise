@@ -10,10 +10,11 @@ worse ambiguity than the duplication the ruling removes.
 
 WHAT IS PINNED HERE, AND WHY EACH PIN CAN FAIL
 ==============================================
-§1 the CARRIER is DECLARED in every registry a journal type is declared in, and
-   is deliberately ABSENT from `log.TORN_TAIL_HARMLESS_EVENT_TYPES` — including
-   the `EntityMutated` hard delete the stale sweep uses, which must stay refused
-   for the same reason (`#10017` step 5).
+§1 the CARRIER is DECLARED in every registry a journal type is declared in; it
+   IS in `log.TORN_TAIL_HARMLESS_EVENT_TYPES` (step 7's settled answer to the
+   placeholder #10129 left — see the test), while the `EntityMutated` hard
+   delete the stale sweep uses must stay REFUSED, because a tolerated torn
+   delete is a resurrection (`#10017` step 5).
 §2 the PAYLOAD is the WRITER'S OWN: the per-turn snapshot `sdk._write_capture_turns`
    builds today, read off a REAL capture, with `contains_session` on the event
    envelope (#3947) and nothing added. Step 7 is then a move, not a reshape.
@@ -29,12 +30,13 @@ WHAT IS PINNED HERE, AND WHY EACH PIN CAN FAIL
    rebuild never had it as a node, and the record's hard-delete record removes
    its row — so neither route resurrects it.
 
-⛔ WHAT THIS FILE DOES NOT CLAIM. Nothing emits `TurnsRecorded` yet: step 7 turns
-the producer over in its own change (this one is deliberately INERT, so the
-capture writer's per-turn `PointAdded` path is untouched). The journal replayed
-in §3/§5 is therefore built from a REAL capture whose turn records are moved onto
-the carrier by this file — the snapshots are the producer's, the carriage is the
-thing under test.
+⛔ WHAT THIS FILE DOES NOT CLAIM. `_write_capture_turns` IS the producer since
+#10017's step 7 — but on the RECORD-ARMED lane only, where an unarmed capture's
+per-turn `PointAdded` path is untouched (#10000's capability rule). The journal
+replayed here is therefore built from a REAL unarmed capture whose turn records
+are moved onto the carrier by this file, so the snapshots are the producer's and
+the CARRIAGE is the thing under test; `tests/test_10017_turn_carrier_replay.py`
+is the file that reads the carrier off an armed capture directly.
 """
 from __future__ import annotations
 
@@ -216,35 +218,62 @@ def test_the_carrier_is_declared_wherever_a_journal_type_is():
     assert rp.TURNS_RECORD_TYPE in _NO_POINT_FOLD
 
 
-def test_the_carrier_declares_no_record_statement_at_all():
-    """`NoRecordEffect` is a decision with a reason, and it produces NOTHING.
+def test_the_carrier_declares_no_NODE_but_does_write_the_ROWS():
+    """`NoRecordEffect` is a decision about the NODE, and step 7 supplies the ROW.
 
-    A "no node effect" that still emitted a row would be a second home invented
-    without a decision — §9.1's record home for the turns is `public.point`,
-    which step 7 writes as its own column statement, not a payload path.
+    A "no node effect" that emitted nothing at all would lose the transcript:
+    §9.1's record home for the turns is `public.point`, and the per-turn
+    `PointAdded` records the carrier replaces were the write that put them
+    there. So the node half stays empty and the HOME half is the carrier-keyed
+    `_turn_row_statements` — one row per turn, `cache_tier = 'record_only'`, plus
+    the `node_identity` row that row's `relation` FK needs (which is identity
+    bookkeeping, not a graph node — see the `⚠️` below).
     """
-    carrier = _carrier([{"id": f"{SESSION}_t0", "content": "c",
-                         "pointKind": "event", "speaker": "user",
-                         "is_episodic": True, "status": "draft",
-                         "createdAt": NOW, "embedding": None}])
-    assert rp.mutations_for(carrier, org_id="o", graph_id="g") == []
+    snap = {"id": f"{SESSION}_t0", "content": "c",
+            "pointKind": "event", "speaker": "user",
+            "is_episodic": True, "status": "draft",
+            "createdAt": NOW, "embedding": None}
+    carrier = _carrier([snap])
     plan = rp.replay_plan([carrier], org_id="o", graph_id="g")
-    assert not any("node_identity" in st.sql for st in plan), (
-        "the carrier materialised a node in the record's own plan")
+    assert [st for st in plan if st.sql.startswith("INSERT INTO public.point")], (
+        "the carrier wrote no turn row — a producer turnover without this "
+        "leaves the capture's turns in no store at all")
+    # ⚠️ A `node_identity` row IS written, and it is not a graph node: the
+    # record's node list comes from the node TABLES (`read_record_view`), and
+    # the identity row is the FK anchor the turn's `relation` row needs — the
+    # same rows the per-turn `PointAdded` lane wrote. What §4 pins is that the
+    # READER plans no node for the row, which is the property that matters (and
+    # which `tests/test_10017_cache_tier.py`'s reader leg measures).
+    #
+    # ⛔ There is no `assert not any("INSERT INTO public.node" ...)` here: no
+    # migration creates a `public.node` table, so that string cannot appear in
+    # any plan — the assertion could not fail, and it would have passed
+    # identically on the pre-fix code. A guard that cannot fire is worse than
+    # none: it reads as coverage.
+    assert sum("INSERT INTO public.point" in st.sql for st in plan) == 1, (
+        "the carrier wrote something other than one turn row per turn")
+    # …and the DECLARED effect stays `NoRecordEffect`: a `NodeSnapshot` here
+    # would be a second node-creating path the graph fold does not have.
+    assert isinstance(rp.RECORD_MUTATIONS[rp.TURNS_RECORD_TYPE].effect,
+                      rp.NoRecordEffect)
 
 
-def test_a_torn_carrier_line_is_REFUSED_and_so_is_the_stale_sweep_delete():
-    """The polarity, and the symmetry that would break it.
+def test_the_carrier_is_TOLERATED_as_a_torn_tail_and_the_DELETE_is_not():
+    """The polarity — SETTLED by step 7, which is what #10129 left it for.
 
-    "`SessionNarrated` is harmless, so its sibling is too" is wrong: the
-    narrative carrier's record home is one row of SUMMARY text, while the turn
-    carrier IS the transcript — a torn `TurnsRecorded` line drops a capture's
-    turn set. So it must NOT be in the allowlist, and the classification is
-    asserted through the classifier rather than by reading the set twice.
+    #10129 declared this a PLACEHOLDER and named the two things that decide it:
+    the WRITE ORDER, and whether the turns survive in the record when the append
+    tears. Measured: `_emit_event` returns on an append failure BEFORE
+    `_write_record_projection` runs, so a torn carrier means that capture's turn
+    rows never reached the record either — refusing the tail recovers nothing
+    for it, while `recover_from_log` then refuses the WHOLE journal
+    (`recovered=False, nodes=0`). The carrier is ADDITIVE, so the revival class
+    this list exists for (a torn DELETE resurrecting removed state) cannot be
+    expressed by it.
     """
-    assert rp.TURNS_RECORD_TYPE not in tlog.TORN_TAIL_HARMLESS_EVENT_TYPES
+    assert rp.TURNS_RECORD_TYPE in tlog.TORN_TAIL_HARMLESS_EVENT_TYPES
     torn = '{"event_id": "e", "ts": "T", "type": "TurnsRecorded", "turns": [{"id"'
-    assert tlog.torn_record_may_revive_state(torn) is True
+    assert tlog.torn_record_may_revive_state(torn) is False
     # The stale-turn purge is a HARD DELETE: a torn one loses the removal and a
     # replay resurrects the turns. `EntityMutated` must stay out of the set —
     # which is the same statement as "the delete itself is never tolerated".
@@ -255,6 +284,35 @@ def test_a_torn_carrier_line_is_REFUSED_and_so_is_the_stale_sweep_delete():
 
 
 # ── §2 the payload is the WRITER'S, not a fixture's ────────────────────────
+
+
+def _assert_snapshot_contract(snapshot: dict, *, optional=frozenset(),
+                             context: str = "") -> None:
+    """Assert ONE journalled turn snapshot against the declared key contract.
+
+    ``TURNS_SNAPSHOT_KEYS`` is the ALWAYS set, ``TURNS_SNAPSHOT_OPTIONAL_KEYS``
+    the at-most-one-branch set, and ``TURNS_SNAPSHOT_UNATTESTABLE_KEYS`` the pair a
+    capture MAY omit TOGETHER when its prior-row read could not attest the stored
+    values (#10021 review P3). Asserting plain equality here made the
+    unattestable arm red with "the writer's per-turn snapshot changed" — a
+    message naming the wrong cause — so the pin is stated as the contract.
+    """
+    keys = set(snapshot)
+    allowed = rp.TURNS_SNAPSHOT_KEYS | optional
+    assert not (keys - allowed), (
+        f"{context}: the writer's per-turn snapshot gained {sorted(keys - allowed)}; "
+        "TURNS_SNAPSHOT_KEYS is the contract step 7 inherits, so both move together")
+    assert keys >= (rp.TURNS_SNAPSHOT_KEYS - rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS), (
+        f"{context}: the snapshot lost {sorted((rp.TURNS_SNAPSHOT_KEYS - rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS) - keys)} — "
+        "only the unattestable pair may be absent")
+    omitted = keys & rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS
+    assert omitted in (set(), set(rp.TURNS_SNAPSHOT_UNATTESTABLE_KEYS)), (
+        f"{context}: {sorted(omitted)} — the unattestable pair is omitted "
+        "TOGETHER or not at all (a half-omitted snapshot leaves one column "
+        "asserting what the other refuses to)")
+    assert not (keys & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS - optional), (
+        f"{context}: the optional branch {sorted((keys & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS) - optional)} "
+        "has no business in this snapshot")
 
 
 def test_the_carrier_payload_keys_are_the_ones_the_capture_writer_builds(sdk):
@@ -275,12 +333,7 @@ def test_the_carrier_payload_keys_are_the_ones_the_capture_writer_builds(sdk):
         f"{len(TURNS)} turn(s) — the population under test is wrong")
     for record in envelope:
         snapshot = record["point"]
-        assert set(snapshot) == rp.TURNS_SNAPSHOT_KEYS, (
-            "the writer's per-turn snapshot changed; TURNS_SNAPSHOT_KEYS is the "
-            "contract step 7 inherits, so both move together")
-        assert not set(snapshot) & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS, (
-            "a fresh capture encoded no vector and preserved none, so the "
-            "optional key has no business here")
+        _assert_snapshot_contract(snapshot, context="a fresh no-vector capture")
         assert "contains_session" not in snapshot, (
             "the session link must ride the EVENT ENVELOPE (#3947), not the "
             "point payload — a node property the live write never sets")
@@ -313,12 +366,10 @@ def test_the_encoded_vector_branch_carries_its_identity_STAMPS(sdk):
         turn_embs=[[0.1, 0.2], [0.3, 0.4]], turn_offset=2)
     encoded = _turn_snapshots(path)[-len(TURNS):]
     assert len(encoded) == len(TURNS)
-    expected = rp.TURNS_SNAPSHOT_KEYS | {
-        "embedding_model", "embedding_revision", "embedding_text_hash"}
+    expected = {"embedding_model", "embedding_revision", "embedding_text_hash"}
     for snapshot in encoded:
-        assert set(snapshot) == expected, (
-            "the encoded-vector snapshot's key set changed; step 7's carrier "
-            "contract moves with it")
+        _assert_snapshot_contract(
+            snapshot, optional=expected, context="an encoded-vector capture")
         assert snapshot["embedding"], "the encoded vector did not ride"
         assert snapshot["embedding_text_hash"], (
             "the stamp must name the text the vector describes (#4194)")
@@ -345,9 +396,11 @@ def test_a_PRESERVED_vector_carries_the_flag_and_withholds_the_identity(sdk):
     preserved = _turn_snapshots(path)[-len(TURNS):]
     assert len(preserved) == len(TURNS)
     for snapshot in preserved:
-        assert set(snapshot) == rp.TURNS_SNAPSHOT_KEYS | {"embedding_preserved"}, (
+        _assert_snapshot_contract(snapshot, optional={"embedding_preserved"},
+                                  context="a preserved-vector capture")
+        assert "embedding_preserved" in snapshot, (
             f"the preserved-vector snapshot is {sorted(snapshot)} — the flag "
-            "and the identity stamps are mutually exclusive branches")
+            "must ride; the identity stamps are the other branch")
         assert snapshot["embedding"], "the prior vector was not carried"
 
 
@@ -426,17 +479,16 @@ def test_neither_replay_engine_creates_a_turn_node(
 def _record_rows(snaps, tier: str = "record_only") -> list[dict]:
     """The `public.point` row step 7's writer must write for one carrier turn.
 
-    ⛔ THIS IS A MODEL OF THE ROW, and the disclosure matters: the declared effect
-    for this type is `NoRecordEffect` (`record_projection.RECORD_MUTATIONS`), so
-    nothing projects rows from a carrier TODAY. What §4/§5 below pin is the ROW
-    CONTRACT and the READER's decision on it — not the row WRITE. A step-7
-    producer that emitted the carrier and forgot the `cache_tier = 'record_only'`
-    column statement would still store and serve the turns (the row lands at the
-    schema DEFAULT 'graph'), and no assertion here would see it — the damage is
-    the SILENT one this file exists to prevent: `read_record_view` would
-    node-ify the turns the journal route creates none of, i.e. the two rebuild
-    routes diverge with no error anywhere. That pin belongs to the change that
-    writes the rows.
+    ⛔ THIS IS A MODEL OF THE ROW, and the disclosure matters: what §4/§5 below
+    pin is the ROW CONTRACT and the READER's decision on it, not the row WRITE.
+    The row WRITE is step 7's and is pinned where it lives —
+    `record_projection._turn_row_statements`, one `public.point` row per turn at
+    `cache_tier = 'record_only'`, asserted in
+    `tests/test_10017_turn_carrier_replay.py`
+    (`test_the_record_writes_one_ROW_per_turn_and_the_tier_goes_to_the_COLUMN`)
+    and in the tier suite. Modelled here so the READER half can be exercised with
+    a row this file controls — including the `'graph'` control row that proves
+    the assertion is about the TIER and not about an empty view.
 
     Only what `read_record_view` reads is built: identity, `is_episodic`, the tier
     as the row's own COLUMN (#10070: it cannot ride the payload — the strip

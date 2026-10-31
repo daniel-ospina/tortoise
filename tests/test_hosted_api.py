@@ -4131,6 +4131,79 @@ class TestSessionList:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+class _ScopedRecordConn:
+    """A record connection that can CARRY THE TENANT SCOPE the shared read installs.
+
+    ⛔ WHY THIS EXISTS (#10021 review P1). `get_session_detail` no longer calls
+    `record_read._turns` directly: it calls `record_read.session_turns`, whose
+    FIRST statement is `scope_connection(conn, org_id)` — a `set_config` plus a
+    read-back of the GUC and of the role's RLS posture (`record_projection`).
+    The doubles these legs used had only `close()`, so that line raised
+    `AttributeError`, the door's fail-soft arm read it as "the record did not
+    answer", and both legs stopped testing the rule they name (measured at head
+    `a100a4430`: `2 failed`, both `'_Conn' object has no attribute 'cursor'`).
+
+    The cursor ECHOES the tenant it was handed, so the real `scope_connection`
+    verification passes, and answers NO rows otherwise — these legs supply the
+    record's answer through their own `_turns` stub and assert the door's use of
+    it. The scope INSTALL itself is pinned against an RLS-modelling connection in
+    `tests/test_10000_turns_record_only.py`
+    (`test_the_turn_read_is_scoped_so_rls_cannot_empty_it`), not here; what a leg
+    asserting `statements` buys is that a door which STOPPED scoping reddens
+    instead of passing on a double that never asked.
+    """
+
+    def __init__(self, *, narrative=()):
+        self.tenant = None
+        #: The `session_narrative` rows this connection answers with — the
+        #: record's OWN account of `turn_count`, which the shared read needs to
+        #: tell a COMPLETE answer from a short one.
+        self.narrative = tuple(narrative)
+        self.statements: list[str] = []
+
+    def cursor(self):
+        return _ScopedRecordCursor(self)
+
+    def close(self):
+        pass
+
+
+class _ScopedRecordCursor:
+    """The two `scope_connection` statements, the narrative row, and nothing else."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._rows: list = []
+
+    def execute(self, sql, params=()):
+        from tortoise.record_projection import TENANT_GUC_SQL, TENANT_SCOPE_SQL
+
+        flat = " ".join(sql.split())
+        self._conn.statements.append(flat)
+        if flat == " ".join(TENANT_GUC_SQL.split()):
+            self._conn.tenant = params[0]
+            self._rows = [("",)]
+        elif flat == " ".join(TENANT_SCOPE_SQL.split()):
+            # `bypassing is False` is the posture the real read-back must
+            # report; the tenant is the one this connection was just scoped to.
+            self._rows = [{"tenant": self._conn.tenant, "bypassing": False}]
+        elif "FROM public.session_narrative" in flat:
+            self._rows = list(self._conn.narrative)
+        else:
+            # No turn row: the legs stub `_turns` themselves.
+            self._rows = []
+        return None
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def close(self):
+        return None
+
+
 class TestSessionDetail:
     """GET /v1/sessions/{session_id} — session detail (#714)."""
 
@@ -4211,7 +4284,14 @@ class TestSessionDetail:
 
         # The record is ARMED (the read door's own predicate) and the graph holds
         # only the Session's counters — the armed shape, asserted.
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
         proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
         proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
@@ -4236,11 +4316,8 @@ class TestSessionDetail:
         # refusal fires only when the caller would otherwise be told "no turns".
         from tortoise.record_read import Turn
 
-        class _Conn:
-            def close(self):
-                pass
-
-        monkeypatch.setattr(ha, "_open_record", lambda: _Conn())
+        conn = _ScopedRecordConn()
+        monkeypatch.setattr(ha, "_open_record", lambda: conn)
         monkeypatch.setattr(ha._record_read, "_turns", lambda *_a, **_k: [
             Turn(turn_id=f"{sid}_t0", index=0,
                  content="[user] We decided to use FalkorDB.",
@@ -4251,6 +4328,11 @@ class TestSessionDetail:
         ok = client.get(f"/v1/sessions/{sid}")
         assert ok.status_code == 200, ok.text
         assert len(ok.json()["turn_points"]) == 2, ok.json()["turn_points"]
+        assert any("set_config" in s for s in conn.statements), (
+            "the door read the record's turns without installing the tenant "
+            "scope — under the production role that read is EMPTY, not an "
+            "error, so 'the record did not answer' and 'the record holds "
+            "nothing' become the same answer (#10000 review P0-1)")
 
     def test_detail_still_serves_the_graph_copy_when_the_record_cannot_answer(
             self, client, monkeypatch):
@@ -4288,9 +4370,16 @@ class TestSessionDetail:
 
         # ARMED for the READ only: the capture above already landed the graph
         # copy, which is the pre-arming state #1591 protects.
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True, (
-            "the armed read predicate is false — this test would pass without "
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None, (
+            "the read door resolves no record tenant — this test would pass without "
             "exercising the fallback at all")
         monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
             RuntimeError("the record is unreachable")))
@@ -4310,23 +4399,35 @@ class TestSessionDetail:
 
         The sibling tests cover the two obvious states — the graph copy is
         EMPTY (refuse) and the graph copy is COMPLETE (serve). This one is the
-        third, and it is the state an ordinary arming day leaves behind:
-        `sdk._write_capture_turns`' stale-turn sweep is gated on the write
-        predicate (`sdk.py:2696`, `if stale and not _record_holds_turns`), so a
-        session captured BEFORE arming and re-captured after it keeps its old,
-        SHORTER turn nodes and NOTHING removes them. With the record then
-        unreachable, the fallback yields 2 turn_points while the response's own
-        `turns` (the Session's `turn_count`) says 4 — the caller cannot tell the
-        transcript is short, and the body even contradicts itself.
+        third, and its shape is still reachable at this head by a route that is
+        NOT the sweep's gate (that gate is gone: `_write_capture_turns` now
+        takes the sweep's ids from BOTH stores — `_record_turn_residue`
+        (the record's own rows) beside `prior_graph_turns` (the graph's own
+        `CONTAINS`-wired turn ids) — and issues the graph
+        `DETACH DELETE` under a bare `if stale:`). The route is the WRITE ORDER:
+        `_write_session_and_turns` MERGEs the `:Session` (its `turn_count`
+        included) BEFORE it calls `_write_capture_turns`, so any failure in the
+        turn statement after that MERGE — a graph write that exhausts its
+        retries, or a per-turn fallback that lands only part of the unrecorded
+        window — leaves a session DECLARING 4 turns while the graph holds fewer.
+        The READ door's refusal must not depend on the writer having succeeded,
+        which is why this arm is pinned rather than assumed unreachable.
+
+        With the record then unreachable, the fallback yields 2 turn_points
+        while the response's own `turns` (the Session's `turn_count`) says 4 —
+        the caller cannot tell the transcript is short, and the body even
+        contradicts itself.
 
         The fixture patches the SDK init so captured turns land in the GRAPH, so
-        the armed re-capture cannot be replayed end to end here. The state it
+        the armed capture cannot be replayed end to end here. The state it
         leaves is reproduced directly and ASSERTED: `turn_count` 4 on the
         Session, with the last two turn nodes removed so the copy is a strict
         prefix (ids `_t0`/`_t1`).
 
-        Mutation: restore `and not turns` (test only emptiness) — this REDs on
-        the 200, which is the silent truncation.
+        Mutation: drop the `served < expected` arm of
+        `record_read.served_turn_count` — or restore the old emptiness-only test
+        (`and not turns`) beside it — and this REDs on the 200, which is the
+        silent truncation.
         """
         sid = "detail-record-down-stale-prefix"
         r = client.post("/v1/sessions", json={
@@ -4360,9 +4461,16 @@ class TestSessionDetail:
         assert nodes[0][0] == 2, nodes
         assert counts[0][0] == 4, counts
 
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True, (
-            "the armed read predicate is false — this test would not reach the "
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None, (
+            "the read door resolves no record tenant — this test would not reach the "
             "fallback arm at all")
         monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
             RuntimeError("the record is unreachable")))
@@ -4406,9 +4514,16 @@ class TestSessionDetail:
             params={"sid": sid}).result_set
         assert counts[0][0] == 0, counts
 
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True, (
-            "the armed read predicate is false — this test would not reach the "
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None, (
+            "the read door resolves no record tenant — this test would not reach the "
             "fallback arm at all")
         monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
             RuntimeError("the record is unreachable")))
@@ -4426,15 +4541,26 @@ class TestSessionDetail:
         session's own count is a transcript the session no longer has.
 
         `<` saw only truncation, so the direction the guard could not see is the
-        one that survived: the stale-turn sweep is gated on the write predicate
-        (`sdk.py:2696`), so after a SHORTER re-capture the older, LONGER node set
-        stays in the graph. With the record unreachable the endpoint then served
-        those points at 200 beside its own `turns: 2` — a body that contradicts
-        itself, and a transcript that is not the session's.
+        one that survived. ⛔ NOT the sweep's gate: at this head the sweep runs
+        unconditionally over `max(graph mark, record high-water)` (#10021), so a
+        re-capture DOES remove the surplus. The superset is still reachable two
+        ways, and the fixture builds the second:
+
+          * a sweep whose journal half failed — the removal is journal-emitted,
+            so a refused append leaves the graph nodes in place;
+          * a graph copy written BEFORE the record was armed, on a session with
+            no `turn_max_index`: the bound then falls back to
+            `coalesce(s.turn_max_index, s.turn_count, 0)`, which substitutes a
+            WINDOW length for the mark, and the record holds no rows to raise it
+            (an unarmed capture wrote none).
+
+        With the record unreachable the endpoint then served those points at 200
+        beside its own `turns: 2` — a body that contradicts itself, and a
+        transcript that is not the session's.
 
         Shape: capture 4 turns, then set the Session's `turn_count` to 2 leaving
-        all four nodes in place — the state a 2-turn re-capture leaves when the
-        sweep is skipped. Both the node count and the count are ASSERTED.
+        all four nodes in place — the residue a skipped or failed sweep leaves.
+        Both the node count and the count are ASSERTED.
 
         Mutation: restore `len(turns) < _expected_turns` — this REDs on the 200.
         """
@@ -4468,9 +4594,16 @@ class TestSessionDetail:
         assert nodes[0][0] == 4, nodes
         assert counts[0][0] == 2, counts
 
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True, (
-            "the armed read predicate is false — this test would not reach the "
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None, (
+            "the read door resolves no record tenant — this test would not reach the "
             "fallback arm at all")
         monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
             RuntimeError("the record is unreachable")))
@@ -4536,9 +4669,16 @@ class TestSessionDetail:
         assert nodes[0][0] == 3, nodes
         assert counts[0][0] == 4, counts
 
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True, (
-            "the armed read predicate is false — this test would not reach the "
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None, (
+            "the read door resolves no record tenant — this test would not reach the "
             "fallback arm at all")
         monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
             RuntimeError("the record is unreachable")))
@@ -4598,9 +4738,16 @@ class TestSessionDetail:
         assert nodes[0][0] == 4, nodes
         assert counts[0][0] == 3, counts
 
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True, (
-            "the armed read predicate is false — this test would not reach the "
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None, (
+            "the read door resolves no record tenant — this test would not reach the "
             "fallback arm at all")
         monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
             RuntimeError("the record is unreachable")))
@@ -4646,9 +4793,16 @@ class TestSessionDetail:
             params={"sid": sid}).result_set
         assert counts[0][0] is None, counts
 
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True, (
-            "the armed read predicate is false — this test would not reach the "
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None, (
+            "the read door resolves no record tenant — this test would not reach the "
             "fallback arm at all")
         monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
             RuntimeError("the record is unreachable")))
@@ -4709,9 +4863,16 @@ class TestSessionDetail:
             "RETURN count(t)", params={"sid": sid}).result_set
         assert nodes[0][0] == 2, nodes
 
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True, (
-            "the armed read predicate is false — this test would not reach the "
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None, (
+            "the read door resolves no record tenant — this test would not reach the "
             "fallback arm at all")
         monkeypatch.setattr(ha, "_open_record", lambda: (_ for _ in ()).throw(
             RuntimeError("the record is unreachable")))
@@ -4723,25 +4884,26 @@ class TestSessionDetail:
             f"{r.status_code} {r.text[:300]}")
         assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
 
-    def test_detail_serves_the_list_when_the_record_answers(
+    def test_detail_refuses_a_short_record_answer_instead_of_a_contradicting_body(
             self, client, monkeypatch):
-        """The completeness guard is gated on the record read FAILING.
+        """⛔ #10021 review P2: a record that ANSWERED SHORT is not served as 200.
 
-        Without this, a guard that fired on the success path too would still
-        pass every other test in this class: their record answers agree with
-        `turn_count`, so the count comparison is silent either way. Here the
-        record returns 2 turns while `turn_count` says 4 — a DISAGREEMENT — and
-        the endpoint must still serve the record's own answer at 200, because
-        reading the record SUCCEEDED and the record is the store of record.
+        The completeness guard used to run only when the record read RAISED, so
+        this exact session was served `200 {"turns": 4, "turn_points": [2
+        rows]}` — the two numbers in one body taken from two stores with nothing
+        reconciling them, which is the truncated-result-indistinguishable-from-
+        complete shape #8447 exists to prevent, arriving through the SUCCESS
+        path. The record STATES 4 turns (`session_narrative.turn_count`, its own
+        account) and holds 2; the graph holds no turn node, so the union is 2.
 
-        This pins "guard only on the fail-soft arm" WITHOUT asserting that the
-        disagreement is correct: a record answer that succeeds but disagrees is
-        #8447's remaining read-side hole, owned by #10021 (its P0-3), where the
-        record's own answer becomes authoritative instead of being compared to a
-        graph count.
+        Both arms now ask ONE rule (`record_read.served_turn_count`), and a
+        transcript shorter than the larger claim is refused with the same
+        explicit error the failure arm uses. Serving the 2 rows with `turns: 2`
+        was the other candidate and is rejected: it keeps the body consistent but
+        makes a provably incomplete transcript look complete.
 
-        Mutation: drop the `if _record_read_failed` gate (`if True:`) — this REDs
-        on the 503.
+        Mutation: put the predicate back behind `if _record_read_failed:` — this
+        REDs on the 200 (and on the contradicting body it serves).
         """
         sid = "detail-record-answers-disagreeing"
         import tortoise.hosted_api as ha
@@ -4753,13 +4915,20 @@ class TestSessionDetail:
             "SET s.created_at=$now, s.is_episodic=true, s.turn_count=4",
             params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
 
-        class _Conn:
-            def close(self):
-                pass
+        # The record's OWN account says 4 turns while it holds 2: the partial
+        # shape that must not be served as a complete transcript.
+        conn = _ScopedRecordConn(narrative=[(None, None, 0, 4)])
 
+        # #10021: the shared read predicate also asks the JOURNAL half of the
+        # capability question, so an armed read needs both — the DSN alone is
+        # the write's arming, not the record's tenure of these turns.
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
-        assert ha._record_holds_turns() is True
-        monkeypatch.setattr(ha, "_open_record", lambda: _Conn())
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        assert ha._record_tenant_for_read({"org_id": "org-1"}) is not None
+        monkeypatch.setattr(ha, "_open_record", lambda: conn)
         monkeypatch.setattr(ha._record_read, "_turns", lambda *_a, **_k: [
             Turn(turn_id=f"{sid}_t0", index=0, content="[user] from record 0.",
                  speaker="user", created_at="2026-10-25T00:00:00+00:00"),
@@ -4768,10 +4937,76 @@ class TestSessionDetail:
         ])
 
         r = client.get(f"/v1/sessions/{sid}")
+        assert r.status_code == 503, (
+            "the record answered SHORT of its own count — a 200 here serves "
+            f"2 rows under `turns: 4`: {r.status_code} {r.text[:300]}")
+        assert r.json()["detail"]["error_code"] == "record_unavailable", r.json()
+
+    def test_detail_publishes_the_served_length_when_the_record_holds_more_than_the_window(
+            self, client, monkeypatch):
+        """The OTHER direction: `turns` must describe the transcript served.
+
+        An armed append leaves the record holding `offset + window` rows while
+        `s.turn_count` is the WINDOW length, so publishing the window put a 2
+        above a 4-row list — the same self-contradicting body from the other
+        side. The union IS the complete transcript: it is served, with its own
+        length.
+
+        ⛔ THE SHAPE IS THE WRITER'S OWN, WINDOW COUNT AND ALL (#10021 review P2).
+        This pin used to build `narrative.turn_count = 4` — a value the writer
+        NEVER produces for an append (`sdk._write_session_and_turns` stores
+        `turn_count = len(turns)` for the window it is writing, and
+        `SessionRecorded` carries that same value into
+        `public.session_narrative.turn_count`), so the pin passed on the one
+        shape that `served != expected` could not refuse and `served_turn_count`
+        refused the real one. Every number here is what the writer actually
+        leaves after an append at `turn_offset=2`: four record rows `_t0.._t3`,
+        `s.turn_count = 2` (the last WINDOW), `s.turn_max_index = 3` (the
+        id-space end the append reaches), and the record's own
+        `turn_count = 2` — SAME as the session's, so `expected` is 2 against 4
+        served.
+
+        Mutation: publish `sess[2]` again — this REDs on `turns == 4`. Restore
+        the `served != expected` refusal in `record_read.served_turn_count` —
+        this REDs on the 503.
+        """
+        sid = "detail-record-appended-window"
+        import tortoise.hosted_api as ha
+        from tortoise.record_read import Turn
+
+        proj = ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) "
+            "SET s.created_at=$now, s.is_episodic=true, s.turn_count=2, "
+            "    s.turn_max_index=3",
+            params={"sid": sid, "now": "2026-10-25T00:00:00+00:00"})
+
+        # ⛔ The record's own count is the WINDOW length too, exactly as the
+        # writer leaves it — not a whole-run count, which no append produces.
+        conn = _ScopedRecordConn(narrative=[(None, None, 0, 2)])
+        monkeypatch.setenv("TORTOISE_EVENT_LOG_BASE_DIR", "/tmp/no-journal-needed")
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org-record")
+        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "g-record")
+        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
+        monkeypatch.setattr(ha, "_open_record", lambda: conn)
+        monkeypatch.setattr(ha._record_read, "_turns", lambda *_a, **_k: [
+            Turn(turn_id=f"{sid}_t{i}", index=i,
+                 content=f"[user] turn {i}.", speaker="user",
+                 created_at="2026-10-25T00:00:00+00:00")
+            for i in range(4)
+        ])
+
+        r = client.get(f"/v1/sessions/{sid}")
         assert r.status_code == 200, (
-            "the record read SUCCEEDED — its own answer is served even where it "
-            f"disagrees with the graph's count: {r.status_code} {r.text[:300]}")
-        assert len(r.json()["turn_points"]) == 2, r.json()["turn_points"]
+            "a COMPLETE append was refused — its four record rows are the whole "
+            "transcript and `turn_count` is only the last window: "
+            f"{r.status_code} {r.text[:300]}")
+        body = r.json()
+        assert len(body["turn_points"]) == 4, body["turn_points"]
+        assert body["turns"] == 4, (
+            "the body publishes the WINDOW length above the transcript it "
+            f"serves: turns={body['turns']!r} over {len(body['turn_points'])} rows")
 
     def test_detail_exposes_the_session_source_node(self, client):
         """#3809: the detail carries the session's graph Source node

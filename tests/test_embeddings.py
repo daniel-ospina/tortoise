@@ -133,16 +133,18 @@ def test_threshold_zero():
 
 # ── 8. threshold one ─────────────────────────────────────────────────
 
-# `"identical" is not a float LITERAL. `cosine_similarity_matrix` normalises then
+# "identical" is not a float LITERAL. `cosine_similarity_matrix` normalises then
 # dots, so two IDENTICAL rows land on 1.0 only up to one float32 ulp — the arm64
-# pool runners measured 0.99999994, i.e. 5.96e-8 BELOW 1.0. A test that asks for
-# `threshold=1.0` verbatim therefore reds on those legs while the behaviour under
-# test is intact (#10010 CI, required check `test (d)`: "threshold 1.0 should only
-# match identical vectors, got []"). One ulp is not a semantic boundary any
-# caller can mean, so the pin sits one ulp below it and asserts the similarity
-# with the same tolerance instead of demanding bit-exact float equality.
+# pool runners measure 0.99999994, i.e. 5.96e-8 BELOW 1.0, and a test that asks
+# for `threshold=1.0` verbatim reds on those legs while the behaviour under test
+# is intact (required check `test (g)`, run 40985705896: "threshold 1.0 should
+# only match identical vectors, got []"; same nodeid on `main`, tracked on
+# #9066 and diagnosed on #10295). One ulp is not a semantic boundary any caller
+# can mean, so the pin sits one ulp below it and asserts the similarity with the
+# same tolerance instead of demanding bit-exact float equality.
 # (The production-side question — should a caller-supplied 1.0 admit a pair one
-# ulp below it? — is a contract decision, not a test fix: filed on #10295.)
+# ulp below it? — changes the matching contract, so it stays an open owner
+# decision on #10295. This file pins what ships today, on every architecture.)
 _IDENTICAL_BOUNDARY = 1.0 - 1e-6
 _COS_ULP = 1e-6
 
@@ -172,7 +174,7 @@ def test_threshold_one_survives_the_rounding_arm64_actually_produces():
     Non-vacuity, and the reason the pin above does not evade the behaviour it
     names: on an x86 box `cosine_similarity_matrix` returns a bit-exact 1.0 for
     the identical pair, so a tolerance added to this file alone would be
-    unobservable here. Injection makes the platform-independent claim testable
+    unobservable there. Injection makes the platform-independent claim testable
     on every platform: whatever the BLAS does at the last bit, the identical
     pair matches and the loose pair does not.
     """

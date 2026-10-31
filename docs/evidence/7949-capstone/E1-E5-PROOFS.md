@@ -175,17 +175,28 @@ here so "swept" is never read into a number nothing re-checks.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:13529` is the fold (`"stats": out.get("stats") or {}`) — while the
-extractor builds `result["classify_later"]` (`tortoise/extractor_v2.py:8961`) and
-`result["vet"]` (`:8971`) on a surface the receipt never carries. `#9116` is open and
-still true at this head.
+`tortoise/sdk.py:14611` is the meta fold — while the extractor builds
+`result["classify_later"]` (`tortoise/extractor_v2.py:8965`) and `result["vet"]`
+(`tortoise/extractor_v2.py:8975`) on the extractor's OWN return.
 
-⇒ **S2.2 and S2.3 are unobservable through the capstone's own entry point**, so any
-table `probes/capstone_measure.py` can emit today reports 6 of 8 steps observed and
-**no row it contains can be certified GREEN**, whatever the underlying numbers do.
-This is a limit of the instrument, not of the verdicts — and it is the reason the
-epic's closing rule is unsatisfiable until `#9116` lands, ahead of every row's own
-blocker.
+⛔ **`#9116`'s seam has since LANDED, and this paragraph is the pre-seam state
+it was written in.** The fold no longer forwards `stats` alone — it calls
+`_capture_stats_with_step_witness`, which copies each stage's own counts onto
+`stats["step_witness"]` (a sub-key of the `stats` key the receipt already
+carried, so no new receipt key and no SDK/MCP verb). S2.2 and S2.3 are
+therefore REACHABLE through the capstone's own entry point at this head; what is
+still true is that they were **absent on the `e0fc940b` run**, which is what the
+scored log and the 6-of-8 row set record.
+
+⇒ **A table measured BEFORE the seam reports 6 of 8 steps observed** and no row
+the already-scored log contains can be certified GREEN, whatever the underlying
+numbers do — that is a limit of the measurement's stamp, not of the verdicts.
+The seam does not by itself move a row: a row moves only by RE-RUNNING
+`probes/capstone_measure.py` at a post-seam head, which is what makes those two
+rows **witnessable** — S2.2 moves on such a re-run, while S2.3 moves only once its
+classify pass carries a non-empty `s2`/`union` (on the measured corpus it is IDLE,
+so a re-run still reports it unobserved). Until such a re-run is committed, the epic's closing rule
+stays unsatisfiable on the committed evidence, ahead of every row's own blocker.
 
 ---
 
@@ -194,9 +205,9 @@ blocker.
 **`#7949` is not closeable, and nothing this lane can land changes that.** Ranked by
 what would have to move:
 
-| to make this row closable | what has to land first | state (the audit is at `3fbca18ed`; every row re-read at `6986dcd4d`, 2026-10-27) |
+| to make this row closable | what has to land first | state (the audit is at `3fbca18ed`; every row re-read at `6986dcd4d`, 2026-10-27; the `#9116` row re-read at this PR's head) |
 |---|---|---|
-| **every row** (GREEN is unreachable) | `#9116` — copy `vet` / `classify_later` (at least) onto the capture receipt, so S2.2/S2.3 become observable | **OPEN** |
+| **every row** (GREEN is unreachable) | `#9116`'s seam has **LANDED** (this PR): `stats["step_witness"]` carries `vet` / `classify_later` (and the other six) on the capture receipt, so S2.2/S2.3 are now observable through the capstone's own entry point. What still has to land is a **committed post-seam re-run** — and on the measured corpus that re-run still reports S2.3 unobserved (its classify pass is IDLE), so it refuses at G5 | `#9116` **LANDED** (this PR); what it leaves open is V5's 8/8 scoping — the owner's explicit decision, on that issue |
 | E1 | `#5333` — **its design half is no longer pending; it was DECIDED on 2026-10-26** (`EXTRACTOR-V4-ARCHITECTURE.md:869`, commit `6986dcd4d`, PR `#10069`): a pass may **add**, may execute an authorised `MERGE`, and after COMMIT may not remove a committed row except through **the journaled `restatus` fold where no visible successor exists, or the D7 `ObjectSuperseded` arm where one does** (`ONLY` is scoped to the successorless case and never denies the D7 arm); a physical delete is **foreclosed to every pass**; the journaled `restatus` fold — the only permitted form of removal-from-recall where no visible successor exists — is **deferred until recall cost is measured** and writes nothing until a relocation pass is authorised, while the D7 `ObjectSuperseded` arm is **permitted now** where a visible successor exists (that is pre-existing supersession, not the deferred relocation). The same paragraph records the measurement that settles this row's shape: **"E1's share is moved by no non-destructive mechanism"** (the shipped gate drops 0 of 34 `^the <X>`; `value_gate`'s own docstring says a definite description is *"left to the arbiter, and is reported, not dropped"*). So the ruling did not hand E1 a mechanism — it foreclosed the one that would move the number. What stays open in `#5333` is **task 1, the owner's authorisation to ever RUN a relocation**, and even that buys only a deferred fold, never a delete | `#5333` **OPEN** (design half **decided**) |
 | E2 | `#9775` — the carve-out is absent on the compact render path; and the surviving-value loss (1 of 14) is upstream of the filter, so the row needs the extraction loss fixed, not the gate | **OPEN** |
 | E3 | `#9736` — the registered denominator counts `:Object` mention links, which carry no anchor **by design** (owner option A, `#5199`). Either the metric is re-registered or the model reopened: an owner decision, not a lane's | **OPEN** |

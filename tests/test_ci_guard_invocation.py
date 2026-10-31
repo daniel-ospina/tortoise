@@ -152,20 +152,26 @@ ENV_REF_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
 #: the fixtures the harness fabricates in each sandbox, by basename: an
 #: enforcing step may only read runner-temp paths from this set, so that what the
 #: harness prepares and what the workflow produces are known to be the same file.
-#: The runner-temp artifacts the frozen-set steps BRANCH ON or reconcile against,
-#: which the harness therefore has to know by name. `junit.xml` and
-#: `expected-nodeids.txt` joined them when the carve-out/slow/track-b legs stopped
-#: reconciling against the host-global `/tmp` literals (#7815): three jobs on one
-#: self-hosted host share ONE `/tmp`, so the guard read a PEER's manifest and
-#: junit and redded on a mismatch belonging to no test it ran (measured on run
-#: 40798901821 — 1428 "expected nodeids absent" against a 4-nodeid run).
-#: `pytest.log` joined them in the same change, for the same reason and one step
-#: further: the carve-out guard's NO-MANIFEST arm (`skip-guard.py <log>`, taken
-#: when `pytest-files` is empty) does not reconcile — it reads the log as its
-#: OBSERVED set, so a peer's clean log hides this leg's availability skip
-#: (fail-open) and a peer's violations red a green leg.
-FIXTURES = ("pytest-rc", "pytest-files", "junit.xml", "expected-nodeids.txt",
-            "pytest.log")
+#: Basenames the harness accounts for under `$RUNNER_TEMP`.
+#:
+#: PRE-STAGED by `_Run.prepare()` — the two a guard step BRANCHES on, so the
+#: frozen-set steps take their real branch instead of an early exit.
+PRE_STAGED_FIXTURES = ("pytest-rc", "pytest-files")
+#: PRODUCED BY THE RUN ITSELF — the pytest step writes these with
+#: `--junitxml=` / `--output` / `| tee`. They are named here (#7815) because the
+#: lane's artefacts moved from the host-global `/tmp` literal to
+#: `${RUNNER_TEMP:-/tmp}`, which is the only spelling `RUNNER_TEMP_LITERAL_RE`
+#: matches: a guard that reads a path the harness cannot name is a guard whose
+#: producer was never checked.
+RUN_ARTEFACT_FIXTURES = (
+    "expected-nodeids.txt",
+    "junit.xml",
+    "pytest.log",
+    "trackb.log",
+    "junit-d14.xml",
+    "pytest-d14.log",
+)
+FIXTURES = PRE_STAGED_FIXTURES + RUN_ARTEFACT_FIXTURES
 #: a literal runner-temp path, the only form this harness can fabricate
 RUNNER_TEMP_LITERAL_RE = re.compile(r"\$\{RUNNER_TEMP:-/tmp\}/[A-Za-z0-9._-]+")
 RUNNER_TEMP_REF_RE = re.compile(r"\$\{RUNNER_TEMP[^}]*\}|\$RUNNER_TEMP\b")
@@ -816,10 +822,21 @@ def test_the_enforcing_steps_preconditions_are_modelled_literally():
             )
         steps = (jobs.get(run.job) or {}).get("steps") or []
         position = next((i for i, s in enumerate(steps) if s.get("name") == run.step.get("name")), None)
+        # A step that RUNS pytest produces its own junit/log/manifest, so it
+        # writes them in place rather than inheriting them from an earlier step.
+        # The d14 lane is exactly that shape: it runs `python -m pytest … | tee`
+        # AND consumes the junit it just wrote, so the earlier-step rule would
+        # refute a producer that is the step itself. Matched on a pytest
+        # INVOCATION (`-m pytest`), never on `--junitxml` — a guard step passes
+        # `--junitxml=<path>` to skip-guard.py and writes nothing.
+        produces_its_own = re.search(r"-m pytest\b", body) is not None
         for literal in sorted(literals):
             earlier = steps[: position or 0]
-            if not any(literal in (s.get("run") or "") for s in earlier):
-                missing.append(f"{run.where} reads {literal} and no earlier step in `{run.job}` writes it")
+            if any(literal in (s.get("run") or "") for s in earlier):
+                continue
+            if produces_its_own:
+                continue
+            missing.append(f"{run.where} reads {literal} and no earlier step in `{run.job}` writes it")
     assert not missing, (
         "these enforcing steps depend on a fixture this harness fabricates that the workflow does "
         f"not verifiably produce: {missing} — in CI the guard would be skipped as 'job already red' "

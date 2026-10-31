@@ -20,6 +20,7 @@ Each test whose docstring carries a ``Mutation:`` line names the edit that turns
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -47,6 +48,10 @@ _ENV_LEAKS = (
     "AUTOSCALE_PROC_DIR",
     "AUTOSCALE_ALLOW_WORKTREE",
     "AUTOSCALE_SKIP_PROBE",
+    # The OS-label mode the timer pins for BOTH its legs — FILL (through the provisioner) and the
+    # ORPHANED re-registration on REPAIR (#10275). Inherited from an operator's shell it would change
+    # every rendered unit, so it leaks exactly like the other seams.
+    "CI_RUNNER_OS_LABEL",
     "RUNNER_AUTOSCALE_INTERVAL",
     "RUNNER_AUTOSCALE_REPO",
     "RUNNER_AUTOSCALE_STATE_DIR",
@@ -568,6 +573,224 @@ def test_the_provisioner_is_pinned_for_the_timer_only_when_it_exists(tmp_path):
     )
 
 
+def test_the_os_label_mode_is_pinned_on_every_renderer_whether_or_not_a_provisioner_resolved(tmp_path):
+    """The timer must carry `CI_RUNNER_OS_LABEL` for BOTH legs that read it — the pin is not
+    conditional on a provisioner resolving.
+
+    `runner_autoscale.py`'s FILL calls `install-ci-runner-x64.sh --count N --fallback auto` through
+    `_run`, which passes no `env=` — the provisioner therefore sees only what the unit inherits, and
+    systemd does not inherit the installing shell. With no pin the installer's default (`off`)
+    applies and every runner the autoscaler ADDS joins without `ubuntu-24.04`: the pool drifts back
+    to zero answers one fill at a time, `--status` stays green until the last carrier is replaced,
+    and then every PR is BLOCKED again — the incident the label exists to end, rebuilt silently.
+
+    ⛔ AND THE FILL LEG IS NOT THE ONLY READER, which is why the pin is UNCONDITIONAL. The same
+    timer runs this tool's REPAIR leg, which re-registers an ORPHANED runner through
+    `resolve_labels` → `_os_labels`, reading the variable from the tool's OWN environment; that
+    leg needs no provisioner (`register()` runs the install's own `config.sh`). Gated on
+    `$PROVISIONER`, the variable was validated and then DROPPED with no message on exactly the
+    boxes where the ORPHANED repair is the only capacity path there is — the operator's `on`
+    silently becoming `off` and the runner re-registered without the label. Both halves are wrong:
+    the variable is not provisioner-only, and the REPAIR leg does exist without it.
+
+    Mutation: gate any of the four pins on `$PROVISIONER` again -> the absent-provisioner `on`
+    cases find no pin -> RED. (Measured: this is the shape the pre-fix code had, and the
+    absent-provisioner `on` case is the one that fails on it.)
+    Mutation: drop the `Environment=CI_RUNNER_OS_LABEL` line -> the `on` case finds no pin -> RED.
+    Mutation: render `auto` unconditionally -> the default case asserts `off` -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    # ⛔ NO PROVISIONER, AND THE PIN IS STILL THERE — `off`, because that is the default. The box
+    # that renders this unit is the one whose only capacity path is the ORPHANED repair, and a
+    # unit that says nothing there leaves the tool reading the variable as unset.
+    res = _run(sb, "--dry-run")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "<key>CI_RUNNER_OS_LABEL</key><string>off</string>" in res.stdout, (
+        "a provisioner-less box got no OS-label pin, so its ORPHANED repair derives `off`"
+    )
+
+    # …and the operator's opt-in reaches a provisioner-less box too: this is the pair that occurs
+    # (unit rendered without a provisioner + ORPHANED runner) and the one the split test files
+    # never exercised together.
+    res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="on"))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "<key>CI_RUNNER_OS_LABEL</key><string>on</string>" in res.stdout, res.stdout
+
+    prov = sb["repo"] / "tools" / "install-ci-runner-x64.sh"
+    prov.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    prov.chmod(0o755)
+
+    # The DEFAULT is `off`: this installer must not flip the #6897 pin by itself on a 24.04 box.
+    res = _run(sb, "--dry-run")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "<key>CI_RUNNER_OS_LABEL</key><string>off</string>" in res.stdout, res.stdout
+
+    # …and the operator's choice at install time is what gets pinned.
+    res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="on"))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "<key>CI_RUNNER_OS_LABEL</key><string>on</string>" in res.stdout, res.stdout
+
+    # A typo is REFUSED here rather than pinned into a unit nothing re-reads.
+    res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="true"))
+    assert res.returncode == 1, (res.stdout, res.stderr)
+    assert "CI_RUNNER_OS_LABEL must be off|on|auto" in res.stderr, res.stderr
+
+    # ⛔ AND EVERY RENDERER, not just the one this box happens to use: the fleet's Linux cells run
+    # the SYSTEMD unit, and a plist-only assertion passed with the systemd line deleted (measured —
+    # the mutation survived until this case existed). The cron entry too: it is prose, so nothing
+    # else can re-read the pin out of it.
+    sb_linux = _sandbox(tmp_path / "linux", uname="Linux")
+    _systemd_stubs(sb_linux)
+    prov_linux = sb_linux["repo"] / "tools" / "install-ci-runner-x64.sh"
+    prov_linux.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    prov_linux.chmod(0o755)
+    res = _run(
+        sb_linux,
+        "--dry-run",
+        env=dict(
+            sb_linux["env"], AUTOSCALE_PLATFORM="systemd", CI_RUNNER_OS_LABEL="on"
+        ),
+    )
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "Environment=CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+    assert "Environment=CI_RUNNER_OS_LABEL=off" not in res.stdout, res.stdout
+    # ⛔ AND THE RENDER IS SILENT. The unit body is an UNQUOTED heredoc, so a backtick in ANY line
+    # of it — a comment included — is executed as a command substitution before `cat` writes.
+    # Measured before the fix: the OS-label rationale's backticks produced two "command not found"
+    # lines on stderr and a unit whose comment had lost `ubuntu-24.04` and `--status`. stderr is
+    # the channel an operator reads to decide whether the install worked, so noise here is the bug.
+    assert "command not found" not in res.stderr, res.stderr
+
+    sb_cron = _sandbox(tmp_path / "cron", uname="Linux")
+    prov_cron = sb_cron["repo"] / "tools" / "install-ci-runner-x64.sh"
+    prov_cron.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    prov_cron.chmod(0o755)
+    res = _run(
+        sb_cron,
+        "--dry-run",
+        env=dict(
+            sb_cron["env"],
+            AUTOSCALE_HAS_SYSTEMD="0",
+            AUTOSCALE_HAS_CRON="1",
+            CI_RUNNER_OS_LABEL="on",
+        ),
+    )
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+
+    # ⛔ AND THE CRON ENTRY CARRIES IT WITH NO PROVISIONER TOO. The cron entry is prose: nothing
+    # else in the tree re-reads the pin out of it, so a gate here is invisible until a box's
+    # ORPHANED runner is re-registered without the label.
+    sb_cron_noprov = _sandbox(tmp_path / "cron-noprov", uname="Linux")
+    res = _run(
+        sb_cron_noprov,
+        "--dry-run",
+        env=dict(
+            sb_cron_noprov["env"],
+            AUTOSCALE_HAS_SYSTEMD="0",
+            AUTOSCALE_HAS_CRON="1",
+            CI_RUNNER_OS_LABEL="on",
+        ),
+    )
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+
+    # …and the SYSTEMD unit too, with no provisioner. The fleet's Linux cells run this one, and a
+    # re-gate on this renderer alone would leave the plist/cron cases green.
+    sb_systemd_noprov = _sandbox(tmp_path / "systemd-noprov", uname="Linux")
+    _systemd_stubs(sb_systemd_noprov)
+    res = _run(
+        sb_systemd_noprov,
+        "--dry-run",
+        env=dict(
+            sb_systemd_noprov["env"],
+            AUTOSCALE_PLATFORM="systemd",
+            CI_RUNNER_OS_LABEL="on",
+        ),
+    )
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "Environment=CI_RUNNER_OS_LABEL=on" in res.stdout, res.stdout
+
+
+# `<<DELIM`, `<<-DELIM`, `<<'DELIM'`, `<<"DELIM"` — but never `<<<`, which is a here-string.
+_HEREDOC_OPEN = re.compile(r"<<(?P<dash>-?)\s*(?P<quote>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)")
+
+
+def _unquoted_heredoc_bodies(text: str) -> list[tuple[int, list[str]]]:
+    """Return (1-based body start line, body lines) for every UNQUOTED heredoc in `text`.
+
+    A QUOTED delimiter (`<<'PY'`) is excluded on purpose: it makes the body fully literal, which
+    is why `tools/run_affected.sh:223`'s `<<'PY'` may carry backticks in its python source.
+    """
+    bodies: list[tuple[int, list[str]]] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = None if "<<<" in line else _HEREDOC_OPEN.search(line)
+        if match is None:
+            i += 1
+            continue
+        delim = match.group("delim")
+        strip_tabs = match.group("dash") == "-"
+        start = i + 2  # 1-based line number of the first body line
+        body: list[str] = []
+        i += 1
+        while i < len(lines):
+            probe = lines[i].lstrip("\t") if strip_tabs else lines[i]
+            if probe == delim:
+                break
+            body.append(lines[i])
+            i += 1
+        if not match.group("quote"):
+            bodies.append((start, body))
+        i += 1
+    return bodies
+
+
+def test_no_unquoted_heredoc_body_in_this_installer_can_run_a_command_substitution():
+    """This file's measured rule — no backtick in an UNQUOTED heredoc body — enforced by suite.
+
+    The bodies are unquoted (they expand the pinned paths), so bash performs command substitution
+    on a backticked span before `cat` writes a byte. Measured twice: a backticked `gh` in one of
+    these comments executed the shim, which found no credential and launched the interactive
+    device flow, so the installer hung for its whole timeout having written NOTHING; and the
+    systemd service body later regained two backticks, so every render printed two
+    "command not found" lines and wrote a unit whose comment had lost the label it names. Both
+    renders were green in this suite, because the assertions read stdout and the damage is in the
+    RENDERED text plus stderr.
+
+    Mutation: put a backtick in any line of any unquoted body -> RED, naming the line.
+    Mutation: the scanner stops finding the bodies -> the coverage assertion -> RED, never a
+    vacuous pass.
+    """
+    bodies = _unquoted_heredoc_bodies(SCRIPT.read_text(encoding="utf-8"))
+
+    # Coverage first: a scanner that finds nothing (a reformatted file, a quoting change) must not
+    # read as "clean". The file renders four schedules: the interpreter probe, the systemd
+    # service, the systemd timer and the launchd plist.
+    assert len(bodies) >= 4, (
+        f"the heredoc scanner found only {len(bodies)} unquoted bodies — it is no longer "
+        "reading this file, so a clean verdict would be vacuous"
+    )
+    assert any("Environment=CI_RUNNER_OS_LABEL" in line for _, body in bodies for line in body), (
+        "the systemd service body was not among the scanned bodies — the incident's own site must "
+        "be covered for this guard to mean anything"
+    )
+
+    offenders = [
+        (start + offset, line.strip())
+        for start, body in bodies
+        for offset, line in enumerate(body)
+        if "`" in line
+    ]
+    assert not offenders, (
+        "backtick(s) inside an UNQUOTED heredoc body — bash runs each one as a command "
+        "substitution at render time (see the RESOLVED ONCE block at the top of this installer). "
+        f"Use plain quotes instead. Offending lines (file line, text): {offenders!r}"
+    )
+
+
 def test_systemd_units_render_with_path_and_the_active_check(tmp_path):
     """On Linux the unit pins HOME/PATH (measured: no HOME ⇒ `gh auth login`, exit 2) and the
     installer verifies `is-active`, not merely `is-enabled`.
@@ -669,6 +892,93 @@ def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
     line = [ln for ln in res.stdout.splitlines() if f"{LABEL}-cron" in ln]
     assert line and "PATH=" in line[0], res.stdout
     assert "HOME=" in line[0], f"cron needs HOME pinned too (gh credential): {line[0]}"
+
+
+def test_cron_entry_exports_the_pins_it_renders(tmp_path):
+    """The cron entry must **EXPORT** its pins, not merely assign them (#10275 review, P2).
+
+    ⛔ WHY A SUBSTRING ASSERTION CANNOT COVER THIS. `cron_line` renders `$CRON_ENV` BEFORE a `;`,
+    and cron runs the entry through `/bin/sh -c`. POSIX gives an assignment with no command name
+    no export attribute (POSIX.1-2017 `export`: the attribute "shall cause them to be in the
+    environment of subsequently executed commands"), so the bare form sets a shell variable of the
+    one shell cron started and the `python` after the `;` inherits NOTHING. Measured on this box:
+        env -i HOME=.. PATH=.. /bin/sh -c 'CI_RUNNER_OS_LABEL=on; python3 -c "…get(…)"'  -> None
+        the same line with `export CI_RUNNER_OS_LABEL=on`                                 -> on
+    The three existing cron arms (`:679`, `:696`, `:712`) assert the TEXT `CI_RUNNER_OS_LABEL=on`
+    appears, which the inert rendering satisfies just as happily: on a cron host the FILL leg
+    (`--fallback auto` through the provisioner) and the ORPHANED re-registration both read
+    `off`, so the #6897 mitigation this PR's third pin exists to carry never reached the pool.
+
+    So this case runs the entry's OWN command half under `/bin/sh` with `CI_RUNNER_OS_LABEL` and
+    `RUNNER_AUTOSCALE_PROVISIONER` absent from the parent environment — cron's own env (`HOME`,
+    `/usr/bin:/bin`) and nothing else — and asserts the process the schedule starts REPORTS them.
+    The tool is replaced by a stub observer that prints what it inherited; the rest of the line
+    (`cd <repo> && <interpreter> <tool>`) is the entry's own text, not a re-implementation.
+
+    Mutation: drop the `export` from `$CRON_ENV` (the pre-fix shape) -> the observer prints
+    `CI_RUNNER_OS_LABEL=UNSET` and `RUNNER_AUTOSCALE_PROVISIONER=UNSET` -> RED. Dropping
+    `$CRON_ENV` from the render is RED for the same reason.
+    """
+    sb = _sandbox(
+        tmp_path,
+        uname="Linux",
+        cron=True,
+        env_overrides={"AUTOSCALE_HAS_SYSTEMD": "0", "AUTOSCALE_HAS_CRON": "1"},
+    )
+    tool_path = sb["repo"] / "tools" / "install-ci-runner-x64.sh"
+    tool_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    tool_path.chmod(0o755)
+
+    res = _run(sb, "--dry-run", env=dict(sb["env"], CI_RUNNER_OS_LABEL="on"))
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    rendered = [ln for ln in res.stdout.splitlines() if f"{LABEL}-cron" in ln]
+    assert len(rendered) == 1, res.stdout
+
+    # cron's five schedule fields, then the command it will run.
+    command = rendered[0].split(None, 5)[5]
+    # Drop the log redirect and the trailing `# <label>` comment: neither is the question here.
+    command = command.split(" >> ", 1)[0]
+    # The interpreter + tool the entry starts, replaced by an observer that can ANSWER "what did
+    # the process inherit". Asserted present first: a silent no-op replace would make this vacuous.
+    invocation = f"{sb['env']['AUTOSCALE_PYTHON']} {sb['install'] / 'runner_autoscale.py'}"
+    assert invocation in command, f"the entry does not start the pinned interpreter: {command}"
+    observer = sb["bin"] / "env-observer"
+    observer.write_text(
+        "#!/bin/sh\n"
+        'printf "CI_RUNNER_OS_LABEL=%s\\n" "${CI_RUNNER_OS_LABEL-UNSET}"\n'
+        'printf "RUNNER_AUTOSCALE_PROVISIONER=%s\\n" "${RUNNER_AUTOSCALE_PROVISIONER-UNSET}"\n'
+        'printf "HOME=%s\\n" "${HOME-UNSET}"\n',
+        encoding="utf-8",
+    )
+    observer.chmod(0o755)
+    command = command.replace(invocation, str(observer))
+
+    # ⛔ CRON'S ENVIRONMENT, NOT THE FIXTURE'S: the account's HOME and `/usr/bin:/bin` (cron sets
+    # those itself, which is why they survive the unexported form), and NEITHER pin.
+    cron_env = {"HOME": str(sb["home"]), "PATH": "/usr/bin:/bin"}
+    for absent in ("CI_RUNNER_OS_LABEL", "RUNNER_AUTOSCALE_PROVISIONER"):
+        assert absent not in cron_env
+    out = subprocess.run(
+        ["/bin/sh", "-c", command],
+        env=cron_env,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+    assert out.returncode == 0, (command, out.stdout, out.stderr)
+    assert "CI_RUNNER_OS_LABEL=on" in out.stdout, (
+        "the entry's `CI_RUNNER_OS_LABEL=on` never reached the process the schedule starts — it is "
+        f"a shell variable of cron's `/bin/sh`, not an export. output: {out.stdout!r} line: {rendered[0]}"
+    )
+    assert f"RUNNER_AUTOSCALE_PROVISIONER={tool_path}" in out.stdout, (
+        "the provisioner override stayed a shell variable too, so the FILL leg resolves its own "
+        f"candidate list instead. output: {out.stdout!r} line: {rendered[0]}"
+    )
+    # The one variable that WAS reaching the tool before the fix: it must still, so this case is
+    # about the export and not about the entry losing its HOME pin.
+    assert f"HOME={sb['home']}" in out.stdout, out.stdout
 
 
 @pytest.mark.parametrize(

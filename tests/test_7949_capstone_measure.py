@@ -18,6 +18,7 @@ the three sources those cites name (`sdk.py`, `projection/edges.py`,
 """
 from __future__ import annotations
 
+import ast
 import importlib.util as _ilu
 import json
 import os
@@ -38,6 +39,10 @@ PREREG = _REPO / "docs/evidence/7949-capstone/preregistration.json"
 E1E2 = _REPO / "docs/evidence/7949-capstone/e1-e2.log"
 
 
+#: `sdk.py` as text — read ONCE, so every derivation below sees the same bytes.
+SDK_SOURCE = (_REPO / "tortoise/sdk.py").read_text()
+
+
 def _sdk_line_naming(code: str) -> int:
     """The ONE line of `sdk.py` that carries `code` — READ from the tree.
 
@@ -52,63 +57,133 @@ def _sdk_line_naming(code: str) -> int:
     resolves to a SYMBOL rather than a line, precisely because a line number
     cannot survive an edit above it.
     """
-    hits = [n for n, line in enumerate(
-        (_REPO / "tortoise/sdk.py").read_text().splitlines(), 1)
-        if code in line]
+    hits = [n for n, line in enumerate(SDK_SOURCE.splitlines(), 1) if code in line]
     assert len(hits) == 1, (
         f"`{code}` is on {len(hits)} lines of sdk.py {hits} — the pin names one")
     return hits[0]
 
 
-#: The meta fold's cite, in the exact shape the probe's causes print it.
-_META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line_naming('\"stats\": out.get(\"stats\")')}"
+#: The #9116 seam's SYMBOL — what a cause names instead of a line.
+#:
+#: A line cite was the right shape while the seam did not exist: the cause had to
+#: send the next lane to the one line that DROPPED the block, and
+#: `_sdk_line_naming` re-derived it so it could not re-stale. Now that the fold
+#: CALLS the seam, what a reader can act on is the helper, and a symbol cannot
+#: re-stale at all.
+_SEAM_SYMBOL = "_capture_step_witness"
+
+#: The fold's CALL SITE, re-derived from the tree (never typed) — the line that
+#: decides whether the seam reaches the receipt at all.
+_META_FOLD_CITE = ("tortoise/sdk.py:" + str(_sdk_line_naming(
+    "_capture_stats_with_step_witness(out, len(extracted))")))
 
 
-#: `extractor_v2.py` is the bundle's SECOND moving source, and a typed line in the
-#: pin re-stales on the same merge `sdk.py` does (#10010 review, P1: this file's
-#: `:8883-8887` sat 88 lines behind the tree after one `main` merge, and the legs it
-#: fed were red). So the extractor cites are read out of the tree too, by ANCHOR —
-#: the symbol whose line the cause must name, never the number.
-_EXTRACTOR = _REPO / "tortoise/extractor_v2.py"
+def _enclosing_functions(source: str, lineno: int) -> list[str]:
+    """The `def`s whose body carries `lineno` of `source` (1-based).
+
+    Parsed, not indent-counted: a line number tells you WHERE the cite points, and
+    only the parse tree tells you WHAT it is inside. ``ast`` is the tree sdk.py is
+    already read as text for, so this adds no new source of truth.
+    """
+    tree = ast.parse(source)
+    return [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= lineno <= (node.end_lineno or node.lineno)
+    ]
 
 
-def _ext_line(anchor: str) -> int:
-    """The ONE line of `extractor_v2.py` that carries `anchor` — READ from the tree."""
+_EXTRACTOR = "tortoise/extractor_v2.py"
+
+
+def _extractor_lineno(code: str) -> int:
+    """The ONE line of `extractor_v2.py` whose code starts with `code` — READ from the tree.
+
+    `_sdk_line_naming`'s reason applies verbatim to the extractor's line cites, and
+    the red it prevents is the one this file carried: `69f156db0` re-derived every
+    `extractor_v2.py` cite the bundle prints (`ef231735b` had inserted 4 lines above
+    the whole S0→S6 block, moving all of them by +4) but left the pins below typed
+    at the old numbers — so the two tests asserting them failed at the very head
+    whose claim was "the shard is green". A typed number can only be repaired by
+    another hand re-derivation; DERIVED here, the assertion keeps its teeth (a cause
+    or an `_IDLE_CITES` entry naming ANY OTHER line still reds) without carrying a
+    number that re-stales on the next insert above it.
+    """
     hits = [n for n, line in enumerate(
-        _EXTRACTOR.read_text().splitlines(), 1) if anchor in line]
+        (_REPO / _EXTRACTOR).read_text().splitlines(), 1)
+        if line.strip().startswith(code)]
     assert len(hits) == 1, (
-        f"`{anchor}` is on {len(hits)} lines of extractor_v2.py {hits} — the pin names one")
+        f"`{code}` starts {len(hits)} lines of extractor_v2.py {hits} — the pin names one")
     return hits[0]
 
 
-def _ext_span(anchor: str) -> str:
-    """`start-end` for the `}`-closed block `anchor` opens, in the probe's cite shape."""
-    lines = _EXTRACTOR.read_text().splitlines()
-    start = _ext_line(anchor)
-    end = next((n for n in range(start + 1, len(lines) + 1)
-                if lines[n - 1].strip() == "}"), None)
-    assert end is not None, f"no closing brace ends the block at extractor_v2.py:{start}"
-    return f"{start}-{end}"
+def _extractor_block(start: int) -> tuple[int, int]:
+    """The first..last line of the `{`-block opened on line `start`, brace-counted.
+
+    A RANGE cite is the shape the bundle prints for an emitted block
+    (``result["vet"]``, the early-return dict), and its END moves with every key
+    added to the block. Counting braces derives both ends from the tree instead of
+    typing the span.
+    """
+    lines = (_REPO / _EXTRACTOR).read_text().splitlines()
+    depth = 0
+    for n in range(start, len(lines) + 1):
+        depth += lines[n - 1].count("{") - lines[n - 1].count("}")
+        if depth == 0:
+            return start, n
+    raise AssertionError(f"unbalanced `{{` from extractor_v2.py:{start}")
 
 
-#: The emitted-surface / flag cites the causes print (block spans, not one line).
-_VET_SURFACE_CITE = f"tortoise/extractor_v2.py:{_ext_span('result["vet"] = {')}"
-_VET_FLAG_CITE = f"tortoise/extractor_v2.py:{_ext_line('vet_enabled = (')}"
-_CLASSIFY_FLAG_CITE = (
-    f"tortoise/extractor_v2.py:{_ext_line('classify_later = kind_classifier is not None')}")
+def _extractor_cite(code: str) -> str:
+    """``:LINE`` for the one line carrying `code` (bare, the shape causes embed)."""
+    return f":{_extractor_lineno(code)}"
 
-#: The turn writer's cite, read the same way (a `sdk.py` line the E3 line prints).
-_TURN_WRITER_CITE = f"tortoise/sdk.py:{_sdk_line_naming('_TURN_WRITE_CYPHER = (')}"
 
-#: Each pass's OWN lines, as the probe prints them. Checked in BOTH directions
-#: below — present in that pass's cause AND absent from the other's — because a
-#: list asserted ONLY for absence rots into strings no cause prints, i.e. an
-#: assertion that cannot fail (the vacuous-pin class).
-_VET_PASS_CITES = ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                   ":8592", ":8612", ":8680", ":8802", ":8478-8481")
-_CLASSIFY_PASS_CITES = ("classify_later", "if classify_later", ":8561", ":8586",
-                        ":8608-8611", ":8692", ":8695", ":8817", ":8827",
-                        ":8708", ":8838")
+def _extractor_range(code: str) -> str:
+    """``:START-END`` for the brace block opened on `code`'s line."""
+    start, end = _extractor_block(_extractor_lineno(code))
+    return f":{start}-{end}"
+
+
+def _extractor_items_gate(gate_code: str) -> str:
+    """``:LINE`` of the first `if items:` after the classify gate `gate_code`.
+
+    `if items:` is not uniquely searchable (the S2 pass and the union pass each
+    carry one), so the pin derives the SECOND gate from its enclosing gate rather
+    than from a bare string that would match either.
+    """
+    lines = (_REPO / _EXTRACTOR).read_text().splitlines()
+    for n in range(_extractor_lineno(gate_code) + 1, len(lines) + 1):
+        if lines[n - 1].strip() == "if items:":
+            return f":{n}"
+    raise AssertionError(f"no `if items:` after extractor_v2.py:{gate_code!r}")
+
+
+#: Every ``extractor_v2.py`` cite the flag-on/zero-activity causes print, DERIVED
+#: from the tree — one table per SURFACE, because the whole point of the rule below
+#: is that the two passes are different code. Every entry except `result` is a line
+#: `_IDLE_CITES` must name (so the bundle cannot drift from the tree without a red);
+#: `result` is the absent-surface cause's ``:START-END`` for the block it names.
+_EXTRACTOR_SITES: dict[str, dict[str, str]] = {
+    "vet": {
+        "flag": _extractor_cite("vet_enabled = (vet_arbiter is not None"),
+        "early": _extractor_cite('"vet": {"enabled": vet_enabled'),
+        "gate_s2": _extractor_cite("if vet_enabled and embed_list:"),
+        "gate_union": _extractor_cite("if vet_enabled and complete_list:"),
+        "result": _extractor_range('result["vet"] = {'),
+    },
+    "classify_later": {
+        "flag": _extractor_cite("classify_later = kind_classifier is not None"),
+        "init_fail": _extractor_cite("classify_later = False"),
+        "early": _extractor_range('"classify_later": {"enabled": classify_later,'),
+        "gate_s2": _extractor_cite("if classify_later and embed_list:"),
+        "items_s2": _extractor_items_gate("if classify_later and embed_list:"),
+        "gate_union": _extractor_cite("if classify_later and complete_list:"),
+        "items_union": _extractor_items_gate("if classify_later and complete_list:"),
+        "result": _extractor_range('result["classify_later"] = {'),
+    },
+}
 
 
 def _load():
@@ -699,7 +774,8 @@ def test_a_witnessed_vet_surface_makes_s2_2_observed():
     receipt carries the surface and all eight steps come back witnessed.
     """
     runs = [_run(stats=dict(_FULL_STATS), stats_keys=sorted(_FULL_STATS),
-                 surfaces={"vet": {"enabled": True, "s2": {"kept": 3}},
+                 surfaces={"vet": {"enabled": True,
+                                    "s2": {"stats": {"candidates": 3}}},
                            "classify_later": {"enabled": True,
                                               "s2": {"kept": 2}}})]
     observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
@@ -714,7 +790,8 @@ def test_a_stats_home_for_the_classify_surface_also_counts():
     stats = {**_FULL_STATS, "classify_later": {"enabled": True,
                                               "s2": {"kept": 2}}}
     runs = [_run(stats=stats, stats_keys=sorted(stats),
-                 surfaces={"vet": {"enabled": True, "s2": {"kept": 1}},
+                 surfaces={"vet": {"enabled": True,
+                                    "s2": {"stats": {"candidates": 1}}},
                            "classify_later": {}})]
     observed, _unobserved = measure.observe_steps(runs, _FULL_CENSUS)
     assert "S2.3" in observed, observed
@@ -725,8 +802,9 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
 
     `extract_session_v2` emits `result["vet"]` and `result["classify_later"]`
     UNCONDITIONALLY — on the FLAG-OFF arm and on the early-return path the block
-    is `{"enabled": False, "s2": {}, "union": {}}` (`:8597-8612`,
-    `:8961-8975`). An acceptance test of "a non-empty dict" therefore takes an OFF
+    is `{"enabled": False, "s2": {}, "union": {}}` (the two cites are the block
+    ranges `_EXTRACTOR_SITES[k]["early"/"result"]` read out of the tree, see
+    `_extractor_block`). An acceptance test of "a non-empty dict" therefore takes an OFF
     block as the witness for "the S2.2 VET pass RAN" and prints
     `step S2.2 WITNESSED … enabled=false, s2={}`. That is the hazard, not
     pedantry: the moment #9116 copies the sibling key at the meta fold — exactly
@@ -755,7 +833,7 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
     # The refusal names WHERE the OFF block was found, so a reader can tell
     # "absent" (the #9116 cause) from "present and off" (this cause).
     assert "receipt['vet']" in unobserved["S2.2"], unobserved["S2.2"]
-    assert _META_FOLD_CITE not in unobserved["S2.2"], unobserved["S2.2"]
+    assert _SEAM_SYMBOL not in unobserved["S2.2"], unobserved["S2.2"]
 
 
 def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
@@ -781,20 +859,23 @@ def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
 def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     """`enabled: true` with zero activity is a NON-witness, and not #9116.
 
-    `extractor_v2.py:8592` computes `vet_enabled` (the FLAG) BEFORE the
-    `if not edus:` early return at `:8596`, whose surface is literally
-    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8612`); the
-    VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
-    `:8680`, `if vet_enabled and complete_list:` `:8802`). So the flag-ON +
-    empty-list session emits `enabled: True` with empty counters and no pass ran —
-    and a FAILED vet pass leaves the same shape (`_run_vet_pass` returns `{}` on
-    its fail-open path, `:8478-8481`).
+    `extractor_v2.py` computes `vet_enabled` (the FLAG) BEFORE the
+    `if not edus:` early return, whose surface is literally
+    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}`; the VET passes
+    themselves are gated on the LIST (`if vet_enabled and embed_list:`,
+    `if vet_enabled and complete_list:`). So the flag-ON + empty-list session emits
+    `enabled: True` with empty counters and no pass ran — and a FAILED vet pass
+    leaves the same shape (`_run_vet_pass` returns `{}` on its fail-open path).
 
     The CLASSIFY pass is DIFFERENT CODE, so the cause is PER SURFACE:
-    `classify_later` is computed at `:8561`, its gates are
-    `if classify_later and embed_list:` (`:8692`) around `if items:` (`:8695`) and
-    `if classify_later and complete_list:` (`:8817`) around `if items:` (`:8827`),
-    and its fail-open `except` sits at `:8708` / `:8838`. A cause templated for the
+    `classify_later` is computed from the classifier / flag pair, its gates are
+    `if classify_later and embed_list:` around `if items:` and
+    `if classify_later and complete_list:` around `if items:`, and its fail-open
+    `except` sits below each. Every number the two causes print is DERIVED from
+    `extractor_v2.py` (`_EXTRACTOR_SITES`), never typed — they move with every
+    insert above them (`ef231735b` shifted ALL of them by +4 while the pins stayed
+    typed at the old numbers, reddening the very shard the re-derivation commit
+    claimed to green). A cause templated for the
     surface NAME while citing the VET lines told a reader of the classify block
     that the VET pass's gate idled it — false: an idle classify block comes from no
     embed list or no classify ITEMS, and `embed_list` is only its first gate
@@ -825,32 +906,46 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         # the LIST gate, and must NOT be attributed to the #9116 meta fold
         assert "`enabled` reads True" in cause, cause
         assert "never that the pass ran" in cause, cause
-        assert _META_FOLD_CITE not in cause, cause
+        assert _SEAM_SYMBOL not in cause, cause
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
-    assert _VET_FLAG_CITE in vet_cause, vet_cause
-    assert ":8612" in vet_cause, vet_cause
-    assert "if vet_enabled and embed_list" in vet_cause, vet_cause
-    assert "_run_vet_pass" in vet_cause, vet_cause
+    for name, site in _EXTRACTOR_SITES["vet"].items():
+        if name == "result":       # emitted by the absent-surface cause, not this one
+            continue
+        assert site in vet_cause, (site, vet_cause)
+    # … and NOT one line of the classify pass's, nor its flag/gate TOKENS
+    for site in _EXTRACTOR_SITES["classify_later"].values():
+        # a range cite reds on its FIRST line too: the reader sent to `:8612`
+        # has landed on the classify early return even if `-8615` is not printed
+        for form in {site, site.split("-", 1)[0]}:
+            assert form not in vet_cause, (form, vet_cause)
+    for classify_token in ("classify_later", "if classify_later"):
+        assert classify_token not in vet_cause, (classify_token, vet_cause)
 
-    # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
-    assert _CLASSIFY_FLAG_CITE in classify_cause, classify_cause
-    assert "if classify_later and embed_list" in classify_cause, classify_cause
-    assert ":8692" in classify_cause, classify_cause
-    assert ":8695" in classify_cause, classify_cause
-    assert "if classify_later and complete_list" in classify_cause, classify_cause
-    assert ":8817" in classify_cause, classify_cause
+    # ── S2.3 cites the CLASSIFY pass's own code … ────────────────────────
+    for name, site in _EXTRACTOR_SITES["classify_later"].items():
+        if name == "result":
+            continue
+        assert site in classify_cause, (site, classify_cause)
+    # … and NOT the VET pass's flag, pass function or any of its lines
+    for site in _EXTRACTOR_SITES["vet"].values():
+        for form in {site, site.split("-", 1)[0]}:
+            assert form not in classify_cause, (form, classify_cause)
+    for vet_token in ("vet_enabled", "_run_vet_pass", "if vet_enabled"):
+        assert vet_token not in classify_cause, (vet_token, classify_cause)
 
-    # … and NEITHER cause borrows the other pass's lines. Asserted in BOTH
-    # directions: each token must be PRESENT in its own pass's cause, or the
-    # absence check is over a string no cause prints and can never fail.
-    for cite in _VET_PASS_CITES:
-        assert cite in vet_cause, (cite, vet_cause)
-        assert cite not in classify_cause, (cite, classify_cause)
-    for cite in _CLASSIFY_PASS_CITES:
-        assert cite in classify_cause, (cite, classify_cause)
-        assert cite not in vet_cause, (cite, vet_cause)
+    # The constant the causes are built FROM must name those same lines: this is
+    # the seam the pre-fix red was on. `69f156db0` re-derived every cite the
+    # bundle prints and left these pins typed, so a `_IDLE_CITES` entry can now
+    # only move together with the tree — a re-derivation to a wrong line reds
+    # here instead of shipping.
+    for key, sites in _EXTRACTOR_SITES.items():
+        for name, site in sites.items():
+            if name == "result":       # emitted by the absent-surface cause, not the table
+                continue
+            assert site in measure._IDLE_CITES[key], (
+                key, name, site, measure._IDLE_CITES[key])
 
     # Different text, so neither cause can stand in for the other: a version
     # emitting the SAME sentence for both surfaces would satisfy every
@@ -899,26 +994,16 @@ def test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass():
 
 
 def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
-    """The cause is MEASURED, and it names the layer that actually drops it.
+    """The cause is MEASURED, and it names the SEAM that did not reach the run.
 
-    The shipped constant said "the receipt's stats carries 20 keys" — a number
-    nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (`_VET_SURFACE_CITE`, read from the tree) and
-    `result["classify_later"]` (`:8961-8967`). The
-    drop is the meta fold at `tortoise/sdk.py:13510` — **re-derived from the tree at
-    this head, never from the other side of a merge.** Both this branch and `main`
-    move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
-    insert above it too; #9202's own branch moved it by 4), so any typed number is
-    stale on the next merge and a merge that "takes the newer side" silently
-    restores it. `_META_FOLD_CITE` therefore READS the line out of `sdk.py` on
-    every run (`_sdk_line_naming`) instead of typing it — the cause must still name
-    the fold's real line, it just cannot re-stale. The cite was
-    `:12196` until an earlier round, and `:12738` until #9952 (`43a6eee6a`, the
-    `:Source` MERGE-key resolver
-    adopting S0a/S0b) moved the fold 6 lines down, so
-    each round the bundle sent the #9116 fixer somewhere else. Getting it wrong sends
-    the next lane to the wrong file; getting the ARITHMETIC wrong sends it to a
-    claim nothing supports.
+    The shipped constant once said "the receipt's stats carries 20 keys" — a
+    number nothing counted. The cause must count what it inspected and name the
+    thing that is missing. Since #9116 landed, the missing thing is the seam
+    itself (``_capture_step_witness``, called at the meta fold), so the cause
+    names the SYMBOL: a line cite cannot re-stale, and the helper is what a
+    reader can act on now that the fold calls it rather than dropping the block.
+    The fold's own line is still re-derived from the tree by the module constant,
+    so a lane that moves the call site is told rather than silently misled.
     """
     stats = {"edus": 10, "chunks": 1, "search_queries": 5,
              "search_degraded": False, "operator_endpoints_minted": 0,
@@ -930,11 +1015,92 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "S2.2" not in observed
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
-    assert _META_FOLD_CITE in cause, cause
-    assert _VET_SURFACE_CITE in cause, cause
+    assert _SEAM_SYMBOL in cause, cause
+    assert "no receipt carries stats['step_witness']" in cause, cause
+    assert "INSTRUMENT gap" in cause, cause
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
-    assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
+    assert _SEAM_SYMBOL in unobserved["S2.3"], unobserved["S2.3"]
+    # The cite resolves to the PRODUCTION fold — the seam is called from INSIDE
+    # `_extract_session_v2`, not from a stray copy elsewhere in the module.
+    # (`_sdk_line_naming` above already reds, at IMPORT, if the call site vanishes
+    # altogether; this arm is the one that reds when the call MOVES, which that
+    # import-time check cannot see.)
+    fold_line = int(_META_FOLD_CITE.rsplit(":", 1)[1])
+    assert _enclosing_functions(SDK_SOURCE, fold_line) == ["_extract_session_v2"], (
+        f"{_META_FOLD_CITE} is not inside _extract_session_v2 — the seam is not called "
+        "from the production capture fold")
+    # non-vacuity: the same mechanism DISCRIMINATES — the identical call attributed
+    # to another function's extent is not `_extract_session_v2`.
+    assert _enclosing_functions(
+        "def commit():\n"
+        "    return _capture_stats_with_step_witness(out, len(extracted))\n", 2
+    ) == ["commit"]
+
+
+def test_the_seam_witnesses_eight_of_eight_with_no_probe_edit_to_the_rule():
+    """#9116's acceptance in the MEASUREMENT lane: the seam makes S2.2/S2.3 real.
+
+    The pre-fix lane could witness 6 of 8 and had to say so. This builds the
+    ``stats`` exactly as the SDK now does — by calling the production
+    ``_capture_step_witness``, not by hand — and requires 8/8 with the witness
+    read for the two steps that were missing.
+    """
+    from tortoise.sdk import _capture_stats_with_step_witness
+
+    out = {
+        "stats": {**_FULL_STATS, "search_queries": 15,
+                  "search_degraded": False},
+        "story_arc": "A narrative.",
+        "s2_embed": {"entities": [1], "events": [1], "points": [1],
+                     "operators": []},
+        # The real VET surface shape (``_run_vet_pass``): counts under
+        # ``stats``, the raw per-candidate ``decisions`` beside it. The seam
+        # forwards the counts only (#10214 review, P1).
+        "vet": {"enabled": True,
+                "s2": {"stats": {"candidates": 3, "discarded": 0},
+                       "decisions": {"pt_0": {"text": "a candidate"}}},
+                "union": {}},
+        "classify_later": {"enabled": True, "s2": {"assigned": 3},
+                           "union": {}},
+        "search": {"mode": "docker", "degraded": False, "queries_run": 15,
+                   "entities": [], "points": [], "events": []},
+        "payload": {"entities": [1], "events": [1], "points": [2],
+                    "operators": [1]},
+    }
+    stats = _capture_stats_with_step_witness(out, 2)
+    surfaces = {"vet": None, "classify_later": None}
+    runs = [_run(stats=stats, stats_keys=sorted(stats), surfaces=surfaces,
+                 receipt_keys=["ok", "stats"])]
+    observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
+    assert list(observed) == list(measure.STEPS), (
+        sorted(measure.STEPS) and [s for s in measure.STEPS if s not in observed])
+    assert not unobserved, unobserved
+    # and the two that needed the seam name WHERE they found it
+    assert "stats['step_witness']['vet']" in observed["S2.2"], observed["S2.2"]
+    assert "stats['step_witness']['classify_later']" in observed["S2.3"], (
+        observed["S2.3"])
+
+
+def test_the_seam_present_but_incomplete_is_a_seam_defect_not_a_pass_finding():
+    """Three states, three causes: absent, present-but-incomplete, present-and-off.
+
+    A seam on the receipt that does not carry its block is a defect in
+    ``_capture_step_witness``; blaming the pass would send the next lane to the
+    extractor, and blaming the instrument (as the absent arm does) would hide a
+    half-landed seam behind the same words.
+    """
+    stats = {**_FULL_STATS, "search_queries": 5, "step_witness": {"map": {}}}
+    runs = [_run(stats=stats, stats_keys=sorted(stats),
+                 receipt_keys=["ok", "stats"])]
+    observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
+    assert "S2.2" not in observed
+    cause = unobserved["S2.2"]
+    assert "INCOMPLETE" in cause, cause
+    assert _SEAM_SYMBOL in cause, cause
+    assert "no receipt carries" not in cause, cause
+    assert "did NOT run" not in cause, cause
+
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -987,7 +1153,7 @@ def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
                      "other=15 (anchored 0)",
                      "total=326", "STRUCTURALLY INCAPABLE",
                      "create_operator", "never writes extractedFrom",
-                     "BY CONSTRUCTION", _TURN_WRITER_CITE,
+                     "BY CONSTRUCTION", measure.TURN_WRITE_CITE,
                      # the denominator is stated as the WRITER class, and the
                      # residual is inside it
                      "supposed-to-derive", "the class where a LOST derivation "
@@ -1178,6 +1344,115 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
     assert f"IMPL={measured.group(1)} INPUT={measured.group(2)} " \
            f"NAND={measured.group(3)}" in s5_row, s5_row
 
+
+# ── the bundle's STATE LEDGER must describe the seam that SHIPPED ──────────
+#
+# #10214 review (P2): the two documents this PR edits carried FIVE present-tense
+# statements describing the PRE-seam receipt — "carries no step surface (#9116)",
+# "carries none (#9116) … refuses at G5 for **every** input and its table is 0/5",
+# "landing #9116 flips both rows with no probe edit", and the two state rows still
+# marked **OPEN** — while the SAME diff shipped the seam and a pin asserting G5 can
+# now COMPLETE (`test_a_completed_run_is_reachable_now_that_the_seam_landed`). A
+# reader who trusts them re-runs the probe expecting 8/8, gets 7/8, and
+# mis-attributes it — exactly the misattribution the G5 three-state split exists to
+# prevent. The bundle sweeps its `file:line` cites and pins its vocabulary
+# (REFUSED is not RED), but nothing read its STATE, which is why the five survived
+# ten review rounds and a green CI.
+
+README_DOC = _REPO / "docs/evidence/7949-capstone/README.md"
+E1E5_PROOFS = _REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md"
+
+#: Present-tense shapes that assert the PRE-seam receipt as the CURRENT state.
+#: The PAST-tense forms ("it refused at G5 for every input", "carried none") stay
+#: allowed on purpose: the seam's absence IS what the frozen log measured, and
+#: deleting that history would delete the reason the measurement probe exists.
+_BUNDLE_PRE_SEAM_PRESENT_TENSE = (
+    "carries no step surface",
+    "carries none (#9116)",
+    "flips both rows with no probe edit",
+    "refuses at G5 for **every** input",
+)
+
+
+def _state_row(text: str, heading: str, issue: str) -> str:
+    """The one row of `heading`'s table that tracks `issue`'s own state.
+
+    Scoped to the section, then to the ROW, because these two documents carry
+    several tables: `#9116` also appears in the eight-step table (its witness
+    column, which is not a state) and in the closure table's prose.
+    """
+    section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+    lines = section.splitlines()
+    row = None
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith("|") or f"`{issue}`" not in line:
+            continue
+        # The table's HEADER may name the issue too ("the `#9116` row re-read at
+        # this PR's head"); a header is the row whose successor is the `|---|`
+        # separator, so it is not the datum — skip it and keep looking.
+        following = next((ln for ln in lines[index + 1:] if ln.strip()), "")
+        if re.match(r"\|\s*:?-{3,}", following):
+            continue
+        row = line
+        break
+    assert row is not None, (
+        f"{heading!r} no longer tracks {issue}: the state ledger a lane reads "
+        "was deleted rather than corrected")
+    return row
+
+
+def test_the_bundle_does_not_state_the_pre_seam_receipt_as_the_current_one():
+    """A lane reading this bundle must be told the receipt HAS the step surface.
+
+    Three assertions, because the failure had three shapes: (1) prose that still
+    says the receipt "carries no step surface" in the present tense; (2) the
+    README's dependency table marking `#9116` **OPEN** after this PR closes it;
+    and (3) the E-row audit's closure table doing the same, 28 lines after the
+    same file states the seam "has since LANDED" — a document contradicting
+    itself on the one question it exists to answer.
+
+    The claim is bound to the CODE, not just to the prose: if `sdk.py`'s meta fold
+    stops calling `_capture_stats_with_step_witness`, the bundle is wrong again
+    and this reds with it, so the two cannot drift apart silently.
+
+    Non-vacuity: at the pre-fix head both documents carry "carries no step
+    surface" (README :104 and :568), "carries none (#9116)" (:104),
+    "flips both rows with no probe edit" (:570), and both state rows read
+    "**OPEN**" (README's Dependency-state row, E1-E5-PROOFS :210), so every
+    assertion below reds there.
+    """
+    readme = README_DOC.read_text()
+    proofs = E1E5_PROOFS.read_text()
+
+    for name, text in (("README.md", readme), ("E1-E5-PROOFS.md", proofs)):
+        for phrase in _BUNDLE_PRE_SEAM_PRESENT_TENSE:
+            assert phrase not in text, (
+                f"{name} still states the pre-seam receipt as the current one "
+                f"({phrase!r}); `#9116`'s seam shipped in this PR, so the receipt "
+                "carries `stats['step_witness']` — say that, and keep the frozen "
+                "log's 6/8 as the HISTORY it is")
+
+    for doc, text, heading in (
+            ("README.md", readme, "## Dependency state"),
+            ("E1-E5-PROOFS.md", proofs, "## Honest closure verdict")):
+        row = _state_row(text, heading, "#9116")
+        assert "**OPEN**" not in row, (
+            f"{doc}'s {heading.lstrip('# ')!r} row still reports `#9116` as OPEN; "
+            "this PR lands it (its body says `Fixes #9116`), so the ledger a future "
+            "lane reads would send it to re-derive a seam that is already here")
+        assert "LANDED" in row, (
+            f"{doc}'s {heading.lstrip('# ')!r} row must name `#9116` as LANDED and "
+            "say what still bounds the run (S2.3's idle classify pass, and V5's "
+            f"8/8 scoping); it reads: {row}")
+
+    # The prose is only allowed to claim this because the fold really does it.
+    sdk = (_REPO / "tortoise" / "sdk.py").read_text()
+    assert '"stats": _capture_stats_with_step_witness(' in sdk, (
+        "the bundle now names `#9116` as LANDED, but `_extract_session_v2`'s meta "
+        "fold does not call `_capture_stats_with_step_witness`: the seam is gone, "
+        "so the documents are lying again — restore the fold or the pre-seam text")
+
+
 # ── the bundle's OWN `file:line` cites must RESOLVE (not merely be spelled) ──
 #
 # The literal-string assertions above pin the SPELLING of a cite, so they pass on
@@ -1203,28 +1478,16 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 # extractor's shared design doc `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
 # architecture doc carries ~15 cites belonging to other epics, so another epic's
-# `sdk.py` cite must not be told to add a phrase for a line it is not about).
-#
-# ⛔ A bare `:NNNN` continuation (the docs write `` `extractor_v2.py:8504` and
-# `:8524` ``) IS a cite this leg resolves — for the documents that opt in via
-# `_BUNDLE_CONTINUATION_DOCS`. It used to be excluded on the reasoning that "the
-# file is named only once for several numbers"; that exclusion was a FALSE PASS
-# and it is the exact shape that rotted: `docs/00_index.md`'s `#7949` row writes
-# `extractor_v2.py:8592` once and then **fourteen** bare numbers, all of which
-# drifted while the sweep stayed green (PR #10010 review, P2 — every one of them
-# pointed at a comment, a blank line, a docstring, or unrelated code, and the row
-# even ordered a block "before" the line it followed). Attribution is mechanical
-# and needs no inference: a bare number belongs to the last file NAMED before it
-# on the same table row, which is how a reader parses it too.
-#
-# `extractor_v2.py` was the first gap: its 15 cites (`8288-8292`, `8278-8284`,
-# `7928-7932`, `7912`, `7881`, `7781-7801`, `7804`) matched no pattern at all, so
-# they were neither resolved nor reported `unmatched` — the leg stayed green over
-# numbers it never read. The index row was the second: nothing but a hand
-# re-derivation stood between it and the same silent staleness — and then it
-# happened a fourth time. The remaining unread continuations are now COUNTED and
-# pinned (`_BUNDLE_UNREAD_CONTINUATIONS`), so the gap cannot grow silently: a new
-# bare continuation in a non-opted-in document reds and names the repair.
+# `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
+# continuation (the docs write `` `extractor_v2.py:8596` and `:8616` ``) is NOT a
+# cite this leg can resolve, because the file is named only once for several
+# numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
+# `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
+# 15 cites (`8288-8292`, `8278-8284`, `7928-7932`, `7912`, `7881`, `7781-7801`,
+# `7804`) matched no pattern at all, so they were neither resolved nor reported
+# `unmatched` — the leg stayed green over numbers it never read. The index row
+# was the second: nothing but a hand re-derivation stood between it and the same
+# silent staleness.
 
 _BUNDLE_DOCS = (
     ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
@@ -1280,50 +1543,11 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13282`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
-# ``tortoise/extractor_v2.py:8883-8887``
+# `tortoise/sdk.py:14555`, ``tortoise/projection/edges.py:2573-2598``, `edges.py:587`,
+# ``tortoise/extractor_v2.py:8975-8979``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
-
-# Documents whose BARE `:NNNN` continuations this leg resolves. The index row is
-# the document that rotted four times, and it is the one whose numbers are NOT
-# paired with a symbol the way the README's `symbol` + `:NNN` step table is — so
-# nothing but this sweep stands between it and silent staleness.
-#
-# ⛔ Opting a document IN is strictly stronger, never a way to stay green: every
-# continuation it carries then has to bind to a `_BUNDLE_RULES` phrase, so a new
-# bare number with no verifiable claim reds as `unmatched` instead of passing.
-_BUNDLE_CONTINUATION_DOCS = ("docs/00_index.md",)
-
-#: a bare continuation: the colon is not preceded by a word char, a dot or a
-#: slash, so `extractor_v2.py:8592` and `https://…` are never re-read as one.
-_BUNDLE_CONTINUATION = re.compile(r"(?<![\w./:]):(\d+)(?:-(\d+))?")
-
-#: ANY `file.py:NNN` on a row, used only to attribute a bare continuation to the
-#: file named before it. Deliberately wider than `_BUNDLE_CITE`: a continuation of
-#: `tools/capstone_verdict_check.py` is not a cite this leg reads (that file is in
-#: no `_BUNDLE_SOURCES`), and it must be attributed — and then dropped — rather
-#: than silently bound to whichever of the three sources appeared last.
-_BUNDLE_ANY_FILE_CITE = re.compile(r"([A-Za-z0-9_./-]+\.py):(\d+)(?:-(\d+))?")
-
-#: Bare continuations of a `_BUNDLE_SOURCES` file that this leg still does NOT
-#: read, by document. These are the documents that have not opted in to
-#: `_BUNDLE_CONTINUATION_DOCS`: the README and both probes, whose numbers are
-#: written beside the symbol they name (the bundle's own documented cite
-#: convention — "the symbol is authoritative and the line is a convenience"), plus
-#: the one E-row cite that wraps. The number is MEASURED, not estimated, and it is
-#: pinned so it cannot GROW unnoticed — a new bare number in one of these documents
-#: reds and says which document to opt in. Closing the remainder (giving each of
-#: these a `_BUNDLE_RULES` phrase) is a follow-up, not a silent exclusion: the
-#: fourteen index-row numbers that used to sit in this pool are exactly what the
-#: exclusion cost, so the pool is now visible and counted.
-_BUNDLE_UNREAD_CONTINUATIONS = {
-    "README.md": 33,
-    "E1-E5-PROOFS.md": 1,
-    "probes/capstone_measure.py": 25,
-    "probes/capstone_run.py": 10,
-}
 
 # A paragraph that is ABOUT numbers which no longer resolve is not a live cite:
 # the README discloses the frozen log's stale set on purpose, and the supersession
@@ -1333,10 +1557,10 @@ _BUNDLE_UNREAD_CONTINUATIONS = {
 # vanishing into the exclusion.
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
-        "sdk.py:12402", "sdk.py:12683", "sdk.py:2368", "edges.py:467",
+        "sdk.py:12401", "sdk.py:12682", "sdk.py:2367", "edges.py:467",
         "edges.py:494-503", "edges.py:2168-2192",
         "tortoise/extractor_v2.py:8278-8285", "tortoise/extractor_v2.py:8288-8292"),
-    r"SUPERSEDED and its file is gone": ("sdk.py:12197",),
+    r"SUPERSEDED and its file is gone": ("sdk.py:12196",),
 }
 
 # (label, source, phrases the DOCUMENT uses to name the line, what the line must
@@ -1351,9 +1575,13 @@ _BUNDLE_HISTORICAL = {
 #                        that grows one line past the block it names reds
 #   ("contains", tok)   — the cited end line carries this token
 _BUNDLE_RULES = (
-    ("the meta fold S2.2/S2.3 are dropped at", "sdk",
-     ('"stats": out.get', "meta fold", "same fold", "dropped at", "must target"),
-     ('"stats": out.get("stats")',), "line", None),
+    # The fold that now CALLS the #9116 seam. Before the seam landed this rule
+    # named `"stats": out.get("stats")` (the line that dropped the block); the
+    # cite is the same fold and a different claim, so the anchors moved with it.
+    ("the meta fold that calls the #9116 seam", "sdk",
+     ('"stats": _capture_stats_with_step_witness', "meta fold", "same fold"),
+     ('"stats": _capture_stats_with_step_witness(out, len(extracted))',),
+     "line", None),
     ("the call that writes the references edge", "sdk",
      ("proj.link_source_to_event(",),
      ("proj.link_source_to_event(",), "line", None),
@@ -1395,32 +1623,6 @@ _BUNDLE_RULES = (
      ("early-return path",),
      ('"classify_later": {"enabled"', '"vet": {"enabled"'), "span",
      ("contains", '"vet": {"enabled"')),
-    # ── the `docs/00_index.md` row's BARE continuations. Each phrase is the row's
-    # own words, sitting immediately before the number it names; each anchor is
-    # the code that number must point at. These are the claims that went unread
-    # for six review cycles (#10010 review, P2), so they are pinned, not prose.
-    ("the OFF block the `if not edus:` return emits", "extractor_v2",
-     ("`if not edus:` return",), ('"vet": {"enabled"',), "line", None),
-    ("the OFF block the classify pass's early return emits", "extractor_v2",
-     ("the early-return block at",), ('"classify_later": {"enabled"',),
-     "span", ("exact", '"slot_rekeys": 0},')),
-    ("the VET pass's embed-list gate", "extractor_v2",
-     ("gated on the LIST",), ("if vet_enabled and embed_list:",), "line", None),
-    ("the VET pass the list gate calls", "extractor_v2",
-     ("the `_run_vet_pass` call itself is",), ("_run_vet_pass(",), "line", None),
-    ("the VET pass's complete-list gate", "extractor_v2",
-     ("the complete-list gate is",),
-     ("if vet_enabled and complete_list:",), "line", None),
-    ("the classify pass's embed-list gate", "extractor_v2",
-     ("`if classify_later and embed_list:`",),
-     ("if classify_later and embed_list:",), "line", None),
-    ("the classify pass's complete-list gate", "extractor_v2",
-     ("`if classify_later and complete_list:`",),
-     ("if classify_later and complete_list:",), "line", None),
-    ("the classify pass's items gate", "extractor_v2",
-     ("`if items:`",), ("if items:",), "line", None),
-    ("the classify pass's fail-open exception paths", "extractor_v2",
-     ("fail-open `except` at",), ("except Exception as e:",), "line", None),
     ("the extractor entry point", "extractor_v2",
      ("extract_session_v2",), ("def extract_session_v2(",), "def", None),
     # The S2.1 FINDING in `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
@@ -1457,7 +1659,7 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     """The rule whose naming phrase sits NEAREST this cite — distance, not order.
 
     A document names a line with the phrase right beside it (`` `vet_enabled` is
-    computed at `extractor_v2.py:8504` ``), so the closest phrase is the one that
+    computed at `extractor_v2.py:8596` ``), so the closest phrase is the one that
     names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
     names the CLASSIFY pass and then the VET flag on one line, and taking the first
     table match bound the VET cite to the classify phrase ~40 characters away (a
@@ -1523,84 +1725,6 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
     return []
 
 
-def _bundle_continuation_records(doc_name: str, text: str, doc_lines,
-                                 paragraphs) -> list:
-    """Every bare `:NNNN` continuation of a swept source, with what it belongs to.
-
-    Attribution is mechanical and needs no inference: a bare number belongs to the
-    last file NAMED before it **within the unit the document is read in** — the
-    table ROW for a row-filtered document (`docs/00_index.md`), the paragraph
-    otherwise. Using the paragraph everywhere would be wrong for the index: its
-    whole §5 table is ONE paragraph, so a bare number on another epic's row would
-    inherit the file named on the `#7949` row. Using the line everywhere is wrong
-    for prose, where the filename and its numbers wrap.
-
-    Only a `_BUNDLE_SOURCES` file is attributable; a continuation of any other
-    file (`tools/capstone_verdict_check.py:110` … `:498`) is attributed and then
-    dropped, so it can never be rebound to whichever source happened to appear
-    last. Yields `(pos, source, start, end, display)`.
-    """
-    row_scoped = doc_name in _BUNDLE_ROW_FILTER
-    line_starts = [0]
-    for ln in doc_lines:
-        line_starts.append(line_starts[-1] + len(ln) + 1)
-    out = []
-    for match in _BUNDLE_CONTINUATION.finditer(text):
-        pos = match.start()
-        line_no = text.count("\n", 0, pos)
-        if row_scoped:
-            unit_start = line_starts[line_no]
-        else:
-            unit_start = next(s for s, _e in paragraphs if s <= pos)
-        named = [n for n in _BUNDLE_ANY_FILE_CITE.finditer(text[unit_start:pos])]
-        if not named:
-            continue
-        path = Path(named[-1].group(1)).name
-        source = next((k for k, v in _BUNDLE_SOURCES.items()
-                       if Path(v).name == path), None)
-        if source is None:
-            continue
-        out.append((pos, source, int(match.group(1)), match.group(2),
-                    match.group(0)))
-    return out
-
-
-def _bundle_continuation_cites(doc_name: str, text: str, doc_lines,
-                               paragraphs) -> list:
-    """The subset of `_bundle_continuation_records` this leg RESOLVES.
-
-    Only for a document that opted in via `_BUNDLE_CONTINUATION_DOCS`.
-    """
-    if doc_name not in _BUNDLE_CONTINUATION_DOCS:
-        return []
-    return _bundle_continuation_records(doc_name, text, doc_lines, paragraphs)
-
-
-def _bundle_unread_continuations(docs) -> dict:
-    """Bare continuations of a swept source that no document opted in to read.
-
-    The MEASURED size of what this leg still cannot verify — reported so the
-    remainder is visible instead of being confused with "nothing there". The
-    count is pinned by `test_the_unread_bare_continuations_are_counted_not_hidden`,
-    so a NEW one reds instead of joining a silent pool: the gap may be closed or
-    acknowledged, never quietly grown.
-    """
-    counts: dict[str, int] = {}
-    for doc_name, doc_path in docs:
-        if doc_name in _BUNDLE_CONTINUATION_DOCS:
-            continue
-        text = doc_path.read_text(encoding="utf-8")
-        doc_lines = text.splitlines()
-        scope = _BUNDLE_ROW_FILTER.get(doc_name)
-        kept = [r for r in _bundle_continuation_records(
-                    doc_name, text, doc_lines, _paragraph_spans(text))
-                if scope is None
-                or scope.search(doc_lines[text.count("\n", 0, r[0])])]
-        if kept:
-            counts[doc_name] = len(kept)
-    return counts
-
-
 def _bundle_sweep(docs, sources) -> dict:
     """Read every LIVE cite out of `docs` and resolve it against `sources`.
 
@@ -1618,25 +1742,22 @@ def _bundle_sweep(docs, sources) -> dict:
         text = doc_path.read_text(encoding="utf-8")
         doc_lines = text.splitlines()
         paragraphs = _paragraph_spans(text)
-        records = [(m.start(), m.group(1), int(m.group(2)), m.group(3),
-                    m.group(0)) for m in _BUNDLE_CITE.finditer(text)]
-        records += _bundle_continuation_cites(doc_name, text, doc_lines,
-                                               paragraphs)
-        for pos, source, start, end, shown_cite in sorted(records):
+        for match in _BUNDLE_CITE.finditer(text):
             paragraph = next((s, e) for s, e in paragraphs
-                             if s <= pos < e)
-            line_no = text.count("\n", 0, pos) + 1
+                             if s <= match.start() < e)
+            line_no = text.count("\n", 0, match.start()) + 1
             # a scoped document is swept ROW by row: only the row (line) that
             # names this bundle is ours, not the whole markdown-table paragraph.
             if not _bundle_in_scope(doc_name, doc_lines[line_no - 1]):
                 continue
             marker = _bundle_historical(text[paragraph[0]:paragraph[1]])
             if marker:
-                skipped.setdefault(marker, []).append(shown_cite)
+                skipped.setdefault(marker, []).append(match.group(0))
                 continue
+            source, start, end = match.group(1), int(match.group(2)), match.group(3)
             rule = _bundle_rule(source, text[paragraph[0]:paragraph[1]],
-                                paragraph[0], pos)
-            cite = f"{doc_name}:{line_no} `{shown_cite}`"
+                                paragraph[0], match.start())
+            cite = f"{doc_name}:{line_no} `{match.group(0)}`"
             if rule is None:
                 unmatched.append(cite)
                 continue
@@ -1696,7 +1817,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:13282` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:14555` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]
@@ -1723,67 +1844,6 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
 
 
-def test_the_unread_bare_continuations_are_counted_not_hidden():
-    """The bare continuations this leg does NOT resolve are a MEASURED remainder.
-
-    ⛔ This test exists because the last time a whole class of cite was excluded
-    from the sweep, it went stale FOUR times with the leg green (`docs/00_index.md`'s
-    `#7949` row — fourteen bare numbers pointing at comments, blank lines, a
-    docstring and unrelated code; PR #10010 review, P2). An excluded cite is fine
-    only while it is COUNTED. A new bare continuation in a document that has not
-    opted in reds here and names the two honest repairs: pair the number with the
-    symbol it names (the bundle's own cite convention, which is what makes the
-    README's step table self-detecting), or add the document to
-    `_BUNDLE_CONTINUATION_DOCS` and give each of its numbers a `_BUNDLE_RULES`
-    phrase — at which point the sweep verifies them instead of tolerating them.
-    """
-    measured = _bundle_unread_continuations(_BUNDLE_DOCS)
-    assert measured == _BUNDLE_UNREAD_CONTINUATIONS, (
-        "the set of bare `:NNNN` continuations this leg cannot resolve has moved — "
-        "a cite nothing re-checks WILL rot silently, so either opt the document in "
-        f"(`_BUNDLE_CONTINUATION_DOCS`) or pair the number with its symbol: "
-        f"measured={measured} pinned={_BUNDLE_UNREAD_CONTINUATIONS}")
-    # and the documents that DO opt in are genuinely read: every continuation in
-    # them is a resolved cite, so opting in cannot be used to stay green.
-    for doc_name, doc_path in _BUNDLE_DOCS:
-        if doc_name not in _BUNDLE_CONTINUATION_DOCS:
-            continue
-        text = doc_path.read_text(encoding="utf-8")
-        doc_lines = text.splitlines()
-        resolved = _bundle_continuation_cites(
-            doc_name, text, doc_lines, _paragraph_spans(text))
-        swept = _bundle_sweep((((doc_name), doc_path),), _BUNDLE_SOURCES)
-        assert swept["checked"] >= len(resolved), (
-            f"{doc_name} opted in to continuation resolution but only "
-            f"{swept['checked']} of its {len(resolved)} continuations were "
-            "checked — the resolver is not reaching them")
-
-
-def test_a_restaled_bare_continuation_reds_the_sweep():
-    """Non-vacuity: the fourteen now-resolved index-row cites really are checked.
-
-    Before this leg could resolve bare continuations, every one of them was
-    invisible to it: this test re-stales one number in a COPY of the shipped row
-    and drives the shipped `_bundle_sweep` over it, so reverting the resolver (or
-    dropping a rule) reds here rather than passing over an unread number.
-    """
-    shipped = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
-    # a bare continuation the resolver must attribute to `extractor_v2.py`
-    stale = shipped.replace(
-        "the early-return block at `:8608-8611`",
-        "the early-return block at `:8520-8523`")
-    assert stale != shipped, "the index row moved — update this non-vacuity pin"
-    with tempfile.TemporaryDirectory() as tmp:
-        doc = Path(tmp) / "00_index.md"
-        doc.write_text(stale, encoding="utf-8")
-        swept = _bundle_sweep((("docs/00_index.md", doc),), _BUNDLE_SOURCES)
-    assert swept["failures"], (
-        "re-staling a bare continuation to the pre-fix `:8520-8523` left the sweep "
-        "green — the index row's continuations are not actually verified")
-    assert any(":8520-8523" in f for f in swept["failures"]), (
-        f"the re-staled cite was not the one that redded: {swept['failures']}")
-
-
 def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     """A cite on ANOTHER epic's index row is not this bundle's to verify.
 
@@ -1803,7 +1863,7 @@ def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     """
     table = (
         "| **`#9664` capstone — the onboarding journey** — see `sdk.py:9` | x |\n"
-        "| **`#7949` / `#9080` capstone — the closing rule** — dropped at "
+        "| **`#7949` / `#9080` capstone — the closing rule** — the meta fold "
         "`sdk.py:3` | y |\n"
     )
     rows = table.splitlines()
@@ -1818,7 +1878,10 @@ def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     assert _bundle_in_scope("README.md", rows[0])
 
     sdk = ["x"] * 9
-    sdk[2] = '            "stats": out.get("stats") or {},'   # line 3: the meta fold
+    # line 3: the meta fold that CALLS the #9116 seam (it used to be the line
+    # that dropped the block — the rule's anchors moved with the fix)
+    sdk[2] = ('            "stats": _capture_stats_with_step_witness('
+              'out, len(extracted)),')
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         doc = root / "00_index.md"

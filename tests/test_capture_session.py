@@ -2905,59 +2905,91 @@ def test_extract_session_v2_pt_ref_meta_warnings(sdk, monkeypatch):
          f"successor would be dangling: {rows!r}")
 
 
-def test_apply_supersessions_legacy_idless_object_journaled_and_folded(sdk):
-    """#2164 review (P2-1): a legacy id-less Object (raw-Cypher-created
-    WITHOUT the canonical obj-<sha26(name)> id — every supported write path
-    mints it, raw writes can skip it) superseded by a payload record must
-    (a) flip status to 'superseded' AND (b) journal the ObjectSuperseded
-    event carrying the SYNTHESIZED canonical id + name + supersedes_by.
+def test_apply_supersessions_legacy_idless_object_is_refused_not_folded(sdk):
+    """#3590: an id-less Object is UNADDRESSABLE — the supersession is
+    REFUSED (recorded + warned), never folded and never journaled.
 
-    Pre-fix the probe row had o.id=None → _emit_event received id=None →
-    the JSONL branch early-returned and the GraphEvent payload became {}
-    — the event journaled NOWHERE (silent drop, the M2 provenance gap)
-    and the live status never flipped."""
+    #2164 review (P2-1) once made this path fold: it SYNTHESIZED the canonical
+    name-derived id (``obj-<sha26(name)>``) so the journal carried "a real,
+    auditable id" for a raw-Cypher-created node. #3590 deleted that derivation
+    (``docs/architecture/identity-decision.md`` — identity is the MINTED id,
+    never a function of the name), so there is no id to address or journal and
+    ``commit_ops.apply_supersessions`` refuses the record instead of inventing
+    one. This pin replaces the pre-#3590 pin
+    ``test_apply_supersessions_legacy_idless_object_journaled_and_folded``,
+    which asserted the synthesized-id fold and was left stale by that change
+    (it went RED on CI jobs `test-slow (e)` / `ci-introduced-failure` at
+    ``9e18023da01f``).
+
+    ⛔ Why the refusal, and not a journal-less fold: #3590's recorded scope —
+    *"No migration / no backfill … Nothing to preserve — start fresh"* —
+    licenses dropping the pre-#3590 record, but a fold that cannot be
+    JOURNALED is not representable at all: writing ``status``/``supersededBy``
+    with no ``ObjectSuperseded`` line would put live state on the graph that a
+    wipe+rebuild cannot restore — the M2 provenance gap that opened #2164 in
+    the first place. So the refusal is the coherent choice, and what this pin
+    forbids is the SILENT version of it.
+    """
     from tortoise.commit_ops import apply_supersessions
-    from tortoise.sdk import _entity_name_id
+    from tortoise.entity_identity import clear_non_folded_entries, non_folded_entries
 
+    # process-level record: clear it so the assertion below cannot pass on a
+    # neighbouring test's entry (non-vacuity).
+    clear_non_folded_entries()
     proj = sdk._get_proj()
     # successor must be visible (the payload-entities equivalent)
     sdk.create_entity("object", "successor-B", objectKind="core:strategy")
     # raw legacy Object — NO id property at all
     proj.g.query("CREATE (o:Object {name:'legacy-X', status:'live'})")
+    # premise asserted BEFORE the conclusion: the fixture really is id-less,
+    # so a refusal-free pass cannot be mistaken for a fold.
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'legacy-X'}) RETURN o.id, o.status",
+    ).result_set
+    assert rows and rows[0][0] is None, f"fixture must be id-less: {rows!r}"
+
+    warns: list[str] = []
     applied = apply_supersessions(
         proj, sdk,
         [{"superseded": "legacy-X", "supersedes_by": "successor-B",
           "evidence": "legacy lifecycle"}],
-        session_id="sess_legacy")
-    assert applied == 1, "legacy no-id supersession must apply"
-    rows = proj.g.query(
-        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
-        params={"n": "legacy-X"}).result_set
-    assert rows and rows[0][0] == "superseded", \
-        f"status never flipped: {rows!r}"
-    assert rows[0][1] == "successor-B", rows
-    # journaled with the synthesized canonical id (create_entity parity)
-    events = proj.g.query(
-        "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) "
-        "RETURN e.payload ORDER BY e.seq",
-    ).result_set
-    assert events, "ObjectSuperseded must reach the :GraphEvent store"
-    payload = json.loads(events[-1][0])
-    assert payload["id"] == _entity_name_id("Object", "legacy-X"), payload
-    assert payload["name"] == "legacy-X", payload
-    assert payload["supersedes_by"] == "successor-B", payload
-    assert payload["session_id"] == "sess_legacy", payload
+        session_id="sess_legacy", warn=warns.append)
+    assert applied == 0, \
+        "an id-less target has no id to address — the record is refused"
+    assert _entity_fold_state(proj, "legacy-X") == ("live", None), \
+        ("the target must be left untouched: a fold with no journal line is "
+         "not restorable by a rebuild")
+    assert _object_superseded_events(proj) == 0, \
+        "nothing may be journaled — least of all under a synthesized id"
+    assert len(warns) == 1 and "id-less" in warns[0] \
+        and "#3590" in warns[0], warns
+    # The RECORD is the non-folded entry (a refusal is an assertion, not a log
+    # line) — shape and counted carrier both named.
+    entries = [e for e in non_folded_entries() if e.name == "legacy-X"]
+    assert [(e.label, e.shape, e.candidate_ids) for e in entries] == [
+        ("Object", "unaddressable-name", ("<id-less>",))], entries
 
 
-def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
-    """#2164 review (P2-1, JSONL half): the synthesized-id emission must reach
-    the JSONL rebuild log (#548) — the store the reviewer's M2 provenance gap
-    is about. Pre-fix the emit passed id=None → the JSONL branch of
-    sdk._emit_event early-returned (``if point is None and id is None``) and
-    the legacy Object's supersession left NO journal line — a wipe+rebuild
-    could never restore (or even show) the fold."""
+def test_apply_supersessions_legacy_idless_object_writes_no_jsonl_line(tmp_path):
+    """#3590 (JSONL half of #2164's M2 gap): the id-less refusal writes NO
+    journal line — and the log is proven LIVE in the same test.
+
+    #2164 review (P2-1, JSONL half) pinned the synthesized-id emission into the
+    JSONL rebuild log (#548). With the synthesis gone there is no id to emit,
+    so the contract inverts: an id-less target leaves NO ``ObjectSuperseded``
+    line. A bare "the log contains none" assertion is vacuous — an SDK built
+    without ``event_log_path``, a closed log, or a broken emit would satisfy it
+    — so the same log is bracket-proven by a CANONICAL-id supersession:
+    nothing for the id-less target, then exactly one line for the canonical
+    one, with its own id/name/supersedes_by.
+
+    This pin replaces ``test_apply_supersessions_legacy_idless_object_reaches_jsonl``
+    (the pre-#3590 JSONL exerciser named in ``docs/event-catalog.md``), which
+    asserted the synthesized id and was left stale by #3590.
+    """
+    from _node_ids import node_id
+
     from tortoise.commit_ops import apply_supersessions
-    from tortoise.sdk import _entity_name_id
 
     events = tmp_path / "events"
     events.mkdir()
@@ -2968,21 +3000,35 @@ def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
         sdk.create_entity("object", "successor-C", objectKind="core:strategy")
         # raw legacy Object — NO id property at all
         proj.g.query("CREATE (o:Object {name:'legacy-Y', status:'live'})")
+
+        def _superseded_lines():
+            log = (events / "events.jsonl").read_text(
+                encoding="utf-8").splitlines()
+            return [json.loads(ln) for ln in log
+                    if '"type": "ObjectSuperseded"' in ln]
+
         applied = apply_supersessions(
             proj, sdk,
             [{"superseded": "legacy-Y", "supersedes_by": "successor-C",
               "evidence": "legacy lifecycle"}],
             session_id="sess_legacy2")
-        assert applied == 1
-        log = (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        superseded_lines = [ln for ln in log
-                            if '"type": "ObjectSuperseded"' in ln]
-        assert superseded_lines, ("ObjectSuperseded must be journaled to the "
-                                  "JSONL log for a legacy no-id Object")
-        ev = json.loads(superseded_lines[-1])
-        assert ev["id"] == _entity_name_id("Object", "legacy-Y"), ev
-        assert ev["name"] == "legacy-Y", ev
-        assert ev["supersedes_by"] == "successor-C", ev
+        assert applied == 0, "an id-less target is refused, not folded"
+        assert _superseded_lines() == [], (
+            "an id-less target has no id to journal — no line may be written")
+
+        # ── positive control: the SAME log, a canonical-id target ──────────
+        sdk.create_entity("object", "canonical-Z", objectKind="core:strategy")
+        applied2 = apply_supersessions(
+            proj, sdk,
+            [{"superseded": "canonical-Z", "supersedes_by": "successor-C",
+              "evidence": "canonical lifecycle"}],
+            session_id="sess_canon")
+        assert applied2 == 1, "a canonical-id target must still fold"
+        lines = _superseded_lines()
+        assert len(lines) == 1, f"exactly one line, for the canonical target: {lines}"
+        assert lines[0]["id"] == node_id(proj, "Object", "canonical-Z"), lines
+        assert lines[0]["name"] == "canonical-Z", lines
+        assert lines[0]["supersedes_by"] == "successor-C", lines
     finally:
         sdk.close()
 
@@ -3356,14 +3402,15 @@ def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
     forces the fold-order pre-pass to resolve BOTH sides against the graph
     (id-form ref + name-form successor) — raw string comparison would miss
     the edge (name != id string)."""
+    from _node_ids import node_id
+
     from tortoise.commit_ops import apply_supersessions
-    from tortoise.sdk import _entity_name_id
 
     proj = sdk._get_proj()
     sdk.create_entity("object", "mx-A", objectKind="core:strategy")
     sdk.create_entity("object", "mx-B", objectKind="core:strategy")
     sdk.create_entity("object", "mx-C", objectKind="core:strategy")
-    b_id = _entity_name_id("Object", "mx-B")
+    b_id = node_id(proj, "Object", "mx-B")
     warns: list[str] = []
     applied = apply_supersessions(
         proj, sdk,
@@ -3599,16 +3646,23 @@ def test_apply_supersessions_cycle_predecessor_hoisted(sdk):
     assert b is not None and (b[0] or "live") == "live", b
 
 
-def test_apply_supersessions_chain_idless_target_converges(sdk):
-    """#2249 (code-review P2-2, second-model): an id-less Object can never be
-    a VISIBLE successor (the fold-time gate requires an id) — chains through
-    one as a middle/tail link are order-insensitive. But an id-less TARGET
-    (chain HEAD, folds by name via the loop's fallback) still participates
-    as a NEEDER of its own successor — [C→D, mid→C] where mid is id-less:
-    mid→C needs C visible; C→D terminalizes C → the pre-pass sorts mid→C
-    first and BOTH folds land (applied=2, mid.sb=C via the name fallback,
-    C.sb=D). Pre-fix payload order [C→D, mid→C] folds C first → mid→C's
-    successor is terminal → gate-skip → mid STAYS LIVE (applied=1)."""
+def test_apply_supersessions_chain_idless_target_is_refused(sdk):
+    """#3590 (re-derives #2249 P2-2): in a chain whose HEAD is id-less, only
+    the addressable link folds — the id-less link is REFUSED, not folded.
+
+    #2249 pinned the pre-#3590 behaviour: an id-less target folded by NAME via
+    the loop's fallback, so [C→D, mid→C] landed BOTH folds (applied=2,
+    mid.sb=C, C.sb=D). #3590 deleted the name fallback (identity is the minted
+    id), so ``mid→C`` is refused while the addressable ``C→D`` still folds —
+    applied=1. This pin replaces ``test_apply_supersessions_chain_idless_target_converges``,
+    which asserted the name fallback and was left stale by that change (RED on
+    CI jobs `test-slow (e)` / `ci-introduced-failure` at ``9e18023da01f``).
+
+    ⛔ The point of pinning it in a CHAIN is the ordering guarantee #2249 was
+    about: the pre-pass still sorts the id-less record normally (it is a needer
+    of its successor), so the refusal is a MAIN-LOOP decision, not an accident
+    of payload order. What it must not do is take C's fold down with it.
+    """
     from tortoise.commit_ops import apply_supersessions
 
     proj = sdk._get_proj()
@@ -3616,6 +3670,10 @@ def test_apply_supersessions_chain_idless_target_converges(sdk):
     sdk.create_entity("object", "it-D", objectKind="core:strategy")
     # raw legacy id-less mid node (NO id property at all)
     proj.g.query("CREATE (o:Object {name:'it-mid', status:'live'})")
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'it-mid'}) RETURN o.id",
+    ).result_set
+    assert rows and rows[0][0] is None, f"fixture must be id-less: {rows!r}"
     warns: list[str] = []
     applied = apply_supersessions(
         proj, sdk,
@@ -3624,11 +3682,14 @@ def test_apply_supersessions_chain_idless_target_converges(sdk):
          {"superseded": "it-mid", "supersedes_by": "it-C",
           "evidence": "c replaces mid (id-less head)"}],
         session_id="sess_it", warn=warns.append)
-    assert applied == 2, \
-        f"id-less-target chain must converge (both folds land): {warns}"
-    assert warns == [], warns
-    mid = _entity_fold_state(proj, "it-mid")
-    assert mid == ("superseded", "it-C"), mid
+    assert applied == 1, \
+        f"only the addressable link folds; the id-less one is refused: {warns}"
+    assert len(warns) == 1 and "it-mid" in warns[0] and "#3590" in warns[0], \
+        warns
+    # the refusal is LOCAL: the id-less head is untouched...
+    assert _entity_fold_state(proj, "it-mid") == ("live", None), \
+        _entity_fold_state(proj, "it-mid")
+    # ...and the addressable link in the same chain still lands.
     assert _entity_fold_state(proj, "it-C") == ("superseded", "it-D")
 
 

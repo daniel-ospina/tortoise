@@ -137,6 +137,15 @@ def test_docs_scanning_gates_stay_in_tier1():
         "and a docs-only edit runs only tier1; without this pin a re-staled "
         "`found`-omission claim merges green (#4309 class)"
     )
+    assert "test_10191_record_move_doc_pin.py" in tier1, (
+        "#10244 review (P3): the #10191 record-side MOVE pin must be in tier1 — "
+        "it guards `docs/INGEST_CONTRACT.md`, which is in NON_PYTHON_PREFIXES "
+        "and matches no SOURCE_PATTERNS entry, so an INGEST-only diff selects "
+        "no surface and runs tier1 ONLY. The `core` row and the `durations` row "
+        "both survive a dropped `tier1` row, so nothing would red: the manifest "
+        "stays internally consistent while the pin sleeps on the exact edit it "
+        "exists to catch (#4309/#8474 class, the hole #10244 closed)"
+    )
     assert "test_fly_secret_drift.py" in tier1, (
         "#8614: the runbook's secret-drift guards read docs/infra-runbook.md "
         "(`docs/` is in NON_PYTHON_PREFIXES and the runbook matches no "
@@ -194,6 +203,21 @@ def test_docs_scanning_gates_stay_in_tier1():
     )
 
 
+    assert "test_substrate_map.py" in tier1, (
+        "#5086 review (P1-2): the substrate map's drift guard must be in tier1 — "
+        "the map IS a document (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`), "
+        "and `docs/` is in NON_PYTHON_PREFIXES and the map matches no "
+        "SOURCE_PATTERNS entry, so the docs-only edit that let the map go stale "
+        "three times selects no surface and runs tier1 ONLY. Registered in "
+        "`core` alone it ran on `tortoise/` diffs, i.e. on the one half of the "
+        "map that is not the artifact that went stale (#4309 class, same dual "
+        "registration as the sibling doc guards above). ⚠️ This row is the MAP's "
+        "arm only: `docs/00_index.md`, the other file the guard reads, is in "
+        "`CORE_ALSO`, so an index-only edit measures `surfaces=['core']` and "
+        "needs no tier1 row (#5086 review P3, cycle 6)"
+    )
+
+
 def test_v4_membership_gate_runs_on_both_architecture_docs():
     """#9778 review (P2): pin the SELECTION, not just the manifest string.
 
@@ -246,6 +270,65 @@ def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
         "edited one digit, or deleted and merge green (#10108 review P1, "
         "#4309 class)"
     )
+
+
+def test_substrate_map_guard_runs_on_the_diffs_it_guards():
+    """#5086 review (P1-2): pin the SELECTION on all four arms, not the string.
+
+    `tests/test_substrate_map.py` re-measures
+    `docs/architecture/SUBSTRATE-REBUILD-MAP.md` against the tree. Four distinct
+    diffs can break it, and before this fix NONE of them selected it — the row had
+    been appended to the `ep:` list rather than `core:`, and neither `core` nor
+    the early return reaches the file anyway:
+
+    - a **docs-only** edit of the map → measured `surfaces=[]`, tier-1 set WITHOUT
+      the pin; `tier1` is the only surface that runs, so the row above is the
+      whole fix. (This is the arm that went stale three times, and the ONLY one
+      that needs `tier1`.)
+    - a **tool-only** edit of `tools/substrate_map_check.py` → measured
+      `surfaces=[]` (a flat `NON_PYTHON_PREFIXES` entry, no `SOURCE_PATTERNS`
+      match), so the tool's own test never ran on the PR editing the tool. Closed
+      by `CORE_ALSO` in `tools/ci_selection.py` (#1349/#3332/#3616 class).
+    - a **`docs/00_index.md`** edit — the OTHER file the guard reads for the
+      registration claim — is `CORE_ALSO` too, so it measures
+      `surfaces=['core']` and reaches the pin through the `core` row. Pinned here
+      because the fix-pass notes and the `tier1` comment both claimed this arm was
+      a docs-only early return; it is not (#5086 review P3, cycle 6).
+    - a **`tortoise/`** symbol move (what the interface map places) → `core`,
+      through the `tortoise/` prefix fallback.
+
+    Measured after the fix: docs `surfaces=[]` + pin present, tool
+    `surfaces=['core']` + pin present, index `surfaces=['core']` + pin present,
+    `tortoise/projection/edges.py` `surfaces=['core', ...]` + pin present.
+    """
+    docs = _sel(["docs/architecture/SUBSTRATE-REBUILD-MAP.md"])
+    assert docs["full"] is False
+    assert docs["surfaces"] == [], docs["surfaces"]
+    assert "test_substrate_map.py" in docs["test_files"], (
+        "a docs-only edit of the map must run the guard that re-measures it — "
+        "otherwise it goes stale a fourth time with every gate green"
+    )
+
+    tool = _sel(["tools/substrate_map_check.py"])
+    assert tool["full"] is False
+    assert "test_substrate_map.py" in tool["test_files"], (
+        "a tool-only edit must run the tool's own negative controls — `tools/` "
+        "is swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing "
+        "that keeps this out of the docs-only early return"
+    )
+
+    index = _sel(["docs/00_index.md"])
+    assert index["surfaces"] == ["core"], index["surfaces"]
+    assert "test_substrate_map.py" in index["test_files"], (
+        "the registration claim reads `docs/00_index.md`, and that path is in "
+        "CORE_ALSO — so an index-only edit is `core`, NOT the docs-only early "
+        "return the `tier1` comment used to describe it (#5086 review P3, "
+        "cycle 6: measured, not reasoned)"
+    )
+
+    symbol_move = _sel(["tortoise/projection/edges.py"])
+    assert "core" in symbol_move["surfaces"], symbol_move["surfaces"]
+    assert "test_substrate_map.py" in symbol_move["test_files"]
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
@@ -1395,6 +1478,27 @@ def test_the_docker_lane_seam_forces_the_full_matrix():
     `core` and the other surfaces' consumers never ran on the PR that made it.
     """
     result = _sel(["tests/_live_utils.py"])
+    assert result["full"] is True, result
+    assert result["test_files"] == "ALL", result
+
+
+def test_the_minted_identity_id_helper_forces_the_full_matrix():
+    """#3590 round-5 review F4: `tests/_node_ids.py` is a CROSS-SURFACE helper.
+
+    It replaced the retired `entity_name_id` derivation in every test that needs
+    "the id of this name", and it is imported from modules registered on several
+    surfaces — `test_sdk_group3.py` (sdk), `test_capture_session.py` /
+    `test_ingest_event_endpoint.py` / `test_event_provenance.py` /
+    `test_status_folds_2729.py` (core), `test_7936_stable_stub_ids.py`
+    (core + sdk) and others. It is NOT a `test_*.py` file, so the manifest never
+    classifies it: without its `SHARED_MODULES` entry a helper-only change
+    selected `core` only and a break it induced in a sdk/api test never ran on
+    the PR that made it (the #1349/#3332/#3910 under-selection class). Same
+    reason — and same shape — as the `_live_utils.py` pin above; the generic
+    `test_every_shared_module_entry_selects_the_full_matrix` cannot catch the
+    entry going MISSING, which is the failure this names.
+    """
+    result = _sel(["tests/_node_ids.py"])
     assert result["full"] is True, result
     assert result["test_files"] == "ALL", result
 
@@ -2847,11 +2951,24 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # Measured on the pre-fix head: `_sel([<this path>])` -> surfaces=[],
         # full=False, so editing the very file the pin parses ran no guard.
         "supabase/migrations/20261024000001_record_session_narrative_carrier.sql",
-        # #10017 R2: the FORWARD migration that re-declares
-        # `chk_point_props_no_derived` to refuse `cache_tier` — and the one file
-        # that can silently SHRINK `point`'s refusal set, because the SQL CHECK
-        # REPLACES while `refused_props_names()` UNIONS (so the parser keeps
-        # reporting every name refused after the database stopped refusing it).
+        # #10017 R2: the FORWARD migration that ADDS `public.point.cache_tier`
+        # (`ALTER TABLE public.point ADD COLUMN`) and re-declares
+        # `chk_point_props_no_derived` to refuse it. Both readers must run on a
+        # change to this file alone — `test_record_projection.py` reads its
+        # ALTER for the column set and its constraint for the refusal,
+        # `test_record_schema_placement.py` pins the record schema. It is also
+        # the one file that can silently SHRINK `point`'s refusal set, because
+        # the SQL CHECK REPLACES while `refused_props_names()` UNIONS (so the
+        # parser keeps reporting every name refused after the database stopped
+        # refusing it). Measured on the pre-fix head: `_sel([<this path>])` ->
+        # `surfaces: []`, `full: false`, both readers ABSENT, so adding the
+        # column and skipping the placement table would have merged with no
+        # guard running at all.
+        # ONE entry, not two: this file was registered here (PR #10070, landing
+        # the same migration on main) and again by this branch's own base, and
+        # the #10258 merge of `origin/main` brought both copies in. The arm
+        # asserted the same three things twice; the duplicate is removed rather
+        # than left to double-run.
         "supabase/migrations/20261029000001_record_point_cache_tier.sql",
         # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
         # it: `test_record_schema_placement.py` reads this file's table, so a
@@ -5152,6 +5269,10 @@ def test_every_file_rides_exactly_one_shard_at_s_greater_than_two():
     assert len({e["half"] for e in inc}) == 5
     assert [e["half"] for e in inc] == ["a", "b", "c", "d", "e"]
     assert sum(len(e["files"].split()) for e in inc) == len(flat)
+    # #6897: every row carries its `runner`, and `fast_matrix_include` must not
+    # silently drop it — the whole lane is that key plus the workflow's `runs-on`.
+    for e in inc:
+        assert "runner" in e, f"the emitted matrix must carry the runner (#6897): {e['half']}"
     # #6145: the emitted headroom is this change's only new OUTPUT — the whole
     # feature is "the margin a leg actually got is visible" — and it had NO
     # assertion: deleting the key from `fast_matrix_include` left all 221 tests
@@ -5409,6 +5530,10 @@ def test_shard_count_is_stable_regardless_of_the_selection_size():
     assert [e["name"] for e in entries] == list("abcdefghi")
     inc = fast_matrix_include(entries)["include"]
     assert [e["half"] for e in inc] == list("abcdefghi")
+    # #6897: the routing is POSITIONAL and derived, so a tiny selection that leaves
+    # most shards EMPTY must still emit a class for every row — an empty shard is
+    # still a JOB, and a row without `runner` makes `runs-on` resolve to null.
+    assert all(e.get("runner") for e in inc), inc
     # every file still rides exactly one shard; the rest are legitimately empty
     flat = [f for e in entries for f in e["files"]]
     assert sorted(flat) == ["test_a", "test_b", "test_c"]
@@ -5504,6 +5629,305 @@ def test_no_required_check_names_a_fast_leg():
     assert not [c for c in record["required_contexts"] if c.startswith("test (")], (
         "no required context may be a shard leg — the shard set changes with S, so "
         "keying the required set on a leg name would make the gate unsatisfiable")
+
+
+# ── #6897: the fast matrix CAN route across both runner classes ──────────
+# The capacity decision is #6897's (owner ruling 2026-10-27: use the compute
+# capacity wherever it is; THROUGHPUT over runner class) — but it is delivered
+# as an OPT-IN, because the pool is **fallback-only** by a RECORDED DECISION
+# (`docs/ops/ci-runner-x64.md` -> "Contradiction test",
+# `scripts/ci_runner_gate.sh:1-30`), and making the pool a primary class by
+# default would be an adoption over that decision.
+#
+# So these pin FOUR properties: the DEFAULT is main's behaviour exactly
+# (`hosted-only`, every row on `ubuntu-latest`) — the one #10186's review found
+# violated, with 3 of 4 pool legs failing on its own head — the opt-in actually
+# splits, every row HAS a class (a missing key makes `runs-on` resolve to null
+# and the file is refused — #6253's zero-jobs case), and the canary producer
+# keeps the label it has always used so the streak stays comparable.
+#
+# ⛔ WHAT THESE DO **NOT** CLAIM: that the hosted half is GitHub-hosted. On this
+# repo `ubuntu-latest` is not hosted-only — `scripts/ci_runner_gate.sh` attaches
+# it to the self-hosted pool as a fallback, and #6897 measured it attached while
+# GitHub-hosted was healthy. The class a `ubuntu-latest` row lands on is main's
+# existing ambiguity, carried over unchanged; `SHARD_RUNNER_HOSTED` names the
+# LABEL, which is all this lane decides.
+
+
+def test_the_fast_split_is_off_by_default_so_the_pool_stays_fallback_only(monkeypatch):
+    """#6897/#10186: with no opt-in, EVERY row is main's `ubuntu-latest`.
+
+    This is the assertion the earlier cut of this branch failed: it routed odd
+    shards to `[self-hosted, self-hosted-x64]` unconditionally, which moved 4 of
+    9 gated shards onto a class the recorded `fallback-only` decision says is not
+    primary. It also fails SAFE on junk: an unset variable, an emptied one, a
+    fork with no `vars`, or a typo must all land on main's behaviour rather than
+    discovering the split when a leg dies.
+    """
+    from tools.ci_selection import (
+        SHARD_ROUTING_ENV,
+        SHARD_ROUTING_HOSTED_ONLY,
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_HOSTED,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+        resolve_shard_routing,
+    )
+    monkeypatch.delenv(SHARD_ROUTING_ENV, raising=False)
+    shards = push_legs(load_manifest())["shards"]
+    inc = fast_matrix_include(shards)["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    assert {e["runner"] for e in inc} == {json.dumps(SHARD_RUNNER_HOSTED)}, (
+        "the default must be hosted-only — the pool is fallback-only by recorded "
+        f"decision (#6897): {sorted(e['runner'] for e in inc)}")
+    # …and it must be the DEFAULT, not an accident of an unset environment: the
+    # mode resolver is the single decision point, and every non-opt-in value
+    # resolves to hosted-only, `hosted-only` itself included (the documented safe
+    # setting must stay legal).
+    for value in (None, "", "   ", SHARD_ROUTING_HOSTED_ONLY, "hosted-only ",
+                  "HOSTED-ONLY", "true", "1", "pool", "split", "pool-splits",
+                  "pool_split"):
+        assert resolve_shard_routing(value) == SHARD_ROUTING_HOSTED_ONLY, value
+    assert resolve_shard_routing(SHARD_ROUTING_POOL_SPLIT) == SHARD_ROUTING_POOL_SPLIT
+    assert resolve_shard_routing(" POOL-SPLIT ") == SHARD_ROUTING_POOL_SPLIT
+    # the environment is the operator lever, so it must reach the matrix — and
+    # only for the exact opt-in.
+    for value in ("", SHARD_ROUTING_HOSTED_ONLY, "nonsense"):
+        monkeypatch.setenv(SHARD_ROUTING_ENV, value)
+        got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+        assert got == {json.dumps(SHARD_RUNNER_HOSTED)}, (value, sorted(got))
+    monkeypatch.setenv(SHARD_ROUTING_ENV, SHARD_ROUTING_POOL_SPLIT)
+    got = {e["runner"] for e in fast_matrix_include(shards)["include"]}
+    assert len(got) == 2, f"the opt-in must actually split: {sorted(got)}"
+
+
+def test_every_fast_row_names_a_runner_and_the_split_uses_both_classes():
+    """#6897: `runner` is emitted per row, positional, and never degenerates.
+
+    Asserts the OPT-IN mode — the default is pinned by the test above.
+    """
+    from tools.ci_selection import (
+        SHARD_ROUTING_POOL_SPLIT,
+        SHARD_RUNNER_HOSTED,
+        SHARD_RUNNER_X64,
+        fast_matrix_include,
+        load_manifest,
+        push_legs,
+    )
+    inc = fast_matrix_include(push_legs(load_manifest())["shards"],
+                              routing=SHARD_ROUTING_POOL_SPLIT)["include"]
+    assert inc, "the real config emits no shards — nothing to route"
+    for e in inc:
+        assert "runner" in e, f"missing runner (#6897): {e['half']}"
+        # a JSON ARRAY STRING, not a bare label: `runs-on` needs an array, and a
+        # matrix value is always a string, so the workflow must `fromJSON` it.
+        parsed = json.loads(e["runner"])
+        assert isinstance(parsed, list) and parsed, e
+        assert all(isinstance(x, str) for x in parsed), e
+        assert parsed in (SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64), (
+            f"unexpected runner class on {e['half']}: {parsed}")
+    # THE CANARY PRODUCER STAYS ON THE HOSTED LABEL — the one it has always used,
+    # so the canary streak keeps comparing tests rather than classes. It is the
+    # HOSTED LABEL and not "GitHub-hosted": see this block's header for why that
+    # label's class is not a guarantee on this repo.
+    producer = [e for e in inc if e["canary_producer"]]
+    assert len(producer) == 1, producer
+    assert json.loads(producer[0]["runner"]) == SHARD_RUNNER_HOSTED, (
+        "the canary producer must stay on the hosted label, not the pool (#6897): "
+        f"{producer[0]['half']} -> {producer[0]['runner']}")
+    # BOTH CLASSES, or the routing is a rename of `ubuntu-latest` with extra
+    # failure modes. (The opposite degeneracy — every row on the pool — would
+    # ALSO lose the hosted fallback the ci_runner_gate exists for.)
+    classes = {e["runner"] for e in inc}
+    assert classes == {json.dumps(SHARD_RUNNER_HOSTED), json.dumps(SHARD_RUNNER_X64)}, (
+        f"the fast matrix must split across both classes, got {sorted(classes)}")
+
+
+def test_runner_routing_is_positional_and_the_last_shard_is_always_on_the_hosted_label():
+    """#6897: the routing rule, on SYNTHETIC shard counts.
+
+    The real manifest is S=9, where "alternate by index" and "the last shard
+    keeps the hosted label" happen to agree (index 8 is even) — so pinning the
+    rule only against the real config would let an S=10 change flip the canary
+    producer onto the pool without a red. This asserts the rule for both
+    parities.
+    """
+    from tools.ci_selection import SHARD_RUNNER_HOSTED, SHARD_RUNNER_X64, fast_shard_runner
+    for count in range(2, 13):
+        runners = [fast_shard_runner(i, count) for i in range(count)]
+        assert runners[-1] == SHARD_RUNNER_HOSTED, (
+            f"S={count}: the last shard is the canary producer and must keep the "
+            "hosted label")
+        if count == 2:
+            # DEGENERATE BY CONSTRUCTION, and safe: with two shards, index 0 is
+            # even and index 1 IS the pinned last one, so there is no pool row to
+            # give. It falls back to exactly main's pre-#6897 behaviour (both on
+            # the hosted label) rather than inventing a split the rule does not
+            # describe.
+            assert runners == [SHARD_RUNNER_HOSTED, SHARD_RUNNER_HOSTED], runners
+        else:
+            assert set(map(tuple, runners)) == {
+                tuple(SHARD_RUNNER_HOSTED), tuple(SHARD_RUNNER_X64)
+            }, f"S={count}: a single class is not a split"
+        # positional alternation over every shard that is not the pinned last one
+        for i, got in enumerate(runners[:-1]):
+            want = SHARD_RUNNER_HOSTED if i % 2 == 0 else SHARD_RUNNER_X64
+            assert got == want, (count, i, got, want)
+        # the returned list is a COPY: a caller mutating one row's label array
+        # (json.dumps in `fast_matrix_include` reads it, so a later edit could
+        # plausibly extend it) must not change the class the NEXT row gets. The
+        # assertion compares against an INDEPENDENT literal and checks identity,
+        # because `==` against the module constant is an aliasing tautology —
+        # dropping the `list()` copy survives it (measured).
+        runners[0].append("mutated")
+        assert fast_shard_runner(0, count) == ["ubuntu-latest"], count
+        assert fast_shard_runner(0, count) is not SHARD_RUNNER_HOSTED, (
+            "fast_shard_runner must return a copy, never the module constant")
+        assert fast_shard_runner(1, count) is not SHARD_RUNNER_X64
+        # The hosted LABEL is pinned deliberately, and a change to it must be a
+        # deliberate change: `ubuntu-latest` is what main uses today, so moving to
+        # the hosted-ONLY `ubuntu-24.04` would also drop the outage fallback and
+        # break comparability with the canary streak's history. That is a decision
+        # (#6897), not a tidy-up — so it cannot happen behind a green suite.
+        assert SHARD_RUNNER_HOSTED == ["ubuntu-latest"], SHARD_RUNNER_HOSTED
+
+
+def test_the_test_job_takes_its_runner_from_the_matrix_with_a_variable_rollback():
+    """#6897: the workflow half of the routing.
+
+    Four claims the unit tests above cannot see: `runs-on` reads the selector's
+    per-row class (no literal that would ignore the matrix, and NO second copy of
+    the mode logic to drift from the selector's), the opt-in reaches the selector
+    as the repo VARIABLE rather than a code edit, the emitted value is parsed
+    (the row value is a JSON string; `runs-on` needs the array), and the job is
+    not renamed — branch protection and the merge rail key on `test (a)`….
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test"]
+    runs_on = str(job["runs-on"])
+    assert runs_on == "${{ fromJSON(matrix.runner) }}", (
+        "`test` must take its runner class from the selector's matrix row, and "
+        f"from nowhere else (got {runs_on!r})")
+    assert "self-hosted" not in runs_on and "ubuntu-" not in runs_on, (
+        "a literal runner label in `runs-on` would bypass the selector — and, "
+        "for a pool label, make the split the DEFAULT again (#10186 review)")
+    # THE OPT-IN IS WIRED, in the job that emits the matrix: without this env
+    # the selector never sees `CI_SHARD_ROUTING` and the split can never be
+    # turned on (the fail-safe direction, but a dead lever all the same).
+    emit = [s for s in wf["jobs"]["changes"]["steps"]
+            if s.get("id") == "push-matrix"]
+    assert len(emit) == 1, emit
+    env = _effective_step_env(wf, "changes", emit[0])
+    assert "vars.CI_SHARD_ROUTING" in env.get("CI_SHARD_ROUTING", ""), (
+        "the matrix emitter must pass the CI_SHARD_ROUTING repo variable to the "
+        f"selector (#6897); got env={env!r}")
+    # the job id and its `test (<half>)` name are branch-protection surfaces
+    assert job["name"] == "test (${{ matrix.half }})", job["name"]
+    # ⛔ and the legs that CANNOT run on the pool keep their version pin: a
+    # `self-hosted` here would let a 39.6m leg be killed at its watchdog (the
+    # measurement in the test-slow header).
+    assert wf["jobs"]["test-slow"]["runs-on"] == "ubuntu-24.04", (
+        "test-slow must stay version-pinned to GitHub-hosted (#6897 does not touch it)")
+
+
+def test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job():
+    """#6897/#10186: ONE lever, EVERY emitter — the tier-2 split included.
+
+    `changes` emits `fast_matrix` from TWO steps: `push-matrix`
+    (`--emit-push-matrix`, every event) and `split` (`--split`, tier-2 PRs, and
+    its output OVERRIDES the push matrix — see the job `outputs:` block). The
+    opt-in is read from the ENVIRONMENT (`resolve_shard_routing(
+    os.environ.get("CI_SHARD_ROUTING"))`), so an emitter that does not carry
+    that variable silently resolves to hosted-only whatever the operator set:
+    a dead lever on exactly the event type every PR uses.
+
+    Measured on the pre-fix tree (`3db8f7d78`): the `env:` was attached to the
+    `push-matrix` STEP only, so with `CI_SHARD_ROUTING=pool-split` in the repo
+    variables a tier-2 PR still emitted nine rows on `["ubuntu-latest"]` and the
+    split never happened. Fail-SAFE (that is main's behaviour) but not the
+    documented contract — `docs/ops/ci-runner-x64.md` says `pool-split` opts in,
+    with no event qualification — and the failure mode is the worst kind: the
+    run looks exactly as if nobody had set the variable.
+
+    The env is asserted through `_effective_step_env` (job + step, merged per
+    step) and additionally, at STEP scope alone, by
+    `test_the_changes_job_carries_no_job_scope_env` —
+    job scope is barred by the capstone pin; the emitter set is DISCOVERED from
+    the run commands rather than named, so a THIRD emitter added later cannot
+    silently miss the lever either.
+    """
+    wf = _load_python_ci()
+    emitters = []
+    for step in wf["jobs"]["changes"]["steps"]:
+        run = str(step.get("run") or "")
+        if "--emit-push-matrix" in run or "--split" in run:
+            emitters.append(step)
+    names = [s.get("name") for s in emitters]
+    assert len(emitters) >= 2, (
+        "the `changes` job must still emit the matrix from both the push step "
+        f"and the tier-2 split step; discovered {names}")
+    missing = [s.get("name") for s in emitters
+               if "vars.CI_SHARD_ROUTING"
+               not in _effective_step_env(wf, "changes", s).get("CI_SHARD_ROUTING", "")]
+    assert not missing, (
+        "every step that emits `fast_matrix` must see CI_SHARD_ROUTING, or the "
+        f"opt-in is silently ignored on that path (#10186): {missing} of {names}")
+
+
+def test_the_changes_job_carries_no_job_scope_env():
+    """#10186 review ISSUE 1 (blocking): the lever may NOT live at JOB scope.
+
+    `changes` also owns the capstone pre-registration gate step, and
+    `tests/test_capstone_preregistration_9075.py` refuses ANY `env:` key in a
+    scope above that step — `_SAFE_JOB_ENV` is empty for every job — because a
+    key there can hook the gate's interpreter or shell (`BASH_ENV`, a
+    `PYTHONPATH` `sitecustomize.py`, `LD_PRELOAD`, `PATH`) so `python3` exits 0
+    with the real check never running. A job-scope lever therefore reds a
+    required FAST shard: measured at head `3eaf43fda`, that pin reported 44
+    failures (`ci_ordering_half_violations` returned one violation, and the
+    unmutated-workflow assertion runs once per silencing-idiom parametrization).
+
+    So the rule is DERIVED from the pin instead of restated: whatever
+    `_SAFE_JOB_ENV` permits for `changes` is the entire allowance, and the lever
+    is carried by each emitter STEP's own `env:` instead. A future pin edit that
+    permits a key here loosens this test automatically, which is the point —
+    one rule, two readers.
+
+    Non-vacuous: at `3eaf43fda` the job carried
+    `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
+    assertions below fail on that tree.
+
+    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:866`
+    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1590`)
+    both send an operator here by name, and both advertised
+    `test_the_changes_job_carries_no_job_scope_env` while the function carried a
+    longer, unrelated name — so `pytest -k test_the_changes_job_carries_no_job_scope_env`
+    collected ZERO tests and its green "no tests ran" read as confirmation
+    (#10186 review, FINDING 1). Renamed to the name the documents already
+    advertise; `test_every_test_name_the_runbook_names_exists` in
+    `tests/test_ci_runner_x64_install.py` now keeps the two in sync.
+    """
+    from tests.test_capstone_preregistration_9075 import _SAFE_JOB_ENV
+
+    wf = _load_python_ci()
+    job = wf["jobs"]["changes"]
+    allowed = set(_SAFE_JOB_ENV.get("changes", frozenset()))
+    extra = sorted(set(job.get("env") or {}) - allowed)
+    assert not extra, (
+        "the `changes` job must not carry `env:` keys above the capstone gate "
+        f"step (#10186); only {sorted(allowed)} are permitted, found {extra}")
+    emitters = [s for s in job["steps"]
+                if "--emit-push-matrix" in str(s.get("run") or "")
+                or "--split" in str(s.get("run") or "")]
+    assert len(emitters) >= 2, [s.get("name") for s in emitters]
+    bare = [s.get("name") for s in emitters
+            if "vars.CI_SHARD_ROUTING"
+            not in str((s.get("env") or {}).get("CI_SHARD_ROUTING", ""))]
+    assert not bare, (
+        "each matrix emitter must carry `CI_SHARD_ROUTING` in its OWN `env:` "
+        "(step scope) — inheriting it from the job is what reds the capstone "
+        f"gate pin (#10186): {bare}")
 
 
 def test_carve_out_mirrors_test_no_redirect_stems():
@@ -6037,6 +6461,22 @@ def _load_python_ci() -> dict:
     return yaml.safe_load(wf_path.read_text())
 
 
+def _effective_step_env(wf: dict, job_id: str, step: dict) -> dict:
+    """The env a STEP actually sees, as GitHub Actions composes it.
+
+    Workflow -> `jobs.<id>.env` -> `jobs.<id>.steps[*].env`, each scope
+    overriding the one above (`docs.github.com` -> "Store information in
+    variables": "The scope of a custom variable set by this method is limited to
+    the element in which it is defined"). A test that reads only
+    `step["env"]` therefore asserts the narrower thing than it claims: it pins
+    WHERE the variable is written instead of THAT it reaches the step, which is
+    how #10186 shipped a lever wired to one of two emitters.
+    """
+    merged = {k: str(v) for k, v in (wf["jobs"][job_id].get("env") or {}).items()}
+    merged.update({k: str(v) for k, v in (step.get("env") or {}).items()})
+    return merged
+
+
 def test_expect_uri_gated_iff_uri():
     """cycle-7 P2-1 + Task 9 (P3): the docker URI and the E2E-6 tripwire
     signal (TORTOISE_TEST_EXPECT_URI) are set under the SAME gate —
@@ -6308,43 +6748,89 @@ def test_live_required_job_runs_only_declared_live_tests():
 def test_test_slow_job_carries_junitxml_manifest_guard():
     """cycle-7 P2-1 (int-1) + Task 9 Step 5: the test-slow legs flip to
     docker with the fast job's exact wiring — (a) the pytest invocation
-    carries a PER-RUNNER --junitxml (${RUNNER_TEMP}/junit.xml — never the
-    host-global /tmp literal, #7815's clobber) -o junit_family=xunit1 AND
-    -r fEs (never the historical -rfE — pytest 9.1.1 replaces the report set
-    on repeated -r flags, so a trailing -rfE would suppress the skip summary
+    carries --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 AND -r fEs
+    (never the historical -rfE — pytest 9.1.1 replaces the report set on
+    repeated -r flags, so a trailing -rfE would suppress the skip summary
     the guard depends on), (b) a manifest-generation step exists BEFORE the
     pytest step (echoing each leg's ${{ matrix.files }} to
     ${RUNNER_TEMP}/pytest-files + --collect-only -m 'not track_b' ->
-    ${RUNNER_TEMP}/expected-nodeids.txt), and (c) a skip-guard step gated on
-    rc==0 AND non-empty $FILES runs tools/skip-guard.py with --manifest."""
+    $PYTEST_MANIFEST), and (c) a skip-guard step gated on rc==0 AND
+    non-empty $FILES runs tools/skip-guard.py with --manifest.
+
+    #10028: the three artifact paths are the PER-JOB variables resolved in
+    the job's first step, not the host-global `/tmp/...` literals — see
+    `test_test_slow_legs_write_per_job_pytest_artifacts` below for the
+    ratchet that keeps them there.
+
+    ⛔ THE PIN MUST NOT RE-STATE THE OLD LITERALS (#10280). This docstring used
+    to assert `--junitxml=/tmp/junit.xml` and `--manifest
+    /tmp/expected-nodeids.txt`, which RE-PINNED the defect: those three paths
+    are shared by every co-tenant job on one host, which is how run
+    40921262252 read a co-tenant's manifest and redded `test-slow (a)` for
+    `850 expected nodeid(s) absent` while its own pytest exited 0. The
+    no-literal half is pinned once, for every migrated leg, by
+    `tests/test_tmpdir_hygiene.py::test_migrated_legs_read_their_OWN_pytest_log`.
+    """
     wf = _load_python_ci()
     steps = wf["jobs"]["test-slow"]["steps"]
     run = next(s for s in steps
                if s.get("name", "").startswith("Run slow test suite"))
     invocation = run["run"]
-    # ⛔ THE GUARD'S TWO RECONCILED ARTIFACTS ARE PER-RUNNER, not host-global
-    # `/tmp` literals (#7815/#10028). The legs that really do share ONE host
-    # `/tmp` are the ones on the `ubuntu-latest` SELF-HOSTED pool (`test`,
-    # `test-concurrency-falkor`, `test-track-b`, `test-carve-out`):
-    # `scripts/ci_runner_gate.sh` re-attaches that label and several runner
-    # installs on one host share `/tmp`, so those jobs run CONCURRENTLY over one
-    # namespace. Measured on run 40798901821, three of them wrote
-    # `/tmp/expected-nodeids.txt` within the same 10 minutes, and `test-track-b`
-    # then reconciled its own 4-nodeid run against a PEER's manifest and
-    # `junit.xml` and redded with 1428 "expected nodeids absent" belonging to no
-    # test it ran. `${RUNNER_TEMP}` is `<runner_install>/_work/_temp`, and a
-    # self-hosted runner executes ONE job at a time — per-JOB unique on a shared
-    # host. Asserting the pinned literal instead would re-open the clobber.
-    # ⛔ `test-slow` IS one of those legs, and this comment used to say it could
-    # not be: the `ubuntu-24.04` pin does not keep it off the pool — the
-    # self-hosted x86_64 runners advertise that label (#10289), and on run
-    # 40861737614 four of its five shards ran CONCURRENTLY on one host
-    # (`Machine name: 'cmux'`) while the fifth ran on a hosted runner. It spells
-    # the path this way because ONE construction must serve every leg; a
-    # co-tenancy argument resting on the label was a wrong REASON for that right
-    # answer, which is exactly what the next lane copies.
-    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in invocation
+    assert '--junitxml="$PYTEST_JUNIT"' in invocation
     assert "-o junit_family=xunit1" in invocation
+    # (d) the resolve step comes FIRST (it publishes $GITHUB_ENV, which only
+    # reaches SUBSEQUENT steps) and fails CLOSED on a missing RUNNER_TEMP — a
+    # silent `/tmp` fallback is indistinguishable from the bug it fixes.
+    resolve = steps[0]
+    assert resolve.get("name", "").startswith("Resolve per-job pytest artifact paths")
+    assert "${RUNNER_TEMP:?" in resolve["run"], \
+        "the resolve step must REFUSE to fall back to the host-global /tmp"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"), ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'echo "{var}=$base/{leaf}"' in resolve["run"]
+    # ... and no part of THIS job may name the host-global artifact again. The
+    # literals are what the collision needs, so their absence is the property —
+    # ACROSS EVERY KEY OF EVERY STEP, not just `run:`. All three literals lived in
+    # the `upload-artifact` step's `with: path:` block before #10028, so a
+    # `run`-only scan is green on exactly the key the collision rides: reverting
+    # that block re-points the upload at the host-global files while the step's
+    # own `if-no-files-found: ignore` + `continue-on-error: true` keep the leg
+    # green on ANOTHER job's `pytest.log`. `json.dumps` carries every YAML value
+    # verbatim (parsed data holds no comments), so the `"# "`-strip still forgives
+    # a shell comment that names a RETIRED path.
+    def host_global_hits(step_list):
+        blob = json.dumps(step_list)
+        return [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                                "/tmp/expected-nodeids.txt")
+                if lit in blob.replace("# " + lit, "")]
+
+    assert host_global_hits(steps) == [], (
+        f"{host_global_hits(steps)} is host-global: two concurrent jobs on a "
+        f"shared runner clobber it and red this leg on the clash (#10028, #7815)")
+    # ⛔ NON-VACUITY, asked of a COPY: reverting ONLY the upload's `path:` block to
+    # the pre-#10028 literals — the one shape a `run`-only scan cannot see — must
+    # red. The real file cannot be both correct and reverted, so the mutation is
+    # the only way to show the guard actually discriminates.
+    upload = next(s for s in steps
+                  if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+    reverted = [
+        {**s, "with": {**s["with"],
+                        "path": "/tmp/pytest.log\n/tmp/junit.xml\n"
+                                "/tmp/expected-nodeids.txt"}}
+        if s is upload else s
+        for s in steps
+    ]
+    assert host_global_hits(reverted) == ["/tmp/pytest.log", "/tmp/junit.xml",
+                                          "/tmp/expected-nodeids.txt"], (
+        "the guard must red on a reverted upload `path:` — that block is where "
+        "all three host-global literals live, and it is not a `run:` key")
+    # ...and this is the fail-open that mutation closes: the retired `run`-only
+    # scan sees NOTHING in those same steps, so it certified a reverting leg green.
+    assert [lit for lit in ("/tmp/pytest.log", "/tmp/junit.xml",
+                            "/tmp/expected-nodeids.txt")
+            if lit in "\n".join(s.get("run", "") for s in reverted)] == [], (
+        "a `run`-only scan is blind to the upload's `path:` — the blank result is "
+        "the defect this scan's broader key set fixes, not a passing check")
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
     cmdline = next(line for line in invocation.splitlines()
@@ -6361,6 +6847,10 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     mrun = manifest["run"]
     assert "pytest-files" in mrun
     assert "--collect-only" in mrun or "--emit-manifest" in mrun
+    # The WRITE side of the same pairing: the manifest step and the skip-fail guard must
+    # name ONE path, or the guard reconciles the run against a file nobody wrote (#7815).
+    assert '--output "$PYTEST_MANIFEST"' in mrun, \
+        "the manifest step must write the SAME $PYTEST_MANIFEST the guard reads"
     # the slow legs' URI gate matches the fast job (full==true only)
     uri = next(s for s in steps
                if s.get("name", "").startswith("Compute docker URI"))
@@ -6370,8 +6860,7 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                  if s.get("name", "").startswith("Skip-fail guard"))
     grun = guard["run"]
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in grun
-    assert '--manifest "${RUNNER_TEMP:-/tmp}/expected-nodeids.txt"' in grun
-    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in grun
+    assert '--manifest "$PYTEST_MANIFEST"' in grun
     # the slow legs no longer carry carve-out files (E2E-4 owns them)
     # #9539: read the DERIVED legs — the workflow holds no literal rows.
     leg_files = slow_leg_files(load_manifest())
@@ -6380,6 +6869,96 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
                    "test_hosted_backup"):
         assert carved not in leg_files, \
             f"slow carve-out file {carved} must not ride the docker slow legs"
+
+
+def test_test_slow_legs_write_per_job_pytest_artifacts():
+    """#10028 (measured 2026-10-29, run 40808264676): the `test-slow` legs must
+    write their pytest artifacts to the PER-JOB path, never the host-global
+    `/tmp/...` literals.
+
+    WHY (this is a false verdict on a REQUIRED check, not tidiness). Four
+    `test-slow` legs are scheduled concurrently on a self-hosted pool where
+    several runner INSTALLS share one `/tmp`. While the three artifacts were
+    `/tmp` literals, a sibling leg's `> /tmp/pytest.log` truncated this leg's
+    log, so `.github/scripts/pytest-attribution.sh` could not prove ownership
+    of the leg's own summary and fell closed — `STALE session summary` /
+    `INCOMPLETE` — and the job went red on a run that passed every test.
+
+    MEASURED, `test-slow (a)` on that run: its own manifest declared 367
+    expected nodeids, its own run reported `365 passed, 2 skipped` (= 367) in
+    2378.86s, and its own `pytest exit code: 0` banner printed — yet the leg
+    concluded `failure` via `STALE session summary (NOT this leg's verdict)` /
+    `##[error]test leg INCOMPLETE`. The same sharing made legs (b) and (e)
+    print FAILED nodeids for `tests/test_epic903_fixtures.py`,
+    `tests/test_epic903_scheduler.py` and `tests/test_graph_diagnostics.py`,
+    though the only progress line either leg's log carries is
+    `tests/test_ci_selection.py::` — tests they never ran. And leg (b)'s #964
+    heartbeat DECREASED inside a "single" session (444 passed -> 353 passed).
+
+    Non-vacuous on the pre-fix workflow: each assertion below is false of the
+    literals that stood there (`--junitxml=/tmp/junit.xml`, `> /tmp/pytest.log`,
+    `--manifest /tmp/expected-nodeids.txt`, and an upload `path:` naming the
+    three `/tmp` files), so restoring any one of them reds this test.
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test-slow"]
+    steps = job["steps"]
+
+    # (1) the paths are resolved FIRST, from RUNNER_TEMP, and fail closed —
+    # `$GITHUB_ENV` only reaches SUBSEQUENT steps, so a later step would leave
+    # every `$PYTEST_*` empty (an empty `> "$PYTEST_LOG"` is a shell error, but
+    # an empty `--junitxml=` is silently the wrong file).
+    resolve = steps[0]
+    assert resolve.get("name") == "Resolve per-job pytest artifact paths (#10028)", \
+        "the artifact paths must be resolved in the FIRST step of test-slow"
+    rrun = resolve["run"]
+    assert "${RUNNER_TEMP:?" in rrun, \
+        "RUNNER_TEMP must fail closed — a silent /tmp fallback is the bug itself"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"),
+                      ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'{var}=$base/{leaf}' in rrun, f"{var} must resolve under $base"
+
+    # (2) NO executable line of the job may name the host-global literals.
+    # Comments are exempt on purpose: the migration's own rationale quotes them.
+    globals_ = ("/tmp/pytest.log", "/tmp/junit.xml", "/tmp/expected-nodeids.txt")
+    offenders = []
+    for step in steps:
+        body = step.get("run")
+        if not isinstance(body, str):
+            continue
+        for line in body.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            offenders += [f"{step.get('name')}: {line.strip()}"
+                          for lit in globals_ if lit in line]
+    assert not offenders, (
+        "test-slow must not write or read the host-global /tmp pytest artifacts — "
+        "concurrent legs share one /tmp and truncate each other's log "
+        "(a green leg then concludes INCOMPLETE/failure): " + "; ".join(offenders)
+    )
+
+    # (3) the run step routes pytest AND the three readers through the vars.
+    run = next(s for s in steps
+               if s.get("name", "").startswith("Run slow test suite"))
+    cmdline = next(line for line in run["run"].splitlines()
+                   if "python -m pytest" in line)
+    assert '-o junit_family=xunit1 > "$PYTEST_LOG" 2>&1' in cmdline, \
+        "the leg's pytest stdout must land in $PYTEST_LOG"
+    for reader in ('tail -n 300 "$PYTEST_LOG"',
+                   '--log "$PYTEST_LOG"',
+                   "grep -E '^(FAILED|ERROR) ' \"$PYTEST_LOG\""):
+        assert reader in run["run"], f"the run step must read the log via {reader!r}"
+
+    # (4) the uploaded artifact is the per-job file. `steps.<id>.with` DOES
+    # allow the `runner` context (a job-level `env:` does not — #6253), so the
+    # upload names `runner.temp` directly, exactly as the fast job's does.
+    upload = next(s for s in steps
+                  if s.get("name", "").startswith("Upload pytest log"))
+    paths = upload["with"]["path"]
+    for leaf in ("pytest.log", "junit.xml", "expected-nodeids.txt"):
+        assert f"${{{{ runner.temp }}}}/{leaf}" in paths, \
+            f"the upload must name {{{{ runner.temp }}}}/{leaf}, not the /tmp literal"
 
 
 def test_xdist_is_admitted_only_in_the_d3_shape():
@@ -6574,140 +7153,315 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert (job["strategy"]["matrix"]
             == "${{ fromJSON(needs.changes.outputs.carve_matrix) }}"), \
         "the carve-out matrix must come from the selector's carve_matrix output"
-    assert '--junitxml="${RUNNER_TEMP:-/tmp}/junit.xml"' in run["run"], \
-        ("#7815: the carve-out legs share a host `/tmp` with the `test` matrix, "
-         "`test-concurrency-falkor`, `test-track-b` and `test-slow` (the pool "
-         "serves both `ubuntu-latest` and the version-pinned `ubuntu-24.04` — "
-         "#10289) so the junitxml they reconcile against must be per-runner, "
-         "never the host-global /tmp literal")
+    assert '--junitxml="$PYTEST_JUNIT"' in run["run"], \
+        "the shard's junit must be the per-job $PYTEST_JUNIT, not the host-global " \
+        "`/tmp/junit.xml` (see test_carve_out_shards_write_per_job_pytest_artifacts)"
 
 
+def test_carve_out_shards_write_per_job_pytest_artifacts():
+    """#10280 (PR #10214 review, P2): the `test-carve-out` SHARDS must write their
+    pytest artifacts to the PER-JOB path, never the host-global `/tmp/...` literals.
 
-def test_the_guard_decided_log_is_per_runner_on_every_pool_leg():
-    """#7815: the pytest LOG is a guard-decided artifact and moves with the rest.
+    WHY THIS JOB SPECIFICALLY. It is a MATRIX (`carve_matrix`, `fail-fast: false`),
+    so its shards run CONCURRENTLY — and on the self-hosted pool several runner
+    installs share ONE `/tmp`, which run 40985248910 shows directly: in one attempt
+    `test (b)`/`test (h)`/`test (c)` and `test-concurrency-falkor` landed on different
+    `pi-runner-vm-*`/`pi-runner-x64-*` installs of the same host. A shard writing
+    `/tmp/pytest.log` is therefore sharing a file not with a sibling JOB but with its
+    own SIBLING SHARDS, a collision no job-name-keyed ownership check can even see
+    (every shard is the string `test-carve-out`). The consequence is the measured one:
+    a truncated log makes `pytest-attribution.sh` fall closed (`INCOMPLETE`), and the
+    `grep '^(FAILED|ERROR) '` the admin rail derives the failure SET from names a
+    sibling shard's nodeids. The `junit.xml`/`expected-nodeids.txt` pair collides the
+    same way and is worse — a sibling's junit is what `skip-guard.py` compares the
+    collected set against, i.e. a false PASS is reachable, not just a false red.
 
-    `expected-nodeids.txt` and `junit.xml` moved to `${RUNNER_TEMP}` because
-    several jobs on one self-hosted host share ONE `/tmp` (#10028). The log was
-    left behind by that change in the legs that WRITE it on the pool, and in
-    `test-carve-out` it is not cosmetic: when `pytest-files` is empty the
-    skip-guard is invoked with the log ALONE, so the log IS its observed set —
-    a peer's clean log hides this leg's availability skip (fail-open) and a
-    peer's violations red a green leg. This pins writer AND readers on the
-    per-runner path, in every leg that shares the host `/tmp`.
-
-    It also pins the REASON, because a right answer stated with the wrong reason
-    is what the next lane copies. The wrong reason was shipped once: `test-slow`
-    was excluded from this set on the argument that its version-pinned
-    `ubuntu-24.04` label guarantees a hosted VM with a private `/tmp`. #10289
-    measures the opposite — the self-hosted x86_64 pool advertises
-    `ubuntu-24.04` — and run 40861737614 shows it: four of `test-slow`'s five
-    shards ran CONCURRENTLY on `Machine name: 'cmux'` while the fifth ran on a
-    genuinely hosted runner. So `test-slow` is one of the legs this pin holds,
-    and no workflow line may claim its temp dir is private again.
-
-    The accepted spelling is a SET, not a literal: hardening the leg to a
-    `PYTEST_LOG` resolved once from `RUNNER_TEMP` (the shape #10264 gives it)
-    must not read as "this leg dropped out of the pin" — the same tolerance
-    `tests/test_pytest_attribution.py::capture_site` already carries, for the
-    same reason.
+    Non-vacuous on the pre-fix workflow: each assertion below is false of the
+    literals that stood there (`--junitxml=/tmp/junit.xml`, `> /tmp/pytest.log`,
+    `--output /tmp/expected-nodeids.txt`, and an upload `path:` naming the three
+    `/tmp` files), so restoring any one of them reds this test.
     """
     wf = _load_python_ci()
-    jobs = wf["jobs"]
-    #: the legs that WRITE the log this pin is about, and whether the leg also
-    #: runs a skip-guard over it. `test-concurrency-falkor` carries no guard of
-    #: its own; it is the CLOBBERER, so it is pinned as a writer only.
-    legs = {
-        "test-concurrency-falkor": ("pytest.log", False, ("${RUNNER_TEMP:-/tmp}/pytest.log",)),
-        "test-carve-out": ("pytest.log", True, ("${RUNNER_TEMP:-/tmp}/pytest.log",)),
-        "test-track-b": ("trackb.log", True, ("${RUNNER_TEMP:-/tmp}/trackb.log",)),
-        "test-slow": ("pytest.log", True,
-                      ("${RUNNER_TEMP:-/tmp}/pytest.log", "$PYTEST_LOG")),
-    }
-    offenders: list[str] = []
-    for job_name, (log, has_guard, wants) in legs.items():
-        bodies = [(s.get("name") or "?", s.get("run") or "")
-                  for s in jobs[job_name]["steps"]]
-        if not any(w in body for w in wants for _name, body in bodies):
-            offenders.append(f"{job_name}: no step writes one of {list(wants)}")
-        for name, body in bodies:
+    job = wf["jobs"]["test-carve-out"]
+    steps = job["steps"]
+
+    # (1) the paths are resolved FIRST, from RUNNER_TEMP, and fail closed —
+    # `$GITHUB_ENV` only reaches SUBSEQUENT steps.
+    resolve = steps[0]
+    # Prefix, not equality: the issue number in the step's label is attribution, not
+    # contract — main landed the same migration for this leg under #10280, so pinning
+    # the ticket number would red a correct merge over a comment.
+    assert resolve.get("name", "").startswith(
+        "Resolve per-job pytest artifact paths"), \
+        "the artifact paths must be resolved in the FIRST step of test-carve-out"
+    rrun = resolve["run"]
+    assert "${RUNNER_TEMP:?" in rrun, \
+        "RUNNER_TEMP must fail closed — a silent /tmp fallback is the bug itself"
+    for var, leaf in (("PYTEST_LOG", "pytest.log"),
+                      ("PYTEST_JUNIT", "junit.xml"),
+                      ("PYTEST_MANIFEST", "expected-nodeids.txt")):
+        assert f'{var}=$base/{leaf}' in rrun, f"{var} must resolve under $base"
+
+    # (2) NO executable line of the job may name the host-global literals. Comments
+    # are exempt on purpose: the migration's own rationale quotes them.
+    globals_ = ("/tmp/pytest.log", "/tmp/junit.xml", "/tmp/expected-nodeids.txt")
+    offenders = []
+    for step in steps:
+        body = step.get("run")
+        if not isinstance(body, str):
+            continue
+        for line in body.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            offenders += [f"{step.get('name')}: {line.strip()}"
+                          for lit in globals_ if lit in line]
+    assert not offenders, (
+        "test-carve-out shards must not write or read the host-global /tmp pytest "
+        "artifacts — concurrent shards share one /tmp (a false verdict on a required "
+        "check, and a junit a sibling shard owns): " + "; ".join(offenders)
+    )
+
+    # (3) the run step routes pytest AND the readers through the vars.
+    run = next(s for s in steps
+               if s.get("name", "").startswith("Run carve-out suite"))
+    cmdline = next(line for line in run["run"].splitlines()
+                   if "python -m pytest" in line)
+    assert '-o junit_family=xunit1 > "$PYTEST_LOG" 2>&1' in cmdline, \
+        "the shard's pytest stdout must land in $PYTEST_LOG"
+    for reader in ('tail -n 200 "$PYTEST_LOG"',
+                   '--log "$PYTEST_LOG"',
+                   "grep -E '^(FAILED|ERROR) ' \"$PYTEST_LOG\""):
+        assert reader in run["run"], f"the run step must read the log via {reader!r}"
+    # The guard/enforcing steps are further STEPS, and they read the log too.
+    guard = next(s for s in steps
+                 if s.get("name", "").startswith("Skip-fail guard"))
+    assert 'skip-guard.py "$PYTEST_LOG"' in guard["run"], \
+        "the skip-fail guard must read this shard's own log"
+    assert '--manifest "$PYTEST_MANIFEST"' in guard["run"], \
+        "the skip-fail guard must compare against this shard's own collected set"
+
+    # (4) the uploaded artifact is the per-job file. `steps.<id>.with` DOES allow the
+    # `runner` context (a job-level `env:` does not — #6253).
+    upload = next(s for s in steps
+                  if str(s.get("uses") or "").startswith("actions/upload-artifact"))
+    paths = upload["with"]["path"]
+    for leaf in ("pytest.log", "junit.xml", "expected-nodeids.txt"):
+        assert f"${{{{ runner.temp }}}}/{leaf}" in paths, \
+            f"the upload must name {{{{ runner.temp }}}}/{leaf}, not the /tmp literal"
+
+    # #10280: the junitxml is the PER-SHARD path, not the host-global literal it
+    # used to be (see the job loop in
+    # `test_every_pytest_capture_leg_resolves_its_artifacts_per_job`).
+    assert "--junitxml=\"$PYTEST_JUNIT\"" in run["run"]
+
+
+# ── #10280: no python-ci pytest leg may keep a host-global /tmp artifact ──
+#
+# The class, stated once so a future leg inherits the reasoning: every runner
+# install on this host shares ONE `/tmp`, and one runner runs one job at a time.
+# So a per-RUNNER path (`$RUNNER_TEMP`) is per-JOB, while a `/tmp` literal is
+# SHARED with whatever else the pool is doing. Measured consequences, in both
+# directions:
+#
+#   * FALSE RED (run 40990582554): `test-track-b` wrote `4 expected nodeids ->
+#     /tmp/expected-nodeids.txt`, then a concurrent `test-carve-out (c)` leg
+#     overwrote that file with its own `616 expected nodeids` (11s earlier on a
+#     sibling runner), and the required check reported `616 expected nodeid(s)
+#     absent from the junitxml` with every test in the leg passing.
+#   * FALSE RED (run 40808264676, #10028): a sibling's `> /tmp/pytest.log`
+#     truncated `test-slow (a)`'s log between its `tail` and the reporter's read,
+#     so a green leg concluded `STALE session summary` / `INCOMPLETE`.
+#   * FALSE PASS (the same sharing, inverted): a leg whose own manifest was
+#     replaced by a LARGER one can just as easily be replaced by a smaller set
+#     that its junitxml happens to satisfy — the coverage manifest is the thing
+#     that certifies "these tests ran", so it must not be writable by a peer.
+#
+# The jobs in the table below are the residue #10028 left (its own comment said the
+# `test-slow` migration was the second of four). The tuple is the list of legs, and it
+# is the ONLY place that list lives — a count stated in this sentence went stale the
+# moment a leg was added to it, so no count is stated here. They are asserted as a TABLE,
+# not one bespoke test per job, so a leg added to the selector's matrix inherits
+# the check by adding its job id here — and so the assertion cannot drift into
+# "whatever the last migrated job happens to look like".
+_PER_JOB_ARTIFACT_JOBS = (
+    "test",
+    "test-slow",
+    "test-track-b",
+    "test-carve-out",
+    "test-concurrency-falkor",
+)
+#: Every host-global pytest artifact spelling the migration retired. Widened
+#: beyond `/tmp/pytest.log` on purpose: filtering on that one literal is what let
+#: `trackb.log` and `junit.xml` read as "already fine" (#10280's review).
+_HOST_GLOBAL_PYTEST_ARTIFACTS = (
+    "/tmp/pytest.log",
+    "/tmp/junit.xml",
+    "/tmp/expected-nodeids.txt",
+    "/tmp/trackb.log",
+    "/tmp/pytest-d14.log",
+    "/tmp/junit-d14.xml",
+)
+
+
+def test_every_pytest_capture_leg_resolves_its_artifacts_per_job():
+    """#10280: every migrated leg resolves its artifacts under `$RUNNER_TEMP`.
+
+    Non-vacuous on the pre-fix workflow, by the reason that actually holds per leg:
+    NONE of the three newly-migrated legs (`test-track-b`, `test-carve-out`,
+    `test-concurrency-falkor`) had a resolver step — so assertion (1) fails on all
+    three — and EACH named at least one of the literals above from an executable
+    `run:` line — so assertion (2) fails on all three too. Both halves are what this
+    test rests on; how MANY distinct literals a leg had is not (the pre-fix counts
+    were 3, 3 and 1 respectively, and a count is the kind of restated measurement
+    that goes stale in the commit which changes the code). Restoring any one literal
+    (or the `/tmp` upload `path:`) reds it again.
+    """
+    wf = _load_python_ci()
+    for job_id in _PER_JOB_ARTIFACT_JOBS:
+        job = wf["jobs"][job_id]
+        steps = job["steps"]
+
+        # (1) resolved FIRST — `$GITHUB_ENV` reaches only SUBSEQUENT steps, and an
+        # empty `--junitxml=` is silently the wrong (empty) path.
+        first = steps[0]
+        assert first.get("name", "").startswith(
+            "Resolve per-job pytest artifact paths"
+        ), f"{job_id}: the artifact paths must be resolved in the FIRST step"
+        assert "${RUNNER_TEMP:?" in first["run"], (
+            f"{job_id}: RUNNER_TEMP must fail closed — a silent /tmp fallback is "
+            "the bug itself"
+        )
+        assert "$GITHUB_ENV" in first["run"], (
+            f"{job_id}: the resolver must export through $GITHUB_ENV"
+        )
+
+        # (2) no executable line of the job may name a host-global literal.
+        # Comments are exempt on purpose — the migration's rationale quotes them.
+        offenders = []
+        for step in steps:
+            body = step.get("run")
+            if not isinstance(body, str):
+                continue
             for line in body.splitlines():
-                # the host-global form, in any spelling: bare, quoted or as an
-                # upload `path:` (a per-runner spelling is the pin).
-                # COMMENT lines are skipped — naming the old path in prose is how
-                # the reason travels with the fix; what must not survive is an
-                # EXECUTABLE host-global path.
                 if line.lstrip().startswith("#"):
                     continue
-                if f"/tmp/{log}" in line and not any(w in line for w in wants):
-                    offenders.append(
-                        f"{job_name}/{name}: host-global `/tmp/{log}` here: {line.strip()!r}")
-        if not has_guard:
-            continue
-        # the guard step is the one that reads the LOG (the manifest-emitting
-        # step names the tool too, and comes first)
-        guards = [s for s in jobs[job_name]["steps"]
-                  if "skip-guard.py" in (s.get("run") or "")
-                  and log in (s.get("run") or "")]
-        if not guards:
-            offenders.append(f"{job_name}: no skip-guard step over the log found to pin")
-        elif not any(w in s["run"] for w in wants for s in guards):
-            offenders.append(
-                f"{job_name}: the skip-guard step reads a different log than the run step "
-                f"writes (one of {list(wants)} absent) — a writer-only change leaves the guard "
-                "on the host-global path, which is the artifact it DECIDES on")
-    assert not offenders, (
-        "#7815: these pool legs still share a host-global pytest log with their concurrent "
-        f"peers: {offenders}. Use `${{RUNNER_TEMP:-/tmp}}/<name>` in the writer, in every "
-        "reader (tail, pytest-attribution.sh, the grep counters, the skip-guard argument) and "
-        "`${{ runner.temp }}/<name>` in the upload `path:`")
+                offenders += [f"{job_id} / {step.get('name')}: {line.strip()}"
+                              for lit in _HOST_GLOBAL_PYTEST_ARTIFACTS
+                              if lit in line]
+        assert not offenders, (
+            "a host-global /tmp pytest artifact is SHARED with every other runner "
+            "install on this host — a co-tenant then rewrites this leg's log, "
+            "manifest or junit (#7815/#10280): " + "; ".join(offenders)
+        )
 
-    # ⛔ THE REASON, now stated as measured rather than as inferred from a label.
-    # `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the pool, but
-    # that is not the only way a leg reaches it: the pool also advertises the
-    # VERSION-PINNED label (#10289), so no `runs-on:` value licenses a
-    # host-global path.
-    runs_on = str(jobs["test-slow"]["runs-on"])
-    assert "ubuntu-latest" not in runs_on, (
-        "`test-slow` is now on `ubuntu-latest`, which `scripts/ci_runner_gate.sh` re-attaches "
-        "to the self-hosted pool — that is the class that cannot finish this leg inside its "
-        "40m watchdog (#7867), so the version pin must stay")
-    wf_text = (Path(__file__).resolve().parents[1]
-               / ".github" / "workflows" / "python-ci.yml").read_text()
-    # What must not survive is the POSITIVE claim that this leg's temp dir is
-    # private ("its own VM", "VM-private", "hosted … so no peer can clobber it").
-    # The claim is checked per COMMENT BLOCK, not per line: the shape that shipped
-    # straddled a line break (`… pinned to the HOSTED` / `` `ubuntu-24.04` label,
-    # so its `/tmp` is its own VM``), so a line-wise matcher read it as clean.
-    # Job-id spellings are removed first, or `test-d14-hosted-api` in a `needs:`
-    # list would read as a hostedness claim about THIS leg.
-    blocks: list[str] = []
-    current: list[str] = []
-    for line in wf_text.splitlines():
-        if line.lstrip().startswith("#"):
-            current.append(line)
-        elif current:
-            blocks.append("\n".join(current))
-            current = []
-    if current:
-        blocks.append("\n".join(current))
-    #: The claim, in the three shapes it has actually been written in. Narrow on
-    #: purpose: a broad "hosted" match reds on the measured correction itself and
-    #: on the pre-existing rationale block above `runs-on:` (which discusses
-    #: hosted-vs-pool wall clock, a different subject).
-    _PRIVATE_TMP = re.compile(r"its own VM|own VM's|VM-?private|private `/tmp`")
-    misattributed = [
-        block.strip() for block in blocks
-        if "test-slow" in block and _PRIVATE_TMP.search(block)
-    ]
-    assert not misattributed, (
-        "these workflow comments still claim `test-slow`'s temp dir is private because of its "
-        "`runs-on:` label — the pool advertises that label too (#10289), measured on run "
-        f"40861737614 (four shards on one host): {misattributed}")
-    # ...and the REASON travels with the code: the correction must cite the
-    # measurement, or the next editor re-derives the wrong premise from the label.
-    assert "#10289" in wf_text, (
-        "the workflow no longer cites #10289 where it explains why `test-slow`'s artifacts "
-        "are per-runner — the label-as-topology premise is what this pin exists to stop")
+        # (3) the upload artifacts are the runner's own files, not `/tmp`'s.
+        # `runner` is a valid context in `steps.<id>.with` (see the #6253 note on
+        # test-slow), which is why this is read from the step rather than a
+        # job-level `env:` block.
+        for step in steps:
+            path = (step.get("with") or {}).get("path")
+            if path is None or "upload-artifact" not in str(step.get("uses", "")):
+                continue
+            for line in str(path).splitlines():
+                assert "${{ runner.temp }}" in line, (
+                    f"{job_id}: the uploaded pytest artifact {line.strip()!r} is not "
+                    "under ${{ runner.temp }} — it would upload a co-tenant's file"
+                )
+                assert "/tmp/" not in line, (
+                    f"{job_id}: the uploaded pytest artifact {line.strip()!r} names "
+                    "the host-global shared /tmp (#10280)"
+                )
+
+
+#: The basenames a skip-fail guard DECIDES on. Each is written by one step and
+#: read back by the guard two steps later, so a fixed host-global path lets a
+#: CONCURRENT job substitute its own file and the guard votes on another leg's
+#: evidence. `expected-nodeids.txt` is the manifest the comparison is against;
+#: `junit*.xml` is the observed set it compares.
+_GUARD_DECIDED_BASENAMES = ("expected-nodeids.txt", "junit.xml", "junit-d14.xml")
+
+#: The jobs that emit a coverage manifest and/or feed one to a guard.
+_GUARD_JOBS = (
+    "test", "test-slow", "test-track-b", "test-carve-out",
+    "test-d14-hosted-api", "test-concurrency-falkor",
+)
+
+
+def test_no_leg_decides_on_a_host_global_manifest_or_junit():
+    """#7815: a skip-fail guard must never read a path a peer job can write.
+
+    MEASURED, not hypothesised. On run 40986966578 the `test-track-b` job wrote
+    `emit-manifest: 4 expected nodeids` at 02:57:07, ran its 4 track_b tests
+    green at 02:58:41, and the guard then reported
+
+        ❌ skip-guard failed (coverage manifest, epic #1647):
+           - tests/test_10122_point_name_not_indexed.py::…
+           - tests/test_ci_runner_x64_install.py::…
+        630 expected nodeid(s) absent from the junitxml testcases
+
+    — not one of them a file that job collected. Four jobs in this workflow
+    wrote the ONE host-global `/tmp/expected-nodeids.txt`, and on the
+    self-hosted pool several runner installs share one `/tmp` (#10289: four
+    shards of a single matrix reported `Machine name: 'cmux'`), so whichever
+    job read last got another job's set. The result is a FALSE RED on a
+    required check (`ci-introduced-failure` then blocked the PR as a NEW
+    failure that main's failure-only baseline could not explain), and in the
+    other direction a peer's clean file can HIDE this leg's availability skip.
+
+    The invariant: every manifest/junit path a guard writes or reads resolves
+    under `${RUNNER_TEMP}` (or the job's own `$PYTEST_*` variables derived from
+    it), or is the checked-in frozen manifest. Comment lines are exempt — they
+    are prose, and the blocks above deliberately quote the old literal to
+    explain the defect."""
+    wf = _load_python_ci()
+    offenders: list[str] = []
+    seen_sites = 0
+    for job_name in _GUARD_JOBS:
+        for step in wf["jobs"][job_name]["steps"]:
+            blobs = []
+            if isinstance(step.get("run"), str):
+                blobs.append(step["run"])
+            with_block = step.get("with")
+            if isinstance(with_block, dict) and isinstance(with_block.get("path"), str):
+                blobs.append(with_block["path"])
+            for blob in blobs:
+                # A job MAY alias the per-runner base (`base="$RUNNER_TEMP"`,
+                # the `test` job's publish step) and spell the basenames off
+                # that alias. That is still per-runner — but only because the
+                # alias is defined from `RUNNER_TEMP` in the SAME blob, which
+                # is the second half of the exemption below; an alias with no
+                # such definition is an offender like any other.
+                alias_is_per_runner = any(
+                    line.split("=", 1)[0].strip().endswith("base")
+                    and "RUNNER_TEMP" in line.split("=", 1)[1]
+                    for line in blob.splitlines()
+                    if "=" in line and not line.lstrip().startswith("#"))
+                for line in blob.splitlines():
+                    if line.lstrip().startswith("#"):
+                        continue
+                    for basename in _GUARD_DECIDED_BASENAMES:
+                        start = line.find(basename)
+                        while start != -1:
+                            seen_sites += 1
+                            head = line[max(0, start - 40):start]
+                            per_runner = (
+                                "RUNNER_TEMP" in head or "runner.temp" in head
+                                or "$PYTEST_" in head
+                                or ("$base" in head and alias_is_per_runner)
+                                or "config/ci-expected-nodeids" in line)
+                            if not per_runner:
+                                offenders.append(f"{job_name}: {line.strip()}")
+                            start = line.find(basename, start + 1)
+    assert seen_sites, (
+        "no guard-decided manifest/junit site found in any job — this pin is "
+        "vacuous, so the basenames or the job list have drifted")
+    assert not offenders, (
+        "#7815: a skip-fail guard decides on a path a CONCURRENT job can write. "
+        "Several runner installs on the self-hosted pool share ONE /tmp, so a "
+        "fixed name lets a peer's manifest/junit stand in for this leg's and "
+        "the guard reds (or greens) on evidence belonging to no test it ran. "
+        "Resolve the path under ${RUNNER_TEMP}. Offending sites:\n  "
+        + "\n  ".join(offenders))
 
 
 # ── #3239: a hung pytest job holds the per-PR concurrency slot ────────────
@@ -7226,18 +7980,10 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
 
     The budget cannot absorb that class: 2x the leg would be >=79m against a
     40m budget built at the `WATCHDOG_HEADROOM` floor, past both
-    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg stays on the
-    VERSION-PINNED label (`ubuntu-<version>`), the same pin and the same
-    reasoning as `workflow-lint` (#7867).
-
-    ⛔ The pin is a LABEL preference, not a topology guarantee, and the
-    difference is load-bearing: the pool was recorded as never claiming
-    `ubuntu-<version>`, and that record is stale — #10289 measures the
-    self-hosted x86_64 runners advertising `ubuntu-24.04`, so this leg can be
-    pool-served after all. Nothing about the /tmp isolation may be inferred from
-    this label; that inference is exactly what #10289 had to correct, and
-    `test_the_guard_decided_log_is_per_runner_on_every_pool_leg` holds the
-    artifact side of it.
+    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg is pinned to a
+    VERSION-PINNED hosted label (the pool claims `ubuntu-latest`, `self-hosted`,
+    `Linux`, `ARM64` and `self-hosted-arm64` — never `ubuntu-<version>`), the
+    same pin and the same reasoning as `workflow-lint` (#7867).
 
     A bare `ubuntu-latest` here re-opens exactly that false red, so this reds
     rather than relying on a comment nobody re-reads."""
@@ -7247,14 +7993,12 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
         "test-slow must NOT use `ubuntu-latest`: the fallback gate re-attaches "
         "that label to the self-hosted ARM64 pool, where this leg needs ~2x its "
         "budget and is killed at the watchdog (measured: 39.6 min of test time, "
-        "rc=137, job 42.1m). Pin a version-pinned label (`ubuntu-24.04`).")
+        "rc=137, job 42.1m). Pin a version-pinned hosted label (`ubuntu-24.04`).")
     assert isinstance(runs_on, str) and re.fullmatch(r"ubuntu-\d+\.\d+", runs_on), (
-        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED "
-        f"`ubuntu-<version>` label: `ubuntu-latest` is re-attached to the "
-        f"self-hosted pool by the fallback gate, and that class cannot finish "
-        f"this leg inside its watchdog (#7867). The label is a PREFERENCE, not a "
-        f"topology guarantee — #10289 measures the pool advertising "
-        f"`ubuntu-24.04` too — so do not infer a private `/tmp` from it.")
+        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED hosted "
+        f"label (`ubuntu-<version>`): `ubuntu-latest` is claimed by the "
+        f"self-hosted pool whenever the fallback is attached, and a label the "
+        f"pool claims puts this leg back on the class that cannot finish it.")
 
     if not SCRIPTS_LINK.is_dir():
         # The machine-local `scripts` pointer is ABSENT or does not resolve, which is
@@ -7293,8 +8037,9 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
     # tolerates the spelling instead of asserting it — but it must still FIND both, or
     # the premise is unreadable and this test must not pass by not looking.
     labels = _gate_pool_labels(gate)
-    assert set(labels) == {"FALLBACK_LABEL", "POOL_LABEL"}, (
-        f"cannot read FALLBACK_LABEL/POOL_LABEL from {CI_RUNNER_GATE} (read "
+    assert "FALLBACK_LABEL" in labels and any(
+        name.startswith("POOL_LABEL") for name in labels), (
+        f"cannot read FALLBACK_LABEL/POOL_LABEL* from {CI_RUNNER_GATE} (read "
         f"{sorted(labels) or 'nothing'}) — the premise of this pin is unverifiable, "
         f"so this test must not pass by not looking. If agent-infra renamed the "
         f"constants, update the matcher here in the same change that renamed them.")
@@ -7318,14 +8063,25 @@ def _gate_pool_labels(gate_text: str) -> dict[str, str]:
     Only the VALUE is contractual; the assignment SHAPE is not, so the matcher accepts
     `export`, either quoting style, none, and leading whitespace. A commented-out
     assignment is not read — prose is not the value the gate will use.
+
+    ⛔ THE NAME IS A FAMILY, NOT ONE CONSTANT (`POOL_LABEL*`). agent-infra split the
+    pool label per architecture — `POOL_LABEL_ARM64="self-hosted-arm64"` and
+    `POOL_LABEL_X64="self-hosted-x64"` — when it started measuring capacity per runner
+    (agent-infra `4d20edd2`, #2904/#2897). Pinning the exact spelling `POOL_LABEL` made
+    the premise UNREADABLE on every host whose agent-infra checkout is current, which
+    reds this guard everywhere except CI (where `scripts/` is absent and the cross-repo
+    half skips) — a pin that only fails where nobody looks. The family accepts both the
+    old single constant and the split pair, and the discriminator below still runs over
+    EVERY label it reads, so a split that reintroduces a version-pinned label still
+    reds.
     """
     found: dict[str, str] = {}
-    for name in ("FALLBACK_LABEL", "POOL_LABEL"):
-        match = re.search(
-            rf'^\s*(?:export\s+)?{name}=["\']?([^"\'\s]+)', gate_text, re.MULTILINE
-        )
-        if match:
-            found[name] = match.group(1)
+    for match in re.finditer(
+        r"^\s*(?:export\s+)?(FALLBACK_LABEL|POOL_LABEL\w*)=[\"']?([^\"'\s]+)",
+        gate_text,
+        re.MULTILINE,
+    ):
+        found[match.group(1)] = match.group(2)
     return found
 
 
@@ -7348,6 +8104,19 @@ def test_the_gate_label_matcher_reads_the_spellings_and_rejects_the_unsafe_one()
     shipped = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-latest"\n'
     expected = {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-latest"}
     assert _gate_pool_labels(shipped) == expected
+    # The SPLIT spelling agent-infra ships today (`POOL_LABEL_ARM64`/`_X64` since it
+    # measures capacity per runner): the family must read BOTH, or a current
+    # agent-infra checkout makes the premise unreadable on the host while CI skips it.
+    split = (
+        'FALLBACK_LABEL="ubuntu-latest"\n'
+        'POOL_LABEL_ARM64="self-hosted-arm64"\n'
+        'POOL_LABEL_X64="self-hosted-x64"\n'
+    )
+    assert _gate_pool_labels(split) == {
+        "FALLBACK_LABEL": "ubuntu-latest",
+        "POOL_LABEL_ARM64": "self-hosted-arm64",
+        "POOL_LABEL_X64": "self-hosted-x64",
+    }, "the split pool label was not read (agent-infra 4d20edd2)"
     for spelling in (
         "export FALLBACK_LABEL='ubuntu-latest'\nexport POOL_LABEL='ubuntu-latest'\n",
         "FALLBACK_LABEL=ubuntu-latest\nPOOL_LABEL=ubuntu-latest\n",
@@ -7421,6 +8190,70 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
         f"the carve-out cap ({cap}m) dwarfs the measured pytest step "
         f"({measured}m) — the cap IS the stale-head exposure, and 90m against "
         f"this work is exactly the defect #3239 reports")
+
+
+def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
+    """#10182/#5219: the carve-out job must be RESTORE-ONLY on the pip cache.
+
+    `actions/cache` saves in a POST step, and (#10182) that post step is charged
+    against the job's `timeout-minutes` like any other step. This job cannot
+    amortize such a save, and no cap it is allowed to carry can: the cap above
+    is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
+    at the ceiling), while ONE shard already spends its 19m floor-clamped
+    watchdog plus ~1.5m of setup/provision — and the SAVE has no timeout of its
+    own, so a slow one is unbounded, not merely large. Headroom amortizes a
+    bounded cost; it cannot amortize an unbounded one.
+
+    MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008): the
+    restore was a PARTIAL hit, so the post step reserved the exact key and began
+    a ~3.6 GB save. Every WORK step passed — pytest finished at 18:10:55, the
+    orphan gate said 'no orphans' at 18:10:53 — and then `Post Cache pip
+    dependency caches` ran 18:12:33 → 18:29:46 against a 17:59:19 start, when
+    `The job has exceeded the maximum execution time of 30m0s`. GitHub reported
+    `cancelled`, which `python-ci-gate` reads as red BY DESIGN (#5219: a
+    cancelled leg certifies nothing) — so a GREEN shard reddened a REQUIRED
+    check on a diff that never touched this job.
+
+    Nothing is lost by not saving here: the key is SHARED
+    (`pip-<os>-<hash uv.lock>`) and is still written on EVERY run by
+    `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`, so this
+    job only ever READ it. The ~90 MB HF embedding cache in the same job is
+    deliberately left alone (measured 1m38s to save, and it is the leg's
+    provisioning path — an uncached load skip-reds the dense assertion #4387);
+    the pip cache is the ~3.6 GB term that does not fit.
+
+    Non-vacuous in both directions: the pre-fix step is a bare `actions/cache@v4`
+    on this path, which reds the first assertion; and the presence + shape of
+    the restore is asserted too, so DELETING the cache step cannot pass.
+    """
+    job = _load_python_ci()["jobs"]["test-carve-out"]
+
+    def _path_of(step: dict) -> object:
+        return (step.get("with") or {}).get("path")
+
+    pip_caches = [s for s in job.get("steps", []) if _path_of(s) == "~/.cache/pip"]
+    assert pip_caches, (
+        "the carve-out job no longer restores the shared pip cache at all — every "
+        "shard would then download torch (140 wheels, ~3.2 GB) cold")
+    saving = [s.get("uses") for s in pip_caches
+              if str(s.get("uses") or "").startswith("actions/cache@")]
+    assert not saving, (
+        f"the carve-out job carries an implicit post-step cache SAVE {saving} on "
+        "~/.cache/pip — that save is charged against the job's `timeout-minutes` "
+        "(#10182) and this job's cap is pinned at <= 3x its measured pytest step, "
+        "so the save can never be amortized. Use `actions/cache/restore@` here "
+        "(#5219: the cancel it causes reds a REQUIRED check on a green shard).")
+    restores = [s for s in pip_caches
+                if s.get("uses") == "actions/cache/restore@v4"]
+    assert len(restores) == 1, (
+        "the carve-out's pip cache step must be exactly one "
+        f"`actions/cache/restore@v4` (found {len(restores)} of {len(pip_caches)} "
+        "pip-cache steps in that shape)")
+    assert restores[0].get("continue-on-error") is True, (
+        "the carve-out's pip-cache restore must be `continue-on-error: true` — a "
+        "cache-SERVICE error (transport/503) must never red the leg; a miss is "
+        "the fail-open case and install-cpu-torch downloads the pinned CPU "
+        "wheel either way")
 
 
 def _carve_matrix() -> dict:
@@ -11752,4 +12585,21 @@ def test_batch_review_tool_change_selects_core_not_tier1():
     r = _sel(["tools/batch_review.py"])
     assert "core" in r["surfaces"], r
     assert "test_batch_review.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_seal_session_events_tool_change_selects_core_not_tier1():
+    # tools/seal_session_events.py (#6388) owns tests/test_session_events_seal.py,
+    # which is `core`-registered in config/ci-surfaces.yml. Without its CORE_ALSO
+    # entry this was the same #3261 silent-drop class `queue_resweep` records:
+    # `tools/` is swallowed by NON_PYTHON_PREFIXES before the `core` fallback, so
+    # a tool-only diff took the docs-only early return and selected NO surface —
+    # the guard never ran on the file it guards.
+    #
+    # Mutation check: removing the CORE_ALSO entry empties `r["surfaces"]`, so
+    # assert 1 (below) is the row that reds first — measured: surfaces=[] and
+    # the test file is unlisted, same as the pre-entry state.
+    r = _sel(["tools/seal_session_events.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_session_events_seal.py" in r["test_files"], r
     assert r["full"] is False, r

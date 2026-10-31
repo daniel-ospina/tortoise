@@ -52,16 +52,27 @@ gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
 UNSET for the same reason: it also switches S2.2 on, so an ambient value would
 silently change the arm. The ``arm:`` line is that read-back, never a typed
 literal — a run that cannot read a flag back as set REFUSES rather than printing a
-claim nothing supports. They are still UNWITNESSABLE through
-``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
-first attributed: ``extract_session_v2`` DOES build the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8961-8967`` and
-``result["vet"]`` at ``:8971-8975``); they are dropped at the meta fold,
-``tortoise/sdk.py:13529`` (``"stats": out.get("stats") or {}`` inside
-``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
-rather than worked around: working around
-it would mean reading a wrapper's state, which is the instrumentation E4's row
-forbids.
+claim nothing supports. **The seam has since LANDED (#9116), so this module no
+longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
+receipt could not carry them and the failure was ONE LAYER UP from where it was
+first attributed: ``extract_session_v2`` built the surfaces
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
+``result["vet"]`` at ``:8975-8979``) while the meta fold dropped them with
+``"stats": out.get("stats") or {}``. The fold now calls
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14611``), which copies each
+stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
+this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
+run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
+that is the run's own answer, not a workaround: reading a wrapper's state instead
+is the instrumentation E4's row forbids.
+
+⛔ THAT FOLD LINE IS TYPED HERE IN PROSE ONLY (which the bundle's cite sweep
+re-resolves), never in a cause this probe PRINTS. Every ``sdk.py`` number a cause
+emits is read off the tree at import as ``META_FOLD_CITE`` / ``LINK_SOURCE_CITE`` /
+``TURN_WRITE_CITE``, because a line cite is the one number no reader can keep true
+by hand: any commit that inserts a line above it moves it, and a stale one sends
+#9116's fixer to the wrong line. A cite that will not resolve to exactly ONE line
+makes the probe REFUSE rather than print it.
 
 📌 CITE CONVENTION (this bundle). Every ``file:line`` is re-derived from the tree
 at the head the bundle is stamped at, and is paired with the SYMBOL it names —
@@ -121,6 +132,61 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+def _sdk_line(code: str) -> int:
+    """The ONE line of ``tortoise/sdk.py`` carrying ``code`` — READ, never typed.
+
+    A line cite is the one number in this bundle no reader can keep true by hand:
+    any commit that inserts a line above the site moves it, and the meta fold has
+    moved on this branch's own history and again on ``main``'s ``#9964``. Typed,
+    the CAUSE re-stales SILENTLY — a shipped cause once named ``:13593`` for a fold
+    that had moved to ``:13611``, and the only thing that caught it was
+    ``tests/test_7949_capstone_measure.py``, which derives the line in the PIN and
+    compares. Deriving it here too means the cause a reader (and #9116's fixer)
+    actually reads cannot re-stale on a merge that touched nothing this bundle
+    owns. The SYMBOL is authoritative and the line is a convenience (the bundle's
+    own cite convention), so deriving it is the same answer Sphinx gives
+    (``py:obj`` resolves to a symbol, not a line).
+
+    ⛔ It REFUSES rather than printing a claim nothing supports: a cite that cannot
+    be resolved to exactly ONE line is not a number this run may print (the
+    ``arm:`` read-back rule, applied to a cite).
+    """
+    source = ROOT / "tortoise/sdk.py"
+    if not source.exists():  # pragma: no cover - a checkout without the tree
+        raise RuntimeError(
+            f"cannot resolve a cite: {source} is not in this checkout, and a "
+            "cause that names no real line is worse than no cite (#9116)")
+    hits = [n for n, line in enumerate(
+        source.read_text(encoding="utf-8").splitlines(), 1)
+        if code in line]
+    if len(hits) != 1:  # pragma: no cover - a moved/ambiguous cite is a refusal
+        raise RuntimeError(
+            f"`{code}` is on {len(hits)} lines of sdk.py {hits} — the cause names "
+            "ONE line, so this run refuses rather than pick (#9116)")
+    return hits[0]
+
+
+#: The meta fold's cite, in the exact shape the causes below print it — derived
+#: from the tree at run time (see ``_sdk_line``), never typed.
+#:
+#: The anchor is the POST-#9116 fold (``"stats":
+#: _capture_stats_with_step_witness(out, len(extracted))``), because the merge
+#: that brought ``_sdk_line`` in also brought the seam this PR lands: the
+#: pre-seam ``"stats": out.get("stats")`` occurs on NO line of the merged tree,
+#: so a cite derived from it would raise at import. Deriving it means the number
+#: below stays right on every tree; typing the OLD code would have frozen the
+#: probe to a fold the branch deletes.
+META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line('"stats": _capture_stats_with_step_witness(')}"
+
+#: The other two ``sdk.py`` sites this probe PRINTS (the emitted composition line
+#: and ``E3_RULE``), derived from the tree for exactly the reason ``_sdk_line``
+#: states above: every one of them moves on a merge that inserts lines above it,
+#: and a stale number in a cause or in the log is a cite the next reader follows
+#: to the wrong line. A number cannot re-stale if it is read on each run.
+LINK_SOURCE_CITE = f"tortoise/sdk.py:{_sdk_line('proj.link_source_to_event(')}"
+TURN_WRITE_CITE = f"tortoise/sdk.py:{_sdk_line('_TURN_WRITE_CYPHER = (')}"
+
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
@@ -146,9 +212,9 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/projection/edges.py:2432-2457``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:2573-2598``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13810`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:14892`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -162,13 +228,13 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/projection/edges.py:2432-2457 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13810 "
+    "tortoise/projection/edges.py:2573-2598 link_source_to_event, reached from "
+    f"the capture path at {LINK_SOURCE_CITE} "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
-    "DERIVATION LINK (tortoise/projection/edges.py:502-510 "
+    "DERIVATION LINK (tortoise/projection/edges.py:614-622 "
     "_anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels "
-    "are _DERIVATION_REFERENCES_LABELS (edges.py:475: Event, Document). A "
+    "are _DERIVATION_REFERENCES_LABELS (edges.py:587: Event, Document). A "
     "Source->Object link is identity/mention and carries none BY DESIGN (owner "
     "option A, #5199; #9736)"
 )
@@ -183,12 +249,15 @@ ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 #: A flag the arm PINS OFF so the measured population is a function of THIS file,
 #: not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
 #: switches S2.2 on (``extractor_v2._value_gate_enabled``), so an ambient value
-#: would silently change the arm between two runs of the same probe.
-ARM_OFF = ("TORTOISE_VALUE_GATE",)
+#: would silently change the arm between two runs of the same probe — and
+#: ``TORTOISE_S2_DECISION_SEAM`` (#5087) is a THIRD switch for S2.2 (it arms the
+#: arbiter, so ``_vet_enabled`` is True), which would arm a network call and a
+#: spend inside an arm this file declares OFF.
+ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2381`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2403`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -754,6 +823,11 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
     return results
 
 
+#: The receipt's ``stats`` sub-key the SDK copies the per-stage blocks onto
+#: (#9116 — ``_capture_step_witness`` in ``tortoise/sdk.py``). One name, so the
+#: probe and the seam cannot spell it differently.
+STEP_WITNESS_KEY = "step_witness"
+
 #: The two stat keys a #9116 surface carries when its pass did WORK. Required for
 #: ANY witness: the flag alone is not evidence (see :func:`_pass_ran`).
 _WITNESS_STATS = ("s2", "union")
@@ -778,9 +852,10 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8592 and "
-        ":8612), and each VET pass is gated on the LIST — `if vet_enabled and "
-        "embed_list:` (:8680), `if vet_enabled and complete_list:` (:8802) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596, the "
+        "flag; :8600, the early return; :8616, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:8684), "
+        "`if vet_enabled and complete_list:` (:8806) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
         "returns {} on its fail-open path, :8478-8481)."
@@ -788,16 +863,16 @@ _IDLE_CITES: dict[str, str] = {
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:8561 (and set False when its classifier cannot "
-        "be constructed, :8586), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:8565 (and set False when its classifier cannot "
+        "be constructed, :8590), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:8608-8611), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:8612-8615), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:8692) around `if items:` "
-        "(:8695), `if classify_later and complete_list:` (:8817) around "
-        "`if items:` (:8827) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:8696) around `if items:` "
+        "(:8699), `if classify_later and complete_list:` (:8821) around "
+        "`if items:` (:8831) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :8708 / :8838)."
+        "empty stats (its fail-open `except` at :8712 / :8842)."
     ),
 }
 
@@ -809,26 +884,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:8608-8612, :8961-8975) — so an acceptance test of "a non-empty dict"
+    {}}`` (:8612-8616, :8965-8979) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8592`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:8595``, whose
-    ``if not edus:`` early return (``:8596``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:8612``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8596`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:8599``, whose
+    ``if not edus:`` early return (``:8600``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:8616``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:8680``) and ``if vet_enabled and complete_list:``
-    (``:8802``). So a session whose conversation produced no list emits
+    embed_list:`` (``:8684``) and ``if vet_enabled and complete_list:``
+    (``:8806``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:8478-8481``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at ``:8561``, its own early-return
+    is different code (``classify_later`` at ``:8565``, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -866,8 +941,10 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
     """The first ``key`` surface a run CARRIES that SAYS its pass ran, and where.
 
     Looks where the surface would legitimately land — the extractor's top-level
-    key on the receipt, then the stats block — and NOWHERE else: a witness read
-    off a wrapper's state is the instrumentation E4's row forbids.
+    key on the receipt, the stats block, and (since #9116's seam landed) the
+    ``stats["step_witness"]`` sub-key the SDK copies onto the receipt — and
+    NOWHERE else: a witness read off a wrapper's state is the instrumentation
+    E4's row forbids.
 
     Returns ``(block, where, refusal)``. ``block`` is non-``None`` only when a
     surface in that place states the pass ran (:func:`_pass_ran`); otherwise
@@ -891,6 +968,13 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
         candidates = (
             (f"receipt[{key!r}]", surfaces.get(key)),
             (f"stats[{key!r}]", (run.get("stats") or {}).get(key)),
+            # #9116 seam: ``stats["step_witness"][key]`` — where the shipped
+            # SDK now copies the stage's own block (`_capture_step_witness` in
+            # tortoise/sdk.py, a sub-key of the ``stats`` key the receipt
+            # already carried). Looked for LAST so a lane that still gets the
+            # extractor's own top-level key is read from there.
+            (f"stats['step_witness'][{key!r}]",
+             ((run.get("stats") or {}).get(STEP_WITNESS_KEY) or {}).get(key)),
         )
         for where_prefix, block in candidates:
             if not isinstance(block, dict) or not block:
@@ -1081,7 +1165,7 @@ def point_composition_line(composition: dict | None) -> str:
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2381, t.is_episodic=true, wired only by CONTAINS), and "
+        f"{TURN_WRITE_CITE}, t.is_episodic=true, wired only by CONTAINS), and "
         f"operator Points are written by create_operator (tortoise/sdk.py — the "
         f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
         f"(measured: {operators_anchored} of {operators} anchored). Whether an "
@@ -1159,7 +1243,7 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"classes cannot carry a derivation link AT ALL and are named "
         f"rather than folded into the figure: the turn rows carry none BY "
         f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2381, t.is_episodic=true, wired only by "
+        f"{TURN_WRITE_CITE}, t.is_episodic=true, wired only by "
         f"CONTAINS), and the operator Points are written by "
         f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
         f"operator writer), which never writes extractedFrom. So "
@@ -1208,6 +1292,47 @@ def _stat_total(stats_list: list[dict], key: str) -> int:
     return sum(int(s.get(key) or 0) for s in stats_list)
 
 
+def _seam_cause(runs: list[dict], stats_keys: list[str], stats_key_total: int,
+                receipt_keys: list[str], key: str) -> str:
+    """Why a step with a KNOWN landed seam still has no witness (#9116).
+
+    Three states, and they send a reader to three different places, so the line
+    reports which one this run is in rather than one message for all three:
+
+      * the receipt carries **no** ``stats['step_witness']`` at all — the seam
+        did not run (extraction never reached ``_extract_session_v2``, or the
+        capture was a replay/keyless lane). Measured, not assumed: the receipt's
+        own key inventory is printed beside it.
+      * the receipt carries the seam but **not this block** — the seam is
+        present and incomplete, which is a defect in ``_capture_step_witness``.
+      * the third possibility — the block is here and says the pass did not do
+        work — never reaches this function; ``_witness_block`` returns a
+        REFUSAL for it, and that message is the pass's own.
+    """
+    with_seam = [run["session_id"] for run in runs
+                 if isinstance((run.get("stats") or {}).get(STEP_WITNESS_KEY),
+                               dict)]
+    measured = (f"Measured on this run: inspected {stats_key_total} stats "
+                f"key(s) across {len(runs)} receipt(s) "
+                f"[{', '.join(stats_keys) or 'none'}] and "
+                f"{len(receipt_keys)} receipt top-level key(s) "
+                f"[{', '.join(receipt_keys) or 'none'}]")
+    if not with_seam:
+        return (
+            f"{measured}; no receipt carries stats[{STEP_WITNESS_KEY!r}], so the "
+            f"#9116 seam that copies result[{key!r}] onto the receipt ("
+            f"`_capture_step_witness`, called at the meta fold "
+            f"{META_FOLD_CITE} in _extract_session_v2) did not reach this "
+            f"capture. This is an "
+            f"INSTRUMENT gap, NOT the pipeline skipping the step; reading a "
+            f"wrapper instead is the instrumentation E4's row forbids")
+    return (
+        f"{measured}; stats[{STEP_WITNESS_KEY!r}] IS present on "
+        f"{len(with_seam)} of {len(runs)} receipt(s), but it carries no "
+        f"{key!r} block — the seam is present and INCOMPLETE, which is a defect "
+        f"in _capture_step_witness (tortoise/sdk.py), not in the pass")
+
+
 def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     """The EIGHT steps, each read off the object that carries it.
 
@@ -1239,7 +1364,6 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     receipt_keys = sorted({key for run in runs
                            for key in (run.get("receipt_keys") or ())})
     stats_key_total = sum(len(run.get("stats") or {}) for run in runs)
-    ran = sorted({run["session_id"] for run in runs})
 
     if edus and chunks:
         observed["S0"] = (f"the reader segmented the corpus: stats.edus={edus} "
@@ -1283,23 +1407,9 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
         unobserved["S2.2"] = (
             f"UNOBSERVED — the arm forced TORTOISE_VET=1 in-process and read it "
             f"back from os.environ (the `arm:` line above is that read-back), "
-            f"so the pass was ENABLED for this run — and whether it then DID any "
-            f"work is NOT observable through this surface, which is exactly why "
-            f"the surface is missing: a flag-on block that idles (an empty list, "
-            f"or a failed fail-open pass) is indistinguishable from this one, so "
-            f"this run does not claim the pass ran. Its surface EXISTS one layer "
-            f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8971-8975. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:13529 (\"stats\": out.get(\"stats\") "
-            f"or {{}} inside _extract_session_v2 — the sibling key is not "
-            f"copied). Measured on this run: "
-            f"inspected {stats_key_total} stats key(s) across {len(ran)} "
-            f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
-            f"{len(receipt_keys)} receipt top-level key(s) "
-            f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:13529 is the line its fix "
-            f"must target; reading a wrapper instead is the instrumentation "
-            f"E4's row forbids")
+            f"so the pass was ENABLED for this run — and this receipt carries no "
+            f"surface that says whether it then DID any work. "
+            f"{_seam_cause(runs, stats_keys, stats_key_total, receipt_keys, "vet")}")
 
     classify_block, classify_where, classify_refusal = _witness_block(
         runs, "classify_later")
@@ -1317,20 +1427,9 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
         unobserved["S2.3"] = (
             f"UNOBSERVED — the arm forced TORTOISE_CLASSIFY_LATER=1 in-process "
             f"and read it back from os.environ (the `arm:` line above is that "
-            f"read-back), so the pass was ENABLED for this run — and whether it "
-            f"then DID any work is NOT observable through this surface, which is "
-            f"exactly why the surface is missing: a flag-on block that idles (no "
-            f"classify items, or a failed fail-open pass) is indistinguishable "
-            f"from this one, so this run does not claim the pass ran. Its "
-            f"surface EXISTS one layer down: extract_session_v2 emits "
-            f"result['classify_later'] UNCONDITIONALLY at "
-            f"tortoise/extractor_v2.py:8961-8967. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:13529 "
-            f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
-            f"Measured on this run: the same {stats_key_total} stats key(s) and "
-            f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
-            f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:13529 is the line its fix must target")
+            f"read-back), so the pass was ENABLED for this run — and this "
+            f"receipt carries no surface that says whether it then DID any work. "
+            f"{_seam_cause(runs, stats_keys, stats_key_total, receipt_keys, 'classify_later')}")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "

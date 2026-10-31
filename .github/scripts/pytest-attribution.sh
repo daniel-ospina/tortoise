@@ -127,41 +127,95 @@ fi
 #     line after the summary and no second banner, because the file was rewritten
 #     underneath the leg.
 #
-# ⚠️ NAMED RESIDUAL, and where the real fix landed: this reporter cannot always tell
-# one session's output from another's when they share the global path
-# (`/tmp/pytest.log`), which is why the rc file next to it already moved to
+# ⚠️ NAMED RESIDUAL, and the real fix FOR THE LEGS NAMED BELOW: this reporter
+# cannot always tell one session's output from another's while a leg writes a
+# HOST-GLOBAL path (`/tmp/*.log`) — the rc file next to it already moved to
 # `${RUNNER_TEMP:-/tmp}/pytest-rc`. A foreign writer that rewrites the file and stops
 # leaves no NUL hole and no unbalanced stack, so under rc=1 it can still read as the
-# leg's verdict. The durable fix is a per-leg log path under `${RUNNER_TEMP}` — now
-# APPLIED to every leg that shares a host `/tmp` (see STATUS below).
+# leg's verdict. For those legs the durable fix is a per-leg log path under
+# `${RUNNER_TEMP}` (#10280); all three matrix jobs now pass one, so for them the
+# signals below are a backstop rather than the load-bearing defence.
 #
-# ⚠️ STATUS: APPLIED for every leg that shares a host `/tmp` (2026-10-29). What the
-# report used to say:
-#   `python-ci.yml`'s `test` job — the fast matrix, NINE legs, and the largest share
-#   of this failure — passes `--log "$PYTEST_LOG"` (`${{ runner.temp }}/pytest.log`,
-#   per-runner and therefore per-job, since a runner runs one job at a time).
-#   The other legs still wrote `/tmp/...` literals and still needed the same change.
-# They no longer do. `test-concurrency-falkor`, `test-carve-out`, `test-track-b`
-# and `test-slow` all pass `${RUNNER_TEMP:-/tmp}/pytest.log` (and `/trackb.log` for
-# track-b) themselves — writer, `tail`, this reporter, the `grep -c` counters, the
-# skip-guard's argument and the upload `path:` — so signals (1)-(3) below are a
-# backstop against a test that SHELLS OUT to pytest, not the load-bearing defence
-# against a co-tenant, in every pool job this file reports on.
+# ⚠️ STATUS: APPLIED TO EVERY `python-ci.yml` LEG THAT WRITES A `> ...` CAPTURE
+# (2026-10-29 #10028 for `test`/`test-slow`; 2026-10-30 #10280 for the rest).
+# `python-ci.yml`'s `test` job — the fast matrix, NINE legs, and the largest share of
+# this failure — passes `--log "$PYTEST_LOG"` (= `${{ runner.temp }}/pytest.log`,
+# per-runner and therefore per-job, since a runner runs one job at a time), and
+# `test-slow`'s FIVE legs pass it too. That second half was a measured false red, not
+# a tidy-up: run 40808264676's `test-slow (a)` printed its own `365 passed, 2 skipped`
+# (= its manifest's 367 expected nodeids) AND its own `pytest exit code: 0` banner, and
+# the job still concluded `failure`, because a sibling's `> /tmp/pytest.log` truncated
+# the file between the leg's `tail` and this reporter's read. For those jobs signals
+# (1)-(3) are a backstop against a test that shells out to pytest, not the load-bearing
+# defence against a co-tenant.
 #
-# ⛔ `test-slow` is IN that set, and its `runs-on: ubuntu-24.04` pin buys NO private
-# `/tmp`. That pin reads like the HOSTED label, but `ubuntu-<version>` is a CUSTOM
-# label this repo's self-hosted pool advertises: `docs/ops/ci-runner-x64.md` measures
-# it ×7 on 2026-10-29, and on run 40861737614 four of `test-slow`'s five shards
-# reported `Machine name: 'cmux'`. So its log path is per-runner for the same reason
-# every other pool leg's is, and "it is version-pinned, therefore its `/tmp` is its
-# own VM" is the WRONG reason that was deleted from `python-ci.yml`,
-# `tests/test_ci_selection.py` and `tests/test_ci_guard_invocation.py` — do not
-# reinstate it here (#7815 / #10028 / #10289).
-# ⚠️ The remaining host-global leg is `test-d14-hosted-api` (`/tmp/pytest-d14.log`,
-# `/tmp/junit-d14.xml`), named at the site as a `⚠️ NAMED RESIDUAL`. Its log basename
-# is unique to that job, so it cannot be clobbered by a co-tenant — only by a stale
-# file from a previous job on the same host, which is a different (and narrower)
-# failure mode than the one this reporter was written for.
+# #10280 then migrated the three legs that still wrote a `>` capture — measured, not
+# prophylactic: on run 40990582554 `test-track-b` wrote `4 expected nodeids ->
+# /tmp/expected-nodeids.txt` and then reconciled its own 4 testcases against a
+# `test-carve-out (c)` leg's register (`emit-manifest: 616 expected nodeids ->` the same
+# shared path, 11s earlier), concluding `616 expected nodeid(s) absent from the
+# junitxml` with every test in the leg passing — a FALSE RED on a required check, and
+# the mirror image of the false PASS the shared manifest makes reachable. Those three
+# jobs (`test-concurrency-falkor`, `test-track-b`, `test-carve-out`) now pass per-job
+# `"$PYTEST_LOG"` / `"$PYTEST_JUNIT"` / `"$PYTEST_MANIFEST"` paths, so for them too
+# these signals are a backstop.
+#
+# The legs that still write `/tmp/...` literals, and still need the same change, are
+# the deliberate residual named on #10280, which carries the rest of the migration:
+#
+#   `validate`                  (`/tmp/pmv-pytest.log`)  — `post-merge-validation.yml`
+#
+# `validate` is residual for its LITERAL, not its redirect, and the distinction matters
+# (PR #10264 review, verified against `capture_site`):
+#
+#   `validate` WRITES its log with `> /tmp/pmv-pytest.log 2>&1` and is COUNTED at the
+#   separate `tail -n 300 /tmp/pmv-pytest.log` site, whose branch
+#   (`^tail\s+-n?\s*\d+\s+(\S+)$`) accepts ANY single token — so migrating it would be
+#   counted without a widening. `capture_site` has NO `>` branch at all: the `>` write is
+#   not a shape it reads, which is why this leg is residual for its LITERAL, not its
+#   redirect.
+#
+# The OTHER leg #10264 named in this paragraph captures through `| tee` rather than a
+# tail, and it is MIGRATED (#7815, PR #10143) — so it is NOT residual and is deliberately
+# not named here. The counter widening it owed is recorded BELOW the delimiter that ends
+# this list, because naming a migrated leg inside the window is itself a red.
+#
+# ⛔ THIS LIST IS DERIVED, NOT REMEMBERED — do not edit it from memory. It is
+# `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
+# which reads every capture site in both workflows this guard names and reds unless the
+# paragraph above names EXACTLY the legs still capturing a host-global `/tmp/*.log`.
+# Migrating one leg (or adding a leg) is therefore a deliberate edit HERE, in the same
+# change — and naming a leg that HAS migrated is a red too, because an over-wide residual
+# sends the next lane to migrate work that is already done.
+#
+# `validate` is the LAST one: it is the warn-only job, so for it the consequence is a
+# misleading artifact rather than a false red on a required check — named anyway, so the
+# residual reads as one scope instead of a list that stops where the gate impact does.
+#
+# ⚠️ THE FOUR `python-ci.yml` LEGS THIS LIST USED TO NAME — `test-concurrency-falkor`,
+# `test-track-b`, `test-carve-out` and `test-d14-hosted-api` — are MIGRATED (#7815, PR
+# #10143), which is why `test-track-b` is no longer a residual. They are migrated in TWO
+# spellings, and the difference is deliberate: #10280 moved the first three onto
+# `"$PYTEST_LOG"` / `"$PYTEST_JUNIT"` / `"$PYTEST_MANIFEST"`, resolved once in the job's
+# first step and failing CLOSED on `${RUNNER_TEMP:?}`, while `test-d14-hosted-api` keeps
+# this PR's per-step `${RUNNER_TEMP:-/tmp}/...`. Both are per-runner (a runner runs one
+# job at a time); neither writes a host-global `/tmp` artifact.
+#
+# `test-track-b` was the sharpest of the five and #10280's own
+# ROOT measurement — its shared `/tmp/expected-nodeids.txt` + `/tmp/junit.xml` produced
+# `4 expected nodeids -> 640 absent`, a false red on a required check — and that is
+# exactly what the per-job paths closed.
+#
+# `test-d14-hosted-api` owed the counter widening #10264 predicted, because it captures
+# through `| tee` rather than a tail: the `tee` branch matched a `/tmp/...` LITERAL only,
+# so a migrated `tee` would have gone UNCOUNTED and the leg's reporter obligation would
+# have stopped being checked at all. That widening is delivered in
+# `tests/test_pytest_attribution.py`'s `_TEE_SITE_RE`, which now accepts the
+# `"${RUNNER_TEMP:-/tmp}/<name>.log"` spelling as well — a guard whose subject is this
+# drift must not be spelling-dependent.
+#
+# For the legs still named above the three signals below stay load-bearing, and they keep
+# the KILL path — the one that produced the "timeout flakes" — from being fooled.
 #
 # So ownership is "PROVEN, or treated as STALE", on three independent signals:
 #

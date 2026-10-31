@@ -60,7 +60,6 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 # `_update_entity`. Imported so neither surface re-literals the vocabulary.
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
-from .ids import entity_name_id as _entity_name_id
 from .ids import ulid
 # #2817: the S5 money derivation (prose → typed value). Module scope because the
 # capture seam's `warn_on` narrowing below is derived from the CLOSED
@@ -93,7 +92,7 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    resolve_document_target_id, resolve_entity_id)
+    entity_create_lock, resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -157,7 +156,16 @@ from .projection.entities import (  # #3998: the declared :Source surface
 # `EventAPI.add_point` stored NOTHING.
 from .projection.entities import (
     flatten_search_keys_prop as _flatten_search_keys_prop,
+    revise_identifier_aliases as _revise_identifier_aliases,
 )
+# #8933 Stage 2 — the write half at the CREATE door. Both are the SAME helpers
+# `_upsert_point_props` uses, so a live create and a rebuild replay derive
+# identically instead of drifting (the ruling's criterion 2).
+from .projection.entities import (
+    append_identifier_aliases,
+    point_identifier_aliases,
+)
+from .sparse import identifier_tokens_enabled as _identifier_tokens_enabled
 # #10122: the FULLTEXT index FIELD TABLE (the one that CREATES the indexes).
 # The Point `name` advisory below reads the Point's fields OFF it rather than
 # re-typing `content`/`search_keys` — so the advisory cannot drift from the
@@ -304,6 +312,20 @@ def _journal_snapshot_from_create_map(
     unusable vector is omitted here and re-added as an explicit `None` by the
     producer's own `setdefault` in `_emit_event` (PRESENCE IS OWNERSHIP,
     #5004), so the key is still on every snapshot a PointAdded emits.
+
+    The DERIVED identifier alias (#8933) IS an exception to "exactly the
+    properties the `CREATE` writes", and it is the only one: the create door
+    snapshots the caller's intent (`_intended`) BEFORE the alias enters
+    `_create_map`, so `search_keys` reaches the store and never the record.
+    That is deliberate — the alias is DERIVED from `content` by
+    `sparse.identifier_alias`, so a replay re-derives it from the same input
+    (the create door and `projection._revise_point` both do). Journaling it
+    would promote a derived value into the truth, and the record would then be
+    able to disagree with the rule that produced it. A CALLER-supplied
+    `search_keys` is not derived and still rides the record. Pinned by
+    `TestWritePath::test_journal_payload_is_never_mutated` and the two SDK-door
+    parity tests. (#10203 review round 11: this docstring was one exception
+    short of the truth.)
     """
     out: dict = {}
     for key, expr in create_map.items():
@@ -2431,14 +2453,185 @@ _TURN_WRITE_CYPHER = (
 
 
 # #10000: §9.1/D1 places the raw transcript in Postgres — "not in the graph, not
-# a `Document`, not a `Point`". The per-turn `PointAdded` records this writer
-# emits ARE that Postgres write (the projection folds them into `public.point`
-# with `is_episodic = true`), so when the record can hold the turns the graph
-# keeps only the Session's redaction count: one node write, no rows, no
-# `CONTAINS` edges.
+# a `Document`, not a `Point`". The turn RECORDS this writer emits ARE that
+# Postgres write — one `PointAdded` per turn while the GRAPH holds them, ONE
+# `TurnsRecorded` carrier when the RECORD does (#10017; same `public.point` row,
+# no node), so that capture leaves the graph only the Session's redaction count:
+# one node write, no rows, no `CONTAINS` edges.
 _SESSION_REDACTIONS_CYPHER = (
     "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"
 )
+
+
+#: "This capture cannot attest the value" — distinct from ``None``, which is a
+#: real absence (a fresh turn) the journalled snapshot must state. A snapshot key
+#: carrying this sentinel is OMITTED, and an omitted column is one the record's
+#: upsert's ``DO UPDATE SET`` never names — so a row that ALREADY exists keeps
+#: its value — and the graph fold's ``coalesce`` leaves alone on match (#10000
+#: review P1).
+#:
+#: ⛔ THE INSERT ARM IS NOT COVERED BY THAT, and this paragraph used to say it was
+#: (#10021 review, P3). ``record_projection._upsert_statement`` builds the
+#: ``INSERT ... (columns)`` list from the same ``col_values`` keys, so an omitted
+#: column is absent from BOTH lists; a row that does not exist yet has nothing to
+#: "not touch" and takes its declared DEFAULT or NULL (PostgreSQL INSERT
+#: contract). ``public.point.status``/``created_at`` declare no default, so a
+#: fresh row lands NULL — the recorded residual, stated at its producer
+#: (``sdk._write_capture_turns``' omitted-field note) and pinned by
+#: ``tests/test_10000_turns_record_only.py::
+#: test_the_omitted_pair_is_safe_on_the_update_arm_only``.
+_UNATTESTABLE = object()
+
+
+def _record_prior_vectors(sdk, session_id: str,
+                          turn_ids: list[str]) -> dict[str, Any] | None:
+    """``{turn_id: PriorTurn}`` for the ids the RECORD already holds.
+
+    ⛔ THE NAME IS THE VECTOR HALF'S, THE MAPPING IS THE WHOLE PRIOR ROW: the same
+    read answers "what vector does the record hold for this turn" (#5004) and
+    "what ``created_at``/``status`` does it hold" (the fold's absolute upsert,
+    which the graph path never needs because its Cypher coalesces).
+
+    The record half of #5004 round-3's PRESERVE rule (#10000 review P1). On the
+    graph path the writer learns what its write LEFT from the write's own
+    read-back (`_TURN_WRITE_CYPHER`'s ``RETURN ... t.embedding``): a re-capture
+    with the embedder unavailable PRESERVES the node's prior vector when the
+    content is unchanged, and the journal carries THAT value, never the ``None``
+    this capture encoded — journalling ``None`` tells the replay the vector is
+    genuinely gone and CLEARS it. With the turns in the record there is no node
+    to read back, so the prior value is read from the record, and the caller
+    applies the same content-unchanged rule the Cypher applies — which is why
+    the stored CONTENT comes back with the vector. The rule's left-hand side is
+    what the RECORD holds, never this capture's own ``turn_texts[i]`` — `_row["c"]`
+    is computed FROM that value, so a comparison against it is the text with
+    itself: every row would look unchanged and a vector for replaced text would
+    be preserved, which is the dense-leg lie #5004 exists to remove.
+
+    Fail-soft in ONE direction only: an unreadable record yields ``None`` — NOT
+    ``{}`` — and logs a WARNING. ``None`` means "this capture cannot know", and it
+    has TWO consequences in the caller, one per half of the row:
+
+    * the VECTOR half is CLEARED: the caller folds ``None`` to an empty map, so no
+      prior row is known for any id and the journalled embedding stays ``None``
+      (the replay's instruction to drop the stored vector);
+    * the ``created_at``/``status`` half is OMITTED, not cleared: the caller marks
+      them ``_UNATTESTABLE`` and the journalled snapshot leaves both fields out,
+      so the replay cannot assert this capture's own values over the record's.
+      ⛔ That protects the row the record ALREADY holds; a row it does not hold
+      takes the omitted column's declared default or NULL, and these two columns
+      declare none (the residual, stated at ``sdk._write_capture_turns``).
+
+    That asymmetry is why ``{}`` is the wrong value here: ``{}`` means "the record
+    holds no row for these ids" (a fresh turn), which licenses the caller to
+    write this capture's own ``created_at``/``status`` — restoring the
+    re-stamp/demote bug this rule fixes. The honest reading is the one that
+    cannot attest a value it could not read; it is a DEGRADATION, not a normal
+    path, so it is never silent. The alternative (omit the key entirely) would
+    let the replay RE-ENCODE the text under whatever model is active, which is
+    the #5004 defect.
+
+    No tenant, no read: the record's key is ``(org_id, graph_id)``, and a tenant
+    the write itself would be refused for is not one this may read from.
+    """
+    from tortoise.record_read import turn_prior_vectors
+    from tortoise.record_serve import open_record
+    from tortoise.record_writer import record_tenant
+
+    tenant = getattr(sdk, "_record_tenant", None) or record_tenant()
+    if tenant is None or not turn_ids:
+        return {}
+    org_id, graph_id = tenant
+    conn = None
+    try:
+        conn = open_record()
+        return turn_prior_vectors(
+            conn, org_id=org_id, graph_id=graph_id, session_id=session_id,
+            turn_ids=turn_ids)
+    except Exception:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "could not read the record's prior turn rows for session %s — this "
+            "capture journals no vector for %d turn(s), so the stored vector is "
+            "cleared rather than preserved (#5004), and it leaves "
+            "created_at/status OUT of the journal rather than asserting this "
+            "capture's own values over the record's", session_id,
+            len(turn_ids), exc_info=True)
+        # ``None`` is NOT ``{}``: ``{}`` means "the record holds no row for these
+        # ids" (a fresh turn), while ``None`` means "this capture cannot know" —
+        # and the journalled snapshot must then OMIT the fields it cannot attest
+        # rather than write a value over the record's.
+        return None
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+
+def _record_turn_residue(sdk, session_id: str,
+                         first_live: int) -> list[str] | None:
+    """The RECORD's turn ids at or above ``first_live`` — the #1920 sweep's ids.
+
+    ⛔ A FACT ABOUT THE GRAPH IS NOT A LICENCE ABOUT THE RECORD (#10021 review
+    P2), and the sweep was the second place that rule was not yet applied. Its
+    whole range used to come from the graph `:Session`'s ``turn_max_index``, read
+    by the caller only when a probe of the graph node said the session already
+    existed — so a session whose ``:Session`` node is gone (the state §2.0 makes
+    normal: the graph is a rebuildable cache, and §9.1's D7 is measured with it
+    destroyed) swept NOTHING, while the record kept every surplus row of the
+    previous, longer capture. Both doors then served those rows as a COMPLETE
+    transcript.
+
+    ``turn_prior_vectors`` answers the same question for the CURRENT window's
+    ids; this answers it for the whole session, which is what a REMOVAL needs.
+    Two bounded reads per armed capture is the cost, and it does not scale with
+    turn count in the way #3086 measures (that pin is about per-turn work and
+    on-loop GRAPH work; this is one fixed record read).
+
+    ⛔ IT NAMES THE ROWS, IT DOES NOT RETURN THE HIGHEST NUMBER (#10021 review
+    P2, CWE-407 / CWE-770). This returned ``turn_high_water``'s single integer,
+    and the caller built the sweep's id list from it with a ``range()`` — an
+    allocation whose size is a STORED integer nothing validates (a legacy or
+    copied row at index ``10**9`` meant ~10⁹ id strings, ~2 × 10⁹ journal
+    appends and a 10⁹-element ``IN $ids``). :func:`record_read.turn_keys_at_or_above`
+    visits the same rows and hands back the ones that exist, so the sweep's cost
+    is O(rows held) whatever the stored index says — enumeration, never a cap
+    (the ruling ``record_read._shortfall`` records for the READ side, applied to
+    the second consumer of the same datum).
+
+    ``None`` — not ``[]`` — when the record cannot be asked: ``[]`` is the clean
+    answer "the record holds no turn at or above this floor", while ``None``
+    means this capture could not look, and the caller reports the un-nameable id
+    space instead of inventing one. Same tenant resolution and same failure
+    posture as ``_record_prior_vectors``: a tenant this capture cannot resolve is
+    a tenant this may not read from.
+    """
+    from tortoise.record_read import turn_keys_at_or_above
+    from tortoise.record_serve import open_record
+    from tortoise.record_writer import record_tenant
+
+    tenant = getattr(sdk, "_record_tenant", None) or record_tenant()
+    if tenant is None:
+        return None
+    org_id, graph_id = tenant
+    conn = None
+    try:
+        conn = open_record()
+        keys = turn_keys_at_or_above(
+            conn, org_id=org_id, graph_id=graph_id, session_id=session_id,
+            first_index=first_live)
+        return list(keys)
+    except Exception:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "could not read the record's turn rows at or above index %d for "
+            "session %s — a shorter re-capture sweeps only the ids the graph "
+            "can name, so record turn rows above the session's live id space "
+            "may survive as residue (#1920/#10021); the next capture asks the "
+            "record again, and that read does not inherit this one's failure",
+            first_live, session_id, exc_info=True)
+        return None
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
 
 
 def _capture_turn_id(session_id: str, index: int, turn_offset: int = 0) -> str:
@@ -2499,6 +2692,65 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
             if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 
 
+def _split_graph_turn_ids(session_id: str, raw: Any) -> list[tuple[str, int | None]]:
+    """The prior read's collected ids → ``(id, index)``, each index parsed once.
+
+    The SAME guard ``_capture_turn_ids`` applies, for the same reasons: str-only
+    (a non-string id would make the suffix slice raise), and a suffix that is
+    ``isdecimal()`` — NOT ``isdigit()``, because ``'²'.isdigit()`` is True while
+    ``int('²')`` raises — with the ``int()`` itself wrapped, because ``int()``
+    also refuses a decimal string longer than its conversion limit, so
+    ``isdecimal()`` being True does not imply parseable.
+
+    An id that cannot be PLACED is returned as ``(id, None)`` rather than
+    dropped, and the sweep LEAVES IT ALONE: "never delete where we cannot place
+    it" is the direction the recorded contract pins
+    (``tests/test_write_session_and_turns_3551.py::
+    test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture``), and no
+    writer mints such an id anyway (``_capture_turn_id`` formats an ``int``), so
+    it cannot be the live window's turn either way.
+    """
+    prefix = f"{session_id}_t"
+    out: list[tuple[str, int | None]] = []
+    for tid in (raw or []):
+        if not isinstance(tid, str) or not tid.startswith(prefix):
+            continue
+        suffix = tid[len(prefix):]
+        if not suffix.isdecimal():
+            continue
+        try:
+            out.append((tid, int(suffix)))
+        except (TypeError, ValueError):
+            out.append((tid, None))
+    return out
+
+
+def _prior_mark_index(turn_max_index: Any, turn_count: Any) -> int:
+    """The prior ``:Session`` read's two arms → the id-space end (or ``-1``).
+
+    ⛔ ``turn_max_index`` is an INDEX and ``turn_count`` is a COUNT (#10021
+    review P3). They used to be read through ONE
+    ``coalesce(s.turn_max_index, s.turn_count, 0)``, which substitutes a COUNT
+    ``N`` for a max index of ``N - 1`` — so a session captured before the mark
+    existed named ONE ID PAST ITS OWN END in the stale-turn sweep. Harmless on a
+    healthy lane (that id does not exist) but a wrong bound is exactly the kind
+    of thing that stops being harmless later, and it is the SAME defect
+    ``hosted_api._prior_stored_turn_count`` was split for on the metering side
+    ("the two arms are converted separately"). So: the mark IS an index and is
+    used as one, the count is converted by ``- 1``, and "neither present" is
+    ``-1`` — which sweeps no id.
+    """
+    for value, delta in ((turn_max_index, 0), (turn_count, -1)):
+        if value is None:
+            continue
+        try:
+            return int(value) + delta
+        except (TypeError, ValueError):
+            # Fail toward deleting NOTHING rather than toward a bad range.
+            return -1
+    return -1
+
+
 @_declares_apply_first_write_lane("_write_capture_turns")
 def _write_capture_turns(
     proj,
@@ -2512,6 +2764,7 @@ def _write_capture_turns(
     texts_and_counts: tuple[list[str], dict[str, int]] | None = None,
     turn_offset: int = 0,
     prior_turn_max_index: int = -1,
+    prior_graph_turns: list[tuple[str, int | None]] | None = None,
 ) -> int:
     """Write a capture's episodic turn stream — to the RECORD when it can hold it (#10000).
 
@@ -2561,12 +2814,28 @@ def _write_capture_turns(
     a hard ``DETACH DELETE``, journaled as an ``EntityMutated`` op=delete
     (the ``delete_point`` record) so a rebuild cannot resurrect the orphan.
 
-    ``session_existed`` is the caller's own pre-MERGE probe: when False the
-    Session had no prior capture, so there can be no stale turn to scan for
-    and the prune read is skipped (the fresh-capture hot path keeps its exact
-    query count — #3086 measures this path). It DEFAULTS TO TRUE — the
-    conservative direction: a caller that omits it prunes, so forgetting the
-    parameter cannot silently reinstate #1920.
+    The sweep's CANDIDATES are the ids the two stores can NAME, never a range
+    built from a stored index (#10021 review P2):
+    ``_record_turn_residue`` (the record's own rows at or above this window's end
+    — read whenever a tenant resolves and the record can carry the delete
+    records, INDEPENDENT of whether this capture can WRITE the record, because a
+    reader must not inherit the write breaker — #10021 review P1) and
+    ``prior_graph_turns`` (the graph's ``CONTAINS``-wired turn ids, the one
+    witness a ``SET`` cannot destroy — #10021 review P2). ``prior_turn_max_index``
+    is still read by the caller and still arrives; it is a COMPARISON here (does
+    the stored id space reach past this window at all), never the size of an
+    allocation.
+
+    ``session_existed`` is the caller's own pre-MERGE probe of the graph
+    ``:Session``. ⛔ IT NO LONGER GATES THE SWEEP OR THE PRIOR-ROW READ (#10021
+    review P2): both asked it for a licence about the RECORD, and a graph probe
+    is not evidence about the record (§2.0 — the graph is the cache, and §9.1's
+    D7 is measured with it destroyed). It is still forwarded by
+    ``_write_session_and_turns``, which uses it for the graph mark read and for
+    its own replay/retry gate; the record half now takes its own candidates from
+    the record (`_record_turn_residue`). It DEFAULTS TO TRUE — the conservative
+    direction: a caller that omits it prunes, so forgetting the parameter cannot
+    silently reinstate #1920.
 
     #4911: RETURNS the number of credential-shaped spans redacted from this
     window, and writes the same number to the Session as ``capture_redactions``
@@ -2649,31 +2918,49 @@ def _write_capture_turns(
     # `session_id`, so a re-issue targets the same node), the CONTAINS edge is
     # a MERGE, and `status`/`createdAt` use `coalesce` — a re-issued statement
     # can neither duplicate a turn nor demote or re-stamp a stored one.
-    # #10000: WHICH STORE holds the turns is a CAPABILITY question, never a
-    # policy flag. The per-turn `PointAdded` records below are gated on a
-    # configured journal (`sdk._get_event_log()`), and the record is armed only
-    # with `TORTOISE_RECORD_DSN`; if either is absent the graph is the only store
-    # that can hold the turns, so this writer keeps both paths and selects by
-    # what is actually available. Removing the graph write unconditionally would
-    # write the transcript to NO store on an unarmed deployment — silent loss of
-    # the capture's whole point.
-    from tortoise.record_writer import record_dsn as _record_dsn
-    _record_holds_turns = (sdk._get_event_log() is not None
-                           and _record_dsn() is not None)
-    if _record_holds_turns:
-        sdk._graph_write_with_retry(
-            lambda: proj.g.query(
-                _SESSION_REDACTIONS_CYPHER,
-                params={"sid": session_id, "redactions": redacted_total},
-            ),
-            what="capture session redaction count",
-        )
-        # No graph read-back: the record holds createdAt/status/embedding, and the
-        # value this writer records next IS the stored value. #5004's
-        # preserved-vector branch cannot be reached from here — there is no node
-        # whose prior vector could have been preserved.
-        stored: dict[str, tuple] = {}
-    else:
+    # ── WHICH STORE HOLDS THE TURNS (#10000) ──────────────────────────────
+    # A CAPABILITY question, never a policy flag (§9.1/D1 puts the transcript in
+    # Postgres; this asks only whether Postgres can hold it right now). Two
+    # halves, and the SECOND one is what the review's P0 was about:
+    #
+    #   1. BEFORE the write: `record_writer.record_holds_turns` — the write
+    #      door's OWN predicate (armed DSN + durable journal + a tenant + a
+    #      closed connect breaker). The record path then SKIPS the graph write
+    #      entirely (the `if not _record_first` batch below), so there is no node
+    #      read-back to learn `createdAt`/`status`/`vector` from: those come from
+    #      the record's PRIOR row instead (`_record_prior_vectors`), which is
+    #      what the journal must carry for a replay to leave the record alone.
+    #      The graph path is the one that writes first and reads back.
+    #   2. AFTER the write: the outcome each emit actually reported. A record
+    #      write can still be REFUSED after the preflight approved it — the
+    #      database went unreachable mid-capture, the breaker tripped on it, the
+    #      fold refused the record — and those turns are then in NO store. So
+    #      every turn whose record write did not LAND is written to the graph
+    #      below, per turn.
+    #
+    # ⛔ A DECISION MADE BEFORE THE WRITE IS NOT A DECISION. Gating only on
+    # journal+DSN (what this code did) meant an armed deployment whose record
+    # write declines wrote the transcript to NO store while the capture returned
+    # success — the one outcome this change may not have.
+    #
+    # Removing the graph write unconditionally would do the same on an UNARMED
+    # deployment, so the graph path is not transitional scaffolding: it is the
+    # store of every lane where the record cannot hold the turns, and it stays
+    # until the record can carry them everywhere.
+    from tortoise.record_writer import record_holds_turns
+    _log = sdk._get_event_log()
+    # DURABILITY IS READ, not assumed — the same value `_emit_event` hands
+    # `write_live_record` (a scratch buffer is not a journal, so the record
+    # declines it, so it cannot hold the turns).
+    _journal_configured = _log is not None
+    _record_first = record_holds_turns(
+        journal_configured=_journal_configured,
+        durable=_journal_configured and getattr(_log, "durable", True),
+        tenant=getattr(sdk, "_record_tenant", None))
+    stored: dict[str, tuple] = {}
+    if not _record_first:
+        # The record cannot hold this capture's turns: the graph is the store,
+        # exactly as before #10000 (byte-identical, read-back included).
         _rows = sdk._graph_write_with_retry(
             lambda: proj.g.query(
                 _TURN_WRITE_CYPHER,
@@ -2684,6 +2971,77 @@ def _write_capture_turns(
         ).result_set
         stored = {r[0]: (r[1], r[2], r[3]) for r in (_rows or [])}
 
+    if _record_first:
+        # ── WHAT THE RECORD'S WRITE *LEAVES* (#5004 round-3, #10000 review P1) ──
+        # Two of the three journalled fields depend on what the record already
+        # holds, and the record path has no node read-back to learn them from, so
+        # they are read here:
+        #
+        #   * the VECTOR — this capture may have encoded none (the embedder was
+        #     unavailable), and journalling `None` is the replay's instruction to
+        #     CLEAR; an unavailable embedder is not a statement that the stored
+        #     vector should be dropped (`#5004`).
+        #   * `created_at` / `status` — the record's upsert writes them from
+        #     EXCLUDED ABSOLUTELY (`record_projection._upsert_statement`), unlike
+        #     `_TURN_WRITE_CYPHER`'s `coalesce`. Journalling this capture's
+        #     `now`/`"draft"` for a turn that is ALREADY stored therefore
+        #     re-stamps its `created_at` and demotes a promoted turn to `draft`
+        #     on the store of record, permanently and silently. Journalling the
+        #     prior values is what makes the fold's write idempotent, and it is
+        #     the same "journal what the write LEFT" rule the graph read-back
+        #     provides on the other path.
+        #
+        # ⛔ THE GATE IS THE RECORD'S OWN READ, NEVER THE GRAPH'S PROBE (#10021
+        # review P2). This used to run only when `session_existed` — a probe of
+        # the GRAPH's `:Session` node — was true. That premise ("a fresh session
+        # has no prior row") is a fact about the GRAPH; the licence it granted
+        # ("so this capture may journal its own `now`/`draft`") is a fact about
+        # the RECORD, and the two coincide only while every captured session also
+        # has a graph `:Session`. §2.0 makes the record the authority and the
+        # graph its cache, and §9.1's capstone D7 is measured with the graph
+        # destroyed: with `session_existed=False` and record rows PRESENT, the
+        # old gate left `_prior` empty and `_prior_unknown` False, so the FRESH
+        # branch journalled this capture's `status="draft"`/`createdAt=now` and
+        # the record's upsert wrote them from EXCLUDED ABSOLUTELY — re-stamping
+        # `created_at` and demoting an already-promoted turn on the store that IS
+        # the system of record, permanently and silently.
+        #
+        # `turn_prior_vectors` already answers "the record holds no row for this
+        # id" with `{}` — the exact value the old `else` branch fabricated — so
+        # asking it costs one bounded record read and buys correctness. The
+        # #3086 hot path keeps its guarantee: that pin is about work scaling with
+        # TURN COUNT and about on-loop graph work, not about one fixed read.
+        _prior: dict[str, Any] = {}
+        _prior_unknown = False
+        if turn_rows:
+            _read = _record_prior_vectors(
+                sdk, session_id, [row["id"] for row in turn_rows])
+            _prior_unknown = _read is None
+            _prior = _read or {}
+        for _i, _row in enumerate(turn_rows):
+            _held = _prior.get(_row["id"])
+            _emb = turn_embs[_i]
+            if _emb is None and _held is not None:
+                # The SAME rule the Cypher applies: a preserved vector survives
+                # only when the content did not change — a vector for text no
+                # longer stored is the dense-leg lie #5004 exists to remove. The
+                # comparison is against what the RECORD holds (`_held.content`),
+                # never against this capture's own `turn_texts[i]`: `_row["c"]`
+                # is computed FROM that value, so that comparison is the text
+                # with itself.
+                _unchanged = _held.content == _row["c"]
+                _emb = _held.embedding if (
+                    _held.embedding is not None and _unchanged) else None
+            if _held is not None:
+                _left_created, _left_status = _held.created_at, _held.status
+            elif _prior_unknown:
+                # Cannot attest: OMIT (see `_UNATTESTABLE`) so the replay leaves
+                # the record's values alone.
+                _left_created = _left_status = _UNATTESTABLE
+            else:
+                _left_created = _left_status = None
+            stored[_row["id"]] = (_left_created, _left_status, _emb)
+
     # #1920, re-homed by #10000: a SHORTER re-capture must remove the previous
     # capture's turns beyond the new window, or the stored transcript keeps rows
     # the session no longer holds. The candidates come from the ID SPACE — the
@@ -2692,38 +3050,173 @@ def _write_capture_turns(
     # (``_capture_turn_ids`` would return nothing and the surplus rows would keep
     # being served). A non-zero ``turn_offset`` is an APPEND, so only ids at or
     # beyond ``turn_offset + len(window)`` are stale.
-    stale: list[str] = []
-    if session_existed:
-        _first_live = turn_offset + len(turn_rows)
-        if prior_turn_max_index >= _first_live:
-            stale = [_capture_turn_id(session_id, _i)
-                     for _i in range(_first_live, prior_turn_max_index + 1)]
-        # Which store the removal targets is the same capability question as the
-        # write above: with the record holding the turns there is no node to
-        # delete, and the record delete is the `PointRetracted` +
-        # `EntityMutated` pair emitted below (folded as a hard delete).
-        if stale and not _record_holds_turns:
-            sdk._graph_write_with_retry(
-                lambda: proj.g.query(
-                    "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                    "WHERE t.id IN $ids DETACH DELETE t",
-                    params={"sid": session_id, "ids": stale},
-                ),
-                what="capture stale-turn sweep",
-            )
+    #
+    # ⛔ THE BOUND IS THE MAX OF BOTH STORES, AND IT IS NOT GATED ON THE GRAPH
+    # (#10021 review P2). Every id that could hold residue has to be named, and
+    # the two stores carry DIFFERENT residue in the two directions that matter:
+    # the graph mark names the surplus a graph-lane capture left, and the
+    # record's own highest index names the surplus a record-lane capture left —
+    # including the case the graph cannot answer at all (`:Session` gone, mark
+    # absent, or a failed mark read). The old `if session_existed:` gate asked a
+    # fact about the GRAPH and used it to decide a removal from the RECORD; with
+    # the node gone the record kept `_t0.._t3` while `turn_count` became 1, and
+    # the read side served four turns as COMPLETE.
+    _first_live = turn_offset + len(turn_rows)
+    # ⛔ THE RECORD'S RESIDUE IS A READ, AND A READER MUST NOT INHERIT THE WRITE
+    # BREAKER (#10021 review P1). This asked `_record_first` — the WRITE door's
+    # predicate, breaker included — so the one read that names the RECORD's
+    # residue (`_record_turn_residue`) ran only when THIS capture could WRITE to
+    # the record, which is the conflation the whole change exists to remove. The
+    # reachable failure: a record connect fails once, the breaker stays open for
+    # `LIVE_WRITE_BREAKER_SECONDS` (60 s, a fixed cooldown, not a probe) — so the
+    # record may be healthy again — and a SHORTER re-capture inside that window
+    # swept nothing, because neither store could name the surplus: the record was
+    # never asked, `prior_turn_max_index` was already lowered by this capture's
+    # own MERGE, and `prior_graph_turns` is empty by construction for a
+    # record-holding session (its turns are not graph nodes). The record then
+    # kept `_t0.._t3` while the session declared one turn, and from that moment
+    # BOTH serving doors refuse it (`record_read._shortfall`'s residue arm ->
+    # `served_turn_count` -> `RecordUnavailable` / HTTP 503) until a later
+    # record-first capture of that same session — which, for a session captured
+    # once, may never come. The write path reports success throughout.
+    #
+    # So the gate is the SAME one declaration asked the way the two READ doors
+    # ask it (`sdk._record_turn_answer`, `hosted_api._record_tenant_for_read`):
+    # `consult_breaker=False`. It still refuses `unarmed` / `malformed_dsn` /
+    # `no_tenant`(-`_carried`) and a journal that cannot carry the delete records,
+    # because those are facts about WHERE a past capture's turns went; it no
+    # longer refuses on `circuit_open`, which is a fact about the last 60 s of
+    # THIS process. The cost is one bounded read on a capture that write-refuses
+    # (the read doors pay the same connect on every request); the alternative is
+    # a transcript no door can serve.
+    # ⚠️ The `no_durable_journal` arm is refused ON PURPOSE: the record half of
+    # the removal is the `EntityMutated` op=delete pair emitted below, which
+    # reaches the record through the journal, so a scratch buffer sweeps nothing
+    # here either — the journal-less/scratch arm is out of this fix's reach by
+    # construction, not by oversight.
+    _record_readable = record_holds_turns(
+        journal_configured=_journal_configured,
+        durable=_journal_configured and getattr(_log, "durable", True),
+        tenant=getattr(sdk, "_record_tenant", None),
+        consult_breaker=False)
+    # ⛔ THE SWEEP NAMES THE IDS THE STORES HOLD; IT NEVER BUILDS THEM FROM A
+    # STORED BOUND (#10021 review P2 — CWE-407 Scope: Availability + CWE-770
+    # allocation without a limit). The candidates used to be
+    # `[_capture_turn_id(session, i) for i in range(_first_live, _stale_bound+1)]`,
+    # with `_stale_bound` the MAX of two stored integers — the graph mark
+    # (`s.turn_max_index`) and the record's highest index — neither validated at
+    # write time (`_turn_index` accepts any suffix `int()` can parse,
+    # `tools/backfill_graph_turns.py` copies ids in verbatim). One row at index
+    # 10**9 therefore made a CAPTURE allocate ~10⁹ id strings, journal ~2 × 10⁹
+    # records and issue a 10⁹-element `IN $ids` — while reporting success. Both
+    # stores can name their own rows, and the surplus is by definition the rows
+    # at/above `_first_live`, so the enumeration below is exact AND O(rows):
+    #   * the record half is `_record_turn_residue` (O(rows), see there);
+    #   * the graph half is `prior_graph_turns`, already collected in the same
+    #     statement as the mark.
+    # No threshold is introduced: a cap would swap one invented bound for another
+    # and misreport a legitimately long session — the ruling `record_read.
+    # _shortfall` records for the READ side, applied to this, the second consumer
+    # of the same datum. The MARK is still read by the caller and still arrives
+    # as `prior_turn_max_index`; it is a COMPARISON here (does the id space reach
+    # past this window at all), never an allocation.
+    _record_residue: list[str] | None = None
+    if _record_readable:
+        _record_residue = _record_turn_residue(sdk, session_id, _first_live)
+    # ⛔ THE STATEMENT-PROOF WITNESS (#10021 review P2). The id space is bounded
+    # by `s.turn_max_index`, and the MERGE this capture already ran LOWERS that
+    # mark to its own window's end — so on the lanes where `_record_first` is
+    # False the mark WAS the sweep's only witness, and one tolerated failure (a
+    # prior read that raised, or a sweep statement that failed after the MERGE
+    # had lowered the mark) left ids NOBODY would name again: every later capture
+    # read the lowered mark, found nothing beyond the window, and the surplus
+    # turn nodes stayed `CONTAINS`-wired forever, with the read side then
+    # publishing a body that contradicts itself (#8447). Main's monotone-up mark
+    # bounded that exposure to one cycle; the live mark (decision (c),
+    # `sdk.py:3431`) is right and stays — so the ids have to come from something
+    # the statement cannot overwrite. `CONTAINS`-wired turn nodes ARE that thing
+    # (`_capture_turn_ids` is the same witness `record_read.turn_high_water`
+    # keeps for the record), read by the caller in the SAME statement that reads
+    # the mark, so the re-capture path pays no extra round-trip. Every id at or
+    # beyond this window's end is residue whatever the mark says, in both
+    # directions: a mark lowered by a previous shrink, a mark read that failed,
+    # and a mark that never existed. An id whose index cannot be PARSED is not
+    # swept — "never delete where we cannot place it", the direction
+    # `tests/test_write_session_and_turns_3551.py` pins.
+    _graph_residue = [tid for (tid, _index) in (prior_graph_turns or [])
+                      if _index is not None and _index >= _first_live]
+    # ⛔ THE TWO HALVES ARE THE UNION OF NAMED ROWS, AND NEITHER IS DERIVED FROM
+    # AN INTEGER (#10021 review P2). The old `_stale_bound` was the MAX of the two
+    # stored indexes and the candidate list was built from it with a `range()`;
+    # both stores can name their own rows, so the list is their union and the
+    # sweep's size is the residue's size, whatever index a stored row carries.
+    stale: list[str] = sorted({*(_record_residue or ()), *_graph_residue})
+    if (_record_residue is None and _record_readable
+            and prior_turn_max_index >= _first_live):
+        # The id space reaches past this window and the record could not be asked
+        # which of its rows are up there. Sweeping the range the mark names is the
+        # allocation this fix removes, so the honest move is to say so: the
+        # graph's own ids are swept below, and the record's rows are named by the
+        # NEXT capture — its read is a reader-flavoured one, so it does not
+        # inherit this failure's breaker state, and its `_first_live` floor is
+        # the same or lower.
+        _logger.warning(
+            "the record could not be asked for session %s's turn rows at or "
+            "above index %d while the session's stored id space reaches %d — "
+            "sweeping only the ids the graph names; a later capture names the "
+            "rest (#1920/#10021 review P2)",
+            session_id, _first_live, prior_turn_max_index)
+    # The RECORD half of the removal is the `PointRetracted` +
+    # `EntityMutated` pair emitted below (its fold is a hard delete), and it is
+    # emitted whatever store holds the turns. The GRAPH half runs when the
+    # graph holds the surplus — which is (a) whenever this capture wrote there,
+    # and (b) whenever a PREVIOUS capture did, i.e. any session captured before
+    # the record was armed. A no-op `DETACH DELETE` on ids the graph does not
+    # carry costs one statement; leaving residue instead is #1920 itself, and it
+    # is reachable from the armed path precisely because arming is new (the
+    # record-capability gate used to be asked with this process's journal, and
+    # that left every pre-arming surplus turn served forever).
+    if stale:
+        sdk._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.id IN $ids DETACH DELETE t",
+                params={"sid": session_id, "ids": stale},
+            ),
+            what="capture stale-turn sweep",
+        )
 
-    # #3947: journal the turn writes so a rebuild can recreate them.
-    # `contains_session` rides the EVENT ENVELOPE, not the point payload —
-    # the CONTAINS link is a capture-write structural fact (ONTOLOGY §4.5),
-    # restored by the projection's edge fold without inventing a node
-    # property the live write never sets. Gated on a configured journal: on a
-    # lane with no `event_log_path` (a hosted SDK when
-    # `TORTOISE_EVENT_LOG_BASE_DIR` is unset; #4240) the JSONL half is a
-    # no-op and the `:GraphEvent` half is not a rebuild source —
-    # `ensure_event_schema` + `next_seq` + `append_event` per turn
-    # there buys no durability on the very lane #3086 measures.
+    # #3947/#10017: journal the turn writes so a rebuild recreates EXACTLY what
+    # the graph holds — and WHICH record does that is decided by the same
+    # capability that decided the write above (#10067).
+    #
+    # `PointAdded` is a NODE-CREATING record, so it is the honest record only
+    # when the graph is the store holding the turn. On a record-armed deployment
+    # the graph write above was skipped, and journaling `PointAdded` anyway made
+    # `rebuild()` re-create every turn the running graph deliberately does not
+    # have: a rebuild that is a regression, not a recovery (§9.1/D1 — raw turns
+    # live outside the graph). Once #10017's purge has removed the legacy turns,
+    # the same replay re-creates them, undoing the migration within a day
+    # (#10067).
+    #
+    # `TurnsRecorded` is that record for this lane (its declaration and payload
+    # pin live in `record_projection`, main's #10129): ONE carrier per capture
+    # holding the very per-turn snapshots this loop builds, and NO graph fold
+    # (`projection._NO_PROJECTION_FOLD`). Its RECORD half — the `public.point`
+    # rows at `cache_tier = 'record_only'` — is the projection's
+    # `_turn_row_statements`, so the live write and a journal replay run the same
+    # statement. Both rebuild routes then agree, which is the whole point: one
+    # journal, one record, one graph.
+    #
+    # ⛔ THE ROW WRITE MUST NOT BE DROPPED FROM THIS CHANGE. Those per-turn
+    # `PointAdded` records ARE the record's turn-row write (this function issues
+    # no row statement of its own — measured: drop them and the record projects
+    # zero turn rows), so a producer turnover that only swapped the journal TYPE
+    # would leave a capture's turns in no store at all.
     if sdk._get_event_log() is None:
         return redacted_total
+    from tortoise.record_projection import TURNS_RECORD_TYPE
+    _turn_records: list[dict] = []
     # #1920 (durability half): the stale-turn delete above is a hard delete,
     # so it needs the SAME honest JSONL record ``delete_point`` emits —
     # ``EntityMutated`` op=delete, whose fold (``_delete_entity_by_id``) is
@@ -2738,8 +3231,32 @@ def _write_capture_turns(
         # subscriber surface. The JSONL half is the ``EntityMutated``
         # op=delete record the replay folds — NOT ``PointRetracted``, whose
         # fold tombstones (the wrong meaning for a removal).
-        sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
+        # ⛔ BUT NOT ON THE RECORD-HELD LANE. `PointRetracted` is in
+        # `_GRAPH_EVENT_TYPES`, so it writes a `:GraphEvent` subscriber row —
+        # and on this lane the turn's CREATION record is the carrier, which is
+        # deliberately NOT in that set (turns leave `poll_events` with step 7;
+        # see `record_projection.TURNS_RECORD_TYPE`). A pre-change turn's `PointAdded`
+        # keeps a creation in the feed with no matching retraction — the asymmetry
+        # accepted here rather than repaired by re-announcing turns; the JSONL half
+        # below still removes the record ROW, so a shorter re-capture is durable. Decided on #10325,
+        # pinned by `tests/test_10017_turn_carrier_replay.py`.
+        if not _record_first:
+            sdk._emit_event("PointRetracted", _deleted_point_payload(tid))
+        # ⛔ TIER-LESS ON PURPOSE. `record_read._turns` has NO tier predicate, so a
+        # DEMOTE would keep serving the dropped turn; the row removal is this
+        # op=delete record (#10067's `_journal_turn_removal` is the OTHER
+        # removal — the capture-side one — and it demotes, because that turn's
+        # row must survive the graph's `DETACH DELETE`).
         sdk._journal_entity_mutation("Point", tid, "delete")
+    #: turn id -> what the RECORD write for it actually did (a `RecordWrite`, or
+    #: `None` when the seam was unarmed/declined/failed). Filled by the emit loop
+    #: below through `record_sink`; only read when the record was meant to hold
+    #: the turns (§"WHICH STORE" above).
+    _record_outcome: dict[str, Any] = {}
+    #: the `record_sink` list `_emit_event` appends this turn's `RecordWrite` to
+    #: (ONE list for the carrier, which is one record write for the whole
+    #: capture; a fresh list per turn on the per-turn `PointAdded` lane).
+    _sink: list = []
     for i, _turn in enumerate(windowed):
         turn_id = _capture_turn_id(session_id, i, turn_offset)
         created_at, status, stored_emb = stored.get(turn_id, (None, None, None))
@@ -2763,9 +3280,58 @@ def _write_capture_turns(
             # #5445: the redacted role (see the turn_rows write above).
             "speaker": _capture_turn_role_text(turn_texts[i])[0],
             "is_episodic": True,
-            "status": status if status is not None else "draft",
-            "createdAt": created_at if created_at is not None else now,
         }
+        # ⛔ The tier does NOT ride this snapshot: `_RECORD_ONLY_KEYS` strips
+        # `cache_tier` before any insert, and the row states it as its own
+        # COLUMN (`record_projection._turn_row_statements`). Carrying it here
+        # would also break `TURNS_SNAPSHOT_KEYS`, the payload pin the carrier
+        # inherits from the writer verbatim.
+
+        # ⛔ AN OMITTED FIELD IS NOT A CLAIM (#10000 review P1). `status` and
+        # `createdAt` are journalled as what the write LEAVES, and both folds
+        # apply the snapshot absolutely (the graph path's `coalesce` is the write
+        # rule; the record's upsert is `EXCLUDED`). So the key is present when
+        # this capture knows the value — the prior row's, or the fresh-turn
+        # defaults — and ABSENT when the prior read could not tell it, while a key
+        # carrying `now`/`draft` DEMOTES and RE-STAMPS a stored turn.
+        #
+        # ⛔ AND ABSENT IS SAFE ON **ONE** ARM, NOT TWO (#10021 review, P3). On the
+        # UPDATE arm `_upsert_statement` builds `DO UPDATE SET` from the supplied
+        # columns' own keys (`updates = ", ".join(... col_values)`), so an omitted
+        # column is not named and the stored value survives — that half is exactly
+        # right. On the **INSERT** arm the same omission takes the column out of
+        # the `INSERT ... (columns)` list too, and a row that does not exist yet
+        # has nothing to "not touch": per PostgreSQL's INSERT contract (\"each column
+        # not present in the explicit or implicit column list will be filled with
+        # a default value, either its declared default value or null if there is
+        # none\") the column takes its DEFAULT or NULL — and `public.point.status`
+        # / `public.point.created_at` are nullable `text` with NO default
+        # (`supabase/migrations/20261012000003_record_epistemic.sql`).
+        #
+        # So this arm's RECORDED RESIDUAL is: when the record does not already
+        # hold the turn (the whole window of a FRESH capture, and any newly
+        # appended turn) the row lands with `created_at = NULL`, `status = NULL`,
+        # where every other writer guarantees a value — the graph path
+        # (`_TURN_WRITE_CYPHER`'s coalesce, above), the fresh-turn branch below,
+        # and `projection/entities.py`'s replay fold
+        # (`n.createdAt=coalesce($ca, n.createdAt, $now)`, :2104;
+        # `n.status=coalesce($st, n.status, 'live')`, :2088). `record_read`
+        # then serves `"created_at": null` for those turns. The trigger is narrow
+        # — `_prior_unknown` needs the prior READ to raise while the subsequent
+        # turn WRITES succeed — and the capture warns; it is recorded here rather
+        # than silently traded because the alternative (journalling
+        # `now`/`draft`) is the demote/re-stamp bug this arm exists to fix.
+        #
+        # ⛔ WHY NOT `coalesce(EXCLUDED.c, point.c)` (the rule the graph applies)?
+        # It does not reach this arm: on a fresh row EXCLUDED.c IS the omitted
+        # NULL, so the coalesce yields NULL too. Making the omission safe both ways
+        # needs a DECLARED DEFAULT on the two columns (then the omission is safe by
+        # contract, and `test_the_omitted_pair_is_safe_on_the_update_arm_only`
+        # reds to say so) — a schema change this lane did not take.
+        if status is not _UNATTESTABLE:
+            _turn_snapshot["status"] = status if status is not None else "draft"
+        if created_at is not _UNATTESTABLE:
+            _turn_snapshot["createdAt"] = created_at if created_at is not None else now
         _turn_snapshot["embedding"] = (
             turn_embs[i] if turn_embs[i] is not None else stored_emb)
         # #5004 round-3: when THIS capture encoded nothing, what rides the
@@ -2776,18 +3342,155 @@ def _write_capture_turns(
         # `stamp_journal_embedding` stamps no identity.
         if turn_embs[i] is None and stored_emb is not None:
             _turn_snapshot["embedding_preserved"] = True
-        sdk._emit_event(
+        _turn_records.append({
+            "id": turn_id,
             # Parity with `create_point`'s emission (#3947 review F5): the
-            # PAYLOAD carries `content_hash`. It belongs here and NOT in the
+            # PAYLOAD carries `content_hash`. It belongs there and NOT in the
             # `point` snapshot, which `_emit_event` strips it from
             # (`content_hash` is derived, and the replay recomputes it in
             # `_upsert_point_props`).
-            "PointAdded",
-            {"id": turn_id, "kind": "event",
-             "content_hash": turn_hashes[i]},
-            point=_turn_snapshot,
+            #
+            # ⚠️ GRAPH-HELD LANE ONLY. `id`/`kind`/`content_hash` are consumed by
+            # the `PointAdded` emission below (`_record["id"]`,
+            # `_record["kind"]`, `_record["content_hash"]`). The record-held
+            # lane emits the CARRIER, which takes `_record["point"]` alone
+            # (`turns=[…]`) — so on THAT lane these three keys are built and
+            # discarded. That is deliberate and harmless (they are cheap, and
+            # `public.point` refuses `content_hash` as a props member, so it
+            # could not ride the carrier's row anyway); it is stated here
+            # because the reverse reading — "the carrier journals a
+            # content_hash" — is a claim a future lane would cite as evidence.
+            "kind": "event",
+            "content_hash": turn_hashes[i],
+            "point": _turn_snapshot,
+        })
+
+    if _record_first:
+        # ONE carrier, holding the writer's snapshots VERBATIM — the payload
+        # contract `record_projection.TURNS_SNAPSHOT_KEYS` pins key-for-key.
+        #
+        # ⚠️ #5004's attestation is stamped HERE rather than by `_emit_event`:
+        # that seam gates on the TYPE (`creating=type_ in ("PointAdded",
+        # "OperatorAdded")`), and this carrier is neither — so without this the
+        # armed lane's turns would journal a vector with NO origin while the
+        # graph lane's attest one, i.e. the same capture would yield different
+        # record content depending on whether `TORTOISE_RECORD_DSN` is set.
+        # `creating=True` is accurate (this capture computed these vectors); the
+        # `embedding_preserved` branch still withholds the identity, because
+        # THAT vector may predate a model change.
+        #
+        # #5148: the import is GUARDED, for the reason `_emit_event` states at
+        # the identical seam — a write must not depend on an import. By the time
+        # we get here the record rows are planned and the stale-turn removals
+        # are already journaled, so raising would hand the caller an
+        # ImportError for a capture that otherwise SUCCEEDED, and would then
+        # reach neither the carrier nor the trailing `SessionRecorded` below.
+        # Skipping the stamp is the fail-SOFT shape `_capture_turn_embeddings`
+        # uses on the same call path: the vectors ride verbatim, only the
+        # identity that makes a model change audible is lost.
+        try:
+            from .embeddings import stamp_journal_embedding
+        except Exception:  # noqa: BLE001, RUF100
+            stamp_journal_embedding = None
+
+        if stamp_journal_embedding is not None:
+            for _record in _turn_records:
+                stamp_journal_embedding(_record["point"], creating=True)
+        # `contains_session` rides the ENVELOPE (a capture-write structural fact,
+        # ONTOLOGY §4.5 — never a node property). The graph fold reads it for
+        # `PointAdded` only; the record applies it once per turn
+        # (`_ENVELOPE_RELATIONS`), so the `relation` rows the record holds are
+        # the same ones the per-turn `PointAdded` lane wrote.
+        sdk._emit_event(
+            TURNS_RECORD_TYPE,
+            {"sessionId": session_id},
+            turns=[_record["point"] for _record in _turn_records],
             contains_session=session_id,
+            # #10000: what the RECORD did with this turn, so the store decision
+            # below is made from the write's own outcome rather than from the
+            # preflight's expectation.
+            record_sink=_sink,
         )
+        # ONE carrier is ONE record write, so its outcome is EVERY turn's
+        # outcome: the store decision below asks per turn, and on this lane a
+        # carrier that landed stored them all while a refused carrier stored
+        # none — writing all of them to the graph is exactly the intent there.
+        _carrier_outcome = _sink[0] if _sink else None
+        for _record in _turn_records:
+            _record_outcome[_record["id"]] = _carrier_outcome
+    else:
+        for _record in _turn_records:
+            _sink = []
+            sdk._emit_event(
+                "PointAdded",
+                {"id": _record["id"], "kind": _record["kind"],
+                 "content_hash": _record["content_hash"]},
+                point=_record["point"],
+                contains_session=session_id,
+                # #10000: what the RECORD did with this turn, so the store
+                # decision below is made from the write's own outcome rather
+                # than from the preflight's expectation.
+                record_sink=_sink,
+            )
+            _record_outcome[_record["id"]] = _sink[0] if _sink else None
+
+    # ── THE STORE DECISION, FROM WHAT THE WRITES ACTUALLY DID (#10000) ────
+    # The preflight above said the record would accept these writes. It can still
+    # be wrong — a connect that fails mid-capture, the breaker tripping on that
+    # failure, an unreachable database, a fold that refuses the record — and the
+    # graph write was SKIPPED on the strength of it. So each turn's outcome is
+    # read here and every turn the record did not take is written to the graph.
+    # A turn reaches at least one store; there is no path in this function where
+    # it reaches neither.
+    if _record_first:
+        def _landed(outcome: Any) -> bool:
+            """Did the record actually store this turn?
+
+            `applied` says the plan executed; `statements` says the fold found
+            something to execute FOR THIS RECORD, which is what a refused record
+            (no usable id, no snapshot) does not. Both must hold: an armed seam
+            that folds nothing would otherwise read as "the record holds it".
+            """
+            return (outcome is not None
+                    and getattr(outcome, "applied", False)
+                    and getattr(outcome, "statements", 0) >= 1)
+
+        _unrecorded = [i for i, _row in enumerate(turn_rows)
+                       if not _landed(_record_outcome.get(_row["id"]))]
+        if _unrecorded:
+            # Loud, because a re-capture's journalled snapshot for these turns is
+            # this capture's `now`/`draft` rather than the values a read-back
+            # would have given — the residual of deciding after the append. The
+            # turn is stored either way; losing it is the alternative.
+            _logger.warning(
+                "capture of session %s: the record did not take %d of %d "
+                "turn(s) — writing them to the GRAPH so the transcript is not "
+                "lost (#10000). The record heals on replay from the journal.",
+                session_id, len(_unrecorded), len(turn_rows))
+            sdk._graph_write_with_retry(
+                lambda: proj.g.query(
+                    _TURN_WRITE_CYPHER,
+                    params={
+                        "turns": [turn_rows[i] for i in _unrecorded],
+                        "sid": session_id, "now": now,
+                        # The turn statement carries the count for the same
+                        # reason the batch does: it cannot be separated from the
+                        # write by a later failure (#4911).
+                        "redactions": redacted_total},
+                ),
+                what="capture turn fallback write",
+            )
+        else:
+            # The record holds every turn, so the graph keeps the Session's
+            # counters and nothing else (#10000): one node write, no rows, no
+            # `CONTAINS` edges.
+            sdk._graph_write_with_retry(
+                lambda: proj.g.query(
+                    _SESSION_REDACTIONS_CYPHER,
+                    params={"sid": session_id, "redactions": redacted_total},
+                ),
+                what="capture session redaction count",
+            )
 
     # #4911: the live `SET s.capture_redactions` above has no journal carrier
     # without this record — a journal-only ``rebuild()`` / ``recover_from_log``
@@ -2903,20 +3606,36 @@ def _write_session_and_turns(
                   # #10000: `turn_count` is a WINDOW LENGTH (``len(turns)``), not
                   # a max id index — an APPEND at ``turn_offset=2`` writes
                   # ``_t2``/``_t3`` while the count reads 2. The stale-turn sweep
-                  # needs the ID SPACE, so the high-water mark is stored beside
-                  # the count and only ever moves UP (an append must not lower it).
-                  "s.turn_max_index=CASE WHEN s.turn_max_index IS NULL "
-                  "OR s.turn_max_index < $tmi THEN $tmi ELSE s.turn_max_index END"]
+                  # needs the ID SPACE, so the id space's end is stored beside
+                  # the count.
+                  #
+                  # ⛔ IT IS THE **LIVE** END, NOT A PEAK (#10000 review P2).
+                  # The first shape kept the larger value (a monotone-up CASE),
+                  # which is right for the sweep — whose range is the PRIOR mark,
+                  # read before this MERGE — and WRONG for the reader that #10000
+                  # added on top of it: `record_read._shortfall` uses this mark as
+                  # the TAIL witness, so a session shrunk from 4 turns to 1 kept a
+                  # mark of 3 and every read of that HEALTHY session reported "the
+                  # tail is missing", forever, with a WARNING and a graph query
+                  # per read. The shrink this write performs is the same one whose
+                  # surplus it sweeps above, so the value the session now holds is
+                  # the value it must declare: one meaning, one consumer question.
+                  # A capture whose turn half fails AFTER this MERGE now leaves a
+                  # surplus only a later capture's sweep would have found — the
+                  # cost of a live witness, and bounded to one failed statement
+                  # (the MERGE precedes the turn write).
+                  "s.turn_max_index=$tmi"]
     merge_params: dict[str, Any] = {"sid": session_id, "now": now,
                                     "tc": turn_count,
                                     "tmi": turn_offset + turn_count - 1}
     session_record: dict[str, Any] = {
         "id": session_id, "created_at": now,
         "turn_count": turn_count, "is_episodic": True,
-        # #10000: the id-space high-water mark rides the SAME record as the count,
-        # so a record-sourced rebuild restores the property the stale-turn sweep
-        # reads (a replay that dropped it would leave the sweep unable to see a
-        # surplus it must remove).
+        # #10000: the id space's LIVE end rides the SAME record as the count, so
+        # a record-sourced rebuild restores the property BOTH consumers read (the
+        # stale-turn sweep's bound and the read's tail witness) to the value the
+        # live MERGE left — a replay that dropped it, or that restored a peak the
+        # live write had lowered, would diverge from the live node.
         "turn_max_index": turn_offset + turn_count - 1,
     }
     if harness:
@@ -3076,20 +3795,49 @@ def _write_session_and_turns(
     # to walk. Read only on a re-capture: a fresh capture has no prior Session and
     # therefore no stale turn, so the fresh-capture hot path keeps its exact query
     # count (#3086).
+    # #10021 review P2/P3: ONE read answers both questions the sweep needs, so
+    # the re-capture path keeps its exact query count (#3086).
+    #
+    #   * the MARK's two arms, converted SEPARATELY (`_prior_mark_index`):
+    #     `turn_max_index` is an INDEX, `turn_count` a COUNT, and the
+    #     `coalesce(...)` that made one value of them named an id one past the
+    #     end for a session captured before the mark existed;
+    #   * the graph's OWN turn ids (`collect(t.id)`), the statement-proof bound.
+    #     The MERGE below lowers `s.turn_max_index`, so a failure between the
+    #     read and the sweep used to leave residue nothing would ever name
+    #     again; the CONTAINS-wired nodes are not something a SET can overwrite.
+    #     The `WHERE` is part of the OPTIONAL MATCH (MEASURED FalkorDB semantics:
+    #     a predicate after an OPTIONAL MATCH is absorbed into the optional
+    #     pattern — the same shape `activation_scorecard.FUNNEL_QUERY` uses), so
+    #     the collection carries TURN points only and a session with none
+    #     collects `[]`.
     prior_turn_max_index = -1
+    prior_graph_turns: list[tuple[str, int | None]] = []
     if session_existed:
         try:
             _prior = proj.g.query(
-                "MATCH (s:Session {id:$sid}) RETURN "
-                "coalesce(s.turn_max_index, s.turn_count, 0)",
-                params={"sid": session_id}).result_set
-            prior_turn_max_index = int(_prior[0][0]) if _prior else -1
+                "MATCH (s:Session {id:$sid}) "
+                "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true AND t.pointKind = 'event' "
+                "AND t.id STARTS WITH $prefix "
+                "RETURN s.turn_max_index, s.turn_count, collect(t.id)",
+                params={"sid": session_id,
+                        "prefix": f"{session_id}_t"}).result_set
+            if _prior:
+                prior_turn_max_index = _prior_mark_index(_prior[0][0],
+                                                         _prior[0][1])
+                prior_graph_turns = _split_graph_turn_ids(session_id,
+                                                          _prior[0][2])
         except Exception:
             # Fail toward deleting NOTHING rather than toward a bad range: a
-            # failed read leaves the mark at -1, which sweeps no id — the same
-            # conservative direction the turn-id parse guard takes ("never
-            # delete where we cannot place it").
+            # failed read leaves the mark at -1 and no witness, which sweeps no
+            # id — the same conservative direction the turn-id parse guard takes
+            # ("never delete where we cannot place it"). ⚠️ It costs ONE cycle,
+            # not the residue: the witness is derived from the NODES, so the next
+            # capture that can read re-derives the bound and sweeps. That is the
+            # property main's monotone-up mark had and this restores.
             prior_turn_max_index = -1
+            prior_graph_turns = []
     sdk._graph_write_with_retry(
         lambda: proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(merge_sets)}",
@@ -3121,6 +3869,7 @@ def _write_session_and_turns(
         proj, sdk, session_id, turns, now=now, turn_embs=turn_embs,
         session_existed=session_existed, turn_offset=turn_offset,
         prior_turn_max_index=prior_turn_max_index,
+        prior_graph_turns=prior_graph_turns,
         texts_and_counts=(turn_texts, redaction_counts))
     return {
         "turn_count": turn_count,
@@ -3652,7 +4401,15 @@ _RESERVED_ENVELOPE_PROPS = (
 #: drop the reserved names before splatting, and `create_source` — the one door
 #: that bypasses intake — drops them itself. With every relay covered, the
 #: collision is impossible and live == replay.
-_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks")
+#: ``record_sink`` (#10000) is the second PER-CALL object the signature owns:
+#: the capture writer hands in a list and `_emit_event` appends the record
+#: write's OUTCOME to it, so the caller can decide a store from what the write
+#: actually did. A caller prop of that name splatted into the call would bind
+#: the parameter and silently suppress the outcome (the capture would then treat
+#: every turn as unrecorded and fall back to the graph — the safe direction, but
+#: a silent one), so it is reserved like the rest.
+_RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
+                            "record_sink")
 
 
 def _drop_reserved_emit_props(props: dict) -> list[str]:
@@ -3793,7 +4550,8 @@ def _named_layer_kinds(props: dict) -> list[tuple[str, str, str]]:
 
 
 #: entity layer → the node label its door mints. Entity identity is
-#: LABEL-SCOPED (``ids.entity_name_id`` hashes ``f"{label}:{name}"``), so the
+#: LABEL-SCOPED (``entity_identity.resolve_or_mint`` is called with a label, and
+#: the fold MERGEs ``(s:Subject {id})`` / ``(o:Object {id})`` separately), so the
 #: same name under the two entity labels is TWO nodes, never one entity seen
 #: twice — which is why a re-route can SPLIT an entity (#9964 review).
 _ENTITY_LAYER_LABEL: dict[str, str] = {"subject": "Subject", "object": "Object"}
@@ -3858,13 +4616,44 @@ def _door_relayed_props(etype: str, item: dict) -> dict:
     return relayed
 
 
+def _landing_entity_label(etype: str, props: dict) -> str | None:
+    """The label an ENTITY item's write actually LANDS on — ``"Subject"``/
+    ``"Object"`` (``None`` for anything that is neither).
+
+    ``etype`` is what the item DECLARED; the entity door re-labels the write by
+    the KIND it names (#9964: ``create_object(objectKind='core:team')`` writes a
+    ``:Subject``), and identity is label-scoped by the MINTED ``id``, not the
+    retired ``sha256(f"{label}:{name}")`` — so anything predicting the node the write
+    touches must ask the DOOR's own authority (``_door_relayed_props`` →
+    ``_kind_layer_note``) rather than the type→label map.
+
+    ⛔ ONE helper, because a guard and the writer it predicts must never probe
+    different labels (#9876 review round 14). Step 3 already routed through
+    ``_existing_entity_ids``; the bundle-wide ambiguity loop added by #3590 read
+    ``_ENTITY_ITEM_LABELS`` directly, so for a kind-routed item Phase 1 asked
+    about a node set the write never touches: with two live ``:Subject``
+    carriers of ``Acme``, ``_validate_bundle`` returned ``[]`` and step 3's
+    ``resolve_or_mint("Subject", …)`` raised ``AmbiguousEntityName`` with the
+    earlier POINTS already committed — the #2422/#7925 partial-mutation class
+    the loop exists to close, re-opened one label over.
+
+    Fails open to the DECLARED label (#1934: a probe must never refuse a
+    write).
+    """
+    try:
+        probe = _kind_layer_note(etype, _door_relayed_props(etype, props))[0]
+    except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
+        probe = etype
+    return _ENTITY_LAYER_LABEL.get(probe) or _ENTITY_LAYER_LABEL.get(etype)
+
+
 def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     """The ids of the entity nodes this write will actually MERGE onto.
 
     ``etype`` is what the ITEM declared; the entity door re-labels the write by
     the KIND it names (#9964: ``create_object(objectKind='core:team')`` writes a
-    ``:Subject``), and identity is label-scoped (``ids.py``:
-    ``sha256(f"{label}:{name}")``) — so probing ``etype``'s label can measure a
+    ``:Subject``), and identity is label-scoped by the MINTED ``id``, not the
+    retired ``sha256(f"{label}:{name}")`` — so probing ``etype``'s label can measure a
     DIFFERENT node than the write touches. Measured at the review head:
     re-ingesting ``{"type": "object", "objectKind": "core:team"}`` reported
     ``created`` while the write MERGED, forever, because the ``:Object`` probe
@@ -3899,12 +4688,7 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     """
     if not isinstance(name, str) or not name:
         return []
-    try:
-        probe_props = _door_relayed_props(etype, props)
-        probe = _kind_layer_note(etype, probe_props)[0]
-    except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
-        probe = etype
-    label = _ENTITY_LAYER_LABEL.get(probe) or _ENTITY_LAYER_LABEL.get(etype)
+    label = _landing_entity_label(etype, props)
     return all_name_holder_ids(g, label, name) if label else []
 
 
@@ -4051,16 +4835,18 @@ def _kind_layer_advisory(note: dict | None, node_id: str | None,
             f"the {layer.capitalize()} the door requested. The kind decides the "
             f"layer (ONTOLOGY §1); "
             # ⛔ The claim is about the GRAPH, never about THIS call. The routed
-            # id is DETERMINISTIC (`_entity_name_id(<label>, name)`), so a re-run
-            # of the very call that first split the entity MERGES onto the node
-            # it already minted — the peer probe below only asks whether the
+            # id is opaque but STABLE for a live name (#3590: the door RESOLVES
+            # the name to its single live holder, so a re-run of the very call
+            # that first split the entity lands on the node it already minted) —
+            # the peer probe below only asks whether the
             # OTHER label holds the name, never whether the routed node is new,
             # so "this write created a SECOND node" was FALSE on every retry
             # (the common case: ingest and capture re-issue writes), while the
             # graph fact it is trying to convey stayed true (#9964 review).
             + (f"⚠️ {_peer_article} :{layer.capitalize()} named {name!r} ALREADY "
-               f"exists ({_peer}), and entity ids are LABEL-scoped "
-               f"(`sha256('<label>:<name>')`), so the graph now holds a SECOND "
+               f"exists ({_peer}), and entity identity is LABEL-SCOPED "
+               f"(a :Subject and an :Object of one name are separate nodes), "
+               f"so the graph now holds a SECOND "
                f"node ({node_id}) beside it rather than replacing it — {name!r} "
                f"has a node under EACH entity label, nothing reconciles them "
                f"for you "
@@ -4554,6 +5340,35 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             raise ValueError(
                 f"{key!r} is a server-managed field and cannot be set via props."
             )
+    # #10017 R2 (review P1-2): `cache_tier` is the record's PLACEMENT
+    # declaration — the row's own statement of which store it is for — and a
+    # tenant write must never carry PLACEMENT AUTHORITY. Measured on this
+    # branch's head BEFORE this guard, through the public SDK:
+    #
+    #     create_point("statement", "...", cache_tier="record_only")
+    #       -> node property `cache_tier='record_only'` AND the record plan
+    #          writes `public.point.cache_tier` from the same snapshot;
+    #     update_point(pid, cache_tier="graph")   -> node flips back to `graph`.
+    #
+    # i.e. a public write could hide a real claim from `read_record_view` and
+    # so from every `rebuild_from_record` — a graph point made silently
+    # disappear from a restore, which is the exact class #10017 exists to
+    # close. The record's own strip set (`record_projection._RECORD_ONLY_KEYS`)
+    # closes the payload half and the fold's skip set
+    # (`projection/entities.py::_META_KEYS`) closes the graph half; this is the
+    # INTAKE half, so the caller is TOLD no rather than silently having the key
+    # dropped (a strip would let a caller believe the placement took).
+    #
+    # Hard-reject, not strip-and-ignore: there is no legitimate caller intent —
+    # the tier is written by the record's own producers (`TurnsRecorded` via
+    # `record_projection._turn_row_statements`, the R1 delete demote via
+    # `record_projection._tier_demote_statement`), never by a props bag.
+    if "cache_tier" in props:
+        raise ValueError(
+            "'cache_tier' is the record's placement declaration, not a "
+            "writable property: a caller prop cannot move a row between the "
+            "graph and the record (#10017 R2)."
+        )
     # #3947 review (security): `contains_session` is an ENVELOPE-level capture
     # directive (it drives the `(:Session)-[:CONTAINS]->(:Point)` rebuild fold),
     # never a Point property. Reject it here as the fail-closed boundary: a
@@ -4987,9 +5802,27 @@ def _warn_point_name_not_lexically_indexed(
             effective[field] = stored.get(field)
         else:
             effective[field] = None
+    # ⛔ WRITE SIDE for the INDEXED half (#10203 review round 12, P2).
+    # ``indexed_tokens`` must be the terms the INDEX will hold, and the index
+    # is written by the WRITE half of the #8933 identifier asymmetry —
+    # ``point_identifier_aliases`` -> ``identifier_aliases(space_separated=
+    # False)`` — which deliberately does NOT mint a composite from prose
+    # (``_IDENTIFIER_SPAN_RE`` admits no whitespace, so "sprint 2024 planning"
+    # indexes ``sprint``/``2024``/``planning`` and never ``sprint2024``).
+    # The tokenizer's DEFAULT is the READ side (it mints ``sprint2024`` from
+    # that prose), so tokenising the indexed text with the default made a
+    # name of ``sprint2024`` intersect ``indexed_tokens`` and this advisory
+    # fall SILENT about a name the engine cannot find — the exact
+    # stored-but-unfindable case it exists to report, silenced by a token no
+    # search can produce. Same fix, same reasoning, as ``tortoise/bm25``
+    # applies to its corpus.
+    # ``name_tokens`` above stays on the READ side on purpose: the name is
+    # caller-typed and reaches the engine as a QUERY (``build_or_query``), so
+    # the read side is the correct half for it.
     for field in fields:
         indexed_tokens.update(tokenize_sparse_query(
-            _lexical_text(effective[field]), keep_numeric=True))
+            _lexical_text(effective[field]), keep_numeric=True,
+            space_separated_identifiers=False))
     if not any(ch.isalnum() for ch in str(name)):
         # Silent only when the name carries NO alphanumeric character at all
         # (pure punctuation/whitespace): then there is nothing to index and the
@@ -5509,7 +6342,8 @@ def _bundle_entity_name_outcomes(
     bundles the writer accepts (review round 4), and the item-only read let
     tainted ones through (round 2).
 
-    Only ``Subject``/``Object`` merge by name. An ``Event`` is append-only (its
+    Only ``Subject``/``Object`` are NAME-resolved (and the name decides the
+    landing node, not the id — #3590). An ``Event`` is append-only (its
     own declared ``status`` is the whole story, and the guard reads it from the
     item), and a ``document`` is a ``:Source`` — neither can be addressed here.
     """
@@ -5622,10 +6456,12 @@ def _iso_date10(value: object) -> str:
     return "" if date == _UNDATED_SENTINEL[:10] else date
 
 
-# #1516: entity ids minted by _entity_name_id / create_entity are PREFIXED
-# (label[:3] + '-' + sha256[:26], e.g. ``sub-<hex26>`` / ``obj-<hex26>``).
-# These are IDs, not names — a guard that only recognizes bare ULIDs treats
-# them as names and runs the stub-creating keyword fallback.
+# #1516: the LEGACY entity ids (label[:3] + '-' + sha256[:26], e.g.
+# ``sub-<hex26>`` / ``obj-<hex26>``) — the derived spelling #3590 RETIRED — are
+# still RECOGNISED here. The recogniser is retained deliberately: a value of
+# that shape is an id, not a name, and a graph written before the change may
+# still carry one. Nothing MINTS this shape any more (#3590 R1: identity is an
+# opaque id minted once, never a function of the name).
 #
 # #3586: the digest spelling is deliberately NOT pinned to ``{26}``/lowercase.
 # An opaque id's spelling is a property of the MINTER, not of the value, so a
@@ -5645,10 +6481,12 @@ def _iso_date10(value: object) -> str:
 # are NOT interchangeable, and widening this one is not free: its consumer
 # (`_check_refs`) fails the WHOLE bundle closed on a hit, so a digest it newly
 # rejects is a previously-valid ref that stops ingesting. Keep it pinned to the
-# shapes the minting surfaces actually emit — a bare ULID, or
-# ``label[:3]-<sha256[:26]>`` (`_entity_name_id`). A spelling no minter can
-# produce (``pr-<hex16>``) cannot shadow a real node, so rejecting it buys no
-# safety and breaks a live ingest.
+# shapes a graph can actually carry: a bare ULID (what every minter emits after
+# #3590) or the legacy ``label[:3]-<sha256[:26]>`` spelling (no minter produces
+# it any more; it is recognised so a pre-change graph's ids are still treated as
+# ids rather than as names). A spelling no writer can produce (``pr-<hex16>``)
+# cannot shadow a real node, so rejecting it buys no safety and breaks a live
+# ingest.
 _ENTITY_ID_RE = re.compile(r"^[a-z]{2,8}-[0-9a-f]{16,64}$", re.IGNORECASE)
 _CANONICAL_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
 
@@ -5657,8 +6495,8 @@ def _is_entity_id(s: str) -> bool:
     """Return True if *s* is shaped like an entity handle (an opaque id), not
     a name: a bare ULID (canonical or Crockford) OR ``prefix-<hex digest>``.
 
-    NOT a provenance test (#3586): a minted id and a legacy
-    ``obj-<sha26(name)>`` alias are shape-identical, so shape alone cannot say
+    NOT a provenance test (#3586): a minted ULID and a legacy
+    ``obj-<sha26(name)>`` alias are both opaque strings, so shape alone cannot say
     which node — if any — a value addresses. Callers that need that answer MUST
     resolve the value first (``_wire_about_value`` does) and use this predicate
     only for the negative case: may an UNRESOLVED value be resolve-or-minted as
@@ -5672,9 +6510,10 @@ def _is_entity_id(s: str) -> bool:
 
 
 def _is_canonical_entity_id(s: str) -> bool:
-    """Return True if *s* is shaped like an id the minting surfaces EMIT — a
-    bare ULID or ``label[:3]-<sha256[:26]>`` (``_entity_name_id``) — and so
-    could address (and shadow) a real node.
+    """Return True if *s* is shaped like an id a node can CARRY — a bare ULID
+    (#3590's only minted shape) or the legacy ``label[:3]-<sha256[:26]>``
+    derived spelling (recognised, never minted) — and so could address (and
+    shadow) a real node.
 
     The HARD-REJECTION predicate (``_check_refs`` fails the whole bundle closed
     on a hit). Do NOT widen it to anticipate a future id format: that trades a
@@ -5855,6 +6694,184 @@ def _attach_source_change_notices(resp: dict, meta: dict) -> None:
     notices = (meta or {}).get("source_change_notices")
     if notices:
         resp["source_change_notices"] = notices
+
+
+# #9116: the receipt sub-key the per-step witness rides in. It lives INSIDE the
+# existing ``stats`` key and is deliberately NOT a new top-level receipt key:
+# the receipt is the product's public write contract (the MCP/SDK surface), and
+# growing it is a decision the owner takes — while ``stats`` is already the
+# receipt's documented ADDITIVE telemetry key ("#2335 WI-1a: stats is ALWAYS
+# present on the receipt (additive meta contract)"). A sub-key inherits that
+# contract, reaches the hosted receipt for free (``hosted_api`` reads
+# ``meta["stats"]`` — so the two lanes cannot drift), and adds no verb.
+_STEP_WITNESS_KEY = "step_witness"
+
+#: The embed-list lanes the witness counts. Counts, never the structures: the
+#: receipt is serialized on the hosted lane and returned to every SDK caller,
+#: so carrying ``payload``/``embed_list``/``search`` themselves would multiply
+#: the receipt's size to answer a question counts answer.
+_STEP_EMBED_KINDS = ("entities", "events", "points", "operators")
+
+
+def _step_embed_counts(block) -> dict[str, int]:
+    """Per-lane item counts of an embed-list block ({} for a non-dict)."""
+    if not isinstance(block, dict):
+        return {}
+    return {k: len(block.get(k) or []) for k in _STEP_EMBED_KINDS}
+
+
+def _gate_counts(surface) -> dict:
+    """The COUNTS out of a VET or classify pass surface (``{}`` when nothing ran).
+
+    TWO SHAPES, and both are handled — reading only the first is what made this a
+    trap for the next caller (PR #10214 review, P3):
+
+    * ``_run_vet_pass`` returns ``{"stats": …, "batch": …, "decisions": …}``, so
+      the counts are NESTED under ``stats``.
+    * a classify pass returns its stats dict DIRECTLY — a bare counts dict with no
+      ``stats`` key at all (``extractor_v2``: ``s2_classify_stats = out["stats"]``,
+      then ``"s2": s2_classify_stats``). An earlier revision of this helper read
+      only the nested shape, so ``_gate_counts(<bare classify block>)`` answered
+      ``{}`` — a pass that DID work reported as idle, which is the misattribution
+      the three-state G5 split exists to prevent, one layer below where it was
+      fixed. It caused no wrong verdict only because ``_capture_step_witness``
+      forwards ``classify_later`` RAW; the docstring said otherwise, so the next
+      caller who trusted it would have got the silent zeros.
+
+    ``decisions``/``batch`` are never forwarded, in either shape: ``decisions`` is
+    not a stats block — ``vet_gate.vet_candidates`` builds one row PER CANDIDATE
+    carrying that candidate's own ``text`` (and, on a discard, a
+    ``counterfactual`` quoting it) — so forwarding a VET surface whole would put
+    extraction-proportional content on a receipt that is serialized on the hosted
+    lane and returned to every SDK caller, which is exactly what this seam's bound
+    forbids. ``batch`` rides the same candidate-level material.
+
+    ``stats`` is the pass's own counts and is non-empty exactly when the pass did
+    work, which is the whole question a witness asks it. The raw decisions stay on
+    the extractor's own return (``result["vet"]``), where the eval lane already
+    reads them.
+    """
+    if not isinstance(surface, dict):
+        return {}
+    stats = surface.get("stats")
+    if isinstance(stats, dict):
+        return stats
+    # The BARE shape: a classify pass's own stats dict, which is counts only. Strip
+    # the candidate-level keys anyway — a surface that carried either one is a VET
+    # surface whose ``stats`` is missing, and forwarding it would breach the bound.
+    return {key: value for key, value in surface.items()
+            if key not in _NON_COUNT_GATE_KEYS}
+
+
+#: Keys that are NOT counts on a gate surface: ``decisions``/``batch`` carry
+#: per-candidate material (candidate ``text``, counterfactuals), ``stats`` is the
+#: nesting marker of the VET shape.
+_NON_COUNT_GATE_KEYS = frozenset({"stats", "batch", "decisions"})
+
+
+def _capture_step_witness(out: dict, *, committed: int) -> dict:
+    """#9116: the facts that let a caller witness each extractor step in ONE pass.
+
+    ``extract_session_v2`` returns ``vet``/``classify_later``/``search``/
+    ``payload`` (its per-stage evidence surfaces), but ``_extract_session_v2``
+    forwarded only ``stats`` — so a caller that drives the real entry point
+    (``capture_session``) could see S0/S1/S2.1/S5 and none of S2.2/S2.3/S3/S6.
+    The capstone probe (``docs/evidence/7949-capstone/probes/capstone_run.py``)
+    hit exactly that: its G5 requires all eight, so it refused for every input
+    and reported the gap as an INSTRUMENT defect.
+
+    This is the seam: one bounded witness record, derived from the SAME ``out``
+    object the pipeline returned (never a wrapper — #7949/E4 forbids
+    monkeypatching the pipeline to watch it), placed under
+    ``meta["stats"]["step_witness"]``.
+
+    It carries FACTS, not a verdict: no step id is graded here. Each block
+    names the values that prove its stage ran (``vet.s2``/``vet.union`` — the
+    VET gate's own COUNTS; ``classify_later`` — the classify passes' own stats;
+    ``search.queries_run``/``degraded`` — S3's own report;
+    ``commit.payload_produced``/``committed`` — the Layer-1 payload's presence
+    plus the count of points the write loop RESOLVED, i.e. created or folded
+    onto an existing canonical, never a minted-only count). The caller decides
+    what it witnessed, which is what keeps the observation independent of the
+    thing observed.
+
+    Bounded by construction: counts, and the stages' own stats dicts taken
+    through :func:`_gate_counts` — never ``payload``, ``embed_list``, the
+    search rows, or a gate's per-candidate ``decisions`` (which carries the
+    candidates' own text).
+    """
+    stats = out.get("stats") or {}
+    llm = stats.get("llm") or {}
+    by_stage = llm.get("by_stage") or {}
+    vet = out.get("vet") or {}
+    classify = out.get("classify_later") or {}
+    search = out.get("search") or {}
+    payload = out.get("payload")
+    s4 = stats.get("s4_merge") or {}
+    return {
+        # S0 — the reader segmented the source (the values already on stats,
+        # mirrored so the witness is readable on its own).
+        "reader": {"edus": stats.get("edus"), "chunks": stats.get("chunks")},
+        # S1 — the first LLM call reached; ``story_arc`` is its product.
+        "story": {"by_stage_s1": bool(by_stage.get("s1")),
+                  "story_arc_chars": len(out.get("story_arc") or "")},
+        # S2.1 — the map's candidates, counted on the PRE-S4 list (``s2_embed``
+        # is S2's own output; ``embed_list`` is what S4 left of it).
+        "map": {"items": _step_embed_counts(
+            out.get("s2_embed") if out.get("s2_embed") is not None
+            else out.get("embed_list"))},
+        # S2.2 — the VET gate's own COUNTS (#5005), projected through
+        # ``_gate_counts``: the surface's ``decisions`` block mirrors the embed
+        # list's text per candidate and stays on the extractor's return.
+        # ``enabled`` False is a real answer: a flag-off pass ran no S2.2.
+        "vet": {"enabled": bool(vet.get("enabled")),
+                "s2": _gate_counts(vet.get("s2")),
+                "union": _gate_counts(vet.get("union"))},
+        # S2.3 — the classify passes' own evidence surface (#1695 Task 5).
+        "classify_later": {"enabled": bool(classify.get("enabled")),
+                           "s2": classify.get("s2") or {},
+                           "union": classify.get("union") or {}},
+        # S3 — the graph search's own report. ``queries_run`` is the budget it
+        # actually spent (0 on the extractor's two skip paths, where the
+        # backend is absent or embedded — a state the capstone's own G2 refuses
+        # before the pass runs) and ``degraded`` says an ATTEMPTED search failed
+        # rather than resolved.
+        "search": {"mode": search.get("mode"),
+                   "degraded": search.get("degraded"),
+                   "reason": search.get("reason"),
+                   "queries_run": search.get("queries_run"),
+                   "hits": {k: len(search.get(k) or [])
+                            for k in ("entities", "points", "events")}},
+        # S5 — the merge's item accounting (the same numbers E4 reads).
+        "merge": {"merged_items": s4.get("merged_items"),
+                  "s2_items": s4.get("s2_items"),
+                  "s4_items": s4.get("s4_items")},
+        # S6 — the Layer-1 payload was produced AND its points went through the
+        # commit loop. ``committed`` is what the write loop RESOLVED, never a
+        # minted-only count: ``extracted`` is appended on a dedup hit and on
+        # every surfaced consolidation fold as well as on a create, so a capture
+        # in which every point folded onto an existing canonical reports the
+        # folded count (the #2949 review F3 note on the fold path says why a
+        # consolidation fold IS a dedup hit).
+        "commit": {"payload_produced": payload is not None,
+                   "entities": len((payload or {}).get("entities") or []),
+                   "events": len((payload or {}).get("events") or []),
+                   "points": len((payload or {}).get("points") or []),
+                   "operators": len((payload or {}).get("operators") or []),
+                   "committed": committed},
+    }
+
+
+def _capture_stats_with_step_witness(out: dict, committed: int) -> dict:
+    """``out["stats"]`` + the #9116 step witness, as a NEW dict.
+
+    A copy on purpose: the extractor's own ``stats`` dict stays exactly what the
+    extractor said, so an eval/harness reader that holds ``out`` cannot see a
+    receipt-only key appear under it.
+    """
+    stats = dict(out.get("stats") or {})
+    stats[_STEP_WITNESS_KEY] = _capture_step_witness(out, committed=committed)
+    return stats
 
 
 def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
@@ -8708,7 +9725,8 @@ class TortoiseSDK:
     def _emit_event(self, type_: str, payload: dict | None = None, *,
                     point: dict | None = None,
                     id: str | None = None,
-                    recorded_ts: str | None = None, **extra) -> bool | None:
+                    recorded_ts: str | None = None,
+                    record_sink: list | None = None, **extra) -> bool | None:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
@@ -8721,19 +9739,36 @@ class TortoiseSDK:
         **Return value (the #7951 commit signal):** ``True`` when the record was
         appended to a configured JSONL journal, ``False`` when a configured
         journal's append RAISED, and ``None`` when there is nothing to log or no
-        journal is configured. The per-call value — not a delta of
+        journal is configured.
+
+        **``record_sink`` (#10000): the RECORD's outcome, not the journal's.**
+        A caller that supplied a list gets this emit's
+        `record_writer.write_live_record` result appended to it — a
+        :class:`~tortoise.record_writer.RecordWrite` when the Postgres record
+        took the record, ``None`` when the seam was unarmed or DECLINED it. It
+        is separate from the return value above on purpose: the two stores fail
+        independently, and the capture writer has to know which one actually
+        holds the turns to be able to put them in the other one when it does
+        not. A per-call OBJECT rather than a state on ``self``: this SDK is
+        shared by concurrent writers (#5612), so the outcome must not travel
+        through the instance. The per-call value — not a delta of
         ``_journal_write_failures`` — is what a live door must gate its cache
         write on: a shared instance counter can be incremented by a CONCURRENT
         writer (#5612), which would report a committed record as failed and
         invite a duplicate re-issue.
 
-        Two call styles supported:
+        Four call styles supported:
         1. ``_emit_event("PointAdded", {"id": ..., ...})``
            — #432: domain payload for the :GraphEvent store.
         2. ``_emit_event("PointAdded", point=point_dict)``
            — #548: full point snapshot for JSONL rebuild replay.
         3. ``_emit_event("PointRevised", id=pid, **props)``
            — #548: id + extra fields for JSONL.
+        4. ``_emit_event("TurnsRecorded", turns=[snapshot, ...])``
+           — #10017: the turn-record CARRIER, which carries neither *point*
+           nor *id*. It is the ONLY record of an armed capture's transcript,
+           so it is a first-class JSONL payload alongside *point* (see the
+           gate below), not an event with "nothing meaningful to log".
 
         **Graph event store (#432):** written when *type_* is in
         ``_GRAPH_EVENT_TYPES`` (11 registered types — PointAdded,
@@ -8745,9 +9780,11 @@ class TortoiseSDK:
         from ``point["id"]`` or *id* + *extra*.
 
         **JSONL event log (#548):** written when *point* is provided (cleaned
-        and appended as the ``"point"`` key) or *id* is provided. Events with
-        neither are skipped (nothing meaningful to log). The full point
-        snapshot is needed for ``rebuild_all`` replay.
+        and appended as the ``"point"`` key), *id* is provided, or ``turns`` is
+        provided (the #10017 carrier — appended as the ``"turns"`` key). Events
+        with NONE of the three are skipped (nothing meaningful to log). The full
+        point snapshot is needed for ``rebuild_all`` replay, and the carrier's
+        ``turns`` list is that same requirement for the record-held lane.
 
         *recorded_ts* (#5048, recorded from #4666): the RECORDED instant of the
         transition, minted ONCE by the caller when the same instant must also
@@ -8866,7 +9903,10 @@ class TortoiseSDK:
                         "degraded state failed too (#9208)", type_)
 
         # ── JSONL event log (#548) ─────────────────────────────────
-        if point is None and id is None:
+        # `turns` is a payload like `point` is (#10017 step 7): a carrier with no
+        # point and no id is still the ONLY record of a capture's transcript, so
+        # treating it as "nothing meaningful to log" silently dropped it.
+        if point is None and id is None and not extra.get("turns"):
             return None  # nothing meaningful to log
         log = self._get_event_log()
         if log is None:
@@ -9018,11 +10058,16 @@ class TortoiseSDK:
         # for a record that persisted while killing the fold too. The loss is
         # observable instead (``monitoring.metrics()["record_write_failures"]``)
         # and ``replay`` heals it from the journal.
-        self._write_record_projection(event, seq=seq)
+        if record_sink is not None:
+            # #10000: the outcome travels to the caller that has to decide
+            # whether the record holds this write (`_write_capture_turns`).
+            record_sink.append(self._write_record_projection(event, seq=seq))
+        else:
+            self._write_record_projection(event, seq=seq)
         return True
 
     def _write_record_projection(self, record: dict,
-                                 seq: int | None) -> None:
+                                 seq: int | None) -> Any:
         """Hand one just-appended journal record to the Postgres record (#9188).
 
         THE production call site. Until this existed, `tortoise/record_projection.py`
@@ -9052,6 +10097,14 @@ class TortoiseSDK:
         already committed, so a record failure is a LOSS TO REPORT (counted in
         ``monitoring.metrics()["record_write_failures"]``, healed by a replay),
         never a reason to fail the caller's write.
+
+        RETURNS what the seam did — a
+        :class:`tortoise.record_writer.RecordWrite` when the record took the
+        record, ``None`` when it was unarmed or declined it (#10000). The
+        capture writer reads that to decide whether the turn is in the record at
+        all, so "the record write did not happen" must be answerable by the
+        caller and not only by a counter: a counter says a write SOMEWHERE
+        failed, and the turn this call is about is the one that goes missing.
         """
         try:
             from . import record_writer
@@ -9060,7 +10113,7 @@ class TortoiseSDK:
             # journal append already happened, so a failing import hook must
             # not hand the caller an ImportError for a write that SUCCEEDED.
             self._record_write_failure("seam_unimportable", exc)
-            return
+            return None
         # DURABILITY IS READ, not assumed (#9231 review P1): no log at all is
         # NOT durable, and a log that declares itself a scratch buffer is not
         # either. The seam DECLINES it and counts the decline on
@@ -9069,8 +10122,8 @@ class TortoiseSDK:
         # nothing was lost (#9231 review P2).
         log = self._event_log
         durable = log is not None and getattr(log, "durable", True)
-        record_writer.write_live_record(record, durable=durable, seq=seq,
-                                        tenant=self._record_tenant)
+        return record_writer.write_live_record(
+            record, durable=durable, seq=seq, tenant=self._record_tenant)
 
     def _bind_record_tenant(self, org_id: str, graph_id: str) -> None:
         """Bind this SDK's writes to one record tenant (#9188).
@@ -10577,6 +11630,35 @@ class TortoiseSDK:
         # (plan §6.7), not a committed rebuild record: the JSONL journal (the
         # rebuild source) holds nothing.
         _intended = _journal_snapshot_from_create_map(_create_map, _create_params)
+        # ── #8933 Stage 2, WRITE HALF — at CAPTURE ──
+        # The ruling says "at capture, write a normalised copy of each identifier
+        # into the indexed text", and `create_point` is the door the mint uses
+        # (`_capture_session_impl` -> `self.create_point`). It used to reach only
+        # `_flatten_search_keys_prop`, so no SDK-created or captured Point ever
+        # held the alias while a REPLAY of the same `PointAdded` did
+        # (`apply` -> `_upsert_point_props`) — `derived = replay(journal)` was
+        # false on `search_keys`, and a query typed with no separator
+        # (`err4032`, the ruling's "dashes, spaces, or none") matched nothing.
+        #
+        # ⛔ It is DERIVED into the node and never RECORDED: `_intended` is
+        # snapshotted on the line above, so the alias reaches the CREATE map and
+        # nothing else. The journal keeps E3's spelling and a rebuild re-derives
+        # the same value from `content` + the payload's own `search_keys` — the
+        # SAME `point_identifier_aliases`/`append_identifier_aliases` pair
+        # `_upsert_point_props` calls, never a second normaliser (the ruling's
+        # criterion 2, and the Elastic `normalizer`-on-the-field shape).
+        _alias_view = {"content": content}
+        if isinstance(props.get("search_keys"), str):
+            _alias_view["search_keys"] = props["search_keys"]
+        if append_identifier_aliases(
+                _alias_view, point_identifier_aliases(_alias_view)):
+            # Rebuilt here (not earlier) so the un-patched path builds the field
+            # list byte-identically to before this change.
+            _create_params["_cp_alias"] = _alias_view["search_keys"]
+            _create_map["search_keys"] = "$_cp_alias"
+            _create_fields = "".join(
+                f", `{str(_k).replace('`', '``')}`: {_v}"
+                for _k, _v in _create_map.items())
         # The append's OWN outcome is the commit signal — a per-call value, not
         # a delta of the shared `_journal_write_failures` counter: a concurrent
         # writer on the same instance can increment that counter between the
@@ -13526,7 +14608,7 @@ class TortoiseSDK:
             # eval lane already surfaces it via ingest_v2; the product
             # lane dropped it here. error_census is a TOP-LEVEL out key
             # (sibling of stats) — folded separately when needed.
-            "stats": out.get("stats") or {},
+            "stats": _capture_stats_with_step_witness(out, len(extracted)),
             # #2335 WI-1a: error_census is a TOP-LEVEL extractor key
             # (sibling of stats) — folded alongside so the observation leg
             # and diagnostics can read it from the meta contract.
@@ -14598,8 +15680,84 @@ class TortoiseSDK:
         # so a stale hash after update_point(content=...) silently breaks
         # dedup and diverges the live graph from JSONL replay (which derives
         # the hash from PointRevised.new_content).
+        #
+        # #8933 Stage 2 (review round 8, F1): tracks whether the ``search_keys``
+        # this door writes was DERIVED, so it can be kept out of the record the
+        # way ``content_hash`` and the derived vector already are. Declared here
+        # (not inside the ``if`` below) because the emit is far below and reads
+        # it unconditionally.
+        _derived_search_keys = False
         if "content" in props:
             props["content_hash"] = _content_hash(props["content"])
+            # #8933 Stage 2 / #10203 (measured P0): a content edit is the THIRD
+            # derived value this door recomputes in the same round trip, for the
+            # same reason as the hash (#1904) and the vector (#4208) — the live
+            # node must equal what a replay of `PointRevised` produces, and the
+            # ruling writes the alias AT CAPTURE, so a revision has to re-derive
+            # it. Leaving it alone meant an edit that introduced an identifier
+            # never indexed it, an edit that removed one kept a stale alias that
+            # still matched the old code, and `check_consistency` reported an
+            # unclearable `divergence="content"` on `search_keys` for a faithful
+            # graph (its reference view derived the NEW content's alias while the
+            # node could only hold the creation's).
+            #
+            # The node's previous value says which tokens are STALE and is not in
+            # the event, so it is read here; `revise_identifier_aliases` then
+            # keeps every non-alias key and swaps the derived half. A
+            # caller-supplied `search_keys` owns the list and wins as the base.
+            #
+            # ⛔ DERIVED, so NOT RECORDED (the #1904/#4208 rule, applied to the
+            # third derived field on this door). `_revise_point` re-derives the
+            # value from `new_content` and the node's own previous keys, so a
+            # journalled copy is dead weight at best and a producer claim the
+            # replay does not honour at worst (#5004/#5046). Left in the record,
+            # `search_keys` is a COLUMN (`public.point`, record_projection
+            # patches columns from the flat `NodePatch`), so a DERIVED value
+            # would become authoritative in the record lane — which that
+            # module's own doctrine forbids, and `chk_*_props_no_derived`
+            # cannot catch it for a name that has a column.
+            #
+            # A CALLER-supplied key is different: it is owned by the call, the
+            # replay cannot recompute it, and it rode `emit_props` before
+            # #8933 too — so that case keeps its record, with the #5046
+            # caller-owned parity gap unchanged (not widened here).
+            # ⛔ AN EXPLICIT `search_keys=None` IS A CLEAR, NOT AN ABSENT KEY
+            # (#10203 review round 12, P3). ``props.get(...)`` cannot tell the
+            # two apart, so a call that edits content AND clears the vocabulary
+            # — ``update_point(id, content=…, search_keys=None)``, the same
+            # documented ``None``-clears shape ``tags``/``embedding`` use in
+            # this very function — used to be REPLACED by the recomputed
+            # derived value, which keeps the node's previous non-alias keys:
+            # the caller was told the write succeeded while the vocabulary it
+            # asked to drop survived on the node and in the FTS index (the
+            # stale-index-value class, reached through argument-default
+            # ambiguity rather than a bad clause).
+            #
+            # So the gate is on the KEY, not the value. The ``None`` then rides
+            # ``SET n += $props`` exactly as it did before #8933 (a null REMOVES
+            # the property) and rides the record too: a clear is CALLER intent,
+            # not a derived value, so it keeps the same caller-owned record
+            # parity a caller-supplied list has (and the same #5046 gap — the
+            # replay fold has no clear clause — neither widened nor narrowed
+            # here). When no content is edited the block below is never even
+            # reached, which is why the defect only ever bit the combined call.
+            if _identifier_tokens_enabled():
+                if "search_keys" in props and props["search_keys"] is None:
+                    _derived_search_keys = False  # caller-owned CLEAR
+                else:
+                    _prev = proj.g.query(
+                        "MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys",
+                        params={"id": id},
+                    ).result_set
+                    _old_content, _old_keys = _prev[0] if _prev else (None, None)
+                    _caller_keys = props.get("search_keys")
+                    props["search_keys"] = _revise_identifier_aliases(
+                        new_content=props["content"],
+                        old_content=_old_content,
+                        old_search_keys=_old_keys,
+                        caller_search_keys=_caller_keys,
+                    )
+                    _derived_search_keys = _caller_keys is None
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         # #5004 round-4: a caller-supplied vector is stored VERBATIM here
@@ -14918,10 +16076,18 @@ class TortoiseSDK:
         # would be dead weight, and #5004's presence-is-ownership rule would
         # read the key as a producer claim the replay does not honour (the
         # #5046 shape). A CALLER-supplied vector stays in the record, as before.
+        # #8933 (review round 8, F1): `search_keys` is the THIRD of these — the
+        # alias `_revise_point` re-derives on a content edit — and it was riding
+        # this record, making "derived, never recorded" (the PR body,
+        # `.env.example`, `point_identifier_aliases`, and the create door's own
+        # snapshot) false from this door onward. Stripped only when DERIVED: a
+        # caller-supplied `search_keys` is caller-owned and stays, exactly like
+        # the vector above.
         emit_props = {
             k: v for k, v in props.items()
             if k != "content_hash"
             and not (_derived_embedding and k == "embedding")
+            and not (_derived_search_keys and k == "search_keys")
         }
         _promote_arm = 'status' in props
 
@@ -16687,6 +17853,13 @@ class TortoiseSDK:
         # DESTROYED the edge live, and the replay (which received the same
         # endpoint contract) dropped it too. ``labels(t)`` rides the same
         # traversal, so no extra round trip is spent resolving the far node.
+        # #10139: ONE vocabulary for the carried attributes — the two 2a-DIRECT
+        # legs below, the 2b emission further down and the pass-2b replay that
+        # re-applies them all read `DIRECT_EDGE_ATTR_KEYS` (`projection/edges.py`).
+        # Spelling the same five keys out at each site is the drift that left the
+        # REBUILD half bare while the live half carried the value.
+        from .projection.edges import DIRECT_EDGE_ATTR_KEYS
+
         def _epistemic_label(node_id: str) -> str | None:
             """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
             for _label in EPISTEMIC_LABELS:
@@ -16752,8 +17925,7 @@ class TortoiseSDK:
                     transferred += 1
                     continue
                 _attrs = {k: v for k, v in rdict.items()
-                          if k in ("direction", "confidence", "weight",
-                                   "label", "batch_id")}
+                          if k in DIRECT_EDGE_ATTR_KEYS}
                 # EMIT-BEFORE-TRANSFER: the REPOINT descriptor (plan §4.4 —
                 # A10's pass-2b repoint apply consumes it post-rebuild).
                 # Flat descriptor shape (REVIEW-FIX P2: match
@@ -16798,8 +17970,7 @@ class TortoiseSDK:
                               f"MERGE (t)-[nr:{rtype}]->(new)")
                     proj.g.query(mq, params={"new_id": new_id, "tid": tid})
                     _keep = {k: v for k, v in rdict.items()
-                             if k in ("direction", "confidence", "weight",
-                                      "label", "batch_id")}
+                             if k in DIRECT_EDGE_ATTR_KEYS}
                     if direction == "out":
                         _a_label, _b_label = new_label, tid_label
                     else:
@@ -16839,13 +18010,19 @@ class TortoiseSDK:
         # §4.4 — same crash discipline as 2a-DIRECT). Rebuild pass-2 resurrects
         # these edges at OLD from the point's immutable snapshot (extractedFrom
         # prop / aboutEntities list), so the pass-2b replay must move them to the
-        # final successor AND delete the resurrection at old. Non-derivable rels
+        # successor THAT SUPERSEDE NAMED (`succ[src]`, ONE HOP per descriptor —
+        # NOT the terminal `_final(src)`, which is only the skip guard) AND
+        # delete the resurrection at old. Non-derivable rels
         # (aboutAction — Action dissolved in Ontology v3.0; wasDerivedFrom — A10
         # raw family) are NEVER snapshot-recreated: no descriptor (do NOT half-
         # own the A10 raw-edge family). The journal carries the target's LOGICAL
         # identity only (tgt=<key> or, for the delete-only guard, tgt=new_id) —
         # never the FalkorDB internal ID (internal ids die at rebuild).
-        from .projection.edges import DERIVABLE_STRUCTURAL_RELS, STRUCTURAL_REL_LABELS, stub_key
+        from .projection.edges import (
+            DERIVABLE_STRUCTURAL_RELS,
+            STRUCTURAL_REL_LABELS,
+            stub_key,
+        )
         structural_rels = SUPERSEDE_STRUCTURAL_RELS
         # Successor internal node ids — runtime-only (never journaled). The 2b
         # no-self-edge guard compares the structural target's NODE IDENTITY to
@@ -16912,13 +18089,17 @@ class TortoiseSDK:
                 # record contract forbids re-applying on a re-link ("a re-link must
                 # not ADVANCE a recorded version", `record_projection.py:2061-2068`).
                 # ⚠️ SCOPE: `extractedFrom`'s `sourceVersion` anchor is therefore
-                # STILL dropped on transfer. That is the pre-existing loss #10139
-                # owns (the rebuild half is bare there too); stating it here rather
-                # than letting the word "never" above imply otherwise.
+                # STILL dropped on transfer — a separate, pre-existing loss this
+                # vocabulary does not own. Stated here rather than letting the
+                # word "never" above imply otherwise.
+                # ⛔ ONE vocabulary, imported: `DIRECT_EDGE_ATTR_KEYS`
+                # (`projection/edges.py`) is the SAME tuple the pass-2b replay
+                # branch reads a descriptor's payload through (#10139), so the
+                # live carry and the rebuilt carry cannot disagree about which
+                # keys a supersede moves.
                 edge_props = {
                     k: v for k, v in (row[4] or {}).items()
-                    if k in ("direction", "confidence", "weight", "label",
-                             "batch_id")
+                    if k in DIRECT_EDGE_ATTR_KEYS
                 }
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
@@ -16966,12 +18147,30 @@ class TortoiseSDK:
                         # gets a target-key suffix — multi-target same-rel id
                         # hygiene (2a-DIRECT's id base is
                         # f"{old_id}->{new_id}:{rtype}").
+                        # #10139: the descriptor carries the edge's
+                        # ATTRIBUTES too, not only its topology. Without them the
+                        # replay can only re-MERGE a BARE edge, so the property
+                        # #9417's live transfer carries (`confidence` from the
+                        # subject binder) survived a supersede and was dropped by
+                        # the next `rebuild_all` — a `live != rebuild` divergence
+                        # on a data-bearing property. FLAT keys, exactly as the
+                        # 2a-DIRECT descriptor above spreads them and exactly as
+                        # `record_projection._relation_coordinates`' consumer reads
+                        # an attribute payload (`{k: payload[k] for k in
+                        # rel.attrs}` — flat, by NAME); a nested `attrs` map would
+                        # be a third shape nothing in the tree reads.
+                        # ⛔ Emitted ONLY when the old edge actually had one of the
+                        # vocabulary's keys: the replay must be able to tell "no
+                        # attributes to carry" from "carry an empty map", and an
+                        # empty map is not writable by FalkorDB (the projection
+                        # degrades it to null with a `#7369` warning).
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:{target_key}",
                             src=old_id, tgt=target_key,
                             target_label=target_label,
                             edge_type=rel,
+                            **edge_props,
                         )
                 # Create new edge: new point → same target (MERGE = idempotent,
                 # no dupes).
@@ -16987,9 +18186,11 @@ class TortoiseSDK:
                 # restated claim about the same subject is bound to the same
                 # Subject by `bind_point_subjects` and both edges exist. In a chain
                 # (X→Y→Z) each transfer would re-stamp the newest successor with the
-                # oldest ancestor's value, and the descriptor below carries no
-                # `attrs`, so the overwritten value is journaled NOWHERE and cannot
-                # be rebuilt.
+                # oldest ancestor's value, and at the time the descriptor carried no
+                # `attrs`, so the overwritten value was journaled NOWHERE and could
+                # not be rebuilt. ⛔ That is fixed since #10139 (the descriptor
+                # carries the values flat) — the wording above is the HISTORY of why
+                # `ON CREATE` is the form, not a live claim about the descriptor.
                 # ⛔ PRECEDENCE, stated: the successor's own live value WINS. That is
                 # what the pre-#9417 code did (a bare MERGE left a pre-existing edge
                 # untouched), so this preserves it while still refusing to leave a
@@ -20692,28 +21893,52 @@ class TortoiseSDK:
     ) -> tuple[bool, str | None, str | None, str | None, int, bool,
                str | None]:
         """``(exists_by_name, terminal_holder_id, operator_holder_id,
-        unevaluable_status_holder_id, carrier_count, merges, target_id)`` for a
-        bundle-local entity ref (#7925) — the entity sibling of
+        unevaluable_status_holder_id, live_carrier_count, merges, target_id)``
+        for a bundle-local entity ref (#7925) — the entity sibling of
         :meth:`_find_terminal_dedup_hit`, and it exists for the same reason:
         the bundle-local endpoint guard has to resolve the endpoint the WRITER
         will use, or the guard fails open and the endpoint becomes a mid-write
         raise on a partially-mutated graph.
 
         ⛔ ``merges`` and the three axes are LOAD-BEARING and they are read from
-        the node the write will actually LAND ON, not from "any holder". Since
-        #8864/#8902 the fold picks its merge key from the carrier count
-        (``merge_key = "id" if name_is_shared else "name"``), so:
+        the node the write will actually LAND ON, not from "any holder". #3590
+        made the CREATE a resolve-or-mint (``entity_identity.resolve_or_mint``),
+        so there are exactly three shapes:
 
-          * **one carrier (or none)** — the merge is keyed on NAME, so the item
-            lands on that holder (or mints) and the holder's axes decide; a
-            declared status is dropped by ``ON CREATE``-only status writes;
-          * **2+ carriers** — the merge is keyed on the record's own ``id``,
-            which for every ingest entity item IS ``ids.entity_name_id(label,
-            name)``. When a carrier already holds that canonical id the item
-            still lands on it (``ON MATCH``), so THAT node's axes decide — not
-            the other carriers'; when no carrier holds it, the item MINTS a
-            node on its own id and inherits NO holder axis, and its declared
-            status is what gets stored.
+          * **no carrier** — the item MINTS a fresh opaque id, inherits NO
+            holder axis, and its declared status is what gets stored;
+          * **one LIVE carrier** — the item RESOLVES to that holder (idempotent
+            re-mention), so THAT node's axes decide; a declared status is
+            dropped by the ``ON CREATE``-only status write;
+          * **one LIVE carrier carrying no ``id``** — a legacy / foreign / raw
+            row: the create ADOPTS it, stamping a minted id onto it (#9876
+            review F2), so the write lands on ONE carrier and the name stays
+            create-able. That id does not exist yet at Phase-1 time, so no
+            landing id is predictable here (``merges=False``, ``target_id=None``)
+            and the holder axes — which are id-valued — cannot be reported;
+          * **2+ LIVE carriers** — the create REFUSES
+            (``AmbiguousEntityName``); no carrier is the target and no holder
+            axis applies.
+
+        ⛔ ``LIVE`` is load-bearing (#3590 round-5 review F1): a TERMINAL
+        carrier does NOT block the create — it is a different incarnation (R5),
+        so such a name MINTs. Reading the axes off it described a node the write
+        never touches, which is both a fail-open (the ``#7925`` arms skipped a
+        write that does store its status, then step 4 died with the earlier
+        items committed) and a false "resolves to terminal" refusal. (A live
+        carrier with NO id is the ADOPTED shape above — the write lands on that
+        node, but under an id minted mid-write.)
+
+        ⛔ …and ``LIVE`` means every live ROW, id or not (#3590 round-8 review
+        FINDING 2, still live at this head): ``resolve_or_mint`` refuses on
+        ``len(live_name_holder_ids(...)) > 1``, and that list is deliberately
+        row-per-holder so an ID-LESS live holder still counts
+        (``live_name_holder_ids``' own docstring: filtering the None out would
+        "silently pick one"). Filtering ``r[0]`` out here made the guard answer
+        ``merges=True`` for one id-carrier plus one id-less live holder while the
+        create raised ``AmbiguousEntityName`` — Phase 1 green, step 3 raises after
+        the earlier items committed. The COUNT is therefore over live rows; only
+        the TARGET requires an id.
 
         Reading the axes from "any carrier" or from "none of them" both fail:
         the first over-rejects (another carrier's terminal status is not the
@@ -20723,13 +21948,19 @@ class TortoiseSDK:
 
         So the axes returned here are the MERGE TARGET's, and are ``None`` when
         the item mints; ``merges`` says which of the two happened, and
-        ``target_id`` is that node's STORED id — which is NOT always
-        ``entity_name_id(label, name)``: with one carrier, and with a carrier
-        whose id a legacy/foreign writer left non-canonical, the fold MERGEs by
-        name onto the node that exists and its ``ON MATCH`` clause rewrites the
-        stored ``id`` to the canonical one. Anything predicting the endpoint the
-        write addresses must therefore use ``target_id`` when it is set. Callers
-        must branch on ``merges`` rather than on ``carrier_count``.
+        ``target_id`` is that node's STORED id (never derived from the name any
+        more — #3590 retired the name→id function). Anything predicting the
+        endpoint the write addresses must therefore use ``target_id`` when it is
+        set. Callers must branch on ``merges`` rather than on
+        ``live_carrier_count``.
+
+        ⛔ ``live_carrier_count`` counts the LIVE set, NOT every row
+        (#3590 round-5 review F1c): the two differ exactly where the create's
+        disposition differs — a terminal-only name is ``exists_by_name=True``
+        with ``live_carrier_count == 0``, and it MINTS. A caller that needs
+        "does the create REFUSE?" must ask ``live_carrier_count > 1``; reading
+        ``exists_by_name`` there skips the landing id for a name whose write
+        does land somewhere (the endpoint-collision guard did, measured).
 
         ``operator_holder_id`` is the same test on the OTHER axis (#7925 review
         round 3): an operator-shaped merge target is not a connection endpoint
@@ -20759,16 +21990,37 @@ class TortoiseSDK:
         ).result_set
         if not rows:
             return False, None, None, None, 0, False, None
-        # The node the item lands on: the sole carrier, or — once the name is
-        # shared — the carrier that already holds the deterministic id the fold
-        # merges on. No such carrier ⇒ the item MINTS and no holder axis applies.
-        canonical = _entity_name_id(label, name)
-        target = (
-            rows[0] if len(rows) <= 1
-            else next((r for r in rows if r[0] == canonical), None)
-        )
-        if target is None:
-            return True, None, None, None, len(rows), False, None
+        # ⛔ #3590 (round-5 review F1): THE TARGET IS THE NODE THE WRITE LANDS
+        # ON, and the write now resolves over **LIVE** carriers only
+        # (`entity_identity.resolve_or_mint`): a TERMINAL sole carrier does not
+        # block a create (it is another incarnation), and an id-less sole
+        # carrier is ADOPTED — the create stamps a minted id onto it rather
+        # than opening a second live node (#3590 review F2).
+        # Reading the three axes off such a carrier described a different node
+        # than the writer used — fail-OPEN on the `#7925` Phase-1 arms (they skip
+        # a bundle item whose status IS stored, then the write dies in step 4
+        # with the earlier items committed) and a false "resolves to terminal"
+        # refusal in the opposite direction. `merges`/`target_id` are therefore
+        # computed from the LIVE holder set, the same predicate the create uses,
+        # so the guard and `resolve_or_mint` cannot disagree.
+        _live = [r for r in rows if not r[1]]
+        if len(_live) != 1 or not _live[0][0]:
+            # 0 (terminal-only) and 2+ (same-name coexistence, which the create
+            #     REFUSES rather than picking a carrier — #8864 / D2): the write
+            #     lands on no single existing carrier, so it MINTS its own node
+            #     and its declared status IS stored (`merges=False`).
+            # 1 id-less live row: ADOPTED — the write lands on that existing
+            #     carrier, so a declared status is dropped exactly as on a
+            #     resolve (`merges=True`) — but its id is stamped DURING the
+            #     write, so Phase 1 predicts no landing id (`target_id=None`) and
+            #     the id-valued axes cannot be reported. RESIDUAL, recorded: an
+            #     operator-shaped or array-status id-less holder is therefore
+            #     only caught in step 4. Legacy/raw graphs only; the adopt path
+            #     is what keeps the name create-able.
+            # The cases are told apart by the live COUNT — and by the target's
+            # own id, which is what separates a MINT from an ADOPT.
+            return True, None, None, None, len(_live), len(_live) == 1, None
+        target = _live[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
         # e.g. an operator-shaped holder with an array status lost the operator
@@ -20781,7 +22033,7 @@ class TortoiseSDK:
             _holder_id if _term else None,
             _holder_id if _op else None,
             _holder_id if _status_is_stored_unhashable(_status) else None,
-            len(rows),
+            len(_live),
             True,
             _holder_id,
         )
@@ -20904,10 +22156,15 @@ class TortoiseSDK:
           referenced or not, on EITHER route, because the ``:Subject`` writer
           (``create_entity(type='subject')``, reached through
           ``create_subject``) validates every item's ``status`` in bundle order
-          before the name MERGE, so a bundle-wide refusal is the only one that
+          before the write, so a bundle-wide refusal is the only one that
           matches the writer (see the loop below);
-        - two endpoints that resolve to the SAME name-merged node (two refs, or
-          a ref and the node id) — a self-edge ``create_direct_edge`` refuses.
+        - two endpoints that resolve to the SAME landing node (two refs, or
+          a ref and the node id) — a self-edge ``create_direct_edge`` refuses;
+        - an entity item naming a name **2+ LIVE entities already hold** — the
+          create REFUSES it (``entity_identity.resolve_or_mint``,
+          route-then-refuse R8), for every entity item, referenced or not, so
+          the bundle is rejected at validation rather than raising in step 3
+          with the earlier items committed (see the loop below).
 
         ⛔ That list is a list of COVERED refusals, not a guarantee that every
         ``_sanitize_props`` refusal is Phase-1. The residual is the rest of the
@@ -21065,32 +22322,63 @@ class TortoiseSDK:
             if key not in holders:
                 holders[key] = self._entity_name_holders(elabel, name)
             return holders[key]
-        # ADOPTION / RENAME map (#7925 review round 5). Step 3 writes every
-        # entity item, and a bundle item naming a holder MERGEs onto it: when
-        # that holder's stored id is NOT the deterministic
-        # `entity_name_id(label, name)` (a legacy/foreign id — `create_event`'s
-        # `aboutSubject` mints `:Subject {id:'Gamma'}`, `_upsert_*`'s `ON MATCH
-        # id=coalesce($id, s.id)` rewrites it), the SAME write re-addresses the
-        # node to the canonical id. Every connection endpoint still naming the
-        # PRE-write id is then dead by step 4 — `create_operator`/
-        # `create_direct_edge` key on `id`, so the bundle aborts with the earlier
-        # items committed (measured: one connection whose endpoint is that id,
-        # any route, either side → `Phase2Error … does not exist`, point
-        # committed, carrier already renamed). Phase 1 refuses it here, which is
-        # this route's stated posture for a shape whose failure mode is a
-        # partial mutation.
+        # (#3590) The AMBIGUITY refusal is a bundle-wide WRITER refusal, so it
+        # gets a bundle-wide Phase-1 verdict — the same authority the `outdated`
+        # and `:Subject`-vocabulary loops at the top of this method have, and for
+        # the same measured reason.
+        #
+        # `create_subject`/`create_object` route through
+        # `entity_identity.resolve_or_mint`, which REFUSES a name held by 2+ LIVE
+        # entities (route-then-refuse, R8) — for EVERY entity item in bundle
+        # order, referenced by a connection or not, on either route. The
+        # per-connection entity leg below only `continue`s on that shape (it has
+        # no landing id to compare, and the refusal belongs to the item), so
+        # without this loop the refusal surfaced in step 3. MEASURED at this head:
+        # `_validate_bundle` returned `[]` for
+        # `{"points": [{"content": "must-not-commit"}], "entities": [{"type":
+        # "object", "name": "Acme"}]}` with two live `Acme` carriers, and
+        # `ingest` raised `AmbiguousEntityName` with **Point 1 already committed**
+        # — the #2422/#7925 partial-mutation class exactly.
+        # ⛔ The probe label is the label the WRITE lands on, not the one the
+        # item declared (#9876 review round 14): a `*Kind` re-labels the write
+        # (#9964), so `_ENTITY_ITEM_LABELS` alone let a kind-routed item past
+        # Phase 1 and the refusal then landed in step 3 with the points already
+        # committed. `_landing_entity_label` is the SAME authority step 3's
+        # `_existing_entity_ids` uses, so the two cannot disagree.
+        for i, item in enumerate(bundle.get("entities") or []):
+            if not isinstance(item, dict):
+                continue
+            _etype = str(item.get("type") or "").strip().lower()
+            _name = item.get("name")
+            if _etype not in _ENTITY_LAYER_LABEL \
+                    or not isinstance(_name, str) or not _name:
+                continue
+            _elabel = _landing_entity_label(_etype, dict(item))
+            if _elabel not in ("Subject", "Object"):
+                continue
+            _live_n = _name_holders(_elabel, _name)[4]
+            if _live_n > 1:
+                violations.append({
+                    "section": "entities", "index": i,
+                    "message": f"ingest: entities[{i}] names the {_elabel} "
+                               f"{_name!r}, which {_live_n} LIVE entities "
+                               f"already hold — the create REFUSES to pick "
+                               f"one for you (route-then-refuse) and raises in "
+                               f"step 3 after the earlier items committed. "
+                               f"Rename or retire one carrier first (#3590)",
+                })
+        # ADOPTION / RENAME map (#7925 review round 5) — RETIRED by #3590.
+        # It existed because step 3's entity write RE-ADDRESSED a holder: an
+        # item naming a holder whose stored id was not the deterministic
+        # `entity_name_id(label, name)` moved that node onto the canonical id,
+        # killing every connection endpoint still naming the pre-write id. With
+        # an opaque minted id there is no canonical id to move to: the create
+        # RESOLVES the name to the holder's own id (or mints a fresh one), so no
+        # node's id changes during step 3 and there is nothing to map. The
+        # connection guard below still reads `_renamed`; it is empty by
+        # construction, and that emptiness is now the ASSERTED property —
+        # a future writer that does re-address a holder must fill it here.
         _renamed: dict[tuple[str, str], str] = {}
-        for _item in bundle.get("entities") or []:
-            if not isinstance(_item, dict):
-                continue
-            _rl = _ENTITY_ITEM_LABELS.get(
-                str(_item.get("type") or "").strip().lower())
-            _rn = _item.get("name")
-            if _rl not in ("Subject", "Object") or not isinstance(_rn, str):
-                continue
-            _rh = _name_holders(_rl, _rn)
-            if _rh[5] and _rh[6] and _rh[6] != _entity_name_id(_rl, _rn):
-                _renamed[(_rl, _rh[6])] = _entity_name_id(_rl, _rn)
         # (#7925 review P2; scope corrected in review round 4) A status the
         # direct-edge terminal check cannot EVALUATE must be refused at the
         # ITEM, not only on the graph-read legs: the `:Object`/`:Event` writers
@@ -21108,16 +22396,18 @@ class TortoiseSDK:
         #     for `:Object`), so the declaration is dropped and the writer
         #     accepts it — the HOLDER's own array status is caught by the
         #     direct-route leg below (`bad_status`), which is where the raise
-        #     would actually come from. An item that MINTS (a shared name whose
-        #     canonical id no carrier holds) is NOT skipped: #8864/#8902 key that
-        #     merge on the item's own id, so its declared array IS stored.
+        #     would actually come from. An item that MINTS (a shared name with NO
+        #     live carrier) is NOT skipped: #3590's resolve-or-mint keys the
+        #     write on the item's own resolved id, so its declared array IS
+        #     stored.
         #
         # Scoped by the ORDERED simulation the fold performs: an item's declared
         # status is stored only when its write CREATES the node, and only the
-        # FIRST bundle item naming a `(label, name)` can — its id
-        # (`entity_name_id`) is deterministic, so every later same-name item
-        # lands on the node the first one created (or on the canonical carrier)
-        # and `status` is written `ON CREATE` only. Checking every item
+        # FIRST bundle item naming a `(label, name)` can — no carrier exists at
+        # Phase-1 time, so that item MINTS, and every later same-name item
+        # RESOLVES onto the node the first one created (#3590: resolve-or-mint,
+        # not a derived id) — and `status` is written `ON CREATE` only. Checking
+        # every item
         # over-rejected a writer-accepted bundle (measured), and checking only
         # the first-per-name via a `seen` set skipped a genuine create.
         _minted_names: set[tuple[str, str]] = set()
@@ -21143,9 +22433,11 @@ class TortoiseSDK:
                 (_existing, _hit, _op, _bad, _carriers, _merges,
                  _target) = _name_holders(_elabel, _name)
                 _key = (_elabel, _name)
-                # MERGES (a carrier holds the canonical id) or not the first
-                # naming item (the first one creates it) ⇒ this write does not
-                # store the status.
+                # MERGES (the write lands on an existing carrier — RESOLVED, or
+                # ADOPTED under an id minted mid-write) or not the first naming
+                # item (the first one creates it) ⇒ this write does not store
+                # the declared status (the projection's write is `ON CREATE`
+                # only, so a matched MERGE never applies it).
                 if _merges or _key in _minted_names:
                     continue
                 _minted_names.add(_key)
@@ -21376,17 +22668,21 @@ class TortoiseSDK:
         for i, conn, route, vals in conns:  # noqa: B007
             if route != "direct":
                 continue
-            # #7925 review P1: endpoints that resolve to the same NAME-MERGED
-            # node are ONE node (`ids.entity_name_id` + the name MERGE), so a
-            # direct edge between them is a self-edge that
+            # #7925 review P1: endpoints that resolve to the SAME node are ONE
+            # node, so a direct edge between them is a self-edge that
             # `create_direct_edge` refuses with a raw ValueError — after steps
             # 2-3 committed (measured). `_check_connection`'s self-edge test
             # compares REF STRINGS, so it cannot see this identity. The identity
-            # is (label, name) on BOTH sides of the bundle/external boundary
-            # (review round 3): a bundle-local ref and the same node addressed
-            # by its id share it. Only the direct route is affected — a reified
-            # pair goes through `create_operator`, which tolerates the shared
-            # node (measured).
+            # is (label, LANDING ID) on BOTH sides of the bundle/external
+            # boundary (review round 3): a bundle-local ref and the same node
+            # addressed by its id share it. Only the direct route is affected —
+            # a reified pair goes through `create_operator`, which tolerates the
+            # shared node (measured).
+            #
+            # ⛔ #3590: the landing id is resolved-or-minted, never derived from
+            # the name (the retired `ids.entity_name_id` + name MERGE are gone),
+            # and the shared-name case is answered by the mint key below. The
+            # previous text described the retired name-as-identity model.
             merged: dict[tuple[str, str], str] = {}
             for v in vals:
                 if not isinstance(v, str):
@@ -21408,24 +22704,48 @@ class TortoiseSDK:
                 # Compare the NODE each endpoint will land on, never the NAME.
                 # The landing id is what `create_direct_edge` sees, and it
                 # differs by ref kind:
-                #   * a bundle-local entity item writes the deterministic
-                #     `entity_name_id(label, name)` — the SAME id for every item
-                #     naming that name, so two such refs are one node whether the
-                #     first one created it or landed on a carrier (#8864/#8902
-                #     key the fold on the record's own id, which IS that id);
+                #   * a bundle-local entity item lands on the id the create
+                #     RESOLVES or MINTS (below), so two refs are one node exactly
+                #     when they share that landing id — the same id for a shared
+                #     name only when neither lands on a carrier (#3590: no id is
+                #     derived from a name);
                 #   * an external ref lands on the node its id names, so two
                 #     carriers that share a NAME are two different endpoints and
                 #     the edge between them is legal (measured over-rejection:
                 #     `create_direct_edge` wrote the edge this guard refused).
                 # Comparing (label, name) got both of these backwards.
                 if v in local:
-                    # The node this item lands on: the merge target when it
-                    # merges (a name-keyed merge ADOPTS the existing node and
-                    # REWRITES its id to the canonical one, so the pre-write id
-                    # is what an external ref still names), else the canonical
-                    # id the item mints.
+                    # The node this item lands on. #3590: the create either
+                    # RESOLVES to the single live holder (id unchanged) or mints
+                    # a fresh id — and a shared name has no target at all, so no
+                    # landing id can be computed for it (the write refuses that
+                    # item; the connection is left to the per-item refusal).
                     _h = _name_holders(ep_label, ep_name)
-                    lid = _h[6] or _entity_name_id(ep_label, ep_name)
+                    if _h[6] is None:
+                        if _h[4] > 1:
+                            # 2+ LIVE carriers: the create REFUSES this item
+                            # (`AmbiguousEntityName`), so it has no landing id.
+                            # The per-item refusal reports it; this guard must
+                            # not invent a target.
+                            #
+                            # ⛔ `_h[4]`, NOT `_h[0]` (#3590 round-5 review
+                            # F1c): `exists_by_name` is true for ONE carrier
+                            # too — including a TERMINAL one, which the create
+                            # does not merge onto, it MINTS past. Reading it
+                            # here skipped the landing id for exactly the
+                            # shape whose write lands on a fresh node.
+                            continue
+                        # Zero LIVE carriers (none at all, or terminal-only):
+                        # the item MINTS; ONE id-less live carrier: it ADOPTS,
+                        # under an id minted mid-write. Either way no landing id
+                        # is predictable at Phase-1 time — and every ref naming
+                        # the SAME name lands on ONE node (the first create
+                        # makes/adopts the holder, the second resolves to it),
+                        # so the name is still a valid endpoint-collision key
+                        # here — it is the node's landing identity, not an id.
+                        lid = f"mint\x00{ep_name}"
+                    else:
+                        lid = _h[6]
                 else:
                     lid = (node_info.get(v) or {}).get("id")
                 if not isinstance(lid, str) or not lid:
@@ -21447,21 +22767,21 @@ class TortoiseSDK:
                 section, item = local[v]
                 if section == "entities":
                     # #7925: the entity side of the SAME guard, added with the
-                    # endpoint widening that made it reachable. The entity
-                    # write path MERGEs :Subject/:Object by NAME (the
-                    # deterministic `(label, name)` id is what makes the merge
-                    # idempotent), so a bundle-local entity ref lands on
-                    # whichever node already holds the name — and a
-                    # `create_direct_edge` endpoint that is terminal raises
-                    # mid-write, after the bundle's earlier items committed.
+                    # endpoint widening that made it reachable. A bundle-local
+                    # entity ref lands on the id the create RESOLVES to (single
+                    # live holder) or MINTS, and a `create_direct_edge` endpoint
+                    # that is terminal raises mid-write, after the bundle's
+                    # earlier items committed. ⛔ #3590: the fold MERGEs
+                    # :Subject/:Object by `id`, so idempotency is carried by the
+                    # caller's resolve-or-mint, not by the MERGE key.
                     # Measured (both shapes leave the predecessor point item
                     # behind): a ref naming an EXISTING terminal Subject, and
                     # an item that DECLARES a terminal `status` (the node the
                     # writer mints is born terminal). Phase 2 cannot prevent
                     # that — `_check_endpoint_race` runs AFTER the entity items
                     # are written, which is why this is Phase-1-only. Only
-                    # Subject/Object merge by name; an Event entity item is
-                    # append-only (no name merge) and a document is a
+                    # Subject/Object are name-resolved; an Event entity item is
+                    # append-only (no name resolution) and a document is a
                     # `:Source`.
                     #
                     # #7925 review P1: Event is NOT exempt. `create_event` ->
@@ -21514,18 +22834,18 @@ class TortoiseSDK:
                             and isinstance(name, str) and name:
                         (exists, hit, _, bad_status, _carriers, merges,
                          _target) = _name_holders(elabel, name)
-                        # #8864/#8902: the fold keys the merge on NAME while the
-                        # name has ONE carrier, and on the record's own `id` once
-                        # it has 2+. Every ingest entity item's id IS
-                        # `ids.entity_name_id(label, name)`, so with 2+ carriers
-                        # the item still LANDS on a carrier holding that
-                        # canonical id (ON MATCH) and only MINTS when none does.
-                        # `merges` is that answer and the axes above are the
-                        # merge target's — so a merge reads the target's
-                        # terminal/unevaluable axes, while a mint keeps its own
-                        # declared status. Branching on the carrier count instead
-                        # fails open on the first case and over-rejects on the
-                        # second (both measured).
+                        # #8864/#8902: the landing node is the RESOLVED holder.
+                        # #3590 retired the name-keyed merge here — `merges` is
+                        # now "lands on a single live carrier" (resolved, or
+                        # ADOPTED when that carrier is id-less — both drop the
+                        # declared status) and the 2+ case REFUSES (it does not
+                        # pick the record's own id), so an item never lands on a
+                        # second carrier by naming one. `merges` is that answer
+                        # and the axes above are the landing node's — a resolve
+                        # reads the target's terminal/unevaluable axes, while a
+                        # mint keeps its own declared status. Branching on the
+                        # carrier count instead fails open on the first case and
+                        # over-rejects on the second (both measured).
                         name_merge = merges
                         # The operator axis is settled by the label gate above
                         # (`tainted_by_bundle`), and the `outdated` flag
@@ -22248,7 +23568,10 @@ class TortoiseSDK:
           policy.
         - Idempotent-ish: points dedup by (content_hash, pointKind) via
           create_point(dedup=True); sources merge by url; Subject/Object
-          merge by name; operator connections dedup by (op_type, input set);
+          resolve-or-mint on the name (#3590: the MERGE key is `id`, so the
+          second item naming a live name RESOLVES to it rather than minting
+          a second carrier); operator connections dedup by (op_type, input
+          set);
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
         - EP-safe: under promotion_policy='gated' every no-status point is
@@ -22596,7 +23919,8 @@ class TortoiseSDK:
                                 "item": item, "result": point,
                                 "deduped": bool(existed)})
 
-        # ── 3. Entities (subject/object merge by name; event/document append) ─
+        # ── 3. Entities (subject/object resolve-or-mint on the name;
+        # event/document append) ─
         for i, item in enumerate(bundle.get("entities") or []):
             viols = []
             self._check_item_shape("entities", i, item, viols)
@@ -36274,9 +37598,11 @@ class TortoiseSDK:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
         via ``_emit_event`` (#2061); SDK-created Objects journal
-        ``ObjectRegistered`` on first canonical registration (probe-gated,
-        #2194 — a canonical re-mention never double-journals); SDK-created
-        Subjects journal ``SubjectAdded`` the same way (probe-gated, #2295);
+        ``ObjectRegistered`` on EVERY create (#3590 — the "first canonical
+        registration" probe of #2194 is gone: a re-mention journals again, which
+        is replay-idempotent because the fold is id-keyed and `createdAt` is
+        first-wins); SDK-created Subjects journal ``SubjectAdded`` the same way
+        (#2295's probe is gone with it);
         Documents journal ``DocumentCreated`` on EVERY create (#2296 —
         emit-on-every-write, since each create mints a fresh ulid and
         ``_upsert_document`` MERGEs by that id). Source journals via
@@ -36394,91 +37720,36 @@ class TortoiseSDK:
         # cover the `create_source` lane — that lane reaches this funnel with
         # `label = "Source"`, so the branch never executes for it;
         # `create_source`'s own strip is what covers it.
-        # (#2194) Journal ObjectRegistered on FIRST canonical registration
-        # only — probe the deterministic canonical id + name
-        # (obj-<sha26(name)>) before apply. The name conjunct hardens against
-        # a cross-name sha-digest collision (would otherwise fail-closed on a
-        # genuinely new registration). A row = canonical re-mention (MERGE by
-        # name, ON MATCH — the #1350 clobber guard keeps status; journaling
-        # again would double-register). The #7936 `_stub` conjunct restates
-        # the precondition honestly: since the event name-stub now carries the
-        # canonical id (#7936), id+name alone can no longer distinguish a
-        # registered node from an unregistered stub — every name-stub would
-        # HIT and the registration would silently stop being journaled.
-        # `_event_plain_merge` marks its stubs `_stub=true` ON CREATE and
-        # `_upsert_object`/`_upsert_subject` REMOVE it (SET NULL) on adoption,
-        # so the probe counts ONLY nodes whose canonical registration was
-        # journaled. No row = fresh create OR #1155/#7936 stub adoption (a
-        # marked name-stub, or a pre-#7936 random-ulid stub the id conjunct
-        # already misses — either way the canonical registration is genuinely
-        # new) → journal after apply. Probe failure
-        # → warning + fail-open-to-journal (a duplicate line is replay-safe;
-        # a skip would silently re-open the node-loss bug). Accepted
-        # divergences (only-on-create mandate): re-mention prop mutations and
-        # pre-#2194-history re-mentions are live-only / never registered —
-        # byte-identity holds for the first canonical registration. Deletes
-        # are NOT journaled (_delete_entity is a bare graph delete — the
-        # journal vocabulary cannot represent deletion): a deleted canonical
-        # Object resurrects on the next rebuild, and delete→recreate mints a
-        # second "first registration" whose replay first-wins over the live
-        # incarnation (pinned as accepted by tests 14-15; #2296 scope hook).
-        _journal_object_registration = False
-        _journal_subject_registration = False
-        # Truthy-name gate mirrors _upsert_object's persistence predicate (it
-        # no-ops on falsy names) — a falsy-name create must not mint a
-        # phantom ObjectRegistered line (junk-line journal growth on a no-op
-        # path). The event-type conjunct mirrors the rebuild dispatcher: pass
-        # 1b replays ONLY the literal "ObjectRegistered" (projection/
-        # __init__.py pass-1b dispatch), so a future label==Object event_type
-        # must never journal a line replay cannot fold (a no-row probe on a
-        # non-OR type would otherwise emit an unreplayable registration).
-        if (label == "Object" and self._event_log_path
-                and event.get("name") and event.get("type") == "ObjectRegistered"):
-            try:
-                _journal_object_registration = not proj.g.query(
-                    "MATCH (o:Object {id:$cid, name:$name}) "
-                    "WHERE coalesce(o._stub, false) = false RETURN o.id",
-                    params={"cid": id_val, "name": event["name"]},
-                ).result_set
-            except Exception:
-                # Fail-open to journaling: a duplicate registration line is
-                # replay-safe; a silent skip would re-open the node-loss bug.
-                _logger.warning(
-                    "ObjectRegistered existence probe failed for %s — "
-                    "journaling optimistically (id=%s)",
-                    event.get("name"), id_val)
-                _journal_object_registration = True
-        # (#2295) Subject mirror of the #2194 Object block above — same probe-
-        # gated first-registration design (Subjects ride the same generic
-        # _create_entity funnel and had the identical durability hole: SDK-
-        # created Subjects were live-graph-only, so a journaled-SDK Subject
-        # vanished silently on rebuild_all — no fold vocabulary to warn).
-        # Keep in sync with the Object block above (label constant, probe
-        # node letter, event-type literal, flag name differ; everything else
-        # is byte-identical). Subjects have no fold/sweep — the round-trip
-        # byte-identity tests are the only guard. Accepted divergences mirror
-        # the Object block's: re-mention prop mutations + pre-#2295-history
-        # re-mentions are live-only; deletes are NOT journaled (_delete_entity
-        # is a bare graph delete) — a deleted Subject resurrects on the next
-        # rebuild, and delete→recreate mints a second "first registration"
-        # whose replay first-wins (pinned as accepted by tests 9a/9b; #2296
-        # scope hook).
-        if (label == "Subject" and self._event_log_path
-                and event.get("name") and event.get("type") == "SubjectAdded"):
-            try:
-                _journal_subject_registration = not proj.g.query(
-                    "MATCH (s:Subject {id:$cid, name:$name}) "
-                    "WHERE coalesce(s._stub, false) = false RETURN s.id",
-                    params={"cid": id_val, "name": event["name"]},
-                ).result_set
-            except Exception:
-                # Fail-open to journaling: a duplicate registration line is
-                # replay-safe; a silent skip would re-open the node-loss bug.
-                _logger.warning(
-                    "SubjectAdded existence probe failed for %s — "
-                    "journaling optimistically (id=%s)",
-                    event.get("name"), id_val)
-                _journal_subject_registration = True
+        # (#2194/#2295/#3590) EMIT the registration on every Object/Subject
+        # create — no "first registration only" probe.
+        #
+        # The probe existed to avoid a duplicate ``ObjectRegistered`` on a
+        # re-mention, and it could only be honest because the id was a FUNCTION
+        # of the name: "the node already carries this canonical id and is not a
+        # stub" was the same question as "this name was already registered".
+        # With a MINTED id (or an adopted explicit one) the two questions come
+        # apart — a node can exist under this id with NO registration line (a
+        # raw/foreign writer's node, or a connector stub) and the probe then
+        # HITS, so the registration is never journaled and `rebuild_all`
+        # DESTROYS a live node. That is the live-without-durable class this
+        # epic removes, so the safe answer is the plan's S2 step 3 ruling
+        # (#3590 D9/P1-D): emit on every create.
+        #
+        # Cost, stated: the journal grows with CREATE-CALL count, not entity
+        # count (an `onboarding.seed` re-run, an `extract_session_v2` loop, a
+        # `/v1/objects` re-POST and a connector re-sync each append one
+        # duplicate line). Duplicate registrations are REPLAY-IDEMPOTENT — the
+        # fold's `MERGE` is id-keyed and `createdAt` adopts on FIRST write
+        # (`coalesce(n.createdAt, $ca)`), so replay is first-wins exactly as
+        # `test_duplicate_registration_lines_replay_idempotently` pins.
+        _journal_object_registration = bool(
+            label == "Object" and self._event_log_path
+            and event.get("name")
+            and event.get("type") == "ObjectRegistered")
+        _journal_subject_registration = bool(
+            label == "Subject" and self._event_log_path
+            and event.get("name")
+            and event.get("type") == "SubjectAdded")
         if ((_journal_object_registration or _journal_subject_registration)
                 and event.get("createdAt") is None):
             # (#2194/#2295) Synthesize createdAt BEFORE apply ONLY on the
@@ -36633,11 +37904,14 @@ class TortoiseSDK:
                 id=event["id"],
                 **_journal_record_payload(event),
             )
-        # #452: Subject/Object MERGE by name (content-hash dedup) — the fresh
-        # id_val never lands on a pre-existing node via ON CREATE, but the
-        # MERGE's ON MATCH clause writes it anyway (`o.id=coalesce($id, o.id)` /
-        # `s.id=coalesce($id, s.id)`), so the id this call returns is DERIVED
-        # from the write, not re-read from the graph. The re-fetch that used to
+        # #452: the pre-#3590 shape MERGEd Subject/Object by name (content-hash
+        # dedup) and the MERGE's ON MATCH clause rewrote the id
+        # (`o.id=coalesce($id, o.id)` / `s.id=coalesce($id, s.id)`), so the id
+        # that call returned was DERIVED from the write, not re-read from the
+        # graph. ⛔ #3590 moved the MERGE key to `id` and made the CALLER's
+        # resolve-or-mint supply identity, so this door's job is unchanged but
+        # no longer load-bearing about a name: the id is the one the caller
+        # resolved. The re-fetch that used to
         # live here (`MATCH (n:{label} {name:$name}) RETURN n.id` →
         # `result_set[0][0]`) resolved identity by NAME: with two same-name
         # carriers it returned an ARBITRARY row (backend order), i.e. possibly
@@ -36813,14 +38087,21 @@ class TortoiseSDK:
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
                                  name: str | None = None,
-                                 provenance: dict | None = None) -> bool | None:
-        # NOTE ON ``name``: RESERVED AND CURRENTLY UNREAD. No producer passes it
-        # (the rename op is deferred to #4769), and `_fold_entity_mutation` does
-        # NOT read it — the fold's `rename` arm applies `state`, so a record
-        # carrying only a top-level `name` unfolds and is reported as a fold
-        # miss. Do NOT treat this field as the way to journal a rename: put the
-        # new name in `state` under `"name"`. #4769 decides whether this field
-        # earns its keep or is deleted.
+                                 provenance: dict | None = None,
+                                 cache_tier: str | None = None) -> bool | None:
+        # NOTE ON ``name``: RESERVED AND CURRENTLY UNREAD — and it is now
+        # PERMANENTLY the wrong field for a rename, not merely an unused one.
+        # #4769's producer half LANDED with #3590: a name-bearing write is
+        # labelled ``op="rename"`` by ``classify_entity_mutation_op`` and
+        # ``_update_entity`` journals the applied map as ``state``, so the new
+        # name travels in ``state["name"]`` and ``_fold_entity_mutation``
+        # applies it with the same ``SET n += $s`` as every other state op. No
+        # producer passes this top-level ``name`` and the fold still does NOT
+        # read it (the rename arm applies ``state``, not this field), so a
+        # record carrying ONLY a top-level `name` unfolds and is reported as a
+        # fold miss. The previous text said the rename op was "deferred to
+        # #4769" — false at this head, and the kind of stale contract a next
+        # lane re-derives against (#3590 review, finding 4).
         """Build and emit ONE ``EntityMutated`` record (#3299).
 
         THE only place an ``EntityMutated`` record is constructed — asserted by
@@ -36872,6 +38153,30 @@ class TortoiseSDK:
         consumer was ``delete_point``; #9207 reversed that door's ordering, so
         the delete gates its RECORD on the cache write instead and reads this
         value to decide whether the destruction it just performed is recorded.
+
+        ``cache_tier``
+            #10017 R1 only, and only on a DELETE: the TIER the removal applies
+            to. Absent — every producer before #10017 — the entity leaves both
+            stores. ``record_only`` states that the GRAPH-tier copy is what is
+            being removed and the record keeps the row (the record's effect is
+            the demote, `record_projection._tier_demote_statement`), because
+            the entity is one the record is the HOME for (§9.1's turn tier) and
+            a delete there would destroy the transcript the removal exists to
+            preserve. It is NOT put in ``state``: ``state`` is re-applied as
+            node properties by the fold's ``SET n += $state``, and a tier is
+            never graph state.
+
+            REFUSED on any op other than ``delete``, and RESERVED on the
+            envelope (``projection._ENTITY_MUTATION_RESERVED_KEYS``). Both are
+            fail-closed against a record that would LIE: the only arms that read
+            a tier are the delete fold's demote
+            (``record_projection._delete_statements``) and the carrier's own row
+            insert, so a tier on a state op would be accepted and then silently
+            ignored by every fold — a record that looks like it moved placement
+            and moves nothing. And a ``provenance`` bag merged over the record
+            must not be able to rewrite the tier, for the same reason the rest of
+            that set exists (#1423): the caller's explicit argument wins, the
+            stray key is dropped loudly.
         """
         from tortoise.projection import _ENTITY_MUTATION_IMPLEMENTED_OPS
         if op not in _ENTITY_MUTATION_IMPLEMENTED_OPS:
@@ -36881,9 +38186,18 @@ class TortoiseSDK:
             raise ValueError(
                 f"{op!r} is not an implemented EntityMutated op "
                 f"(declared: {sorted(_ENTITY_MUTATION_IMPLEMENTED_OPS)})")
+        if cache_tier is not None and op != "delete":
+            # Codomain error, same class as the op check above: the fold has no
+            # arm that reads a tier outside a delete, so accepting one here
+            # would emit a record whose declared placement nothing applies.
+            raise ValueError(
+                f"cache_tier={cache_tier!r} is meaningless on op {op!r}: only a "
+                "delete records a tier (#10017 R1)")
         record: dict = {"id": id_val, "op": op, "label": label}
         if state is not None:
             record["state"] = state
+        if cache_tier is not None:
+            record["cache_tier"] = cache_tier
         if name is not None:
             record["name"] = name
         if provenance:
@@ -36905,6 +38219,158 @@ class TortoiseSDK:
         # `_emit_event` call itself, its payload and its best-effort failure
         # handling are unchanged.
         return self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
+
+    def _journal_turn_removal(self, turn_ids) -> dict[str, bool | None]:
+        """#10017 R1 — the GRAPH-tier removal of captured turns, JOURNALED.
+
+        The problem it exists for. §9.1 puts raw turns outside the graph, so
+        #10017's purge deletes the legacy turn nodes the record now holds — and
+        a graph delete that is not journaled is a RESURRECTION (`log.py`'s own
+        name, #3316): the journal still carries the `PointAdded` that created
+        each turn, so a later `rebuild()` replays a history that never contained
+        the removal and re-materialises every turn the delete phase removed,
+        while reporting success.
+
+        Contract, and it is the `delete_point` shape (#9207/#7951) rather than
+        an invention:
+
+          * **After** the delete has proven it landed, never before. A record
+            that outlives a failed destroy claims a state nobody verified.
+          * Called with the ids the DELETE STATEMENT ITSELF returned — not an
+            earlier gather. The gather-then-delete shape left a TOCTOU window
+            in which a concurrent capture's turn was removed live and never
+            journaled (#7951 review P2-c).
+          * ``cache_tier='record_only'``, because the record KEEPS the row: the
+            turn's home is Postgres, and this record says so. The graph fold
+            hard-deletes the node; the record fold demotes the tier
+            (`record_projection._tier_demote_statement`).
+
+        One record per id, through the ONE `EntityMutated` builder — no second
+        event shape, no second bus. Returns ``{turn_id: outcome}`` so the caller
+        can refuse to report a removal it could not record (the #7951
+        per-call commit signal; `False` means a configured journal's append
+        RAISED, `None` means no journal is configured and nothing was recorded).
+
+        ⛔ It does NOT delete anything. The destructive half — the census gate
+        (`tools/turn_parity_census.py` exit 0), the `DETACH DELETE`, the
+        preview-then-token confirmation — is a separate, separately-gated
+        artefact; this is the half that makes the removal REPLAYABLE.
+        """
+        from tortoise.record_projection import RECORD_ONLY_TIER
+
+        if isinstance(turn_ids, str):
+            raise ValueError(
+                "_journal_turn_removal takes an iterable of turn ids, not one "
+                "id: a bare string would be journalled one CHARACTER at a time "
+                "and every one of those records would match nothing")
+        return {tid: self._journal_entity_mutation(
+                    "Point", tid, "delete", cache_tier=RECORD_ONLY_TIER)
+                for tid in (turn_ids or ())}
+
+    def _refuse_ambiguous_rename(self, id_val: str, new_name: str) -> None:
+        """Refuse a rename onto a name a DIFFERENT live entity already holds.
+
+        #3590 R2 + D3: the name is a mutable natural key, and a natural key that
+        two live entities both hold is ambiguous — every later by-name resolve
+        refuses (`entity_identity` route-then-refuse) and the name is
+        create-poisoned with no by-name repair path. The write is therefore
+        refused, before anything is written.
+
+        The check is scoped to the identity labels the TARGET actually carries
+        (`Object`/`Subject` — the two labels whose ``name`` is a natural key), so
+        a Point/Event/Document rename is unaffected: their identity is their
+        `id`/`eventId`/`url`, and their `name` is not a key at all.
+
+        ⛔ A NO-OP re-write is not a rename (#3590 review, finding 2). The guard
+        fires on *any* truthy string ``name`` in ``props``, and a read-modify-write
+        caller that re-sends the entity's CURRENT name (the ordinary
+        ``update_entity(id, name=<unchanged>, status=…)`` shape) moves nothing — yet
+        it was refused with ``NameAlreadyHeld`` whenever ANOTHER live carrier also
+        holds that name. That two-carrier state is LEGAL and reachable (D2, and
+        this PR's own fixtures build it), so the old guard made a legal graph
+        un-updatable through the public door. The target's stored name is read in
+        the same label-scoped probe and the label is skipped when it already
+        equals ``new_name``: nothing moves, so nothing can become ambiguous.
+
+        ⛔ Every OTHER live holder competes, **id-less or not** (#9876 review
+        F1): ``live_name_holder_ids`` is row-per-holder and contributes ``None``
+        for an id-less legacy / raw row, which is a live competitor all the same
+        — see the filter's own comment below for what filtering it away did.
+
+        ⛔ THE CALLER MUST HOLD ``entity_create_lock(label, new_name)`` ACROSS
+        THIS PROBE AND THE WRITE IT AUTHORISES (#9876 review). The probe is
+        check-then-act: the write that makes the new holder visible happens in
+        ``_update_entity``'s label loop, so without the lock a create can mint
+        and write a carrier between the probe and the write, leaving two LIVE
+        holders of one name — the exact state this guard exists to prevent.
+        ``_update_entity`` takes both identity labels' locks (fixed order) around
+        both.
+        """
+        from .entity_identity import live_name_holder_ids
+        from .exceptions import NameAlreadyHeld
+        g = self._get_proj().g
+        # ⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND
+        # (n:Object OR n:Subject)` (#3590 review round 5, finding 2). FalkorDB
+        # indexes are label-scoped, so a pattern with no label in it can use no
+        # label's `id` index and degrades to a whole-node scan — on a write path
+        # that previously touched an index only, and that a `:Point` update
+        # (the common `update_entity(name=…)` case) pays for a set that is
+        # provably empty. Two index-servable probes answer the same question.
+        for label in ("Object", "Subject"):
+            rows = g.query(
+                f"MATCH (n:{label} {{id: $id}}) RETURN n.name",
+                params={"id": id_val}).result_set
+            if not rows:
+                continue
+            # #3590 review (finding 2): the target's OWN name comes back on the
+            # probe that already proved it carries this label, so the no-op arm
+            # costs no extra read. `isinstance` because a stored name may be a
+            # non-string (the writers accept one), and a non-string is never
+            # "already this name".
+            stored = rows[0][0] if rows[0] else None
+            if isinstance(stored, str) and stored == new_name:
+                continue
+            holders = live_name_holder_ids(g, label, new_name)
+            # ⛔ Count HOLDERS (live rows), not truthy ids (#9876 review F1).
+            # That list is deliberately row-per-holder and yields ``None`` for
+            # an id-less LIVE row — the legacy / raw shape the create ADOPTS —
+            # so that a refusal site cannot filter it away. An `if h` filter
+            # dropped exactly that holder, so the rename LANDED and left two
+            # live carriers of one name: `resolve_fold_name` then reports
+            # `ambiguous-entity-name`, which is NON-exempt, so `rebuild_all`
+            # stops over the name this door made ambiguous — with no by-name
+            # repair path. The two sibling refusal sites count live ROWS for the
+            # same reason (`entity_identity.resolve_or_mint` compares
+            # `len(holders)`, `_entity_name_holders` counts `_live`).
+            others = [h for h in holders
+                      if h is None or str(h) != str(id_val)]
+            if others:
+                raise NameAlreadyHeld(label, new_name, others, id_val)
+
+    def _entity_identity_for(self, label: str, name: str, *,
+                             explicit_id: str | None = None) -> str:
+        """The id a create must write: the live holder's, or a freshly MINTED one.
+
+        #3590 R1/R2 (the model change): identity is an opaque id minted once at
+        creation; ``name`` is a mutable natural key, never the identity. So a
+        create resolves the name to its single LIVE holder (the #452 idempotent
+        re-mention) and otherwise MINTS — it never derives an id from the name
+        (``obj-<sha26(name)>``), which is what made a rename mint a second entity
+        and a delete+re-create resurrect the first one.
+
+        Raises :class:`~tortoise.entity_identity.AmbiguousEntityName` when two or
+        more LIVE entities already hold the name: a create may not pick one for
+        the caller (route-then-refuse, R8).
+
+        ⛔ The returned id is not yet visible as a holder — that happens at the
+        caller's ``MERGE``. A caller MUST therefore run this call and the write
+        it feeds inside :func:`tortoise.entity_identity.entity_create_lock`, or
+        the empty-holder check is a TOCTOU window rather than a guard (#3590
+        review, finding 1). ``create_entity`` does.
+        """
+        from .entity_identity import resolve_or_mint
+        return resolve_or_mint(self._get_proj().g, label, name,
+                               explicit_id=explicit_id)[0]
 
     @_declares_apply_first_write_lane("_update_entity")
     def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
@@ -37308,289 +38774,221 @@ class TortoiseSDK:
         # return through it (the re-key guard is kept general and defensively
         # covers `eventId` should that ban ever be lifted).
         post_write_id = id_val
-        for label, prop in _CANONICAL_ENTITY_ID_PROPS:
-            # #4649: a canonical label's identity is an OR-SET, not one key.
-            # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
-            # carry a secondary one (`Source` by `url` — url-only stubs minted
-            # by `_link_source` have no `id`, so the primary MATCH below used to
-            # miss and this surface returned the UNCHANGED node as success).
-            # The primary key is ALWAYS tried first (byte-identical MATCH text
-            # and #327 index plan), the secondary only on a miss.
-            id_keys = (prop, *secondary_entity_id_props(label))
-            if label == "Point":
-                # #9287: this IS the ``:Point`` update door (``commit_schema``
-                # lists the pair ``update_point`` / ``_update_entity``), and it
-                # writes caller props with a live ``SET n += $p``. The refusal
-                # itself is fired in the match loop below, where a hit proves
-                # the node IS a Point: an unconditional refusal here (or at the
-                # top of this method) failed an unrelated write, because this
-                # surface reaches EVERY label — measured:
-                # ``update_entity(object_id, point_kind='statement\u200b')``
-                # raised while ``create_object(..., props={'point_kind':
-                # padded})`` is allowed by ``_create_entity``'s sibling
-                # exemption, and no calibration gate reads a non-Point label's
-                # ``pointKind`` (``_CALIBRATION_GATED_LABELS == ("Point",)``).
-                # The door that matters stays closed; the others stay inert.
-                # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
-                # discipline on this generic surface too. `_sanitize_props`
-                # deliberately ACCEPTS a caller `embedding` (the recorded
-                # PR #3018 decision: stored verbatim), and this branch writes
-                # it RAW through `SET n += $p` — but it never set the
-                # `embedding_verbatim` marker. Without the marker a LATER
-                # re-emit still narved the vector: `promote_point` journals
-                # `get_point(pid)`, whose snapshot now carries the raw vector
-                # and no marker, so `_upsert_point_props` took its `vecf32`
-                # arm — live `0.3` vs replay `0.30000001192092896`, the exact
-                # "same journal, different graph" class #5004 removes. The
-                # same store-width guard as `update_point` applies for the
-                # same reason (a wrong-width vector is written live but
-                # REFUSED on replay). Gated on the KEY, so an unrelated
-                # mutation leaves the marker alone; `_sanitize_props` has
-                # already rejected a caller-supplied marker, so this cannot
-                # be forged. NOTE this does NOT widen the #4094 exemption:
-                # `_update_entity` still journals no embedding line of its
-                # own — it only makes the marker ride a re-emit that some
-                # OTHER record journals.
-                if "embedding" in props:
-                    # A LOCAL copy: `_CANONICAL_ENTITY_ID_PROPS` visits every
-                    # label with this SAME dict (`SET n += $props`, and the
-                    # non-Point branch journals it as `state`), so mutating
-                    # `props` here would stamp the Point-only marker onto
-                    # Subject/Object/Document/Source/Event — a round-11
-                    # reviewer reproduced exactly that via
-                    # `update_entity(<subject_id>, embedding=…)`.
-                    point_props = dict(props)
-                    if point_props.get("embedding") is not None:
-                        _dim = proj.required_embedding_dim
-                        if _dim is not None:
-                            try:
-                                _w = len(point_props["embedding"])
-                            except TypeError:
-                                _w = None
-                            if _w != _dim:
-                                _logger.warning(
-                                    "update_entity: a caller-supplied "
-                                    "embedding of width %s does not match "
-                                    "this store's %d — clearing it rather "
-                                    "than storing one the index cannot hold "
-                                    "or the replay would refuse (#5004)",
-                                    _w if _w is not None else "?", _dim)
-                                point_props["embedding"] = None
-                    # `None` (not `False`): `SET n += {k: null}` REMOVES the
-                    # property, matching `update_point`'s clear and keeping
-                    # "absent" meaning "server-vectored" on both sides.
-                    # NOTE the marker is LIVE-ONLY on this path: the branch
-                    # emits no embedding record of its own (#4094), so a
-                    # rebuild does not reproduce it. That residual is pinned
-                    # in `test_update_entity_point_branch_is_a_declared_
-                    # exemption`; the alternative (leaving the vector unmarked)
-                    # re-opens the `vecf32` narrowing on the LATER, JOURNALED
-                    # `promote_point` re-emit, which is the class #5004 exists
-                    # to remove.
-                    point_props["embedding_verbatim"] = (
-                        True if point_props.get("embedding") is not None
-                        else None)
-                else:
-                    point_props = props
-                for match_prop in id_keys:
-                    res = proj.g.query(
-                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
-                        "RETURN count(n)",
-                        params={"id": id_val, "p": point_props},
-                    )
-                    if res.result_set and res.result_set[0][0]:
-                        break
-                # #10122: POINT-gated, and only once the write LANDED. This
-                # surface reaches every label, and `name` IS indexed on
-                # Subject/Object/Event — warning before the match would both
-                # inflate the count for sibling labels and cry wolf on a miss
-                # (`update_entity("no-such-id", name=...)`), the two things the
-                # #3377 arm below is careful about. The advisory is the same one
-                # `create_point`/`update_point` call: this live `SET n += $p` is
-                # a THIRD Point write seam and it does not pass through
-                # `_upsert_point_props` (which is why it is not covered from
-                # there).
-                if res.result_set and res.result_set[0][0]:
-                    _warn_point_name_not_lexically_indexed(
-                        point_props, door="update_entity")
-                # Post-apply, per matched label — the `_delete_entity`
-                # emitter's ordering contract (a failed/no-op write never
-                # leaves a phantom record).
-                if (annotator_updates and res.result_set
-                        and res.result_set[0][0]):
-                    self._emit_event("PointRevised", id=id_val,
-                                     **annotator_updates)
-            else:
-                # C1 (#3312 statuses, #3377 rename): this branch used to apply
-                # caller props with a live `SET n += $p` and emit NOTHING — so
-                # `rebuild_all` replayed the entity from its creation snapshot
-                # (status / name / objectKind / confidence reverted). Journal
-                # the mutation at the surface that performs it.
-                #
-                # `state` = the WRITE'S OWN KEYS carrying the GRAPH'S STORED
-                # values (the same statement applies and reads back):
-                #   * a key set to None is REMOVED live, so `properties(n)`
-                #     omits it -> `state[k] is None` -> the fold's identical
-                #     `SET n += {k: null}` removes it too. A full
-                #     `properties(n)` SNAPSHOT would omit the key and RESURRECT
-                #     it from the creation record;
-                #   * a coerced value (Decimal/numpy -> native) is journalled as
-                #     the stored primitive, so the append cannot silently drop
-                #     the record (#4647: only an exactly-representable
-                #     Decimal/numpy reaches this point — the write guard refuses
-                #     the rest);
-                #   * keys the write did NOT apply are absent, so replay never
-                #     overwrites the typed Vectorf32 the upsert created
-                #     (`properties(n)` returns a vector as a plain list;
-                #     re-applying it would demote it and break the vector leg).
-                if "name" in props:
-                    # ── #3377 DEFERRED (#4769) ───────────────────────────────
-                    # A write that changes `name` must NOT be journaled YET.
-                    # This is a VERIFIED regression, not a hypothetical:
-                    # `_fold_object_superseded` falls back to matching by NAME
-                    # for legacy id-less records (#2164 ISSUE-B), and that fold
-                    # is DEFERRED to a sweep that runs AFTER this inline one
-                    # (deliberately — it is an unconditional SET that must follow
-                    # every Object-creation event). Journaling a rename therefore
-                    # renames the node in pass 1b, BEFORE the sweep, so the name
-                    # branch stops matching and a legacy id-less supersede is
-                    # DROPPED: live and `apply()` keep status='superseded' while
-                    # `rebuild_all` returns the object status='live'. Pre-#3377
-                    # the name never changed at replay, so the match held —
-                    # journalling the rename INTRODUCES the regression.
-                    #
-                    # So the rename half of this lane is RETURNED TO OPEN, and
-                    # #4769 lands rename journalling TOGETHER WITH the structural
-                    # sweep-ordering fix rather than before it (three review
-                    # rounds each found a different defect at that same boundary).
-                    #
-                    # The graph write still happens — only the journal record is
-                    # withheld — and the withhold is LOUD, so this is a declared
-                    # deferral, never the silent loss this lane exists to fix.
-                    rest = {k: v for k, v in props.items() if k != "name"}
-                    keys = list(rest)
-                    # #4649: the OR-SET, and the write and its read-back are ONE
-                    # statement — the form the generic branch below already uses.
-                    # They MUST NOT be split into a write followed by a separate
-                    # MATCH: a url-keyed :Source is addressed BY `url`, and `url`
-                    # is a writable prop, so a second query matching the ORIGINAL
-                    # url runs AFTER the SET and misses the re-keyed node — the
-                    # write lands, NO `EntityMutated` record is emitted, and
-                    # `rebuild_all` silently reverts the `url` (a live≠replay
-                    # divergence with no fold-miss warning, because there is no
-                    # record to miss). MATCHing first and reading
-                    # `properties(n)` after the SET binds the node by its
-                    # PRE-write key while the returned values are post-write.
-                    applied = None
-                    matched_prop = None
+        # ── #3590 / #3377: a rename is a JOURNALED mutation on the stable id ──
+        # The graph write below applies `name` like any other prop, and the
+        # `EntityMutated` record now carries it (the classifier returns `op=rename`
+        # for a name-bearing write), so a rename survives replay instead of being
+        # reverted by `rebuild_all`. Two properties make that safe, and both are
+        # checked HERE, before any label is written:
+        #
+        # 1. R2 — the name is a mutable NATURAL KEY, so moving it moves a
+        #    property, never an identity. The `EntityMutated` fold is id-keyed
+        #    and `_fold_object_superseded` no longer falls back to matching by
+        #    name (that fallback — and the legacy id synthesis that fed it — are
+        #    retired in this change), so a rename can no longer drop a supersede
+        #    record on replay. That fallback was the ONLY recorded reason the
+        #    rename record was withheld (#4769).
+        # 2. The rename may not create ambiguity: two LIVE entities holding one
+        #    name makes every later by-name create/read refuse, and there is no
+        #    by-name repair path. Refused with `NameAlreadyHeld` BEFORE the loop,
+        #    so a refusal leaves the graph untouched.
+        # ⛔ THE GUARD AND THE WRITE IT AUTHORISES ARE ONE CRITICAL SECTION
+        # (#9876 review). `_refuse_ambiguous_rename` reads the live holder
+        # set and then the label loop below writes `SET n += $props`, which is
+        # what makes the NEW holder visible — two graph round trips with no lock
+        # between them (check-then-act). Interleaved with a create, it left two
+        # LIVE carriers of one name, which create-poisons the name and makes
+        # `rebuild_all` stop over it (the same harm the create door's lock was
+        # added for, `entity_identity.entity_create_lock`).
+        #
+        # Both identity labels' locks are taken, in a FIXED order, rather than
+        # asking the guard which one the target carries: a `:Subject` can also
+        # carry `:Object`, a fixed order cannot deadlock, and the keys are
+        # `(label, name)`-scoped so an unrelated rename never contends. Taken
+        # ONLY for a name-bearing write (a rename), so the ordinary
+        # `update_entity(status=…)` path pays nothing.
+        _rename_locks: tuple[tuple[str, str], ...] = ()
+        if isinstance(props.get("name"), str) and props["name"].strip():
+            _rename_locks = (("Object", props["name"]),
+                             ("Subject", props["name"]))
+        with contextlib.ExitStack() as _rename_lock_stack:
+            for _lock_key in _rename_locks:
+                _rename_lock_stack.enter_context(
+                    entity_create_lock(*_lock_key))
+            if _rename_locks:
+                self._refuse_ambiguous_rename(id_val, props["name"])
+            for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+                # #4649: a canonical label's identity is an OR-SET, not one key.
+                # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
+                # carry a secondary one (`Source` by `url` — url-only stubs minted
+                # by `_link_source` have no `id`, so the primary MATCH below used to
+                # miss and this surface returned the UNCHANGED node as success).
+                # The primary key is ALWAYS tried first (byte-identical MATCH text
+                # and #327 index plan), the secondary only on a miss.
+                id_keys = (prop, *secondary_entity_id_props(label))
+                if label == "Point":
+                    # #9287: this IS the ``:Point`` update door (``commit_schema``
+                    # lists the pair ``update_point`` / ``_update_entity``), and it
+                    # writes caller props with a live ``SET n += $p``. The refusal
+                    # itself is fired in the match loop below, where a hit proves
+                    # the node IS a Point: an unconditional refusal here (or at the
+                    # top of this method) failed an unrelated write, because this
+                    # surface reaches EVERY label — measured:
+                    # ``update_entity(object_id, point_kind='statement\u200b')``
+                    # raised while ``create_object(..., props={'point_kind':
+                    # padded})`` is allowed by ``_create_entity``'s sibling
+                    # exemption, and no calibration gate reads a non-Point label's
+                    # ``pointKind`` (``_CALIBRATION_GATED_LABELS == ("Point",)``).
+                    # The door that matters stays closed; the others stay inert.
+                    # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
+                    # discipline on this generic surface too. `_sanitize_props`
+                    # deliberately ACCEPTS a caller `embedding` (the recorded
+                    # PR #3018 decision: stored verbatim), and this branch writes
+                    # it RAW through `SET n += $p` — but it never set the
+                    # `embedding_verbatim` marker. Without the marker a LATER
+                    # re-emit still narved the vector: `promote_point` journals
+                    # `get_point(pid)`, whose snapshot now carries the raw vector
+                    # and no marker, so `_upsert_point_props` took its `vecf32`
+                    # arm — live `0.3` vs replay `0.30000001192092896`, the exact
+                    # "same journal, different graph" class #5004 removes. The
+                    # same store-width guard as `update_point` applies for the
+                    # same reason (a wrong-width vector is written live but
+                    # REFUSED on replay). Gated on the KEY, so an unrelated
+                    # mutation leaves the marker alone; `_sanitize_props` has
+                    # already rejected a caller-supplied marker, so this cannot
+                    # be forged. NOTE this does NOT widen the #4094 exemption:
+                    # `_update_entity` still journals no embedding line of its
+                    # own — it only makes the marker ride a re-emit that some
+                    # OTHER record journals.
+                    if "embedding" in props:
+                        # A LOCAL copy: `_CANONICAL_ENTITY_ID_PROPS` visits every
+                        # label with this SAME dict (`SET n += $props`, and the
+                        # non-Point branch journals it as `state`), so mutating
+                        # `props` here would stamp the Point-only marker onto
+                        # Subject/Object/Document/Source/Event — a round-11
+                        # reviewer reproduced exactly that via
+                        # `update_entity(<subject_id>, embedding=…)`.
+                        point_props = dict(props)
+                        if point_props.get("embedding") is not None:
+                            _dim = proj.required_embedding_dim
+                            if _dim is not None:
+                                try:
+                                    _w = len(point_props["embedding"])
+                                except TypeError:
+                                    _w = None
+                                if _w != _dim:
+                                    _logger.warning(
+                                        "update_entity: a caller-supplied "
+                                        "embedding of width %s does not match "
+                                        "this store's %d — clearing it rather "
+                                        "than storing one the index cannot hold "
+                                        "or the replay would refuse (#5004)",
+                                        _w if _w is not None else "?", _dim)
+                                    point_props["embedding"] = None
+                        # `None` (not `False`): `SET n += {k: null}` REMOVES the
+                        # property, matching `update_point`'s clear and keeping
+                        # "absent" meaning "server-vectored" on both sides.
+                        # NOTE the marker is LIVE-ONLY on this path: the branch
+                        # emits no embedding record of its own (#4094), so a
+                        # rebuild does not reproduce it. That residual is pinned
+                        # in `test_update_entity_point_branch_is_a_declared_
+                        # exemption`; the alternative (leaving the vector unmarked)
+                        # re-opens the `vecf32` narrowing on the LATER, JOURNALED
+                        # `promote_point` re-emit, which is the class #5004 exists
+                        # to remove.
+                        point_props["embedding_verbatim"] = (
+                            True if point_props.get("embedding") is not None
+                            else None)
+                    else:
+                        point_props = props
                     for match_prop in id_keys:
-                        applied = proj.g.query(
-                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
-                            "SET n += $props "
+                        res = proj.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
+                            "RETURN count(n)",
+                            params={"id": id_val, "p": point_props},
+                        )
+                        if res.result_set and res.result_set[0][0]:
+                            break
+                    # #10122: POINT-gated, and only once the write LANDED. This
+                    # surface reaches every label, and `name` IS indexed on
+                    # Subject/Object/Event — warning before the match would both
+                    # inflate the count for sibling labels and cry wolf on a miss
+                    # (`update_entity("no-such-id", name=...)`), the two things the
+                    # #3377 arm below is careful about. The advisory is the same one
+                    # `create_point`/`update_point` call: this live `SET n += $p` is
+                    # a THIRD Point write seam and it does not pass through
+                    # `_upsert_point_props` (which is why it is not covered from
+                    # there).
+                    if res.result_set and res.result_set[0][0]:
+                        _warn_point_name_not_lexically_indexed(
+                            point_props, door="update_entity")
+                    # Post-apply, per matched label — the `_delete_entity`
+                    # emitter's ordering contract (a failed/no-op write never
+                    # leaves a phantom record).
+                    if (annotator_updates and res.result_set
+                            and res.result_set[0][0]):
+                        self._emit_event("PointRevised", id=id_val,
+                                         **annotator_updates)
+                else:
+                    # C1 (#3312 statuses, #3377 rename): this branch used to apply
+                    # caller props with a live `SET n += $p` and emit NOTHING — so
+                    # `rebuild_all` replayed the entity from its creation snapshot
+                    # (status / name / objectKind / confidence reverted). Journal
+                    # the mutation at the surface that performs it.
+                    #
+                    # `state` = the WRITE'S OWN KEYS carrying the GRAPH'S STORED
+                    # values (the same statement applies and reads back):
+                    #   * a key set to None is REMOVED live, so `properties(n)`
+                    #     omits it -> `state[k] is None` -> the fold's identical
+                    #     `SET n += {k: null}` removes it too. A full
+                    #     `properties(n)` SNAPSHOT would omit the key and RESURRECT
+                    #     it from the creation record;
+                    #   * a coerced value (Decimal/numpy -> native) is journalled as
+                    #     the stored primitive, so the append cannot silently drop
+                    #     the record (#4647: only an exactly-representable
+                    #     Decimal/numpy reaches this point — the write guard refuses
+                    #     the rest);
+                    #   * keys the write did NOT apply are absent, so replay never
+                    #     overwrites the typed Vectorf32 the upsert created
+                    #     (`properties(n)` returns a vector as a plain list;
+                    #     re-applying it would demote it and break the vector leg).
+                    keys = list(props)
+                    res = None
+                    # #4649: OR-SET — primary identity key first, then the label's
+                    # secondary key(s) only if the primary matched nothing.
+                    for match_prop in id_keys:
+                        res = proj.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props "
                             "RETURN [k IN $keys | properties(n)[k]] AS vals",
                             params={"id": id_val, "props": props, "keys": keys},
                         )
-                        # A miss mutates nothing, so there is nothing to warn
-                        # about (an `update_entity("no-such-id", name=...)` must
-                        # not cry wolf). A result row means the write landed on
-                        # THIS branch's node. Do NOT add `count(n)`: beside
-                        # `properties(n)` it becomes a grouping key, so a miss
-                        # would yield no row and a duplicate-id match one row PER
-                        # GROUP.
-                        if applied.result_set:
-                            matched_prop = match_prop
+                        # No match => [] for THIS form. Do NOT add `count(n)`: beside
+                        # `properties(n)` it becomes a grouping key, so a miss yields
+                        # no row and a duplicate-id match yields one row PER GROUP.
+                        # A non-empty `keys` with a result row means the write
+                        # landed on THIS branch's node.
+                        if res.result_set:
                             break
-                    matched = matched_prop is not None
-                    if isinstance(props.get(matched_prop), str):
-                        # The matched key is one this write rewrote, so the node
-                        # no longer lives at `id_val` (a non-str value means the
-                        # key was cleared, leaving nothing to resolve).
-                        post_write_id = props[matched_prop]
-
-                    # Journal everything the write changed EXCEPT `name`. The
-                    # reason `name` is withheld — it moves the node before the
-                    # deferred name-keyed supersede sweep runs — simply does NOT
-                    # apply to the other keys, so withholding the whole map
-                    # would leave #3312 open for the ordinary call
-                    # `update_entity(id, name=..., status=...)`, silently
-                    # reverting the status on rebuild.
-                    if matched and rest:
-                        vals = list(applied.result_set[0][0])
-                        if len(vals) != len(keys):
-                            _logger.error(
-                                "state arity mismatch for %s %r: %d keys "
-                                "vs %d values — journalling the shorter "
-                                "of the two",
-                                label, id_val, len(keys), len(vals))
-                        # `rest` carries no `name`, so the classifier can
-                        # never return `rename` here — it is `restatus` or
-                        # `revise`, both implemented.
-                        self._journal_entity_mutation(
-                            label, id_val,
-                            classify_entity_mutation_op(rest),
-                            state=dict(zip(keys, vals, strict=False)),
-                        )
-
-                    if matched:
-                        # #2296 residual, deliberately NOT promised away here: if
-                        # this label's CREATION was never journaled (an `Object`
-                        # minted by `_connect_issue_objects`' bare live MERGE,
-                        # which emits no record), `rebuild_all` does not merely
-                        # revert the `name`, it DESTROYS the node. The warning
-                        # below therefore claims only what the deferred rename
-                        # does — it does not promise the node or its siblings
-                        # survive.
-                        # Warn on EVERY occurrence, not once per process: this
-                        # class recurs, and a one-shot net would leave the
-                        # second and later reverts silent — the exact failure
-                        # mode this lane exists to remove.
-                        _logger.warning(
-                            "update_entity: the `name` change is NOT journaled "
-                            "— #3377's rename journalling is deferred to #4769 "
-                            "(journalling it breaks a legacy name-keyed "
-                            "ObjectSuperseded on replay: the rename moves the "
-                            "node's name before the deferred supersede sweep "
-                            "matches on it). THE `name` WILL BE REVERTED BY "
-                            "`rebuild_all`."
-                        )
-                    continue
-                keys = list(props)
-                res = None
-                # #4649: OR-SET — primary identity key first, then the label's
-                # secondary key(s) only if the primary matched nothing.
-                for match_prop in id_keys:
-                    res = proj.g.query(
-                        f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props "
-                        "RETURN [k IN $keys | properties(n)[k]] AS vals",
-                        params={"id": id_val, "props": props, "keys": keys},
+                    if not keys or not res.result_set:
+                        continue
+                    if isinstance(props.get(match_prop), str):
+                        # Same re-key case as the `id`-addressed branch above: the
+                        # matched key is one this write rewrote.
+                        post_write_id = props[match_prop]
+                    vals = list(res.result_set[0][0])
+                    if len(vals) != len(keys):
+                        # Impossible by construction — `[k IN $keys | ...]` is
+                        # length-preserving — so this is an engine contract breach.
+                        # LOUD (the append is already best-effort; a silent
+                        # truncation would journal a state that never existed).
+                        _logger.error(
+                            "state arity mismatch for %s %r: %d keys vs %d values "
+                            "— journalling the shorter of the two",
+                            label, id_val, len(keys), len(vals))
+                    self._journal_entity_mutation(
+                        label, id_val, classify_entity_mutation_op(props),
+                        state=dict(zip(keys, vals, strict=False)),
                     )
-                    # No match => [] for THIS form. Do NOT add `count(n)`: beside
-                    # `properties(n)` it becomes a grouping key, so a miss yields
-                    # no row and a duplicate-id match yields one row PER GROUP.
-                    # A non-empty `keys` with a result row means the write
-                    # landed on THIS branch's node.
-                    if res.result_set:
-                        break
-                if not keys or not res.result_set:
-                    continue
-                if isinstance(props.get(match_prop), str):
-                    # Same re-key case as the `name` branch above: the matched
-                    # key is one this write rewrote.
-                    post_write_id = props[match_prop]
-                vals = list(res.result_set[0][0])
-                if len(vals) != len(keys):
-                    # Impossible by construction — `[k IN $keys | ...]` is
-                    # length-preserving — so this is an engine contract breach.
-                    # LOUD (the append is already best-effort; a silent
-                    # truncation would journal a state that never existed).
-                    _logger.error(
-                        "state arity mismatch for %s %r: %d keys vs %d values "
-                        "— journalling the shorter of the two",
-                        label, id_val, len(keys), len(vals))
-                self._journal_entity_mutation(
-                    label, id_val, classify_entity_mutation_op(props),
-                    state=dict(zip(keys, vals, strict=False)),
-                )
         return self._get_entity(post_write_id)
 
     @_declares_apply_first_write_lane("_delete_entity")
@@ -37720,15 +39118,30 @@ class TortoiseSDK:
                     f"Must be one of: "
                     f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
                 )
-            node = self._create_entity(
-                "Subject", _entity_name_id("Subject", name),
-                _entity_door_props("subjectKind", name, props),
-                "SubjectAdded", is_episodic=is_episodic)
+            # ⛔ #3590 review (finding 1): resolve AND write under ONE lock.
+            # `resolve_or_mint` only closes the check-then-act window if the
+            # write that makes the holder visible happens before the lock is
+            # released — otherwise two threads both see zero live holders, both
+            # mint, and both write (two live carriers of one name, which then
+            # create-poisons the name). Same shape as the source merge lock
+            # (`_source_merge_locks` + `create_source`).
+            from .entity_identity import entity_create_lock
+            with entity_create_lock("Subject", name):
+                node = self._create_entity(
+                    "Subject",
+                    self._entity_identity_for("Subject", name,
+                                              explicit_id=_server_id),
+                    _entity_door_props("subjectKind", name, props),
+                    "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
-            node = self._create_entity(
-                "Object", _entity_name_id("Object", name),
-                _entity_door_props("objectKind", name, props),
-                "ObjectRegistered", is_episodic=is_episodic)
+            from .entity_identity import entity_create_lock
+            with entity_create_lock("Object", name):
+                node = self._create_entity(
+                    "Object",
+                    self._entity_identity_for("Object", name,
+                                              explicit_id=_server_id),
+                    _entity_door_props("objectKind", name, props),
+                    "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
             # stripped HERE, at the Event door, because ``event`` is the
@@ -37859,7 +39272,40 @@ class TortoiseSDK:
                     # journaled in `targets` and all of them are written, so an
                     # arbitrary backend row order can never be pinned (review
                     # P2-3 at 2b9626072).
+                    # ⛔ #8398: the CASCADE decides the arm — it is the live
+                    # semantics (`_ABOUT_NAME_CASCADE`, first match wins) and it
+                    # is rel-IGNORING on purpose, so the record pins the arm the
+                    # cascade answered rather than the `rel` the caller asked
+                    # for. Registering under the CALLER'S DECLARED label first
+                    # (what this loop used to do) made the cascade's answer
+                    # trivially that label: `create_event(aboutObject="Shared")`
+                    # against three same-name `:Event` carriers minted a brand
+                    # new `:Object` and wired it, so the three carriers
+                    # `origin/main` wired — and which the cascade resolves — got
+                    # no edge at all (#8398 pinned: measured `set()` vs three
+                    # carriers). A registration therefore may NEVER run ahead of
+                    # the resolution; it is the producer duty for what the
+                    # cascade could not answer, applied below.
                     _link, _internal = proj.resolve_about_link(_val)
+                    # ⛔ NO REGISTRATION HERE (#3590 D1, RULED 2026-10-26).
+                    # The cascade falling through to the Subject stub means the
+                    # name resolved to NO holder — i.e. the record MENTIONS a
+                    # name nobody registered. D1: a mention is the LINK, never a
+                    # creation, so "an unresolvable mention drops its link,
+                    # records the miss, and mints nothing". An earlier commit of
+                    # this branch registered the stub here (a `SubjectAdded` per
+                    # mention); that is the minting arm D1 forbids — it grows the
+                    # entity set and the journal out of prose.
+                    #
+                    # The link SHAPE stays exactly as the fallback returned it —
+                    # `how:"id"` with the NAME as `targets`,
+                    # `target_label:"Subject"`, the name as `resolve_key` and
+                    # `mint_if_absent: True` — and `_internal` stays None, so
+                    # `wire_about_link` resolves-or-mints the name-keyed stub by
+                    # the name the record pins, IDENTICALLY live and on replay.
+                    # That fold-side construction (`_mint_subject_stub`) is the
+                    # mint #8914 filed as a bug; it is open and out of scope
+                    # here, and moving it is that issue's work, not this door's.
                     if _link is not None:
                         about_links.append(_link)
                         _about_writes.append((_link, _internal))
@@ -37867,6 +39313,27 @@ class TortoiseSDK:
                     # an unresolvable HANDLE wires NO edge (#3586) — nothing to
                     # journal, but the door still has to report it.
                     _about_writes.append((_rel, _val))
+            # ── #3590 D1 (RULED): the MENTIONS this record carries ────────
+            # `subject`, `object` and every `uses[]` name are MENTIONS, and a
+            # mention does not create an entity: the entity set grows only from
+            # an explicit registration (`create_entity`) that mints the id. So
+            # this door mints NOTHING for them and journals nothing — the fold
+            # resolves each name against the graph's live holders and, where the
+            # record names something nobody registered, drops that one link and
+            # records it as the EXEMPT `unfolded-mention` (live and replay run
+            # the same resolver, so both drop the same link).
+            #
+            # ⛔ An earlier commit of this branch registered them here, calling
+            # it the "D9 producer duty". That was the minting arm D1 forbids, and
+            # it made `create_event(subject="X")` create X and append a
+            # `SubjectAdded` — the "non-referential mention promoted to a node"
+            # defect `docs/architecture/STORAGE-ARCHITECTURE.md` records.
+            # ⚠️ What a caller now sees: a name that was never registered wires
+            # NO `performs` / `produces` / `uses` edge. Register the entity
+            # explicitly (``create_entity``) when the edge is wanted — that is
+            # the same degrade ``EventAPI.add_event`` has always had, and it is
+            # written down in ``entity_identity.resolve_fold_name`` and in the
+            # `unfolded-mention` exemption.
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
                 "eventStatus": "scheduled", **props}, "EventRecorded",
@@ -38600,7 +40067,13 @@ class TortoiseSDK:
             # The SDK read is BOUND to `SESSION_READ_FIELDS` by the parity
             # test, so this lane cannot serve a different vocabulary from the
             # hosted endpoint it mirrors.
-            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
+            # #10000 review P2: APPENDED (sess[12]) and NOT served — the turn
+            # read's id-space TAIL witness. `turn_count` is a WINDOW length, so
+            # a refused HIGHEST turn is invisible to it; `turn_max_index` is the
+            # mark the capture MERGE writes and the fold restores, so the record
+            # read can see a missing tail.
+            "s.client_captured_at, s.client_captured_at_source, s.capture_lane, "
+            "s.turn_max_index",
             params={"sid": session_id},
         ).result_set
         if not rows:
@@ -38612,18 +40085,123 @@ class TortoiseSDK:
             "RETURN count(p)",
             params={"sid": session_id},
         ).result_set[0][0]
-        turn_rows = proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
-            "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
-            params={"sid": session_id},
-        ).result_set
-        turn_points = []
-        for tr in turn_rows:
-            role, body = _capture_turn_role_text(tr[1] or "")
-            turn_points.append({
-                "id": tr[0], "role": role, "content": body,
-                "created_at": tr[2],
-            })
+        # #10000: the turns are RECORD rows once the record holds them, so this
+        # read asks the SAME question the capture writer asks — and reads the
+        # record through the SAME door the hosted endpoint uses
+        # (`record_read.session_turns`, which scopes the connection and reports
+        # whether the record ANSWERED). Without this arm the SDK's own detail
+        # read walked `CONTAINS -> Point {pointKind:'event'}` and served
+        # `turn_points: []` for every captured session on an armed deployment —
+        # the endpoint and the SDK twin disagreeing about one session, which
+        # #3557's parity contract exists to prevent.
+        turn_points: list[dict] = []
+        from tortoise.record_read import (
+            TurnAnswer,
+            merge_turn_payloads,
+            served_turn_count,
+            turn_payloads,
+        )
+        from tortoise.record_serve import RecordUnavailable
+
+        # The id-space high-water mark (sess[12], the `:Session` read above) is
+        # the TAIL witness the record's own `turn_count` cannot be: `None` when
+        # this session predates the mark, which makes the tail check abstain
+        # (#10000 review P2).
+        # ⛔ THE SECOND HALF OF THE ANSWER IS WHETHER THE READ FAILED (#10021
+        # review P2). `_record_turn_answer` returns `None` for three different
+        # states — no record tenant, a write-door refusal, and a read that
+        # RAISED — and only the last one leaves the body publishing one store's
+        # count over another store's list. Handing that state to
+        # `served_turn_count` as `read_failed` is what makes this door refuse
+        # where the hosted door refuses; without it the outage arm served
+        # `{"turns": N, "turn_points": []}` with a 200.
+        _answer, _read_failed = self._record_turn_answer(
+            session_id,
+            turn_max_index=sess[12] if isinstance(sess[12], int) else None)
+        if _answer is not None and _answer.answered:
+            turn_points = turn_payloads(_answer.turns)
+        else:
+            if _answer is not None:
+                # Reachable record, no answer for these turns, and the Session
+                # above states a count: a divergence between the two stores.
+                # Never silence, and never an empty transcript while another
+                # store holds one.
+                #
+                # ⛔ UNLESS THE RECORD NEVER SPOKE (#10021 review P2):
+                # `NO_ACCOUNT` is a session captured BEFORE the record was armed
+                # — no narrative row, no turn rows — which is the expected
+                # migrate-phase state and the largest population on a
+                # transitional deployment. Narrating it at WARNING is what makes
+                # a REAL divergence indistinguishable from healthy traffic. The
+                # union merge below is identical either way.
+                if _answer.kind == TurnAnswer.NO_ACCOUNT:
+                    _logger.debug(
+                        "session %s: the record holds no account of this "
+                        "session (%s) — serving the graph copy, which is the "
+                        "pre-arming state and not a divergence",
+                        session_id, _answer.reason)
+                else:
+                    _logger.warning(
+                        "session %s: the record did not answer for its whole "
+                        "transcript (%s) — merging the graph copy for the turns "
+                        "it does not hold", session_id, _answer.reason)
+            turn_rows = proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+                "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
+                params={"sid": session_id},
+            ).result_set
+            graph_points: list[dict] = []
+            for tr in turn_rows:
+                role, body = _capture_turn_role_text(tr[1] or "")
+                graph_points.append({
+                    "id": tr[0], "role": role, "content": body,
+                    "created_at": tr[2],
+                })
+            # ⛔ A SHORT record answer is not an answer (#10000 review P0): the
+            # writer's store decision is per TURN while this read's is per
+            # SESSION, so a mid-capture refusal leaves part of the transcript in
+            # each store. `merge_turn_payloads` serves the UNION (the record's
+            # rows first, then the graph's for the ids it does not hold) — the
+            # same rule the hosted door applies, from the ONE definition.
+            turn_points = (
+                merge_turn_payloads(
+                    _answer, graph_points,
+                    # The residue filter: a row above the session's live
+                    # id-space end is not its transcript, and this is the door
+                    # that would otherwise SERVE it (#10021 review P3).
+                    turn_max_index=(sess[12] if isinstance(sess[12], int)
+                                    else None))
+                if _answer is not None else graph_points)
+        # ⛔ THE TWO NUMBERS IN THIS BODY MUST NOT CONTRADICT EACH OTHER
+        # (#10021 review P2). `turns` used to be the `:Session`'s `turn_count`
+        # (a WINDOW length) while `turn_points` is the union the record read and
+        # the graph copy produce, so on a split store the body served
+        # `{"turns": 4, "turn_points": [2 rows]}` with no error — the
+        # truncated-result-indistinguishable-from-complete shape #8447 forbids,
+        # one arm over from the failure path the hosted door already guarded.
+        # The rule is ONE shared definition (`record_read.served_turn_count`),
+        # applied here exactly as the hosted endpoint applies it, so the two
+        # doors cannot disagree about one session (#3557's parity contract).
+        #
+        # ⛔ `read_failed` IS PART OF "APPLIED EXACTLY AS THE HOSTED DOOR"
+        # (#10021 review P2). The hosted door passes it
+        # (`hosted_api.py`, `read_failed=_record_read_failed`) and this door did
+        # not, so the SAME rule answered differently on the one state it exists
+        # for: on a record read that RAISED, `answer is None` + `read_failed`
+        # True is "consulted, could not be verified" (refuse unless the graph
+        # copy agrees with the session's count), while the default `False` reads
+        # it as "never consulted" (an unarmed deployment) and publishes the
+        # session's count over whatever the graph holds.
+        served_turns, _turns_refusal = served_turn_count(
+            answer=_answer, served=len(turn_points), declared=sess[2],
+            read_failed=_read_failed)
+        if _turns_refusal:
+            _logger.warning("session %s: %s", session_id, _turns_refusal)
+            # An EXPLICIT error, never a shorter transcript served as complete:
+            # a new reply field would widen a public wire surface, so the
+            # refusal is the sanctioned shape (`#8447`: "an explicit error, or a
+            # reply field that says so").
+            raise RecordUnavailable(f"session {session_id}: {_turns_refusal}")
         ext_rows = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
             "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
@@ -38650,7 +40228,7 @@ class TortoiseSDK:
         return {
             "id": sess[0],
             "created_at": sess[1],
-            "turns": sess[2],
+            "turns": served_turns,
             "actor_user_id": sess[3],
             "actor_display": sess[3],
             "harness": sess[4],
@@ -38674,6 +40252,123 @@ class TortoiseSDK:
             "extracted_points": extracted_points,
             "source": source,
         }
+
+    def _record_turn_answer(self, session_id: str, *,
+                            turn_max_index: int | None = None
+                            ) -> tuple[Any, bool]:
+        """``(this session's turns AS THE RECORD ANSWERS THEM, read_failed)``.
+
+        The first element is a `record_read.TurnAnswer` — or ``None`` — imported
+        inside this method because the record's read path is not on this
+        module's import surface.
+
+        The SDK half of #10000's read switch: the hosted endpoint and this
+        client are the two surfaces a customer reads a transcript from, and both
+        must consult the store the writer actually used. A ``None`` answer means
+        the caller then serves the graph, which is where the capture writer put
+        the turns in exactly that case.
+
+        ⛔ TWO RETURNED HALVES, because ``None`` ALONE CONFLATES TWO STATES
+        (#10021 review P2). "The record was not consulted" (no tenant, or the
+        write door refuses this capability — an unarmed deployment, where the
+        graph IS the store and its copy is the transcript) and "the record was
+        consulted and the read RAISED" (where the graph is a cache of unknown
+        agreement) are different facts about the same ``None``, and the caller
+        reconciles the body's two numbers against them differently: the first
+        has one store, the second must prove the copy complete. The flag is
+        passed to `record_read.served_turn_count` as ``read_failed`` — the arm
+        the hosted door already supplies — so the parity contract (#3557) holds
+        on the failure state too, not only on the success one.
+
+        ⛔ IT ASKS THE RECORD'S CAPABILITY, NOT THIS PROCESS'S JOURNAL (#10000
+        review P2). The question "is the record where this session's turns are"
+        is about the process that CAPTURED the session, and this is a READ door:
+        a journal-less SDK (the documented embedded/dev lane, and the shape of any
+        reader that is not the writer) may be reading a session the hosted lane
+        captured WITH a journal. Asking its own journal answered a write-side
+        question about the wrong process — `None`, the graph — and the graph holds
+        no turn node, because the record took them: an empty transcript for a
+        captured session, mutely. So the gate is the record's capability for this
+        tenant (`live_write_refusal`: armed DSN + tenant; the WRITE breaker is
+        deliberately not consulted — see its `consult_breaker`) and
+        `session_turns.answered` is the AUTHORITY on whether this session's turns
+        are in there. A record that is unarmed — the graph-only lane — is still
+        answered `None` with no round trip, and a record that stays silent falls
+        back to the graph through the caller's existing `not answered` arm.
+        (Asking is not the same as trusting: the durability half is a WRITE
+        precondition and lives in `_write_capture_turns`, where it decides the
+        store.)
+
+        ``turn_max_index`` is the caller's `:Session` read (sess[12]), passed
+        straight through: the record's `turn_count` is a WINDOW length and
+        cannot witness a missing TAIL, so the id-space high-water mark is the
+        only datum that can, and the door that already read it supplies it
+        (#10000 review P2).
+
+        Deliberately fail-soft: a record that raises must not blank a transcript
+        the graph still holds, and the exception is logged rather than swallowed.
+        """
+        from tortoise.record_read import session_turns
+        from tortoise.record_serve import open_record
+        from tortoise.record_writer import live_write_refusal, record_tenant
+
+        tenant = self._record_tenant or record_tenant()
+        if tenant is None:
+            # No record tenant: the same SDK's capture is refused `no_tenant`
+            # and writes its turns to the graph, so the graph is the answer. NOT
+            # a read failure — there is nothing to be unverifiable against.
+            #
+            # ⚠️ RECORDED RESIDUAL (#10021 review N2, P3) — the justification
+            # above is a fact about the WRITING process, and this is a READ door:
+            # on a multi-tenant reader (`record_tenant()` is None by design
+            # without a declaration) reading a session whose turns the HOSTED
+            # writer put in the record, this arm answers "the graph is the
+            # store" and the caller serves `turn_points: []` beside the
+            # session's own `turns: N` — the #8447 self-contradicting body —
+            # SILENTLY. The narrowest true statement is that the tenant is
+            # unknowable here, which argues for a WARNING on this arm rather
+            # than a graph answer; not done in #10000 because the arm is
+            # unreachable whenever the SDK is the writer, so it cannot be
+            # measured from this branch. Strictly better than `main` either way
+            # (which never consulted the record at all).
+            return None, False
+        # `durable=True` is this read door's statement about the WRITER's side:
+        # whether the capturing process could journal is not observable here, and
+        # the record's own answer is what decides. A refusal (unarmed, malformed
+        # DSN) is the graph-only lane and costs no round trip.
+        #
+        # ⛔ `consult_breaker=False` — A READER MUST NOT INHERIT THE WRITE
+        # BREAKER (#10000 review P1). `circuit_open` is a cost bound on the write
+        # path, not a fact about where this session's turns are: asked with it,
+        # an armed deployment whose record holds the turns answered `None` here
+        # for 60 s after one failed capture connect, the caller served the
+        # graph's (non-existent) turn nodes, and its `_answer is not None`
+        # WARNING never fired — a silently empty transcript. Asking costs one
+        # bounded connect per read, and a failure is logged below.
+        if live_write_refusal(durable=True, tenant=tenant,
+                              consult_breaker=False) is not None:
+            # Same shape as the no-tenant arm: the record is not this SDK's
+            # store here, so its absence is not an unverifiable read.
+            return None, False
+        org_id, graph_id = tenant
+        conn = None
+        try:
+            conn = open_record()
+            return session_turns(conn, org_id=org_id, graph_id=graph_id,
+                                 session_id=session_id,
+                                 turn_max_index=turn_max_index), False
+        except Exception:  # noqa: BLE001, RUF100
+            _logger.warning(
+                "session %s: the record turn read failed — serving the graph "
+                "copy for this read", session_id, exc_info=True)
+            # ⛔ `True`, NOT a bare `None`: the record holds these turns and
+            # could not be asked, so the graph copy is a CACHE whose agreement
+            # with the session's count is the only evidence it is complete.
+            return None, True
+        finally:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
 
     def index_file(self, path: str,
                    file_type: str | None = None,   # "agent_session"|"meeting"|"doc"|None(auto)
@@ -40708,17 +42403,61 @@ class TortoiseSDK:
                     repo = None
                     issue_number = None
                     url = None
-                if not oid:
-                    # Deterministic hash (builtin hash() is salted per-process →
-                    # would create duplicate Objects on every run).
-                    oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
                 okind = "pr" if key == "prs" else "issue"
+                if not oid:
+                    # #3590: NEVER derive an id from the name. The old
+                    # `{kind}_{sha256(name)[:8]}` was a name-derived identity:
+                    # a rename minted a second Object and a delete+re-create
+                    # resurrected the first one. Resolve the single LIVE holder
+                    # (an idempotent re-index) or MINT an opaque id — and route
+                    # it through the SDK create door, so the registration is
+                    # JOURNALED and `rebuild_all` reproduces the node (the raw
+                    # MERGE below journals nothing).
+                    #
+                    # #3590 review P1: `AmbiguousEntityName` is NOT an error
+                    # here — a name held by two or more LIVE entities is
+                    # the legal same-name coexistence (D2/#8864), and this is a
+                    # REFERENCE-wiring loop, not a create. Letting the create
+                    # door's refusal escape aborted the whole write
+                    # (`ingest_corpus`/`_index_sessions` mark the file complete
+                    # and then raise, and `_session_event_write` raises between
+                    # the live Event MERGE and its journal record — a live node
+                    # with no durable record). The documented contract of this
+                    # method is "a resolution failure is logged at debug";
+                    # skipping the item is that contract.
+                    from .entity_identity import (
+                        AmbiguousEntityName,
+                        entity_create_lock,
+                        resolve_or_mint,
+                    )
+                    try:
+                        # ⛔ #3590 review (finding 1): resolve AND write under ONE
+                        # lock, or the empty-holder check is a TOCTOU window —
+                        # two writers both mint and the name ends up with two
+                        # live carriers. Same critical section the SDK create
+                        # door uses.
+                        with entity_create_lock("Object", name):
+                            oid, _created = resolve_or_mint(
+                                proj.g, "Object", name)
+                            self._create_entity(
+                                "Object", oid,
+                                {"name": name, "objectKind": okind,
+                                 "repo": repo,
+                                 "issue_number": issue_number,
+                                 "url": url},
+                                "ObjectRegistered")
+                    except AmbiguousEntityName as exc:
+                        _logger.debug(
+                            "_connect_issue_objects: skipping reference %r — "
+                            "%s", name, exc)
+                        continue
                 # #3574: store the name VERBATIM — never `name[:200]`.
                 #
-                # `name` IS the Object's identity: `_upsert_object` MERGEs on
-                # it, `_fold_object_superseded` MATCHes it, and the canonical
-                # id (`_entity_name_id` → `obj-<sha26(name)>`) is derived from
-                # the FULL name. This was the only writer applying a 200-char
+                # `name` is the Object's natural key and the value every
+                # by-name reader matches (#3590 demoted it from identity to
+                # natural key; it is no longer an id input, and the derived
+                # `obj-<sha26(name)>` id is retired). This was the only writer
+                # applying a 200-char
                 # cap, so a GitHub title > 200 chars (the session-indexing
                 # lane's stock input — titles run to 256) landed under a name
                 # no other name-keyed writer or reader could match:
@@ -40746,10 +42485,14 @@ class TortoiseSDK:
                     # the doors above, one layer out. The kind belongs to the
                     # fold's ON CREATE arm; a re-index refreshes the fields it
                     # legitimately owns and touches nothing else.
+                    # #3590: `o.name` is ON CREATE only. A name is a mutable
+                    # natural key, so moving it is a JOURNALED rename
+                    # (`EntityMutated op=rename`) — a connector re-index must not
+                    # rewrite it live-only, which would replay differently.
                     "MERGE (o:Object {id:$oid}) "
                     "ON CREATE SET o.objectKind=$okind, o.name=$name, o.repo=$repo, "
                     "o.issue_number=$issue_number, o.url=$url "
-                    "ON MATCH SET o.name=$name, o.repo=$repo, "
+                    "ON MATCH SET o.repo=$repo, "
                     "o.issue_number=$issue_number, o.url=$url",
                     params={"oid": oid, "name": name, "okind": okind,
                             "repo": repo, "issue_number": issue_number, "url": url},

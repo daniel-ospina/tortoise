@@ -20,10 +20,13 @@ from tortoise.log import (  # noqa: E402, RUF100
     torn_record_may_revive_state,
 )
 
-# #9555/R7: read the narrative carrier's type off the registry, so this file's
-# exact-membership pin cannot drift from the constant the producer emits.
+# #9555/R7 / #10017 R2: read the carriers' types off the registry, so this
+# file's exact-membership pin cannot drift from the constants the producer emits.
 from tortoise.record_projection import (
     NARRATIVE_RECORD_TYPE as _NARRATIVE_RECORD_TYPE,
+)
+from tortoise.record_projection import (
+    TURNS_RECORD_TYPE as _TURNS_RECORD_TYPE,
 )
 
 
@@ -582,12 +585,22 @@ def test_torn_tail_allowlist_holds_no_destructive_type():
         # one is a graph no-op. Read off the registry rather than re-typed, so
         # the literal cannot drift from the constant the producer emits.
         _NARRATIVE_RECORD_TYPE,
+        # #10017 R2: §9.1's RAW-TURN carrier — the same `_NO_PROJECTION_FOLD`
+        # no-op, and the reason it MUST be tolerated rather than left to the
+        # default: the polarity here is "a NEW type defaults to REFUSED", so a
+        # capture cut off mid-line would otherwise block `rebuild`,
+        # `recover_from_log` and `backup.restore` on an intact journal.
+        _TURNS_RECORD_TYPE,
     }) == TORN_TAIL_HARMLESS_EVENT_TYPES
     # Named terminal / removal / CLEARING types that would resurrect state if
     # tolerated. PointInvalidated / PointSuperseded are EP-terminal (a dropped
     # one lets a withdrawn claim vote); EntityMutated op=delete and PointsMerged
     # hard-delete; PointRevised / OperatorAnnotated carry a payload null that
     # CLEARS an authoritative property.
+    #
+    # ⛔ #10017 R1: the graph-tier turn removal is an `EntityMutated` op=delete
+    # (already in this set), which is why the shape this PR adds is on the
+    # DESTRUCTIVE side: a tolerated torn delete is a resurrection.
     destructive = {
         "PointRetracted", "PointSuperseded", "PointInvalidated",
         "PointsMerged", "EntityMutated", "ObjectSuperseded",
