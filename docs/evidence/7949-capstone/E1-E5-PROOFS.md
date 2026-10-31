@@ -250,7 +250,8 @@ and removing the file it replaces. This note is the correction that rule permits
 # the suite gate, not a dependency of this test.
 TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_7949_e5_section10_writeback.py -q -p no:cacheprovider
 
-# the pre-existing proofs cited above
+# the census's SURVIVING pins (four of nineteen; the other fifteen went with the
+# deleted capture door — see the E3 rows above), plus the pre-existing scorer proofs
 TORTOISE_TEST_CARVE_OUT=1 \
 uv run pytest tests/test_e1_e2_measurement.py::test_the_shipped_arm_moves_the_share_by_exactly_zero \
               tests/test_extractor_v2.py::TestMasterList::test_operational_value_carve_out_surfaces \
