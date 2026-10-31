@@ -18,6 +18,7 @@ import contextlib
 import contextvars
 import logging
 import math
+import os
 import threading
 import time
 
@@ -29,6 +30,7 @@ from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
 from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
     import_sentence_transformer,
     import_tfidf_vectorizer,
+    import_torch,
 )
 from .ids import content_hash
 
@@ -101,6 +103,150 @@ _MAX_JOURNALLED_VECTOR_LEN = 8192
 #: instead, because ``EmbedderUnavailableError`` interpolates ``last_error``
 #: into its own message and storing that re-nests the whole prior chain.
 _MAX_LAST_ERROR_LEN = 500
+
+
+# ── #10296: the embedder's intra-op thread pin ──────────────────────────────
+#
+# torch's intra-op pool defaults to ``nproc``, and for the calls THIS module
+# makes — a handful of short texts, one call per point/turn — that default is
+# not merely wasteful, it is 100x+ SLOWER, because the pool's barrier/sync cost
+# dominates a forward pass this small. Measured 2026-10-31 on an 8-core x86_64
+# box (a re-run of the benchmark #10296 carries), BAAI/bge-small:
+#
+#     threads   one 29-char text   one 32 x 200-word batch
+#     1         45.3 ms           21.05 s
+#     2         224.3 ms          18.47 s
+#     4         2874.8 ms         24.05 s
+#     8         5715.5 ms         17.04 s   <- torch's default here
+#
+# So the single-thread pool is the best or near-best choice in BOTH regimes
+# (within ~20% of the fastest bulk time, and 126x faster on the short call the
+# write path actually makes), and the cost stops scaling with how busy the host
+# is — which is the property that failed CI: on the contended self-hosted pool
+# one embedding cost seconds, every `tests/test_capture_session.py` item ran
+# 40-90s instead of ~0.5s, and the REQUIRED `test-slow (e)` leg spent its whole
+# 40m watchdog inside the embedding forward pass with 120 of 857 nodeids done
+# (#10296; the same kill on main at run 40796571501).
+#
+# A bulk lane (backfill, longmem eval) can still widen the pool with
+# ``TORTOISE_EMBED_THREADS`` — the pin is a DEFAULT, not a ceiling.
+EMBED_THREADS_ENV = "TORTOISE_EMBED_THREADS"
+#: The measured default. ONE thread; see the table above for why not ``nproc``.
+EMBED_DEFAULT_INTRA_OP_THREADS = 1
+#: BLAS-level siblings of the intra-op pool. ``torch.set_num_threads`` covers
+#: the intra-op pool in THIS process; these cover the guard/child processes
+#: (``tests/test_embedded_concurrency.py`` relies on the same trio, #10333) and
+#: any library that sizes its own pool from the environment at import time.
+_EMBED_THREAD_ENV_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+#: What was actually applied, for :meth:`EmbeddingModel.status` — #10296 asks
+#: for the pin to be OBSERVABLE so a later "why is CI slow" investigation does
+#: not have to rediscover it.
+_embed_thread_pin: dict | None = None
+
+
+def resolve_embed_threads() -> tuple[int, str]:
+    """``(threads, source)`` — the operator's pin, else the measured default.
+
+    ``TORTOISE_EMBED_THREADS`` is read per call (not frozen at import) so a
+    test, an operator or a bulk lane can retarget it; an unparseable or <1
+    value is REFUSED with a warning and falls back to the default rather than
+    silently disabling the pin (a ``set_num_threads(0)`` raises deep inside
+    torch and would present as a load failure).
+    """
+    raw = os.environ.get(EMBED_THREADS_ENV)
+    if raw is not None and raw.strip():
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            value = 0
+        if value >= 1:
+            return value, "env"
+        logger.warning(
+            "%s=%r is not a positive integer — using the measured default of %d"
+            " thread(s)", EMBED_THREADS_ENV, raw, EMBED_DEFAULT_INTRA_OP_THREADS)
+    return EMBED_DEFAULT_INTRA_OP_THREADS, "default"
+
+
+def pin_embed_threads() -> dict:
+    """Pin torch's intra-op pool (and its BLAS env) ONCE, at embedder init.
+
+    Returns ``{"threads", "source", "previous", "env_vars"}`` (``previous``
+    is ``None`` when torch could not be imported, which is the designed
+    zero-dependency path — the pin is then recorded as not applied rather than
+    reported as applied). Never raises: a load that cannot pin its threads must
+    still load.
+
+    Implemented with ``torch.set_num_threads`` rather than environment alone
+    because torch is already imported by the time sentence-transformers is
+    built, so the env is too late for THIS process's intra-op pool; the env is
+    still set (``setdefault``, so an operator's own value wins) for the BLAS
+    trees and for any child process spawned later.
+
+    ⛔ This call pins the LOAD thread, which is not where the forward passes
+    run — see :func:`ensure_embed_threads` for the thread-locality trap and the
+    per-encode re-assert.
+    """
+    global _embed_thread_pin
+    threads, source = resolve_embed_threads()
+    previous: int | None = None
+    applied = False
+    try:
+        torch = import_torch()
+        previous = int(torch.get_num_threads())
+        if previous != threads:
+            torch.set_num_threads(threads)
+        applied = True
+    except Exception as e:  # noqa: BLE001, RUF100 — a pin must never fail a load
+        logger.info("embedder intra-op thread pin skipped (torch unavailable): %s", e)
+    env_set: list[str] = []
+    for var in _EMBED_THREAD_ENV_VARS:
+        if os.environ.get(var) in (None, ""):
+            os.environ[var] = str(threads)
+            env_set.append(var)
+    record = {
+        "threads": threads,
+        "source": source,
+        "previous": previous,
+        "applied": applied,
+        "env_vars": env_set,
+    }
+    _embed_thread_pin = record
+    if applied:
+        logger.info(
+            "embedder intra-op threads pinned to %d (was %s, source=%s) — "
+            "%s overrides for a bulk lane (#10296)",
+            threads, previous, source, EMBED_THREADS_ENV)
+    return record
+
+
+def embed_thread_pin() -> dict | None:
+    """The last applied pin, or ``None`` before the embedder was loaded."""
+    return _embed_thread_pin
+
+
+def ensure_embed_threads() -> None:
+    """Re-assert the pin on THIS thread, immediately before a forward pass.
+
+    ⛔ ``torch.set_num_threads`` is **not** fully process-global: a thread that
+    has ever set its own count keeps it, and a new thread reads the value that
+    was global when it was created. Measured on torch 2.x — a worker thread's
+    ``set_num_threads(1)`` is visible to itself while the main thread still
+    reads its own ``2``. The load runs on a WORKER thread
+    (``EmbeddingModel.__init__``), so pinning only there is exactly the kind of
+    "applied, but not where it matters" fix #10296 is about: the forward pass
+    runs on whichever thread calls ``encode``.
+
+    So every encode site calls this first. When the count already matches it is
+    two C calls and no-op; it never raises (a pin must never fail a write).
+    """
+    record = _embed_thread_pin
+    threads = record["threads"] if record else resolve_embed_threads()[0]
+    try:
+        torch = import_torch()
+        if int(torch.get_num_threads()) != threads:
+            torch.set_num_threads(threads)
+    except Exception as e:  # noqa: BLE001, RUF100 — never fail an encode
+        logger.debug("embedder thread pin not re-asserted on this thread: %s", e)
 
 
 def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
@@ -700,6 +846,11 @@ class EmbeddingModel:
             "last_error": cls._last_error,
             "failure_kind": cls._last_failure_kind,
             "cooldown_remaining_s": round(remaining, 3),
+            # #10296: the intra-op pin the load applied (``None`` before any
+            # load attempt). Observable on purpose — a "why is this host slow"
+            # investigation reads it here instead of rediscovering torch's
+            # default, which cost a required slow leg its whole watchdog.
+            "threads": embed_thread_pin(),
         }
 
     @classmethod
@@ -730,6 +881,14 @@ class EmbeddingModel:
         result: dict = {"model": None}
 
         def _load():
+            # #10296: pin the intra-op pool BEFORE the encoder is built or
+            # asked to forward. Inside its own try/except (``pin_embed_threads``
+            # never raises, but a hostile monkeypatched module must not turn a
+            # thread pin into a load failure — the load is what matters).
+            try:
+                pin_embed_threads()
+            except Exception:  # noqa: BLE001, RUF100
+                logger.debug("embedder thread pin failed", exc_info=True)
             try:
                 SentenceTransformer = import_sentence_transformer()
                 result["model"] = SentenceTransformer(
@@ -816,6 +975,7 @@ class EmbeddingModel:
         """
         if self._model is None:
             return None
+        ensure_embed_threads()
         return self._model.encode(
             texts, batch_size=batch_size, show_progress_bar=show_progress_bar)
 
@@ -873,6 +1033,7 @@ def compute_embeddings(
         return [None] * len(texts)
     try:
         _t0 = time.perf_counter()
+        ensure_embed_threads()
         vecs = model.encode(truncated)
     except Exception:
         # An encode that RAISED produced no model work, so it is counted as
@@ -1107,6 +1268,7 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
         model = None
     if model is not None:
         try:
+            ensure_embed_threads()
             vecs = model.encode(texts, show_progress_bar=False)
             if vecs is not None and len(vecs) > 0:
                 return np.asarray(vecs, dtype=np.float64), False
