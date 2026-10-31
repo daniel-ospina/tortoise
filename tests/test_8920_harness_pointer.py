@@ -132,6 +132,16 @@ HELPER = "quiesce_testclient_background_work"
 CONSUMER_FIXTURES: dict[str, tuple[str, ...]] = {
     "test_export_delete.py": ("sb_client", "reg_client"),
     "test_pack_state.py": ("supabase_client",),
+    # #10067 CI: `sel_client` seeds the registry and then asserts on it, so it
+    # is the criterion above in its strongest form — EXCLUSIVE OWNERSHIP of the
+    # store the entry's armed sweeps also write. It was the one unquiesced
+    # `TestClient(app)` entry in the packs family (`test_pack_state.py`'s
+    # sibling fixture already applied the seam), and the cost was measured: a
+    # `PUT /v1/graphs/{graph_id}/packs` answered `{"detail":"Unknown
+    # organization"}` on PR #10199's `test (c)` with `hosted_api.py`
+    # byte-identical to `main`. Named here so losing the call reds this guard
+    # rather than silently returning that fixture to the #4816 1-in-N flake.
+    "test_pack_selection_by_graph.py": ("sel_client",),
     "test_writer_inventory.py": ("client",),
 }
 

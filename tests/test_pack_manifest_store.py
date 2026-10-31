@@ -36,6 +36,7 @@ from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
 from tortoise.hosted_api import app, get_current_org, get_current_user
 
 TEST_ORG_ID = f"team-{uuid.uuid4().hex[:8]}"
@@ -85,7 +86,7 @@ def client():
         # it adds the #1950 TORTOISE_DB_PATH pin + deterministic close of
         # _make_sdk anchors at exit (this file's local helper cleared neither).
         with patched_tortoise_sdk(db_path):
-            yield TestClient(app)
+            yield verdict_client(app)
 
 
 @pytest.fixture
@@ -96,7 +97,7 @@ def client_b():
         app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM_B)
         # #2127: shared helper (see client).
         with patched_tortoise_sdk(db_path):
-            yield TestClient(app)
+            yield verdict_client(app)
 
 
 def _team_sdk(org_id: str = TEST_ORG_ID):
@@ -342,7 +343,7 @@ class TestUploadEndpoint:
             # #2127: shared helper — the caller path arg is deliberately
             # dropped by the helper (documented); immaterial here (the 401
             # fires before any SDK construction).
-            c = TestClient(app)
+            c = verdict_client(app)
             r = c.post("/v1/packs/manifests",
                        json={"manifest_yaml": VALID_MANIFEST})
             assert r.status_code == 401
@@ -613,7 +614,7 @@ class TestUploadBodyCap:
         handler, detail "Internal server error") — byte-parity with the
         pre-fix request.json() path. raise_server_exceptions=False so the
         500 is returned, not re-raised (precedent: tests/test_hosted_api.py)."""
-        with TestClient(app, raise_server_exceptions=False) as tc:
+        with verdict_client(app, raise_server_exceptions=False) as tc:
             r = tc.post("/v1/packs/manifests", content=b"{not json")
         assert r.status_code == 500
         assert r.json()["detail"] == "Internal server error"
@@ -621,7 +622,7 @@ class TestUploadBodyCap:
     def test_upload_empty_body_500(self, client):
         """Empty body → 500 (json.loads(b"") raises JSONDecodeError), same
         as request.json() on the pre-fix path."""
-        with TestClient(app, raise_server_exceptions=False) as tc:
+        with verdict_client(app, raise_server_exceptions=False) as tc:
             r = tc.post("/v1/packs/manifests", content=b"")
         assert r.status_code == 500
         assert r.json()["detail"] == "Internal server error"
@@ -686,12 +687,12 @@ class TestIsolation:
             sdk_mod.TortoiseSDK.__init__ = _route_patch
             app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
             try:
-                c_a = TestClient(app)
+                c_a = verdict_client(app)
                 r = c_a.post("/v1/packs/manifests",
                              json={"manifest_yaml": VALID_MANIFEST})
                 assert r.status_code == 201, r.text
                 app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM_B)
-                c_b = TestClient(app)
+                c_b = verdict_client(app)
                 r_b = c_b.get("/v1/packs")
                 ns = [p["namespace"] for p in r_b.json()["packs"]]
                 assert "tenant-ops" not in ns, \
@@ -821,3 +822,52 @@ class TestRebuildDurability:
                 "p.status ORDER BY p.namespace").result_set)
         assert after_installs == before_installs, (
             "the real :PackInstall (source='custom') did not survive (#2814)")
+
+
+# ── #5049 / #8582: a load-dependent refusal is not this file's verdict ──────
+
+
+class TestVerdictContract:
+    def test_the_files_own_client_converts_the_wait_bound_refusal(
+            self, client, monkeypatch):
+        """A transport wait-bound refusal is a NON-ANSWER, not a product FAIL.
+
+        `POST /v1/packs/manifests` runs a real MERGE + activation behind
+        `WaitBoundMiddleware`, so on a loaded runner the 10 s transport wait
+        bound (`mcp_auth._TRANSPORT_WAIT_BOUND_S`, owner ruling 2026-09-20)
+        refuses the request. Read by a plain client that refusal lands in the
+        caller's own `assert 504 == 201`, which is a FAIL that says nothing
+        about the code under test (#5049 rule 1) — measured on PR #10199's CI:
+        `test_tenant_a_pack_invisible_to_tenant_b` went red on a loaded
+        self-hosted leg while `tortoise/hosted_api.py` was byte-identical to
+        `main`. The `client` fixture's `verdict_client` seam converts it to the
+        contract's INCONCLUSIVE skip instead, so the verdict is a function of
+        the code and not of the host's load.
+
+        ⛔ The control half is what keeps this non-vacuous: the SAME request
+        through an unconverted `TestClient` returns the refusal, so the skip
+        below is the seam's doing and not the route's. Reverting the fixtures
+        to `TestClient` reds this pin on its `pytest.raises` arm.
+        """
+        from tortoise import mcp_auth
+        from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT
+
+        method, path = "POST", "/v1/packs/manifests"
+        assert (method, path) not in _TRANSPORT_WAIT_BOUND_EXEMPT, (
+            "the route is exempt from the bound, so this pin would prove "
+            "nothing about the seam")
+        monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+
+        # Control: the pre-fix shape — an unconverted client reads the refusal.
+        with TestClient(app) as raw:
+            refused = raw.post(path, json={"manifest_yaml": VALID_MANIFEST})
+        assert refused.status_code == 504, refused.text
+        assert refused.json() == {
+            "detail": mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE}
+
+        # The converted seam this file's fixtures build: INCONCLUSIVE, not FAIL.
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            client.post(path, json={"manifest_yaml": VALID_MANIFEST})
+        message = str(excinfo.value)
+        assert "INCONCLUSIVE [#5049]" in message
+        assert f"{method} {path}" in message

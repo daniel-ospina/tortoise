@@ -526,9 +526,11 @@ def check_registered(doc_text: str) -> list[str]:
 def _is_shallow_clone() -> bool | None:
     """Whether this checkout is shallow; `None` when git cannot say.
 
-    Local and cheap (no network, no lazy fetch) — called only on the path where
-    the ancestry probe already failed to resolve the object, to say WHY in the
-    report instead of blaming the document.
+    Local and cheap (no network, no lazy fetch) — called only on the ancestry
+    paths that need it: where the probe could not resolve the object (status
+    128, to say WHY in the report instead of blaming the document) and where it
+    answered "not an ancestor" (status 1, which a grafted graph can say about a
+    real ancestor — #10356).
     """
     try:
         proc = subprocess.run(
@@ -571,6 +573,21 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     git status at all, so it cannot be put in the status-1 (drift) channel — an
     operator told "the document and the tree disagree" on a slow clone is handed
     a wrong instruction about a correct document.
+
+    ⛔ **Status 1 is only DRIFT when this checkout can actually walk the
+    history** (#10356). A SHALLOW clone truncates the graph at its boundary, so
+    a commit that IS an ancestor can still come back "no" whenever its object
+    happens to be present (a deep-enough depth, a partial fetch, a pack that
+    carried it) while the commits between it and the tip are grafted away.
+    Measured in a real depth-1 clone of a 4-commit repo: with the target object
+    absent, `--is-ancestor` exits 128 ("Not a valid commit name"); after the
+    same object is fetched explicitly so it is present but unreachable under
+    the graft, the same call exits **1** with no error text at all. Reporting
+    that as drift redded the CI `test` job on a map that is correct (`test`
+    checks out at the default `fetch-depth: 1`; the REQUIRED `docs` job proves
+    the claim at `fetch-depth: 0`). So the shallow/absent-object test decides
+    the CHANNEL and git's status only decides within it: a shallow checkout
+    cannot adjudicate ancestry, whatever status it returns.
     """
     match = _FRONTMATTER_SHA.search(doc)
     if not match:
@@ -606,6 +623,24 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     except OSError as exc:  # pragma: no cover - git absent is a state error
         raise _state_error(f"git unavailable ({exc})") from exc
     if proc.returncode == 1:
+        # Status 1 is git's "no, not an ancestor" — but only a checkout that
+        # carries the history can say that. See this function's docstring:
+        # under a shallow graft a genuine ancestor answers 1 whenever its object
+        # is present, and scoring that as drift false-reds a correct map on
+        # every PR from a `fetch-depth: 1` job (#10356).
+        shallow = _is_shallow_clone()
+        if shallow:
+            return (
+                [],
+                [
+                    f"measured_at_commit {sha} cannot be verified here: git "
+                    f"answered 'not an ancestor', but this checkout is SHALLOW "
+                    f"(depth 1), where a genuine ancestor reports the same "
+                    f"status once its object happens to be present — the "
+                    f"REQUIRED `docs` job runs this check at fetch-depth: 0, "
+                    f"and that is where the claim is proved"
+                ],
+            )
         return ([f"measured_at_commit {sha} is not an ancestor of HEAD"], [])
     if proc.returncode != 0:
         # 128 = git does not HAVE the object. That says nothing about the
