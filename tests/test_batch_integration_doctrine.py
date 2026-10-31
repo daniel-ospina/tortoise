@@ -113,20 +113,22 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **111 such mutants
-measured at this head: 0 survive** (109 measured at ``c50628450``, plus the two this
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **117 mutants are
+measured across the rounds; 116 are killed** (109 measured at ``c50628450``, plus the two this
 round added) — the two this round added are the omitted
 ``ci-introduced-failure`` member and a fence that executes the SHARED instance as
 the lane, each killed by its own check, measured — and the honest document is
 0 of 16 red.
 
-This round adds one more class to that list: an append-a-mover SUFFIX on any of
+Two more classes belong to that list: an append-a-mover SUFFIX on any of
 those lines — `git bisect reset <branch> && git switch main`, `git log --oneline -1
 ; git reset --hard main` — because naming the branch is not the same as HEAD ENDING
 on it, so the return and the window's benign lines must BE one command (no separator
 outside quoted spans). One survivor remains and is named rather than hidden:
 `git switch --detach -C <branch> "$PINNED"`, which git refuses outright (rc=128) and
-whose `|| exit 1` halts — a predicate-tightness miss, not a broken invariant.
+whose `|| exit 1` halts — a predicate-tightness miss, not a broken invariant. A
+separator appended to the poll line, the merge line, the after-merge log line or the
+revert line is the same class one fence over: every one of them must BE one command.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
 session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
@@ -266,7 +268,7 @@ def _suite_argv_ok(cmd: str) -> bool:
 #: reports a half-written log as a finished run.
 _POLL = re.compile(
     r'kill\s+-0\s+"\$\(cat\s+/tmp/[\w.-]+\)"\s+2>/dev/null\s+&&\s+echo\s+RUNNING'
-    r"\s+\|\|\s+echo\s+.+"
+    r"\s+\|\|\s+echo\s+(?:'[^']*'|\"[^\"]*\")\s*"
 )
 
 #: The dirty-tree subject: the command whose failure must reach the halt.
@@ -340,7 +342,14 @@ def _code(line: str) -> str:
     satisfiable by an annotation rather than by the command
     (``git switch -c … || exit 1   # use switch -C next time`` passed).
     """
-    return line.rstrip().split("#", 1)[0].rstrip()
+    stripped = line.rstrip()
+    # Cut at the first `#` that is OUTSIDE a quoted span. A quote-blind cut truncated
+    # the batch merge line at `-m "batch: merge PR ` — the `#<N>` inside the message —
+    # and every suffix after it was invisible to every predicate built on `_code`.
+    match = re.search(r"(?:^|\s)#", _unquoted(stripped))
+    if match:
+        stripped = stripped[: match.start()].rstrip()
+    return stripped
 
 
 def _halts(code: str) -> bool:
@@ -993,6 +1002,12 @@ def test_reverting_a_batch_culprit_passes_a_mainline() -> None:
     # reverted changes to the worktree and the INDEX without committing, so the
     # batch branch keeps the culprit while the "one more full suite run" — which
     # measures the worktree — certifies a tree the batch does not contain.
+    chained = [cmd for cmd in reverts if re.search(r"[;&|]", _unquoted(_code(cmd)))]
+    assert not chained, (
+        "the revert must be ONE command: a suffix such as `; git switch main` moves "
+        "HEAD after the revert commits, and the doctrine's next step — 'one more full "
+        f"suite run' — then measures a tree that is not the batch: {chained}"
+    )
     uncommitted = [
         cmd for cmd in reverts if re.search(r"(?<!\S)(?:-n|--no-commit|--squash)(?!\S)", cmd)
     ]
@@ -1147,6 +1162,21 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
         "rebuilding the batch must reset the branch to the pin; a one-shot create "
         f"leaves the following --no-ff merge on the wrong branch: {flat}"
     )
+
+    # EVERY line of the assembly fence must be ONE command (or end at a halt): a
+    # suffix on the merge line — `git merge … refs/tmp/pr-<N> && git switch main` —
+    # puts the second and every later merge on the operator's local `main`, so the
+    # gate measures a tree the branch does not contain. The merge line also carries a
+    # `#` inside its message, which a quote-blind `_code` used to hide.
+    for fence in batch:
+        for command in fence:
+            code = _code(command)
+            if _ends_at_halt(code) or _halts(code):
+                continue
+            assert not re.search(r"[;&|]", _unquoted(code)), (
+                "every line of the batch-assembly fence must be one command: a "
+                f"separator here lands later merges off the batch branch: {command}"
+            )
 
     # ...and the batch branch must still be the one checked out when the FIRST
     # merge runs. A HEAD-moving line carrying no `$PINNED` is invisible to the
