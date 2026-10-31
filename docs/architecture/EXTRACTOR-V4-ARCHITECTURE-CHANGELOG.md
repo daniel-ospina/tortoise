@@ -1289,3 +1289,44 @@ re-verified against the pin and left as written. ⚠️ **No guard requires the 
 a resolvable symbol** — the citation-rot guard resolves a cell only when one is there, which is why
 two symbol-less cells sat in a load-bearing table; the proposal to close that lives on the issue,
 not in this file.
+## 2026-10-30 — the compact render now carries the declared carve-out, and the compaction rule says what it may drop (`#9775`)
+
+§7 of the design document states the guarantee in one sentence — *"any mechanical filter MUST carry
+this carve-out, or it will drop the facts users care about most"* — and one render path did not. The
+compact render (`_render_master_compact`, reached through the documented `TORTOISE_EXTRACTOR_PROMPT=compact`
+opt-in) appended neither `STATE_VALUE_CARVE_OUT` nor the user-personal-state vocabulary the carve-out
+names, while `_render_master_core_only`, `_render_master_verbose` and S1's `_granularity_text` all
+render the carve-out; the two master renders additionally carry the vocabulary it names (S1's
+template never points at it). Two consequences were measured rather than inferred: the carve-out's
+own retention bar sits short of baseline (49.4% strict verbatim survival on the flags-on arm against
+a 49/90 = 54.4% committed baseline), and on the capstone corpus the whole value class scored 1 of 14
+against a bar of 13 with the loss upstream of the selection path. The prompt-side consequence was
+visible in the text itself: S2's Tier-A rule instructs the mapper to see *"the USER-PERSONAL-STATE
+VOCABULARY in the master list"*, and the compact prompt did not carry that section at all.
+
+**The decision, and the rule it rests on.** The compact render is a *presentation* compaction (pilot
+`#1549`: kind names only, pack sections chosen by the story, the granularity hint reduced to matched
+domains). A compaction may drop a HINT — a block whose absence costs precision in one story. It may
+not drop the GUARANTEE, which is unconditional by declaration. So both blocks are now appended
+unconditionally, **outside** the render's `if story:` gate, and last, so the carve-out stays the final
+rule before generation on all three renders. Making them story-selectable is the defect returning in
+a quieter shape: a story matching no trigger would drop the guarantee while every matched-story
+assertion stayed green. The cost is stated, not hidden: the shipped master render grows by 1658 bytes
+(~415 tokens) in compact mode, measured on `build_master_list()`.
+
+**What pins it.** `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires`
+asserts the WHOLE constant AND a literal of its boundary sentence (`Only INCIDENTAL process logistics
+remain droppable`) — the constant alone is true by construction, since an edit to it moves both sides
+of the comparison together, so the literal is what actually reds on a boundary-sentence edit — plus
+the vocabulary and each of its categories, over the three master renders in three story shapes
+(matched, `None`, unmatched).
+`::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly` then takes the same guarantee
+through `render_s2_prompt` / `render_s4_prompt` under the compact toggle, passing `core_only=False`
+EXPLICITLY (the dispatcher otherwise resolves it from `TORTOISE_CLASSIFY_LATER`, and the core-only
+branch would silently be the render under test) and asserting `PACK KINDS` plus the compact master
+header, so the compact branch is PROVEN taken rather than assumed — exactly
+once per prompt, so a second copy of one instruction cannot ride along. The registry row
+`state_value_carve_out` records the rule rather than an omission, and keeps `not-implemented` because
+of what it records next: nothing in the write path *enforces* retention. Prompt text is not the
+guarantee, and the enforcement half is `#10360`.
+>>>>>>> refs/tmp/pr-10382

@@ -1114,60 +1114,189 @@ def test_the_state_value_carve_out_is_registered_and_marked_absent() -> None:
     the table carried only seven rows — so the mechanism the checklist names
     ("verbatim operational values hold on a live write") had **neither code entry
     nor marker** in the registry while the gate passed. Its state must stay
-    `not-implemented` while the guarantee is prompt-only and one render path
-    (`_render_master_compact`) deliberately omits it: a row marked `implemented`
+    `not-implemented` because the guarantee is still prompt-only (no mechanical
+    enforcement; #2453's own closing records that): a row marked `implemented`
     here would make prompt text read as the guarantee, which is the defect this
     registry exists to catch.
+
+    What the row no longer records is an OMISSION: until #9775 the compact render
+    appended nothing, so the row's `note` had to name the render path that
+    dropped the guarantee. Every render path now carries it, and the row says so
+    and names the compaction rule that keeps it there — the code half of that
+    claim is `test_every_render_path_carries_the_carve_out_the_guarantee_requires`.
     """
     rows = {r["id"]: r for r in load_registry()["mechanisms"]}
     assert "state_value_carve_out" in rows, sorted(rows)
     row = rows["state_value_carve_out"]
     assert row["state"] == NOT_IMPLEMENTED, row
     assert isinstance(row.get("tracking_issue"), int), row
-    # The compact render's omission is NAMED in the row — the bounded alternative
-    # #5064's E2 comment records ("mark the omission explicit in the registry").
+    # The compact render is NAMED in the row: it is the path the row's claim was
+    # once false on (#9775), so a reader is sent to the render the compaction
+    # rule lives in rather than to a prose assurance.
     assert "_render_master_compact" in row["note"], row["note"]
 
 
-def test_the_compact_render_omits_the_carve_out_the_row_records() -> None:
-    """The row's one ABSENCE claim is pinned to the code, not to its own prose.
+#: The carve-out's BOUNDARY SENTENCE, as a literal: the clause that says what
+#: may STILL be dropped once the durable values are carried. It is pinned as a
+#: literal rather than through `STATE_VALUE_CARVE_OUT` because comparing the
+#: constant against a render that renders the same constant is true by
+#: construction — editing this sentence moved both sides together and left the
+#: guard green (measured, #9775 fix round 2), which is precisely the
+#: "declared-vs-present" hole the registry row exists to catch.
+CARVE_OUT_BOUNDARY = "Only INCIDENTAL process logistics remain droppable"
 
-    Without this, the probe that would falsify it is a grep of the note: if a
-    later change appends the carve-out to `_render_master_compact` (the first
-    closing option in #9775) the registry would keep claiming an omission that
-    no longer exists and nothing would red. So the render is exercised: the
-    carve-out must be present where the row says it is, and ABSENT from the
-    compact render — the shape `tests/test_extractor_v2.py` already pins for
-    `SHORT_SESSION_FACT_RULE` (review cycle 1, P2).
 
-    The compact render is called with a story that RENDERS its one conditional
-    block: passing `None` (as an earlier revision did) skips the `if story:`
-    branch entirely, so a fix that appended the carve-out INSIDE it — #9775's
-    first closing option — would have left this assertion green while the row
-    kept recording an omission that no longer existed (review P2). The
-    granularity block's presence is asserted first, so the vacancy claim cannot
-    pass by rendering nothing.
+def test_every_render_path_carries_the_carve_out_the_guarantee_requires() -> None:
+    """The declared guarantee holds on EVERY path that builds a prompt (#9775).
+
+    §7 of `EXTRACTOR-V4-ARCHITECTURE.md` declares it: *"any mechanical filter MUST
+    carry this carve-out, or it will drop the facts users care about most."* The
+    compact render (`TORTOISE_EXTRACTOR_PROMPT=compact`) appended nothing — no
+    `STATE_VALUE_CARVE_OUT` and no user-personal-state vocabulary — so a documented
+    render toggle silently removed a declared guarantee on the S2/S4 write path.
+    (Measured on the capstone corpus: 1 of 14 value-bearing planted units survived,
+    against a bar of 13 — #9775's own comment.)
+
+    So the guarantee is pinned as a GUARANTEE, not as string presence on one path.
+    Both halves are asserted where they are load-bearing:
+
+    * `STATE_VALUE_CARVE_OUT` — the whole constant AND a literal of its boundary
+      sentence, so editing that sentence reds here rather than shipping under an
+      unchanged header. The literal is what makes the claim true: an edit to the
+      constant moves BOTH sides of `v2.STATE_VALUE_CARVE_OUT in rendered`
+      together, so pinning the constant alone cannot see the boundary sentence go
+      (measured: that mutation left this test green);
+    * the user-personal-state vocabulary it names — S2's Tier-A rule tells the
+      mapper to see "the USER-PERSONAL-STATE VOCABULARY in the master list", so a
+      render that omits the block leaves that instruction pointing at a section
+      the prompt does not carry.
+
+    ⚠️ The compact render's `if story:` gate is the thing that made a caller-level
+    fix insufficient, so the render is exercised in THREE story shapes: a matched
+    story (its granularity hint renders — the non-vacuity half), `None`, and a
+    story matching no trigger. A carve-out appended INSIDE the story gate — the
+    shape an earlier revision of this guard warned about — passes the first and
+    reds the other two, which is exactly the regression that would re-open #9775
+    in a form a single-case assertion cannot see.
+    """
+    from tortoise import extractor_v2 as v2
+
+    master = v2.build_master_list()
+    ups_header = "USER-PERSONAL-STATE VOCABULARY (Tier-A classification"
+    ups = master.get("user_personal_state") or {}
+    assert ups, (
+        "the master carries no user-personal-state vocabulary, so the "
+        "vocabulary half of this guard would prove nothing"
+    )
+
+    def _assert_guarantee(where: str, rendered: str, *,
+                          vocabulary: bool = True) -> None:
+        assert v2.STATE_VALUE_CARVE_OUT in rendered, (
+            f"{where} dropped the declared state-value carve-out (~#9775): the "
+            "guarantee is `STATE_VALUE_CARVE_OUT` rendered whole, not a header"
+        )
+        # The BOUNDARY SENTENCE, as a literal — not through the constant. This is
+        # the half that says what may still be dropped, and a literal is the only
+        # way to pin it: the constant comparison above tracks the constant, so an
+        # edit to the sentence alone keeps it green on BOTH sides.
+        assert CARVE_OUT_BOUNDARY in rendered, (
+            f"{where} carries the carve-out but not its boundary sentence "
+            f"({CARVE_OUT_BOUNDARY!r}) — what may still be dropped is "
+            "unpinned by the constant alone (~#9775)"
+        )
+        if not vocabulary:
+            return
+        assert ups_header in rendered, (
+            f"{where} dropped the user-personal-state vocabulary the carve-out "
+            "names (~#9775) — S2's Tier-A rule points the mapper at that block"
+        )
+        for cat in ups:
+            assert f"- {cat}: " in rendered, (where, cat)
+
+    # S1's own seam (E2/D3): the carve-out rides the granularity slot. The
+    # VOCABULARY half is not S1's to carry — S1 renders granularity, not the
+    # master list, and its template never points at the vocabulary block — so it
+    # is asserted only where a master render exists.
+    _assert_guarantee("S1 (`_granularity_text`)", v2._granularity_text(master),
+                      vocabulary=False)
+    _assert_guarantee("the core-only master render",
+                      v2._render_master_core_only(master))
+    _assert_guarantee("the verbose master render",
+                      v2._render_master_verbose(master))
+
+    matched_story = "we shipped the dev: extractor change"
+    matched = v2._render_master_compact(master, matched_story)
+    # Non-vacuity AND scope: the story gate is still live — it compacts the HINT
+    # block — while the guarantee rides through it untouched.
+    assert "MEMORY GRANULARITY" in matched, (
+        "the compact render no longer emits its granularity hint for a "
+        "dev:-matched story, so the story-gate half of this guard is vacuous"
+    )
+    for story in (matched_story, None, "lunch was fine"):
+        rendered = v2._render_master_compact(master, story)
+        _assert_guarantee(f"the compact render (story={story!r})", rendered)
+
+
+def test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly(
+    monkeypatch,
+) -> None:
+    """…and through the dispatcher the S2/S4 write path actually CALLS (#9775).
+
+    A fix that only touched `_render_master_compact` while the prompt path bypassed
+    it cannot pass this. Two details are what make that sentence true, and both were
+    measured as WRONG before this revision:
+
+    * `core_only=False` is passed **explicitly**. `render_s2_prompt` / `render_s4_prompt`
+      resolve `core_only` from `TORTOISE_CLASSIFY_LATER` when it is `None`, and with
+      that flag on `_render_master` takes the CORE-ONLY branch — so the assertions
+      silently tested a render that is not the one under test (measured: with the
+      render fix reverted and `TORTOISE_CLASSIFY_LATER=1`, the dispatcher half
+      contributed nothing and the direct assertions failed alone);
+    * the COMPACT branch is PROVEN taken, not assumed: `PACK KINDS` survives
+      compaction but is absent from the core-only render, and the compact master's
+      header (`"…from this list. Do NOT mint kinds."`) is compact-only text — the
+      verbose render interposes `(namespaced or bare form)`.
+
+    Exactly ONCE per prompt: the seam rule is single-render, per the
+    `SHORT_SESSION_FACT_RULE` precedent in `tests/test_extractor_v2.py`.
     """
     from tortoise import extractor_v2 as v2
 
     master = v2.build_master_list()
     marker = "STATE-VALUE CARVE-OUT"
-    assert marker in v2._granularity_text(master), "S1 lost the carve-out"
-    assert marker in v2._render_master_core_only(master), "core-only lost it"
-    assert marker in v2._render_master_verbose(master), "verbose lost it"
-    # A dev:-triggered story selects granularity subsections, i.e. the branch a
-    # carve-out fix would land in. If this stops rendering the block, the
-    # assertion below would be vacuous — so it is pinned too.
-    compact = v2._render_master_compact(master, "we shipped the dev: extractor change")
-    assert "MEMORY GRANULARITY" in compact, (
-        "the compact render no longer emits its granularity block for a "
-        "dev:-matched story, so the carve-out assertion below proves nothing"
-    )
-    assert marker not in compact, (
-        "the compact render now carries the carve-out: the `state_value_carve_out` "
-        "row still records the omission, so update the row (and #9775) with the "
-        "decision instead of deleting this assertion"
-    )
+    compact_header = "from this list. Do NOT mint kinds."
+    matched_story = "we shipped the dev: extractor change"
+    monkeypatch.setenv("TORTOISE_EXTRACTOR_PROMPT", "compact")
+    for name, prompt in (
+        ("S2 (compact, via `render_s2_prompt`)",
+         v2.render_s2_prompt(master=master, story=matched_story,
+                             core_only=False)),
+        ("S4 (compact, via `render_s4_prompt`)",
+         v2.render_s4_prompt(matched_story, {"results": []}, {},
+                             master=master, core_only=False)),
+    ):
+        assert "PACK KINDS" in prompt, (
+            f"{name} carries no PACK KINDS section, so it rendered the CORE-ONLY "
+            "master and this guard is not testing the compact path at all "
+            "(pass `core_only=False` explicitly — the flag default is "
+            "`TORTOISE_CLASSIFY_LATER`)"
+        )
+        assert compact_header in prompt, (
+            f"{name} does not carry the compact master header, so it rendered "
+            "the VERBOSE master and the compact path is unpinned here"
+        )
+        assert v2.STATE_VALUE_CARVE_OUT in prompt, (
+            f"{name} dropped the declared state-value carve-out (~#9775): the "
+            "compact prompt reached through the dispatcher carries no guarantee"
+        )
+        assert CARVE_OUT_BOUNDARY in prompt, (
+            f"{name} carries the carve-out but not its boundary sentence "
+            f"({CARVE_OUT_BOUNDARY!r}) (~#9775)"
+        )
+        assert prompt.count(marker) == 1, (
+            f"{name} renders the carve-out {prompt.count(marker)} times — "
+            "one prompt, one copy of the guarantee"
+        )
 
 
 def test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render() -> None:
