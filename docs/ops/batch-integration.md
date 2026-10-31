@@ -114,7 +114,11 @@ git fetch origin main
 PINNED="$(git rev-parse origin/main)"            # PIN THIS SHA — every later comparison is against it
 # ⛔ A dirty tree defeats the switch: `git switch -c` CARRIES uncommitted and untracked files.
 [ -z "$(git status --porcelain)" ] || { echo "dirty tree — the baseline would measure it, not origin/main"; exit 1; }
-git switch -c integration/base-check "$PINNED"   # ⛔ SWITCH, not `git branch` — run the suite on THIS tree
+git switch -C integration/base-check "$PINNED" || exit 1   # ⛔ SWITCH, not `git branch` — run the suite on THIS tree.
+# `-C` (create OR reset), not `-c`: a RE-baseline is the normal case (see Landing route 1), and a
+# bare `-c` dies with `fatal: a branch named 'integration/base-check' already exists` — after which,
+# in a fence with no `set -e`, the pytest lines below run on whatever tree HEAD happens to be on.
+# `|| exit 1` makes that impossible: the fence stops instead of measuring the wrong tree.
 # BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
 uv run pytest tests/ -q -m 'not track_b and not live and not integration'
 uv run pytest tests/test_ingest_safety.py -q -m track_b
@@ -193,7 +197,10 @@ gh pr view <N> --json headRefOid,mergeable     # headRefOid must equal the regis
 Build in **ascending PR number** so the composition is deterministic and reconstructible:
 
 ```bash
-git checkout -b integration/batch-1 "$PINNED"
+git switch -C integration/batch-1 "$PINNED" || exit 1
+# `-C` = create OR reset. A rebuild from a new pin is the intended case, and a plain `-b` fails on
+# an existing branch — after which the `--no-ff` merge below would merge a foreign PR head into
+# whatever branch the operator happens to be standing on.
 git fetch origin pull/<N>/head:refs/tmp/pr-<N>          # exactly the reviewed head
 git merge --no-ff --no-edit -m "batch: merge PR #<N> (<sha>)" refs/tmp/pr-<N>
 git log --oneline -1                                    # after EVERY merge

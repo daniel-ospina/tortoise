@@ -68,7 +68,15 @@ every revision by design: it guards against a re-pointed or deleted document, no
 against a bad command. The contract-sentences check is green from ``f3c6c803b``
 on, which is when those sentences landed.
 
-Static, no network / DB / graph.
+Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
+session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
+this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports 13 ERRORS
+that have nothing to do with the doctrine. Name a lane:
+
+    TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_integration_doctrine.py -q
+
+(CI is unaffected: the `core`/`tier1` surface runs in the `test` job, which exports
+`TORTOISE_DB_URI`.)
 """
 
 from __future__ import annotations
