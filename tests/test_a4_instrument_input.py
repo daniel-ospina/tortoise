@@ -19,9 +19,13 @@ These tests pin the INPUT, at the three levels the issue names:
   Points the first-pass FTS actually returns;
 * arm — the ORDERED hit list DIFFERS between the two arms.
 
-The arm test needs the FalkorDB full-text index (the embedded lane has none,
-and A4 is structurally inert there — ``index_missing`` — which is the same
-blank-input trap one lane over), so it SKIPS on the embedded carve-out. The
+The arm test needs the FalkorDB full-text index. FalkorDBLite (the embedded
+lane's backend) **has** it — measured `leg_trace` `reason='ok'`, `count=4` on this
+box — so these arm tests RUN on the embedded lane; they take the
+``_skip_if_no_fts`` skip only on a backend that really lacks the index. (This
+paragraph used to claim the embedded lane has none and that the arm tests skip
+there; that is false on FalkorDBLite, and believing it is what made the red at
+``assert off == on`` look like an environment artefact.) The
 mutation direction is pinned too: ``search_keys=False`` reproduces #5534's
 defect shape (zero keys, empty expansion, identical arms).
 
@@ -101,24 +105,90 @@ def keyword_lane(monkeypatch):
     embedder installed — a real product configuration) rather than paying the
     ~40 s embedder load for a leg that cannot affect A4 either way. The
     DENSE-lane A/B is measured by ``docs/runbook/5534_a4_ab_diagnostic.py``
-    (21/21 questions differ); this file guards the INPUT, cheaply."""
+    (21/21 questions differ); this file guards the INPUT, cheaply.
+
+    The BM25 lexical ARM is pinned OFF here (``TORTOISE_BM25_LEXICAL=0``, set via
+    the constant ``tortoise.bm25.BM25_ENV`` — NOT an env name to export), which
+    the description above no longer implies: since #10240 the shipped default is
+    the arm ON, so "no embedder" alone is no longer "the shipped config". The pin
+    is what keeps this file's A/B single-variable (#10436).
+
+    WHY the pin is load-bearing: the ``search_keys_prf`` lever has a SECOND
+    effect besides A4 — it stands the BM25 arm down (#8488 (f), deliberately,
+    pinned by ``tests/test_bm25_lexical_8488.py::TestReadPath::
+    test_expansion_passes_stand_the_arm_down``), because a later pass *would*
+    overwrite the slot the arm writes: the stand-down keys on the FLAG
+    (``sdk.py:33038-33040``), not on a replacement actually happening — which is
+    exactly the open question in #10436, since on a store with no ``search_keys``
+    the expansion returns ``None`` and nothing is overwritten. So ON vs OFF of
+    this file's lever changed the lexical SCORER as well as the expansion, and an
+    ordered-hit-list comparison across it stopped being an A4 measurement — it
+    measured the arm.
+
+    LANE: the divergence needs ``is_embedded`` (the arm gate is embedded-only,
+    ``sdk.py:32946/33041``). In a URI-SET pytest session that ``is_embedded``
+    comes from ``FalkorProjection``'s test redirect (``explicit_path and
+    TORTOISE_DB_URI and TORTOISE_TEST_MODE == "1" and not exempt`` — see
+    ``tests/test_markers.py`` and ``tests/conftest.py``), which NULLS this
+    fixture's explicit ``db_path``; #139's path-wins precedence would otherwise
+    make the fixture embedded on every lane. This file's stem is deliberately NOT
+    in ``TEST_NO_REDIRECT_STEMS`` (``tests/_embedded.py``) — unlike
+    ``test_bm25_lexical_8488``, which is registered so its embedded constructions
+    survive an out-of-band URI run — so under a docker URI the arm never runs and
+    this pin is a NO-OP there; do not read that as the premise being false.
+
+    Reproduce it on the PRE-FIX tree (``main@2487e7e1f``; on this tree the pin
+    makes it green) with:
+
+        env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 \
+            uv run pytest tests/test_a4_instrument_input.py::\
+            test_seed_without_search_keys_reproduces_5534
+
+        E  At index 1 diff: 'a4-s2_t0' != 'a4-s0_t0'
+        W  tortoise.sdk:sdk.py:33054: #8488: BM25 lexical arm standing down —
+           search_keys_prf replaces the lexical slot after the arm would have
+           written it
+
+    A4 itself is provably inert without aliases (``_search_keys_prf_expansion``
+    returns ``None`` — "nothing to expand" — and the caller keeps the ORIGINAL
+    fts leg), so holding the scorer constant restores the single-variable A/B
+    this file exists to be, WITHOUT touching an assertion. The arm-plus-A4
+    composition is deliberately NOT measured here (it is the thing the
+    stand-down suppresses); see #10436."""
+    from tortoise.bm25 import BM25_ENV
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(
         EmbeddingModel, "get",
         classmethod(lambda cls, load_timeout=None: None))
+    monkeypatch.setenv(BM25_ENV, "0")
     return None
 
 
+# ── the lane: one lever at a time ──────────────────────────────────────
+
+
+def test_keyword_lane_pins_the_bm25_arm_off(keyword_lane):
+    """The pin above must be IN EFFECT — with ``BM25_ENV`` rather than a
+    literal, so a rename of the env var cannot quietly restore the confounded
+    A/B (#10436). Deliberately NOT an ``assert`` inside ``keyword_lane``: a
+    fixture that hard-fails would turn a future mutation of the LEVER into a
+    fixture ERROR, hiding the assertion it is supposed to discriminate."""
+    from tortoise.bm25 import bm25_enabled
+    assert not bm25_enabled(), (
+        "the BM25-arm pin did not take — the A/B is confounded again")
+
+
 def _skip_if_no_fts(sdk) -> None:
-    """The embedded FalkorDBLite lane has no Point FTS index — the ``fts``
-    leg records ``reason='index_missing'`` and A4 can never expand. Same
-    blank-input condition as #5534, so skip rather than assert a zero."""
+    """Skip on a backend with no Point FTS index (A4 records
+    ``reason='index_missing'`` and can never expand). NOTE: the embedded
+    FalkorDBLite lane DOES have the index, so this skip does not fire there —
+    the arm tests really run on it (#10436)."""
     trace: list[dict] = []
     run_fts_query(sdk._get_proj().g, "probe", entity_type="point", limit=1,
                   leg_trace=trace)
     if trace and trace[0].get("reason") == "index_missing":
-        pytest.skip("no Point FTS index on this lane (embedded carve-out) — "
-                    "A4 is structurally inert without it")
+        pytest.skip("no Point FTS index on this backend — A4 is structurally "
+                    "inert without it")
 
 
 def _arms(sdk, question: str, limit: int = 20) -> tuple[list[str], list[str]]:
