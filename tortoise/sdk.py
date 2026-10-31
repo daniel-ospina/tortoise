@@ -21619,12 +21619,22 @@ class TortoiseSDK:
         return SEMANTICS_DIRECTIONS.get(semantics)
 
     @staticmethod
-    def _canonical_direction(op_type: str, direction: str | None) -> str | None:
+    def _canonical_direction(op_type: str, direction: str | None) -> str:
         """CYCLE-25 per-op_type absent↔default canonicalization (ontology v3.6
         #5): direction-ABSENT canonicalizes per op_type — IMPL → "bidirectional",
         NAND → "unidirectional" (the extraction default); other operator types
         keep create_operator's bidirectional default. Absent is NOT a distinct
-        value in the §5.2.7 comparison."""
+        value in the §5.2.7 comparison.
+
+        The return is TOTAL — never ``None``: an absent direction is replaced by
+        ``op_type``'s own default, which is what makes "absent" indistinguishable
+        from that default in the comparison (the whole point of the cycle-25
+        rule). The annotation says so because callers RELY on it: the #10195
+        re-point door sorts the canonicalized directions to iterate them in a
+        stable order, and an earlier ``str | None`` annotation made that read as
+        a comparison of possibly-``None`` values (a ``type-var`` failure on
+        ``sorted``) rather than as the true statement that every element is a
+        token."""
         if direction is not None:
             return direction
         return "unidirectional" if op_type == "NAND" else "bidirectional"

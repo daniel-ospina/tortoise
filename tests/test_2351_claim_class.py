@@ -574,20 +574,36 @@ def test_supersede_repoint_judges_a_duplicated_slot_idx(lane):
     candidate, tie-broken by claim id — instead of either skipping (fail-open) or
     judging every tied input (which would refuse a shape the loader keeps).
 
-    The tie-break is load-bearing here: the earlier-created ``src`` sorts first,
-    so it IS the source slot the loader reads, and once the successor is authored
-    the rebuilt factor is the derived-over-asserted wiring the door refuses.
+    The tie-break is load-bearing here: the ``src`` that sorts first IS the
+    source slot the loader reads, and once the successor is authored the rebuilt
+    factor is the derived-over-asserted wiring the door refuses.
+
+    ⛔ THE TWO IDS ARE PINNED, because the tie-break is LEXICOGRAPHIC and the
+    minted id is NOT creation-ordered: ``ids.ulid()`` is
+    ``<ms-hex>-<uuid4().hex[:12]>`` (``tortoise/ids.py:26``), so two points
+    created inside the SAME millisecond sort by their RANDOM suffix. The ULID
+    spec only guarantees same-millisecond creation order for a STATEFUL MONOTONIC
+    generator that increments the randomness on each draw, which this is not. So
+    the earlier-created point is not reliably the smaller id, and when the
+    successor drew the smaller suffix the door (correctly, in parity with
+    ``ep.py``'s ``ORDER BY coalesce(r.idx, 0), c.id``) took IT as the source,
+    judged ``asserted --IMPL--> derived``, and let the supersede through — making
+    this test's expectation, not the door, the wrong half. Pinning ``src < new``
+    makes the SHAPE decide the verdict instead of the draw (a flaky test that
+    fails on a random 12-hex draw is not a coverage guarantee).
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
     src = lane.create_point("statement", "computed source",
-                            claim_class="derived")["id"]
+                            claim_class="derived",
+                            id="0000000001-aaaaaaaaaaaa")["id"]
     op = lane.create_operator("IMPL", src, [old], direction="->")
     # Collapse the target slot onto position 0: two inputs, one ``idx``.
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = 1 SET r.idx = 0",
         params={"op": op["id"]})
-    new = lane.create_point("statement", "authored v2")["id"]
+    new = lane.create_point("statement", "authored v2",
+                            id="0000000002-bbbbbbbbbbbb")["id"]
 
     with pytest.raises(ValueError, match="DERIVED"):
         lane.supersede_point(old, new)
@@ -596,6 +612,42 @@ def test_supersede_repoint_judges_a_duplicated_slot_idx(lane):
     assert _props(lane, new).get("status") == "live"
     assert _operator_rows(lane, old) == [[op["id"], "IMPL", 0]]
     assert _operator_rows(lane, new) == []
+
+
+def test_supersede_repoint_takes_the_loaders_tie_break_the_other_way(lane):
+    """The MIRROR of the case above: the SUCCESSOR sorting first is the source.
+
+    The same duplicated ``idx`` layout with the ids the other way round. Here
+    ``new`` is the smaller claim id, so it is the input the loader reads as the
+    source — the rebuilt factor is ``asserted(new) --IMPL--> derived(src)``,
+    which overrides nothing, so the door must PASS the supersede and transfer the
+    predecessor's slot.
+
+    This is the half that pins the round-1 decision ("one candidate, tie-broken
+    by claim id") from the over-refusal side: a door that judged EVERY tied input
+    would find the ``derived(src) --IMPL--> asserted(new)`` assignment among the
+    candidates and refuse a shape the load side keeps. Both ids are pinned for
+    the reason given on the case above — ``ids.ulid()`` has a random 12-hex
+    suffix, so creation order is not id order inside one millisecond.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived",
+                            id="0000000002-bbbbbbbbbbbb")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # The same collapse: two inputs, one ``idx``.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = 1 SET r.idx = 0",
+        params={"op": op["id"]})
+    new = lane.create_point("statement", "authored v2",
+                            id="0000000001-aaaaaaaaaaaa")["id"]
+
+    # No raise: ``new`` outranks ``src`` at the tied idx, it is the source the
+    # loader reads, and asserted-over-derived is the legal direction.
+    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert _operator_rows(lane, new) == [[op["id"], "IMPL", 0]]
+    assert _operator_rows(lane, old) == []
 
 
 def test_supersede_repoint_judges_every_stored_direction(lane):
