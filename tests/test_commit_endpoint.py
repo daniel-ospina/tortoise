@@ -4448,7 +4448,9 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source(client):
     persist §9.1's prose onto a node AND into the `EntityMutated` record, where a
     rebuild restores it: the `__runId` hole (#5196 round 3) one property over.
 
-    (1) FAILS if the key is only DECLARED: the write is accepted and survives.
+    (1) FAILS if the key is not in the set: `_update_entity` reaches its
+        `:Source` arm and refuses with the label-specific message — MEASURED
+        both ways at #10389's head (see (4)).
     (2) REACHABLE: the refusal is checked through the real tenant surface, and
         the node is read afterwards to prove nothing landed.
     (3) ISOLATED (#10389 review P2-1): the `client` fixture is REQUIRED, not
@@ -4462,13 +4464,22 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source(client):
         AGENTS.md records #5084's measured leftovers). Under `client`, the
         patched `__init__` binds the per-test temp DB, so the probe graph is
         private and the SDK is closed in a `finally`.
+
+    (4) THE MATCH IS THE LABEL-SPECIFIC PHRASE, DELIBERATELY (#10389 review,
+        ISSUE 1 consequence 3 — MEASURED). A bare `match="server-managed"` is
+        VACUOUS here: `_refuse_unpaired_narrative`'s update-door message also
+        carried those words, so with `story_arc` REMOVED from
+        `_SOURCE_SERVER_MANAGED_PROPS` this test stayed GREEN (measured:
+        `1 passed` with the entry commented out, that guard refusing instead).
+        `"server-managed on a :Source"` appears only in the `:Source` arm, so
+        re-widening it re-opens exactly that hole.
     """
     sdk = _team_sdk()
     url = f"session:narr-route-{content_hash('narrative-route-probe')[:12]}"
     try:
         sdk.create_source(url, "agentSession", contentHash="h1")
 
-        with pytest.raises(ValueError, match="server-managed"):
+        with pytest.raises(ValueError, match="server-managed on a :Source"):
             sdk.update_entity(url, story_arc="NARRATIVE-ZEBRA prose must not land")
 
         rows = sdk._get_proj().g.query(

@@ -5409,7 +5409,8 @@ _RESERVED_ACTOR_PROPS = frozenset(
 
 
 from tortoise.record_projection import (  # noqa: E402
-    _SESSION_COORDINATE_KEYS as _NARRATIVE_SESSION_COORDINATE_KEYS)
+    _SESSION_COORDINATE_KEYS as _NARRATIVE_SESSION_COORDINATE_KEYS,
+)
 
 #: §9.1's narrative key, and the SESSION it must name — read from the record's
 #: own projection (`_SESSION_COORDINATE_KEYS`) rather than re-typed (#10389 review
@@ -5465,12 +5466,15 @@ def _refuse_unpaired_narrative(props: dict, *, door: str,
 
       * an UPDATE door (`label is None`) — an update writes caller props straight
         onto the node (`SET n += $props`), so on `:Point`/`:Object`/`:Subject` it
-        would carry the prose into the graph, and on `:Event`/`:Source` it is
-        refused one frame later by the server-managed set, so either way it
-        cannot file §9.1's row. Measured at #10389's head: `update_entity(<object>,
-        story_arc=…, sessionId=…)` wrote the prose onto the `:Object` node AND
-        (once the record names the session) into `public.session_narrative` — two
-        drifting homes, the duplicate §9.1(b)/R7 exists to remove.
+        would carry the prose into the graph AND, once the record names the
+        session, file the row as well: two drifting homes, the duplicate
+        §9.1(b)/R7 exists to remove. Measured at #10389's head:
+        `update_entity(<object>, story_arc=…, sessionId=…)` wrote the prose onto
+        the `:Object` node and into `public.session_narrative`. ⛔ THIS ARM NEVER
+        SEES `:Event`/`:Source`: `_update_entity` calls it AFTER their
+        `_SERVER_MANAGED_PROPS_BY_LABEL` blocks, which own those refusals and
+        their messages (#10389 review cycle 2 — placed first it shadowed them and
+        made the table's entries dead code).
       * a label whose fold does NOT refuse the key (`:Point`, `:Object`,
         `:Subject`) — the open `#228` passthrough persists it, so a PAIRED write
         would put the prose on a node while the record files it, and an UNPAIRED
@@ -5518,11 +5522,11 @@ def _refuse_unpaired_narrative(props: dict, *, door: str,
             f"{_NARRATIVE_PROP!r} cannot be written through {door}: §9.1/D1 puts "
             f"the S1 narrative in `public.session_narrative` (filed by its "
             f"session), and an update writes caller props straight onto the "
-            f"node — so this call would either duplicate the prose into the "
-            f"graph or be refused one frame later by the label's server-managed "
-            f"set, and in neither case does it file §9.1's row. Write the "
-            f"narrative through the capture / commit path (it carries its own "
-            f"session), or create the carrier with `sessionId=`."
+            f"node — so this call puts the prose on the graph and, once the "
+            f"record names the session, in the table too: two homes drifting "
+            f"apart, and §9.1's row is not filed BY the update either way. "
+            f"Write the narrative through the capture / commit path (it carries "
+            f"its own session), or create the carrier with `sessionId=`."
         )
     if label not in _NARRATIVE_LABELS:
         raise ValueError(

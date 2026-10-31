@@ -158,7 +158,7 @@ def test_a_paired_narrative_is_journalled_and_files_its_record_row(sdk, tmp_path
     # (a) the record carries the prose WITH its session coordinate — the pair
     lines = [json.loads(line) for line in
              (tmp_path / "journal.jsonl").read_text().splitlines() if line.strip()]
-    carriers = [l for l in lines if l.get("story_arc")]
+    carriers = [entry for entry in lines if entry.get("story_arc")]
     assert carriers, "the narrative must reach the journal, or it is in no store"
     assert carriers[-1]["sessionId"] == SESSION
     # …and the record's OWN projection turns that line into §9.1's row
