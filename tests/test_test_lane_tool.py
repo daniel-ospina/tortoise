@@ -3053,10 +3053,11 @@ def test_the_env_fallback_does_not_call_a_readable_ceiling_unreadable(
 # (`TORTOISE_DB_URI='docker://:falkordb@localhost:6379/…' pytest tests/`) cannot
 # run on a cell: the services lanes publish on EPHEMERAL ports (#6673) and a
 # private lane on its own, so nothing answers on 6379. The session-start gate
-# then refuses once per test, and the run reports a wall of `E`s (405 measured on
-# a full `tests/` collection) that reads like a product catastrophe. `run`
-# removes the step a caller can forget, so what it must be pinned on is the exact
-# child ENVIRONMENT and ARGV — not Docker's behaviour, which is why `start` is
+# then refuses once per COLLECTED TEST, and the run reports a wall of `E`s and no
+# verdict (the population is the suite's size — 41,842 tests at #10399's head;
+# the batch's log held 405 because its process died mid-run). `run` removes the
+# step a caller can forget, so what it must be pinned on is the exact child
+# ENVIRONMENT and ARGV — not Docker's behaviour, which is why `start` is
 # stubbed here like everywhere else in this file.
 
 def _stub_start(monkeypatch, *, port: int = 16406):
@@ -3163,20 +3164,41 @@ def test_run_reports_a_SIGNAL_kill_as_128_plus_N_not_a_negative_code(
 def test_run_names_the_target_BEFORE_the_child_starts(
         lane, monkeypatch, capsys):
     """The resolved lane is on stderr before pytest runs, so a run that is killed
-    mid-flight still leaves its target in whatever log it was redirected to."""
+    mid-flight still leaves its target in whatever log it was redirected to.
+
+    The ORDER is the assertion: stderr is read from INSIDE the stub, at the
+    moment the child would have started. Reading it afterwards would pass even if
+    the line were printed only after the child returned — which is exactly the
+    case a killed run cannot report.
+    """
     _stub_start(monkeypatch, port=16406)
-    order: list = []
+    at_child_start: list = []
 
     def fake_run(argv, env=None, **kwargs):
-        order.append("child")
+        at_child_start.append(capsys.readouterr().err)
         return _R(0, "", "")
 
     monkeypatch.setattr(tl.subprocess, "run", fake_run)
     tl.main(["run", "--", "-q"])
-    err = capsys.readouterr().err
-    assert "fdb-lane-0123456789" in err
-    assert "TORTOISE_DB_URI=docker://:@127.0.0.1:16406/" in err
-    assert order == ["child"]
+    assert len(at_child_start) == 1
+    assert "fdb-lane-0123456789" in at_child_start[0]
+    assert "TORTOISE_DB_URI=docker://:@127.0.0.1:16406/" in at_child_start[0]
+
+
+def test_bare_run_targets_the_SUITE_not_the_rootdir(lane, monkeypatch):
+    """`run` with no pytest argv means `tests/` — the help text's own promise.
+
+    With NO path pytest collects from the ROOTDIR (there is no `testpaths` in
+    pyproject.toml), which sweeps `validation/`, `graph-scripts/` and
+    `integrations/tests/` and dies on a module-level assertion there: a run that
+    tests none of the suite and exits 2. Both spellings a caller can type for
+    "the default" must land on `tests/`.
+    """
+    _stub_start(monkeypatch)
+    for argv in (["run"], ["run", "--"]):
+        seen = _capture_run(monkeypatch)
+        tl.main(argv)
+        assert seen["argv"] == [sys.executable, "-m", "pytest", "tests/"], argv
 
 
 def test_run_and_up_emit_the_SAME_three_seam_vars(lane, monkeypatch, capsys):

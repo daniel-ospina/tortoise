@@ -636,11 +636,15 @@ calls `worktree_report.py check` rather than re-implementing the format.
 > ```
 >
 > WHY (#10399, measured): a full suite started with the 6379 URI on a cell
-> reports **405 `E`s** and no verdict, from ONE refusal repeated per test —
-> `Failed: no TORTOISE_DB_URI database could be reached at localhost:6379 …`
-> (`tests/_embedded.py:954`). Nothing listens on 6379 there: the services lanes
-> publish on **ephemeral** ports (#6673) and a private lane on its own. A
-> **URI-less** run fails the same way from the other side, verbatim:
+> reports a wall of `E`s and no verdict, because the session-start gate refuses
+> ONCE PER COLLECTED TEST — `Failed: no TORTOISE_DB_URI database could be reached
+> at localhost:6379 …` (`tests/_embedded.py:954`). The count is therefore the size
+> of the population, not a constant: `tests/` collects **41,842** tests at
+> #10399's head, and a run that is KILLED mid-flight shows only as many as it
+> reached (the batch's own log held **405** before its process died). Nothing
+> listens on 6379 there: the services lanes publish on **ephemeral** ports
+> (#6673) and a private lane on its own. A **URI-less** run fails the same way
+> from the other side, verbatim:
 > `Failed: default pytest requires TORTOISE_DB_URI (epic #1647 P4) …`
 > (`tests/_embedded.py:770`). Neither is a diff regression — both are the suite
 > refusing a target that does not exist, which is why `run` (not a hand-eval'd
@@ -665,8 +669,11 @@ uv run pytest tests/ -v
 # Embedded carve-out (the 17 embedded-only files; URI-less opt-in):
 TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_embedded_lifecycle.py tests/test_guard.py -v
 
-# Run specific test file (docker lane)
+# Run specific test file (docker lane — only where 6379 really serves it)
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_directional_impl_fix.py -v
+
+# …on a cell, the same subset without that assumption:
+uv run python tools/test_lane.py run -- tests/test_directional_impl_fix.py -v
 ```
 
 > **Private lane instance (#5084) — use this when more than one lane is testing.**

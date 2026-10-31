@@ -239,6 +239,14 @@ Also fail-closed by design:
 
 USAGE
 -----
+    uv run python tools/test_lane.py run -- tests/ -q   # start + export + run
+    uv run python tools/test_lane.py down               # remove it
+
+``run`` is the spelling to prefer: it is the one place the three seam variables
+(#5084) are APPLIED rather than printed, so no caller has to remember them, and
+bare ``run`` targets ``tests/`` rather than the rootdir. The two-step form below
+is for a shell that wants the variables itself:
+
     uri="$(uv run python tools/test_lane.py uri)" || exit 1
     eval "$uri"
     uv run pytest tests/ -q
@@ -2222,10 +2230,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     (``TORTOISE_DB_URI='docker://:falkordb@localhost:6379/…' pytest tests/``),
     and on a cell nothing listens on 6379 — the services lanes publish on
     EPHEMERAL ports (#6673) and a private lane on its own. The session-start
-    gate then refuses ONCE PER TEST, so the run reports a wall of ``E``s (405
-    measured on a full ``tests/`` collection) that reads like a product
-    catastrophe and is in fact a target that does not exist. Hand-``eval``-ing
-    the three exports works but is a step every caller can forget (and one did).
+    gate then refuses ONCE PER COLLECTED TEST, so a full run reports a wall of
+    `E`s and no verdict (the population is not a fixed number: `tests/` collects
+    41,842 tests at #10399's head, and a run that is killed mid-flight shows
+    only as many as it reached — the batch's own log held 405 before its process
+    died). Hand-``eval``-ing the three exports works but is a step every caller
+    can forget (and one did).
 
     This runs the child with ``sys.executable -m pytest`` — the interpreter
     that is already RUNNING this tool, i.e. the lane's venv — rather than a
@@ -2251,6 +2261,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         # way `cargo run --` and `docker run … --` do), so the separator is
         # consumed here rather than handed to pytest as an unknown argument.
         extra = extra[1:]
+    if not extra:
+        # Bare `run` means THE SUITE — `tests/`. This is not cosmetic: with no
+        # path, pytest collects from the ROOTDIR (there is no `testpaths` in
+        # pyproject.toml), which sweeps `validation/`, `graph-scripts/`,
+        # `integrations/tests/` and emits a collection error — a run that tests
+        # none of the suite and exits 2. The help text promises this default, so
+        # the code has to BE the default.
+        extra = ["tests/"]
     env = {**os.environ, **lane_seam_env(port, args.graph)}
     argv = [sys.executable, "-m", "pytest", *extra]
     print(
@@ -2367,7 +2385,7 @@ def build_parser() -> argparse.ArgumentParser:
             # pytest flags it recognises and reject those it does not.
             sp.add_argument("pytest_args", nargs=argparse.REMAINDER,
                             help="pytest argv, after `--` "
-                                 "(default: tests/)")
+                                 "(default: tests/ — the suite)")
         sp.set_defaults(func=fn)
     return p
 
