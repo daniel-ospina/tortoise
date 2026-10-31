@@ -780,6 +780,35 @@ class TestIdentityOnTheResult:
         assert "no candidate was left unchecked" in messages[0], messages[0]
         assert "did not run over the whole candidate set" not in messages[0]
 
+    def test_an_unrun_lookup_with_no_candidate_never_claims_the_budget_cut(self):
+        """`unresolved` with a ZERO numerator is a third fact (#5095 review round 3).
+
+        The lookup did not run AT ALL and there was no candidate whose own query
+        could have — and the `partial` sentence asserted both of those falsely
+        ("the budget cut part of the lookup", "every committed candidate's own
+        query ran"). The pre-fix code reached that sentence because the block
+        branched on `unresolved_total` alone, so this run carried a warning that
+        contradicted the reason it printed in the same line.
+        """
+        class _NoCandidates(_FakeModel):
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "stop"
+                if "STORY SUMMARIZER" in system:
+                    return "A narrative."
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [], "chain_notes": [], '
+                        '"link_before_create": []}')
+
+        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
+        block = out["identity"]
+        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
+        assert block["unresolved_total"] == 0, block
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert messages, out["warnings"]
+        assert "the lookup did not run" in messages[0], messages[0]
+        assert "budget" not in messages[0], messages[0]
+        assert "every candidate's own query" not in messages[0], messages[0]
+
     def test_a_resolved_run_reports_resolved_and_does_not_warn(self):
         """The flag-side of R1: the disposition must not fire on a healthy run.
 
