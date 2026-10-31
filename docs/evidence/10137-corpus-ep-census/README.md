@@ -46,6 +46,7 @@ score    = PARTIAL(24 of 500) — a complete sample of a sample, never presented
 | `factor_edges` (direct claim↔claim IMPL/NAND) | **0** |
 | `points_with_ep` | 2,696 |
 | `points_unmeasured` | 24,912 |
+| `points_with_ep_unread` / `points_unmeasured_unread` | **0 / 0** (every question's census was read — the sum is complete, not partial) |
 | `points_off_neutral` = `points_moved_off_neutral` | 185 |
 
 ### Per question type
@@ -137,3 +138,29 @@ All 24 questions completed (`failed = 0`), then the runner's watchdog aborted th
 written. The census is therefore derived from the run's own checkpoint via the runner's own
 aggregation function — the same code path the report uses (`run.py:5693`) — not a second
 implementation. `probes/census.py` is that call, and it reads either shape.
+
+### The per-question block, on the REPORT path (the shape a finalised run writes)
+
+The checkpoint write has always carried each question's belief manifest
+(`run.py:5115-5116`), which is why the cells above could be audited row by row. The **report's**
+outcome projection is an explicit whitelist and did **not** carry it, so reading a report gave a
+correct aggregate (`methodology.measurement_posture.activation`) above **192 of 192 null**
+per-question cells — the ordinary path a future run takes was the one that lost the column, and a
+null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a measured one
+(#10137 review, P2). Two changes close it:
+
+- `outcomes_to_report` now projects `belief_activation` **conditionally** — under the arm only,
+  exactly like the checkpoint write and the `#2578` / `#2976` arms. An UNARMED outcome gains no
+  key, so its published shape is unchanged (the golden projection in
+  `tests/test_longmem_runner.py` still matches key for key).
+- `probes/census.py` **fails closed** on an input that carries no manifest at all: it emits
+  `per_question: null` with `per_question_source` naming why, instead of one null row per
+  question. A *partial* population still publishes its rows, and `per_question_unread` says how
+  many questions inside them were never measured — the same disclosure the summed cells already
+  make with `<key>_unread`, and the `*_unread` companions of `points_with_ep` /
+  `points_unmeasured` now ride `cells` too.
+
+`census.json` below was written by the *checkpoint* path, so it carries `per_question_source:
+"outcome.belief_activation"` and `per_question_unread: 0` — measured on every one of the 24
+questions, which is verifiable from the rows themselves (no `null` in any of the eight measured
+cells across the 24 questions).

@@ -21,7 +21,9 @@
     "factor_edges": 0,
     "factor_edges_unread": 0,
     "points_with_ep": 2696,
+    "points_with_ep_unread": 0,
     "points_unmeasured": 24912,
+    "points_unmeasured_unread": 0,
     "points_off_neutral": 185,
     "points_moved_off_neutral": 185,
     "ep_ran": 24,
@@ -232,6 +234,8 @@
       "question_type": "single-session-assistant"
     }
   ],
+  "per_question_source": "outcome.belief_activation",
+  "per_question_unread": 0,
   "per_question": [
     {
       "question_id": "118b2229",

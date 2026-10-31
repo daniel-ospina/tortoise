@@ -15,6 +15,14 @@ ratio answers "did the belief layer participate on this question at all"; the
 claim ratio answers "on what share of claims". A run can read 24/24 on the
 first and 9% on the second, and the second is the honest denominator for
 "how much of this answer came from our epistemic layer".
+
+The per-question block is published only when the input CARRIES the manifests
+(``outcome.belief_activation``): an input with none reports
+``per_question: null`` plus ``per_question_source`` saying so, never rows of
+nulls — a null ``ep_ran`` must not be readable as a measured one. A PARTIAL
+population publishes its rows AND ``per_question_unread``, the count that says
+how many questions inside them were never measured (the same disclosure
+``<key>_unread`` makes for the summed cells).
 """
 from __future__ import annotations
 
@@ -66,6 +74,35 @@ def cells(path: str) -> dict:
     if isinstance(covered, int) and isinstance(unmeasured, int) \
             and (covered + unmeasured):
         claim_ratio = covered / (covered + unmeasured)
+
+    rows = [o for o in outcomes if isinstance(o, dict)]
+    manifests = [o for o in rows if isinstance(o.get("belief_activation"), dict)]
+    per_question_unread = len(rows) - len(manifests)
+    if rows and not manifests:
+        # See the note on ``per_question`` below: an input with no manifest
+        # anywhere has NO per-question census, and 24 rows of nulls would
+        # read as a measured-and-null question. Publish the absence.
+        per_question: list[dict] | None = None
+        per_question_source = (
+            "absent — no outcome in this input carries a "
+            "belief_activation manifest (a non-armed run, or a report written "
+            "before the projection carried it)")
+    else:
+        per_question = [{
+            "question_id": o.get("question_id"),
+            "question_type": o.get("question_type"),
+            "operators": (o.get("belief_activation") or {}).get("operators"),
+            "factor_edges": (o.get("belief_activation") or {}).get("factor_edges"),
+            "points_with_ep": (o.get("belief_activation") or {}).get("points_with_ep"),
+            "points_unmeasured": (o.get("belief_activation") or {}).get("points_unmeasured"),
+            "points_off_neutral": (o.get("belief_activation") or {}).get("points_off_neutral"),
+            "points_moved_off_neutral":
+                (o.get("belief_activation") or {}).get("points_moved_off_neutral"),
+            "ep_ran": (o.get("belief_activation") or {}).get("ep_ran"),
+            "no_op_reason": (o.get("belief_activation") or {}).get("no_op_reason"),
+        } for o in rows]
+        per_question_source = "outcome.belief_activation"
+
     return {
         "source": source,
         "questions_in_run": n,
@@ -83,7 +120,15 @@ def cells(path: str) -> dict:
             "measured", "questions_inert", "questions_neutral",
             "questions_off_neutral", "questions_contribution_unknown",
             "operators", "operators_unread", "factor_edges",
-            "factor_edges_unread", "points_with_ep", "points_unmeasured",
+            "factor_edges_unread", "points_with_ep",
+            # #10137 review (P2): the ``*_unread`` companions are the ONLY
+            # thing that says how partial ``points_with_ep`` /
+            # ``points_unmeasured`` are (``measurement_posture.
+            # _UNKNOWN_PER_MANIFEST_KEYS`` publishes one per key). Publishing
+            # the sum without them lets a census read on 1 of 24 questions
+            # read exactly like a complete one.
+            "points_with_ep_unread", "points_unmeasured",
+            "points_unmeasured_unread",
             "points_off_neutral", "points_moved_off_neutral",
             "ep_ran", "failed")},
         "inert_by_reason": summary.get("inert_by_reason"),
@@ -96,19 +141,23 @@ def cells(path: str) -> dict:
         } for o in outcomes if isinstance(o, dict)],
         # The run's OWN per-question cells, so the artifact can be checked
         # question by question instead of only in aggregate.
-        "per_question": [{
-            "question_id": o.get("question_id"),
-            "question_type": o.get("question_type"),
-            "operators": (o.get("belief_activation") or {}).get("operators"),
-            "factor_edges": (o.get("belief_activation") or {}).get("factor_edges"),
-            "points_with_ep": (o.get("belief_activation") or {}).get("points_with_ep"),
-            "points_unmeasured": (o.get("belief_activation") or {}).get("points_unmeasured"),
-            "points_off_neutral": (o.get("belief_activation") or {}).get("points_off_neutral"),
-            "points_moved_off_neutral":
-                (o.get("belief_activation") or {}).get("points_moved_off_neutral"),
-            "ep_ran": (o.get("belief_activation") or {}).get("ep_ran"),
-            "no_op_reason": (o.get("belief_activation") or {}).get("no_op_reason"),
-        } for o in outcomes if isinstance(o, dict)],
+        #
+        # FAIL CLOSED (#10137 review, P2). ``o["belief_activation"]`` is only
+        # carried by outcomes whose shape included it — the checkpoint write
+        # always does (``run.py:5115-5116``), the report's projection does
+        # since this review. On an input that carries NO manifest, emitting one
+        # row per outcome would publish 24 rows of nulls under an aggregate
+        # that still looks right: a null ``ep_ran`` /
+        # ``points_with_ep`` would be indistinguishable from a measured one, and
+        # the loss would be silent. So publish the ABSENCE and where it comes
+        # from (the ``absent()`` discipline: a census nobody read is not a zero,
+        # which is the same rule ``measurement_posture`` applies to summed
+        # cells). A PARTIAL manifest population is not an absence — the rows
+        # exist and ``per_question_unread`` says how many questions inside them
+        # were never measured, exactly like ``<key>_unread``.
+        "per_question_source": per_question_source,
+        "per_question_unread": per_question_unread,
+        "per_question": per_question,
     }
 
 
