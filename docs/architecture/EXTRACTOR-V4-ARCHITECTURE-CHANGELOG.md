@@ -1289,6 +1289,7 @@ re-verified against the pin and left as written. ⚠️ **No guard requires the 
 a resolvable symbol** — the citation-rot guard resolves a cell only when one is there, which is why
 two symbol-less cells sat in a load-bearing table; the proposal to close that lives on the issue,
 not in this file.
+
 ## 2026-10-30 — the compact render now carries the declared carve-out, and the compaction rule says what it may drop (`#9775`)
 
 §7 of the design document states the guarantee in one sentence — *"any mechanical filter MUST carry
@@ -1329,4 +1330,3 @@ once per prompt, so a second copy of one instruction cannot ride along. The regi
 `state_value_carve_out` records the rule rather than an omission, and keeps `not-implemented` because
 of what it records next: nothing in the write path *enforces* retention. Prompt text is not the
 guarantee, and the enforcement half is `#10360`.
->>>>>>> refs/tmp/pr-10382
