@@ -256,8 +256,9 @@ lines and every clause of the doctrine holds: the job is declared at
 ``.github/workflows/python-ci.yml:4292`` (``if: always()``, ``actions: read``, ``GH_TOKEN``, and
 "Reading the run's jobs and their step logs is the whole requirement"), it is in ``python-ci-gate``'s
 ``needs:`` (:4411) and in the gate's own ``LEGS_FILE`` table (:4496), ``DEFERRABLE_LEGS`` is declared
-at :4435 (and ``changes`` is not in it), and the table this module points at begins at :4483
-(``cat > "$LEGS_FILE" <<'LEGS'``). Deleting those needles would have made the partition claim false —
+at :4435 (and ``changes`` is not in it), and the ``changes`` row the guard cites is :4484 (the
+leg table's ``cat > "$LEGS_FILE" <<'LEGS'`` opener is :4483). Deleting those needles would have made
+the partition claim false —
 the defect the list was added to fix. A stale checkout, not a defect in the document.
 **The surviving CLASS — and it is the reason #10434 exists.** Earlier rounds named a
 single survivor; rounds 30-34 measured ~90 further mutants and the honest claim is
