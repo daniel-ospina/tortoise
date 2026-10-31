@@ -72,6 +72,16 @@ or facts that were false against the tree they describe:
   fallback — inverting the repo's recorded #5084 rule for the very measurement the
   doctrine calls non-negotiable (peer lanes' graphs enter the batch id set and not the
   baseline's, so Phase 4 convicts an innocent PR);
+* **the baseline was the one phase that neither CLEARED its report nor checked that the run
+  COMPLETED**: ``pytest`` truncates a junit file only in ``pytest_sessionfinish``, so a baseline the
+  kernel killed left the PREVIOUS batch's report at the fixed path and the ``-gt 0`` guard passed on
+  that stale number — and the baseline id set and count ARE the ledger every later verdict is diffed
+  against, so a stale baseline both hides ``main``'s own red and convicts an innocent PR;
+* **the baseline total had no carrier**: ``$BASELINE_TOTAL`` was computed in Phase 1's shell and read
+  in Phase 3's, which may be a LATER shell (the doctrine already carries the run's status and
+  ``$PINNED`` in files for exactly that reason) — there ``[ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ]``
+  compares against the empty string, bash rejects it (rc=2), and the count halt reports a COMPLETE,
+  green batch as SHORTER than the baseline;
 * the carve-out file count was quoted from memory and was stale.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
@@ -89,10 +99,12 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-tes
 would make the reproduced/not-reproduced list read as a complete partition.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **19 checks** at this head, **0 red**: **15 of 19** at
-``a17576c43``, **12 of 19** at ``f3c6c803b``, **10 of 19** at ``a8be548762``, **8 of 19** at
-``295d6d385``, **6 of 19** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **5 of 19** at
-``ed1c03b82`` and ``c50628450``, and **4 of 19** at ``a888c6980`` / ``aede4190f`` — where three
+revision rather than asserted — **21 checks** at this head, **0 red**: **2 of 21** at
+``a12792afe`` (the two this round added — the baseline count's carrier and the baseline report's
+completion check; every older revision is red on them too, by the rule below), **17 of 21** at
+``a17576c43``, **14 of 21** at ``f3c6c803b``, **12 of 21** at ``a8be548762``, **10 of 21** at
+``295d6d385``, **8 of 21** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **7 of 21** at
+``ed1c03b82`` and ``c50628450``, and **6 of 21** at ``a888c6980`` / ``aede4190f`` — where three
 are exactly that round's findings (the bisect attribution, the gate run's completion, and
 the omitted ``changes`` member) and the fourth is the exit-status-persistence requirement,
 which landed AFTER those revisions. The fourth is the rule rather than an exception: a check
@@ -152,6 +164,10 @@ fire), and the four round-27 re-measurements
 (poll / merge / after-merge-log / revert each with an appended mover) — plus the
 guard-internal pair: restoring the quote-blind ``_code`` lets a ``&& git switch main``
 suffix on the merge line pass GREEN, which is exactly what the quote-aware cut kills.
+**8 more measured this round, 8 killed**, each red on the two checks it targets: delete the
+carrier write, delete the consumer's ``cat`` bind, stop clearing the carrier, drop the
+absent-carrier halt; stop clearing the baseline report, drop the ``BASELINE_RC=$?`` capture,
+widen its predicate to accept ``137`` (SIGKILL/OOM), and make the predicate ``|| true``.
 **The surviving CLASS — and it is the reason #10434 exists.** Earlier rounds named a
 single survivor; rounds 30-34 measured ~90 further mutants and the honest claim is
 weaker than "one survivor": the guard decides SHELL CONTROL FLOW by pattern-matching
@@ -159,13 +175,13 @@ text, so any ONE-LINE edit that changes a subject's INPUTS rather than its wordi
 leaves a textually perfect halt bash-dead. Measured witness: inserting
 ``BASELINE_TOTAL=0`` between the fence's own ``[ "$BASELINE_TOTAL" -gt 0 ]`` guard and
 the count halt makes the count halt dead (``bash`` prints CONTINUED) with the guard
-**0 of 19 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
+**0 of 21 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
 ``unset``, deleting the ``-gt 0`` line). No accumulation of spellings closes it; the
 closure is to EXECUTE the fences under a stubbed PATH and assert the fence STOPS,
 which is #10434. One instance of that class is still named explicitly below:
 ``git switch --detach -C <branch> "$PINNED"``, which git refuses outright (rc=128) and
 whose ``|| exit 1`` halts — a predicate-tightness miss, not a broken invariant — and
-the honest document is 0 of 19 red.
+the honest document is 0 of 21 red.
 
 Two more classes belong to that list: an append-a-mover SUFFIX on any of
 those lines — `git bisect reset <branch> && git switch main`, `git log --oneline -1
@@ -364,6 +380,49 @@ _RC_POLL = re.compile(
     r"^\[\s*-f\s+/tmp/[\w.-]+\s*\]\s*&&\s*echo\s+(?:'[^']*'|\"[^\"]*\")\s*"
     r"\|\|\s*echo\s+(?:'[^']*'|\"[^\"]*\"|\S+)$"
 )
+
+
+def _status_head(var: str) -> re.Pattern[str]:
+    """The COMPLETED-run predicate: only 0 and 1 are a finished pytest run.
+
+    Named per variable so the same pin applies to the gate's `$RC` and to the baseline's
+    `$BASELINE_RC` — one shape, two carriers, because a predicate that accepts 137
+    (SIGKILL/OOM) or 2 (interrupted) certifies a KILLED run as COMPLETED.
+    """
+    return re.compile(
+        rf'^\[\s*"\${var}"\s+-eq\s+0\s*\]\s*\|\|\s*\[\s*"\${var}"\s+-eq\s+1\s*\]\s*\|\|'
+    )
+
+
+#: The halt behind `_status_head`: the last thing on the line, and a `{…}` body may hold only
+#: echo/printf segments before its final non-zero `exit` (so `{ (exit 1); }` — a CHILD exit — and a
+#: decoy group inside a message are both refused).
+_STATUS_TAIL = re.compile(
+    r"^\s*(?:\{\s*(?:(?:echo|printf)\s+[^;{}()]*;\s*)*"
+    r"exit\s+[1-9]\d*\s*;?\s*\}|exit\s+[1-9]\d*)\s*$"
+)
+
+#: The BASELINE total's carrier. `$BASELINE_TOTAL` is computed in Phase 1's fence and consumed in
+#: Phase 3's, and Phase 3 may be a LATER shell (the same reason the run's status and `$PINNED` are
+#: carried in files): there `[ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ]` compares against the empty
+#: string, bash rejects it (rc=2), and the count halt reports a COMPLETE, green run as SHORTER than
+#: the baseline. The producer is a `printf … > /tmp/<name>` of `$BASELINE_TOTAL`; the consumer binds
+#: `BASELINE_TOTAL` back with `cat`. A carrier that is neither written nor cleared is the same defect
+#: as a status file the poll never wrote.
+_CARRIER_WRITE = re.compile(
+    r'^printf\s+\S+\s+"?\$BASELINE_TOTAL"?\s*>\s*(?P<path>/tmp/[\w.-]+)$'
+)
+_CARRIER_BIND = re.compile(
+    r'^BASELINE_TOTAL="?\$\(\s*cat\s+(?P<path>/tmp/[\w.-]+)\s*\)"?$'
+)
+_CARRIER_TEST = re.compile(r"^\[\s*-s\s+(?P<path>/tmp/[\w.-]+)\s*\]")
+
+#: The baseline fence's own report, and the two halves of the same rule the gate already applies:
+#: clear it (pytest truncates a junit file only in `pytest_sessionfinish`, so a killed run leaves the
+#: PREVIOUS report at the path) and refuse anything but a COMPLETED status.
+_BASELINE_JUNIT = "--junitxml=/tmp/baseline-junit"
+_BASELINE_RC_CAPTURE = re.compile(r'^(?:BASELINE_RC|RC)=\$\?$')
+_BASELINE_RC = "BASELINE_RC"
 
 #: The dirty-tree subject: the command whose failure must reach the halt.
 _DIRTY_TEST = re.compile(r"^(?:\[\s*-z\s|test\s+-z\s)")
@@ -1007,20 +1066,8 @@ def test_the_lane_sync_is_the_one_command_that_keeps_the_extras() -> None:
     assert len(syncs) == 1, (
         f"the doctrine must document exactly one `uv sync`: {syncs}"
     )
-    extras = sorted(
-        token for token in shlex.split(_code(syncs[0])) if token.startswith("--extra")
-    )
-    assert extras == ["--extra embeddings", "--extra parity"] or extras == [
-        "--extra",
-        "--extra",
-        "embeddings",
-        "parity",
-    ] or sorted(shlex.split(_code(syncs[0]))[2:]) == [
-        "--extra",
-        "--extra",
-        "embeddings",
-        "parity",
-    ], (
+    extras = sorted(shlex.split(_code(syncs[0]))[2:])
+    assert extras == ["--extra", "--extra", "embeddings", "parity"], (
         "the lane install must name BOTH extras in one command: `uv sync --extra "
         "embeddings --extra parity`. A plain or single-extra sync silently removes "
         f"the other, and the run then measures a keyword-only product: {syncs}"
@@ -1392,13 +1439,7 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
     # run could still certify BATCH-GREEN for a tree no run has seen. Pin the TAIL: the
     # halt is the LAST thing on the line, and a `{…}` body may hold only echo/printf
     # segments before its final non-zero `exit`.
-    _STATUS_RC = re.compile(
-        r'^\[\s*"\$RC"\s+-eq\s+0\s*\]\s*\|\|\s*\[\s*"\$RC"\s+-eq\s+1\s*\]\s*\|\|'
-    )
-    _STATUS_TAIL = re.compile(
-        r"^\s*(?:\{\s*(?:(?:echo|printf)\s+[^;{}()]*;\s*)*"
-        r"exit\s+[1-9]\d*\s*;?\s*\}|exit\s+[1-9]\d*)\s*$"
-    )
+    _STATUS_RC = _status_head("RC")
     bad_status = [
         c
         for c in status_checks
@@ -1434,6 +1475,170 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
         "killed or interrupted run has no failure set to diff and is never BATCH-GREEN "
         f"(row: {verdict_rows})"
     )
+
+
+def test_the_baseline_count_carries_across_shells() -> None:
+    """the ``a12792afe`` P2-1: ``$BASELINE_TOTAL`` was the one value with no carrier.
+
+    Phase 1 computed it with a plain assignment and Phase 3 compared against it — but Phase 3 may run
+    in a LATER shell, which the doctrine itself relies on two sections below (the run's status is a
+    file, and ``$PINNED`` is re-materialised from the PR body because *landing is a different
+    actor*). In that later shell the comparison degrades to ``[ "12345" -ge "" ]``, bash rejects it
+    (``integer expression expected``, rc=2), and the ``||`` fires — with the wrong diagnosis
+    ("SHORTER than the baseline") on a COMPLETE, green batch. The count halt is the only mechanical
+    detector left for a run that finished but reported too few tests, so it has to be readable.
+
+    Producer and consumer are bound here, and the carrier must be cleared before it is written — a
+    previous batch's total surviving a killed baseline is the same defect as a stale status file.
+    """
+    fences = _fences()
+    writes = [
+        (fence, match.group("path"))
+        for fence in fences
+        for c in fence
+        if (match := _CARRIER_WRITE.match(_code(c)))
+    ]
+    assert writes, (
+        "the baseline total is never written to a file, so it cannot cross a shell boundary: Phase 3 "
+        "may be a LATER shell, where `[ \"$BATCH_TOTAL\" -ge \"$BASELINE_TOTAL\" ]` compares against "
+        "the empty string (bash rc=2) and the halt reports a complete, green batch as SHORTER than "
+        'the baseline. Carry it: `printf \'%s\\n\' "$BASELINE_TOTAL" > /tmp/baseline.total`'
+    )
+    paths = {path for _fence, path in writes}
+    assert len(paths) == 1, f"the baseline total is carried through more than one file: {sorted(paths)}"
+    carrier = paths.pop()
+
+    for fence, path in writes:
+        assert path == carrier
+        codes = [_code(c) for c in fence]
+        assert any(
+            c.startswith("BASELINE_TOTAL=") and "grep" in c for c in codes
+        ), (
+            "the carried value must be the BASELINE's own total, computed from its junit report in "
+            "the same fence — a carrier written from anywhere else measures a different run"
+        )
+        cleared = {
+            token
+            for c in codes
+            for match in re.finditer(r"rm\s+-f\s+(.*)$", c)
+            for token in match.group(1).split()
+        }
+        assert carrier in cleared, (
+            f"{carrier} must be CLEARED before the baseline run (`rm -f … {carrier}`): a previous "
+            "batch's total survives a killed baseline and Phase 3 then compares against it"
+        )
+        writes_at = [i for i, c in enumerate(codes) if _CARRIER_WRITE.match(c)]
+        report_at = [i for i, c in enumerate(codes) if _BASELINE_JUNIT in c]
+        assert report_at and min(writes_at) > min(report_at), (
+            "the carrier must be written AFTER the baseline report it is derived from — writing it "
+            "first carries the count of a run that has not happened"
+        )
+
+    # The consumer: every fence that carries the count halt must BIND the total from that file, and
+    # must HALT on an absent carrier rather than degrade to an empty comparison.
+    consumers = [
+        fence
+        for fence in fences
+        if any(re.match(r'^\[\s+-n\s+"\$BATCH_TOTAL"', _code(c)) for c in fence)
+    ]
+    assert consumers, "the gate no longer compares the run's test count — re-point this guard"
+    for fence in consumers:
+        codes = [_code(c) for c in fence]
+        binds = [
+            (i, match.group("path"))
+            for i, c in enumerate(codes)
+            if (match := _CARRIER_BIND.match(c))
+        ]
+        assert binds, (
+            f"the gate fence compares against `$BASELINE_TOTAL` without binding it from {carrier}: "
+            'in a later shell that is an empty string (bash rc=2), reported as a SHORT run. Bind it: '
+            f'`BASELINE_TOTAL="$(cat {carrier})"`'
+        )
+        assert {path for _i, path in binds} == {carrier}, (
+            f"the gate binds the baseline total from {sorted({p for _i, p in binds})}, but Phase 1 "
+            f"wrote {carrier}: the comparison then reads a file nobody produced"
+        )
+        halt_at = [i for i, c in enumerate(codes) if re.match(r'^\[\s+-n\s+"\$BATCH_TOTAL"', c)]
+        assert min(i for i, _p in binds) < min(halt_at), (
+            "the count halt runs BEFORE the total is bound from the carrier — it then compares "
+            "against whatever `$BASELINE_TOTAL` happened to be, or nothing at all"
+        )
+        tested = [
+            i
+            for i, c in enumerate(codes)
+            if (match := _CARRIER_TEST.match(c)) and match.group("path") == carrier and _halts(c)
+        ]
+        assert tested and min(tested) < min(halt_at), (
+            f"an ABSENT {carrier} must HALT the gate fence (`[ -s {carrier} ] || {{ …; exit 1; }}`) "
+            "and must do so before the count halt: without it the comparison runs against an empty "
+            "string, which bash rejects — a fail-closed read is right, a silent one is not"
+        )
+
+
+def test_the_baseline_report_is_cleared_and_its_status_checked() -> None:
+    """the ``a12792afe`` P2-2: Phase 1 neither cleared its report nor checked the run COMPLETED.
+
+    Phase 3 does both, with the reason written down: `rm -f /tmp/batch.rc /tmp/batch-junit.xml` —
+    "a stale status/report from an earlier run must not decide this one" — and `rc ∈ {0, 1}` because
+    "a killed run prints no summary". Phase 1, the phase whose numbers ARE the ledger, did neither:
+    `pytest` truncates a junit file only in `pytest_sessionfinish`, so a baseline the kernel killed
+    (measured on #10399: five ``python`` processes in 23 minutes) leaves the PREVIOUS batch's report
+    at the fixed path, and the `-gt 0` guard passes happily on that stale number. A stale baseline
+    both hides `main`'s own red and convicts an innocent PR — the two outcomes this phase exists to
+    prevent.
+    """
+    fences = [
+        fence for fence in _fences() if any(_BASELINE_JUNIT in _code(c) for c in fence)
+    ]
+    assert fences, "the baseline run no longer writes a junit report — re-point this guard"
+    head = _status_head(_BASELINE_RC)
+    for fence in fences:
+        codes = [_code(c) for c in fence]
+        runs = [i for i, c in enumerate(codes) if _SUITE_CMD.match(c) and _BASELINE_JUNIT in c]
+        assert runs, "no baseline suite command writes the report — re-point this guard"
+        cleared = {
+            token
+            for c in codes
+            for match in re.finditer(r"rm\s+-f\s+(.*)$", c)
+            for token in match.group(1).split()
+        }
+        assert "/tmp/baseline-junit.xml" in cleared, (
+            "the baseline must CLEAR its junit report before the run (`rm -f /tmp/baseline-junit.xml`): "
+            "pytest truncates it only in `pytest_sessionfinish`, so a baseline the kernel killed "
+            "leaves the PREVIOUS batch's report there and the count reads it as THIS baseline"
+        )
+        clear_at = [i for i, c in enumerate(codes) if re.search(r"rm\s+-f\s+.*baseline-junit", c)]
+        assert min(clear_at) < min(runs), (
+            "the report is cleared AFTER the suite line, so it guards nothing"
+        )
+        captures = [i for i, c in enumerate(codes) if _BASELINE_RC_CAPTURE.match(c)]
+        assert captures, (
+            "the baseline must capture the run's exit status (`BASELINE_RC=$?` on the line after the "
+            "suite): `pytest` exits 0/1 on a COMPLETED run and 2/3/4/5 — or 128+N — when it was "
+            "interrupted, misconfigured or KILLED, and a killed run reports no summary, so nothing "
+            "else distinguishes it"
+        )
+        assert min(captures) > min(runs), (
+            "the exit-status capture sits BEFORE the suite run, so it captures something else"
+        )
+        preds = [c for c in codes if f'"${_BASELINE_RC}"' in c and "-eq" in c]
+        assert preds, (
+            f"no exit-status predicate on `${_BASELINE_RC}`: a status that is captured and never "
+            "checked leaves a KILLED baseline reading as a finished one"
+        )
+        bad = [
+            c
+            for c in preds
+            if not (
+                (matched := head.match(c))
+                and _STATUS_TAIL.match(_unquoted(c)[matched.end() :])
+            )
+        ]
+        assert not bad, (
+            "the baseline status predicate must accept EXACTLY 0 and 1 — any additional accepted "
+            "code (137=SIGKILL/OOM, 2=interrupted) certifies a KILLED baseline as COMPLETED: "
+            f"{bad}"
+        )
 
 
 def test_the_baseline_refuses_a_dirty_tree() -> None:
@@ -1678,11 +1883,15 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
         "the landing pin must be read from the batch PR body Phase 1 recorded it "
         f"to — a value taken from the local repo tests `main` against itself: {defines[0]}"
     )
-    assert defines, (
-        "the landing fence uses $PINNED without defining it: Phase 1 set it in a "
-        "DIFFERENT shell, so here it is empty and the assertion reports "
-        "`main moved:  -> <sha>` against an unmoved main. Materialise it from the "
-        "batch PR body (Phase 1 records it there)"
+    # ...and the polarity: `[ -z "$PINNED" ]` refuses every real sha, so landing
+    # becomes impossible — the same class as the `--jq -r` defect that made the
+    # check unpassable.
+    empty_guards = [
+        c for c in landing[0] if re.match(r'\[\s*-z\s+"\$PINNED"\s*\]', _code(c))
+    ]
+    assert not empty_guards, (
+        'the landing fence must not guard the pin with `[ -z "$PINNED" ]`: a `-z` '
+        f"guard refuses every real sha, so the landing step can never pass: {empty_guards}"
     )
     # gh has no raw (`-r`) flag: `--jq -r '.body'` makes `-r` the EXPRESSION and
     # `.body` a second positional argument, so the payload is never filtered and
@@ -1769,12 +1978,6 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     ), (
         "a guard that is not backed by a halt is an annotation: an empty $PINNED "
         "must stop the fence here, not merely fail a later comparison"
-    )
-    assert pin_guards and any(
-        re.match(r'\[\s*-n\s+"\$PINNED"\s*\]', _code(c)) for c in landing[0]
-    ), (
-        'the landing fence must guard the pin with `[ -n "$PINNED" ]`: a `-z` '
-        "guard refuses every real sha, so the landing step can never pass"
     )
     assert all("--jq" in cmd or "--template" in cmd for cmd in defines), (
         "the landing pin must read the batch PR body through `--jq '.body'` or "
@@ -1870,7 +2073,7 @@ def test_the_unreproduced_gate_legs_are_named() -> None:
         "surface-guard",
         "ci-introduced-failure",
         # `changes` is the diff SELECTOR: a non-deferrable row of the gate's own leg
-        # table (`.github/workflows/python-ci.yml:4484`, not in `DEFERRABLE_LEGS`),
+        # table (`.github/workflows/python-ci.yml:4483`, not in `DEFERRABLE_LEGS`),
         # and the one leg whose failure makes every other leg skip — the selection a
         # batch's pytest run cannot exercise (#10400 P3).
         "`changes`",

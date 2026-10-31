@@ -141,13 +141,29 @@ git switch -C integration/base-check "$PINNED" || exit 1   # ⛔ SWITCH, not `gi
 # bare `-c` dies with `fatal: a branch named 'integration/base-check' already exists` — after which,
 # in a fence with no `set -e`, the pytest lines below run on whatever tree HEAD happens to be on.
 # `|| exit 1` makes that impossible: the fence stops instead of measuring the wrong tree.
+# ⛔ CLEAR the report and the carried count FIRST. pytest truncates a junit file only in
+# `pytest_sessionfinish`, so a baseline run the kernel killed leaves the PREVIOUS batch's report at
+# this path — and the count below then reads it as THIS baseline, which is the ledger every later
+# verdict is diffed against (main's own red is hidden, and an innocent PR is convicted).
+rm -f /tmp/baseline-junit.xml /tmp/baseline.total
 # BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
 # `--junitxml` is not decoration: Phase 3 compares the gate run's test COUNT to this file,
 # because a run the kernel killed reports no summary and would otherwise read as green.
 uv run pytest tests/ -q --junitxml=/tmp/baseline-junit.xml -m 'not track_b and not live and not integration'
+BASELINE_RC=$?
+# ⛔ COMPLETED is not merely finished. pytest exits 0 (passed) or 1 (tests failed) on a COMPLETED
+# run, and 2/3/4/5 — or 128+N — when it was interrupted, misconfigured or KILLED. A killed baseline
+# writes no summary, and by the Baseline rule a missing id set reads as "nothing was red on main":
+# that is the ledger corruption the whole phase exists to prevent, arriving silently.
+[ "$BASELINE_RC" -eq 0 ] || [ "$BASELINE_RC" -eq 1 ] || { echo "the baseline run did not COMPLETE (rc=$BASELINE_RC; 137=SIGKILL/OOM) — no ledger, so no honest verdict is possible"; exit 1; }
 uv run pytest tests/test_ingest_safety.py -q -m track_b
 BASELINE_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/baseline-junit.xml | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
 [ -n "$BASELINE_TOTAL" ] && [ "$BASELINE_TOTAL" -gt 0 ] || { echo "no baseline junit total — the baseline run wrote no report"; exit 1; }
+# ⛔ CARRY the total to Phase 3 in a FILE, not a shell variable. Phase 3 runs in a LATER shell (the
+# same reason the run's status and `$PINNED` are carried in files): there `[ "$BATCH_TOTAL" -ge
+# "$BASELINE_TOTAL" ]` compares against the empty string, bash rejects the expression (rc=2), and
+# the count halt reports "SHORTER than the baseline" on a complete, green batch.
+printf '%s\n' "$BASELINE_TOTAL" > /tmp/baseline.total
 git switch -                                      # back to the lane you came from
 ```
 
@@ -180,6 +196,22 @@ Record the baseline result **as data**: counts, the **exact list of failing test
 duration. Those ids are the ledger that later failures are diffed against. Record `$PINNED` too — in
 the batch PR body, as a `pinned-base: <sha>` line — because landing is a different shell
 (see [Landing](#landing--main-must-still-be-the-tree-you-tested)).
+
+**Everything this phase must hand to a later phase goes into a FILE, never into a shell variable.**
+The doctrine already carries `$PINNED` in the batch PR body and the gate run's exit status in
+`/tmp/batch.rc` for exactly this reason — a plain variable is gone the moment the operator opens the
+next shell, and nothing requires phases 1-3 to share one. `$BASELINE_TOTAL` is the third: it is
+written to `/tmp/baseline.total` here and read back in Phase 3, because the count halt is the only
+mechanical detector left for a run that finished but reported too few tests. An absent carrier is a
+halt, not an empty comparison: `[ "$BATCH_TOTAL" -ge "" ]` is `rc=2`, which a naive fence then reports
+as a short run on a batch that was in fact complete.
+
+**The baseline's own report is cleared and completion-checked, like the gate's.** `pytest` truncates a
+junit file only in `pytest_sessionfinish`, so a run killed mid-flight (measured on #10399: five
+`python` processes in 23 minutes) leaves the **previous** batch's report at the fixed path, and
+`pytest`'s exit status is the only thing that distinguishes it from a finished run: only `0` and `1`
+are a COMPLETED run. A baseline that is stale or killed is worse than no baseline — it is a
+confident ledger of the wrong tree.
 
 **The marker filter is not decoration.** `python-ci.yml`'s deterministic lanes run the suite with
 `-m 'not track_b and not live and not integration'`. `live` marks live-API probes and `integration`
@@ -299,6 +331,12 @@ rm -f /tmp/batch.rc /tmp/batch-junit.xml   # a stale status/report from an earli
 [ -f /tmp/batch.rc ] || { echo "no /tmp/batch.rc — the gate run was never launched in this shell: launch it above, then poll"; exit 1; }
 RC="$(cat /tmp/batch.rc)"
 [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || { echo "the gate run did not COMPLETE (rc=$RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+# ⛔ The baseline TOTAL does not survive Phase 1's shell either: Phase 3 may be a LATER shell, where
+# the comparison below would run against an empty string (bash: `integer expression expected`, rc=2)
+# and the halt would report a COMPLETE, green run as SHORTER than the baseline. Read the file Phase 1
+# wrote, exactly as the status and the pin are read, and refuse an absent one.
+[ -s /tmp/baseline.total ] || { echo "no /tmp/baseline.total — Phase 1 never recorded the baseline count; re-run Phase 1 (Landing route 1)"; exit 1; }
+BASELINE_TOTAL="$(cat /tmp/baseline.total)"
 BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/batch-junit.xml | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
 [ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the gate run reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — SHORTER than the baseline: investigate (a killed run, or a diff that legitimately removes or moves tests) — and never call it green: UNPROVEN-FULL-SUITE(<lane>)"; exit 1; }
 
