@@ -44,6 +44,7 @@ Static: no DB, no network, no real model.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -53,6 +54,23 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
+
+
+@pytest.fixture(autouse=True)
+def _classify_later_off(monkeypatch):
+    """Pin the contract this file asserts to the one CI renders.
+
+    A truthy ambient ``TORTOISE_CLASSIFY_LATER`` flips both renderers to the
+    ``_CORE_ONLY`` template, which drops ``OUTPUT_CONTRACT`` and the
+    ``{date_anchor}`` slot from the system prompt. Two cases here read those
+    tokens in the rendered prompt, so without this the file's green would
+    depend on the caller's shell — a lane that exported the flag would see
+    four reds that say nothing about the framing. Same posture as
+    ``tests/test_extractor_v2.py``. Pinned by
+    ``test_the_file_is_immune_to_an_ambient_classify_later``.
+    """
+    monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+
 
 # ── the fixtures ────────────────────────────────────────────────────────────
 
@@ -539,6 +557,29 @@ def test_the_quote_to_turn_resolver_still_anchors_through_a_framed_prompt():
     assert any("contradicts the quote's turn 0" in w for w in warnings), (
         "the wrong model index must still lose with a warning"
         f" — got {warnings}")
+
+
+def test_the_file_is_immune_to_an_ambient_classify_later():
+    """A flag in the caller's shell must not decide whether this file is green.
+
+    A truthy ``TORTOISE_CLASSIFY_LATER`` swaps both renderers to the
+    ``_CORE_ONLY`` template, which drops ``OUTPUT_CONTRACT`` and the
+    ``{date_anchor}`` slot — the two tokens the parser cases above read in the
+    system prompt. Measured on the pre-fixture file: `TORTOISE_CLASSIFY_LATER=1
+    pytest tests/test_extractor_prompt_framing_10311.py` reds **4** cases
+    (`output_contract`, `date_anchor`, and both parser round-trips), none of
+    which says anything about the framing. The autouse fixture removes the var
+    so the file's verdict is about the code, not about the shell.
+    """
+    assert os.environ.get("TORTOISE_CLASSIFY_LATER") is None, (
+        "the autouse fixture must have removed the ambient flag before any"
+        " render ran — otherwise the two contract assertions above are a"
+        " property of the caller's shell")
+    system = v2.render_s2_prompt(edus=EDUS)
+    assert v2.OUTPUT_CONTRACT in system
+    assert "{date_anchor}" not in system, (
+        "the base template's date slot must have been filled, i.e. the CORE_ONLY"
+        " template is not the one under test")
 
 
 # ── 4. drops-the-clause-reddens ─────────────────────────────────────────────
