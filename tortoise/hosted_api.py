@@ -691,8 +691,8 @@ def _default_graph_name(org: dict) -> str | None:
                                     org.get("graph_namespace"))
 
 
-#: #10180: the DEFAULT namespace belonging to the credential THIS request
-#: resolved, as ``(org_id, graph_namespace)``. Read by
+#: #10180: the DEFAULT graph belonging to the credential THIS request
+#: resolved, as ``(org_id, graph_namespace, default_graph_id)``. Read by
 #: :func:`_org_default_namespace` so the lanes that hold only an ``org_id`` —
 #: the onboarding projection and its completion gate, the seed/indexing runners,
 #: the event sweep — reuse the value the auth seam already has instead of paying
@@ -700,9 +700,11 @@ def _default_graph_name(org: dict) -> str | None:
 #: they can never disagree with the credential the request was admitted with.
 #: The PAIR's presence means "resolved": ``namespace`` may legitimately be None
 #: (registry lane, or an org with no ``graph_name``), which means "take the
-#: historical open", not "go read".
+#: historical open", not "go read". ``default_graph_id`` is the SAME
+#: credential's record tenant (#10025), carried in the same tuple so a lane that
+#: needs both does not read for one of them.
 _resolved_default_namespace: contextvars.ContextVar[
-    tuple[str, str | None] | None] = contextvars.ContextVar(
+    tuple[str, str | None, str | None] | None] = contextvars.ContextVar(
         "_resolved_default_namespace", default=None)
 
 
@@ -722,10 +724,17 @@ def _publish_default_namespace(org: dict) -> None:
     every org-level reader looked at the org's default. Nothing is published for
     that credential, so those lanes fall back to the control-plane read and still
     answer "the org's default", never the caller's binding.
+
+    ``default_graph_id`` rides along because it is the OTHER answer about the
+    same graph (the record tenant, #10025) and it came from the same credential
+    resolution: a lane that takes the name from here and the id from a second
+    read straddles a promotion that commits between them, opening the DEMOTED
+    graph while filing every record row under the PROMOTED one.
     """
     org_id = org.get("org_id")
     if org_id and not org.get("graph_id"):
-        _resolved_default_namespace.set((org_id, org.get("graph_namespace")))
+        _resolved_default_namespace.set(
+            (org_id, org.get("graph_namespace"), org.get("default_graph_id")))
 
 
 def _org_default_namespace(org_id: str) -> str | None:
@@ -775,6 +784,55 @@ def _org_default_namespace(org_id: str) -> str | None:
         return None
     return _moved_default_namespace(
         org_id, rows[0].get("graph_name") if rows else None)
+
+
+def _org_default_graph(org_id: str) -> tuple[str | None, str | None]:
+    """BOTH answers about the org's default graph — from ONE instant.
+
+    ``(moved_namespace, default_graph_id)``: the namespace an org-wide open must
+    use (``None`` ⇒ the historical ``namespace=org_id`` open, exactly as
+    `_org_default_namespace` answers) and the record tenant for that same graph
+    (``None`` ⇒ nothing nameable, so the write stays refused ``no_tenant``).
+
+    WHY ONE FUNCTION. The lanes below resolve the NAME to open their SDK and the
+    ID to file their records, and asked separately the two are two reads at two
+    instants: a ``promote_default_graph`` commit landing between them makes the
+    lane write the graph the promotion DEMOTED while every Object / Event /
+    ``-closed`` row it mints names the graph the promotion PROMOTED — the
+    ``derived != measured`` split #10025 exists to remove, re-created by the very
+    verb #10180 adds. Answers about one graph must come from one row, so this
+    reads ``public.graphs``'s active ``kind='default'`` row ONCE (its ``id`` and
+    ``namespace`` — see :func:`tortoise.supabase_control.default_graph_row_for`),
+    and the promotion writes that row and ``organizations.graph_name`` in one
+    transaction, so the pair cannot disagree.
+
+    On a REQUEST it costs nothing and is coherent by construction: the auth seam
+    published the admitted credential's own two values
+    (`_publish_default_namespace`), which were resolved from the same credential
+    dict the data plane opened, so both come back without a read.
+
+    FAIL-SOFT, for `_org_default_namespace`'s reason: an unreadable control plane
+    yields ``(None, None)`` — the historical open and NO tenant, which is the
+    fail-closed ``no_tenant`` direction (#9192), never a guess.
+    """
+    from tortoise.supabase_control import (
+        default_graph_row_for,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+
+    if not is_supabase_enabled():
+        # The self-host registry lane has no `public.graphs` row and no tenant
+        # its record could name — do not pay a control-plane call to learn that.
+        return None, None
+    hint = _resolved_default_namespace.get()
+    if hint is not None and hint[0] == org_id:
+        return _moved_default_namespace(org_id, hint[1]), hint[2]
+    row = default_graph_row_for(get_control_plane(), org_id)
+    if row is None:
+        return None, None
+    return (_moved_default_namespace(org_id, row.get("namespace")),
+            row.get("id"))
 
 
 def _org_sdk(org_id: str, *, namespace: str | None = None) -> TortoiseSDK:
@@ -7538,8 +7596,12 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
                         exc_info=True)
 
 
-def _bind_default_graph_record_tenant(sdk: TortoiseSDK,
-                                      org_id: str) -> None:
+_UNRESOLVED_DEFAULT_GRAPH = object()
+
+
+def _bind_default_graph_record_tenant(
+        sdk: TortoiseSDK, org_id: str,
+        *, default_graph_id: object = _UNRESOLVED_DEFAULT_GRAPH) -> None:
     """Bind the ORG'S DEFAULT GRAPH as this lane's record tenant (#10047).
 
     For the lanes that build their OWN SDK — the two background indexing jobs,
@@ -7586,26 +7648,37 @@ def _bind_default_graph_record_tenant(sdk: TortoiseSDK,
     (``_github_token_enc`` / ``_get_onboarding_state`` for the jobs), it is not
     per-request, and it cannot fail the lane: an unreadable control plane logs
     and leaves the write refused, which is the direction #5148 requires.
+
+    ``default_graph_id`` is the PRE-RESOLVED id, for a lane that already read it
+    — and it exists because the id and the namespace are answers about ONE row:
+    `_org_default_graph` reads both in one round trip, and a lane that took the
+    name from there and then read the id again here would straddle a promotion
+    committing between the two, writing the DEMOTED graph's namespace while
+    filing every record under the PROMOTED graph's id. Passing it (including
+    ``None``, meaning "no row was nameable — bind nothing") skips the read and
+    closes that window; omitting it keeps the read for the lanes that resolved
+    nothing else.
     """
-    try:
-        from tortoise.supabase_control import (
-            default_graph_id_for,
-            get_control_plane,
-            is_supabase_enabled,
-        )
-        # The SELF-HOST lane has no control plane and no `public.graphs` row to
-        # read: `record_tenant_for` refuses its ids anyway (they are Falkor
-        # `:Graph` node ids the record's FK cannot satisfy), so do not pay a
-        # control-plane call to learn that.
-        if not is_supabase_enabled():
+    if default_graph_id is _UNRESOLVED_DEFAULT_GRAPH:
+        try:
+            from tortoise.supabase_control import (
+                default_graph_id_for,
+                get_control_plane,
+                is_supabase_enabled,
+            )
+            # The SELF-HOST lane has no control plane and no `public.graphs` row
+            # to read: `record_tenant_for` refuses its ids anyway (they are
+            # Falkor `:Graph` node ids the record's FK cannot satisfy), so do not
+            # pay a control-plane call to learn that.
+            if not is_supabase_enabled():
+                return
+            default_graph_id = default_graph_id_for(get_control_plane(), org_id)
+        except Exception:
+            _logger.warning(
+                "could not resolve the DEFAULT-graph record tenant for org %s — "
+                "its record writes stay refused no_tenant",
+                org_id, exc_info=True)
             return
-        default_graph_id = default_graph_id_for(get_control_plane(), org_id)
-    except Exception:
-        _logger.warning(
-            "could not resolve the DEFAULT-graph record tenant for org %s — "
-            "its record writes stay refused no_tenant",
-            org_id, exc_info=True)
-        return
     if not default_graph_id:
         return
     _bind_record_tenant(sdk, {"org_id": org_id, "graph_id": None,
@@ -34009,14 +34082,20 @@ def _run_onboarding_seed(org_id: str, *, org_name: str | None = None,
                 "org_name_source": org_source if org_display else None,
                 "person_name_source": person_source}
 
-    sdk = _org_sdk(org_id)
     # #10047: this runner writes the org's DEFAULT graph (`namespace=org_id`
     # — or the namespace a #10180 promotion moved it to, which `_org_sdk` and
     # `_bind_default_graph_record_tenant` resolve the SAME way) and holds no
     # credential dict, so name that graph's record tenant here —
     # through the one chokepoint — or every Subject/edge it files is refused
     # `no_tenant` while the seed reports success.
-    _bind_default_graph_record_tenant(sdk, org_id)
+    #
+    # ⛔ ONE READ for BOTH answers: `_org_default_graph` returns the namespace
+    # the seed OPENS and the tenant it FILES UNDER from a single `public.graphs`
+    # read, so a promotion committing between two reads cannot leave the seed
+    # writing the demoted graph while naming the promoted one (#10180 review).
+    moved, tenant = _org_default_graph(org_id)
+    sdk = _org_sdk_from_name(org_id, moved)
+    _bind_default_graph_record_tenant(sdk, org_id, default_graph_id=tenant)
     try:
         surface = _OrgSeedSurface(sdk)
         try:
@@ -34188,10 +34267,13 @@ def _run_starter_seed(org_id: str, *, org_name: str | None = None,
     if person_user_id in (None, "api") or "@" in str(person_user_id):
         person_user_id = None
     include_person = person is not None
-    sdk = _org_sdk(org_id)
     # #10047: the starter seed writes the org's DEFAULT graph by construction —
     # bind that graph's record tenant (see _bind_default_graph_record_tenant).
-    _bind_default_graph_record_tenant(sdk, org_id)
+    # ⛔ Both answers from ONE `public.graphs` read (`_org_default_graph`), for
+    # `_run_onboarding_seed`'s reason: two reads straddle a promotion.
+    moved, tenant = _org_default_graph(org_id)
+    sdk = _org_sdk_from_name(org_id, moved)
+    _bind_default_graph_record_tenant(sdk, org_id, default_graph_id=tenant)
     try:
         proj = sdk._get_proj()
         surface = _OrgSeedSurface(sdk)
@@ -37860,17 +37942,23 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     terminal_status: str | None = None
     terminal_error: str | None = None
     try:
-        # The default-graph NAME is resolved in a worker (one control-plane
+        # The default-graph answers are resolved in a worker (one control-plane
         # round trip, which must not run on the loop), but the SDK is
         # CONSTRUCTED back here, ON the loop — ``_make_sdk`` in a pooled worker
         # resolves the store path from that thread's stale stamp (#7500).
-        org_sdk = _org_sdk_from_name(org_id, await _cp_offload(
-            lambda: _org_default_namespace(org_id), op="org_sdk"))
+        # `_org_default_graph` returns the NAME to open AND the record tenant to
+        # file under from that ONE read: two reads would straddle a promotion
+        # (the walk then writes the demoted graph while its rows name the
+        # promoted one — #10180 review).
+        moved, tenant = await _cp_offload(
+            lambda: _org_default_graph(org_id), op="org_sdk")
+        org_sdk = _org_sdk_from_name(org_id, moved)
         # #10047: the walk is a DETACHED task carrying only `org_id`, so it
         # cannot see the credential that started it; it opens the org's DEFAULT
         # graph, so that graph's record tenant is the answer for every Object /
         # Event / `-closed` row it mints.
-        _bind_default_graph_record_tenant(org_sdk, org_id)
+        _bind_default_graph_record_tenant(org_sdk, org_id,
+                                         default_graph_id=tenant)
 
         # #1844: the index job writes zero non-episodic :Point nodes, so it never
         # trips the POINT arm of the "points" resource.
@@ -38215,11 +38303,15 @@ def _relink_sessions_after_index(org_id: str) -> None:
         # the SDK is journal-less and ``sdk._emit_event`` is a no-op on
         # ``EntityLinked`` (JSONL-only, absent from ``_GRAPH_EVENT_TYPES``), so
         # the edges stay live-only — the documented unconfigured-lane bound.
-        _link_sdk = _org_sdk(org_id)
         # #10047: the relink pass emits `EntityLinked` through THIS SDK on the
         # org's DEFAULT graph — the tenant must ride it, or the edges it
-        # journals are refused `no_tenant`.
-        _bind_default_graph_record_tenant(_link_sdk, org_id)
+        # journals are refused `no_tenant`. Both the name it opens and the
+        # tenant it files under come from ONE `public.graphs` read, so a
+        # promotion committing in between cannot split them (#10180 review).
+        moved, tenant = _org_default_graph(org_id)
+        _link_sdk = _org_sdk_from_name(org_id, moved)
+        _bind_default_graph_record_tenant(_link_sdk, org_id,
+                                          default_graph_id=tenant)
         proj = _link_sdk._get_proj()
         rows = proj.g.query(
             "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
@@ -38438,14 +38530,16 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
               "blobs_skipped_oversized": 0, "repos_processed": 0,
               "repos_total": 0, "errors": [], "quota_hit": False}
     try:
-        # Same split as `_run_indexing`: the NAME is read in a worker, the SDK
-        # is constructed on the loop (#7500 — see `_org_sdk_from_name`).
-        org_sdk = _org_sdk_from_name(org_id, await _cp_offload(
-            lambda: _org_default_namespace(org_id), op="org_sdk"))
+        # Same split as `_run_indexing`: the answers are read in a worker, the
+        # SDK is constructed on the loop (#7500 — see `_org_sdk_from_name`).
+        moved, tenant = await _cp_offload(
+            lambda: _org_default_graph(org_id), op="org_sdk")
+        org_sdk = _org_sdk_from_name(org_id, moved)
         # #10047: same detached-task reason as `_run_indexing` — the docs walk
         # writes the org's DEFAULT graph and carries no credential to resolve a
         # tenant from.
-        _bind_default_graph_record_tenant(org_sdk, org_id)
+        _bind_default_graph_record_tenant(org_sdk, org_id,
+                                         default_graph_id=tenant)
 
         # ── Documents gate (Task 9): the docs job gates on the DOCUMENTS
         # resource — the points gate is vacuous for docs (index_directory

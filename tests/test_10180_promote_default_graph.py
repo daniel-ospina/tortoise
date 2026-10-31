@@ -304,10 +304,29 @@ def test_the_double_rejects_a_second_live_default():
         fake._assert_one_live_default(TEAM)
 
 
-def test_the_verb_refuses_to_run_when_the_index_is_already_violated():
-    """Pre-existing drift (two live defaults, raw SQL/ops) must not be
-    'resolved' by a promotion that silently picks one — the refusal is what
-    keeps the repair an explicit operator action."""
+def test_the_verb_converges_pre_existing_duplicate_default_drift():
+    """Pre-existing drift (two live defaults, raw SQL/ops) is REPAIRED by a
+    promotion — the verb does not refuse it.
+
+    Read the SQL, not the intent: the migration's demote is
+
+        UPDATE public.graphs g SET kind = 'custom'
+         WHERE g.org_id = p_org_id AND g.kind = 'default'
+           AND g.status <> 'deleted' AND g.id <> p_graph_id
+
+    with NO row-count guard, and demoting cannot violate a uniqueness index —
+    so both drifted rows are demoted, one default remains, and the
+    post-condition passes. The migration header lists this very state as one the
+    post-condition covers, not among the refusals, and the function returns
+    `ok`. This test used to assert the opposite (a raised
+    `uq_graphs_org_default_active`) while the double raised on its own, and the
+    fake's docstring claims it mirrors the SQL — so the mismatch would have told
+    a future lane that a drift guard exists in the verb, or that the verb cannot
+    converge a drifted org. It can.
+
+    FAIL-ON: re-add a row-count refusal to the double (the pre-fix shape) and
+    this reds — the promotion succeeds against production and raises here.
+    """
     fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": [],
                              "graphs": []})
@@ -316,12 +335,23 @@ def test_the_verb_refuses_to_run_when_the_index_is_already_violated():
         {"id": "g_10180dupe00005", "org_id": TEAM, "name": "dupe",
          "kind": "default", "namespace": "org_dupe", "status": "active"})
     assert len(fake._live_default_rows(TEAM)) == 2
-    with pytest.raises(RuntimeError, match="uq_graphs_org_default_active"):
-        fake.rpc("promote_default_graph",
-                 {"p_org_id": TEAM, "p_graph_id": NEW_ID},
-                 representation=True)
-    # …and nothing moved: the drift is still exactly as the operator left it.
-    assert {g["id"]: g["kind"] for g in fake.tables["graphs"]}[NEW_ID] == "custom"
+    receipt = fake.rpc("promote_default_graph",
+                       {"p_org_id": TEAM, "p_graph_id": NEW_ID},
+                       representation=True)
+    # The move happened, and the drift is GONE: exactly one live default (the
+    # target) — the same after-state the DB's post-condition certifies.
+    kinds = {g["id"]: g["kind"] for g in fake.tables["graphs"]}
+    assert kinds[NEW_ID] == "default"
+    assert kinds[OLD_ID] == "custom"
+    assert kinds["g_10180dupe00005"] == "custom", (
+        "the demote statement has no `id <> p_graph_id`-only narrowing — every "
+        "drifted default row must be demoted")
+    live = _defaults(fake)
+    assert [g["id"] for g in live] == [NEW_ID], live
+    # The receipt reports the FIRST demoted row (plpgsql's non-STRICT INTO).
+    assert receipt["ok"] is True
+    assert receipt["already_default"] is False
+    assert receipt["previous_default_graph_id"] in (OLD_ID, "g_10180dupe00005")
 
 # ── 4. ATOMICITY SHAPE: one RPC, one transaction, serialized on the org ────
 
@@ -1268,3 +1298,145 @@ def test_the_event_sweep_takes_the_namespace_from_its_enumeration():
         "the enumeration must carry graph_name into the dict the sweep reads")
     # …and the sweep passes it, so no read is needed.
     assert '_org_sdk(org["org_id"], namespace=org.get("graph_name"))' in src
+
+
+# ── 14. The lanes that build their OWN SDK open and file from ONE read ─────
+# The five lanes below resolve the graph they OPEN (the org's default
+# namespace) and the tenant they FILE UNDER (that same row's id). Asked as two
+# reads, the pair is two instants — and `promote_default_graph` commits both
+# facts in one transaction, so a promotion landing between them leaves the job
+# writing the graph the promotion DEMOTED while every Object / Event / `-closed`
+# row it mints names the graph the promotion PROMOTED. That is the
+# `derived != measured` split #10025 exists to remove, re-created by the verb
+# #10180 adds. `_org_default_graph` answers both from ONE `public.graphs` read.
+
+_TWO_ANSWER_LANES = ("_run_indexing", "_run_docs_indexing",
+                     "_run_onboarding_seed", "_run_starter_seed",
+                     "_relink_sessions_after_index")
+
+
+def test_the_default_graph_pair_is_read_at_one_instant(monkeypatch):
+    """A promotion committing between the two reads SPLITS a lane; one read
+    cannot.
+
+    The race is driven deterministically: the fake fires a real
+    `promote_default_graph` immediately after answering the FIRST `graphs` read
+    — i.e. exactly between read #1 (name) and read #2 (id) of the pre-fix shape.
+
+    FAIL-ON (measured by the non-vacuity half below): with the pair resolved by
+    two reads, the namespace says "not moved" (`namespace=org_id`, the DEMOTED
+    graph) while the tenant says NEW_ID (the PROMOTED graph) — the lane then
+    writes one graph and files the rows under the other, permanently.
+    """
+    fake = _fake_org_row(monkeypatch, f"org_{TEAM}")
+    orig_query = fake.query
+    fired: list[bool] = []
+    def _query(table, **kw):
+        rows = orig_query(table, **kw)
+        # Fire on the FIRST control-plane read of EITHER table: the interesting
+        # instant is "a promotion commits after the first answer and before a
+        # second could be asked". One read ⇒ both answers are from it; two reads
+        # ⇒ the name is pre-promotion and the id is post.
+        if table in ("organizations", "graphs") and not fired:
+            fired.append(True)
+            # The promotion commits NOW — after this read answered.
+            fake.rpc("promote_default_graph",
+                     {"p_org_id": TEAM, "p_graph_id": NEW_ID},
+                     representation=True)
+        return rows
+
+    monkeypatch.setattr(fake, "query", _query)
+    token = ha._resolved_default_namespace.set(None)
+    try:
+        moved, tenant = ha._org_default_graph(TEAM)
+    finally:
+        ha._resolved_default_namespace.reset(token)
+    assert fired, "the fake never served a `graphs` read — nothing was raced"
+    assert (moved, tenant) in ((None, OLD_ID),
+                               (f"org_{TEAM}_{NEW_ID}", NEW_ID)), (
+        "the namespace a lane OPENS and the tenant it FILES UNDER must describe "
+        "the same default row: got "
+        f"{(moved, tenant)!r} — that pair is a graph/data split (#10025)")
+
+    # ── NON-VACUITY: the PRE-FIX two-read shape still splits on this fixture,
+    # so the assertion above is discriminating rather than descriptive. Rebuilt
+    # on a fresh control plane because the promotion above already moved it.
+    from tortoise.supabase_control import default_graph_id_for
+
+    two = _fake_org_row(monkeypatch, f"org_{TEAM}")
+    name_before = ha._org_default_namespace(TEAM)          # read #1
+    two.rpc("promote_default_graph",
+            {"p_org_id": TEAM, "p_graph_id": NEW_ID},
+            representation=True)                          # the commit
+    tenant_after = default_graph_id_for(two, TEAM)        # read #2
+    assert (name_before, tenant_after) == (None, NEW_ID), (
+        "the fixture no longer reproduces the split — the test above would be "
+        f"vacuous. got {(name_before, tenant_after)!r}")
+
+
+def test_the_bind_takes_a_pre_resolved_tenant_without_reading(monkeypatch):
+    """`default_graph_id=` skips the read, including when it is ``None``.
+
+    FAIL-ON: ignore the pre-resolved id and the lane pays a SECOND read for an
+    answer it already has — the read that straddles the promotion in the test
+    above. A ``None`` must also skip the read: it is "no row was nameable, bind
+    nothing" (fail-closed `no_tenant`), not "go read and hope".
+    """
+    _hosted(monkeypatch)
+
+    class _Boom:
+        def query(self, *a, **k):
+            pytest.fail("a pre-resolved tenant must not read the control plane")
+
+    monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                        lambda: _Boom())
+    installed: list[tuple] = []
+
+    class _Sdk:
+        def _bind_record_tenant(self, *a):
+            installed.append(a)
+
+    ha._bind_default_graph_record_tenant(_Sdk(), TEAM, default_graph_id=NEW_ID)
+    assert installed == [(TEAM, NEW_ID)], installed
+    ha._bind_default_graph_record_tenant(_Sdk(), TEAM, default_graph_id=None)
+    assert installed == [(TEAM, NEW_ID)], (
+        "a None pre-resolved id must bind NOTHING (never a guess)")
+
+
+def test_every_default_graph_lane_resolves_both_answers_once():
+    """Source pin for the CLASS, AST-based (not a grep of one lane).
+
+    Each of the five lanes that build their own SDK must resolve the pair
+    through `_org_default_graph` — and hand the tenant to the bind — so a new
+    lane that copies `_org_default_namespace(...)` + `_bind_default_graph_record_tenant(...)`
+    (the pre-fix spelling, which reds the test above) cannot pass unnoticed.
+
+    FAIL-ON: reintroduce the two-read spelling in any of these lanes and this
+    names it.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).resolve().parent.parent / "tortoise"
+                      / "hosted_api.py").read_text(encoding="utf-8"))
+    fns = {n.name: n for n in ast.walk(tree)
+           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for lane in _TWO_ANSWER_LANES:
+        assert lane in fns, f"{lane} is gone — update this pin's inventory"
+        calls = [c for c in ast.walk(fns[lane]) if isinstance(c, ast.Call)]
+        callees = {getattr(c.func, "id", None) for c in calls}
+        assert "_org_default_graph" in callees, (
+            f"{lane} no longer resolves the default graph's name AND tenant "
+            "from one read (`_org_default_graph`) — two reads straddle a "
+            "promotion and split the graph it writes from the rows it files")
+        assert "_org_default_namespace" not in callees, (
+            f"{lane} still resolves the default NAMESPACE on its own — that is "
+            "the read the promotion straddles; take the pair from "
+            "`_org_default_graph`")
+        binds = [c for c in calls
+                 if getattr(c.func, "id", None) ==
+                 "_bind_default_graph_record_tenant"]
+        assert binds, f"{lane} no longer binds the default-graph tenant"
+        assert any(k.arg == "default_graph_id" for k in binds[0].keywords), (
+            f"{lane} binds without handing over the tenant it just read — the "
+            "bind then READS again, which is the split")
