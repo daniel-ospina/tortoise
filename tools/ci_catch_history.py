@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ci_catch_history.py — what the 74 PRE-MERGE `slow_files` have ever caught (#10131).
+"""ci_catch_history.py — what each of the 74 `slow_files` has ever caught (#10131).
 
 THE QUESTION. `config/ci-surfaces.yml` carries 74 `slow_files` that run **pre-merge** on
 every PR whose surfaces select them. That placement is a RECORDED DECISION — the config
@@ -29,7 +29,7 @@ Three facts decide it, and each is a defect in a naive reading:
    produces** (its ``junitxml manifest guard`` writes ``/tmp/junit.xml``, uploaded in the
    ``pytest-log-<job>-<leg>`` artifact). No parallel source is invented — the artifact the
    workflow uploads is the artifact this reads — and the same is true of the carve-out job,
-   which is where 9 of the 74 actually run.
+   which is where the carve-out members of the 74 actually run.
 3. **An expired artifact is NOT "never caught anything".** An unattributable red is
    ``UNKNOWN``, it names its reason, and it is scoped to the leg whose artifact is missing
    — never folded into "never", and never extrapolated over.
