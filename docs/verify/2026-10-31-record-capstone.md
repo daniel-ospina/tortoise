@@ -16,7 +16,7 @@ deployment runs.
 | | |
 |---|---|
 | Issue | #9567 (capstone, Scenario A/B evidence for D2, D3, D7) |
-| Deployed code proven against | `b101355a8` — `deploy-hosted.yml` run [41235268490](https://github.com/daniel-ospina/tortoise/actions/runs/41235268490), job `deploy-api` step 12 `Deploy: success`, 2026-10-31T19:39:48Z |
+| Deployed code proven against | `b101355a8` — `deploy-hosted.yml` run [41235268490](https://github.com/daniel-ospina/tortoise/actions/runs/41235268490) (created 2026-10-31T19:39:48Z), job `deploy-api` step 12 `Deploy (retry through Fly lease/API races): success` completed **19:48:23Z** |
 | Live deployment arming read | `curl -s https://tortoise-y4mjjq.fly.dev/health` → `"record":{"armed":true,"ok":true,"dsn":"adb0c38b",…}` (that process's own report, 2026-10-31T21:07Z) |
 | FalkorDB | private lane `fdb-lane-44bd557920` on `127.0.0.1:16400` (Docker, `falkordb/falkordb-server:v4.20.6`), flushed to **0 nodes** before each arm |
 | Record | Postgres 16 `p10000-record-pg` on `127.0.0.1:32988`, repo record migrations applied, tenant `org-9567c` / `g-9567c` (a `public.graphs` row was inserted first — the FK the projection relies on) |
@@ -165,7 +165,9 @@ and **refuses** the bypassing role rather than merely testing under a different 
    failing `test-slow` shards on run 41240532814 — `(d)` at 21:24:26Z, `(a)` at 21:32:42Z — with others
    still queued; another lane owns its forward merge, and this artifact does not read that rollup as a
    verdict). The `create_event` door is tracked
-   separately as **#10428**.
+   separately as **#10428**. ⚠️ The citation is **time-scoped on purpose**: a later shard (`test-slow
+   (e)`) also failed, at 21:41:27Z, after the instant pinned here — this artifact reports the surface it
+   read at 21:33Z and never the rollup's current colour.
 2. **A `:Source` still carries raw TURN text in `summary`** — 80 B, `'TURN-ZEBRA-9567 the raw transcript
    text …'` — written by the capture path itself (`sdk._session_source_metadata`). Not new information:
    it is recorded on **#10000** (last comment) as the second prose passthrough onto a node, and this
