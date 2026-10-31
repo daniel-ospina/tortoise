@@ -1943,7 +1943,8 @@ class _EntityHandlers:
         # `tortoise_create_document`) left `s.story_arc` = the PROSE on the
         # `:Source` node verbatim, because this call deliberately passes NO
         # `allow_keys` and `story_arc` is in none of `_SOURCE_HANDLED`, this set
-        # or `_DOC_RETIRED_KEYS`.
+        # or `_DOC_RETIRED_KEYS`. MEASURED after it: the same call reads back
+        # `s.story_arc` = None while `project="kept-228"` still lands.
         #
         # ⛔ IT STAYS DECLARED in `_SOURCE_NODE_PROPS` (legacy nodes must still
         # read back) — declared ⇒ readable, listed HERE ⇒ never written from a
@@ -1958,6 +1959,12 @@ class _EntityHandlers:
         # owner rule says the property must not exist, the destructive purge of
         # what does exist is #10017, and no in-tree producer ever emitted the key
         # on this event (`api.add_document` takes no such parameter).
+        #
+        # ⛔ Scope, so this is not read as more than it is: it denies the KEY.
+        # Another spelling (`storyArc`) still lands, exactly as any unknown key
+        # does — that is #228's passthrough contract, not a narrative route, and
+        # no reader or restore lane reads it (door 2 restores the `story_arc`
+        # column only).
         "story_arc",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of
