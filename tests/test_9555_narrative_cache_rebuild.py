@@ -270,3 +270,139 @@ def test_the_document_fold_cannot_put_the_narrative_back_on_a_source():
             "`story_arc` — the deny entry must be ONE key, not a blanket refusal")
     finally:
         proj.close()
+
+
+def test_the_event_fold_and_its_replay_cannot_put_the_narrative_on_an_event():
+    """#10389 review round 5 ISSUE 1 (P2) — the `:Event` half of the enumeration.
+
+    ⚠️ SAME FILE AND SAME REASON as the document pin above: it needs a GRAPH, and
+    the carrier file runs in CI's zero-skip `test-record-postgres` job (#9551).
+
+    `create_event(...)` (the SDK door behind the MCP tool `tortoise_create_event`)
+    emits `EventRecorded`, and `_upsert_event` is that record's replay fold — its
+    extras ride `_persist_extra_props`, whose skip set is
+    `_META_KEYS | _EVENT_HANDLED`. `story_arc` was in neither, and ONTOLOGY §4.4
+    declares it on `:Source` only, so on `:Event` it was an UNDECLARED property
+    on the open passthrough: the #3998/D30 shape one label over, and DURABLE —
+    the same fold runs on replay, so a `rebuild_all` restores it. MEASURED
+    before the entry: one call left `e.story_arc` = the PROSE on the
+    AgentSession node, the very anchor this PR's own
+    `tests/test_commit_endpoint.py::TestFourNodeChain` asserts is prose-free.
+
+    (1) FAILS pre-fix, at the FIRST assertion (the skip-set membership) — the
+        graph arms below are independent, so a dropped entry cannot be masked by
+        a passing one.
+    (2) DOES NOT CLOSE the open passthrough (#228): a genuinely arbitrary caller
+        prop still lands, and the REPLAY arm proves it is the KEY that is denied
+        rather than the record.
+    (3) REPLAY IS THE SAME FOLD: the second arm replays a legacy `EventRecorded`
+        carrying the key into a FRESH graph and reads nothing back, so the deny
+        holds for a rebuild and not only for the live write.
+    """
+    if not os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("TORTOISE_DB_URI not set — the fold needs a graph to write")
+    from tortoise.projection import FalkorProjection
+    from tortoise.projection.entities import _EntityHandlers as _FP
+    from tortoise.sdk import TortoiseSDK
+
+    assert "story_arc" in _FP._EVENT_HANDLED, (
+        "the EventRecorded fold admits `story_arc` again — `create_event(..., "
+        "story_arc=…)` then writes §9.1's PROSE onto an `:Event` node and a "
+        "rebuild restores it (#10389 ISSUE 1 door 1)")
+
+    graph = f"test_9555_narr_event_{uuid.uuid4().hex[:8]}"
+    sdk = TortoiseSDK(graph_name=graph)
+    try:
+        ev = sdk.create_event("narrative-event-door", "AgentSession",
+                              story_arc=NARRATIVE, project="kept-228")
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:$e}) RETURN e.story_arc, e.project",
+            params={"e": ev["id"]}).result_set
+        assert rows, "create_event minted no :Event — the probe proved nothing"
+        arc, project = rows[0]
+        assert arc is None, (
+            "§9.1's narrative reached an `:Event` node through the SDK door "
+            "behind `tortoise_create_event` — D1 puts it in "
+            f"public.session_narrative only (#10000). Got {arc!r}")
+        assert project == "kept-228", (
+            "#228's arbitrary-prop passthrough was closed along with "
+            "`story_arc` — the deny entry must be ONE key, not a blanket refusal")
+    finally:
+        sdk.close()
+
+    proj = FalkorProjection.from_uri(
+        os.environ["TORTOISE_DB_URI"],
+        graph_name=f"test_9555_narr_event_replay_{uuid.uuid4().hex[:8]}")
+    try:
+        eid = f"ev-replay-door-{uuid.uuid4().hex[:8]}"
+        # FLAT record shape (`inner = event.get("event", event)` in
+        # `_upsert_event` — a nested `event` dict would carry ONLY its own keys
+        # and the probe would prove nothing about the extras).
+        proj.apply({"type": "EventRecorded", "id": eid, "eventId": eid,
+                    "name": "legacy journal record",
+                    "story_arc": NARRATIVE, "project": "kept-228"})
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:$e}) RETURN e.story_arc, e.project",
+            params={"e": eid}).result_set
+        assert rows, "the replay fold minted no :Event — the probe proved nothing"
+        arc, project = rows[0]
+        assert arc is None, (
+            "a legacy `EventRecorded` carrying `story_arc` REPLAYS the prose "
+            "onto the node, so `rebuild_all` re-rents the RAM #10000 exists to "
+            f"stop (#10389 ISSUE 1 door 1). Got {arc!r}")
+        assert project == "kept-228", (
+            "the replay arm must deny the KEY, not every extra prop")
+    finally:
+        proj.close()
+
+
+def test_the_tenant_route_cannot_put_the_narrative_back_on_an_event():
+    """#10389 review round 5 ISSUE 1 (P2) — the SECOND `:Event` door.
+
+    `_EVENT_HANDLED` closes the FOLD, and it cannot close this one: the generic
+    tenant surface (`tortoise_update_entity`) writes caller props straight through
+    `SET n += $props` on its non-Point label loop and never consults a label
+    skip-set. MEASURED before the guard: `update_entity(<agentSession eventId>,
+    story_arc=<narrative>)` was ACCEPTED, persisted live, journalled into an
+    `EntityMutated` record and SURVIVED a `rebuild_all` — the `__runId` hole
+    (#5196 round 3) one property over, on the anchor this PR declares prose-free.
+
+    (1) FAILS pre-fix: the write is accepted and reads back, so both the
+        `pytest.raises` and the read-back assertion red.
+    (2) DOES NOT CLOSE the tenant surface: a caller prop it is FOR is still
+        accepted through the same call, so this is one refused key and not a
+        blanket refusal (the #4649 lesson: a broad refusal broke a live contract).
+    (3) REACHABLE: the SDK method behind the MCP tool `tortoise_update_entity`,
+        on its own graph.
+    """
+    if not os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("TORTOISE_DB_URI not set — the route needs a graph to write")
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(graph_name=f"test_9555_narr_evroute_{uuid.uuid4().hex[:8]}")
+    try:
+        ev = sdk.create_event("narrative-event-tenant", "AgentSession")
+        eid = ev["id"]
+
+        with pytest.raises(ValueError,
+                           match="not a caller-settable property on an :Event"):
+            sdk.update_entity(eid, story_arc=NARRATIVE)
+
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:$e}) RETURN e.story_arc",
+            params={"e": eid}).result_set
+        assert rows, "the probe Event is missing — the refusal proved nothing"
+        assert rows[0][0] is None, (
+            "the S1 narrative reached an `:Event` node through the tenant route "
+            "— §9.1/D1 places it in public.session_narrative only (#10000)")
+
+        # ...and the surface still works for a prop it is FOR.
+        sdk.update_entity(eid, eventStatus="completed")
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:$e}) RETURN e.eventStatus",
+            params={"e": eid}).result_set
+        assert rows and rows[0][0] == "completed", (
+            "the refusal was too broad — `eventStatus` is an ordinary Event prop "
+            "and must still land through this route")
+    finally:
+        sdk.close()

@@ -1653,6 +1653,28 @@ class _EntityHandlers:
         # only in-tree SDK/indexer writers reach it. The pack-declared fold
         # generalization is Object-scoped and does NOT extend to Events
         # (#2729); #2725 answered the Event-carries-state question "no".
+        #
+        # #10000 / D1 (§9.1): `story_arc` is NOT Event content either, and this
+        # skip set is the `EventRecorded` fold's ONLY write filter
+        # (`_persist_extra_props` skips `_META_KEYS | _EVENT_HANDLED`, and the
+        # same fold is the live writer AND the replay writer — `rebuild_all`
+        # calls it), so the entry is what denies the route on BOTH sides at
+        # once. MEASURED at #10389's review head, before this entry: one SDK
+        # call `create_event("probe-event-door5", "AgentSession",
+        # story_arc=<prose>, project="kept-228")` (the door behind the MCP tool
+        # `tortoise_create_event`) left `e.story_arc` = the PROSE on the node,
+        # `e.project` = `kept-228`. MEASURED after it: `e.story_arc` reads back
+        # `None` and `e.project` still lands, so the entry is ONE key and not a
+        # blanket refusal of the passthrough (#228). ⚠️ That narrows `#228` on
+        # this fold deliberately; the departure is marked ON `#228` with an
+        # `OVERRIDES:` line (`#issuecomment-6541136211`).
+        # ⛔ ONTOLOGY §4.4 declares `story_arc` on `:Source` only, so on
+        # `:Event` it was an UNDECLARED property riding the open passthrough —
+        # the same #3998/D30 shape this change closes for the document fold.
+        # Do NOT cite this entry as evidence a legacy `:Event` cannot be READ:
+        # `:Event` has no read filter, so a node that already carries the key
+        # still reads it back.
+        "story_arc",
     })
     # #3998 (D30): the DECLARED extra-property surface of a :Source. The graph
     # is the INDEX of the raw, not its store — so this is a CLOSED set, not an
@@ -6794,6 +6816,29 @@ _SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
     # into an `EntityMutated` record, and SURVIVES `rebuild_all` — the `__runId`
     # hole one property over (#5196 round 3). Declared ⇒ readable; listed HERE ⇒
     # caller-unsettable.
+    "story_arc",
+})
+# The SERVER-MANAGED subset for `:Event` — the write filter's counterpart of
+# `_SOURCE_SERVER_MANAGED_PROPS`, consumed by the generic tenant route
+# (`sdk._update_entity`, the surface behind the MCP tool `tortoise_update_entity`)
+# where it reaches an `:Event` target. `:Event` has no read DECLARATION (no
+# `filter_*_props` over it), so this set is the whole contract: it names the keys
+# a caller may NOT set through that route. It is a SET rather than a single key
+# for the same reason as the Source one — the next such key must not need a
+# second guard, and two copies of one contract is how the copy that drifts stops
+# being true.
+_EVENT_SERVER_MANAGED_PROPS: frozenset = frozenset({
+    # #10000 / D1 (§9.1): the S1 narrative is text in Postgres
+    # (`public.session_narrative`, #9555), never a node property. The commit
+    # writer stops writing it, `_EVENT_HANDLED` stops the `EventRecorded` fold
+    # from restoring it, and without this entry the generic tenant route still
+    # puts it back: MEASURED at #10389's review head, before this entry,
+    # `update_entity(<agentSession eventId>, story_arc=<prose>)` was ACCEPTED,
+    # persisted live, journalled into an `EntityMutated` record, and SURVIVED a
+    # `rebuild_all` — the `__runId` hole (#5196 round 3) one property over, on
+    # the label whose prose-free state this change's own pin asserts.
+    # `_EVENT_HANDLED` alone does NOT close it: that skip set is consulted by the
+    # FOLD, and this route writes caller props straight through `SET n += $props`.
     "story_arc",
 })
 

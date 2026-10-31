@@ -143,6 +143,7 @@ from .projection import _graph_metadata_write_scope
 # projection package (one home), not in a second copy at this call site.
 from .projection import _stored_prop_value, _UNSTORED
 from .projection.entities import (  # #3998: the declared :Source surface
+    _EVENT_SERVER_MANAGED_PROPS,
     _SOURCE_NODE_PROP_NAMES,
     _SOURCE_SERVER_MANAGED_PROPS,
     filter_source_props,
@@ -38048,6 +38049,36 @@ class TortoiseSDK:
         """
         return stored_source_document_kinds(g, id_val)
 
+    def _label_reachable_by(self, g, label: str, id_val: str) -> int:
+        """Count the `:<label>` nodes the WRITE below would reach for `id_val`.
+
+        ONE implementation of the key discipline, because a guard whose
+        predicate differs from the write's is decoration: the write resolves a
+        canonical label by its PRIMARY key then its SECONDARY
+        (`secondary_entity_id_props`), so a stub keyed only by the secondary one
+        (a url-only `:Source` minted by `_link_source`) IS writable — and a
+        guard that matched only the primary would report itself satisfied while
+        that write landed.
+
+        The order mirrors the write's own: the PRIMARY key first (byte-identical
+        MATCH text and #327 index plan), the secondary only on a miss. The key
+        set is DERIVED from the same declarations the write and the fold use
+        (#3860's one-table rule) rather than hardcoded, so a future secondary
+        key cannot reopen the bypass silently (#5196 review round 3, P2).
+        """
+        from tortoise.projection import secondary_entity_id_props
+
+        _keys = (_ENTITY_ID_PROP.get(label, "id"),
+                 *secondary_entity_id_props(label))
+        for _k in _keys:
+            _hit = g.query(
+                f"MATCH (n:{label} {{{_k}:$id}}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _hit:
+                return _hit
+        return 0
+
     def _source_reachable_by(self, g, id_val: str) -> int:
         """Count the `:Source` nodes the WRITE below would reach for `id_val`.
 
@@ -38061,25 +38092,11 @@ class TortoiseSDK:
 
         The order mirrors the write's own discipline: the PRIMARY key is tried
         first (byte-identical MATCH text and #327 index plan) and the secondary
-        only on a miss.
+        only on a miss. The resolution itself lives in `_label_reachable_by`
+        (#10389 review P2): one predicate for every label, so the `:Event`
+        guard added beside it cannot drift from the `:Source` one.
         """
-        # #5196 review round 3, P2: derive the key set from the SAME declaration
-        # the write and the fold use (#3860's one-table rule), not a hardcoded
-        # `url`. Today `_CANONICAL_ENTITY_SECONDARY_ID_PROPS` yields exactly
-        # `("url",)`, so this is a drift guard rather than a live hole: a future
-        # secondary key would otherwise reopen the url-stub bypass silently.
-        from tortoise.projection import secondary_entity_id_props
-
-        _keys = (_ENTITY_ID_PROP.get("Source", "id"),
-                 *secondary_entity_id_props("Source"))
-        for _k in _keys:
-            _hit = g.query(
-                f"MATCH (n:Source {{{_k}:$id}}) RETURN count(n)",
-                params={"id": id_val},
-            ).result_set[0][0]
-            if _hit:
-                return _hit
-        return 0
+        return self._label_reachable_by(g, "Source", id_val)
 
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
@@ -38428,6 +38445,32 @@ class TortoiseSDK:
             # stub ACCEPTED `update_entity(text=<2 KB>)`, persisting the payload
             # live and into the EntityMutated journal, while the guard reported
             # itself satisfied.
+            # ── #10000 (D1, §9.1): the :Event anchor, same gate ──
+            # The narrative's prose-free state on the AgentSession `:Event` is a
+            # PINNED property of this change (`tests/test_commit_endpoint.py`
+            # ::TestFourNodeChain) and the commit writer's `e.story_arc` SET is
+            # deleted. `_EVENT_HANDLED` closes the `EventRecorded` fold, but this
+            # route writes caller props straight through `SET n += $props` in the
+            # non-Point label loop below and NEVER consults a label skip-set — so
+            # without this refusal the generic tenant surface
+            # (`tortoise_update_entity`) puts the prose back on that very node,
+            # JOURNALLED into an `EntityMutated` record a `rebuild_all` restores:
+            # the `__runId` hole (#5196 round 3) one property and one label over.
+            # Resolved with the SAME predicate the write uses
+            # (`_label_reachable_by`), and only when a managed key is actually
+            # supplied, so an ordinary `update_entity(<eventId>, status=…)` pays
+            # no extra round trip.
+            _event_managed = sorted(
+                k for k in props if k in _EVENT_SERVER_MANAGED_PROPS)
+            if _event_managed and self._label_reachable_by(
+                    self._get_proj().g, "Event", id_val):
+                raise ValueError(
+                    f"{_event_managed!r} is not a caller-settable property on "
+                    f"an :Event — the S1 narrative lives in "
+                    f"`public.session_narrative`, never on a node (§9.1/D1, "
+                    f"#10000). The key is READ back from a legacy node that "
+                    f"still carries it, and refused on every write door."
+                )
             _is_source = self._source_reachable_by(self._get_proj().g, id_val)
             if _is_source:
                 # #5140 P1: the `documents` METER KEY (#1726 predicate) cannot
