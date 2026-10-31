@@ -466,9 +466,20 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     `RedisMixin._cleanup` `rmtree`s — `dbdir` equals `redis_dir` only through
     `__init__`'s `if not self.dbdir:` fallback, which no explicit filename can
     reach. Measured inside
-    pytest, the pre-fix shape reds with `.settings` STILL PRESENT and no RDB
-    written at all, i.e. `_cleanup` had not run at that moment. So the failure
-    is not a teardown artifact, it is the ROWS: read them. The 404 that reddened
+    pytest at this head, the pre-fix shape reds with `.settings` STILL PRESENT,
+    NO RDB written at all, and `RedisMixin._cleanup` never entered (traced) — so
+    no teardown ran, and the rows were never deleted. What did happen is the
+    server IDENTITY: the seeder's release — through `tortoise.FalkorDB.close()`,
+    the seam that neutralizes first — reclaims its ephemeral socket dir
+    (`_remove_ephemeral_socket_dir`) while the daemon is still ALIVE, and
+    neutralizes `RedisMixin._cleanup` (`_neutralize_redislite_cleanup`), so the
+    daemon is ORPHANED — store unreachable, no save taken. `.settings` survives
+    but the pid path it records lived in the removed dir, so `_is_redis_running()`
+    answers False on the next construction, which therefore starts a SECOND,
+    empty server (different pid) instead of joining the live one: **0** rows,
+    the rows stranded on a server the app never talks to. That is the failure
+    this guard names, and it is what its `app_server=(socket=…, pid=…)`
+    evidence is for. The 404 that reddened
     CI `test (c)` of run `41210146871`
     (`TestGraphPacksRest::test_graph_bound_key_reads_only_its_own_graph`) is the
     same symptom.
@@ -602,11 +613,23 @@ def test_a_seeded_team_survives_the_seeder_that_wrote_it(monkeypatch):
     each alone keeps this green (measured at this head).
 
     FAIL-ON (MEASURED on `main`'s tree at `7a6301142`): with the seeder's SDK
-    dropped rather than closed (#10424's pre-fix shape), `gc.collect()` runs the
-    last-client teardown, the next construction starts an EMPTY server, and
+    dropped rather than closed (#10424's pre-fix shape), the app's read lands on
+    a DIFFERENT, EMPTY embedded server, and
     `hosted_api._registry_anchor()` — the exact helper `_org_node` reads —
     returns **0** Team rows. Verified in both directions at this head: pre-fix
     shape → `0 == 1` red; post-fix → `1` green.
+
+    ⛔ ONE MECHANISM, STATED ONCE (#10424 review P3 — this docstring and
+    `_assert_seed_visible`'s used to carry two mutually exclusive accounts of
+    the same red, and they resolve to this measured one): the rows are NOT
+    deleted and no teardown runs. The seeder's release reclaims its ephemeral
+    socket dir while its daemon is still alive and neutralizes
+    `RedisMixin._cleanup`, so the daemon is orphaned and `.settings` keeps a pid
+    path that no longer resolves; the next construction cannot join that daemon
+    and starts a second, empty one — the `Unknown organization` 404 class. The
+    measurement, not a second theory, is recorded in `_assert_seed_visible`'s
+    docstring: `.settings` present, no RDB, `RedisMixin._cleanup` never entered,
+    seeder daemon alive with its socket dir gone.
     """
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     monkeypatch.delenv("SUPABASE_URL", raising=False)
