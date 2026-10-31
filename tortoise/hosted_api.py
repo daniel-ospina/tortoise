@@ -691,6 +691,33 @@ def _default_graph_name(org: dict) -> str | None:
                                     org.get("graph_namespace"))
 
 
+#: #10180: the DEFAULT namespace belonging to the credential THIS request
+#: resolved, as ``(org_id, graph_namespace)``. Read by
+#: :func:`_org_default_namespace` so the lanes that hold only an ``org_id`` —
+#: the onboarding projection and its completion gate, the seed/indexing runners,
+#: the event sweep — reuse the value the auth seam already has instead of paying
+#: a control-plane read for it (on the event loop, on the capture path), and so
+#: they can never disagree with the credential the request was admitted with.
+#: The PAIR's presence means "resolved": ``namespace`` may legitimately be None
+#: (registry lane, or an org with no ``graph_name``), which means "take the
+#: historical open", not "go read".
+_resolved_default_namespace: contextvars.ContextVar[
+    tuple[str, str | None] | None] = contextvars.ContextVar(
+        "_resolved_default_namespace", default=None)
+
+
+def _publish_default_namespace(org: dict) -> None:
+    """Hand this request's default namespace to the ``org_id``-only lanes (#10180).
+
+    Purely an optimization-with-a-guarantee: the value comes from the credential
+    the request was ADMITTED with, so a lane that reads it here cannot land on a
+    different graph than the one the data plane opened for the same request.
+    """
+    org_id = org.get("org_id")
+    if org_id:
+        _resolved_default_namespace.set((org_id, org.get("graph_namespace")))
+
+
 def _org_default_namespace(org_id: str) -> str | None:
     """`_moved_default_namespace` for a lane that holds only an ``org_id``.
 
@@ -715,6 +742,12 @@ def _org_default_namespace(org_id: str) -> str | None:
 
     if not is_supabase_enabled():
         return None
+    # This request already resolved a credential for this org — use its answer
+    # (see `_resolved_default_namespace`). No read, and no chance of disagreeing
+    # with the graph the data plane opened.
+    hint = _resolved_default_namespace.get()
+    if hint is not None and hint[0] == org_id:
+        return _moved_default_namespace(org_id, hint[1])
     try:
         rows = get_control_plane().query(
             "organizations", select=["graph_name"],
@@ -746,13 +779,15 @@ def _org_sdk(org_id: str, *, namespace: str | None = None) -> TortoiseSDK:
     the read and goes through the same decision. Omitting it costs one
     primary-key read — and a promoted org whose control plane is unreadable then
     falls back to the historical graph, i.e. the DEMOTED one. That residual is
-    accepted only for the lanes that call THIS form (see
-    `_org_default_namespace`): background/sweep/dream/webhook/indexing passes and
-    the org-import endpoint, all of which are retry-or-abandon and already do
-    blocking graph work. The request data plane, the MCP lane and the quota gate
-    do NOT come through here — they use the credential's own value
-    (`_default_graph_name` / `_org_sdk_for_credential`), so they cannot fail
-    open.
+    accepted only for the lanes that call THIS form — a background/sweep/dream/
+    webhook/indexing pass, the org-import endpoint, or an on-request helper
+    reached WITHOUT an auth-resolved credential. On a REQUEST the resolver never
+    reads at all: the auth seam publishes the credential's value
+    (`_publish_default_namespace`) and `_org_default_namespace` consumes it, so
+    the capture's completion gate, the onboarding projection/echo and the seed
+    runners resolve the same graph the request's data plane opened. The request
+    data plane, the MCP lane and the quota gate take the value directly
+    (`_default_graph_name` / `_org_sdk_for_credential`) and cannot fail open.
 
     For every organization that has not promoted, this returns byte-for-byte
     what ``_make_sdk(namespace=org_id)`` returns — same graph, same SDK
@@ -1388,7 +1423,11 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                     if rid in emitted:
                         continue
                     emitted.add(rid)
-                parsed.append({"org_id": rid, "name": r.get("name")})
+                # #10180: carry `graph_name` through — it is fetched on the
+                # same page precisely so the retention sweep can resolve each
+                # org's DEFAULT graph without a second read per org.
+                parsed.append({"org_id": rid, "name": r.get("name"),
+                               "graph_name": r.get("graph_name")})
             # Completeness. The walk above stops only on an EMPTY page (or the
             # page cap, which leaves ``exhausted`` False); only THEN is it asked
             # whether the fleet is complete:
@@ -6658,6 +6697,8 @@ async def get_current_org(request: Request) -> dict:
         from tortoise.pricing import tier_limits
         request.state.org_id = org_id
         request.state.tier = tier or "free"
+        _publish_default_namespace({"org_id": org_id,
+                                    "graph_namespace": graph_namespace})
         lim = tier_limits(tier or "free")
         # max_orgs removed: multi-org is a USER capability, not a tier field
         # (per-org billing; tier limits come from pricing.json)
@@ -6782,6 +6823,7 @@ async def _get_current_org_supabase(request: Request, token: str) -> dict:
             )
         request.state.org_id = org_id
         request.state.tier = org["tier"]
+        _publish_default_namespace(org)
         # #308: R3 read velocity + R4 geo (best-effort, off the critical
         # path via to_thread).
         await _abuse_post_auth(request, org)
@@ -7094,6 +7136,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     # (UNMETERED_INCREMENT on a perfectly resolvable org). Setting it here —
     # before the handler runs — makes the org resolvable at the boundary.
     request.state.org_id = org["org_id"]
+    _publish_default_namespace(org)
     return org
 
 
@@ -7736,6 +7779,7 @@ async def get_current_org_gated(request: Request) -> dict:
         # bare dict; a missing id must not turn a metering lookup into a 500.
         if org.get("org_id"):
             request.state.org_id = org["org_id"]
+            _publish_default_namespace(org)
         return org
     return await get_current_org(request)
 
@@ -7925,6 +7969,7 @@ async def get_current_org_session(request: Request, gate_key_login: bool = True)
         # reason: an override may return a bare dict.
         if org.get("org_id"):
             request.state.org_id = org["org_id"]
+            _publish_default_namespace(org)
         return org
     # Session JWT (eyJ...) — verify + resolve the user's org.
     user = await get_current_user(request)
