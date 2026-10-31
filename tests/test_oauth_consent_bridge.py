@@ -2999,8 +2999,9 @@ _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
 #: claim past this gate), every exempt path must be a file the append-only gate actually covers,
 #: and the sibling pgTAP suite — which is NOT append-only and WAS fixable — must carry no premise
 #: at all.
-#: The applied migration that froze the pre-correction sentence (see the exemption below), and
-#: the file whose real `--`-wrapped shape the leader arm in the corpus test is anchored on.
+
+#: The applied migration that froze the pre-correction sentence: the record's key, and the file
+#: whose real `--`-wrapped shape the leader arm in the corpus test is anchored on.
 _IMMUTABLE_MIGRATION_SAMPLE = "supabase/migrations/20261030000001_oauth_consent_tickets.sql"
 
 _RECORDED_IMMUTABLE_MIGRATION_PREMISES: dict[str, tuple[str, ...]] = {
@@ -3075,6 +3076,11 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
          so a broken comparison form fails here rather than reporting every home clean;
       3. the TRUE mechanism is still stated where the guard lives (the reasoning must be
          corrected, never deleted), which is the other direction of the same edit.
+
+    ⛔ ONE corpus entry is tolerated rather than clean: the applied migration whose RLS comment
+    append-only froze (`_RECORDED_IMMUTABLE_MIGRATION_PREMISES` — see its docstring). It is
+    tolerated for the ONE sentence recorded there, in THAT path only, and
+    `test_the_immutable_migration_exemption_tolerates_only_the_RECORDED_premise` pins both halves.
     """
     corpus = {rel: (REPO / rel).read_text(encoding="utf-8").split(_PREMISE_GATE_MARKER)[0]
               for rel in _ANON_KEY_PREMISE_CORPUS}
