@@ -1763,15 +1763,14 @@ an attribute the graph does not have. Pinned by
 The rule in §9.1 is unchanged: the transcript lives outside the graph, the CAPABILITY decides which
 store holds a capture's turns, and where the record holds them the graph keeps no turn node. What
 left §9.1 with step 7 (`#10017`'s carrier, landed as `#10076`; the type declared by `#10129`) is the
-paragraph that said **where that rule stood** — "nothing sets `'record_only'` yet" and its closing
-"do not read the paragraph above as a description of current behaviour" — i.e. delivery state spoken
-as delivery, which is exactly the shape the class guard refuses in a design document. Issue state and
-the narrative of what changed belong in this file (`#8542`); §9.1 states the rule they settled on, and
-the design that replaced that paragraph is below. This entry is the record of that move, kept next to
-the paragraph's subject rather than in the design documents.
+paragraph that said **where that rule stood**: `"nothing sets 'record_only' yet"`, closed by `"do not
+read the paragraph above as a description of current behaviour"`. That was a statement about the work's
+state, and the landing made it false; `#8542` keeps delivery state and the narrative of what changed in
+this file, so §9.1 states the rule they settled on and this entry records the move. The design that
+replaced that paragraph is below.
 
-What the design document now says in that place, as design — the statements this entry is the record
-for:
+What is stated now, in the design document and in the seams it points at — the statements this entry
+is the record for:
 
 - **The journal.** On the record-held lane a capture's turns are journalled as ONE `TurnsRecorded`
   carrier holding the writer's per-turn snapshots verbatim, **instead of** one `PointAdded` per turn,
@@ -1809,11 +1808,12 @@ home, not §9.1 (`#8542` moved design narration out of the document, and did not
   belongs to. A write the record cannot attribute keeps the turns in the graph, and a scratch buffer
   is not a journal.
 
-Why it left: the class guard
+Why it left: it spoke about where the work stood rather than about the design, and `#8542` keeps that
+in this file. Nothing mechanical forced the move — the class guard
 (`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
-refuses, in the design documents, an issue-state claim adjacent to a `#NNN`, the narration of a
-change, and delivery spoken as delivery. A delivery stamp and a "do not read this as current
-behaviour" close are exactly those shapes, so the record belongs here and §9.1 keeps only the rule.
+refuses an issue-state claim adjacent to a `#NNN`, the narration of a change, and delivery spoken as
+delivery, and **none of its arms fires on that line** (measured on the removed text). The routing is
+the ground, and a reader should not expect a red to catch a similar sentence written again.
 
 The pins for the statements above are the carrier's own:
 `tests/test_10017_turn_carrier_replay.py::test_the_record_held_lane_journals_the_carrier_not_point_added`,
