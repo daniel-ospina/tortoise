@@ -94,9 +94,21 @@ USAGE
   uv run python tools/served_skills_parity.py --sync --commit <sha>
 
 ``--sync`` is the DERIVATION: it fetches upstream (HEAD, or ``--commit``),
-writes each served copy byte-for-byte and re-cuts
-`config/served-skills-upstream.yml`. Run it after editing a skill upstream,
-then commit the changed skills + the pin together.
+writes each served copy byte-for-byte, re-cuts
+`config/served-skills-upstream.yml`, and rebuilds the `.skill` DOWNLOAD
+archives built from those copies (#10437). Run it after editing a skill
+upstream, then commit the changed skills + the pin + the archives together.
+
+⛔ THE ARCHIVES ARE PART OF THE DERIVATION, NOT A SEPARATE CHORE. The served
+copy is also the source `tools/build_skill_archives.py` zips into
+`website/skills/<name>.skill` (the file the ChatGPT card hands over), so a sync
+that moved a served copy left that archive stale — and the prescribed fix then
+delivered a tree that fails
+`tests/test_onboarding_variants.py::test_9660_skill_archive_holds_exactly_its_
+own_skill`. That is the exact defect this tool's own remedy produced on #10088:
+exit 0 from both `--check` arms, a red repo. `sync()` now re-derives them, from
+the bytes it just wrote, through the builder that owns the archive format
+(one source of bytes, not two).
 
 ``--sync --commit <sha>`` is for pinning a specific upstream commit. It is not
 silently equivalent to HEAD: the currency arm compares the pinned bytes against
@@ -133,6 +145,10 @@ from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_REL = Path("config") / "served-skills-upstream.yml"
+#: Where the `.skill` downloads live, RELATIVE TO THE ROOT BEING SYNCED (`root`,
+#: so a throwaway root in a test never touches this checkout). Derived from the
+#: served copies by `tools/build_skill_archives.py`; see `_rebuild_archives`.
+ARCHIVES_REL = Path("website") / "skills"
 RAW_HOST = "https://raw.githubusercontent.com"
 # A directory listing has no raw form, so the one API call in this tool lives
 # here. Unauthenticated it is 60 requests/hour per IP — enough for a daily run
@@ -732,12 +748,73 @@ class SyncResult(NamedTuple):
     ``target`` is returned rather than left in the manifest: ``sync`` re-loads
     the pin into its own dict, so a caller printing the outer manifest reports
     the PREVIOUS commit — the one fact `--sync` exists to report.
+
+    ``archives`` is the SEPARATE derived artifact (#10437): the `.skill`
+    downloads rebuilt from the served copies. Kept out of ``changed`` (which
+    keeps meaning "served copies rewritten") so one list never mixes a served
+    mirror with a zip built FROM it — an operator reading ``changed`` can still
+    tell which byte the pin moved.
     """
 
     changed: list[str]
     target: str
     previous: str
     at_head: bool | None  # None = could not be read (the note is still printed)
+    archives: list[str] = []
+
+
+def _build_skill_archives():
+    """`tools/build_skill_archives.py` — the module that OWNS the zip format.
+
+    Imported, never re-implemented: two copies of "what a `.skill` byte stream
+    is" is how the served copy and the download drift apart, which is the defect
+    #10437 exists to close. Import direction is script-first (`python
+    tools/served_skills_parity.py` puts `tools/` on `sys.path`, so the package
+    form fails there) — the shape `tools/ci_manifest.py` uses for the same
+    problem.
+    """
+    try:
+        import build_skill_archives as mod
+    except ImportError:  # pragma: no cover - `tools.<pkg>` runtime (pytest)
+        from tools import build_skill_archives as mod
+    return mod
+
+
+def _rebuild_archives(root: Path, manifest: dict, dry_run: bool = False) -> list[str]:
+    """Re-derive `website/skills/<name>.skill` under ``root``; return what moved.
+
+    The archive is BUILT from the served copy, so any sync that moves a served
+    copy makes it stale — and nothing in either `--check` arm looks at it. The
+    consumer that DOES (`tests/test_onboarding_variants.py::test_9660…`) is a
+    pytest test, so the sanctioned remedy produced a red tree (#10088: both parity
+    arms green, CI `1 failed, 2869 passed`).
+
+    Skills are taken from the PIN (not from the builder's own list) so a pin that
+    serves a subset never gains an archive here, and the bytes come from the
+    file just written under ``root`` — a throwaway root stays throwaway.
+    """
+    bsa = _build_skill_archives()
+    moved: list[str] = []
+    for name in bsa.SKILL_NAMES:
+        entry = manifest["skills"].get(name)
+        if entry is None:
+            continue
+        source = root / entry["served_path"]
+        if not source.is_file():
+            # A `--dry-run` root that holds no mirror yet: sync wrote nothing, so
+            # there are no bytes to derive an archive FROM and inventing them is
+            # worse than reporting nothing. A real (writing) sync always has the
+            # file — it wrote it a few lines above.
+            continue
+        target = root / ARCHIVES_REL / f"{name}.skill"
+        wanted = bsa.build(name, source)
+        if target.is_file() and target.read_bytes() == wanted:
+            continue
+        moved.append(f"{ARCHIVES_REL / f'{name}.skill'} ({len(wanted)} bytes)")
+        if not dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(wanted)
+    return moved
 
 
 def sync(root: Path, manifest_path: Path, commit: str | None = None,
@@ -784,8 +861,12 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
     manifest["upstream"]["commit"] = target
     if not dry_run:
         manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+    # AFTER the served copies are on disk (and only from those bytes): the
+    # archives are derived FROM the mirror, so building them before the write
+    # would zip the previous mirror — the stale-archive defect, one level down.
+    archives = _rebuild_archives(root, manifest, dry_run=dry_run)
     return SyncResult(changed=changed, target=target, previous=previous,
-                      at_head=at_head)
+                      at_head=at_head, archives=archives)
 
 
 # ── report + CLI ───────────────────────────────────────────────────────────
@@ -900,6 +981,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  pin moved {result.previous[:12]} -> {result.target[:12]}")
             for line in result.changed:
                 print(f"  ~ {line}")
+            if result.archives:
+                print(f"  {verb} {len(result.archives)} .skill archive(s)")
+                for line in result.archives:
+                    print(f"  ~ {line}")
             if result.at_head is False:
                 _note(
                     f"{result.target[:12]} is NOT upstream HEAD: the currency arm "
