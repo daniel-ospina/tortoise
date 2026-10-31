@@ -6406,9 +6406,15 @@ def _item_stored_point_kind(item: dict) -> str | None:
     pinned by ``TestTheMintRecordIsKeyedByTheSTOREDKind``.
 
     ``None`` for a declared non-string ``pointKind``: ``n.pointKind = $kind``
-    can match no string kind, so nobody can fold onto that mint. (The write
-    door refuses that shape anyway — ``_refuse_invisible_point_kinds`` — so
-    this only stops the guard claiming an identity the graph will not hold.)
+    can match no string kind, so nobody can fold onto that mint. ⛔ The write
+    door does NOT refuse that shape — ``_refuse_invisible_point_kinds``
+    delegates to ``_refuse_invisible_kind``, which REFUSES PADDED STRINGS ONLY
+    and returns early for a non-``str`` (``create_point(42, …)`` is documented
+    there as out of contract but writable), so a list-valued ``pointKind`` can
+    reach the node. ``None`` here is therefore what keeps the guard from
+    claiming an identity the graph will not hold — and the same rule is why
+    :meth:`TortoiseSDK._terminal_content_candidates` skips a non-``str`` STORED
+    kind instead of keying a dict by it (#9819 review round 6).
     """
     declares, value = _item_prop_at_depth(
         item, "pointKind", _POINT_ITEM_MINT_STATUS_DEPTH)
@@ -22661,6 +22667,16 @@ class TortoiseSDK:
         A ``None`` content hash is only ever the A10 hash-less shape, so the two
         identity spaces cannot collide within one map (they are separate maps
         by construction, and a hash-less row is keyed by its content).
+
+        ⛔ A row whose STORED ``pointKind`` is not a ``str`` is SKIPPED, never
+        keyed (#9819 review round 6). The writer's ``n.pointKind = $kind``
+        compares a STRING, so an array kind is addressable by no item's dedup
+        query: skipping the row changes no verdict and the item ``mints``,
+        exactly what the writer does. Keying it instead raised a bare
+        ``TypeError: unhashable type: 'list'`` out of Phase 1 (a FalkorDB
+        property may be a list), bypassing the aggregated
+        ``BundleValidationError`` contract — the same defect class the ITEM
+        side already closes in :func:`_item_point_kind`.
         """
         if not wanted:
             return {}, set(), {}, set()
@@ -22681,6 +22697,13 @@ class TortoiseSDK:
         terminal_hashless: dict[tuple[str, str], str] = {}
         present_hashless: set[tuple[str, str]] = set()
         for raw_hash, kind, content, node_id, terminal in rows:
+            if not isinstance(kind, str):
+                # ✋ Unhashable (and unaddressable) — see the docstring. `raw_hash`
+                # and `content` need no such test for the mirror-image reason:
+                # the WHERE admits only a value that EQUALS one of the bundle's
+                # own strings (`content_hash IN $hashes`, `content IN $contents`)
+                # or a NULL hash, so neither can be a non-string here.
+                continue
             if raw_hash is None:
                 present_hashless.add((content, kind))
                 if terminal:

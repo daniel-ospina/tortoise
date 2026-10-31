@@ -1285,3 +1285,44 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
                      ("T1-retracted", "T2-live", "T3-hashless-retracted",
                       "T3-hashless-live", "T2-shadows-T3")]:
             assert batched[pair][1] is False, f"{pair} must not mint"
+
+    def test_a_stored_non_string_kind_is_skipped_not_keyed(self, sdk):
+        """#9819 review round 6 — the ROW side's unhashable-kind guard.
+
+        The item side is normalised by ``_item_point_kind`` (a non-string kind
+        falls back to the default), but ``kind`` in the row loop is the node's
+        STORED ``n.pointKind``, which FalkorDB may return as a **list** — and a
+        list is unhashable, so keying the identity maps by it raised a raw
+        ``TypeError: unhashable type: 'list'`` out of Phase 1, bypassing the
+        aggregated ``BundleValidationError`` contract. The state is reachable:
+        ``_refuse_invisible_kind`` admits a non-string kind **by documented
+        decision** (padded strings only are refused), and this tree already
+        seeds an array ``pointKind`` on a ``:Point`` by plain Cypher
+        (``tests/test_consistency_divergence_5011.py``).
+
+        Writer parity — why SKIPPING is the right answer and not a shrug:
+        ``n.pointKind = $kind`` compares a STRING, so an array kind matches no
+        item's dedup query. The row is invisible to the writer, so the item
+        MINTS. Pre-fix this test errors inside
+        ``_terminal_content_candidates``, before it can assert anything.
+        """
+        content = "ARRAY-KIND-9819"
+        pid = sdk.create_point("statement", content)["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.pointKind = ['x']",
+            params={"id": pid})
+
+        cands = sdk._terminal_content_candidates([(content, "statement")])
+        assert _content_candidate_resolution(
+            cands, content, "statement") == (None, True), (
+            "an array-kind row must read as NO terminal hit and MINT — the "
+            "writer's `n.pointKind = $kind` cannot match an array")
+        # …and it agrees with the per-item helpers this batched read replaced.
+        assert sdk._find_terminal_dedup_hit(content, "statement") is None
+        assert sdk._find_point_by_content(
+            content, pointKind="statement") is None
+        # The Phase-1 CONTRACT holds end to end — a zero-violation verdict,
+        # not the raw TypeError a keyed list raised.
+        assert sdk._validate_bundle(
+            {"points": [{"ref": "p1", "kind": "statement",
+                         "content": content}]}) == []
