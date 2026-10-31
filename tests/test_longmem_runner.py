@@ -6432,7 +6432,15 @@ def test_e2e10_budget_capped_context_v3_part(tmp_path):
     chunks from one session cannot blow the reader's context budget — the
     context stays <= cap, ordering follows RANK (points and chunks
     interleaved — the R1 points-first partition is deliberately reversed),
-    and context_tokens is honest."""
+    and context_tokens is honest.
+
+    BOTH assertions are placed where they actually BIND (#10277 review P2,
+    #10425): the session yields 10 chunks against a per-session cap of 3, so
+    ``chunks_capped`` has slack instead of exactly the one passing value, and
+    the context cap sits BELOW the untrimmed render of the same pool (measured
+    487 tokens in both BM25 arm states) so the budget walk really trims. A cap
+    the context never reaches measures nothing — the previous 2000-token cap
+    left the whole pooled context ~7x under it."""
     # The filler shares the query's content word ("destination") ON PURPOSE.
     # This test's subject is the per-session CHUNK CAP, so the near-duplicate
     # chunks have to actually be RETRIEVED — otherwise the cap is handed a
@@ -6448,10 +6456,16 @@ def test_e2e10_budget_capped_context_v3_part(tmp_path):
     # the filler with the query keeps the fixture's premise true under EITHER
     # arm state (measured 5/2 with the arm ON and with TORTOISE_BM25_LEXICAL=0),
     # so a future default flip cannot silently zero this counter.
+    #
+    # 10 chunks, not 5 (#10425): at 5 the only passing value of `capped >= 2`
+    # was exactly `5 - 3`, so the assertion read "all five chunks must be
+    # retrieved" and it flipped RED when the arm narrowed RETRIEVAL rather than
+    # when dedup regressed. Measured with 20 turns: 10 retrieved, 7 capped,
+    # 3 in the pool — in both arm states.
     filler = [{"role": "user", "content": f"planning detail number {i} "
                "about the destination for the upcoming trip itinerary",
                "has_answer": False}
-              for i in range(9)] + [
+              for i in range(19)] + [
         {"role": "user", "content": "the destination is Kyoto",
          "has_answer": True}]
     q = {
@@ -6465,12 +6479,35 @@ def test_e2e10_budget_capped_context_v3_part(tmp_path):
         "answer_session_ids": ["dupe-s0"],
         "haystack_sessions": [filler],
     }
+    from tools.longmem_eval import retrieve as rtr
+
     sdk = _fresh_sdk(tmp_path)
     try:
-        ingest_haystack(sdk, q, chunk_turns=2)  # 5 near-duplicate chunks
+        ingest_haystack(sdk, q, chunk_turns=2)  # 10 near-duplicate chunks
+        # A cap the pool's untrimmed render EXCEEDS (see the guard below).
+        # 2000 was ~7x the whole pooled context (measured 289 tokens), so the
+        # assertion could not fail even with the budget walk disabled (#10425).
+        context_cap = 400
         ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
-                                    max_context_tokens=2000)
-        assert ret["context_tokens"] <= 2000
+                                    max_context_tokens=context_cap)
+        # NON-VACUITY, measured on THIS fixture: the untrimmed render of the
+        # pool is expensive enough that the cap has something to do. Without
+        # it, a fixture/estimator change could silently return the assertion
+        # below to unobservable — the defect #10425 records.
+        untrimmed_tokens = _estimate_tokens(
+            render_context(ret["hits"],
+                           question_date=q.get("question_date") or None))
+        assert untrimmed_tokens > context_cap, (
+            f"the pooled context renders to {untrimmed_tokens} tokens, at or "
+            f"under the {context_cap}-token cap — the budget assertion below "
+            "would be vacuous; add filler or lower the cap (#10425)"
+        )
+        assert ret["context_tokens"] <= context_cap
+        # ...and the trim is OBSERVABLE, not a rounding artifact.
+        assert ret["context_tokens"] < untrimmed_tokens, (
+            f"context_tokens={ret['context_tokens']} equals the untrimmed "
+            f"render ({untrimmed_tokens}) — the cap did not trim (#10425)"
+        )
         # rank-interleaved ordering: the context is a RANK-ORDER prefix of
         # the pool (chunks interleave at their RRF rank — no points-first
         # tiering)
@@ -6483,9 +6520,24 @@ def test_e2e10_budget_capped_context_v3_part(tmp_path):
         assert ret["context_tokens"] == _estimate_tokens(
             render_context(ret["context_points"],
                            question_date=q.get("question_date") or None))
-        # per-session dedup holds even with 5 near-duplicate chunks
+        # per-session dedup holds even with 10 near-duplicate chunks
         dupe_chunks = [h for h in ret["hits"] if _is_raw_chunk(h)]
-        assert len(dupe_chunks) <= 3
+        # The fixture's PREMISE, asserted so a narrowing retrieval reports
+        # itself as a fixture problem instead of as a dedup regression: 10
+        # chunks are measured here, 7 is the point at which `capped >= 2`
+        # regains zero slack.
+        assert ret["dedup_stats"]["chunks_retrieved"] >= 7, (
+            "the fixture's premise is that MANY near-duplicate chunks are "
+            f"retrieved (measured 10); only "
+            f"{ret['dedup_stats']['chunks_retrieved']} were, so the cap has no "
+            "slack left to lose — fix the fixture, not the cap (#10425)"
+        )
+        # EXACTLY the cap, not "at most": `<=` cannot see OVER-capping (a cap
+        # narrowed 3 -> 1 shrinks the pool and `<= 3` still passes).
+        assert len(dupe_chunks) == rtr.DEFAULT_MAX_CHUNKS_PER_SESSION, (
+            f"the pool kept {len(dupe_chunks)} chunks from one session, not "
+            f"the cap of {rtr.DEFAULT_MAX_CHUNKS_PER_SESSION} (#10425)"
+        )
         assert ret["dedup_stats"]["chunks_capped"] >= 2
     finally:
         sdk.close()
