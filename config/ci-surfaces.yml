@@ -8593,7 +8593,7 @@ durations:
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 3.2  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_extractor_v4_s4_stage_claims.py: 3.0  # #8500: `ast` walks over two source files + doc-text scans, plus THREE in-process behavioural tests (`vet_gate.check_batch`/`apply_vet`, `kind_classifier`/`_apply_classify_kinds`) and a row-scoped read of §4.0; no DB. Measured 2026-10-18 with `--durations=0`: 3.96–6.97 s of call time over three runs (one `ast.parse` of the 9.5k-line `extractor_v2.py` is 0.44 s and the mutation fixtures reparse it), so the previous `0.1` under-declared ~50x (#8955 review, UNVERIFIED item) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.9
-  test_5095_s3_identity_policy.py: 4.7  # #5095: 41 hermetic tests — a fake model, a
+  test_5095_s3_identity_policy.py: 4.7  # #5095: 47 hermetic tests — a fake model, a
   # stub `_fts_rows`, `sdk=None`; no DB, no network, no real model. Measured
   # locally: 4.70 s of test body for the whole file (`pytest -q`, private lane).
   # A file a PR ADDS cannot carry a CI junit reading, so this is the local

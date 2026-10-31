@@ -329,20 +329,25 @@ def test_the_state_of_code_paragraph_tracks_what_runs():
         "renderer no longer invites `new` (#5095) — the paragraph is stale in "
         "the direction that makes a fixed defect read as open."
     )
-    assert "NEVER asserted" in section or "never mint it" in section or \
-        "never mint it" in section, (
+    assert "NEVER asserted" in section or "never mint it" in section, (
         "§4.4 lost the invariant the state-of-code paragraph is about"
     )
     # What runs now, and what remains: BOTH halves must be stated, or the
-    # paragraph over-claims in one direction or the other.
-    assert "identity" in section, (
-        "§4.4's state-of-code paragraph does not name the `identity` block / "
-        "record half that #5095 landed — a reader would read the remaining "
-        "absence as if nothing had landed."
+    # paragraph over-claims in one direction or the other. ⛔ These assert the
+    # NEW paragraph's own wording, not words the section already contained: I1's
+    # row reads "An unresolved IDENTITY is NEVER asserted new" and "HOLD the
+    # candidate — never mint it" on the BASE document, so assertions on those
+    # alone stayed green with the whole #5095 paragraph deleted (#5095 review A3).
+    assert "What runs now" in section, (
+        "§4.4's state-of-code paragraph no longer has its 'What runs now' half — "
+        "the record half #5095 landed would read as if nothing had landed."
     )
-    assert "never mint it" in section.lower() or "still not enforced" in section.lower() \
-        or "still absent" in section.lower(), (
-        "§4.4 does not say the MINT half is still absent — the record half "
+    assert "`identity` block" in section, (
+        "§4.4's 'What runs now' paragraph does not name the `identity` block — a "
+        "reader would read the remaining absence as if nothing had landed."
+    )
+    assert "still not enforced" in section, (
+        "§4.4 does not say the MINT half is still not enforced — the record half "
         "would then read as the whole of I1 (#5095)."
     )
 
