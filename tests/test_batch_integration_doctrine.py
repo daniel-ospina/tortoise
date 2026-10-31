@@ -1,10 +1,11 @@
 """The batch-integration doctrine's commands must execute against THIS repo.
 
-WHY THIS FILE EXISTS (#10399 review P1-1/P1-2/P1-4/P1-5, P2-1, P2-3)
--------------------------------------------------------------------
+WHY THIS FILE EXISTS (#10399 review P1-1/P1-2/P1-4/P1-5, P2-1, P2-3, and the fixes
+at ``f3c6c803b``: ISSUE 1-5 / P1-P3)
+------------------------------------------------------------------------------
 ``docs/ops/batch-integration.md`` is a *doctrine*: an operator follows it
-top-to-bottom and executes its command blocks. Two of those commands failed as
-written, and two stated facts were false against the tree they describe:
+top-to-bottom and executes its command blocks. Commands that failed as written,
+or facts that were false against the tree they describe:
 
 * the suite blocks carried no ``TORTOISE_DB_URI`` and no marker filter, so the
   documented baseline dies at session start (``tests/conftest.py``'s
@@ -14,20 +15,39 @@ written, and two stated facts were false against the tree they describe:
 * every merge in a batch is a merge commit by construction, so the documented
   ``git revert <sha>`` exits 128 (``is a merge but no -m option was given``) and
   drops nothing;
+* **Phase 1 created the baseline branch with ``git branch`` and never checked it
+  out**, so the "baseline on ``origin/main`` ALONE" ran in whatever tree the
+  operator stood in — and that ledger is what every later verdict is diffed
+  against;
+* **``git bisect run`` leaves HEAD detached at the first bad commit** and the
+  doctrine never returned to the batch branch, so the documented "drop the
+  culprit" committed the revert onto a detached HEAD (the batch kept the
+  culprit) and the final verdict measured a tree nobody lands;
+* **``-m track_b`` was silently dropped from the gate** although CI's
+  ``test-track-b`` job is a MUST-PASS ``needs:`` of the required
+  ``python-ci-gate`` — so a batch could be green with a gate member unrun;
 * the invariant ("``main`` only ever receives a tree that has already passed the
   full suite") was unenforceable, because nothing re-checked that ``main`` was
   still the pinned base at landing time — the property bors and GitHub's queue
   get for free by owning the merge, and the live ``.mergify.yml`` queue keeps
   moving ``main`` while a batch runs;
+* the landing assertion read ``$PINNED``, which Phase 1 set in a *different*
+  shell, so in the landing actor's shell it compared against the empty string;
 * the carve-out file count was quoted from memory and was stale.
 
-Prose is not pinned here — only the executable claims. A wording edit that keeps
-the commands honest does not red this file; a command edit that would not run
-does.
+WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
+command edit that would not run reds this file, and a wording edit that keeps the
+commands honest does not. Three things are additionally pinned as **substrings**
+because they are the document's contract rather than its wording — the
+``OVERRIDES:`` line, the verdict markers, and the "never green on a partial lane"
+rule — plus the two marker strings (``--no-ff``, ``export TORTOISE_DB_URI=``) that
+must sit in the *fence* they belong to, not merely somewhere in the prose.
 
-Non-vacuity: measured on the pre-fix head ``a17576c43`` — checks 1, 2, 3, 4 and 5
-all red on it (``5 failed, 1 passed``; the one pass is the parser sanity check,
-which must hold on both trees).
+Non-vacuity: measured against the pre-fix documents — **6 of 11 red** at
+``f3c6c803b`` (the head this group of checks was written against) and **9 of 11
+red** at ``a17576c43``. The two that pass on every tree are the parser sanity
+check and the machinery-naming check, by design: they guard against a re-pointed
+or deleted document, not against a bad command.
 
 Static, no network / DB / graph.
 """
@@ -40,18 +60,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "ops" / "batch-integration.md"
 
-#: The filter every CI lane applies to the deterministic suite
-#: (``.github/workflows/python-ci.yml``; ``pyproject.toml`` defines the markers).
+#: The marker filter the ``python-ci.yml`` deterministic lanes apply.
 MARKER_FILTER = "-m 'not track_b and not live and not integration'"
 
-#: A full-suite invocation — ``pytest tests/`` optionally followed by flags.
-#: ``pytest <some file>`` (the bisect/blame commands) deliberately does NOT match.
-_FULL_SUITE = re.compile(r"\bpytest\s+tests/\s*(?:$|-)")
+#: The three exclusions, required as *terms* rather than as one literal string —
+#: a reordered ``-m`` must pass, a missing exclusion must not (the selector's
+#: meaning, not its spelling).
+EXCLUSION_TERMS = ("not track_b", "not live", "not integration")
+
+#: The positive marker of the other half. CI runs it as ``test-track-b``, a
+#: ``needs:`` of the required ``python-ci-gate``.
+TRACK_B_FILTER = "-m track_b"
+
+#: A full-suite invocation: ``pytest tests``, ``pytest tests/``, ``pytest ./tests/``
+#: — optionally followed by flags or a redirect. ``pytest <some file>`` (the
+#: bisect/blame commands) deliberately does NOT match, so it is not required to
+#: carry a full-suite marker filter.
+_FULL_SUITE = re.compile(r"\bpytest\s+(?:\./)?tests/?\s*(?:$|[-\s>])")
 
 #: The landing-time base check: compare ``origin/main`` to the pinned sha.
 _PINNED_MAIN_ASSERTION = re.compile(
     r'\[\s*"\$\(git\s+rev-parse\s+origin/main\)"\s*=\s*"\$PINNED"\s*\]'
 )
+
+#: Commands that move HEAD onto a ref — what Phase 1 must do before its suite run.
+_MOVES_HEAD = re.compile(r"\bgit\s+(?:switch|checkout)\b")
 
 
 def _text() -> str:
@@ -59,62 +92,199 @@ def _text() -> str:
     return DOC.read_text(encoding="utf-8")
 
 
-def _fenced_commands() -> list[str]:
-    """Every non-blank, non-comment line inside a fenced code block."""
-    commands: list[str] = []
+def _fences() -> list[list[str]]:
+    """Every fenced code block, as its list of non-blank, non-comment lines."""
+    fences: list[list[str]] = []
+    current: list[str] = []
     in_fence = False
     for line in _text().splitlines():
         stripped = line.strip()
         if stripped.startswith("```"):
+            if in_fence:
+                fences.append(current)
+                current = []
             in_fence = not in_fence
             continue
         if in_fence and stripped and not stripped.startswith("#"):
-            commands.append(stripped)
-    return commands
+            current.append(stripped)
+    return [fence for fence in fences if fence]
+
+
+def _fenced_commands() -> list[str]:
+    """Every non-blank, non-comment line inside a fenced code block, flattened."""
+    return [cmd for fence in _fences() for cmd in fence]
+
+
+def _full_suite_fences() -> list[list[str]]:
+    """The fences that carry a full-suite run, in document order."""
+    return [fence for fence in _fences() if any(_FULL_SUITE.search(c) for c in fence)]
+
+
+def _fence_index(predicate) -> int:
+    """Index of the first fence satisfying ``predicate``; -1 when there is none."""
+    for i, fence in enumerate(_fences()):
+        if predicate(fence):
+            return i
+    return -1
 
 
 def test_this_guard_parses_the_document() -> None:
     """A parser that finds nothing would make every check below vacuous."""
     commands = _fenced_commands()
     assert len(commands) >= 10, f"parsed only {len(commands)} fenced commands — re-point this guard"
+    assert _fences(), "no fenced code block parsed — re-point this guard"
     assert any(_FULL_SUITE.search(cmd) for cmd in commands)
 
 
-def test_every_full_suite_command_carries_the_ci_marker_filter() -> None:
-    """#10399 review P1-5: the documented suite is the DETERMINISTIC suite.
+def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
+    """#10399 review ISSUE 1 / P1-5: the documented suite is the DETERMINISTIC suite.
 
     Bare ``pytest tests/`` runs the ``live`` and ``integration`` markers, which
-    need live credentials and production access; no CI lane runs them
-    (``-m 'not track_b and not live and not integration'``). Every such failure
-    the doc manufactures becomes a ``BASELINE(<ids>)`` id or convicts an
-    innocent PR — the exact noise the Baseline rule exists to remove.
+    need live credentials and production access; no CI lane runs them. And a
+    ``-m 'not track_b …'`` run is only HALF the deterministic suite: CI runs
+    ``test-track-b`` with ``-m track_b`` as a MUST-PASS ``needs:`` of the
+    required ``python-ci-gate``, so a batch that never runs it can be green with
+    a gate member unrun. Every full-suite command must therefore be one half or
+    the other, never a bare run and never a silently partial one.
     """
     full_suite = [cmd for cmd in _fenced_commands() if _FULL_SUITE.search(cmd)]
     assert full_suite, "the doctrine no longer documents a full-suite run — re-point this guard"
-    missing = [cmd for cmd in full_suite if MARKER_FILTER not in cmd]
+
+    bare = [cmd for cmd in full_suite if "-m" not in cmd]
+    assert not bare, (
+        "a full-suite command in the doctrine carries no `-m` filter, so it runs "
+        f"the live/integration markers no CI lane runs: {bare}"
+    )
+
+    # The two deliberate halves are told apart by which one they select: the
+    # ``-m track_b`` half may target one file (CI's job runs
+    # ``tests/test_ingest_safety.py -m track_b``), so it is matched on ANY command.
+    deterministic = [cmd for cmd in full_suite if TRACK_B_FILTER not in cmd]
+    track_b = [cmd for cmd in _fenced_commands() if TRACK_B_FILTER in cmd]
+
+    missing = [
+        cmd for cmd in deterministic if not all(term in cmd for term in EXCLUSION_TERMS)
+    ]
     assert not missing, (
-        "every full-suite command in the doctrine must carry the CI marker "
-        f"{MARKER_FILTER!r}; these do not: {missing}"
+        "every deterministic full-suite command must exclude all of "
+        f"{EXCLUSION_TERMS}; these do not: {missing}"
+    )
+
+    assert track_b, (
+        "the doctrine documents no `-m track_b` run: `python-ci.yml`'s "
+        "`test-track-b` job runs that half as a MUST-PASS need of the required "
+        "`python-ci-gate`, so a batch that skips it leaves a gate member unrun"
+    )
+
+
+def test_the_track_b_gate_leg_is_run_in_the_gate_phase() -> None:
+    """#10399 review ISSUE 1: the second half runs in Phase 3, not only in prose.
+
+    A `-m track_b` mention anywhere would satisfy a naive substring check, so
+    this requires it inside a fence that ALSO carries the deterministic half —
+    i.e. the documented gate run covers both halves.
+    """
+    fences = _full_suite_fences()
+    assert fences, "the doctrine no longer documents a full-suite run — re-point this guard"
+    paired = [
+        fence
+        for fence in fences
+        if any(TRACK_B_FILTER in c for c in fence)
+        and any(
+            _FULL_SUITE.search(c)
+            and TRACK_B_FILTER not in c
+            and all(term in c for term in EXCLUSION_TERMS)
+            for c in fence
+        )
+    ]
+    assert paired, (
+        "no fenced block runs the `-m track_b` half alongside the deterministic "
+        "half; the gate phase must run BOTH (test-track-b is a python-ci-gate need)"
     )
 
 
 def test_the_lane_is_selected_and_exported_before_the_first_suite_run() -> None:
-    """#10399 review P1-4: the suite is URI-required, so the lane comes first.
+    """#10399 review P1-4 / ISSUE 3: the suite is URI-required, so the lane comes first.
 
     ``tests/conftest.py::_p4_uri_required`` fails the session closed when
     ``TORTOISE_DB_URI`` is unset and the carve-out is not opted in, so a
     documented baseline that precedes the lane selection cannot run at all.
+
+    Resolved against the FENCED COMMANDS, not raw lines: a prose mention of
+    ``TORTOISE_DB_URI`` (the doc explains the gate in words, earlier) must not
+    satisfy this, or deleting the whole export fence would leave it green.
     """
-    lines = _text().splitlines()
-    uri_lines = [i for i, line in enumerate(lines) if "TORTOISE_DB_URI" in line]
-    suite_lines = [i for i, line in enumerate(lines) if _FULL_SUITE.search(line)]
-    assert uri_lines, "the doctrine no longer names TORTOISE_DB_URI — re-point this guard"
-    assert suite_lines, "the doctrine no longer documents a full-suite run — re-point this guard"
-    assert min(uri_lines) < min(suite_lines), (
-        "the lane (TORTOISE_DB_URI) is first named at line "
-        f"{min(uri_lines) + 1} but the first full-suite command is at line "
-        f"{min(suite_lines) + 1}: the baseline would die at session start "
+    commands = _fenced_commands()
+    exports = [i for i, cmd in enumerate(commands) if "export TORTOISE_DB_URI=" in cmd]
+    suites = [i for i, cmd in enumerate(commands) if _FULL_SUITE.search(cmd)]
+    assert exports, (
+        "no fenced command exports TORTOISE_DB_URI= — the documented suite would "
+        "die at session start (tests/_embedded.py::_assert_p4_uri_required)"
+    )
+    assert suites, "the doctrine no longer documents a full-suite run — re-point this guard"
+    assert min(exports) < min(suites), (
+        "the lane is exported only at fenced command "
+        f"{min(exports) + 1} but the first full-suite command is at "
+        f"{min(suites) + 1}: the baseline would die at session start "
         "(tests/_embedded.py::_assert_p4_uri_required)"
+    )
+
+
+def test_phase_1_checks_out_the_pinned_base_before_the_baseline_suite() -> None:
+    """#10399 review ISSUE 2: ``git branch`` creates a ref and does NOT move HEAD.
+
+    The baseline fence is headed "run the suite on ``origin/main`` ALONE", and
+    its id list is the ledger every later verdict is diffed against. Created with
+    ``git branch`` from a lane worktree, the suite runs on the LANE — polluting
+    the ledger in both directions (main's own red is hidden, an innocent PR is
+    convicted). The fence must move HEAD onto ``"$PINNED"`` before the run.
+    """
+    fences = _fences()
+    first = _fence_index(lambda fence: any(_FULL_SUITE.search(c) for c in fence))
+    assert first >= 0, "no baseline fence found — re-point this guard"
+    fence = fences[first]
+    moves = [i for i, c in enumerate(fence) if _MOVES_HEAD.search(c) and '"$PINNED"' in c]
+    assert moves, (
+        "the baseline fence must CHECK OUT the pinned base (`git switch -c … "
+        '"$PINNED"` or `git switch --detach "$PINNED"`) before running the '
+        "suite; `git branch` creates the ref and leaves HEAD in the operator's "
+        "own tree, so the baseline would be measured on the wrong tree"
+    )
+    run = [i for i, c in enumerate(fence) if _FULL_SUITE.search(c)]
+    assert min(moves) < min(run), (
+        "the baseline fence checks out the pinned base only AFTER the suite run"
+    )
+
+
+def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
+    """#10399 review ISSUE 3 (at ``f3c6c803b``) / P1-3: ``bisect run`` leaves HEAD detached.
+
+    ``git bisect run`` ends detached at the first bad commit, so the documented
+    ``git revert -m 1`` commits onto a detached HEAD: ``integration/batch-1``
+    keeps the culprit the doctrine says to drop, and the final full run measures
+    a tree nobody lands. A ``git bisect reset`` (or an explicit ``git switch``
+    back to the batch branch — the walk-the-merges route detaches too) must come
+    between the bisect and the revert.
+    """
+    commands = _fenced_commands()
+    bisects = [i for i, c in enumerate(commands) if c.startswith("git bisect start")]
+    reverts = [i for i, c in enumerate(commands) if "git revert" in c]
+    assert bisects, "the doctrine no longer documents a bisect — re-point this guard"
+    assert reverts, "the doctrine no longer documents dropping a culprit — re-point this guard"
+    returns = [
+        i
+        for i, c in enumerate(commands)
+        if c.startswith("git bisect reset") or re.match(r"git switch integration/batch-", c)
+    ]
+    assert returns, (
+        "no `git bisect reset` (or `git switch integration/batch-…`) anywhere: "
+        "`git bisect run` leaves HEAD DETACHED at the first bad commit, so the "
+        "revert below never lands on the batch branch"
+    )
+    assert min(bisects) < min(returns) < min(reverts), (
+        "the return to the batch branch must sit BETWEEN the bisect "
+        f"(command {min(bisects) + 1}) and the revert (command "
+        f"{min(reverts) + 1}); found it at {min(returns) + 1}"
     )
 
 
@@ -134,19 +304,94 @@ def test_reverting_a_batch_culprit_passes_a_mainline() -> None:
 
 
 def test_landing_asserts_main_is_still_the_pinned_base() -> None:
-    """#10399 review P1-3: the tested tree must be the landed tree.
+    """#10399 review P1-3 / P2-1: the tested tree must be the landed tree.
 
     bors fast-forwards ``main`` to the staging branch it tested and GitHub's
     queue validates against "the latest version of the target branch" — both get
     the property by OWNING the merge. Here ``.mergify.yml`` keeps merging to
     ``main`` while a batch runs, so the base must be re-checked mechanically at
     landing time, or the invariant is a sentence rather than a property.
+
+    And the check must be SELF-CONTAINED: ``$PINNED`` is set in Phase 1's shell,
+    while landing "is a separate, human-routed step" in a different shell — so
+    the landing fence has to materialise ``PINNED`` itself, from the batch PR
+    body Phase 1 wrote it to.
     """
-    fenced = "\n".join(_fenced_commands())
-    assert _PINNED_MAIN_ASSERTION.search(fenced), (
+    fences = _fences()
+    landing = [fence for fence in fences if _PINNED_MAIN_ASSERTION.search("\n".join(fence))]
+    assert landing, (
         "the doctrine must carry the landing-time base assertion "
         '`[ "$(git rev-parse origin/main)" = "$PINNED" ]` as an executable '
         "command; without it a batch can land a tree no run has seen"
+    )
+    defines = [
+        cmd for cmd in landing[0] if re.match(r'(?:export\s+)?PINNED=', cmd)
+    ]
+    assert defines, (
+        "the landing fence uses $PINNED without defining it: Phase 1 set it in a "
+        "DIFFERENT shell, so here it is empty and the assertion reports "
+        "`main moved:  -> <sha>` against an unmoved main. Materialise it from the "
+        "batch PR body (Phase 1 records it there)"
+    )
+
+
+def test_the_manifest_claim_survives_the_revert() -> None:
+    """#10399 review ISSUE 5: after a revert the log is "merges ATTEMPTED".
+
+    Read as the landed manifest, ``git log origin/main..integration/batch-1``
+    advertises a PR whose content the revert removed, and a re-run of the Phase 4
+    bisect is walked straight back to the already-dropped merge.
+    """
+    text = _text()
+    assert "merges attempted" in text.lower(), (
+        "the doctrine must say the batch log records *merges attempted* — after "
+        "the reverts it prescribes, `git log origin/main..integration/batch-1` "
+        "also names dropped PRs, so reading it as the landed manifest re-blames "
+        "a culprit that was already removed"
+    )
+
+
+def test_the_contract_sentences_are_pinned() -> None:
+    """#10399 review P3: the document's load-bearing claims, not its wording.
+
+    The guard's header claims it keeps the doctrine honest. These four are the
+    claims a wording edit could invert while every command stayed executable, so
+    they are pinned as substrings: the ``OVERRIDES:`` line (the ruling this doc
+    records), the four verdict markers, the never-green-on-a-partial-lane rule,
+    and the ``--no-ff`` assembly form inside the assembly fence.
+    """
+    text = _text()
+    assert "ci-main.yml's post-merge full suite" in text and "OVERRIDES" in text, (
+        "the doctrine must carry the same `OVERRIDES:` line as decision issue "
+        "#10399 — it is what makes the ruling visible to an adopter"
+    )
+    # The verdict rows are pinned as TABLE ROWS, not as loose substrings: the
+    # markers also appear in the surrounding prose (`UNPROVEN-FULL-SUITE(...)` is
+    # quoted in the carve-out paragraph), so a substring check would survive
+    # deleting a row from the table.
+    table = "\n".join(line for line in text.splitlines() if line.startswith("|"))
+    for marker in (
+        "BATCH-GREEN",
+        "BATCH-GREEN(BASELINE(",
+        "BATCH-RED(",
+        "UNPROVEN-FULL-SUITE(",
+    ):
+        assert marker in table, f"the verdict table no longer defines {marker!r}"
+    assert "never green on a partial lane" in text, (
+        "the rule that a subset is never a green is the one that stops this "
+        "process manufacturing the red main it exists to prevent"
+    )
+    assert "only ever receives a tree that has already passed the full suite" in text, (
+        "the invariant sentence is the whole document — every phase is in "
+        "service of it"
+    )
+
+    assembly = _fence_index(lambda fence: any("git merge" in c for c in fence))
+    assert assembly >= 0, "the doctrine no longer documents assembling a batch — re-point this guard"
+    assert any("--no-ff" in c for c in _fences()[assembly]), (
+        "the assembly fence must keep `--no-ff` on every merge: a fast-forward "
+        "merge is not a merge commit, so the documented `git revert -m 1` "
+        "would then have no mainline to revert against"
     )
 
 

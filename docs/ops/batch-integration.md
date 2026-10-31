@@ -111,20 +111,50 @@ pre-existing bug inside a batch, which is scope creep with no review).
 
 ```bash
 git fetch origin main
-PINNED="$(git rev-parse origin/main)"           # PIN THIS SHA — every later comparison is against it
-git branch integration/base-check "$PINNED"     # no changes on this branch
+PINNED="$(git rev-parse origin/main)"            # PIN THIS SHA — every later comparison is against it
+git switch -c integration/base-check "$PINNED"   # ⛔ SWITCH, not `git branch` — run the suite on THIS tree
 uv run pytest tests/ -q -m 'not track_b and not live and not integration'
+git switch -                                      # back to the lane you came from
 ```
 
-Record the baseline result **as data**: counts, the **exact list of failing test ids**, and the
-duration. Those ids are the ledger that later failures are diffed against.
+**`git switch -c`, never `git branch`.** `git branch integration/base-check "$PINNED"` creates the ref
+and leaves your working tree exactly where it was — so the suite runs on whatever branch you happen to
+be standing in (in this fleet, usually a lane worktree carrying unreviewed changes), while the heading
+above promises `origin/main` alone. The baseline id list is the ledger every later verdict is diffed
+against, so a polluted baseline both hides main's own red **and** convicts an innocent PR for a failure
+the lane introduced. `git switch -c` (or `git switch --detach "$PINNED"`) is the whole fix.
 
-**The marker filter is not decoration.** Every CI lane in this repo runs the deterministic suite with
-`-m 'not track_b and not live and not integration'` (`.github/workflows/python-ci.yml`). `live` marks
-live-API probes and `integration` marks opt-in tests needing live credentials or production access
-(`pyproject.toml`). A bare `pytest tests/` therefore runs tests that cannot pass on a lane without
-those credentials — and by the Baseline rule every such failure becomes a `BASELINE(<ids>)` id, or
-convicts an innocent PR. The filter is what makes the run comparable to CI at all.
+Record the baseline result **as data**: counts, the **exact list of failing test ids**, and the
+duration. Those ids are the ledger that later failures are diffed against. Record `$PINNED` too — in
+the batch PR body, as a `pinned-base: <sha>` line — because landing is a different shell
+(see [Landing](#landing--main-must-still-be-the-tree-you-tested)).
+
+**The marker filter is not decoration.** `python-ci.yml`'s deterministic lanes run the suite with
+`-m 'not track_b and not live and not integration'`. `live` marks live-API probes and `integration`
+marks opt-in tests needing live credentials or production access (`pyproject.toml`). A bare
+`pytest tests/` therefore runs tests that cannot pass on a lane without those credentials — and by the
+Baseline rule every such failure becomes a `BASELINE(<ids>)` id, or convicts an innocent PR. The filter
+is what makes the run comparable to CI at all.
+
+Two corrections to the quantifier, because both decide whether the batch is a gate or a gesture:
+
+- **`-m track_b` is NOT deselected upstream.** `python-ci.yml`'s `test-track-b` job runs
+  `tests/test_ingest_safety.py -m track_b` as its own **MUST-PASS** member — it is a `needs:` of the
+  required `python-ci-gate` (measured max 1.15 m, `python-ci.yml:2450`). CI runs the deterministic
+  suite in two marker **halves**; a batch that runs only the `not track_b` half leaves a gate member
+  unrun, and a `track_b` regression introduced by the composition reaches `main` unseen — the exact
+  class the invariant forbids. So Phase 3 runs **both** halves.
+- **`post-merge-validation.yml` does NOT use this filter.** Its run is
+  `-m 'not track_b' --ignore=tests/e2e $SLOW_IGNORES` — no `not live`, no `not integration`, slow
+  files excluded. That is *why* it is the **detector** and not the reproducer: it watches `main` with
+  a different (narrower and slower-excluding) set, so a `BATCH-GREEN` batch can still red a
+  post-merge run on a test the batch never ran. It detects; the batch gates.
+
+And the gate has **non-test legs** a pytest run cannot reproduce at all: `packs-compile` (whole-registry
+`PackRegistry.load_all()`), `manifest-integrity`, `workflow-lint`, `surface-guard`. The batch
+reproduces the two **test** halves; those legs are owed by the landing rail, which still requires
+`python-ci-gate` (see [Landing](#landing--main-must-still-be-the-tree-you-tested)). Never read a green
+batch as "`python-ci-gate` passed".
 
 ### 2. Assemble the batch
 
@@ -145,7 +175,11 @@ git log --oneline -1                                    # after EVERY merge
 ```
 
 Each merge is a real `--no-ff` merge commit naming its PR, so `git log origin/main..integration/batch-1`
-**is** the batch's manifest.
+is the batch's record of **merges attempted**. It is *not* the landed manifest once Phase 4 reverts a
+culprit: a revert adds `Revert "batch: merge PR #<N>"`, so the log then names a PR whose content is
+**not** in the tree. Read it as attempted-and-maybe-dropped — the landed content is the **tree**, and
+the dropped PR is the one with a matching revert line (a re-run of the Phase 4 bisect that ignores
+this walks straight back to the already-dropped merge and re-blames it).
 
 **Conflicts.** Resolve only when the resolution is **unambiguous** — both sides additive, or the same
 fix applied two ways with identical effect. Write down which side you took and why. Otherwise **drop
@@ -155,11 +189,21 @@ mode this process exists to prevent.
 
 ### 3. Run the gate on the batch tree
 
-Same lane, same command, same env as the baseline:
+Same lane, same commands, same env as the baseline — **both** halves of the deterministic suite:
 
 ```bash
-uv run pytest tests/ -q -m 'not track_b and not live and not integration'   # detached, polled; never one blocking call
+# Half 1 — the deterministic suite. Detached and POLLED, never one blocking call: a wedged
+# foreground run takes the whole lane down with it and leaves no log.
+uv run pytest tests/ -q --junitxml=/tmp/batch-junit.xml -m 'not track_b and not live and not integration' > /tmp/batch.log 2>&1 &
+echo $! > /tmp/batch.pid
+kill -0 "$(cat /tmp/batch.pid)" 2>/dev/null && echo RUNNING || echo 'DONE — read /tmp/batch.log'   # repeat until DONE
+
+# Half 2 — the track_b leg CI runs as its own MUST-PASS, gate-member job (`-m track_b`).
+uv run pytest tests/test_ingest_safety.py -q -m track_b
 ```
+
+A run that skips half 2 has not run the gate, so it cannot produce `BATCH-GREEN` — see the verdict
+table and the `UNPROVEN-FULL-SUITE(<lane>)` rule.
 
 ### 4. Compare to the baseline and blame
 
@@ -168,7 +212,7 @@ uv run pytest tests/ -q -m 'not track_b and not live and not integration'   # de
 - **A failure id that is NOT in the baseline set is NEW** and convicts a PR. Find which one:
 
 ```bash
-git log --oneline origin/main..integration/batch-1        # candidate merges
+git log --oneline origin/main..integration/batch-1        # merges ATTEMPTED — skip any with a matching Revert
 git bisect start integration/batch-1 origin/main          # or, cheaper, walk the merges
 #   at each step: run ONLY the failing files (not the whole suite)
 #   git bisect good <merge sha> / git bisect bad <merge sha>
@@ -179,7 +223,18 @@ uv run pytest <the failing file(s)> -q
 
 ```bash
 git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1 || exit 1'
+git bisect reset integration/batch-1   # ⛔ REQUIRED: `bisect run` leaves HEAD DETACHED at the first bad commit
+git switch integration/batch-1         # the cheaper walk-the-merges route leaves it detached too
+git log --oneline -1                   # must name integration/batch-1's tip, never a bisect probe
 ```
+
+  **Without the return, two silent failures follow.** `git bisect` checks out its probes and `git bisect
+  run` ends detached at the first bad commit, so: (1) the revert below commits onto a **detached HEAD**
+  and never lands on `integration/batch-1`, which therefore still contains the PR the doctrine says to
+  drop; and (2) the "one more full suite run" measures the first-bad commit's tree — missing every PR
+  merged after the culprit — and *that* result becomes the verdict row. The verdict would then describe
+  a tree nobody lands, which is the tested-tree≠landed-tree failure arriving before the Landing section
+  can catch it.
 
   Attribute to the **merge commit's PR** — the log line names it.
 
@@ -192,8 +247,9 @@ git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1 || exit 1
   git revert --no-edit -m 1 <merge sha>
   ```
 
-  Then re-run **only the failed files**, then **one more full suite run**. A batch that cannot be made
-  green ships without the culprit, never with it.
+  Then re-run **only the failed files**, then **one more full suite run — both halves** (a green that
+  excludes `-m track_b` is not a green). A batch that cannot be made green ships without the culprit,
+  never with it.
 
 ### 5. Verdict — and it must be honest about what ran
 
@@ -221,8 +277,9 @@ drops `parity` (pyarrow). The extras are part of the lane definition, not setup 
 
 ## Aftermath
 
-- The batch PR body is the **evidence**: constituent PRs, conflicts dropped and why, baseline vs batch
-  matrix, per-PR attribution, verdict. Written with `--body-file`, never an inline body.
+- The batch PR body is the **evidence**: constituent PRs, conflicts dropped and why, the
+  `pinned-base: <sha>` line the Landing check reads, baseline vs batch matrix, per-PR attribution,
+  verdict. Written with `--body-file`, never an inline body.
 - The record of a *review* is not the record of a *batch*. Do not record a review of your own work
   (#825).
 - Landing the batch is a separate, human-routed step. The batch lane never merges its own PR.
@@ -241,10 +298,19 @@ assembly time:
 
 ```bash
 git fetch origin main
+# $PINNED does NOT survive Phase 1's shell — landing is a different actor. Read it from the batch PR
+# body (Phase 1 recorded it there) and never from memory:
+PINNED="$(gh pr view <batch PR> --json body --jq -r '.body' | sed -n 's/^pinned-base: //p')"
+[ -n "$PINNED" ] || { echo "no pinned-base: line in the batch PR body — the pin is unknown, re-run Phase 1"; exit 1; }
 [ "$(git rev-parse origin/main)" = "$PINNED" ] || {
   echo "main moved: $PINNED -> $(git rev-parse origin/main) — re-baseline and re-run phases 1-3"; exit 1
 }
 ```
+
+An unset `$PINNED` in the landing shell compares against the empty string: it fails **closed** (which is
+right) but prints `main moved:  -> <sha>` against an unmoved `main`, so the one mechanical enforcement
+of the invariant reads as noise. Materialising it from the PR body makes the check self-contained —
+the PR body is already the evidence artifact (see Aftermath).
 
 If that assertion fails, there are exactly two honest routes and no third:
 
