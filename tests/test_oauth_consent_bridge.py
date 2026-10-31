@@ -2969,13 +2969,24 @@ _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
 )
 
 
-def _flatten(text: str) -> str:
-    """Case-folded, whitespace-collapsed — the gate's own comparison form.
+#: A line-leading comment leader in ANY language this corpus holds: SQL `--`, JS `//`, Python
+#: `#`, C-style `*` continuation. ⛔ This is load-bearing, not cosmetic. The corpus now includes
+#: two `.sql` homes whose comments carry `--` on EVERY line, so a claim re-wrapped inside one
+#: reads `… the consent page embeds -- it in its HTML …`. A comparison form that only collapses
+#: whitespace leaves that leader in place and is therefore BLIND in exactly those homes — measured
+#: on `8ed208244`: both SQL files carried the claim and `_flatten` without this strip reported
+#: CLEAN on both. Stripping the leader is what makes a needle span a wrapped comment line.
+_COMMENT_LEADER = re.compile(r"(?m)^[ \t]*(?:--|//|#|\*)[ \t]?")
 
-    A claim survives re-wrapping and re-casing; it does not survive being a paste. Used on BOTH
-    sides so a needle cannot pass by being re-flowed across two lines in the doc.
+
+def _flatten(text: str) -> str:
+    """Case-folded, comment-leader-stripped, whitespace-collapsed — the gate's comparison form.
+
+    A claim survives re-wrapping, re-casing AND re-commenting; it does not survive being a paste.
+    Used on BOTH sides so a needle cannot pass by being re-flowed across two lines in the doc, and
+    cannot hide behind a `--`/`#`/`//` leader in the homes written in those dialects.
     """
-    return re.sub(r"\s+", " ", text).strip().casefold()
+    return re.sub(r"\s+", " ", _COMMENT_LEADER.sub(" ", text)).strip().casefold()
 
 
 def _false_anon_key_claims(text: str) -> list[str]:
@@ -3031,6 +3042,24 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
             " ".join(words[len(words) // 2:]) + ", so reuse cannot matter.\n"
         assert _false_anon_key_claims(rewrapped), (
             f"the denylist missed {needle!r} re-wrapped across a line break")
+
+    # …and re-wrapped across a `--` SQL comment line, which is the shape that ACTUALLY shipped in
+    # the migration: `-- the consent page embeds` / `-- it in its HTML`. A comparison form that
+    # leaves the leader in place turns that into `embeds -- it` and never matches, so without this
+    # arm the two `.sql` homes are in the corpus and still unscanned — a false PASS on the exact
+    # claim the gate names (measured on `8ed208244`, both files, both reported clean).
+    sample_sql = corpus["supabase/migrations/20261030000001_oauth_consent_tickets.sql"]
+    for needle, _why in _FALSE_ANON_KEY_BROWSER_CLAIMS:
+        words = needle.split()
+        half = len(words) // 2
+        rewrapped_sql = (
+            sample_sql + "\n-- the anon key is public: it " + " ".join(words[:half])
+            + "\n-- " + " ".join(words[half:]) + ", so reuse cannot matter.\n"
+        )
+        assert _false_anon_key_claims(rewrapped_sql), (
+            f"the denylist missed {needle!r} re-wrapped across a `--` comment line — the two "
+            "`.sql` corpus homes carry a leader on every line, so a form that keeps the leader "
+            "is blind in exactly the homes this PR added")
 
     # (3) the TRUE mechanism survives — a deletion would pass (1) and lose the reasoning
     token_src = _flatten(corpus["tortoise/consent_token.py"])

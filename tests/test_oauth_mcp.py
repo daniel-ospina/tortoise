@@ -3223,9 +3223,10 @@ class TestCimdClientIdentity:
             "response_type": "code", "code_challenge": challenge,
             "code_challenge_method": "S256", "state": "st-1",
             # #3524 §9 step 4: the AS renders the consent page only for a request
-            # that carries the app-written attempt key (its only render-time
-            # evidence of a session); without one it 302s to the app's sign-in
-            # leg, which this file's TestClient cannot answer (404).
+            # that carries an attempt key (its only render-time SIGNAL — presence
+            # is not provenance; the mint proves ownership, `403
+            # no_authorize_attempt` on a mismatch); without one it 302s to the
+            # app's sign-in leg, which this file's TestClient cannot answer (404).
             "scope": "mcp", "resource": "", "attempt_key": "ak-cimd"})
         assert r.status_code == 200, r.text
         assert "claude.ai" in r.text

@@ -41661,11 +41661,12 @@ async def oauth_authorize(request: Request):
     `Domain=.premiselabs.co` cookie. That is deleted. The split is by evidence
     the AS actually has:
 
-      * an authorize request that carries `attempt_key` is one the app ALREADY
-        advanced (its `/api/consent/start` route records the attempt, resolves
-        the session, and only then redirects here) → render the page, which asks
-        that same origin for a bound assertion;
-      * anything else has no evidence of a session → 302 to the app's sign-in
+      * an authorize request that carries `attempt_key` is the one the app's
+        `/api/consent/start` route writes after it records the attempt and
+        resolves the session → render the page, which asks that same origin for a
+        bound assertion. ⛔ The CARRIAGE is what the AS can see, not the author:
+        see the paragraph below on why presence is not provenance;
+      * anything else carries no attempt marker at all → 302 to the app's sign-in
         leg with the COMPLETE request carried as its return target
         (`consent_bounce_url`), so nothing has to be reconstructed from memory
         on the way back.
