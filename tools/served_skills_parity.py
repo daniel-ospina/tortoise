@@ -769,9 +769,9 @@ def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
     `changed` list. A skill whose served bytes did not move can still carry a
     stale archive left by an earlier commit, and that is precisely the state
     this PR exists to repair, so `--sync` repairs it instead of enumerating what
-    it just wrote. The wider call reports no churn: `rebuild()` compares the
-    bytes before writing (they are byte-stable via `_FIXED_DATE`), so an archive
-    that is already current is neither rewritten nor reported.
+    it just wrote. The wider call reports no churn: `write_stale_archives()`
+    compares the bytes before writing (they are byte-stable via `_FIXED_DATE`),
+    so an archive that is already current is neither rewritten nor reported.
 
     Best-effort by design: the archive builder is imported from `tools/`, and a
     checkout that cannot supply it must not make `--sync` fail AFTER it has
@@ -788,7 +788,7 @@ def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
         return ()
     if builder is None:
         return ()
-    return tuple(builder.rebuild(root, wanted))
+    return tuple(builder.write_stale_archives(root, wanted))
 
 
 _ARCHIVE_BUILDER: list[object] = []

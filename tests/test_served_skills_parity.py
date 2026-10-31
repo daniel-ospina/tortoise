@@ -632,8 +632,9 @@ def _make_archive_stale(root, name: str,
     The archive is a byte function of the served copy, so an archive that differs
     from it can only come from a PREVIOUS source revision — the stale-derived-
     artifact state `--sync` exists to repair (`f045ac953`, `cd7410b80`). It is
-    also the only state in which a rebuild is OBSERVABLE: rebuilding from an
-    already-matching source writes nothing (`build_skill_archives.rebuild`).
+    also the only state in which a re-cut is OBSERVABLE: writing from an
+    already-matching source writes nothing
+    (`build_skill_archives.write_stale_archives`).
     """
     sys.path.insert(0, str(REPO))
     from tools import build_skill_archives as bsa
@@ -678,7 +679,7 @@ def test_4643_sync_re_cuts_the_derived_skill_archives_it_invalidates(monkeypatch
         dest.write_bytes(b"---\nname: stale\n---\n# the OLD served copy\n")
     # The archives exist and are CURRENT for the old copy — the state a previous
     # sync (or a previous commit) leaves behind.
-    assert sorted(bsa.rebuild(root)) == sorted(bsa.SKILL_NAMES), "fixture archives"
+    assert sorted(bsa.write_stale_archives(root)) == sorted(bsa.SKILL_NAMES), "fixture archives"
 
     upstream_bytes = {e["upstream_path"]: b"---\nname: shipped\n---\n# NEW upstream\n"
                       for e in manifest["skills"].values()}
@@ -697,7 +698,7 @@ def test_4643_sync_re_cuts_the_derived_skill_archives_it_invalidates(monkeypatch
     # Both gates the tree ships with now agree — the actual defect was that
     # `--check` (parity) was green while the archive arm was red.
     assert sp.check_local(sp.load_manifest(pin), root) == [], "sync output must pass parity"
-    assert bsa.rebuild(root) == [], "sync output must leave no stale archive"
+    assert bsa.write_stale_archives(root) == [], "sync output must leave no stale archive"
 
 
 def test_4643_sync_re_cuts_a_stale_archive_whose_served_copy_it_did_not_write(
@@ -737,7 +738,7 @@ def test_4643_sync_re_cuts_a_stale_archive_whose_served_copy_it_did_not_write(
     assert sorted(result.archives) == sorted(bsa.SKILL_NAMES), (
         "a stale archive is re-cut even when its own served copy was not written; "
         f"rebuilt {result.archives!r}")
-    assert bsa.rebuild(root) == [], "sync left a stale archive behind"
+    assert bsa.write_stale_archives(root) == [], "sync left a stale archive behind"
 
 
 def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
@@ -747,7 +748,7 @@ def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
     deletes the guard it exists to pin — `sync()`'s
     `_rebuilt_archives(...) if not dry_run else ()` (`tools/served_skills_parity.py`).
     The previous version could not: it drove `_sync_fixture`, which creates
-    neither `root` nor any served copy, so `rebuild()` hit
+    neither `root` nor any served copy, so `write_stale_archives()` hit
     `if not source_path(name, root).is_file(): continue`
     (`tools/build_skill_archives.py`) for every name, returned `[]`, never
     reached `target.parent.mkdir(...)`, and satisfied both assertions with the
@@ -758,8 +759,9 @@ def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
     1. the served copies EXIST and differ from upstream, so the sync has work;
     2. the archives on disk are STALE **relative to those served copies** (cut
        from an older copy), which is the one state a guard-less dry run would
-       repair — `rebuild()` is byte-idempotent, so served copies that already
-       agree with their archive would leave the mutant invisible even with (1).
+       repair — `write_stale_archives()` is byte-idempotent, so served copies
+       that already agree with their archive would leave the mutant invisible
+       even with (1).
 
     State (2) is not contrived: it is the stale-derived-artifact state this PR
     exists to repair (`f045ac953`, and `cd7410b80` a day earlier) — the served

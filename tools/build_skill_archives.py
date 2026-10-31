@@ -110,8 +110,17 @@ def build(name: str, root: Path = REPO_ROOT) -> bytes:
     return buf.getvalue()
 
 
-def rebuild(root: Path = REPO_ROOT, names=None) -> list[str]:
+def write_stale_archives(root: Path = REPO_ROOT, names=None) -> list[str]:
     """Write every STALE archive under `root`; return the names written.
+
+    ⛔ NOT called `rebuild`. `tests/test_destructive_wipe_guard.py` pins every
+    `*.rebuild(...)`/`*.rebuild_all(...)` call site in `tests/` to a literal
+    `confirm_destructive` boolean, because `tortoise`'s `rebuild`/`rebuild_all`
+    DETACH-DELETE a projection. That pin is a name-matched AST sweep, so a
+    non-destructive function sharing the name reds it (`#10423`: 3 sites in
+    `tests/test_served_skills_parity.py`), and allowlisting archive-building in
+    a destructive-wipe pin trades a real safety list for a naming accident. A
+    distinct name keeps both honest: this function writes a zip, it never wipes.
 
     The callable half of the `--check`/write pair, so the step that INVALIDATES
     an archive can re-cut it without shelling out. That is the whole point
@@ -122,7 +131,7 @@ def rebuild(root: Path = REPO_ROOT, names=None) -> list[str]:
     cd7410b80 (#9750 round 3) and f045ac953 (#10423), same test, same rebuild.
 
     Byte-stable: `_FIXED_DATE` plus the source bytes alone decide the archive,
-    so rebuilding an already-current archive writes nothing and reports nothing.
+    so writing an already-current archive writes nothing and reports nothing.
     A name with no served source under `root` is SKIPPED rather than raising —
     a caller may be driving a partial tree, and the archive of a skill that
     does not exist there is not this function's verdict to give (the parity
