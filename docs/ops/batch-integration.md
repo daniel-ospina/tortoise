@@ -197,6 +197,15 @@ pre-existing bug inside a batch, which is scope creep with no review).
 # silently-stale ref makes a Landing pin check PASS against a moved `main`.)
 git fetch origin main || { echo "the fetch FAILED — refusing to pin a stale origin/main; the last successful fetch is not current main, and every later verdict is diffed against this pin"; exit 1; }
 PINNED="$(git rev-parse origin/main)"            # PIN THIS SHA — every later comparison is against it
+# ⛔ PRINT the pin — do not merely remember it. The batch PR body must carry it as a
+# `pinned-base: <sha>` line, and Landing reads that line in a DIFFERENT shell: `$PINNED` does not
+# survive this one. Copy the printed line; never re-derive it there. The only re-derivation
+# available at body-writing time is `git rev-parse origin/main`, which by then is CURRENT main —
+# and feeding that in makes Landing's `[ "$(git rev-parse origin/main)" = "$PINNED" ]` compare
+# main to itself: always true, on a moved base, with every other check in that section green.
+# Same reason Phase 3 prints `tested-tree:` — a carrier with no producer is a hand-copied value,
+# and a hand-copied value is the one thing a mechanical check cannot distinguish from a derived one.
+printf 'pinned-base: %s\n' "$PINNED"
 # ⛔ A dirty tree defeats the switch: `git switch -C` CARRIES uncommitted and untracked files.
 [ -z "$(git status --porcelain)" ] || { echo "dirty tree — the baseline would measure it, not origin/main"; exit 1; }
 git switch -C integration/base-check "$PINNED" || exit 1   # ⛔ SWITCH, not `git branch` — run the suite on THIS tree.
@@ -312,7 +321,10 @@ innocent PR, which is the outcome this whole phase exists to prevent.
 Record the baseline result **as data**: counts, the **exact list of failing test ids**, and the
 duration. Those ids are the ledger that later failures are diffed against. Record `$PINNED` too — in
 the batch PR body, as a `pinned-base: <sha>` line — because landing is a different shell
-(see [Landing](#landing--main-must-still-be-the-tree-you-tested)).
+(see [Landing](#landing--main-must-still-be-the-tree-you-tested)). The fence above **prints** that
+line (`printf 'pinned-base: %s\n' "$PINNED"`): copy it, and never re-derive it later, because
+`git rev-parse origin/main` at body-writing time is current `main` and makes Landing's assertion
+compare `main` to itself. It is the same producer/consumer pair as `tested-tree:`.
 
 **Everything this phase must hand to a later phase goes into a FILE, never into a shell variable.**
 The doctrine already carries `$PINNED` in the batch PR body and the gate run's exit status in
@@ -761,9 +773,9 @@ drops `parity` (pyarrow). The extras are part of the lane definition, not setup 
 ## Aftermath
 
 - The batch PR body is the **evidence**: constituent PRs, conflicts dropped and why, the
-  `pinned-base: <sha>` line the Landing check reads, the `tested-tree: <sha>` line its post-merge
-  detector reads (Phase 3 prints it; re-record it whenever the batch branch's tree changes, i.e.
-  after a revert), baseline vs batch matrix, per-PR attribution, verdict. Written with
+  `pinned-base: <sha>` line the Landing check reads (Phase 1 prints it), the `tested-tree: <sha>` line
+  its post-merge detector reads (Phase 3 prints it; re-record it whenever the batch branch's tree
+  changes, i.e. after a revert), baseline vs batch matrix, per-PR attribution, verdict. Written with
   `--body-file`, never an inline body.
 - The record of a *review* is not the record of a *batch*. Do not record a review of your own work
   (#825).

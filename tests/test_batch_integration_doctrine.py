@@ -272,6 +272,29 @@ or facts that were false against the tree they describe:
   contradicted itself about its one carrier: one paragraph said ``$BATCH`` "needs no carrier" while
   the fence that EXPORTS it said the claim "would be false in exactly the normal case" — the first is
   now the halt it actually has, and the guard refuses it.
+* **the ``pinned-base:`` carrier had readers, a halt and NO producer.** Landing read the line out of
+  the batch PR body and halted when it was absent, and ``:313`` told the operator to record it — but
+  no fence ever PRINTED it (five ``printf``s, the pin not among them). Landing is a different
+  shell/actor, so the value is not in scope when the body is written, and the only re-derivation the
+  document left reachable is ``git rev-parse origin/main``: current ``main``, which turns the
+  document's "only mechanical enforcement of the invariant" into ``[ "$(git rev-parse origin/main)"
+  = "$(git rev-parse origin/main)" ]`` — always true, on a moved base, with every other check in that
+  section green. Fail-OPEN, and invisible in both directions: 37 of 37 checks were green with no
+  producer and 37 of 37 stayed green when one was added, because the guard pinned the READER hard (one
+  definition, a PR-body read, a halting fetch before it) and pinned no WRITER. Phase 1 prints
+  ``pinned-base:`` beside the assignment now, and every carrier the doctrine reads back out of the PR
+  body must be produced by a ``printf`` in an EARLIER fence, from a variable that fence DERIVES.
+* **the deterministic half's skip-REASON axis was pinned per FENCE, and half 1 shares its fence with
+  half 2.** Phase 3 and the post-revert re-check each run BOTH halves, so each carries two
+  ``comm -13`` diffs and two ``[ -s … ] && { … exit 1; }`` halts; ``any()`` over the fence let the
+  ``track_b`` copy satisfy the half-1 demand, and the ``track_b`` filter on the sibling check meant
+  only half 2's pair was ever verified. Measured at ``1c5fefdc4`` against the honest document:
+  deleting Phase 3's half-1 ``comm -13`` line, deleting its halt, deleting both, deleting the
+  post-revert half-1 halt, or flipping the diff to ``comm -23`` measured **0 of 37 red** each — so a
+  skip SWAP at an equal count (one live-FalkorDB skip traded for a collection skip) stayed invisible
+  in the fence the verdict is printed from, which is the #1382 class this doctrine closes for half 1.
+  The axis is parameterised by the junit report a run WRITES now: each half owes its own reasons, its
+  own diff against ITS baseline, and its own halt.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
@@ -303,11 +326,11 @@ number for a live-config
 property (the required contexts that ``check-required-set.py --live`` asserts, ``.mergify.yml``'s
 ``batch_size``) — and the TESTED TREE the landing is compared against, carried by VALUE in the batch
 PR body (``tested-tree: <sha>``, printed by both fences that run the suite on the batch branch),
-because a branch records where it is LATER while the invariant is about what was MEASURED.
+because a branch records where it is LATER while the invariant is about what was MEASURED, and the PRODUCER of every carrier the doctrine reads back out of the batch PR body (``pinned-base:`` from Phase 1, ``tested-tree:`` from Phase 3 and the post-revert re-check — a ``printf`` in an EARLIER fence, from a variable that fence DERIVES, so a hand-copied value cannot silently replace a derived one), and the skip-REASON axis per RUN rather than per fence (each half owes its own reasons, its own diff against ITS baseline, and its own halt).
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **37 checks**, **0 red**, and the head the round-35 review was taken
-at (``9f8e12192``) is **5 of 37**: the three findings of that review that red a CHECK there — the
+revision rather than asserted — **38 checks**, **0 red**, and the head the round-35 review was taken
+at (``9f8e12192``) is **7 of 38**: the three findings of that review that red a CHECK there — the
 ``-m track_b`` half's missing SKIP axis, the two unhalted ``git fetch origin main`` lines the pin and
 the landing gate ride on (one check, enumerated over fences) — plus the ``batch_size`` value restated
 in prose, plus (round 36) the residual-window check, which now requires the tested tree to be
@@ -315,24 +338,24 @@ carried BY VALUE, plus the ``$BATCH`` "needs no carrier" claim, which the ledger
 refuses. The tree assertion's unpinned SUBJECT is GREEN on that document by
 construction (it asserts a non-``main`` ref), which is exactly why it is pinned by a MUTANT rather
 than by the revision axis: pasting ``main`` in as the compared ref measured 0 of 37 red. The
-P1+P2 repair head, ``c6d4c8278``, is **2 of 37** — the residual-window requirement (its detector
+P1+P2 repair head, ``c6d4c8278``, is **3 of 38** — the residual-window requirement (its detector
 diffs a remote batch branch) AND that same ``needs no carrier`` refusal, both of which are round-36
 findings about THAT document; the ``c7a772628`` / ``657a544a4`` head is
-**8 of 37** (the checks that did not exist yet — the residual-window check, the ``a66387f9f``
+**10 of 38** (the checks that did not exist yet — the residual-window check, the ``a66387f9f``
 round's CI-population, exported-ledger-name and fenced post-revert re-run checks, the pin-reading
 fetch check, the tightened argv on ``test_every_full_suite_command_is_one_of_the_two_deliberate_halves``,
-and this round's SKIP-axis and ``batch_size`` tightenings), **12 of 37** at ``4dc214c02`` (that
+and this round's SKIP-axis and ``batch_size`` tightenings), **13 of 38** at ``4dc214c02`` (that
 round's five — the skip carriers, the graded bisect, the halted merge + ``HEAD^2`` assert, the
 draft-until-asserted landing rule, the live-config literals — plus the ones that did not exist then),
-**15 of 37** at ``7fb722a9a`` (plus the gate fence's TREE assertion, the bounded wait before the
-status read, and the reviewed-head fetch's force + halt), **17 of 37** at ``62c79b0b8`` (plus the lane
-assertion and the hand-written ordinal — the two findings of the round that preceded it), **18 of 37**
+**16 of 38** at ``7fb722a9a`` (plus the gate fence's TREE assertion, the bounded wait before the
+status read, and the reviewed-head fetch's force + halt), **18 of 38** at ``62c79b0b8`` (plus the lane
+assertion and the hand-written ordinal — the two findings of the round that preceded it), **19 of 38**
 at ``a6a71c1e5`` (the per-batch ledger, added there) and at ``a4028e8d7`` (that one plus the
-``-m track_b`` instrumentation, which this round's SKIP-axis requirement now also reds), **20 of 37**
+``-m track_b`` instrumentation, which this round's SKIP-axis requirement now also reds), **21 of 38**
 at ``a12792afe`` (those plus the baseline count's carrier and the baseline report's completion
-check), **33 of 37** at ``a17576c43``, **30 of 37** at ``f3c6c803b``, **28 of 37** at
-``a8be548762``, **26 of 37** at ``295d6d385``, **25 of 37** at ``32a2dc87d`` / ``ba7f83feb`` /
-``64ae70fc5``, **24 of 37** at ``ed1c03b82`` and ``c50628450``, and **23 of 37** at ``a888c6980``
+check), **34 of 38** at ``a17576c43``, **31 of 38** at ``f3c6c803b``, **29 of 38** at
+``a8be548762``, **27 of 38** at ``295d6d385``, **26 of 38** at ``32a2dc87d`` / ``ba7f83feb`` /
+``64ae70fc5``, **25 of 38** at ``ed1c03b82`` and ``c50628450``, and **24 of 38** at ``a888c6980``
 and ``aede4190f`` — where three are exactly that round's findings (the bisect attribution, the gate
 run's completion, and the omitted ``changes`` member) and the fourth is the exit-status-persistence
 requirement, which landed AFTER those revisions. That fourth is the rule rather than an exception,
@@ -435,7 +458,7 @@ pre-fix ``|| exit 1`` bisect grader; keep the grading but drop ``exit 125``. Del
 paragraph; name a draft rule and a ``queue_conditions`` entry in UNRELATED sentences (so the
 mechanism is not identified — the check reads one sentence, not two words anywhere). Restore "the
 seven required contexts"; restore ``batch_size: 4``; delete the concurrent-batch clause. The honest
-document is **0 red**, and the review's own head ``4dc214c02`` is **12 of 37** — exactly
+document is **0 red**, and the review's own head ``4dc214c02`` is **13 of 38** — exactly
 these five findings plus the checks that did not exist yet, and nothing else.
 
 **The ``a66387f9f`` round** (three checks and the tightened suite argv) carries its own
@@ -460,10 +483,47 @@ the first, which reds its own check plus the argv allowlist that now requires th
 ``--ignore=tests/e2e`` from a ``tests/`` run (2 red); restore *"The filter is what makes the run
 comparable to CI at all."* (1 red); make the Phase 0 ledger name a plain assignment again (1 red); and
 delete the post-revert re-check fence, leaving the prose (1 red). The revision axis agrees: the head
-the review sat at, ``484a4911d``, is **8 of 37** — the three new checks plus the argv check plus this
+the review sat at, ``484a4911d``, is **10 of 38** — the three new checks plus the argv check plus this
 round's tightenings, which did not exist as requirements at that head — plus, since round 36, the
 residual-window check's tested-tree requirement, which reds there because that head's detector diffs
-a remote batch branch. (The earlier ``7`` was measured before that tightening.)
+a remote batch branch. (The earlier ``8`` was measured before that tightening, and before round 37's producer and per-run SKIP checks, which both red there.)
+
+**Round 37 — two P2s, and the check count moved 37 → 38.** Both were producer/coverage gaps in
+machinery that already had readers, so each fix is a small one plus the check that would have caught it.
+
+*The ``pinned-base:`` carrier had no producer.* Landing read the line from the batch PR body, halted
+when it was absent, and no fence ever printed it, so the only re-derivation left was
+``git rev-parse origin/main`` — current ``main``, which makes the assertion compare ``main`` to
+itself. Measured both ways: with no producer the guard was **37 of 37 green**, and adding one also
+left it **37 of 37 green**, because the reader was pinned hard and no writer at all. Phase 1 now
+prints the line beside the assignment, and the pair is pinned together — every ``<label>:`` the
+doctrine reads back out of the PR body must be produced by a ``printf`` in an EARLIER fence, from a
+variable that fence DERIVES. Non-vacuity: deleting the new ``printf 'pinned-base: %s\n'`` line reds
+**1 of 38** — exactly ``test_every_carrier_line_the_doctrine_reads_back_is_printed_by_a_fence`` —
+and the honest document is **0 red**.
+
+*The deterministic half's skip-REASON axis was pinned per fence, not per run.* Phase 3 and the
+post-revert re-check each run BOTH halves, so each carries two ``comm -13`` diffs and two ``-s``
+halts; ``any()`` over the fence let the ``track_b`` copy satisfy the half-1 demand, and the
+``track_b`` filter meant only half 2's pair was ever checked. The axis is parameterised by the junit
+report a run WRITES now, so each half owes its own reasons, its own diff against ITS baseline, and
+its own halt. Seven mutants measured against the honest document, each red on the strengthened check
+and nothing else (the last also reds the half-2 parity check, which is the same defect seen from the
+other side): delete Phase 3's half-1 ``comm -13 … > $B/new-skip-reasons``; delete its ``[ -s … ]``
+halt; delete both; delete the post-revert half-1 halt; flip the diff to ``comm -23``; delete the
+half-1 reasons producer; point half 1's diff at ``baseline-trackb.skipped-reasons``. Before the fix,
+the first five measured **0 of 37 red** each.
+
+The revision axis was re-measured at this head, not carried: ``9f8e12192`` **7 of 38** (the tightened
+SKIP axis reds there too, because that document predates half 1's reason machinery), ``c7a772628`` /
+``657a544a4`` **10 of 38**, ``4dc214c02`` **13 of 38**, ``7fb722a9a`` **16 of 38**, ``62c79b0b8**
+**18 of 38**, ``a6a71c1e5`` / ``a4028e8d7`` **19 of 38**, ``a12792afe`` **21 of 38**,
+``a17576c43`` **34 of 38**, ``f3c6c803b`` **31 of 38**, ``a8be548762`` **29 of 38**,
+``295d6d385`` **27 of 38**, ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5`` **26 of 38**,
+``ed1c03b82`` / ``c50628450`` **25 of 38**, ``a888c6980`` / ``aede4190f`` **24 of 38**, and
+``c6d4c8278`` **3 of 38** — every one of them gains the producer check, because no pre-fix revision
+printed ``pinned-base:``. Mutant figures quoted from EARLIER rounds were measured against the guard
+as it then stood (37 checks) and are left as recorded; every revision count above was re-measured.
 
 **10 more measured with the ``9f8e12192`` round, 10 killed** (each red on ONE check and on nothing
 else): delete the gate fence's half-2 skip block; delete the baseline's half-2 skip recording; delete
@@ -3248,6 +3308,82 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     )
 
 
+#: A carrier PRODUCER: the `printf` that emits a `<label>: <value>` line the batch PR body must
+#: carry. The printed value must be a VARIABLE — a printed literal is a hand-copied value with a
+#: production step in front of it.
+_CARRIER_PRINT = re.compile(
+    r"^printf\s+'(?P<label>[a-z][a-z-]*): %s\\n'\s+\"\$(?P<var>[A-Z][A-Z0-9_]*)\"$"
+)
+#: A carrier CONSUMER: the `sed` that lifts `<label>: ` back out of the batch PR body.
+_CARRIER_READ = re.compile(r"sed\s+-n\s+'s/\^(?P<label>[a-z][a-z-]*): //p'")
+
+
+def test_every_carrier_line_the_doctrine_reads_back_is_printed_by_a_fence() -> None:
+    """the ``1c5fefdc4`` P2-1: the pin's carrier had readers and a halt — and NO producer.
+
+    ``:313`` told the operator to *"Record `$PINNED` too — in the batch PR body, as a
+    `pinned-base: <sha>` line"*, and Landing halts when the line is absent. **No fence ever PRINTED
+    it**: `grep -n '^printf' docs/ops/batch-integration.md` found five `printf`s and the pin was not
+    one of them. Landing is explicitly a different shell/actor, so the value is not in scope when
+    the body is written — and the only re-derivation the document leaves reachable is
+    ``git rev-parse origin/main``, which at body-writing time is CURRENT ``main``. Feed that in and
+    the landing assertion becomes ``[ "$(git rev-parse origin/main)" = "$(git rev-parse
+    origin/main)" ]``: always true, on a moved base, with every other check in the Landing section
+    green — the doctrine's headline failure passing its own "only mechanical enforcement of the
+    invariant". It is fail-OPEN, too: ``$PINNED`` is non-empty, so the ``[ -n "$PINNED" ]`` guard is
+    satisfied.
+
+    And the guard could not see it from either side: 37 of 37 checks were green with no producer, and
+    37 of 37 stayed green when one was added — the guard pinned the READER hard (exactly one
+    definition, a PR-body read, a halting fetch before it, a halting assertion) and pinned no WRITER
+    at all. So the pair is pinned together, in the direction the failure ran: **every ``<label>: ``
+    the doctrine reads back out of the batch PR body must be PRODUCED by a ``printf`` in an EARLIER
+    fence, from a variable that fence DERIVES.** ``tested-tree:`` (Phase 3, re-printed by the
+    post-revert re-check) and ``pinned-base:`` (Phase 1) are the two, and a hand-copied value cannot
+    silently replace either.
+    """
+    fences = _fences()
+    reads: dict[str, int] = {}
+    for i, fence in enumerate(fences):
+        for command in fence:
+            match = _CARRIER_READ.search(_code(command))
+            if match:
+                reads.setdefault(match.group("label"), i)
+    assert reads, (
+        "no fence reads a `<label>: <value>` line back out of the batch PR body — re-point this guard"
+    )
+    assert set(reads) == {"pinned-base", "tested-tree"}, (
+        "the carriers read back out of the batch PR body changed: this guard pins the pair the "
+        f"landing assertion and its post-merge detector rely on — {sorted(reads)}"
+    )
+    for label, read_at in sorted(reads.items()):
+        producers = [
+            (i, match)
+            for i, fence in enumerate(fences[:read_at])
+            for command in fence
+            if (match := _CARRIER_PRINT.match(_code(command))) and match.group("label") == label
+        ]
+        assert producers, (
+            f"nothing PRINTS `{label}:` before the fence that reads it back. A carrier with no "
+            "producer is a hand-copied value, and the only re-derivation left to the operator is the "
+            "one that makes the check vacuous (`git rev-parse origin/main` IS current main, so "
+            "Landing's assertion compares main to itself). Print it where the value is derived: "
+            f"`printf '{label}: %s\\n' \"$VALUE\"`"
+        )
+        for i, match in producers:
+            var = match.group("var")
+            derived = [
+                _code(c)
+                for c in fences[i]
+                if re.match(rf"^(?:export\s+|readonly\s+)?{var}=", _code(c))
+            ]
+            assert derived and any("$(" in c for c in derived), (
+                f"the `{label}:` producer prints ${var}, but the same fence never DERIVES it (no "
+                f"`{var}=\"$(…)\"`): a printed literal is a hand-copied value one step later — "
+                f"derived={derived}"
+            )
+
+
 def test_the_manifest_claim_survives_the_revert() -> None:
     """#10399 review ISSUE 5: after a revert the log is "merges ATTEMPTED".
 
@@ -3476,6 +3612,96 @@ _SKIP_REASON_DIFF = re.compile(
 )
 
 
+#: The reason axis is pinned per RUN, not per FENCE. A fence that runs both halves (Phase 3, and the
+#: post-revert re-check) carries TWO `comm -13` diffs and TWO `[ -s … ] && { … exit 1; }` halts, one
+#: per half, so an `any()` over the fence let the `track_b` copy stand in for the deterministic one.
+#: Measured at ``1c5fefdc4`` against the honest document: deleting Phase 3's half-1
+#: `comm -13 … > $B/new-skip-reasons` line, deleting its halt, deleting both, or flipping the diff to
+#: `comm -23` measured **0 of 37 red** each — so a skip SWAP with an equal count (one live-FalkorDB
+#: skip traded for a collection skip) stayed invisible in the fence the verdict is printed from, which
+#: is the #1382 class the doctrine closes at ``:539``. The junit report a run WRITES decides which
+#: half of the axis that run owes.
+_JUNIT_REPORT = re.compile(r'--junitxml="?(?P<path>' + _LEDGER + r')"?')
+
+_SKIP_REASONS_FROM_RUN = _TRACK_B_SKIP_REASONS_SRC
+_SKIP_REASON_RUN_DIFF = re.compile(
+    r'^comm\s+-13\s+"?(?P<base>' + _LEDGER + r')"?\s+"?(?P<batch>' + _LEDGER + r')"?\s*>\s*'
+    r'"?(?P<out>' + _LEDGER + r')"?$'
+)
+
+
+def _skip_reason_axis_misses(codes: list[str], run_at: int, report: str) -> list[tuple[str, str]]:
+    """Is THIS run's skip-REASON axis instrumented? ``[(what, why)]`` — empty means yes.
+
+    Per RUN, never per fence: the junit report a run WRITES decides which half of the axis the fence
+    owes. Half 1 diffs against ``baseline.skipped-reasons``, half 2 (``…trackb``) against
+    ``baseline-trackb.skipped-reasons`` — the two halves have their own populations, so a half that
+    diffs against the other half's baseline, or whose diff/halt belongs to its sibling run, leaves a
+    swapped skip in THIS run invisible.
+    """
+    misses: list[tuple[str, str]] = []
+    half_two = "trackb" in report
+    reasons = [
+        (m.group("out"), i)
+        for i, c in enumerate(codes)
+        if (m := _SKIP_REASONS_FROM_RUN.search(c)) and m.group("path") == report
+    ]
+    if not reasons:
+        return [
+            (
+                "reasons",
+                f"no skip REASONS are recorded from {report} in this fence: an equal COUNT can be a "
+                "SWAP (one live-FalkorDB skip traded for a collection skip), and only the multiset "
+                "sees it",
+            )
+        ]
+    if any(i < run_at for _out, i in reasons):
+        misses.append(("reasons", f"{report}'s reasons are recorded BEFORE the run that writes it"))
+    sources = {out for out, _i in reasons}
+    diffs = [
+        (m.group("base"), m.group("out"), i)
+        for i, c in enumerate(codes)
+        if (m := _SKIP_REASON_RUN_DIFF.match(c)) and m.group("batch") in sources
+    ]
+    if not diffs:
+        misses.append(
+            (
+                "reason diff",
+                f"no `comm -13 <baseline> <batch>` diff of the reasons recorded from {report}: the "
+                "count comparison cannot see a SWAP, so a test that had to run and did not is "
+                "invisible in this run",
+            )
+        )
+        return misses
+    for base, out, at in diffs:
+        if ("trackb" in base) != half_two:
+            misses.append(
+                (
+                    "reason diff",
+                    f"{report}'s reasons are diffed against the OTHER half's baseline ({base}): the "
+                    "two halves have their own populations, so this diff is not about this run",
+                )
+            )
+        if at < run_at:
+            misses.append(("reason diff", f"{report}'s reason diff sits BEFORE the run it judges"))
+        halts = [
+            i
+            for i, c in enumerate(codes)
+            if (m := _SKIP_REASON_HALT.match(c)) and m.group("path") == out
+        ]
+        if not halts:
+            misses.append(
+                (
+                    "reason halt",
+                    f"the reason diff of {report} ({base} -> {out}) does not HALT: a NEW skip "
+                    "reason is a test that must run and did not, and no failure id records it",
+                )
+            )
+        elif any(i < run_at for i in halts):
+            misses.append(("reason halt", f"{report}'s reason halt sits BEFORE the run it judges"))
+    return misses
+
+
 def test_a_skip_the_baseline_did_not_have_blocks_the_verdict() -> None:
     """the ``4dc214c02`` P1: a SKIP is invisible to both completion detectors.
 
@@ -3576,13 +3802,33 @@ def test_a_skip_the_baseline_did_not_have_blocks_the_verdict() -> None:
             "`-le` the baseline's (a flipped `-ge` refuses a clean run and passes a dirty one): "
             f"{counts}"
         )
-        assert any(_SKIP_REASON_HALT.match(c) for c in fence_codes), (
-            "no halt on NEW SKIP REASONS: the count comparison cannot see a swap, so the reason "
-            "diff (`comm -13` against the baseline's) must stop the fence when it is non-empty"
+        # ⛔ PER RUN, not "somewhere in this fence". This is the sibling of the `continue` defect
+        # above, one axis over: a fence that runs both halves (Phase 3, and the post-revert
+        # re-check) carries TWO reason diffs and TWO halts — one for `batch-junit.xml` and one for
+        # `batch-trackb.xml` — so `any()` over the fence let the `track_b` copy stand in for the
+        # deterministic one. Measured at `1c5fefdc4` against the otherwise honest document: deleting
+        # Phase 3's half-1 `comm -13 …` line, deleting its `-s` halt, deleting both, or flipping the
+        # diff to `comm -23` measured **0 of 37 red** each — a skip SWAP at an equal count is
+        # exactly what the count comparison cannot see, so half 1's reason machinery has to be
+        # pinned to half 1's OWN run. The junit report a run writes decides which half it owes.
+        runs = [
+            (i, m.group("path"))
+            for i, c in enumerate(fence_codes)
+            if (m := _JUNIT_REPORT.search(c))
+        ]
+        assert len(runs) == 2, (
+            "a verdict-bearing gate fence must run BOTH halves, and each run must write its own "
+            f"junit report: found {[path for _i, path in runs]}"
         )
-        assert any(_SKIP_REASON_DIFF.match(c) for c in fence_codes), (
-            "the reason diff is not a `comm -13 <baseline> <batch>` of the two recorded multisets"
-        )
+        for run_at, report in runs:
+            misses = _skip_reason_axis_misses(fence_codes, run_at, report)
+            assert not misses, (
+                f"the skip-REASON axis is not instrumented for THIS run ({report}): "
+                + "; ".join(f"{what} — {why}" for what, why in misses)
+                + ". Each half owes its OWN `grep … <report> … sort > <reasons>`, its OWN "
+                "`comm -13` against that half's baseline, and its OWN `[ -s … ] && { … exit 1; }` "
+                "halt — a sibling run's copy does not cover this one"
+            )
     assert gated, (
         "the gate fence never compares skips against the baseline: a run whose live-FalkorDB tests "
         "all SKIP exits 0 with an unchanged test count, so it is indistinguishable from a full run"
