@@ -715,6 +715,20 @@ def _apply_time_window(annotated: list[dict], constraint: TimeConstraint,
       the filter cannot compute bounds → returns [] so the caller's defensive
       fallback (``tr_window_fallback``) keeps the unfiltered pool).
 
+    ⚠️ The recency branch has a SECOND degradation path, and it is a
+    behaviour CHANGE for a hand-built constraint: a BLANK `N`
+    (`constraint.start` ``None``/empty) used to be coerced to 0 by
+    ``int(constraint.start or 0)``, i.e. the one-day window ``[qdate, qdate]``,
+    which kept the question-day hit and dropped every earlier one. It now
+    reaches :func:`facet_window_bounds`, whose recorded rule is that a missing
+    day count is UNRESOLVABLE and therefore NO BOUND (coercing it to 0 built
+    the NARROWEST possible window) → this seam returns [] → the caller keeps
+    the unfiltered pool, exactly like every other unresolvable input. The
+    PRODUCT path cannot reach it (``detect_time_constraint``'s recency regex
+    always captures a digit run, so it always emits a count); only a caller that hand-builds a
+    ``TimeConstraint("recency", start=None)`` sees the difference, and its
+    direction is the shared rule: no day count never means "one day".
+
     BOTH sides resolve through the ONE calendar-date resolver the product
     loop already uses: the window comes from
     :func:`tortoise.coverage_loop.facet_window_bounds`, and each hit's
@@ -739,7 +753,8 @@ def _apply_time_window(annotated: list[dict], constraint: TimeConstraint,
     if constraint.kind == "recency":
         # Recency needs a clock. An absent question date keeps the pre-#9182
         # contract exactly: cannot compute bounds → [] → caller falls back.
-        # (An unparseable one is handled by the resolver: it returns None.)
+        # (An unparseable one is handled by the resolver: it returns None —
+        # and so does a BLANK day count, see this function's docstring.)
         if not question_date:
             return []
         anchor = question_date

@@ -1498,6 +1498,48 @@ def test_tr_window_filter_falls_back_when_starved(tmp_path):
         sdk.close()
 
 
+def test_tr_window_applies_on_the_producers_slash_date_shape(tmp_path):
+    """#9182 criterion (b), END-TO-END — the window APPLIES on the real
+    producer date shape, at the CALLER's branch (where ``tr_window_fallback``
+    is actually set).
+
+    The seam-level pin lives in
+    ``tests/longmem_eval/test_9182_tr_window_producer_shape.py`` and, by its
+    own docstring, cannot notice a change in the caller; that module is also
+    the NON-GATING lane (`tests/longmem_eval/**`, owner decision 2026-10-27),
+    so the pin that actually gates a merge has to live here — next to the two
+    ISO marker pins above, and reaching the same marker.
+
+    No frozen dataset is needed: ``tools/longmem_eval/ingest.py`` copies
+    ``haystack_dates[si]`` verbatim into the session's recorded date, so slash
+    strings flow through the real ingest/retrieve path untouched.
+
+    Pre-fix this reddens on the OTHER side of the seam: the recency branch ran
+    ``strptime(question_date[:10], "%Y-%m-%d")``, which raises on
+    ``2025/06/15 (Sun) 12:00`` → ``_apply_time_window`` returned ``[]`` →
+    ``tr_window_fallback`` True and the out-of-window 2025-06-01 session
+    stayed in the pool.
+    """
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _tr_question(two_sessions=True)
+        q["question"] = "What did Ava do 10 days ago?"
+        q["question_date"] = "2025/06/15 (Sun) 12:00"
+        q["haystack_dates"] = ["2025/06/10 (Tue) 10:00",
+                              "2025/06/01 (Sun) 09:00"]
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20, tr_top_k=12)
+        assert ret["tr_constraint"] == "recency"
+        assert ret["tr_window_fallback"] is False, (
+            "the window must APPLY on the producer's slash date shape, not "
+            "fall back to the unfiltered pool")
+        pool_dates = {h["session_date"] for h in ret["hits"]
+                      if h["session_date"]}
+        assert pool_dates == {"2025/06/10 (Tue) 10:00"}  # 06-01 is outside
+    finally:
+        sdk.close()
+
+
 def test_session_chunks_union_equals_full_transcript(tmp_path):
     """Owner invariant (R1 #1540): the union of a session's chunk contents
     == the full verbatim session transcript — extraction never replaces

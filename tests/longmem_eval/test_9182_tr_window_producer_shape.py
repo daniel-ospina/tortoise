@@ -201,8 +201,15 @@ def test_the_seam_returns_a_non_empty_window_for_the_caller_to_keep():
     a change in the CALLER's branch. The end-to-end marker itself is pinned on
     ISO shapes by ``tests/test_longmem_runner.py::
     test_tr_window_filter_excludes_out_of_window_session`` (marker False) and
-    ``::test_tr_window_filter_falls_back_when_starved`` (marker True); no
-    producer-shape end-to-end pin exists — it would need the frozen dataset.
+    ``::test_tr_window_filter_falls_back_when_starved`` (marker True), and on
+    the PRODUCER's slash shape by ``::
+    test_tr_window_applies_on_the_producers_slash_date_shape`` (marker False,
+    pool narrowed to the in-window session) — that last one needs no frozen
+    dataset (``tools/longmem_eval/ingest.py`` copies ``haystack_dates[si]``
+    verbatim into the session's recorded date), and it lives in the runner
+    module rather than here because ``tests/longmem_eval/**`` is the
+    non-gating lane (owner decision 2026-10-27, #10194), so a pin that must
+    gate a merge cannot live in this file.
     """
     windowed = _apply_time_window(
         [*HITS, {"session_date": "2022-01-01"}],
