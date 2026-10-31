@@ -971,6 +971,30 @@ def main(argv: list[str] | None = None) -> int:
                 "branch returns BEFORE the document/report is written, so the "
                 "flag would be accepted, print nothing machine-readable, and "
                 "exit 0. Run --sync, then the check that writes the report.")
+    else:
+        # The mirror-image defect. `--commit` and `--dry-run` are read ONLY
+        # inside the `--sync` branch above, so WITHOUT it both were accepted and
+        # dropped: `--check-upstream --commit <sha>` graded the PIN that is
+        # already written, printed no mention of `<sha>`, and exited 0 — a
+        # caller who named a commit was answered about a different commit, the
+        # shape AGENTS.md calls "a tool that cannot answer its own question".
+        # A bare `--dry-run` likewise ran BOTH network arms: an operator asking
+        # for a preview got a live check. Same rule as the block above — a flag
+        # accepted and silently ignored is worse than a refusal (review finding,
+        # P2).
+        strays = [flag for flag, on in (("--commit", args.commit is not None),
+                                        ("--dry-run", args.dry_run))
+                  if on]
+        if strays:
+            parser.error(
+                f"{' / '.join(strays)} only mean something with --sync, and "
+                "without it they would be accepted and silently ignored: "
+                "--commit names the upstream commit to DERIVE from, while "
+                "--check grades the pin already recorded, so `--check-upstream "
+                "--commit <sha>` would report on the pin and never mention "
+                "<sha>; --dry-run only suppresses --sync's writes, so on its own "
+                "it leaves both network arms running live. Run `--sync "
+                f"{' '.join(strays)}` or drop {' it' if len(strays) == 1 else ' them'}.")
 
     root = Path(args.root).resolve()
     manifest_path = Path(args.manifest) if args.manifest else root / MANIFEST_REL

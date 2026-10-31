@@ -896,6 +896,37 @@ def test_4643_sync_combined_with_a_check_arm_is_refused(tmp_path, monkeypatch, c
     assert "--sync cannot be combined with" in capsys.readouterr().err
 
 
+def test_4643_commit_or_dry_run_without_sync_is_refused(capsys):
+    """`--commit` and `--dry-run` are read ONLY inside the `if args.sync:`
+    branch, so without `--sync` both were accepted and silently dropped:
+    `--check-local --commit <sha>` graded the pin and exited 0 without ever
+    mentioning `<sha>` — a caller who named a commit was answered about a
+    different commit — and a bare `--dry-run` ran the live checks anyway. The
+    mirror image of the `--sync --check*` / `--sync --json` refusals, refused on
+    the same rule: a flag accepted and silently ignored is worse than a refusal
+    (review finding, P2)."""
+    for stray in (["--commit", "d" * 40], ["--dry-run"]):
+        for arm in ("--check-local", "--check-upstream"):
+            with pytest.raises(SystemExit) as exc:
+                sp.main([arm, *stray, "--root", str(REPO),
+                         "--manifest", str(MANIFEST)])
+            assert exc.value.code == 2, (
+                f"{arm} {stray[0]} must refuse (argparse usage error), not run "
+                "a check about something else and exit 0")
+    # A bare invocation (no arm named) grades BOTH arms, so `--dry-run` alone is
+    # dropped there too — and that is the spelling an operator reaching for
+    # "show me what the sync would do" is most likely to type.
+    with pytest.raises(SystemExit) as exc:
+        sp.main(["--dry-run", "--root", str(REPO), "--manifest", str(MANIFEST)])
+    assert exc.value.code == 2, "a bare --dry-run must refuse, not run live checks"
+
+    err = capsys.readouterr().err
+    assert "only mean something with --sync" in err, (
+        f"the refusal must say why the flag is meaningless here: {err!r}")
+    assert "--commit" in err and "--dry-run" in err, (
+        f"the refusal must name the flag it refused: {err!r}")
+
+
 def test_4643_json_is_one_document_on_the_green_path(capsys):
     """`--json` is a MACHINE-READABLE flag, and the run a monitor reads most is
     the green one. It used to print the JSON object followed by `1 + len(skills)`
