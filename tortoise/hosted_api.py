@@ -17180,9 +17180,14 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
         "record did not take the `SessionNarrated` carrier (refusal=%s, "
         "journalled=%s) and the graph writes that used to hold the prose are "
         "deleted (#10000). The narrative is LOST unless the source is "
-        "re-distilled; arm the journal / TORTOISE_RECORD_DSN, or replay the "
-        "journal once they are.", session_id, refusal or "seam not reached",
-        journalled)
+        "re-distilled. ⛔ THE REMEDY IS THE JOURNAL, WHICH IS A PRECONDITION "
+        "AND NOT AN ALTERNATIVE (#10389 review): "
+        "`sdk.py::TortoiseSDK._emit_event` returns BEFORE the record leg when "
+        "no journal is configured, and `_record_write_without_journal` counts "
+        "that shape as `no_journal` — so a deployment that arms the RECORD "
+        "alone writes nothing and heals nothing. Arm a DURABLE journal "
+        "(`TORTOISE_JOURNAL`) and replay it.", session_id,
+        refusal or "seam not reached", journalled)
     return "nowhere"
 
 

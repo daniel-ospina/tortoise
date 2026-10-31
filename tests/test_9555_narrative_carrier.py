@@ -399,6 +399,53 @@ def test_the_receipt_says_the_narrative_is_not_in_its_record_home():
         "source is the only one there is")
 
 
+def test_the_nowhere_remedy_names_the_JOURNAL_precondition_not_the_record(caplog):
+    """#10389 review (532ed707e) — a remedy must be able to remediate.
+
+    The `nowhere` ERROR offered the RECORD as an alternative to the journal
+    ("arm the journal / `TORTOISE_RECORD_DSN`"). It cannot remediate this
+    state: `sdk.py::TortoiseSDK._emit_event` returns BEFORE the record leg when
+    no journal is configured, and `_record_write_without_journal` is the
+    counter for exactly that deployment shape — its own docstring says an
+    operator "can arm the record and not the journal — and then nothing is
+    written". So the second half of that advice was a no-op, and the lane that
+    reads this ERROR would have spent the fix on it. The class is this branch's
+    own: a refusal must not name a remediation that cannot remediate.
+
+    (1) FAILS pre-fix: the reviewed text carried `TORTOISE_RECORD_DSN` as an
+        offered remedy, so the `not in` arm reds. It reads the message the door
+        actually logs, not the docstring's summary of it.
+    (2) DISCRIMINATING the other way: deleting the remedy is not a way to pass
+        — the message must still name the lever that DOES work (the journal).
+    """
+    caplog.clear()
+    assert hosted_api._report_narrative_home(
+        session_id=SESSION, outcome=None, journalled=None) == "nowhere"
+    text = " ".join(r.getMessage() for r in caplog.records
+                    if r.levelname == "ERROR")
+    assert "NO store" in text, (
+        "the `nowhere` lane logged no ERROR naming the state — a silent 200 is "
+        "the loss this reporter exists to name")
+    assert "TORTOISE_JOURNAL" in text, (
+        "the `nowhere` ERROR names no lever. The journal is the one that works "
+        "(`_emit_event` reaches the record leg only after a journal append "
+        "commits); a remedy-less ERROR leaves the operator to guess")
+    assert "TORTOISE_RECORD_DSN" not in text, (
+        "the `nowhere` ERROR still offers arming the RECORD as a remedy. With "
+        "no journal, `_emit_event` returns before the record leg and "
+        "`_record_write_without_journal` counts the shape as `no_journal` — "
+        "arming the DSN alone writes nothing, so the advice is a no-op "
+        "(#10389 review: a refusal must not name a remediation that cannot "
+        "remediate)")
+    #: The advisory the CALLER reads already named the journal only; the log
+    #: line is what disagreed with it, and the two now say the same thing.
+    advisory = hosted_api._narrative_home_advisory("nowhere", SESSION)["message"]
+    assert "journal" in advisory and "TORTOISE_RECORD_DSN" not in advisory, (
+        "the `nowhere` advisory and the `nowhere` ERROR disagree about the "
+        "remedy — one of the two is telling the operator to do something that "
+        "cannot work")
+
+
 # ── §2 the record effect, through the shape-keyed projection ────────────────
 
 def _narrative_statements(records):
