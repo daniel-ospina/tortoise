@@ -215,8 +215,9 @@ run's red. That artifact's own residual list names exactly the gap this run clos
 Arms B/B′ took that **write** recipe (drive `_execute_commit_writes` with a `story_arc` against the armed
 record), but read the result as **SQL**, not through the SDK reader: the evidence is
 `SELECT session_id, length(narrative) FROM public.session_narrative` executed as
-`tortoise_record_app` inside the RLS boundary (`R2` below). ⛔ So this run proves the **write path and
-the record contents**, and it does **not** exercise `record_text.session_text(...).narrative` — that
+`tortoise_record_app` inside the RLS boundary (`R2` above). ⛔ So this run proves the **write path and
+the record contents**, and it does **not** exercise `record_read.session_text(...).narrative`
+(`tortoise/record_read.py:1029`) — that
 reader leg is still unexercised, and the prior artifact's `narrative=None` was a *reader* output, not a
 missing row. The narrative went from "not measured" to **a 129 B row in `public.session_narrative`**,
 written by the carrier (`sdk._emit_event("SessionNarrated")`) from the commit path itself and visible
