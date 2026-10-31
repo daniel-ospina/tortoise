@@ -351,10 +351,33 @@ class TestRenderSearchResults:
         removed from the degraded branch (#5095 review B3)."""
         rendered = v2._render_search_results({})
         assert "UNRESOLVED" in rendered, rendered
-        assert "no existing items" not in rendered.replace(
-            "no existing items available", ""), rendered
+        # Direct, with NO carve-out. An earlier draft of this line read
+        # `rendered.replace("no existing items available", "")` — which
+        # deletes the very clause it claims to forbid, so it could never fail
+        # (#5095 review round 1, ISSUE 2). The companion test below proves this
+        # predicate rejects the pre-fix sentence rather than being vacuous.
+        assert "no existing items" not in rendered, rendered
         # `None` too: a caller that passed nothing established nothing.
         assert "UNRESOLVED" in v2._render_search_results(None)
+
+    def test_the_empty_branch_guard_bites_on_the_sentence_it_forbids(
+            self, monkeypatch):
+        """Non-vacuity for the assertion above (#5095 review round 1, ISSUE 2).
+
+        A `not in` is only load-bearing if the phrase it forbids can reach the
+        render at all. Route `origin/main`'s pre-fix clause through the note
+        seam and show that it lands in the empty branch verbatim — so the guard
+        above is a live assertion, not a tautology over a string that could
+        never appear.
+        """
+        pre_fix = ("(graph search DEGRADED — skipped; no existing items "
+                   "available; assume everything is new)")
+        monkeypatch.setattr(v2._failure_policy, "lookup_note",
+                            lambda _search: pre_fix)
+        rendered = v2._render_search_results({})
+        assert "no existing items" in rendered, (
+            "the pre-fix clause must reach the empty branch, else the `not in` "
+            "guard cannot bite", rendered)
 
 
 # ── 7. the producer: search_graph reports coverage ─────────────────────────
