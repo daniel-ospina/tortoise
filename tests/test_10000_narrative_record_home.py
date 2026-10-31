@@ -65,7 +65,7 @@ def _prose_on_nodes(sdk) -> list:
         params={"a": MARKER}).result_set
 
 
-def test_an_unpaired_narrative_is_refused_rather_than_stored_nowhere(sdk):
+def test_an_unpaired_narrative_is_refused_rather_than_stored_nowhere(sdk, tmp_path):
     """The measured hole: accepted, dropped by the fold, in no store (#10399 residual)."""
     with pytest.raises(ValueError) as exc:
         sdk.create_event("probe-unpaired", "AgentSession", story_arc=PROSE)
@@ -74,9 +74,14 @@ def test_an_unpaired_narrative_is_refused_rather_than_stored_nowhere(sdk):
     assert "sessionId" in message, (
         "the refusal must name the fix — the session the narrative pairs with")
     assert "§9.1" in message, "the refusal must cite the rule it enforces"
-    # Nothing was written: no node, no journal line. A refusal that half-wrote
-    # would be the same silent-loss class in a different costume.
+    # Nothing was written: no node, and NO JOURNAL LINE either. A refusal that
+    # half-wrote would be the same silent-loss class in a different costume, so
+    # the journal is asserted rather than only described (review cycle 5 P3).
     assert _prose_on_nodes(sdk) == []
+    journal = Path(tmp_path / "journal.jsonl")
+    assert not journal.exists() or PROSE not in journal.read_text(), (
+        "a refused narrative was JOURNALLED — the refusal must land before the"
+        " record append, not after it")
 
 
 def test_the_update_door_refuses_it_too(sdk):

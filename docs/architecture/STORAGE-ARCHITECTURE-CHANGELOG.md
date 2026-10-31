@@ -1882,12 +1882,17 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   `EntityMutated` record and restored by a rebuild. `_EVENT_SERVER_MANAGED_PROPS` (new, the write-filter
   counterpart of `_SOURCE_SERVER_MANAGED_PROPS`) refuses it, resolved with the same predicate the write
   uses.
-- **The `:Point` passthrough — the route no deny set covers, filed as `#10429`.** `create_point` writes
-  caller props in its CREATE map, `_upsert_point_props` is its replay fold, and `_update_entity`'s
-  Point branch writes them live; MEASURED, `create_point("statement", …, story_arc=…)` leaves the
-  PROSE on the node and the same payload through the fold re-materialises it. Narrowing it is
-  `#2795`/D2's open-set passthrough decision and needs its own `OVERRIDES:` marker, so §9.1(b) names it
-  as an open route instead of counting it denied.
+- **The `:Point` passthrough — LIVE closed at the SDK door, REPLAY open (`#10429`).** ⚠️ **CORRECTED
+  (`#10389` review cycle 4/5):** this entry first stated the whole route as live-open and prescribed a
+  point deny set as the lever. At `#10389`'s head the two LIVE surfaces — `create_point` and
+  `update_point` (which `update()`/`create_or_update_point()` reach) — REFUSE the key through
+  `sdk._refuse_unpaired_narrative(..., label="Point")`; MEASURED, both raise and no node carries the
+  prose afterwards. `_upsert_point_props`, the replay fold, still materialises it from a journal that
+  carries it, and THAT is what `#10429` owns. ⛔ The lever named here is now replay-only and destructive:
+  a point deny set is consulted only by the fold while `update_point` writes raw `SET n += $props`, so
+  adding the key there would make a `rebuild_all` DELETE the property from every legacy `:Point` (live ≠
+  replay) and would justify itself with an `OVERRIDES:` line asserting a live hole that no longer exists.
+  §9.1(b) counts the route denied at its two write doors and names the replay half.
 
 **And the replay half of that route reclaims what a legacy journal carried.** Residual (a) said only that
 nodes already carrying the prose keep it, which is true of the copies this change stops writing and NOT
