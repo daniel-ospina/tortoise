@@ -7512,8 +7512,10 @@ class TestEvidence8503Claims:
 # rendered under "EVERY kind you emit MUST come from this list" — so a pack whose
 # RELATIONS name another namespace's kind offered a closed vocabulary its own
 # declarations could not be spelled in (`packs/investment-portfolio-manager`:
-# `marks`/`constrainedBy` endpoints are `venture:investment`, and no
-# `portfolio:` trigger word is also a `venture:` trigger). The closure is taken
+# `marks`/`constrainedBy` endpoints are `venture:investment`, and three of the
+# four `portfolio:` trigger words are not also `venture:` triggers — only the
+# bare `portfolio` one is, and it is also a `pm:` trigger — so that one mention
+# never demonstrated the defect). The closure is taken
 # over the DECLARED REFERENCES (the brief's reserved `pack_refs` section), not
 # over the manifests' `depends_on` list — see `_select_pack_kinds`' docstring
 # and `test_the_namespace_closure_is_deliberately_not_taken`.
@@ -7609,6 +7611,65 @@ class TestCompactReferenceClosure:
         hit = v2._select_pack_kinds(
             "the investment mandate", pack_kinds, refs)
         assert hit == {"portfolio:mandate": "m"}, hit
+
+    def test_a_malformed_row_cannot_make_the_render_raise(self):
+        """The RENDER path never raises on a malformed master.
+
+        `pack_refs` reaches `_select_pack_kinds` through `_build_master_from_brief`,
+        which filters each ROW to a list/tuple but not its ELEMENTS — so a hand-built
+        or JSON-round-tripped master can carry a nested list, which is unhashable
+        and made `partner in pack_kinds` raise `TypeError: unhashable type: 'list'`
+        from inside the render. Same contract as `_values_suffixes` ("the RENDER
+        path must never raise on it") and as this module's own shape guards.
+        """
+        m = v2._build_master_from_brief(
+            {"a:one": "d", "pack_refs": {"a:one": [["x"], 7, None, "b:two"]}})
+        assert m["pack_refs"] == {"a:one": [["x"], 7, None, "b:two"]}, (
+            "fixture: `_build_master_from_brief` keeps the row's elements as-is")
+        rendered = v2._render_master_compact(m, "a story about a")
+        assert "a:one" in rendered
+        hit = v2._select_pack_kinds("a story about a", m["pack_kinds"],
+                                    m["pack_refs"])
+        assert hit == {"a:one": "d"}, hit
+
+    def test_the_refs_are_undirected_and_drop_core_and_bare(self):
+        """The DIRECT contract of `_relation_endpoint_refs` — the only pin on it.
+
+        Every catalog-level assertion above reaches this function only through
+        `ontology.relations` of the SHIPPED manifests. Two consequences, both
+        measured: (a) no shipped manifest uses
+        `extraction.relationTemplates[].fromKind/toKind`, so deleting that
+        collection site left the whole suite green; (b) the `core:` and bare-name
+        exclusions were un-pinned entirely. This row is hermetic — its own
+        manifest, no catalog — so each clause fails on its own mutation.
+        """
+        from tortoise.value_extractor import _relation_endpoint_refs
+
+        raw = {
+            "ontology": {"relations": [
+                # a foreign pairing, named in ONE direction only
+                {"fromKind": "a:one", "toKind": "b:two"},
+                # …and BOTH are partners of each other once collected
+                {"fromKind": "b:two", "toKind": "a:three"},
+                # core is always rendered — never a ref
+                {"fromKind": "a:one", "toKind": "core:plan"},
+                # a bare name resolves against the declaring namespace
+                {"fromKind": "a:one", "toKind": "Bare"},
+            ]},
+            "extraction": {"relationTemplates": [
+                {"fromKind": "a:one", "toKind": "c:three"},
+            ]},
+        }
+        assert _relation_endpoint_refs(raw) == {
+            "a:one": ["b:two", "c:three"],
+            "b:two": ["a:one", "a:three"],
+            "a:three": ["b:two"],
+            "c:three": ["a:one"],
+        }, _relation_endpoint_refs(raw)
+        # shape-intolerant, not shape-crashing
+        for junk in (None, [], "x", 7, {"ontology": "nope"},
+                     {"ontology": {"relations": [None, 7, {"fromKind": 3}]}}):
+            assert _relation_endpoint_refs(junk) == {}, junk
 
     def test_the_closure_iterates_to_a_fixpoint(self):
         """A kind the closure ADDS brings the partners of its own declarations.

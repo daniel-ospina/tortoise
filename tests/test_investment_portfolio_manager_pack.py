@@ -645,10 +645,18 @@ class TestClashRules:
         The row alone proved NARROWING and never checked that the narrowed
         vocabulary can still spell the pack's declarations: `marks` and
         `constrainedBy` both take a `venture:investment` endpoint, `depends_on`
-        declares `venture`, and no `portfolio:` trigger word is also a
-        `venture:` trigger — so a portfolio story used to lose the very kind a
+        declares `venture`, and three of the four `portfolio:` trigger words are
+        not also `venture:` triggers (only the bare `portfolio` one is, and it is
+        also a `pm:` trigger) — so a portfolio story used to lose the very kind a
         valuation mark exists to value, while the list is rendered under
         "EVERY kind you emit MUST come from this list".
+
+        ⛔ The "three of the four" is not a hedge, it is the measurement, and it
+        is what makes the DISCRIMINATION section below necessary: the `portfolio`
+        mention selects the `venture:` row on its own, so that one mention never
+        demonstrated the defect. The pre-#9733 sentence said "no `portfolio:`
+        trigger word is also a `venture:` trigger" — false, and contradicted by
+        this test's own assertion at the bottom.
 
         Every trigger word is exercised, not one: a row is data and the defect
         is a missing CO-SELECTION, so probing a single mention would pass while

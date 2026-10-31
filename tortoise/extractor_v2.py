@@ -974,9 +974,10 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict,
     ANOTHER namespace's kind offered a closed vocabulary its own declarations
     could not be spelled in: `packs/investment-portfolio-manager` declares
     `depends_on: [venture]` and its `marks`/`constrainedBy` endpoints are
-    `venture:investment`, while no `portfolio:` trigger word is also a
-    `venture:` trigger — a portfolio story therefore lost the position kind its
-    valuation mark exists to value.
+    `venture:investment`, while three of the four `portfolio:` trigger words are
+    not also `venture:` triggers (only the bare `portfolio` one is, and it is
+    also a `pm:` trigger) — a portfolio story therefore lost the position kind
+    its valuation mark exists to value.
 
     ``pack_refs`` is the brief's reserved ``pack_refs`` section
     (``{kind: [every kind its own declared relations pair it with]}``, built by
@@ -1004,10 +1005,11 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict,
     pack actually references are the ones whose absence makes a declared
     relation unemittable, and they are named by the declarations themselves — so
     the closure is taken over THOSE. Measured over the real catalog, the
-    fixpoint leaves every story narrow (7-20 of 47 kinds) and leaves ZERO
-    half-offered relations — a relation is half-offered when exactly one of its
-    two namespaced endpoints is in the list, i.e. exactly the unspellable state
-    this fix exists to remove; ``TestCompactReferenceClosure
+    fixpoint leaves every story narrow and leaves ZERO half-offered relations —
+    measured 1-24 of the 47 shipped kinds across all 53 trigger words, i.e. never
+    the all-packs set. A relation is half-offered when exactly one of its two
+    namespaced endpoints is in the list, i.e. exactly the unspellable state this
+    fix exists to remove; ``TestCompactReferenceClosure
     ::test_no_relation_is_left_half_offered`` pins the metric.
     """
     if not story:
@@ -1042,7 +1044,13 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict,
         worklist = list(selected)
         while worklist:
             for partner in refs.get(worklist.pop()) or ():
-                if partner in pack_kinds and partner not in selected:
+                # a row built by hand or from JSON may carry garbage (a nested
+                # list is unhashable, an int is not a kind); the RENDER path
+                # must never raise on a malformed master — same direction as
+                # `value_extractor._relation_endpoint_refs`' own shape guard,
+                # and as `_values_suffixes`' "the render path must never raise"
+                if (isinstance(partner, str) and partner in pack_kinds
+                        and partner not in selected):
                     selected[partner] = pack_kinds[partner]
                     worklist.append(partner)
     return selected

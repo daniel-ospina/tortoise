@@ -48,7 +48,9 @@ def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
     list". A selecting pack whose relations name ANOTHER namespace's kind thus
     offers a vocabulary its own declarations cannot be spelled in: the portfolio
     overlay's ``marks``/``constrainedBy`` endpoints are ``venture:investment``,
-    and no ``portfolio:`` trigger word is also a ``venture:`` trigger — so a
+    and three of the four ``portfolio:`` trigger words are not also ``venture:``
+    triggers (only the bare ``portfolio`` one is, and it is also a ``pm:``
+    trigger) — so a
     portfolio story lost the very position kind the mark values.
 
     ⛔ **Keyed by KIND and UNDIRECTED, including same-namespace partners.** The
@@ -71,11 +73,20 @@ def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
     read: it carries ENTITY TYPES (``Object``/``Subject``), never a namespaced
     kind (``pack_registry`` dataclass comment).
 
+    ⚠️ ``extraction.relationTemplates[].fromKind/toKind`` is read for the same
+    reason as ``ontology.relations[]``: it is the second declaration site that
+    names a KIND on both sides of a typed edge. No SHIPPED manifest uses it
+    today (only ``packs/_template`` shows it, commented out), so it is pinned by
+    its own hermetic unit test rather than by the catalog sweep — otherwise
+    deleting the site would leave every test green.
+
     Bare names and ``core:`` refs are dropped: a bare name resolves against the
     declaring pack's own namespace and a ``core:`` kind is always rendered.
     First-seen order, de-duplicated; shape is NOT trusted — this reads raw YAML,
     so a malformed section degrades to nothing rather than raising (the manifest
-    validator reports it).
+    validator reports it). ``tests/test_extractor_v2.py
+    ::TestCompactReferenceClosure::test_the_refs_are_undirected_and_drop_core
+    _and_bare`` is the direct pin on this function's contract.
     """
     if not isinstance(raw, dict):
         return {}
