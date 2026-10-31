@@ -16758,8 +16758,23 @@ class FalkorProjection(
                     if final_id == oid:
                         continue
                     fseq = fold_seq.get(oid)
+                    # ⛔ The operator POPULATION is the CANONICAL one —
+                    # ``is_operator = true OR op_type IS NOT NULL``, the same
+                    # disjunction live ``supersede_point``'s 2a reads (#10418
+                    # review P3). With the narrow ``{is_operator:true}`` here
+                    # the replay dropped the transfer for a flag-less operator
+                    # (the hybrid ``create_point(op_type=…)`` shape,
+                    # ``is_operator=false`` WITH ``op_type``): its point event
+                    # replays it without the flag, so pass 2 re-created the
+                    # operator's edge at the STALE ``inputs`` endpoint (the dead
+                    # predecessor) and this leg never moved it — the #2423
+                    # resurrection, live/rebuild divergence measured on the
+                    # hybrid shape. Same predicate as ``ep.py``'s Batch-1
+                    # filter, so the replay cannot describe a different
+                    # operator set than the loader that judges the factor.
                     rows = self.g.query(
-                        "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$id}) "
+                        "MATCH (op:Point)-[r]->(old:Point {id:$id}) "
+                        "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
                         "RETURN op.id, type(r), r.idx, ID(r), op.label",
                         params={"id": oid},
                     ).result_set
@@ -16778,9 +16793,13 @@ class FalkorProjection(
                         repoints.append(
                             (row[0], row[1], row[2], row[3], oid, final_id,
                              row[4]))
+                    # The INPUT mirror reads the SAME canonical population, so
+                    # a flag-less operator's support mirror follows the
+                    # successor on replay exactly as live's 2a-INPUT loop moves
+                    # it (#10418 review P3).
                     for row in self.g.query(
-                        "MATCH (old:Point {id:$id})-[ri:INPUT]->"
-                        "(op:Point {is_operator:true}) "
+                        "MATCH (old:Point {id:$id})-[ri:INPUT]->(op:Point) "
+                        "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
                         "RETURN op.id, ri.idx, ID(ri), op.label",
                         params={"id": oid},
                     ).result_set:
