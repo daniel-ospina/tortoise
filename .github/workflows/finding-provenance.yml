@@ -69,8 +69,23 @@
 # (`self-hosted,Linux,ARM64,ubuntu-latest`), so `ubuntu-latest` can resolve to
 # either pool. Measured 2026-10-05: among the last 100 runs of this workflow,
 # some landed on `pi-runner-vm-*` while the most recent were all on
-# `GitHub Actions <N>` — i.e. the routing is ambiguous, not fixed. A
-# version-pinned label no self-hosted runner claims removes the ambiguity.
+# `GitHub Actions <N>` — i.e. the routing is ambiguous, not fixed.
+#
+# ⛔ `ubuntu-24.04` USED to settle that ambiguity by being unclaimable from the
+# fleet. Since the 2026-10-29 mitigation (#6897 suspended;
+# docs/ops/ci-runner-x64.md, "the label contract") the installer CAN emit
+# `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`, so BOTH jobs below are
+# POOL-ELIGIBLE while the mitigation is
+# engaged — the premise this comment used to end on, "a version-pinned label no
+# self-hosted runner claims", is FALSE. Re-measure it rather than trusting this
+# text: `gh api repos/<owner>/<repo>/actions/runners`.
+# ⛔ THE COST, STATED: the pool's service PATH is a minimal non-login one with no
+# `gh`, so a pool-served run of these jobs used to red as `gh: command not
+# found` / 127 — a red that reads as a product failure and is not (run
+# 40141219586; 38 of the 39 `classify` failures measured on 2026-10-24 were on
+# `pi-runner-vm-*` holding this same label). That gap is now closed by the
+# `runner-tools.sh ensure gh` step in each job, which provides the tool or fails
+# NAMING it (#9018) — not by the label.
 # Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`.
 #
 # WHAT THIS DOES NOT DO (#4732 hole 2): a body validated once is never
@@ -199,8 +214,8 @@ jobs:
           python-version: '3.12'
 
       # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────
-      # `runs-on: ubuntu-24.04` is documented as a HOSTED-ONLY pin, and the pool is
-      # not supposed to claim it — but it HAS, and there is job evidence: run
+      # `runs-on: ubuntu-24.04` WAS a HOSTED-ONLY pin — pool-eligible only under the
+      # CI_RUNNER_OS_LABEL=on|auto mitigation (header above) — and there is job evidence:
       # 40141219586's `classify` was served by `runner_name: pi-runner-vm-3` with
       # `labels: [ubuntu-24.04]`, and 38 of the 39 `classify` failures measured on
       # 2026-10-24 held that same label on `pi-runner-vm-2/3/4/5/6`. (The drift arm
