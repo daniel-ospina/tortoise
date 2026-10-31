@@ -182,9 +182,10 @@ def test_the_commit_path_READS_the_record_outcome_it_cannot_assume():
     """#10389 review ISSUE 2 — the only writer's outcome is read, not assumed.
 
     With the node writes deleted the carrier IS the narrative's only write, and
-    `sdk._emit_event` is best-effort by contract: no journal configured returns
-    BEFORE the record leg (`sdk.py:9889-9894`), and a raising append returns
-    `False` and skips it (`sdk.py:10027`). Either lane leaves the prose in NO
+    `sdk.py::TortoiseSDK._emit_event` is best-effort by contract: no journal
+    configured returns BEFORE the record leg (its `if log is None:` arm), and a
+    raising append returns `False` and skips it (its per-call `return False`).
+    Either lane leaves the prose in NO
     store while the commit answers 200 — the state this pin refuses.
 
     (1) FAILS on the pre-fix phase, on both counts: no `record_sink=` at the

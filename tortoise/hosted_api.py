@@ -17085,12 +17085,14 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
     the narrative's only PRODUCER on the commit path. Its outcome therefore IS
     the guarantee, and the commit door is the one place that can say so.
 
-    ⛔ IT CANNOT BE ASSUMED. `sdk._emit_event` is best-effort by contract
-    ("Both stores are best-effort — failures log and continue (never crash the
-    mutation)", ``sdk.py:9705-9712``), and its RECORD leg is not even reached
-    when no journal is configured (``sdk.py:9889-9894`` returns before it) or
-    when the journal append RAISED (``sdk.py:10027``). Measured consequence
-    before this report existed: the commit answered 200 with the narrative in
+    ⛔ IT CANNOT BE ASSUMED. `sdk.py::TortoiseSDK._emit_event` is best-effort by
+    contract ("Both stores are best-effort — failures log and continue (never
+    crash the mutation)", its own docstring), and its RECORD leg is not even
+    reached when no journal is configured (its `if log is None:` arm calls
+    `_record_write_without_journal` and returns before the record) or when the
+    journal append RAISED (its per-call `return False`; the caller's
+    `record_sink` then stays empty). Measured consequence before this report
+    existed: the commit answered 200 with the narrative in
     no store at all, which is the state the sibling pin calls out — "with the
     node write gone (#10000) the narrative would then be stored NOWHERE".
 
@@ -17498,9 +17500,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # fail-closed, whatever the writes around it are: `sdk._emit_event` is
     # best-effort by contract ("Both stores are best-effort — failures log and
     # continue"), its record leg is skipped entirely with no journal configured
-    # (`sdk.py:9889-9894`) and when the append raised (`sdk.py:10027`), and this
-    # door used to ignore the return. Before #10000 those two lanes degraded to
-    # "the prose still sits on the node"; after it they stored the narrative
+    # (its `if log is None:` arm) and when the append raised (its per-call
+    # `return False`), and this door used to ignore the return. Before #10000
+    # those two lanes degraded to "the prose still sits on the node"; after it
+    # they stored the narrative
     # NOWHERE while the commit answered 200. So the record's per-call outcome is
     # read here (`record_sink`, the mechanism `_write_capture_turns` already
     # gates its own store decision on) and `_report_narrative_home` turns it

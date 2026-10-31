@@ -1430,3 +1430,131 @@ def test_the_carrier_entry_claims_91_only_for_what_91_carries():
         f"the entry no longer reports {missing} at all — the repair is to say "
         "WHERE those statements live, not to stop recording them"
     )
+
+
+#: The passages that justify `hosted_api._report_narrative_home` cite
+#: `sdk._emit_event`'s best-effort contract as their AUTHORITY: the reporter
+#: exists because the emit can answer "committed" while the narrative reached no
+#: store, so a reader following that citation is checking the change's whole
+#: premise. All three cited `sdk.py` by LINE, and at `#10389`'s review head every
+#: one was wrong — `9705-9712` landed on `record_degraded`'s `#9208` remedy
+#: comment, `9889-9894` on the `record_sink` docstring paragraph, `10027` on the
+#: event-store handler's `record_degraded` import block.
+#:
+#: ⛔ NOT merge drift, which is the part that makes this a rule rather than
+#: bad luck: `git diff` on `tortoise/sdk.py` between that head and its merge base
+#: is EMPTY. No integration moved those lines — they were never right. `sdk.py`
+#: is 44k lines, so no line in it survives an unrelated commit; that is the same
+#: rot `#7948` retired from `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 and the §9.1
+#: guard above retires from `STORAGE-ARCHITECTURE.md`.
+#:
+#: SCOPE, deliberately narrow: `sdk.py` line citations inside these three
+#: passages. `_execute_commit_writes` also carries a PRE-EXISTING
+#: `projection/entities.py:4896` citation that this change neither introduced nor
+#: measured, and a guard over every `file.py:NNNN` there would red on that
+#: unrelated line — a citation-shape rule is not allowed to become a backlog item
+#: for debt it did not find.
+_NARRATIVE_HOME_CITATIONS = (
+    ("tortoise/hosted_api.py",
+     ("_report_narrative_home", "_execute_commit_writes")),
+    ("tests/test_9555_narrative_carrier.py",
+     ("test_the_commit_path_READS_the_record_outcome_it_cannot_assume",)),
+)
+
+#: The authority the narrative-home reasoning must name, symbol-keyed: the CLASS
+#: and the METHOD, because `_emit_event` alone resolves off any module's private
+#: helper and a bare `sdk._emit_event` is the form that rotted.
+_NARRATIVE_HOME_SYMBOL = "sdk.py::TortoiseSDK._emit_event"
+
+
+def _function_texts(path: Path, names: tuple[str, ...]) -> dict[str, str]:
+    """`name -> its own source text` for each named `def` in `path`.
+
+    Read through `ast` so the scope is the FUNCTION and not a line window: this
+    guard's whole premise is that a line number is not a stable address, so a
+    guard that found its own scope by line number would be the same mistake it
+    exists to catch.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    found: dict[str, str] = {}
+    for node in ast.walk(ast.parse("\n".join(lines))):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in names):
+            found[node.name] = "\n".join(lines[node.lineno - 1:node.end_lineno])
+    return found
+
+
+def test_the_narrative_home_citations_are_symbol_keyed_and_resolve():
+    """The narrative-home reasoning cites `_emit_event` by SYMBOL, never a line.
+
+    Three arms, each measured on the pre-fix text of `bb6197375`:
+
+    * NO `sdk.py:NNNN` in any of the three passages — the pre-fix text carries
+      all three (all wrong), so this arm is red on it and names each one;
+    * the authority is cited symbol-keyed (`sdk.py::TortoiseSDK._emit_event`)
+      somewhere in those passages, so removing the line citations cannot be
+      "fixed" by deleting the justification altogether;
+    * that symbol RESOLVES, as a METHOD OF THAT CLASS — a rename or a move out
+      of `TortoiseSDK` reds instead of leaving a citation naming something that
+      is not there (measured by re-pointing the string at
+      `sdk.py::TortoiseSDK._emit_events`).
+    """
+    sources: dict[str, dict[str, str]] = {}
+    for rel, names in _NARRATIVE_HOME_CITATIONS:
+        texts = _function_texts(ROOT / rel, names)
+        absent = [name for name in names if name not in texts]
+        assert not absent, (
+            f"`{rel}` no longer defines {absent} — the narrative-home reasoning "
+            "moved, so re-point this guard at its new home rather than letting "
+            "it scan nothing and pass"
+        )
+        sources[rel] = texts
+
+    surplus = [
+        (rel, name, match.group(0))
+        for rel, texts in sources.items()
+        for name, text in texts.items()
+        for match in _LINE_CITATION.finditer(text)
+        if match.group(0).split(":", 1)[0].endswith("sdk.py")
+    ]
+    assert not surplus, (
+        "the passages that justify `_report_narrative_home` cite `sdk.py` by "
+        "LINE again. That citation IS the change's premise — the emit is "
+        "best-effort, so the commit door must read its outcome — and a line in "
+        "a 44k-line module cannot survive an unrelated commit: at `#10389`'s "
+        "review head all three were wrong, and they were wrong at the merge "
+        "base too. Name the symbol and the behaviour instead "
+        f"(`{_NARRATIVE_HOME_SYMBOL}` plus its `if log is None:` arm and its "
+        "per-call `return False`):\n  - "
+        + "\n  - ".join(f"`{rel}::{fn}` cites `{cite}`"
+                        for rel, fn, cite in surplus)
+    )
+
+    citing = [f"{rel}::{name}" for rel, texts in sources.items()
+              for name, text in texts.items()
+              if _NARRATIVE_HOME_SYMBOL in text]
+    assert citing, (
+        "none of the narrative-home passages names `"
+        + _NARRATIVE_HOME_SYMBOL
+        + "` any more — the rationale's authority is then uncited, which reads "
+        "exactly like a claim nobody can check. Cite the symbol that carries the "
+        "best-effort contract, not just the module: " + ", ".join(sorted(sources))
+    )
+
+    cited_file, _, cited_symbol = _NARRATIVE_HOME_SYMBOL.partition("::")
+    cls_name, _, method = cited_symbol.rpartition(".")
+    sdk_path = ROOT / "tortoise" / cited_file
+    tree = ast.parse(sdk_path.read_text(encoding="utf-8"))
+    holders = [
+        node.name for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == cls_name
+        and any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name == method for child in node.body)
+    ]
+    assert holders, (
+        f"`{_NARRATIVE_HOME_SYMBOL}` does not resolve at HEAD — `{cls_name}` "
+        f"defines no `{method}` (or the class/method moved). The citation has "
+        "rotted: re-verify the best-effort contract and re-point it to the "
+        "symbol that now carries it, rather than to a line."
+    )

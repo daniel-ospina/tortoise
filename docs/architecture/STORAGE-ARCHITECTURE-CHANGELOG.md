@@ -1757,6 +1757,7 @@ reproduce the measured 0.91 → 0.42 destruction). `sourceVersion` stays uncarri
 fold drops it too — so the two routes agree by both losing that anchor rather than the record keeping
 an attribute the graph does not have. Pinned by
 `tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.
+
 ## §9.1's carrier paragraph — the design stayed, the delivery state left (`#10067`, 2026-10-30)
 
 The rule in §9.1 is unchanged: the transcript lives outside the graph, the CAPABILITY decides which
