@@ -763,15 +763,6 @@ class _LegScript:
         self.outcomes = list(outcomes)
         self.calls = 0
 
-    # The signature is the engine's own ``query`` contract, so the unused
-    # parameters stay — but the `noqa` directive for ARG002 that used to sit
-    # on this line is NOT needed and was itself a finding: ``ARG`` is not in
-    # ``[tool.ruff.lint] select``, so the directive could never suppress
-    # anything, and RUF100 (which IS selected) reports a dead directive as an
-    # error. Left in, it reddened `ruff check .` — i.e. `agent-infra-ci /
-    # lint` — on every PR in the repo from aed841e8b onward (#10356). Do not
-    # re-add it; if the unused-argument check is ever wanted, add ``ARG`` to
-    # ``select`` in pyproject.toml rather than restoring a per-line false noqa.
     def query(self, cypher, params=None, timeout=None):
         out = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
         self.calls += 1

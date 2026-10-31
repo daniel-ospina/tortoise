@@ -5140,8 +5140,14 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # parameters, no ``measured``) that call satisfies every parameter,
     # raises NOTHING and prints ``SELECTED granularity`` — measured by
     # executing the three signature shapes. ``match=`` pins the WORDING of
-    # the required-argument failure, which is `main`'s
-    # `missing 1 required keyword-only argument: 'measured'`.
+    # the required-argument failure, which for the call below is the PLURAL
+    # `missing 2 required keyword-only arguments: 'measured' and 'results'`
+    # — ``results`` joined ``measured`` when the third cause needed it, so
+    # the singular `missing 1 required keyword-only argument: 'measured'` is
+    # what `main` emits and NOT what this call emits (#10356 review P2). The
+    # regex deliberately spans either pluralization (it stops at
+    # "argument.*measured"), so a future third keyword does not red it; the
+    # ``excinfo`` assertions are what pin both names.
     #
     # This paragraph used to claim the call below raised `unexpected keyword
     # argument 'measured'`, and that a bare ``pytest.raises(TypeError)`` was
@@ -5151,11 +5157,11 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # it say that — the `unexpected keyword argument 'measured'` message
     # belongs to the ``measured=False`` call ABOVE (:5125). The inverted
     # lesson is the real one: bare and anchored behave IDENTICALLY against
-    # both reachable shapes (pre-fix — no exception, both red; `main` — the
-    # required-argument wording, both accept), so dropping ``match=`` is a
-    # no-op and must not read as a regression. It is kept as the wording pin;
-    # the ``excinfo`` assertions below are what actually assert the contract
-    # (#10355 review P2).
+    # both reachable shapes (pre-fix — no exception, both red; `main` — its
+    # singular required-argument wording, both accept), so dropping
+    # ``match=`` is a no-op and must not read as a regression. It is kept as
+    # the wording pin; the ``excinfo`` assertions below are what actually
+    # assert the contract (#10355 review P2).
     #
     # The anchor for that pre-fix shape is `48d745f2e`, and the wording
     # matters because the claim is ancestry (#10355 review P2, corrected): it
@@ -5321,6 +5327,41 @@ def test_comment_blocks_stitches_a_wrap_and_documents_its_merge():
 
     merged = _comment_blocks("x = 1  # first subject\n# second subject\n")
     assert merged == ["first subject second subject"], merged
+
+
+def test_option_help_block_survives_a_narrow_terminal(monkeypatch, capsys):
+    """#10356 review P3: the width-agnostic matcher must be PINNED, not narrated.
+
+    ``_option_help_block`` was widened to match the option line with or
+    without a trailing space because at ``COLUMNS=30`` argparse prints
+    ``'  --mock'`` on its own line and the pre-fix ``startswith('  --mock ')``
+    matcher returned ````. The only call site pins ``COLUMNS=200``, where
+    argparse pads the invocation out to the help column — so a space DOES
+    follow the flag, the PRE-FIX matcher chooses the same start index, and
+    reverting the widening left the suite green.
+
+    So this test renders the help at both widths and asserts, per width, that
+    the block is found AND whether the pre-fix matcher would have found it. At
+    width 30 it would not: that is what makes the arm depend on the widening.
+    RED on the pre-fix helper: the width-30 case returns ```` and the
+    ``assert block`` below fails."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    for width, pre_fix_matches in (("30", False), ("200", True)):
+        monkeypatch.setenv("COLUMNS", width)
+        with pytest.raises(SystemExit) as ei:
+            sg.main(["--help"])
+        assert ei.value.code == 0
+        help_text = capsys.readouterr().out
+        block = _option_help_block(help_text, "--mock")
+        assert block, (
+            f"no `--mock` help block at COLUMNS={width} — the matcher is not "
+            f"width-agnostic")
+        option_line = next(ln for ln in help_text.splitlines()
+                           if ln.startswith("  --mock"))
+        assert option_line.startswith("  --mock ") is pre_fix_matches, (
+            f"at COLUMNS={width} argparse rendered {option_line!r} — this width "
+            f"does not discriminate the widened matcher")
 
 
 def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys,
@@ -5621,7 +5662,11 @@ def test_points_census_refuses_an_impossible_or_half_known_pair():
     A half-known pair (``total`` known, ``embedded`` unknown) is the fourth
     state that lands in ``None/None`` — it must not publish the total as
     though the unknown half were zero, which is the fabricated-``0`` this PR
-    removes — and it is an ABSENCE, so it is never counted as refused.
+    removes — and it is an ABSENCE, so it is never counted as refused. That
+    exemption is scoped to a PLAUSIBLE reported half: a lone ``-5`` or a lone
+    ``True`` is a producer lie whether or not its sibling arrived, so it is
+    refused (#10356 review P3 — before that arm such a row returned
+    ``records_refused: 0`` and ``_dense_leg_verified`` read it MEASURED).
     Reachability is nil today (``retrieve.py`` derives both halves
     from ONE Cypher row, so ``0 <= embedded <= total`` holds by construction);
     this pins the contract the next producer reads."""
@@ -5640,6 +5685,13 @@ def test_points_census_refuses_an_impossible_or_half_known_pair():
         # An ABSENT half is an unknown, not a lie: excluded and NOT refused.
         "half known": ([{"points_total": 3, "points_embedded": None}], 0),
         "key absent": ([{"points_total": 3}], 0),
+        # A LONE half that is itself impossible is a lie even though its
+        # sibling never arrived (#10356 review P3): before this arm these
+        # fell through as UNKNOWNs, so the cell still read MEASURED.
+        "lone negative total": ([{"points_total": -5}], 1),
+        "lone bool total": ([{"points_total": True}], 1),
+        "lone impossible embedded": ([{"points_embedded": -1}], 1),
+        "lone non-integer half": ([{"points_total": "3"}], 1),
     }
     for why, (outcomes, refused) in impossible.items():
         assert _points_census(outcomes) == {"points_total": None,
@@ -5667,13 +5719,20 @@ def test_a_refused_census_record_refutes_the_cell(capsys):
     closing the class the rule names.
 
     ``_points_census`` refuses a pair whose halves are impossible
-    (``embedded > total``, a bool, a negative). Dropping it silently leaves
-    the cell's census ``None/None``, which the coverage arm does not refute
-    (an unknown population is not a miss) — so a cell whose ONLY record was
-    impossible still read **MEASURED**, the exact certification the value rule
-    exists to prevent. In a MIXED cell the refused points left the population
-    and the published coverage could only rise, i.e. the exclusion fails in
-    the fail-open direction. So the refusal is carried out as
+    (``embedded > total``, a bool, a negative) — and, since #10356, a record
+    whose single reported half is itself impossible. Dropping it silently
+    leaves the cell's census ``None/None``, which the coverage arm does not
+    refute (an unknown population is not a miss) — so a cell whose ONLY
+    record was impossible still read **MEASURED**, the exact certification the
+    value rule exists to prevent. In a MIXED cell the refused points left the
+    population and the published coverage is taken over a smaller one, in a
+    direction the exclusion does NOT determine: ``embedded > total`` DEFLATES
+    it (``[{10,0}, {3,7}]`` publishes ``0.0`` where including both is
+    ``7/13``), a negative half inflates it. Either way the published number
+    is unreadable, so the exclusion is fail-open in both directions — the
+    "an exclusion can only inflate coverage" story this docstring used to
+    tell was backwards for the shape it named first (#10356 review P2). So
+    the refusal is carried out as
     ``records_refused`` and fails the cell closed:
 
         [{total: 3, embedded: 7}]                              -> refused, NOT MEASURED
@@ -5709,6 +5768,23 @@ def test_a_refused_census_record_refutes_the_cell(capsys):
                       **census)
     assert row["embedding_coverage"] == 1.0
     assert sg._dense_leg_verified([row]) is False
+
+    # (2b) The direction of an exclusion is NOT determined, and this is the
+    # shape that refutes the "an exclusion can only INFLATE coverage" story
+    # (#10356 review P2): an admitted (10, 0) beside a refused (3, 7)
+    # publishes 0.0, where INCLUDING the refused record moves the same pair
+    # UP to 7/13. Pinned so the corrected prose cannot drift back.
+    deflating = [{"points_total": 10, "points_embedded": 0},
+                 {"points_total": 3, "points_embedded": 7}]
+    census = sg._points_census(deflating)
+    assert census == {"points_total": 10, "points_embedded": 0,
+                      "records_refused": 1}
+    published = sg._aggregate_embedding_coverage(deflating)
+    assert published == 0.0, published
+    assert round(7 / 13, 4) > published, (
+        "the refused record's own ratio is > 1, so excluding it DEFLATES the "
+        "published coverage — the direction claim must not say 'only up'")
+    assert sg._dense_leg_verified([_sweep_cell(**census)]) is False
 
     # ... and the operator sees WHY, in the line that carries the verdict.
     capsys.readouterr()

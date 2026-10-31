@@ -717,8 +717,9 @@ The 3-point micro-test that SELECTS the granularity knob before the pilot:
 #     run was invoked — the dense leg did not actually run.
 #   * fourth case, distinct from all three (#10355 P3): the embedder ran and no
 #     cell wrote zero vectors, but a cell's CENSUS refused a record — the
-#     producer reported a points pair that cannot be true (`points_embedded >
-#     points_total`, a bool, a negative) — so that cell reads NOT MEASURED as
+#     producer reported a points value that cannot be true (`points_embedded >
+#     points_total`, a bool, a negative, or a lone half that is itself
+#     impossible) — so that cell reads NOT MEASURED as
 #     well. The `dense leg:` line shows `records_refused=[...]` beside the
 #     verdict. The remedy is the census PRODUCER, not the embedder: the leg
 #     ran, and re-running reproduces the same verdict byte for byte.
