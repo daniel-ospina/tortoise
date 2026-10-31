@@ -6175,6 +6175,12 @@ surfaces:
   # same reason — `tortoise/retry.py` matches no SOURCE_PATTERNS, so a
   # retry.py-only diff must still run the file that pins the new wiring.
   - test_7405_update_point_writes.py
+  # #9750: the operator's input set is a SET — a repeated target must write ONE
+  # typed edge + ONE INPUT edge, at `create_operator` (the primitive every door
+  # goes through), at ingest's resolved-id seam, and in `_find_operator`'s
+  # dedup key. `sdk` owns it (`tortoise/sdk.py`); the file also pins the
+  # `duplicate_target_deduped` warning against the §3.2 closed-set conformance.
+  - test_ingest_duplicate_target.py
   # #4520: DUAL-REGISTERED with `core` and `battery` — the seam covers the
   # SDK's vector writers (`tortoise/sdk.py`, `session_indexer.py`) and the
   # `tools/ask_spotcheck.py` spot-check write, so an sdk-surface change must
