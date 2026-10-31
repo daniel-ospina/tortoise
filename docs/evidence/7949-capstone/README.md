@@ -139,7 +139,7 @@ stamp**, and those are the numbers listed here — the ones the log itself rende
 renders them: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
 references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
 (`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
-re-derived by this bundle to `502`/`510`), `edges.py:2168-2192` (`link_source_to_event`),
+re-derived by this bundle to `774`/`782`), `edges.py:2168-2192` (`link_source_to_event`),
 `tortoise/extractor_v2.py:8278-8285` (the **classify-later** surface, as the S2.3 cause string cites
 it), and `tortoise/extractor_v2.py:8288-8292` (the **VET** surface, as the S2.2 cause string cites
 it). **They no longer resolve at this head** — they are the stamp's, and a fresh `+N` bump of them
@@ -148,7 +148,11 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:9217-9223` here, not in the log. (The SYMBOL is what makes
+the `result["classify_later"]` block at `:9217-9223` here, not in the log. The `8288-8292` cite is
+the `result["vet"]` block, and it is corrected to `:9227-9231` here — **not** to the `:8534-8538`
+this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
+head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
+number. (The SYMBOL is what makes
 this line checkable: a bare number in this paragraph is read by no pin — the paragraph is
 `_BUNDLE_HISTORICAL`, deliberately — so a reader re-deriving it must land on the block the sentence
 names, not on the number alone.) That is deliberate: a scored log is a measurement record and the bundle's rule is
