@@ -758,6 +758,33 @@ def test_10437_a_pinned_skill_with_no_archive_name_is_reported(capsys, tmp_path)
     assert capsys.readouterr().err == ""
 
 
+def test_10437_a_missing_fetched_payload_is_a_refusal_not_a_skip(tmp_path):
+    """An absent payload must RAISE, not `continue`.
+
+    `--sync` fetches every pinned skill, so this is unreachable today — which is
+    why it must be a refusal: a bare `continue` silently re-creates the #10088
+    shape (a derived artifact nobody rebuilds, with every arm green) the moment
+    a caller builds `payloads` from something narrower. The refusal is a
+    `ParityError`, so `main()` reports it as "could not verify" and exits 1
+    fail-closed instead of tracebacking (#10437 review, P2).
+
+    FAILS IF: the branch is `continue` — `_rebuild_archives` returns an empty
+    tuple and `pytest.raises` never sees an exception.
+    """
+    bsa = sp._build_skill_archives()
+    pinned = {name: {"served_path": f"served/{name}/SKILL.md"}
+              for name in bsa.SKILL_NAMES}
+    withheld = bsa.SKILL_NAMES[0]
+    payloads = {name: b"# body\n" for name in bsa.SKILL_NAMES if name != withheld}
+
+    with pytest.raises(sp.ParityError, match="no fetched payload"):
+        sp._rebuild_archives(tmp_path / "root", {"skills": pinned}, payloads)
+    # `withheld` is the FIRST name the loop reaches, so the refusal lands before
+    # any write: the refusal is not a partial success, and this case says so.
+    assert not (tmp_path / "root" / sp.ARCHIVES_REL).exists(), (
+        "the refusing run must not leave a partially derived archive tree")
+
+
 def test_10437_dry_run_names_the_archives_the_real_run_rewrites(
         monkeypatch, tmp_path):
     """`--dry-run` must not UNDER-report the derived artifacts (review, Issue 2).
@@ -825,7 +852,15 @@ def test_10437_the_cli_reports_the_archives_and_dry_run_writes_none(
                   "--manifest", str(pin), "--attempts", "1", "--backoff", "0"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "would re-derive 3 .skill archive(s)" in out, out
+    # ⛔ Counted from the ARCHIVABLE set — the pin's skills intersected with the
+    # builder's `SKILL_NAMES` — never the literal 3 and never
+    # `len(manifest["skills"])`: the pin may carry a skill the builder owns no
+    # archive name for, and a pinned FOURTH skill must not red the case that
+    # asserts the operator-facing line (#10437 review, P2). `1717b1ed6`
+    # converted the `changed` assertions to this rule and left these two.
+    archivable = [name for name in sp._build_skill_archives().SKILL_NAMES
+                  if name in manifest["skills"]]
+    assert f"would re-derive {len(archivable)} .skill archive(s)" in out, out
     assert "how-to-use-tortoise.skill" in out, out
     for name, payload in sentinel.items():
         assert (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes() == payload, (
@@ -834,7 +869,7 @@ def test_10437_the_cli_reports_the_archives_and_dry_run_writes_none(
     rc = sp.main(["--sync", "--root", str(root), "--manifest", str(pin),
                   "--attempts", "1", "--backoff", "0"])
     assert rc == 0
-    assert "re-derived 3 .skill archive(s)" in capsys.readouterr().out
+    assert f"re-derived {len(archivable)} .skill archive(s)" in capsys.readouterr().out
 
 
 def _sync_fixture(tmp_path, monkeypatch, head: str, upstream_bytes: dict[str, bytes]):

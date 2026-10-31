@@ -308,7 +308,13 @@ _COUNT_WORDS = {value: word for word, value in _NUMBER_WORDS.items()}
 _PLANNED_KEY = "future_phantom_key"
 _WARNINGS_SECTION = re.compile(r"^## Warnings\b.*?(?=^## |\Z)", re.M | re.S)
 _DECLARED_COUNT = re.compile(r"\bthe ([A-Z]+)(?:-key table| keys)\b")
-_KEY_TOKEN = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
+# ⛔ No `(?:_…)` REQUIRED component: the first version demanded an underscore,
+# so a phantom key written without one (`phantomkey`) was invisible to
+# `_listed_keys` and passed all three arms — an advertised-but-unemitted key
+# slipping through the one arm written to catch exactly that (#10437 review,
+# P2). The block this matches IS the enumeration by construction, so a bare
+# lowercase token there is a key claim, not prose.
+_KEY_TOKEN = re.compile(r"`([a-z][a-z0-9_]*)`")
 
 
 def _declared_key_claims(section: str) -> list[tuple[str, int | None]]:
@@ -436,13 +442,59 @@ def test_served_skill_advertises_only_keys_the_product_emits():
     `test_10437_warning_table_gate_…` cases against synthetic sections.
     """
     text = _skill_text()
-    if text is None or "promotion_policy" not in text:
-        pytest.skip("J8 skill section (#1057) not yet landed — markers "
-                    "absent/untracked")
+    if text is None:
+        # ⛔ ONLY an absent mirror skips. The earlier form also skipped when the
+        # unrelated `promotion_policy` marker was gone, which made a brand-new
+        # gate fail OPEN: a mirror restructure that dropped that marker
+        # silently disabled the warnings gate while this line stayed green
+        # (#10437 review, P2). The subject here is the `## Warnings` section —
+        # the file is tracked in-repo, so `text is None` is the only legitimate
+        # "nothing to grade" case.
+        pytest.skip("the served mirror is absent from this tree — nothing to "
+                    "grade (`website/apps/dashboard/public/skills/"
+                    "how-to-use-tortoise/SKILL.md`)")
     match = _WARNINGS_SECTION.search(text)
     assert match is not None, "the served skill has no “## Warnings” section"
     problems = _warning_table_problems(match.group(0))
     assert not problems, "\n".join(problems)
+
+
+def test_10437_the_gate_does_not_skip_on_a_missing_unrelated_marker(monkeypatch):
+    """The gate must NOT skip when a marker unrelated to its subject is gone.
+
+    The ``pytest.skip`` used to fire on ``"promotion_policy" not in text`` too,
+    so a mirror restructure that dropped that marker silently disabled a gate
+    whose subject is the `## Warnings` section — a fail-OPEN path in a guard
+    written to be fail-closed (#10437 review, P2).
+
+    FAILS IF: the skip condition mentions anything but ``text is None``. The
+    pre-fix gate returns a SKIP here, which this case catches as the wrong
+    exception class (a skip from a gate that HAS its subject is the defect it
+    pins, so it is asserted against rather than allowed to colour the run
+    green).
+    """
+    keys = sorted(WARNING_KEYS)
+    # The shape the gate exists to red: one key short, heading still truthful.
+    defective = _synthetic_warnings_section(_COUNT_WORDS[len(keys)], keys[:-1])
+    assert "promotion_policy" not in defective
+
+    monkeypatch.setattr(sys.modules[__name__], "_skill_text", lambda: defective)
+    with pytest.raises(BaseException) as excinfo:
+        test_served_skill_advertises_only_keys_the_product_emits()
+    assert isinstance(excinfo.value, AssertionError), (
+        "the gate must RED on an incomplete `## Warnings` section even when the "
+        "unrelated promotion_policy marker is absent — it bailed out instead: "
+        f"{excinfo.value!r}")
+    assert "INCOMPLETE" in str(excinfo.value), excinfo.value
+
+    # The control: only an ABSENT mirror may skip, so the skip branch keeps the
+    # subject it was written for rather than being deleted outright.
+    monkeypatch.setattr(sys.modules[__name__], "_skill_text", lambda: None)
+    with pytest.raises(BaseException) as excinfo:
+        test_served_skill_advertises_only_keys_the_product_emits()
+    assert type(excinfo.value).__name__ == "Skipped", (
+        "an absent mirror is the one case that still skips (nothing to "
+        f"grade), but the gate raised {excinfo.value!r}")
 
 
 # ── non-vacuity: each arm reds on the mirror shape it was written for ──
@@ -505,6 +557,33 @@ def test_10437_warning_table_gate_reds_on_an_advertised_key():
     problems = _warning_table_problems(section)
     assert problems, "an advertised-but-unemitted key passed every arm"
     assert _PLANNED_KEY in "\n".join(problems)
+
+
+def test_10437_warning_table_gate_reads_a_key_with_no_underscore():
+    """A phantom key spelled WITHOUT an underscore must still be read as one.
+
+    `_KEY_TOKEN` required a `_word` part, so a key such as ``phantomkey`` never
+    entered `_listed_keys`: the advertised arm stayed silent, the completeness
+    arm stayed silent (every product key was present) and the count arm stayed
+    silent (the heading was truthful about 13) — an advertised-but-unemitted
+    key passing all three arms, which is the one thing this gate exists to stop
+    (#10437 review, P2).
+
+    The three silent arms are asserted here so the case demonstrably isolates
+    the token pattern rather than redding for a neighbouring reason.
+    """
+    keys = sorted(WARNING_KEYS)
+    phantom = "phantomkey"  # no underscore: the old token regex could not see it
+    section = _synthetic_warnings_section(_COUNT_WORDS[len(keys)],
+                                          [*keys, phantom])
+
+    assert _declared_key_count(section) == [len(keys)]  # count arm: silent
+    assert phantom in _listed_keys(section), (
+        "the gate cannot see a phantom key without an underscore, so its "
+        "advertised arm is blind to it")
+    problems = _warning_table_problems(section)
+    assert any(phantom in problem for problem in problems), problems
+    assert not any("INCOMPLETE" in problem for problem in problems), problems
 
 
 def test_10437_warning_table_gate_reds_on_a_declared_count_mismatch():

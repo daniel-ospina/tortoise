@@ -826,8 +826,22 @@ def _rebuild_archives(root: Path, manifest: dict, payloads: dict[str, bytes],
         if name not in manifest["skills"]:
             continue
         payload = payloads.get(name)
-        if payload is None:  # pragma: no cover - sync fetches every pinned skill
-            continue
+        if payload is None:
+            # ⛔ RAISE, never `continue`. `sync` fetches every pinned skill, so
+            # this is unreachable today — and that is exactly why a silent skip
+            # is wrong: it is a derived artifact this change exists to keep
+            # fresh, and a `continue` here would resurrect the #10088 shape
+            # (an archive nobody re-derives, with every arm green) the day a
+            # caller builds `payloads` from something narrower. The scan above
+            # already REFUSES to drop a pinned skill silently, for the same
+            # reason (#10437 review, P2).
+            raise ParityError(
+                f"{name}: no fetched payload to build website/skills/{name}.skill "
+                "from, although the pin lists it and build_skill_archives owns "
+                "an archive name for it. `_rebuild_archives` is fed the bytes "
+                "`sync` fetched for EVERY pinned skill; a missing one is a bug "
+                "in this caller, not a case to skip — skipping is how a "
+                "derived artifact goes stale with the gate green (#10088).")
         target = root / ARCHIVES_REL / f"{name}.skill"
         wanted = bsa.build_from_bytes(name, payload)
         if target.is_file() and target.read_bytes() == wanted:
