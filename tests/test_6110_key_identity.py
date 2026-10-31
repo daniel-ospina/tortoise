@@ -738,6 +738,51 @@ class TestPhase1GuardSeesTheContentIdentity:
             ).result_set == [], (
                 f"Phase-1 must reject before any write for {extra!r}")
 
+    def test_a_terminal_declaration_after_an_in_bundle_live_mint_is_not_a_mint(
+            self, sdk):
+        """#9819 review P2 (round 4): ``_mints`` is a GRAPH read, so it cannot
+        see a point an EARLIER item of the same bundle mints.
+
+        Bundle order: item 0 mints content "SEQ-LIVE" LIVE; item 1 re-declares
+        the same content with ``status='retracted'``; item 2 re-states it once
+        more. The writer content-folds items 1 and 2 onto item 0's LIVE node
+        (``create_point`` pops the declared status BEFORE its dedup branch, so
+        the fold stores nothing terminal), i.e. item 1 MINTS NOTHING — yet the
+        record saw it as a terminal mint and refused item 2 with "reuses
+        content that points[1] … mints with status 'retracted'", a statement
+        that is false about the write. ``origin/main`` commits this bundle.
+
+        Discriminating: pre-fix this raises ``BundleValidationError`` and no
+        point is written at all; post-fix it commits (created=1, deduped=2).
+        The sibling arm — an earlier item that mints TERMINAL — is still
+        refused, pinned by
+        ``test_intra_bundle_content_fold_onto_a_self_minted_terminal_point``
+        and ``test_a_real_one_fold_terminal_mint_is_still_recorded`` above.
+        """
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "SEQ-LIVE"},
+                {"ref": "p2", "kind": "statement", "content": "SEQ-LIVE",
+                 "status": "retracted"},
+                {"ref": "p3", "kind": "statement", "content": "SEQ-LIVE"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 1
+        assert res["deduped"]["points"] == 2
+        assert len(set(res["ids"]["points"])) == 1, (
+            "both re-statements must fold onto the ONE point the bundle minted")
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'SEQ-LIVE' "
+            "RETURN n.status, n.id"
+        ).result_set
+        assert len(rows) == 1, (
+            f"exactly one point — the two later items FOLD, they do not mint "
+            f"(got {rows})")
+        assert rows[0][0] == "live", (
+            "the declared 'retracted' was popped by the dedup fold, so nothing "
+            "in this bundle mounts a terminal mint")
+
 
 class TestContentIdentityReadIsBatched:
     """#9819 review P2: the content identity must not cost a graph read PER

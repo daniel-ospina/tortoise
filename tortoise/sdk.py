@@ -23079,6 +23079,14 @@ class TortoiseSDK:
         # mints terminal under a content the later item also carries is
         # invisible to the graph read, exactly as the key case was.
         minted_terminal_content: dict[tuple[str, str], tuple[int, object]] = {}
+        # FIRST-WRITER-WINS on the CONTENT identity, the same shape the KEY
+        # simulation uses (`minted_terminal` forgets every later item under a
+        # key an earlier one minted; see `_mints_here` below). `_mints` is a
+        # GRAPH read, so it cannot see a point an EARLIER item of this bundle
+        # mints — without this map the later item is recorded as a terminal
+        # mint it never performs and the bundle is refused for a fold onto a
+        # mint that does not happen (#9819 review P2).
+        minted_content: dict[tuple[str, str], int] = {}
         # #9819 review P2: the CONTENT identity is now resolved in ONE query for
         # the whole bundle instead of three per item (`_find_terminal_dedup_hit`
         # → any-hash → hash-less fallback), which had made `_validate_bundle`
@@ -23221,24 +23229,39 @@ class TortoiseSDK:
             # terminal status the writer never writes; #9819 review P2).
             mint_status = _item_effective_status(
                 pitem, _POINT_ITEM_MINT_STATUS_DEPTH)
-            # Conservative in the FAIL-CLOSED direction, stated so it is not
-            # read as precision: this records a declared terminal status without
-            # predicting a CONTENT fold onto an existing live point (which would
-            # pop the declaration and mint nothing terminal). Over-rejecting that
-            # pathological combination — a bundle that declares `retracted` on a
-            # key which content-folds onto a live point and then reuses the key —
-            # is preferred to letting a fold land on a terminal mint.
+            # Does THIS item mint the content identity? `_mints` is the
+            # writer's own `_find_point_by_content` answer, but it is a GRAPH
+            # read — it cannot see a point an earlier item of THIS bundle
+            # minted, and `create_point` pops the declared status BEFORE its
+            # dedup branch, so a later item under an already-in-bundle-minted
+            # content FOLDS onto that node and mints nothing. FIRST WRITER WINS
+            # (`minted_content`), exactly as the key simulation does: the
+            # record below must describe the write, not the graph read.
+            # ⛔ The TERMINAL record is still written by the FIRST minting item,
+            # so a fold onto an intra-bundle TERMINAL point stays refused.
+            _mints_here = _mints and (pkind, _content_id) not in minted_content
+            if _mints_here:
+                minted_content[(pkind, _content_id)] = j
             if (isinstance(mint_status, str)
                     and mint_status in TERMINAL_EXCLUDED_STATUSES):
+                # Conservative in the FAIL-CLOSED direction, stated so it is
+                # not read as precision: the KEY record does not predict a
+                # CONTENT fold onto an existing live point (which would pop the
+                # declaration and mint nothing terminal). Over-rejecting that
+                # pathological combination — a bundle that declares `retracted`
+                # on a key which content-folds onto a live point and then
+                # reuses the key — is preferred to letting a fold land on a
+                # terminal mint.
                 if _has_pkey:
                     minted_terminal[(pkind, pkey)] = (j, mint_status)
                 # Content is an identity too, so the same simulation covers a
                 # later item with the SAME content under a DIFFERENT (or no)
-                # key. Only record when this item actually MINTS (`_mints`, the
-                # writer's own `_find_point_by_content` answer): an item whose
-                # content already matches a graph point content-folds onto it
-                # and mints nothing terminal (its declared status is popped).
-                if _content_id is not None and _mints:
+                # key. Only record when this item actually MINTS
+                # (`_mints_here`): an item whose content already matches a
+                # graph point, OR a point minted by an EARLIER ITEM of this
+                # bundle, content-folds and mints nothing terminal (its
+                # declared status is popped by the dedup branch).
+                if _content_id is not None and _mints_here:
                     minted_terminal_content[(pkind, _content_id)] = (j, mint_status)
 
     def _check_endpoint_race(self, index: int, conn: dict,
