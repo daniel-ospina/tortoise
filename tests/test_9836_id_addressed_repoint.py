@@ -195,6 +195,39 @@ def test_the_no_self_edge_guard_still_journals_nothing_for_this_family(edge_sdk)
         rebuilt.close()
 
 
+@pytest.mark.parametrize("rel", FAMILY)
+def test_a_supersede_CHAIN_lands_the_edge_on_the_terminal_point(edge_sdk, rel):
+    """The shared MOVE machinery, exercised through the new addressing.
+
+    One descriptor per hop, each landing at the successor ITS OWN supersede
+    named, so the edge ends at the terminal point on both routes exactly as live
+    left it — the property `_structural_repoint_statements`' "ONE HOP, not
+    `_final(src)`" clause exists for. The family only changes how the TARGET is
+    addressed, so this leg asserts the addressing did not disturb the hop rule.
+    """
+    sdk, journal, tmp_path = edge_sdk
+    x = sdk.create_point("claim", "x", pointKind="statement")["id"]
+    y = sdk.create_point("claim", "y", pointKind="statement")["id"]
+    z = sdk.create_point("claim", "z", pointKind="statement")["id"]
+    target = sdk.create_point("claim", "t", pointKind="statement")["id"]
+    assert sdk.create_edge(rel, x, target)["created"] is True
+    sdk.supersede_point(x, y)
+    sdk.supersede_point(y, z)
+
+    live = _edges(sdk._proj, rel)
+    assert live == {(z, target)}, live
+    srcs = [r["src"] for r in _repoints(journal) if r.get("edge_type") == rel]
+    assert srcs == [x, y], (
+        f"{rel}: a chain must journal ONE descriptor PER HOP ({srcs}) — "
+        "collapsing onto the terminal point is the shape #10139 round 4 fixed")
+    rebuilt = FalkorProjection(str(tmp_path / "rebuilt.db"))
+    try:
+        rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert _edges(rebuilt, rel) == live
+    finally:
+        rebuilt.close()
+
+
 def test_a_rel_the_supersede_does_not_move_is_untouched(edge_sdk):
     """The family is a SUBSET of the transfer set — `dependsOn` is not in it.
 
