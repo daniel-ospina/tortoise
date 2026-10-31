@@ -8880,7 +8880,8 @@ class TortoiseSDK:
             # best-effort, non-fatal, and non-blocking (daemon thread) so a
             # load failure surfaces ONCE here instead of masquerading as a
             # per-query _FAIL_COOLDOWN_S gap. The outcome is declared via
-            # EmbeddingModel.status() and retrieval_legs(); the cooldown
+            # EmbeddingModel.status() (``retrieval_legs()`` declared it too
+            # until #4282 deleted that method); the cooldown
             # itself is unchanged (never sticky-off).
             try:
                 from .embeddings import EmbeddingModel
