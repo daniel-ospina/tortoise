@@ -2069,3 +2069,71 @@ def test_idxless_mitigation_edge_survives_rebuild(sup):
         f"rebuilt edge drifted: {_mitigated_by(succ)} != {pre}")
     assert _mitigated_by(mit["id"]) == set(), (
         "rebuilt: idx-less edge stranded on the superseded prior")
+
+
+def _canonical_operator_edges(proj, pid: str) -> set:
+    """``(op_id, rel, idx)`` for every operator edge reaching ``pid``, read
+    through the CANONICAL population EP's Batch-1 filter uses
+    (``is_operator = true OR op_type IS NOT NULL``).
+
+    ``_sem_edges`` above is deliberately the NARROW ``{is_operator:true}`` form
+    (most of this file pins what the ordinary writer mints); the replay-side
+    population question needs the disjunction, because that is what live
+    ``supersede_point``'s 2a reads (#10418 review P3).
+    """
+    return {tuple(r) for r in proj.g.query(
+        "MATCH (op:Point)-[r:IMPL|NAND]->(p:Point {id:$id}) "
+        "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
+        "RETURN op.id, type(r), r.idx",
+        params={"id": pid}).result_set}
+
+
+def test_flag_less_operator_edge_stays_on_the_successor_across_the_replay(sup):
+    """The replays' operator POPULATION equals live 2a's — the canonical one.
+
+    Live ``supersede_point`` transfers a flag-less operator's edge (its 2a reads
+    ``is_operator = true OR op_type IS NOT NULL``, the predicate ``ep.py``'s
+    Batch-1 filter uses); the rebuild pass-2b re-point leg read the NARROW
+    ``{is_operator:true}``, so a node the live door transferred for could be
+    missed by the replay and left at the dead predecessor — the #2423
+    resurrection on the one population this PR widened the door to.
+
+    ⚠️ SCOPE OF THIS PIN (measured, not assumed). The replay's identity
+    derivation currently makes the two predicates select the SAME set on a
+    rebuilt graph: ``_upsert_point_props`` derives operator-ness from the
+    payload's NESTED ``operator`` key (``isop = bool(op)``), so a replayed
+    ``op_type`` always arrives WITH ``is_operator = true`` — while a flat
+    ``op_type`` with no nested key replays as a plain claim and loses it. So
+    this case cannot EXERCISE the widened predicate today (the raw
+    ``REMOVE n.is_operator`` below is restored by the replay from the
+    operator's own ``OperatorAdded`` snapshot), and this test is an
+    anti-regression pin for the parity rather than a pre-fix-failing one. The
+    gap that hides it — a hybrid ``create_point(op_type=…)`` point losing
+    ``op_type`` on replay — is a separate, pre-existing defect filed on its own.
+    """
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    b = sdk.create_point("statement", "B", status="live")["id"]
+    succ = sdk.create_point("statement", "A'", status="live")["id"]
+    op = sdk.create_operator("IMPL", a, [b])
+    # The legacy / migrated operator shape #10195's population widening covers:
+    # ``op_type`` present, the boolean flag dropped by a migration / raw write.
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) REMOVE n.is_operator",
+        params={"id": op["id"]})
+
+    sdk.supersede_point(a, succ)
+    proj = sdk._get_proj()
+    pre_old = _canonical_operator_edges(proj, a)
+    pre_new = _canonical_operator_edges(proj, succ)
+    assert not pre_old, f"live supersede left an operator edge on old: {pre_old}"
+    assert pre_new, "live supersede did not transfer the flag-less operator edge"
+
+    _rebuild(sdk, events)
+
+    assert not _canonical_operator_edges(proj, a), (
+        "the replay re-materialized the flag-less operator's edge at the "
+        "superseded point (#2423 resurrection)")
+    assert _canonical_operator_edges(proj, succ) == pre_new, (
+        "the replay dropped or moved a transferred flag-less operator edge: "
+        f"{sorted(_canonical_operator_edges(proj, succ))} != {sorted(pre_new)}")
