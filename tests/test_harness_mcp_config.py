@@ -2092,11 +2092,12 @@ _ORG_CHOOSER = "or asks you to choose when your account can use more than one"
 def _assert_org_pick_precedes_authorize(block: str) -> None:
     """The consent page disables Authorize until the Organization chooser has a value.
 
-    `tortoise/oauth.py` hides the named-org line and calls `disableAuthorize()` on
-    the `len(orgs) > 1` memberships branch; the select's onchange re-enables it. So
-    "click Authorize, then pick" names an inert control. Extracted from the journey
-    test so the law itself can be proved on synthetic copy — an inline assertion is
-    only ever exercised by the real file, which cannot show it would red.
+    `tortoise/oauth.py` hides the named-org line and leaves Authorize DISABLED on the
+    `len(orgs) > 1` memberships branch (`authBtn().disabled = true`); the `#org-select`
+    onchange is the only thing that re-arms it. So "click Authorize, then pick" names an
+    inert control. Extracted from the journey test so the law itself can be proved on
+    synthetic copy — an inline assertion is only ever exercised by the real file, which
+    cannot show it would red.
     """
     # Flattened first: JSX and markdown wrap mid-sentence, so matching the raw
     # source would red a correct card whose sentence happens to break across a
@@ -2118,7 +2119,7 @@ def _assert_recipe_row_order(label: str, block: str) -> None:
     """One recipe block: names the chooser, names both acts, picks BEFORE Authorize.
 
     The chooser is a property of the PAGE (`tortoise/oauth.py` calls
-    `disableAuthorize()` on the several-Organization branch), so every carrier that
+    `authBtn().disabled = true` on the several-Organization branch), so every carrier that
     drives the consent page must state it, and must state the pick before the button
     it enables. Compared case-insensitively so the pin tracks the ORDER — the spelling
     is guarded separately by
@@ -2567,8 +2568,8 @@ def test_9660_chatgpt_is_a_live_onboarding_journey_not_a_docs_dead_end():
     # dialog — so the pick is pinned, not merely described.
     #
     # AND IT COMES BEFORE `Authorize`: on the chooser branch the button is disabled
-    # until a value is picked (`disableAuthorize()`, then the select's onchange
-    # re-enables it), so "click Authorize, then pick" names an inert control.
+    # until a value is picked (`authBtn().disabled = true`, then the select's onchange
+    # re-arms it), so "click Authorize, then pick" names an inert control.
     for fact in ("the page names it", "or asks you to choose when your account can use "
                  "more than one", "the connector writes to"):
         in_block(connector, fact)
@@ -2680,8 +2681,8 @@ def test_9660_the_org_choice_precedes_authorize_on_every_recipe_carrier():
 
     WHY ORDER, NOT PRESENCE. `tortoise/oauth.py` reveals the consent page's two
     shapes: with one selectable Organization it names it and Authorize is live;
-    with several it hides that line, shows a "Choose an org…" chooser and calls
-    `disableAuthorize()`, re-enabling the button only from the chooser's onchange.
+    with several it hides that line, shows a "Choose an org…" chooser and leaves
+    Authorize disabled, arming it only from the chooser's onchange.
     So "click Authorize, and check the Organization … if it offers a chooser, pick
     one" tells such a user to click a disabled control. A presence assertion cannot
     see that; two offsets can.
