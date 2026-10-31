@@ -50,6 +50,19 @@ properties. Each has a test here that FAILS when the property is broken:
    stderr) ends its row early. `test_every_markdown_row_has_the_same_number_of_cells` and
    `test_an_unknown_reason_cannot_break_the_row_it_is_rendered_in` fail if either returns,
    which is the difference between #10131's acceptance artifact and 74 rows of pipe text.
+10. **EVERY cut of the sample is kept, including the last one** — `window.truncation` is the
+    paragraph a reader uses to judge how much of the sample the numbers rest on, so a cut may
+    never erase one recorded before it, and a population the API bound shortened must say so.
+    `test_a_budget_cut_keeps_the_cuts_recorded_before_it` and
+    `test_a_budget_cut_while_listing_names_the_population_it_cut` fail on the `_spend`
+    ASSIGNMENT (a budget cut wrote the field directly, erasing every earlier cut).
+11. **An EXCLUSIVE label needs a sample without gaps** — `CATCH-PUSH-ONLY` says "only on
+    main", which a recorded PR-head gap cannot support (the same asymmetry `NEVER` forbids for
+    a push attestation), and an artifact that was downloaded and opened as a valid zip cannot
+    be reported as "expired or never produced".
+    `test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main` and
+    `test_a_zip_that_lacks_the_members_is_a_READ_gap_not_an_expired_artifact` fail if either
+    reading returns.
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -481,6 +494,48 @@ def test_a_push_only_red_is_catch_push_only(tmp_path):
     assert row["status"] == catch.CATCH_PUSH_ONLY
     assert row["pr_head_catches"] == []
     assert [c["run_id"] for c in row["push_main_catches"]] == [str(RUN_PUSH)]
+
+
+def test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main(tmp_path):
+    """`CATCH-PUSH-ONLY` asserts an EXCLUSIVE claim, so a PR-head gap must outrank it.
+
+    ⛔ `status` returned `CATCH_PUSH_ONLY` before it consulted `unknowns`, so a row with a
+    recorded PR-head artifact gap was counted in `coverage.status_CATCH_PUSH_ONLY` and
+    printed as "*N* only on main" — the bucket a `slow_files` reopen argues from. That is
+    the same asymmetry the `NEVER` branch forbids for a push attestation (a gap is an
+    UNKNOWN, never a negative about a PR head): "it never caught on a PR head" is
+    unmeasured here, not measured-and-negative. The catch on main is still cited.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[
+            _run(RUN_PR, SHA, "pull_request", pr=71),
+            _run(RUN_PUSH, SHA, "push"),
+        ],
+        jobs={
+            # The PR head is RED with NO artifact — an unreadable PR-head sample.
+            RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")],
+            RUN_PUSH: [_check(200, RUN_PUSH, f"{family} ({leg})", "failure")],
+        },
+        artifacts={
+            (RUN_PUSH, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            ),
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN, row["status"]
+    assert [c["run_id"] for c in row["push_main_catches"]] == [str(RUN_PUSH)], (
+        "the main catch is still cited — what is withheld is the exclusive wording"
+    )
+    assert any(u["kind"] == "pr-head" for u in row["unknown"])
+    assert "withheld" in (row["note"] or "")
+    assert report["coverage"]["status_" + catch.CATCH_PUSH_ONLY] == 0, (
+        "a row with a PR-head gap must not be counted as 'only on main'"
+    )
+    assert report["coverage"]["status_" + catch.UNKNOWN] > 0
 
 
 def test_classname_is_the_fallback_when_the_file_attribute_is_absent(tmp_path):
@@ -1067,6 +1122,33 @@ def test_a_budget_exhausted_artifact_listing_does_not_claim_expiry(tmp_path):
     assert "could not be READ" in blocked["unknown"][0]["reason"]
 
 
+def test_a_zip_that_lacks_the_members_is_a_READ_gap_not_an_expired_artifact(tmp_path):
+    """The artifact was downloaded and IS a valid zip, so none of the expiry causes is true.
+
+    ⛔ The "carries neither member" branch appended a note but never registered the cause on
+    `RunArtifacts.download_failed`, so `unread_for(name)` stayed `None` and the row took the
+    EXPIRY arm: *"expired past the repo's N-day retention, never produced, or not a parsable
+    zip/XML"* — three causes this walk had just disproved (the artifact is in the listing, it
+    was produced, and the `ZipFile` open succeeded). The branch is reachable by design of the
+    upload it reads (`.github/workflows/python-ci.yml`: `if: always()`,
+    `if-no-files-found: ignore`, five paths), so a leg that died before the junit/manifest
+    steps uploads exactly this zip.
+    """
+    family, leg = _leg_of("test_billing.py")
+    name = catch.artifact_name(family, leg)
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=72)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")]},
+        artifacts={(RUN_PR, name): _zip_members({"pytest.log": b"collected 0 items\n"})},
+    )
+    row = _row(_report(root), "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    reason = row["unknown"][0]["reason"]
+    assert "retention" not in reason, "the artifact was downloaded — it is not expired"
+    assert "neither" in reason and "valid zip" in reason, reason
+
+
 def test_a_job_retried_many_times_marks_the_leg_unknown_once(tmp_path):
     """A retried job yields one cleared attempt per retry — and ONE UNKNOWN block per row."""
     family, leg = _leg_of("test_billing.py")
@@ -1375,6 +1457,83 @@ def test_a_cut_listing_reaches_the_report_window(tmp_path):
     assert long_reads
     assert truncation.count("listing stopped after page 1") == len(long_reads)
     assert "TRUNCATED" in catch.render_summary(report)
+
+
+def test_a_budget_cut_keeps_the_cuts_recorded_before_it():
+    """`_spend` ASSIGNED `truncation`, so the budget sentence erased every earlier cut.
+
+    ⛔ Order is deterministic, not a race: `list_runs` notes its cuts and completes before the
+    detail loop spends the budget, so the LAST writer was always `_spend` — and it replaced
+    the accumulated list's rendering with its own sentence. The reachable shape: a listing
+    that stopped early on page 2, then a walk that exhausted `--max-api-calls` in the detail
+    loop, published only "API-call bound reached" and dropped the page-1 cut from the one
+    paragraph a reader uses to judge how much of the sample the numbers rest on.
+    """
+    client = catch.GhClient("o/r", max_calls=1)
+    client.note_truncation("pull_request/failure listing stopped after page 1: page cap")
+    with pytest.raises(catch.BudgetExhausted):
+        client._spend(5)
+    text = client.truncation or ""
+    assert "listing stopped after page 1" in text, "the earlier cut was erased"
+    assert "API-call bound reached (1)" in text
+
+
+def test_a_budget_cut_while_listing_names_the_population_it_cut():
+    """A population the bound cut mid-listing must not read as a population of that size.
+
+    ⛔ `list_runs`'s `except BudgetExhausted: return runs` recorded nothing, so
+    `window.populations[key]` said `read: 200, requested: 500, hit_bound: False` under a
+    caption that only flags the AT-REQUESTED case — the population read as complete.
+    """
+    client = catch.GhClient("o/r", max_calls=2)
+
+    def _gh(args, binary=False):
+        client._spend(1)  # exactly what the real `_gh` does at the top of every attempt
+        page = int(args[1].rsplit("page=", 1)[1])
+        return json.dumps(
+            {
+                "total_count": 1000,
+                "workflow_runs": [
+                    _run(page * 1000 + i, SHA, "pull_request", pr=1) for i in range(100)
+                ],
+            }
+        )
+
+    client._gh = _gh  # type: ignore[method-assign]
+    runs = client.list_runs("pull_request", None, "failure", 500)
+    assert len(runs) == 200, "the pages that WERE read are kept"
+    text = client.truncation or ""
+    assert "pull_request/failure listing stopped after page 2" in text, text
+    assert "API-call bound reached (2)" in text
+
+
+def test_a_budget_cut_in_the_detail_loop_keeps_the_listing_cut_in_the_window():
+    """The composition travels: `window["truncation"]` is what `render_summary` prints."""
+
+    class _CutThenBroke(catch.GhClient):
+        """A cut listing (real pager), then the budget runs out in the detail loop."""
+
+        def __init__(self) -> None:
+            super().__init__("o/r", max_calls=0)
+            self._pager = _pager(fail_page=2)
+
+        def list_runs(self, event, branch, conclusion, limit):
+            runs = self._pager.list_runs(event, branch, conclusion, limit)
+            self.truncations = list(self._pager.truncations)
+            self.truncation = self._pager.truncation
+            return runs
+
+        def jobs(self, run_id):
+            self._spend(1)  # the bound trips here, exactly as it does inside `_gh`
+            return []
+
+        def retention_days(self):
+            return 90
+
+    report = catch.build_history(MANIFEST, _CutThenBroke())
+    truncation = report["window"]["truncation"] or ""
+    assert "listing stopped after page 1" in truncation, truncation
+    assert "API-call bound reached" in truncation, truncation
 
 
 # --- 11. one bad READ of a run must not discard the walk --------------------

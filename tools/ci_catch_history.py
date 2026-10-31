@@ -795,7 +795,16 @@ class FileHistory:
         if self.pr_catches:
             return CATCH_PR
         if self.push_catches:
-            return CATCH_PUSH_ONLY
+            # ⛔ "ONLY on main" is an EXCLUSIVE claim, and a recorded PR-head gap is exactly
+            # the evidence that this sample cannot support one: the PR-head read is missing,
+            # so "it never caught there" is unmeasured, not measured-and-negative. This is the
+            # same asymmetry the NEVER branch below forbids (a gap is an UNKNOWN, never a
+            # negative about a PR head) — and the label is the bucket a `slow_files` reopen
+            # argues from, so it must not outrank a gap. A push-main gap does not bind here:
+            # the claim is about PR heads.
+            if not any(u.kind == "pr-head" for u in self.unknowns):
+                return CATCH_PUSH_ONLY
+            return UNKNOWN
         if self.unknowns:
             return UNKNOWN
         if self.pr_runs_attested:
@@ -883,6 +892,14 @@ class FileHistory:
                 f"runs in the NON-GATING lane, not on a PR head — {NON_GATING_DECISION}; "
                 f"this row's question is answered by that decision, not by a measurement"
             )
+        if self.status == UNKNOWN and self.push_catches:
+            # The exclusive label was withheld, so say what the row DOES know: the catch on
+            # main is real and still cited; what the sample cannot support is "ONLY on main".
+            return (
+                f"catches on {len(self.push_catches)} main push run(s), but a PR-head gap (see "
+                f'the UNKNOWN reasons) leaves the PR-head side unmeasured — "only on main" is '
+                f"an exclusive claim this sample cannot support, so it is withheld"
+            )
         if self.status == UNKNOWN and self.lane == LANE_ORPHAN:
             return (
                 "in `slow_files` but in NO gating leg and NOT on the declared non-gating "
@@ -945,11 +962,17 @@ class GhClient:
 
     def _spend(self, count: int = 1) -> None:
         if self.calls + count > self.max_calls:
-            self.truncation = (
+            # ⛔ COMPOSED, never assigned. `note_truncation` is the one writer that keeps every
+            # cut, and this branch runs LAST (the listing phase completes before the detail
+            # loop spends): assigning `truncation` here erased every cut already recorded, so
+            # a walk that cut a listing and THEN ran out of budget published only the budget
+            # sentence — the page-1 cut vanished from the report's own window paragraph, the
+            # one place a reader judges how much of the sample the numbers rest on.
+            self.note_truncation(
                 f"API-call bound reached ({self.max_calls}) — the sample below is the prefix "
                 f"that was read, not the window"
             )
-            raise BudgetExhausted(self.truncation)
+            raise BudgetExhausted(self.truncation or "")
         self.calls += count
 
     #: A long walk is hundreds of calls; one transient `gh` transport failure must not
@@ -1029,6 +1052,16 @@ class GhClient:
             try:
                 raw = self._gh(["api", url])
             except BudgetExhausted:
+                # ⛔ The population's OWN cut is a separate fact from the budget sentence
+                # `_spend` just recorded: the window reports `read: N, requested: M` for this
+                # population, and a reader who sees N < M must be told that N is a prefix the
+                # bound cut, not the population's size. On page 1 there is nothing read yet to
+                # describe, and the budget sentence already discloses the cut.
+                if page > 1:
+                    self.note_truncation(
+                        f"{event}/{conclusion} listing stopped after page {page - 1}: "
+                        f"API-call bound reached ({self.max_calls})"
+                    )
                 return runs
             except ReadError as exc:
                 if page == 1:
@@ -1911,8 +1944,19 @@ def _leg_evidence(
             junit_member = next((n for n in members if n.endswith(JUNIT_MEMBER)), None)
             nodeids_member = next((n for n in members if n.endswith(NODEIDS_MEMBER)), None)
             if junit_member is None and nodeids_member is None:
-                notes.append(
-                    f"artifact {name} carries neither {JUNIT_MEMBER} nor {NODEIDS_MEMBER}"
+                detail = f"artifact {name} carries neither {JUNIT_MEMBER} nor {NODEIDS_MEMBER}"
+                notes.append(detail)
+                # ⛔ Register the cause on the same channel as the sibling READ gaps (the
+                # failed download above, the bad zip below). Without it `unread_for` stayed
+                # `None` and the row fell through to the EXPIRY arm — *"expired past the
+                # repo's N-day retention, never produced, or not a parsable zip"* — three
+                # causes this walk has just disproved: the artifact IS in the listing, it WAS
+                # produced, and it IS a valid zip. The upload is `if: always()` +
+                # `if-no-files-found: ignore` over five paths, so a leg that died before the
+                # junit/manifest steps produces exactly this zip.
+                artifacts.download_failed[name] = (
+                    f"{detail} — the artifact was downloaded and is a valid zip, so this is "
+                    f"not expiry and not an unproduced artifact"
                 )
                 return None
             sources: list[str] = []
@@ -1934,6 +1978,14 @@ def _leg_evidence(
                     sources.append("expected-nodeids")
                     executed |= scoped
             if not sources:
+                # Same rule: the bytes were read and unzipped, so nothing here is expiry.
+                detail = (
+                    f"artifact {name}: its {JUNIT_MEMBER} was unparsable and no "
+                    f"{NODEIDS_MEMBER} attested the leg, so the artifact says nothing about "
+                    f"what ran"
+                )
+                notes.append(detail)
+                artifacts.download_failed[name] = detail
                 return None
             return LegEvidence(
                 failed_paths=failed,
