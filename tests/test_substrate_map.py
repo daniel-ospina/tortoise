@@ -134,14 +134,47 @@ def _label_hits() -> tuple[int, int, int]:
     return lines, files, narrow
 
 
+def _checkout_history_is_complete() -> bool:
+    """Whether THIS clone can walk its WHOLE history.
+
+    Asked of git directly rather than via `smc._is_shallow_clone()`, so a bug in
+    the tool's helper cannot make the oracle agree with it. This is the fact the
+    tool corroborates before it may read status **1** as drift: in a shallow clone
+    the graft boundary cuts the ancestry walk, so a commit that IS an ancestor in
+    the complete history answers with the same status an unrelated tree does
+    (#10406, the depth-1 `test` job). Anything other than a positive "not shallow"
+    is False — a clone whose completeness cannot be established cannot support an
+    expectation of CLEAN either.
+    """
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=smc.ANCESTRY_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return probe.returncode == 0 and probe.stdout.strip() == "false"
+
+
 def _ancestry_is_verifiable_here() -> bool:
-    """Whether THIS clone carries the object `measured_at_commit` names.
+    """Whether THIS clone can ADJUDICATE the `measured_at_commit` claim.
 
     Probed with its own `git` call on purpose — NOT via `smc._is_shallow_clone()`,
     so a bug in the helper cannot make the test agree with it. `actions/checkout`
     fetches one commit by default, so in the CI `test` job this is False and the
     ancestry claim is unprovable there; the REQUIRED `docs` job (fetch-depth 0)
     is where it is proved.
+
+    ⛔ **Status 1 needs the same corroboration the tool applies.** Three of the
+    four answers are arm-deciding on their own: `0` is proved ancestry, an absent
+    object (128) and a timeout are unverified in ANY clone. Status `1` is the one
+    that depends on the checkout — in a shallow clone a TRUNCATED walk returns it
+    for a true claim (#10406), so it only means drift where the history is
+    complete. Without this mirror the oracle would expect `CLEAN` from a run that
+    correctly said `UNVERIFIED` and fail in both branches.
 
     ⛔ **Bounded with the tool's own bound** (`smc.ANCESTRY_TIMEOUT_S`). Unbounded,
     this oracle ran the exact probe the tool deliberately caps: on a partial clone
@@ -162,7 +195,92 @@ def _ancestry_is_verifiable_here() -> bool:
         )
     except subprocess.TimeoutExpired:
         return False
-    return probe.returncode == 0
+    if probe.returncode == 0:
+        return True
+    if probe.returncode == 1:
+        # "Not an ancestor" — or a graft-truncated walk. Only a complete history
+        # tells the two apart, which is exactly what the tool corroborates.
+        return _checkout_history_is_complete()
+    return False
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    assert done.returncode == 0, f"git {' '.join(args)}: {done.stderr}"
+    return done.stdout.strip()
+
+
+def _commit(repo: Path, message: str) -> str:
+    """Commit the staged tree and return the new sha (hermetic identity).
+
+    `commit.gpgsign=false` is pinned alongside the identity: without it a
+    developer box with signing enabled globally fails the commit with
+    `gpg failed to sign the data`, which would red the ancestry controls below
+    for a non-bug (the hazard `test_ci_timing.py` keeps a dedicated case for).
+    """
+    done = subprocess.run(
+        [
+            "git", "-c", "user.name=substrate-map", "-c", "user.email=t@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", message,
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _deepened_shallow_clone(tmp_path: Path) -> tuple[Path, str]:
+    """A depth-1 PR-merge-ref clone that ANOTHER ref has since deepened.
+
+    The state the `test` job's clone is in by the time this guard runs, built here
+    with real git rather than described: `actions/checkout` fetches the merge ref
+    at `--depth=1`, then another test in the SAME shard fetches `origin main` into
+    the same object store (`tests/test_9397_about_edge_properties.py::_ensure_commit`
+    does exactly that, by design — it is what makes that leg run in CI). Main's
+    history therefore arrives while HEAD stays the shallow boundary.
+
+    Returns `(clone, sha)` where `sha` is an ancestor of HEAD in the full history
+    and is PRESENT in the object store, yet unreachable through the boundary.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    _git(src, "init", "-q", ".")
+    _git(src, "symbolic-ref", "HEAD", "refs/heads/main")
+    (src / "f").write_text("1", encoding="utf-8")
+    _git(src, "add", "f")
+    reachable = _commit(src, "A")
+    (src / "f").write_text("2", encoding="utf-8")
+    _git(src, "add", "f")
+    base = _commit(src, "M0")
+    _git(src, "checkout", "-q", "-b", "feature")
+    (src / "g").write_text("3", encoding="utf-8")
+    _git(src, "add", "g")
+    _commit(src, "X")
+    _git(src, "checkout", "-q", "main")
+    (src / "f").write_text("4", encoding="utf-8")
+    _git(src, "add", "f")
+    _commit(src, "M1")
+    _git(src, "checkout", "-q", "-b", "pr", base)
+    (src / "h").write_text("5", encoding="utf-8")
+    _git(src, "add", "h")
+    _commit(src, "X2")
+    _git(
+        src, "-c", "user.name=substrate-map", "-c", "user.email=t@example.invalid",
+        "-c", "commit.gpgsign=false",
+        "merge", "-q", "--no-ff", "-m", "P", "main",
+    )
+    clone = tmp_path / "clone"
+    _git(
+        tmp_path, "clone", "-q", "--depth=1", "--branch", "pr",
+        f"file://{src}", str(clone),
+    )
+    assert _git(clone, "rev-parse", "--is-shallow-repository") == "true"
+    # The deepen: main's history enters the object store; HEAD's boundary stays.
+    _git(clone, "fetch", "-q", "--depth=200", "origin", "main")
+    _git(clone, "cat-file", "-e", f"{reachable}^{{commit}}")
+    return clone, reachable
 
 
 def test_the_shipped_map_is_clean() -> None:
@@ -174,19 +292,22 @@ def test_the_shipped_map_is_clean() -> None:
 
     ⚠️ The ancestry claim is the ONE exception and it is stated, not silently
     skipped: a `fetch-depth: 1` checkout (the CI `test` job's) cannot walk the
-    history, so the question is unanswerable THERE — the object may be absent
-    (`git` exits 128) or present-but-unreachable under the shallow graft (`git`
-    exits 1 about a real ancestor, which is NOT drift — #10356). The offline
-    half is asserted FIRST — in a shallow clone a real offline drift still reds
-    this — and only then is the ancestry half handed to the job that has the
+    history, so the question is unanswerable THERE — the object may be ABSENT
+    (`git` exits 128) or PRESENT but graft-unreachable under the shallow graft
+    (`git` exits **1** about a real ancestor, the status that otherwise means
+    drift, so it is NOT drift there — #10356). The offline half is asserted
+    FIRST — in a shallow clone a real offline drift still reds this — and only
+    then is the ancestry half handed to the job that has the
     history.
 
-    The unverified arm accepts EITHER wording the tool uses for "this checkout
+    The unverified arm accepts EVERY wording the tool uses for "this checkout
     cannot answer": the absent-object status arm, the shallow status-1 arm (a
-    grafted graph answers "not an ancestor" about a real ancestor — #10356), and
-    the bounded-probe timeout arm. All three are one verdict, so they carry one
-    token — before that they did not, and this test FAILED (rather than skipped)
-    whenever the bound tripped (#5086 review P2, cycle 6).
+    grafted graph answers "not an ancestor" about a real ancestor — #10356), the
+    status-1 arm where the completeness probe itself could not answer
+    (`_is_shallow_clone()` -> `None`, #10420), and the bounded-probe timeout arm.
+    All four are one verdict, so they carry one token — before that they did not,
+    and this test FAILED (rather than skipped) whenever the bound tripped (#5086
+    review P2, cycle 6).
     """
     result = smc.measure()
     assert result["problems"] == [], result["problems"]
@@ -195,10 +316,10 @@ def test_the_shipped_map_is_clean() -> None:
         assert len(result["unverified"]) == 1, result["unverified"]
         assert "cannot be verified here" in result["unverified"][0], result["unverified"]
         pytest.skip(
-            "shallow checkout: the `measured_at_commit` object is absent or "
-            "unreachable here, so the offline half is all this job proves; the "
-            "ancestry claim is proved by the REQUIRED `docs` job, which checks "
-            "out at fetch-depth: 0 and runs "
+            "this checkout cannot adjudicate the ancestry claim (`measured_at_commit` "
+            "is absent, or present but graft-unreachable in a shallow clone), so the "
+            "offline half is all this job proves; the ancestry claim is proved by "
+            "the REQUIRED `docs` job, which checks out at fetch-depth: 0 and runs "
             "`tools/substrate_map_check.py --check` unconditionally"
         )
     assert result["verdict"] == "CLEAN", result["problems"]
@@ -584,9 +705,9 @@ def test_a_sha_that_is_not_an_ancestor_is_drift(monkeypatch) -> None:
     sha from another repository. That IS a disagreement between the document and
     the tree, so it must never collapse into the state-error arm.
 
-    The clone is pinned NOT shallow on purpose: a depth-1 checkout answers 1
-    about a commit that really is an ancestor (see the test below), so status 1
-    is only drift where the history can be walked.
+    The completeness stub states the premise the status alone cannot carry: this
+    answer only means drift in a clone that CAN walk its whole history (see
+    `test_a_shallow_checkout_cannot_call_an_ancestor_drift` for the other half).
     """
     monkeypatch.setattr(
         smc.subprocess,
@@ -613,6 +734,29 @@ def test_a_shallow_checkout_cannot_call_an_ancestor_drift(monkeypatch) -> None:
     delete the row" — about a correct document, and redded the CI `test` job
     (run 41167511516). A shallow checkout cannot adjudicate ancestry whatever
     status it returns, so this is the same state error the 128 arm is.
+
+    ⛔ This control landed on `main` independently as #10356 and #10406 keeps it
+    — same name, every assertion — rather than retiring it for the sibling it
+    adds. On #10406 (`test (e)` in the Python CI run 41183423096, 2026-10-31,
+    head `d0cd6c38c`): the depth-1 `test` job reported `measured_at_commit
+    4f68a2aa7… is not an ancestor of HEAD` and reded two required tests, while
+    the `docs` job of the sibling `CI` run 41183423210 — the same check at
+    `fetch-depth: 0`, on the same head — passed, because the merge commit IS a
+    descendant of that commit.
+
+    Reproduced in a real depth-1 clone of this repo: writing the object into the
+    clone's object DB makes `cat-file -t` succeed and `--is-ancestor` still exit
+    1 with `rev-parse --is-shallow-repository` answering `true`.
+
+    ⛔ Non-vacuous: on the pre-fix tool this test FAILS — the drift problem comes
+    back and `unverified` is empty. The fix corroborates status 1 with the
+    repository's own completeness and defers the claim to the `docs` job.
+
+    The unresolvable arm (`_is_shallow_clone()` → None: git answered the ancestry
+    probe but not this one) is asserted too, and it is the arm this control did
+    NOT carry before #10406: it cannot certify drift either, and it must not
+    claim the checkout IS shallow. Only a positive `False` may accuse the
+    document.
     """
     monkeypatch.setattr(
         smc.subprocess,
@@ -628,6 +772,117 @@ def test_a_shallow_checkout_cannot_call_an_ancestor_drift(monkeypatch) -> None:
     assert "cannot be verified here" in unverified[0], unverified[0]
     assert "SHALLOW" in unverified[0], unverified[0]
     assert "not an ancestor" in unverified[0], unverified[0]
+    assert "is not an ancestor" not in unverified[0], unverified
+
+    monkeypatch.setattr(smc, "_is_shallow_clone", lambda: None)
+    problems, unverified = smc.check_measured_at_commit(_doc())
+    assert problems == [], problems
+    assert len(unverified) == 1, unverified
+    assert "cannot be verified here" in unverified[0]
+    assert "SHALLOW" not in unverified[0], unverified
+
+
+def test_an_unreadable_completeness_answer_cannot_certify_drift(monkeypatch) -> None:
+    """Fails if an exit-0 payload this code cannot READ is scored as "complete".
+
+    `_is_shallow_clone()` is a tri-state — `True` (this checkout is shallow),
+    `False` (it can walk its whole history), `None` (git could not say) — and only
+    a positive `False` may promote git's status 1 to DRIFT. The pre-#10406 shape,
+    `return proc.stdout.strip() == "true"`, collapses every UNRECOGNISED exit-0
+    payload onto `False`, i.e. onto the strongest claim the probe can make ("this
+    clone can walk its whole history"). A status-1 ancestry answer then reds the
+    REQUIRED `docs` job with "the document and the tree disagree — do not delete
+    the row to make this green" about a document that is right: the exact defect
+    this module exists to stop, reached through the one input the docstring
+    already reserved `None` for.
+
+    git prints exactly `true` or `false` today, so this arm is unreachable on the
+    versions measured — the #10406 reviewer recorded it as noted-not-a-finding.
+    It is closed anyway because the fallthrough is INVERTED (an unanswerable
+    probe is the one path that may accuse a correct document), which is the same
+    asymmetry `test_a_shallow_checkout_cannot_call_an_ancestor_drift` guards.
+
+    ⛔ Non-vacuous: on the pre-fix tool BOTH halves fail — the first loop gets
+    `False` for the unrecognised payloads, and the end-to-end arm gets a drift
+    problem instead of the state error.
+    """
+    # The two words git actually prints keep their meaning (positive controls).
+    for payload, expected in (("true\n", True), ("false\n", False)):
+        monkeypatch.setattr(
+            smc.subprocess,
+            "run",
+            lambda *a, _p=payload, **k: subprocess.CompletedProcess(a[0], 0, _p, ""),
+        )
+        assert smc._is_shallow_clone() is expected, payload
+
+    # Anything else is "git could not say" — never "the history is whole".
+    for payload in ("yes\n", "TRUE\n", "\n", "fatal: not a git repository\n"):
+        monkeypatch.setattr(
+            smc.subprocess,
+            "run",
+            lambda *a, _p=payload, **k: subprocess.CompletedProcess(a[0], 0, _p, ""),
+        )
+        assert smc._is_shallow_clone() is None, payload
+
+    # End to end, through the LIVE `_is_shallow_clone` (not a stub of it): the
+    # ancestry probe answers status 1 and the completeness probe answers an
+    # unreadable exit-0 word, which must land in the state error, not in drift.
+    def _unreadable_completeness(argv, **_kwargs):
+        if "--is-shallow-repository" in argv:
+            return subprocess.CompletedProcess(argv, 0, "yes\n", "")
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr(smc.subprocess, "run", _unreadable_completeness)
+    problems, unverified = smc.check_measured_at_commit(_doc())
+    assert problems == [], (
+        f"an unanswerable completeness probe cannot certify drift: {problems}")
+    assert len(unverified) == 1, unverified
+    assert "cannot be verified here" in unverified[0], unverified[0]
+    # It must not claim the checkout IS shallow either — the honest cause is that
+    # git did not answer, and the two causes read differently on purpose.
+    assert "SHALLOW" not in unverified[0], unverified
+
+
+def test_status_1_for_a_PRESENT_yet_grafted_commit_is_the_real_git_verdict(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Fails if the arm above rests on a git behaviour that does not happen.
+
+    The stub above asserts the tool's DECISION for status 1 in a shallow clone;
+    this asserts its PREMISE with real git, which is what makes that decision
+    reachable rather than hypothetical — and what makes it non-vacuous if git's
+    own behaviour changes: a dead arm would otherwise keep passing its stub.
+
+    Measured on the runner's git (2.56.0) and on 2.43.0: with the object ABSENT
+    `--is-ancestor` exits **128**; after the deepening fetch it is PRESENT
+    (`cat-file -e` succeeds) and exits **1** — the same status a genuinely
+    unrelated tree produces — while `rev-parse --is-shallow-repository` still
+    answers `true`. So in that state the tool must report the STATE arm: the
+    document is not wrong, the history is cut.
+    """
+    clone, sha = _deepened_shallow_clone(tmp_path)
+    probe = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+        cwd=clone,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 1, (
+        f"this control exists for the state where git answers 'not an ancestor' "
+        f"about a PRESENT commit; got rc={probe.returncode} ({probe.stderr.strip()})"
+    )
+    monkeypatch.setattr(smc, "ROOT", clone)
+    problems, unverified = smc.check_measured_at_commit(
+        f"---\nmeasured_at_commit: {sha}\n---\n"
+    )
+    assert problems == [], (
+        f"a truncated history cannot prove non-ancestry — the document is not "
+        f"wrong; got problems={problems}"
+    )
+    assert len(unverified) == 1, unverified
+    assert "cannot be verified here" in unverified[0], unverified
+    assert "SHALLOW" in unverified[0], unverified
+    assert "not an ancestor" in unverified[0], unverified
 
 
 def test_an_unbounded_ancestry_probe_cannot_hang_the_gate(monkeypatch) -> None:
