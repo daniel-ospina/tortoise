@@ -320,14 +320,45 @@ count, pack catalog/install, the indexing/seed lanes whose record tenant already
 comes from the row, and the points/sessions quota check);
 `graph_metadata`'s default `namespace` reads the row rather than the column;
 promotion = swap `kind` + move
-`organizations.graph_name` (which keeps §3's invariant true). Byte-identical
-today **for every org the five current provisioning sites created** (the literals
-above) and for every registry/selfhost org (an org-wide registry credential
-carries `graph_namespace = None`, so the fallback IS the derivation) — but it
-re-expresses the E2E-5 "byte-identical" gate as "byte-identical for every org
-whose default row names `org_{org_id}`", and the derivation/column equality must
-be pinned by a test or a constraint first (the count above is how to find the
-orgs that already fail it).
+`organizations.graph_name` (which keeps §3's invariant true).
+
+   **Byte-identity is conditional, and it is conditional PER POPULATION: the two
+   lanes answer "the row" differently, so only one of them is unchanged by this
+   option.**
+
+   **Hosted orgs** (provisioned by the five sites above) — identical **iff**
+   `organizations.graph_name = 'org_' || id`, and `public.graphs` is the store that
+   answers "the row" for them. The count above is the measurement: 0 rows →
+   unchanged; anything above 0 names orgs whose default row does **not** name the
+   derivation (the pre-#1903 `org_{name}` shape, `:33378`), and **those orgs move**
+   under this option.
+
+   **Registry/selfhost orgs** (`sdk.org_create`) — that lane writes **no
+   `public.graphs` default row for Fact B to follow**, so the derivation stays the
+   only resolver and these orgs do **not** move. `_graph_create`'s
+   Supabase-control-plane arm returns the deterministic id *without persisting* —
+   its own docstring names the INSERT as C2/C3, out of C1's scope
+   (`sdk.py:35582-35605`) — and its registry arm writes a registry `Graph` node in
+   FalkorDB, not a Supabase row. The parenthetical this sentence used to carry ("an
+   org-wide registry credential carries `graph_namespace = None`, so the fallback
+   IS the derivation") proved only what such an org opens **today**; byte-identity
+   needs the stronger claim, and it is the one above: **there is no row to
+   disagree with.**
+
+   ⚠️ **The exemption is "orgs with no control-plane row", NOT "orgs created by
+   that SDK call".** A `sdk.org_create` org that **also** carries an
+   `organizations` row gets a default row minted on its first credential miss, and
+   `ensure_default_graph_row` takes that row's namespace from the **column**
+   (`supabase_control.py:4151` read, `:4168` insert) — which for that lane is
+   `org_{name}` (the user's chosen name, `sdk.py:35415`) while `org_id` is a ULID
+   (`:35454`, passed to `_graph_create` at `:35550`). The row then names
+   `org_{name}` while the derivation produces `org_{<ULID>}`, so **that org IS
+   moved**, and the derivation/column equality must be pinned by a test or a
+   constraint rather than counted.
+
+   This is also the E2E-5 "byte-identical" gate, restated honestly: byte-identical
+   **for every org whose default row names `org_{org_id}`** — the same condition as
+   above, now named as the gate instead of claimed as a blanket.
    ⚠️ **The in-tree proof that a partial change set splits the org**, and the
    reason #12–#18 must be in it: `hosted_api.py:9788-9793` says *"An org-wide API
    KEY is NOT that shape — its drain opens `_make_sdk(namespace=org_id)`, the
