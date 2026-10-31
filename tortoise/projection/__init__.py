@@ -20331,6 +20331,7 @@ class FalkorProjection(
                     if not matched:
                         _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
                     return matched or 0
+            # (non-vacuity probe: Event replay arm removed)
             # #4649: OR-SET — primary key first, the label's secondary key on a
             # miss (a url-only :Source has no `id`). Without the fallback the
             # record folds to a MISS and `rebuild_all` reverts the write the
