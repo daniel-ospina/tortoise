@@ -35,11 +35,16 @@ tree disagree:
      the tree it was cut from (`tools/finding_provenance.py`'s rule, applied to a
      doc rather than to a finding). ⚠️ **(6) is the one claim that needs history.**
      `actions/checkout` fetches ONE commit by default, so in the `test` job the
-     object is absent and the question is unanswerable THERE. That is reported as
-     `UNVERIFIED` — a state error (exit 2), never a drift, because the document is
-     not wrong, the clone is shallow. The claim is proved by the REQUIRED `docs`
-     job: it checks out at `fetch-depth: 0` and runs `--check` unconditionally,
-     which is also the only home a docs-only PR reaches (#4454's precedent).
+     object is absent and the question is unanswerable THERE. Absence is decided
+     by an explicit `git cat-file -e` PRESENCE probe — never inferred from
+     `--is-ancestor`'s error status, which is not portable (git 2.56 answers 1 for
+     an object a depth-1 clone does not have; git 2.43 answers 128) and which
+     reported a correct document as `DRIFTED` on PR #10382's required `test`
+     shard. It is reported as `UNVERIFIED` — a state error (exit 2), never a
+     drift, because the document is not wrong, the clone is shallow. The claim is
+     proved by the REQUIRED `docs` job: it checks out at `fetch-depth: 0` and runs
+     `--check` unconditionally, which is also the only home a docs-only PR reaches
+     (#4454's precedent).
 
 ⛔ What it deliberately does NOT check, and why:
 
@@ -546,6 +551,76 @@ def _is_shallow_clone() -> bool | None:
     return proc.stdout.strip() == "true"
 
 
+def _object_present(sha: str) -> tuple[bool | None, str]:
+    """Whether this clone CARRIES `sha` as a commit — `(present, git's detail)`.
+
+    `None` means the question was not answered (the probe hit its bound).
+
+    ⛔ **Asked BEFORE the ancestry probe, and never inferred from its status.**
+    The two questions are different, and only one of them has a portable status:
+    `git cat-file -e` answers PRESENCE directly (0 = present, anything else =
+    absent), while `--is-ancestor`'s answer for an object the clone does not have
+    is an ERROR condition whose status is not guaranteed. This tool used to
+    infer "absent" from that error status — `--is-ancestor` "exit[s] with status
+    0 if true, or with status 1 if not. Errors are signaled by a non-zero status
+    that is not 1" — so status 1 meant drift and 128 meant unverified.
+
+    ⚠️ **MEASURED, and it is why this probe exists:** the REQUIRED `test` shard
+    (job 124517936895, PR #10382, git 2.56.0) is a depth-1 clone that CANNOT
+    carry the `measured_at_commit` object — and its ancestry probe answered
+    **status 1**, so a perfectly correct document was reported `DRIFTED` ("the
+    document and the tree disagree — do not delete the row to make this green"),
+    which redded `test_the_shipped_map_is_clean` and `test_cli_exit_codes`. Git
+    2.43 returns 128 for the same clone shape, so the error-status convention is
+    an implementation detail this guard must not rest on.
+
+    Split by cause, never by message: a TIMEOUT is `None` (unverified), an
+    unreadable git is a state error, and every non-zero exit is "this clone does
+    not have that commit" — which says nothing about the document.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=ANCESTRY_TIMEOUT_S,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"},
+        )
+    except subprocess.TimeoutExpired:
+        return (None, "")
+    except OSError as exc:  # pragma: no cover - git absent is a state error
+        raise _state_error(f"git unavailable ({exc})") from exc
+    if proc.returncode == 0:
+        return (True, "")
+    detail = (proc.stderr or proc.stdout).strip().splitlines()
+    return (False, detail[0] if detail else "git gave no detail")
+
+
+def _absent_object_report(sha: str, why: str) -> str:
+    """The UNVERIFIED entry for an object this clone does not carry.
+
+    ONE token across every unverified arm (`cannot be verified here`), because
+    callers key on it — and the CAUSE is named in the same sentence, so the
+    reader is not handed the drift instruction for a correct document.
+    """
+    shallow = _is_shallow_clone()
+    if shallow:
+        hint = (
+            "this checkout is SHALLOW (depth 1), so the object is absent by "
+            "construction — the REQUIRED `docs` job runs this check at "
+            "fetch-depth: 0, and that is where the claim is proved"
+        )
+    elif shallow is False:
+        hint = (
+            "this clone is not shallow but does not carry the object (a "
+            "partial clone, or a sha that does not exist at all)"
+        )
+    else:  # pragma: no cover - git could not say whether the clone is shallow
+        hint = "git could not say whether this checkout is shallow"
+    return f"measured_at_commit {sha} cannot be verified here: {why} ({hint})"
+
+
 def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     """`measured_at_commit` is an ancestor of HEAD — the map names its tree.
 
@@ -565,17 +640,43 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     the same lazy fetch), so it is UNVERIFIED, exit 2, never a pass and never
     drift (#5086 review P2, cycle 4).
 
-    The split keys on git's own STATUS, which is what the platform guarantees:
-    `--is-ancestor` *"exit[s] with status 0 if true, or with status 1 if not.
-    Errors are signaled by a non-zero status that is not 1."* A timeout is not a
-    git status at all, so it cannot be put in the status-1 (drift) channel — an
-    operator told "the document and the tree disagree" on a slow clone is handed
-    a wrong instruction about a correct document.
+    The split is by CAUSE, in two steps, and only the second one is about
+    ancestry:
+
+    1. **Does this clone carry the object?** `_object_present` asks
+       `git cat-file -e` — 0 = yes, anything else = no. Absent is UNVERIFIED and
+       the ancestry probe is never reached, because a clone that lacks the
+       commit has not disagreed with the document. This is the arm the REQUIRED
+       `test` shard lands in (depth-1 checkout) and it must stay a state error
+       there: inferring presence from `--is-ancestor`'s *error* status is what
+       mis-scored it as drift (see `_object_present` for the measurement).
+    2. **Is it an ancestor of HEAD?** Now the object IS here, so the question is
+       real and `--is-ancestor` has a real answer: status 0 = clean, status 1 =
+       genuine drift (a re-cut against another branch, a rebase that dropped the
+       commit, a sha from a different repository).
+
+    A timeout at either step is not a git status at all, so it cannot be put in
+    the drift channel — an operator told "the document and the tree disagree" on
+    a slow clone is handed a wrong instruction about a correct document.
     """
     match = _FRONTMATTER_SHA.search(doc)
     if not match:
         return (["frontmatter carries no `measured_at_commit: <sha>`"], [])
     sha = match.group(1)
+    # Presence FIRST: a clone that does not carry the object has not disagreed
+    # with the document, and git's error status for that case is not portable.
+    present, absent_why = _object_present(sha)
+    if present is None:
+        return (
+            [],
+            [
+                f"measured_at_commit {sha} cannot be verified here: could not be "
+                f"verified within {ANCESTRY_TIMEOUT_S}s (git is trying to fetch an "
+                "object it does not have, so this checkout cannot answer the claim)"
+            ],
+        )
+    if not present:
+        return ([], [_absent_object_report(sha, absent_why)])
     try:
         proc = subprocess.run(
             ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
