@@ -153,11 +153,13 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 __all__ = [
+    "GRAPH_TIER",
     "JOURNAL_EVENT_TYPES",
     "NARRATIVE_RECORD_TYPE",
     "NARRATIVE_TABLE",
     "PACKAGED_MIGRATIONS",
     "RECORD_MUTATIONS",
+    "RECORD_ONLY_TIER",
     "ROLE_POSTURE_SQL",
     "TENANT_GUC",
     "TENANT_GUC_SQL",
@@ -481,28 +483,52 @@ NARRATIVE_RECORD_TYPE = "SessionNarrated"
 
 #: The ONE record type whose whole job is to carry a capture's raw TURN SET into
 #: the record (#10017, step 3 of the ruling on that issue). Declared ONCE here and
-#: — from step 7, which turns the producer over — imported by it
-#: (`sdk._write_capture_turns`), for the same reason as
+#: imported by its producer (`sdk._write_capture_turns`), for the same reason as
 #: :data:`NARRATIVE_RECORD_TYPE`: a producer and a registry that spell one type
-#: two ways is the class of defect that made `create_document(type="SourceCreated")`
-#: journal nothing at all.
+#: two ways is the class of defect that made
+#: `create_document(type="SourceCreated")` journal nothing at all.
 #:
-#: ⛔ NOTHING EMITS IT YET, and that is the change this declaration belongs to:
-#: declaring the carrier is INERT until step 7 emits it, so the capture writer's
-#: per-turn `PointAdded` records are untouched here.
+#: ⚠️ STEP 7 EMITS IT NOW (this change), and the two halves have to be read
+#: together or the swap looks like a data loss:
+#:
+#:   * the per-turn `PointAdded` records it replaces ARE the record's turn-row
+#:     write (`_write_capture_turns` issues no row statement of its own, and the
+#:     graph write is already skipped once the record is armed — measured: drop
+#:     them and the record projects zero turn rows). So the carrier must give the
+#:     record that row write in the SAME change: `_turn_row_statements`, one
+#:     `public.point` row per turn at `cache_tier = 'record_only'`.
+#:   * the GRAPH half is `projection/__init__.py::_NO_PROJECTION_FOLD` — declared
+#:     there so both replay engines treat the type as recognized-and-not-folded
+#:     instead of "unrecognized event type" / `record_non_folded`.
 #:
 #: ⛔ AND STEP 7 INHERITS A THIRD STORE, not just the two this type names. The
 #: per-turn `PointAdded` records it replaces are ALSO the `:GraphEvent` /
 #: claim-transition stream — `sdk._GRAPH_EVENT_TYPES`, `shared_state.events
 #: .CLAIM_EVENT_TYPES`, and `docs/event-catalog.md`'s `PointAdded` row ("one per
-#: `{session_id}_t{i}` turn Point") — which is what `poll_events` serves. A
-#: "move" that simply stops emitting them silently removes one subscriber row per
-#: turn, and NOTHING gates that: the catalog is prose and no test pins it. So
-#: step 7 must EITHER keep a store-only per-turn emission (the two-store split
-#: this same writer already performs for the stale-turn sweep: `PointRetracted`
-#: store-only + `EntityMutated` for JSONL) OR record the decision to drop the
-#: turn rows from `poll_events`. `TurnsRecorded` must NOT be added to
-#: `_GRAPH_EVENT_TYPES` to compensate — that set's shape is a recorded decision.
+#: `{session_id}_t{i}` turn Point") — which is what `poll_events` serves.
+#:
+#: **THE DECISION THIS CHANGE RECORDS (it was required by #10017's own
+#: instruction of 2026-10-27T03:21:55Z, "either a store-only per-turn emission or
+#: the recorded decision to drop turns from `poll_events`"): turns LEAVE
+#: `poll_events` on the record-armed lane, and NO store-only emission replaces
+#: them.** The reason is the one that decides it: on this lane the writer
+#: deliberately stores no turn NODE, so a `:GraphEvent` about a turn would
+#: advertise an entity the graph does not hold — a subscriber would be told about
+#: a Point no graph read can return. ⛔ AND NOTHING COMPENSATES FOR IT ON THE
+#: FEED: `SessionRecorded` is NOT in `_GRAPH_EVENT_TYPES` either, so it writes no
+#: `:GraphEvent` row and `poll_events` (which serves `event_store.read_after`)
+#: never sees it — on the armed lane the change feed's visibility therefore ends
+#: with the EXTRACTION lane's claim Points, which are unaffected and stay
+#: `PointAdded`. The capture's own session-level record is JSONL only (durable
+#: in `public.journal_event` / the journal file), and the whole transcript is
+#: served by `get_session_detail` from the record, which is where §9.1/D1 puts
+#: it — a READ, not an announcement. Do not write a comment here claiming the
+#: feed still announces the capture; it does not. `TurnsRecorded` must NOT be
+#: added to `_GRAPH_EVENT_TYPES` to "restore" the rows — that set's shape is a
+#: recorded decision, and adding a JSONL-only carrier to it would make an event
+#: with no entity. Pinned by `tests/test_10017_turn_carrier_replay.py`
+#: (`test_an_armed_capture_writes_NO_graph_event_for_its_turns`), so the drop is a
+#: stated decision rather than an untested side effect of a type rename.
 TURNS_RECORD_TYPE = "TurnsRecorded"
 
 #: ⛔ THE PAYLOAD IS PINNED TO THE WRITER'S, so step 7 is a MOVE and not a
@@ -571,6 +597,20 @@ TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
 TURNS_SNAPSHOT_UNATTESTABLE_KEYS: frozenset[str] = frozenset({
     "status", "createdAt",
 })
+
+#: The `public.point.cache_tier` domain (#10017 R2). The column's own CHECK
+#: (`supabase/migrations/20261029000001_record_point_cache_tier.sql`) is the authority
+#: the database enforces; this pair is the value the PROJECTION writes, and
+#: `tests/test_10017_turn_carrier_replay.py` pins the two declarations together
+#: so a domain change cannot land on one side only.
+#:
+#:   * ``graph``       — the record and the cache both hold the row (the default,
+#:                       and every row written before the tier existed).
+#:   * ``record_only`` — the record holds it, the graph must not (§9.1's tier).
+#:                       `cache_projection.read_record_view` skips these rows, so
+#:                       `rebuild_from_record` and a journal rebuild agree.
+GRAPH_TIER = "graph"
+RECORD_ONLY_TIER = "record_only"
 
 #: The journal's record-type vocabulary. Sourced from the graph fold's own
 #: dispatch (`tortoise/projection/`) and the producers' emit sites, and pinned
@@ -1158,19 +1198,21 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
             "the same rule applies to raw turns). Its RECORD home is "
             "`public.point` — the table `record_read` already serves the "
             "transcript from — with `cache_tier = 'record_only'`; NOT a new "
-            "table, and no secondary projection is declared here because "
-            "nothing emits this type yet (step 7 does, in its own change). The "
+            "table, and its row statement is the CARRIER-KEYED secondary "
+            "projection `_turn_row_statements` (step 7 of the ruling, landed "
+            "with the producer that emits this type). The "
             "tier cannot ride the event payload: `_RECORD_ONLY_KEYS` strips it "
-            "before the insert, so step 7 must write it as its own column "
-            "statement (#10070). Until then, FOR THIS TYPE, the two rebuild "
-            "routes agree by BOTH having nothing to do — "
+            "before the insert, so the row statement names the COLUMN "
+            "explicitly (`_turn_row_statements`, #10070's named shape). "
+            "Declaring `NoRecordEffect` here is deliberate and is NOT the "
+            "same statement as \"the carrier writes nothing\": "
             "`projection/__init__.py::_NO_PROJECTION_FOLD` folds the type "
-            "nowhere, and this entry projects no row. That agreement is about "
-            "the CARRIER and says nothing about the per-turn `PointAdded` "
-            "records a capture still emits, which BOTH routes still fold into "
-            "turn nodes — so do not read it as §9.1 already holding; see "
-            "that section's measured note in STORAGE-ARCHITECTURE.md. The "
-            "payload is pinned to the writer's per-turn snapshot; see "
+            "nowhere (the GRAPH half), while the row/home half is keyed on "
+            "the CARRIER in the shape-keyed pass — so a replay writes one "
+            "`public.point` row per turn and no node, and the two rebuild "
+            "routes agree for the right reason. A `NodeSnapshot` effect "
+            "cannot express it: the payload is a LIST of snapshots, not one. "
+            "The payload is pinned to the writer's per-turn snapshot; see "
             "TURNS_SNAPSHOT_KEYS."
         ),
     ),
@@ -1490,8 +1532,10 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # precedent — the record strip alone was never sufficient for that key).
     # ⛔ And because this strips it, the tier can NOT be set through an event
     # payload: it is dropped before the insert, so the row lands the DEFAULT
-    # `graph` and the turn would be materialised again. Step 7 must write it as
-    # its own column statement.
+    # `graph` and the turn would be materialised again. It is written as its own
+    # column statement instead — `_turn_row_statements` below writes the
+    # `TURNS_RECORD_TYPE` carrier's rows with the tier COLUMN set for exactly
+    # this reason, and REFUSES a row it cannot place.
     "cache_tier",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
@@ -1921,15 +1965,85 @@ def _delete_statements(
     node: Node,
     key: str,
     match: tuple[str, ...] = ("node_key",),
+    cache_tier: Any = None,
 ) -> list[Statement]:
     """A hard delete: the identity parent FIRST (so the subquery sees the node
     row), then the node row. The identity delete cascades the incident edges,
     matching the graph's `DETACH DELETE`; the explicit node delete is the
-    child-first form and a no-op once the cascade has run."""
+    child-first form and a no-op once the cascade has run.
+
+    ``cache_tier`` is the #10017 R1 discriminator, and it exists because ONE op
+    cannot mean two end-states (#3300). Absent — every producer before #10017,
+    and every producer whose removal is real — the entity leaves BOTH stores.
+    ``record_only`` says the graph-tier copy is what is being removed and the
+    RECORD keeps the row: the graph fold still hard-deletes the node (it never
+    reads this key), and the record DEMOTES the row's tier instead of deleting
+    it.
+
+    ⛔ Why the demote and not the delete (`delete_point`'s `DELETE FROM
+    public.point` is the wrong shape here, and not by a little): the turns
+    #10017's purge removes from the graph are the SAME rows the copy phase just
+    put in the record, verified row-for-row by `tools/turn_parity_census.py`
+    BEFORE the delete is allowed. Deleting them would destroy the transcript the
+    purge exists to preserve — and it would happen immediately, not only on a
+    later replay, because `_emit_event` hands every appended record straight to
+    `record_writer.write_live_record` (the ONE production record door —
+    `write_records` is the batch/replay door, not this path). The demote is also
+    what keeps the two REBUILD routes agreeing: leave the row at its `graph`
+    default and `rebuild_from_record` re-creates the node the journal rebuild
+    correctly omits (`cache_projection.read_record_view`'s tier predicate is the
+    other half).
+
+    **OVERRIDES:** #10017 R1's recorded record-side mechanism (an
+    identity-then-row `DELETE`, `record_projection.py`'s `_delete_statements`
+    tier-less arm) — a tier-scoped removal's RECORD effect is a TIER DEMOTE
+    (`UPDATE public.point SET cache_tier = 'record_only'`) instead. R1's
+    premise, that journaling the removal "needs **no new mechanism**", holds on
+    the GRAPH fold (still a hard `DETACH DELETE`, unchanged) and is wrong on the
+    record fold, where it would delete the very rows the purge's census just
+    verified. Recorded on the issue (#10017) as well, which is the artifact the
+    lane that builds the gated purge tool reads first.
+
+    ``record_only`` is the only value a DELETE may carry: `graph` would name a
+    tier the row is not being left in, and the column exists only on
+    `public.point`, so a tier-scoped delete of any other label is refused rather
+    than emitted as SQL against a column that is not there.
+    """
+    if cache_tier is not None:
+        if cache_tier != RECORD_ONLY_TIER or node.table != "point":
+            raise RefusedJournalOperation(
+                f"EntityMutated op='delete' on {node.label!r} carries "
+                f"cache_tier={cache_tier!r}: the only tier-scoped removal is "
+                f"`{RECORD_ONLY_TIER}` on a `Point` (the one table with the "
+                "tier column). A `graph`-tier delete names a state the row is "
+                "not left in, and any other label has no column to demote.")
+        return [_tier_demote_statement(org_id, graph_id, key, match)]
     return [
         _identity_delete_statement(org_id, graph_id, node, key, match),
         _delete_statement(org_id, graph_id, node, key, match),
     ]
+
+
+def _tier_demote_statement(
+    org_id: str,
+    graph_id: str,
+    key: str,
+    match: tuple[str, ...] = ("node_key",),
+) -> Statement:
+    """The record's half of a graph-tier removal: the row STAYS, its tier moves.
+
+    A 0-row no-op when the record does not hold the row, which is the same
+    verdict the graph fold reaches for a delete of an absent node — a removal
+    record is never a creating record.
+    """
+    predicate = " OR ".join(f"{c} = %s" for c in match)
+    if len(match) > 1:
+        predicate = f"({predicate})"
+    return Statement(
+        "UPDATE public.point SET cache_tier = %s "
+        f"WHERE org_id = %s AND graph_id = %s AND {predicate}",
+        (RECORD_ONLY_TIER, org_id, graph_id, *([key] * len(match))),
+    )
 
 
 def _relation_coordinates(
@@ -2747,7 +2861,8 @@ def _op_dispatch_statements(
         raise RecordProjectionError(f"EntityMutated op={op!r} carries no key")
     match = _ENTITY_MATCH_COLUMNS.get(table, ("node_key",))
     if op in dispatch.delete_ops:
-        return _delete_statements(org_id, graph_id, node, key, match=match)
+        return _delete_statements(org_id, graph_id, node, key, match=match,
+                                  cache_tier=payload.get("cache_tier"))
     if op in dispatch.patch_ops:
         # #9881 — `state` is the write's FULL applied map, and for a rename that
         # map contains the new `name`. It used to be filtered out of the patch
@@ -2891,6 +3006,11 @@ def _nested_node_carrier(record: Mapping[str, Any],
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
+    # #10017 R2/step 7: the carrier's turns are `public.point` rows for the SAME
+    # session the per-turn `PointAdded` records linked, so the `relation` rows the
+    # record holds are unchanged by the producer turnover — `_turn_row_statements`
+    # applies this directive once PER TURN (one envelope, N targets).
+    (TURNS_RECORD_TYPE, "contains_session", "CONTAINS", "Session", "Point"),
 )
 
 
@@ -3778,6 +3898,84 @@ def _operator_relation_statements(
     return statements
 
 
+def _turn_row_statements(
+    record: Mapping[str, Any],
+    org_id: str,
+    graph_id: str,
+    columns: Mapping[str, frozenset[str]] | None = None,
+    refused: Mapping[str, frozenset[str]] | None = None,
+) -> list[Statement]:
+    """The `public.point` rows :data:`TURNS_RECORD_TYPE` contributes — its HOME.
+
+    #10017's ruling places a capture's raw turns OUTSIDE the graph and IN the
+    record (§9.1/D1, owner 2026-09-23), and `public.point` is the table
+    `record_read` already serves the transcript from. So the carrier is a
+    `NoRecordEffect` mutation on the GRAPH axis and a row writer on the HOME
+    axis, exactly as the narrative carrier is (§9555's `_narrative_statements`).
+
+    ⛔ WHY A SECONDARY PROJECTION AND NOT A `NodeSnapshot` EFFECT. The payload is
+    a ``turns`` LIST — one record per capture, main's landed shape (#10129) —
+    while a `NodeSnapshot` mutation addresses exactly one node. Keying the rows
+    on the CARRIER keeps one decision in one place and makes the live write and a
+    full replay run the SAME statement, which is what keeps the record
+    `replay(journal)`: a row written by the producer directly would leave
+    `replay` unable to reconstruct it.
+
+    ⛔ THE TIER IS STATED HERE, AND IT IS NOT OPTIONAL. It cannot ride the
+    payload (`_RECORD_ONLY_KEYS` strips `cache_tier` before `_split_properties`
+    sees it — the strip is what stops a `PointAdded` from hiding a real graph
+    point), so a row that did not state it would land the schema DEFAULT
+    `'graph'` and `read_record_view` would hand the turn to `record_plan`: the
+    record route would re-materialise the very node the carrier exists to keep
+    out of the graph (#10067). So this function REFUSES a row it cannot place
+    rather than falling back to the default.
+
+    The turn snapshot is the WRITER'S OWN (`sdk._write_capture_turns`, pinned
+    key-for-key by :data:`TURNS_SNAPSHOT_KEYS`), and it goes through the same
+    ``_split_properties`` split every other point row does — so a column the
+    snapshot carries lands as a column, an undeclared key lands in the props
+    tail, and a refused key is refused — without a second, drifting spelling of
+    that rule.
+    """
+    if record.get("type") != TURNS_RECORD_TYPE:
+        return []
+    columns = columns if columns is not None else table_columns()
+    refused = refused if refused is not None else refused_props_names()
+    turns = record.get("turns")
+    if not isinstance(turns, (list, tuple)) or not turns:
+        raise RecordProjectionError(
+            f"{TURNS_RECORD_TYPE!r} carries no `turns` list "
+            f"(got {type(turns).__name__}) — a carrier that carries no turn "
+            "would report a capture as filed while the record holds none of "
+            "its transcript")
+    node = Node("point", "Point", "id")
+    _node_table(node, columns)
+    statements: list[Statement] = []
+    for index, snapshot in enumerate(turns):
+        if not isinstance(snapshot, Mapping):
+            raise RecordProjectionError(
+                f"{TURNS_RECORD_TYPE!r} turns[{index}] is "
+                f"{type(snapshot).__name__}, not a snapshot mapping")
+        key = _key_value(node, snapshot, "id")
+        props = {k: v for k, v in snapshot.items() if k not in _RECORD_ONLY_KEYS}
+        props["id"] = key
+        col_values, tail = _split_properties(
+            node.table, props, columns=columns, refused=refused)
+        col_values[node.key_column] = key
+        # The row's own declaration that it is not graph state. Stated on the
+        # COLUMN, never in `tail` (the tail is what `cache_projection` copies
+        # back onto a node verbatim).
+        col_values["cache_tier"] = RECORD_ONLY_TIER
+        statements.append(_identity_statement(org_id, graph_id, node, key))
+        statements.append(
+            _upsert_statement(org_id, graph_id, node, key, col_values, tail))
+        # AFTER the identity + row upsert: the session endpoint must already be
+        # in `node_identity` or the composite FK refuses the insert.
+        statements.extend(_envelope_relation_statements(
+            org_id, graph_id, record, TURNS_RECORD_TYPE, key, columns, refused))
+    return statements
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -3804,6 +4002,9 @@ def mutations_for(
             columns=columns, refused=refused,
         ),
         *_narrative_statements(record, org_id, graph_id),
+        # #10017 step 7: the raw-turn carrier's HOME home — one `public.point`
+        # row per turn at `cache_tier = 'record_only'`, and no node anywhere.
+        *_turn_row_statements(record, org_id, graph_id, columns, refused),
     ]
 
 

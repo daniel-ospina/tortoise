@@ -138,23 +138,36 @@ jobs:
     # hangs and usually serves in minutes; the cadence/concurrency question stays
     # open and is tracked separately.
     #
-    # `ubuntu-24.04` is HOSTED-ONLY **as measured 2026-10-27 with the fallback
-    # engaged**: all nine runners advertised `ubuntu-latest` and none advertised
-    # `ubuntu-24.04` (with the fallback disengaged, none carries either). The
-    # rule is recorded (docs/ops/ci-runner-x64.md:25-26) and honoured by the
-    # installer — `resolve_labels()` can emit only `self-hosted-x64` or
-    # `self-hosted-x64,ubuntu-latest` (tools/install-ci-runner-x64.sh), asserted
-    # at `tests/test_ci_runner_x64_install.py:181`, and the re-registration path
-    # strips a version-pinned hosted label (`_preserve_labels`,
-    # tools/runner_autoscale.py).
-    # ⛔ BUT the pin is OBSERVED, NOT GUARANTEED: no test in this repo reads the
-    # LIVE label set, and the pool HAS served this very label — 2026-10-24's
-    # `finding-provenance` jobs ran on `pi-runner-vm-*` carrying `ubuntu-24.04`
-    # (tests/test_runner_tool_contract.py:5-12), drift the gate's text-reading arm
-    # could not see. Re-measure `gh api repos/<owner>/<repo>/actions/runners` if a
-    # runner's labels are re-cut: if the pool ever claims it again, this pin
-    # silently stops pinning and the failure mode is exactly the one it removes.
-    # Public repo, so hosted minutes are free: this spends nothing.
+    # `ubuntu-24.04` is HOSTED-ONLY for THIS job by choice, but NOT — any more —
+    # because the pool cannot answer it. Since the 2026-10-29 mitigation (#6897
+    # suspended; docs/ops/ci-runner-x64.md, "the label contract") the installer
+    # CAN emit `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`
+    # (tools/install-ci-runner-x64.sh; the flag defaults to `off`, so nothing
+    # changes for a box that does not set it) and an ORPHANED re-registration
+    # derives the same fact (tools/runner_autoscale.py) — so the premise this
+    # comment was written on ("`ubuntu-24.04` is claimed by no self-hosted
+    # runner") is FALSE. ⛔ WHAT DOES **NOT** HOLD IT: `_preserve_labels` still
+    # DROPS a version pin on RE-registration and nothing in this tree
+    # re-attaches it on that path, so a re-registered runner loses the label
+    # until someone runs `--repair-labels` on a box whose OWN resolution
+    # claims it (`on`, or `auto` on a host whose `/etc/os-release` reports
+    # 24.04 — a DECLINING `auto` claims nothing and drops it with the rest of
+    # the family) or reinstalls. `--status`' `label-coverage` exit 5 is what makes
+    # that visible; re-measure rather than trusting this text:
+    # `gh api repos/<owner>/<repo>/actions/runners`. The installer never hands
+    # `config.sh` a version pin with the flag off — pinned at
+    # `tests/test_ci_runner_x64_install.py:230`.
+    # ⛔ THE COST, STATED: GitHub's label matching is cumulative and unscoped
+    # (github/docs, "Using self-hosted runners in a workflow"), so while the
+    # mitigation is engaged this observer is POOL-ELIGIBLE — and a guard whose
+    # job is to report on a full pool can sit in `actions/checkout` behind that
+    # very backlog, then die at its own `timeout-minutes` with the measuring step
+    # SKIPPED: quiet precisely during the hosted outage it exists to surface.
+    # `runs-on:` cannot scope that away, because the mitigation is label-wide and
+    # not leg-scoped. Keep the pin for what it still buys — on a healthy day this
+    # leg lands on hosted and spends no pool slot and no fleet quota — and if the
+    # mitigation becomes permanent, re-scope this leg onto a label only hosted
+    # answers. Public repo, so hosted minutes are free: this spends nothing.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
