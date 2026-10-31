@@ -1123,6 +1123,20 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # :func:`default_graph_id_for_credential`, the one home the session/JWT and
     # OAuth credential resolvers call too, so all three credential classes name
     # the default tenant the same way (or refuse it the same way).
+    #
+    # ⚠️ RECORDED RESIDUAL (accepted, not forgotten): `graph_namespace` above
+    # comes from the org row while this id comes from `public.graphs`, i.e. two
+    # reads inside one auth call — so a `promote_default_graph` committing
+    # between them can hand the credential a namespace from one default and an
+    # id from the other. It is the same class the org-id-only lanes closed by
+    # reading the pair once (`hosted_api._org_default_graph`, #10180 review); it
+    # is NOT closed here because both fields of the credential dict are already
+    # a single snapshot from the request's point of view (the data plane opens
+    # `graph_namespace` and the record files under `default_graph_id`, both from
+    # THIS dict), the promotion is an org-admin action rather than a per-write
+    # one, and re-reading here would add a control-plane round trip to every
+    # org-wide API-key auth. Closing it means resolving both from one row in
+    # this function — the same `default_graph_row_for` shape — not a third read.
     if graph_id:
         default_graph_id = None
     else:
