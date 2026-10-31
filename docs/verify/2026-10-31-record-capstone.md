@@ -203,21 +203,30 @@ deployment also prints, so it is not evidence of a write.
 ## 6. Relationship to the 2026-10-26 capstone run (a continuation, not a second opinion)
 
 The committed `tests/test_9567_record_capstone.py` and `docs/verify/2026-10-26-record-capstone.md`
-measured D1–D5, D9 (direct connection) and D10, each with a named red. That artifact's own residual list
-names exactly the gap this run closes:
+measured D1–D5, D9 (direct connection) and D10 (with D6's seam half), each with a named red **or a
+cited prior red** — three of those rows (D2, D3, D4) were *not re-mutated in that run* and carry a prior
+run's red. That artifact's own residual list names exactly the gap this run closes:
 
 > *"**D7** narrative text — the §9.1 carrier is emitted by the layer-1 commit path, not
 > `capture_session`; the reader returned `narrative=None` on a real capture"* — drive
 > `hosted_api._execute_commit_writes` with a `story_arc` against the armed record, then read
 > `session_text.narrative`.
 
-That is what Arms B/B′ did: the narrative went from `narrative=None` to a **129 B row in
-`public.session_narrative`**, written by the carrier (`sdk._emit_event("SessionNarrated")`) from the
-commit path itself, and visible through the app role's RLS boundary. So the composite D7 now reads:
-**both prose tiers land in, and read back from, the record — and the turn TIER is absent from the graph
-— while the PROSE is still reachable from two nodes.** No measurement the 2026-10-26 artifact already
-made is re-opened or contradicted; where the two overlap (D2) this run is a second, independent
-measurement of it.
+Arms B/B′ took that **write** recipe (drive `_execute_commit_writes` with a `story_arc` against the armed
+record), but read the result as **SQL**, not through the SDK reader: the evidence is
+`SELECT session_id, length(narrative) FROM public.session_narrative` executed as
+`tortoise_record_app` inside the RLS boundary (`R2` below). ⛔ So this run proves the **write path and
+the record contents**, and it does **not** exercise `record_text.session_text(...).narrative` — that
+reader leg is still unexercised, and the prior artifact's `narrative=None` was a *reader* output, not a
+missing row. The narrative went from "not measured" to **a 129 B row in `public.session_narrative`**,
+written by the carrier (`sdk._emit_event("SessionNarrated")`) from the commit path itself and visible
+through the app role's RLS boundary. So the composite D7 now reads:
+**both prose tiers land in the record and are readable from it as the app role, and the turn TIER is
+absent from the graph — while the PROSE is still reachable from two nodes, and the SDK reader leg is
+still unexercised.** No measurement the 2026-10-26 artifact already
+made is re-opened or contradicted; where the two overlap (**D2**, and **D7's raw-turn half** — the two
+turns present in `public.point` and read back as the app role) this run is an independent second
+measurement of the same state.
 
 ## 7. Reproduce
 
