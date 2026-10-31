@@ -1758,19 +1758,25 @@ fold drops it too — so the two routes agree by both losing that anchor rather 
 an attribute the graph does not have. Pinned by
 `tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.
 
-## §9.1's carrier paragraph — the design stayed, the delivery state left (`#10067`, 2026-10-29)
+## §9.1's carrier paragraph — the design stayed, the delivery state left (`#10067`, 2026-10-30)
 
 The rule in §9.1 is unchanged: the transcript lives outside the graph, the CAPABILITY decides which
 store holds a capture's turns, and where the record holds them the graph keeps no turn node. What
 left §9.1 with step 7 (`#10017`'s carrier, landed as `#10076`; the type declared by `#10129`) is the
-paragraph that said **where that rule stood** — the delivery stamp, the "instead of" / "stops
-re-creating" narration, the named residuals' issue state, and the pointer at a `log.py` note
-deferring the torn-tail classification. Issue state and the narrative of what changed belong in this
-file (`#8542`); §9.1 states the rule they settled on. This entry is the record of that move, kept
-next to the paragraph's subject rather than in the design documents.
+paragraph that said **where that rule stood** — "nothing sets `'record_only'` yet" and its closing
+"do not read the paragraph above as a description of current behaviour" — i.e. delivery state spoken
+as delivery, which is exactly the shape the class guard refuses in a design document. Issue state and
+the narrative of what changed belong in this file (`#8542`); §9.1 states the rule they settled on, and
+the design that replaced that paragraph is below. This entry is the record of that move, kept next to
+the paragraph's subject rather than in the design documents.
 
-What the design document now says in that place, as design:
+What the design document now says in that place, as design — the statements this entry is the record
+for:
 
+- **The journal.** On the record-held lane a capture's turns are journalled as ONE `TurnsRecorded`
+  carrier holding the writer's per-turn snapshots verbatim, **instead of** one `PointAdded` per turn,
+  and its replay materialises no node — a `PointAdded` there re-created the turn nodes on every
+  rebuild, i.e. a rebuild that undid this placement (`#10067`).
 - **The row.** The carrier states its turn rows itself — `_turn_row_statements`
   (`tortoise/record_projection.py:3901`), one `public.point` row per snapshot at
   `cache_tier = 'record_only'`, the tier from the record TYPE's declaration and never from a payload.
@@ -1801,8 +1807,8 @@ What the design document now says in that place, as design:
 Why it left: the class guard
 (`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
 refuses, in the design documents, an issue-state claim adjacent to a `#NNN`, the narration of a
-change, and delivery spoken as delivery. A delivery stamp and a residual stated with its issue's
-state are exactly those shapes, so the record belongs here and §9.1 keeps only the rule.
+change, and delivery spoken as delivery. A delivery stamp and a "do not read this as current
+behaviour" close are exactly those shapes, so the record belongs here and §9.1 keeps only the rule.
 
 The pins for the statements above are the carrier's own:
 `tests/test_10017_turn_carrier_replay.py::test_the_record_held_lane_journals_the_carrier_not_point_added`,
