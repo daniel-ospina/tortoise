@@ -858,7 +858,7 @@ _IDLE_CITES: dict[str, str] = {
         "`if vet_enabled and complete_list:` (:9300) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :8960-8963)."
+        "returns {} on its fail-open path, :8962-8965)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
