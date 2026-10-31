@@ -866,11 +866,17 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
     the same container) cannot inherit a previous narrative and pass on it —
     the isolation is the tenant, which is what the record's own key shape gives.
 
-    ``with_source`` adds the capture's own transcript `:Source` record, which is
-    the record that carries `story_arc` onto a NODE (`hosted_api`
-    `_execute_commit_writes` step 2 does exactly that MERGE). The cache rebuild
-    needs it: without a `:Source` record there is nothing in the record for the
-    rebuild to reproduce the narrative ON, so "the cache holds the narrative" is
+    ``with_source`` adds a SYNTHETIC `SourceCreated` record carrying
+    `story_arc`, i.e. the shape `_upsert_document`'s passthrough would fold onto
+    a `:Source` node. It is deliberately NOT the shape the commit path emits any
+    more (#10000 deleted the raw `s.story_arc=$arc` MERGE), and a real
+    `SourceCreated` carrying the key is DENIED by `_upsert_source`'s
+    `allow_keys` — so this seed stands for the residual hole in the fold
+    (`_upsert_document`'s no-allowlist passthrough, reachable from
+    `tortoise_create_document`, recorded in §9.1), not for live commit
+    behaviour. The cache rebuild needs it: without some record for the narrative
+    there is nothing for the rebuild to reproduce the narrative ON, so "the
+    cache holds the narrative" is
     unmeasurable and a rebuild that writes only the turn Points satisfies every
     count.
     """
@@ -912,10 +918,11 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
             _counts_record(redactions=4, turns=2),
         ]
         if with_source:
-            # The transcript `:Source` the commit's raw MERGE writes
-            # `s.story_arc=$arc` onto — the SAME text the carrier states, so the
-            # record and the cache state one fact (and the rebuild has to
-            # reproduce it on a node, not merely re-count rows).
+            # SYNTHETIC, and named as such (#10000): a `SourceCreated` row
+            # carrying `story_arc`. The commit path no longer writes the key onto
+            # a node, and `_upsert_source` DENIES it here — this seed stands for
+            # the fold's remaining hole (`_upsert_document`'s no-allowlist
+            # passthrough), which the rebuild parity check below measures.
             records.append({
                 "type": "SourceCreated",
                 "id": f"session:{SESSION}",
