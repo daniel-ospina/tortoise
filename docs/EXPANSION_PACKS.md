@@ -461,6 +461,7 @@ desired set**, never by a status the caller sends.
 
 So `configured: false` is **not** a synonym for "the whole catalog applies" —
 the RECORDS are the predicate. Read it as "never explicitly configured".
+
 - **`set_graph_packs` is the only path that moves the revision.** Every seeding
 path (`get_tenant_packs`'s self-heal *and* `ensure_tenant_packs` — the
 provision retry, the Supabase control plane, and
