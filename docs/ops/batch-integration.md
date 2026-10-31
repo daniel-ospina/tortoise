@@ -112,8 +112,12 @@ pre-existing bug inside a batch, which is scope creep with no review).
 ```bash
 git fetch origin main
 PINNED="$(git rev-parse origin/main)"            # PIN THIS SHA — every later comparison is against it
+# ⛔ A dirty tree defeats the switch: `git switch -c` CARRIES uncommitted and untracked files.
+[ -z "$(git status --porcelain)" ] || { echo "dirty tree — the baseline would measure it, not origin/main"; exit 1; }
 git switch -c integration/base-check "$PINNED"   # ⛔ SWITCH, not `git branch` — run the suite on THIS tree
+# BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
 uv run pytest tests/ -q -m 'not track_b and not live and not integration'
+uv run pytest tests/test_ingest_safety.py -q -m track_b
 git switch -                                      # back to the lane you came from
 ```
 
@@ -122,7 +126,17 @@ and leaves your working tree exactly where it was — so the suite runs on whate
 be standing in (in this fleet, usually a lane worktree carrying unreviewed changes), while the heading
 above promises `origin/main` alone. The baseline id list is the ledger every later verdict is diffed
 against, so a polluted baseline both hides main's own red **and** convicts an innocent PR for a failure
-the lane introduced. `git switch -c` (or `git switch --detach "$PINNED"`) is the whole fix.
+the lane introduced. `git switch -c` (or `git switch --detach "$PINNED"`) fixes the *wrong branch*;
+it does **not** fix a *dirty tree* — `git switch -c <branch> <commit>` re-applies local modifications
+to the new tree (it refuses only where they differ between the two branches, so uncommitted work on a
+file `main` did not touch is carried silently, and untracked files are always carried). Hence the
+`git status --porcelain` precondition above: in this fleet the lane's normal state **is** a dirty tree,
+and that is exactly the work the baseline must not measure.
+
+**The baseline runs BOTH halves.** Phase 3 runs `-m track_b` as well as the deterministic marker (see
+below), so a baseline that runs only the first half is structurally incapable of containing a
+pre-existing `track_b` failure — Phase 4 would then classify that failure as `NEW` and convict an
+innocent PR, which is the outcome this whole phase exists to prevent.
 
 Record the baseline result **as data**: counts, the **exact list of failing test ids**, and the
 duration. Those ids are the ledger that later failures are diffed against. Record `$PINNED` too — in
@@ -150,11 +164,22 @@ Two corrections to the quantifier, because both decide whether the batch is a ga
   a different (narrower and slower-excluding) set, so a `BATCH-GREEN` batch can still red a
   post-merge run on a test the batch never ran. It detects; the batch gates.
 
-And the gate has **non-test legs** a pytest run cannot reproduce at all: `packs-compile` (whole-registry
-`PackRegistry.load_all()`), `manifest-integrity`, `workflow-lint`, `surface-guard`. The batch
-reproduces the two **test** halves; those legs are owed by the landing rail, which still requires
-`python-ci-gate` (see [Landing](#landing--main-must-still-be-the-tree-you-tested)). Never read a green
-batch as "`python-ci-gate` passed".
+And the gate has legs a pytest run does **not** reproduce, in two kinds — so never read a green batch
+as "`python-ci-gate` passed":
+
+- **Non-test legs**, which no pytest run can reproduce at all: `packs-compile` (whole-registry
+  `PackRegistry.load_all()`), `manifest-integrity`, `workflow-lint`, `surface-guard`.
+- **Two test legs the batch's lane SKIPS rather than runs.** `test-d14-hosted-api` runs
+  `pytest tests/ -m embedded_only` **URI-less** (with `TORTOISE_TEST_CARVE_OUT=1`) and fail-closes on an
+  all-skip floor precisely because those tests run in no other job — while Phase 0 above *mandates* a
+  URI, and the D14 hook makes every `embedded_only` test **skip visibly** when one is set, so the batch
+  collects them and reports skips. `test-record-postgres` installs `.[test,postgres]` and arms
+  `TEST_RECORD_DB_URI`; the batch's `uv sync --extra embeddings --extra parity` installs neither
+  `psycopg2` nor a record DB, so those skip too.
+
+Both of those are `needs:` of the required `python-ci-gate`, so they are gate members, not formality.
+All of the above are owed by the landing rail, which still requires `python-ci-gate` (see
+[Landing](#landing--main-must-still-be-the-tree-you-tested)).
 
 ### 2. Assemble the batch
 
@@ -255,7 +280,7 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
 
 | Verdict | Meaning |
 |---|---|
-| `BATCH-GREEN` | Full suite ran on the batched tree, no NEW failures vs baseline. |
+| `BATCH-GREEN` | Full suite ran on the batched tree, no NEW failures vs baseline. It does **not** mean `python-ci-gate` passed: the `embedded_only` and record-postgres test legs, and the non-test legs, are skipped rather than reproduced (see the gate-legs list above). |
 | `BATCH-GREEN(BASELINE(<ids>))` | Green *relative to baseline*; the listed ids were already red on main. |
 | `BATCH-RED(<ids>)` | New failures remain after dropping the culprit(s). Do not merge. |
 | `UNPROVEN-FULL-SUITE(<lane>)` | **The full suite did not run.** Only the embedded carve-out or a subset ran. This is never "green". |
@@ -300,7 +325,7 @@ assembly time:
 git fetch origin main
 # $PINNED does NOT survive Phase 1's shell — landing is a different actor. Read it from the batch PR
 # body (Phase 1 recorded it there) and never from memory:
-PINNED="$(gh pr view <batch PR> --json body --jq -r '.body' | sed -n 's/^pinned-base: //p')"
+PINNED="$(gh pr view <batch PR> --json body --jq '.body' | sed -n 's/^pinned-base: //p')"
 [ -n "$PINNED" ] || { echo "no pinned-base: line in the batch PR body — the pin is unknown, re-run Phase 1"; exit 1; }
 [ "$(git rev-parse origin/main)" = "$PINNED" ] || {
   echo "main moved: $PINNED -> $(git rev-parse origin/main) — re-baseline and re-run phases 1-3"; exit 1
@@ -311,6 +336,14 @@ An unset `$PINNED` in the landing shell compares against the empty string: it fa
 right) but prints `main moved:  -> <sha>` against an unmoved `main`, so the one mechanical enforcement
 of the invariant reads as noise. Materialising it from the PR body makes the check self-contained —
 the PR body is already the evidence artifact (see Aftermath).
+
+⛔ **`--jq`, never `--jq -r`.** `gh` has no raw (`-r`) flag — that is `jq`'s — so `-r` is taken as the
+*expression*, `.body` becomes a second positional argument, and the payload is never filtered: on
+gh 2.102.0 the command fails outright (`accepts at most 1 arg(s), received 2`); on older builds it
+prints the pretty-printed JSON object, which the `sed` then cannot match. Either way `$PINNED` is empty
+and the landing step exits 1 with *"no pinned-base: line in the batch PR body"* on a body that carries
+the line — the check is impossible to pass as written, and the reachable improvisations are to skip the
+assertion or hand-copy the sha. `--jq '.body'` (or `--template '{{.body}}'`) emits the bare body.
 
 If that assertion fails, there are exactly two honest routes and no third:
 

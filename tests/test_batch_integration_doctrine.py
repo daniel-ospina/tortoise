@@ -1,7 +1,8 @@
 """The batch-integration doctrine's commands must execute against THIS repo.
 
 WHY THIS FILE EXISTS (#10399 review P1-1/P1-2/P1-4/P1-5, P2-1, P2-3, and the fixes
-at ``f3c6c803b``: ISSUE 1-5 / P1-P3)
+at ``f3c6c803b``: ISSUE 1-5 / P1-P3; and after ``e715d81b2``: P1-P3 plus the
+``a8be548762`` P2)
 ------------------------------------------------------------------------------
 ``docs/ops/batch-integration.md`` is a *doctrine*: an operator follows it
 top-to-bottom and executes its command blocks. Commands that failed as written,
@@ -33,6 +34,18 @@ or facts that were false against the tree they describe:
   moving ``main`` while a batch runs;
 * the landing assertion read ``$PINNED``, which Phase 1 set in a *different*
   shell, so in the landing actor's shell it compared against the empty string;
+* **the pin was read with ``gh pr view … --jq -r '.body'``**, and ``gh`` has no
+  raw flag: ``-r`` becomes the *expression*, so the payload is never filtered,
+  ``$PINNED`` is empty, and the landing step exits 1 on a body that carries the
+  line — the doctrine's only mechanical check, impossible to pass;
+* **the baseline ran one half of the suite while the gate ran two**, so a
+  pre-existing ``track_b`` red was classified ``NEW`` and convicted an innocent
+  PR — and the baseline could still measure a **dirty tree**, because
+  ``git switch -c`` carries uncommitted and untracked files into the new tree;
+* **the leg list was a partition claim that was false**: ``test-d14-hosted-api``
+  (``-m embedded_only``, URI-less) and ``test-record-postgres``
+  (``[postgres]`` + ``TEST_RECORD_DB_URI``) are ``python-ci-gate`` members the
+  batch's URI lane *skips* rather than reproduces;
 * the carve-out file count was quoted from memory and was stale.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
@@ -41,13 +54,19 @@ commands honest does not. Three things are additionally pinned as **substrings**
 because they are the document's contract rather than its wording — the
 ``OVERRIDES:`` line, the verdict markers, and the "never green on a partial lane"
 rule — plus the two marker strings (``--no-ff``, ``export TORTOISE_DB_URI=``) that
-must sit in the *fence* they belong to, not merely somewhere in the prose.
+must sit in the *fence* they belong to, not merely somewhere in the prose, and
+the leg names (``test-d14-hosted-api``, ``test-record-postgres``) whose omission
+would make the reproduced/not-reproduced list read as a complete partition.
 
-Non-vacuity: measured against the pre-fix documents — **6 of 11 red** at
-``f3c6c803b`` (the head this group of checks was written against) and **9 of 11
-red** at ``a17576c43``. The two that pass on every tree are the parser sanity
-check and the machinery-naming check, by design: they guard against a re-pointed
-or deleted document, not against a bad command.
+Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
+revision rather than asserted: **11 of 13 red** at ``a17576c43``, **8 of 13** at
+``f3c6c803b``, and **4 of 13** at ``a8be548762`` — the four there being exactly
+the findings that head's review raised (the landing pin's ``--jq -r``, the
+baseline's missing ``-m track_b`` half, the missing clean-tree precondition, and
+the two gate test legs the URI lane skips). The parser-sanity check is green on
+every revision by design: it guards against a re-pointed or deleted document, not
+against a bad command. The contract-sentences check is green from ``f3c6c803b``
+on, which is when those sentences landed.
 
 Static, no network / DB / graph.
 """
@@ -59,9 +78,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "ops" / "batch-integration.md"
-
-#: The marker filter the ``python-ci.yml`` deterministic lanes apply.
-MARKER_FILTER = "-m 'not track_b and not live and not integration'"
 
 #: The three exclusions, required as *terms* rather than as one literal string —
 #: a reordered ``-m`` must pass, a missing exclusion must not (the selector's
@@ -116,6 +132,11 @@ def _fences() -> list[list[str]]:
 def _fenced_commands() -> list[str]:
     """Every non-blank, non-comment line inside a fenced code block, flattened."""
     return [cmd for fence in _fences() for cmd in fence]
+
+
+def _deterministic_half(cmd: str) -> bool:
+    """A full-suite run of the deterministic half (``-m 'not track_b …'``)."""
+    return bool(_FULL_SUITE.search(cmd)) and TRACK_B_FILTER not in cmd
 
 
 def _full_suite_fences() -> list[list[str]]:
@@ -192,11 +213,15 @@ def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
 
 
 def test_the_track_b_gate_leg_is_run_in_the_gate_phase() -> None:
-    """#10399 review ISSUE 1: the second half runs in Phase 3, not only in prose.
+    """#10399 review ISSUE 1 / the ``e715d81b2`` P2: BOTH halves, in EVERY suite phase.
 
-    A `-m track_b` mention anywhere would satisfy a naive substring check, so
-    this requires it inside a fence that ALSO carries the deterministic half —
-    i.e. the documented gate run covers both halves.
+    A `-m track_b` mention anywhere would satisfy a naive substring check, so this
+    requires it inside a fence that ALSO carries the deterministic half. And it
+    requires that of **every** full-suite fence that runs the deterministic half —
+    not just one: half 2 was added to the Phase 3 gate and not to the Phase 1
+    baseline, which left the baseline set structurally incapable of containing a
+    pre-existing `track_b` failure, so Phase 4 classified it NEW and convicted an
+    innocent PR.
     """
     fences = _full_suite_fences()
     assert fences, "the doctrine no longer documents a full-suite run — re-point this guard"
@@ -204,16 +229,22 @@ def test_the_track_b_gate_leg_is_run_in_the_gate_phase() -> None:
         fence
         for fence in fences
         if any(TRACK_B_FILTER in c for c in fence)
-        and any(
-            _FULL_SUITE.search(c)
-            and TRACK_B_FILTER not in c
-            and all(term in c for term in EXCLUSION_TERMS)
-            for c in fence
-        )
+        and any(_deterministic_half(c) and all(term in c for term in EXCLUSION_TERMS) for c in fence)
     ]
     assert paired, (
         "no fenced block runs the `-m track_b` half alongside the deterministic "
         "half; the gate phase must run BOTH (test-track-b is a python-ci-gate need)"
+    )
+    unpaired = [
+        [c for c in fence if _deterministic_half(c)]
+        for fence in fences
+        if any(_deterministic_half(c) for c in fence)
+        and not any(TRACK_B_FILTER in c for c in fence)
+    ]
+    assert not unpaired, (
+        "a suite phase runs only the deterministic half and never `-m track_b`: "
+        "a pre-existing track_b red would then be missing from that phase's id set "
+        f"(Phase 4 calls it NEW and convicts an innocent PR); offending fences: {unpaired}"
     )
 
 
@@ -317,6 +348,26 @@ def test_reverting_a_batch_culprit_passes_a_mainline() -> None:
     )
 
 
+def test_the_baseline_refuses_a_dirty_tree() -> None:
+    """the ``e715d81b2`` P3: ``git switch -c`` carries uncommitted and untracked files.
+
+    ``git switch -c <branch> <commit>`` re-applies local modifications to the new
+    tree (it refuses only where they differ between the two branches) and always
+    carries untracked files — so in this fleet's normal state (a lane worktree with
+    unreviewed changes) the fence headed "run the suite on ``origin/main`` ALONE"
+    measures the lane. The clean-tree precondition is the other half of the fix.
+    """
+    fences = _fences()
+    first = _fence_index(lambda fence: any(_FULL_SUITE.search(c) for c in fence))
+    assert first >= 0, "no baseline fence found — re-point this guard"
+    baseline = fences[first]
+    assert any("git status --porcelain" in c for c in baseline), (
+        "the baseline fence must refuse a dirty tree (`[ -z \"$(git status "
+        "--porcelain)\" ]`) before switching: `git switch -c` carries uncommitted "
+        "and untracked files into the baseline tree, so the run measures the lane"
+    )
+
+
 def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     """#10399 review P1-3 / P2-1: the tested tree must be the landed tree.
 
@@ -346,6 +397,21 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
         "DIFFERENT shell, so here it is empty and the assertion reports "
         "`main moved:  -> <sha>` against an unmoved main. Materialise it from the "
         "batch PR body (Phase 1 records it there)"
+    )
+    # gh has no raw (`-r`) flag: `--jq -r '.body'` makes `-r` the EXPRESSION and
+    # `.body` a second positional argument, so the payload is never filtered and
+    # `$PINNED` comes out empty — on gh 2.102.0 it fails outright with
+    # "accepts at most 1 arg(s), received 2". The landing step must be runnable.
+    confused = [cmd for cmd in defines if "--jq -r" in cmd or "--jq=-r" in cmd]
+    assert not confused, (
+        "the landing pin is read with `--jq -r`, which gh does not have (that is "
+        "jq's flag): `-r` is taken as the expression and `.body` as a second "
+        f"argument, so the body is never extracted and $PINNED is empty: {confused}"
+    )
+    assert any("--jq" in cmd or "--template" in cmd for cmd in defines), (
+        "the landing pin must read the batch PR body through `--jq '.body'` or "
+        "`--template '{{.body}}'` — that is the only mechanical enforcement of "
+        "the tested-tree==landed-tree invariant"
     )
 
 
@@ -407,6 +473,31 @@ def test_the_contract_sentences_are_pinned() -> None:
         "merge is not a merge commit, so the documented `git revert -m 1` "
         "would then have no mainline to revert against"
     )
+
+
+def test_the_unreproduced_gate_legs_are_named() -> None:
+    """the ``a8be548762`` P2: the reproduced/not-reproduced list is a partition claim.
+
+    ``test-d14-hosted-api`` runs ``-m embedded_only`` URI-less and
+    ``test-record-postgres`` arms ``[postgres]`` + ``TEST_RECORD_DB_URI``; both are
+    ``needs:`` of the required ``python-ci-gate``, and the batch's URI lane SKIPS
+    both rather than reproducing them. A list of the legs a pytest run does not
+    reproduce that omits them reads as a complete partition while two gate test
+    legs never execute — so ``BATCH-GREEN`` becomes achievable on a tree they never
+    ran.
+    """
+    text = _text()
+    for needle in (
+        "test-d14-hosted-api",
+        "test-record-postgres",
+        "embedded_only",
+        "TEST_RECORD_DB_URI",
+    ):
+        assert needle in text, (
+            f"the doctrine must name {needle!r} where it lists the legs a pytest run "
+            "does not reproduce: both are python-ci-gate members the batch's URI "
+            "lane skips, so omitting them makes the list read as a complete partition"
+        )
 
 
 def test_the_live_queue_and_the_carve_out_registry_are_named() -> None:
