@@ -366,14 +366,26 @@ def test_embedder_constants():
 # ── runner ───────────────────────────────────────────────────────────
 
 def _run_all():
+    ran = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
-    print("\nall embedding tests passed")
+            ran += 1
+    # The COUNT is printed, not just "passed": most tests in this file print
+    # their own `PASS` line but the `#10296` block does not (it only prints on
+    # SKIP), so a runner that lost half the file still ended on the same
+    # sentence. A number that moves when a block is added is what makes the
+    # loss visible in this mode rather than only under pytest.
+    print(f"\nall embedding tests passed ({ran} tests)")
 
 
-if __name__ == "__main__":
-    _run_all()
+# ⛔ The guard sits at EOF, NOT here, and that placement is load-bearing (#10010
+# review F3): `_run_all` discovers tests from `globals()` at CALL time, so a guard
+# placed above any `def test_` makes `python3 tests/test_embeddings.py` print
+# "all embedding tests passed" having run none of the tests defined below it. It
+# sat above the whole `#10296` block and silently lost all seven of those pins in
+# the file's own documented second execution mode — the mode the PR body cites as
+# evidence. Keep it last.
 
 
 # ── 14. #10296: the intra-op thread pin ───────────────────────────────
@@ -655,3 +667,39 @@ def test_the_thread_pin_is_not_one_process_wide_scalar():
             "torch changed and ensure_embed_threads' premise needs revisiting")
     finally:
         torch.set_num_threads(saved_threads)
+
+
+def test_the_standalone_runner_cannot_lose_a_test_defined_below_it():
+    """#10010 review F3 — the file's second execution mode must not silently skip.
+
+    ``_run_all()`` discovers tests from ``globals()`` at CALL time, so the
+    ``if __name__ == "__main__"`` guard is only correct at the END of the file:
+    placed above any ``def test_`` it prints *"all embedding tests passed"*
+    having run none of the tests below that line. It sat above the whole
+    ``#10296`` block, so ``python3 tests/test_embeddings.py`` ran 14 of 21 and
+    reported success — and that mode is cited as evidence in PR #10010's body.
+
+    Asserted STATICALLY, because the property is about source ORDER, not
+    behaviour: a runtime check inside ``_run_all`` cannot see a test that was
+    never defined at the moment it ran. Pre-fix this fails with guard at line
+    375 and the last test at 581.
+    """
+    from pathlib import Path
+
+    src = Path(__file__).resolve().read_text(encoding="utf-8").splitlines()
+    guards = [i for i, line in enumerate(src) if line.startswith("if __name__")]
+    assert len(guards) == 1, (
+        f"expected exactly one `if __name__` guard, found {len(guards)} at "
+        f"lines {[g + 1 for g in guards]}")
+    last_test = max(i for i, line in enumerate(src) if line.startswith("def test_"))
+    assert guards[0] > last_test, (
+        f"the `if __name__ == '__main__'` guard (line {guards[0] + 1}) sits "
+        f"ABOVE the last test (line {last_test + 1}), so "
+        f"`python3 tests/test_embeddings.py` silently runs none of the tests "
+        f"defined below it — move the guard to EOF")
+
+
+# ── runner (LAST — see the note on `_run_all`) ────────────────────────────
+
+if __name__ == "__main__":
+    _run_all()
