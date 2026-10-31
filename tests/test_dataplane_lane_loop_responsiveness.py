@@ -124,6 +124,7 @@ import pytest
 
 # The authenticated TestClient fixture (temp-DB SDK patching + the module-level
 # env the app needs on import). Imported for the fixture, not for the tests.
+from tests._verdict import inconclusive
 from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
 from tortoise.sdk import TortoiseSDK
@@ -136,6 +137,72 @@ TICK_S = 0.02
 # next tick cannot run until the freeze releases); a free loop yields
 # ~STALL_S/TICK_S = 100. Loose on purpose — see the write file's rationale.
 MIN_TICKS_IN_STALL = 10
+
+# ── #5049 rule 1: the tick count may not produce a FAIL on its own ────────
+# `ticks_in_stall` is a WALL-CLOCK SCHEDULING measurement, so on its own it
+# states as much about the machine as about the code. #5049's refactor
+# direction (encoded in `tests/_verdict.py`: "No fixed wall-clock budget may
+# produce FAIL … a deadline expiry is evidence about machine load, not about
+# the property under test") rules that out, and this guard measured the cost:
+#
+# MEASURED 2026-10-31, PR #10346 `test (g)` run 41147715365 job 124377940394
+# (`28287e984`, a consent-page diff that touches NO file in this module's
+# subject): `the event loop completed only 0 tick(s) during a 2.0s blocked
+# graph call (need 10)` — a FAIL from the machine. The off-load assertion that
+# is this module's actual subject (`ran_on_loop is False`) had already PASSED
+# in that run, and the other 11 shards were green. Which machine-level cause
+# produced the starvation is NOT established (one reproduction attempt — 6 CPU
+# hogs pinned to the test's own 2 vCPUs — still yielded ~100 ticks), and that
+# is exactly the point: a count a lane cannot attribute is not a verdict about
+# the code.
+#
+# So the count is CALIBRATED against this host's own idle rate before it may
+# red anything: `_measure_idle_ticks` runs the same ticker for the same span
+# with nothing blocking, and `_stall_tick_floor` derives the floor. A host that
+# cannot tick at all makes the measurement impossible → INCONCLUSIVE (a skip
+# naming the deadline), never a FAIL. A host that ticks normally keeps the
+# pre-existing floor EXACTLY (`min(MIN_TICKS_IN_STALL, …)`), so an inline graph
+# call — which yields 0 ticks while the loop is demonstrably alive, measured
+# here — still reds: the discrimination this guard was built for is untouched.
+CALIBRATION_SPAN_S = STALL_S
+
+
+def _stall_tick_floor(baseline_ticks: int) -> int:
+    """The in-stall tick floor, calibrated against this host's own idle rate.
+
+    ``baseline_ticks`` is what the SAME ticker completed over the SAME span
+    with nothing blocking (``_measure_idle_ticks``).
+
+    * ``0`` is the UNCALIBRATED sentinel: the host could not schedule the loop
+      over a whole idle span, so a 0 in-stall count is not evidence about the
+      code. Callers must exit INCONCLUSIVE — never read it as a floor of 0,
+      which would make the guard vacuous.
+    * Otherwise the floor is the pre-existing ``MIN_TICKS_IN_STALL``, lowered
+      only for a host that measures itself below twice that rate (a thinned
+      but still-scheduling runner), and never below 1 tick — one tick inside
+      the window is already impossible on the inline shape.
+    """
+    if baseline_ticks <= 0:
+        return 0
+    return min(MIN_TICKS_IN_STALL, max(1, baseline_ticks // 2))
+
+
+def _measure_idle_ticks(span_s: float = CALIBRATION_SPAN_S) -> int:
+    """Ticks this host's loop completes over ``span_s`` with NOTHING blocking.
+
+    Runs on a loop of its own, after the measured drive, so the calibration is
+    paid only on a run that is about to red — the green path costs nothing.
+    """
+    async def _tick() -> int:
+        count = 0
+        deadline = time.perf_counter() + span_s
+        while time.perf_counter() < deadline:
+            count += 1
+            await asyncio.sleep(TICK_S)
+        return count
+
+    return asyncio.run(_tick())
+
 
 _INTERNAL_KEY = "loop-responsiveness-internal-key"
 _SEEDED_SESSION = "dataplane-loop-3718-session"
@@ -535,11 +602,36 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
 
     entered, exited = state["entered"], state["exited"]
     in_stall = [t for t in ticks if entered < t < exited]
-    assert len(in_stall) >= MIN_TICKS_IN_STALL, (
+    # #5049 rule 1: the count is calibrated (see `_stall_tick_floor`) before it
+    # may red — a wall-clock scheduling measurement alone is a statement about
+    # the host, not about `delete_session`.
+    floor = MIN_TICKS_IN_STALL
+    baseline_ticks = None
+    if len(in_stall) < MIN_TICKS_IN_STALL:
+        baseline_ticks = _measure_idle_ticks()
+        floor = _stall_tick_floor(baseline_ticks)
+        if floor == 0:
+            inconclusive(
+                "the event loop's own tick rate (this host completed "
+                f"{baseline_ticks} tick(s) over a {CALIBRATION_SPAN_S:.1f}s "
+                "IDLE span, the same span the stall window gave "
+                f"{len(in_stall)}), so 'the loop kept scheduling during the "
+                "blocked call' could not be observed at all ("
+                f"{state.get('calls', 0)} probe call(s), thread "
+                f"{state.get('thread')!r})",
+                deadline_s=CALIBRATION_SPAN_S,
+                diagnosis=(
+                    "The off-load assertion above already holds "
+                    "(`ran_on_loop is False`), so this is a missing "
+                    "MEASUREMENT, not a product verdict."),
+            )
+    assert len(in_stall) >= floor, (
         f"the event loop completed only {len(in_stall)} tick(s) during a "
-        f"{STALL_S:.1f}s blocked graph call (need {MIN_TICKS_IN_STALL}) — the "
-        f"call is blocking the event loop, so every concurrent request waits "
-        f"for the graph round trip (#3718)")
+        f"{STALL_S:.1f}s blocked graph call (need {floor}; this host "
+        f"calibrated {baseline_ticks} tick(s) over an idle span of the same "
+        f"length, with nothing blocking) — the call is blocking the event "
+        f"loop, so every concurrent request waits for the graph round trip "
+        f"(#3718)")
 
     assert health.json()["status"] in {"ok", "degraded"}, health.text
     assert health_done < exited, (
@@ -1154,3 +1246,48 @@ def test_cancelled_commit_holds_the_lock_until_the_worker_finishes(
         f"— the retry re-ran it instead of replaying the winner (#3718)")
     assert response.status_code == 200, response.text[:200]
     assert response.json().get("duplicate") is True, response.text[:200]
+
+
+# ── the calibration's own arithmetic (#5049 rule 1) ──────────────────────
+# `_stall_tick_floor` is what stops a wall-clock tick count from producing a
+# FAIL on a host that cannot schedule the loop at all. It has to keep BOTH
+# halves: a healthy host must keep the pre-existing floor verbatim (or the
+# guard silently loses its discrimination against the inline shape), and a host
+# that cannot tick must return the UNCALIBRATED sentinel — never a floor of 0,
+# which `assert ticks >= 0` would read as a pass and make the guard vacuous.
+@pytest.mark.parametrize(
+    ("baseline_ticks", "floor", "why"),
+    [
+        # A free loop yields ~STALL_S/TICK_S = 100. Unchanged behaviour.
+        (100, MIN_TICKS_IN_STALL, "healthy host keeps the pre-existing floor"),
+        (240, MIN_TICKS_IN_STALL, "a faster host does not RAISE the floor"),
+        # A thinned-but-scheduling runner: the floor scales down with it, and
+        # never below one tick — the inline shape completes zero.
+        (18, 9, "a thinned host lowers the floor proportionally"),
+        (4, 2, "an almost-starved host still demands what it can deliver"),
+        (1, 1, "the lowest calibratable host still demands one tick"),
+        # The sentinel. The caller exits INCONCLUSIVE on it (see the test body);
+        # this pins that it is 0 and therefore can never be met by an inline
+        # freeze (0 ticks) or read as an unconditional pass.
+        (0, 0, "an uncalibratable host returns the sentinel"),
+    ],
+)
+def test_the_stall_tick_floor_is_calibrated_and_never_vacuous(
+        baseline_ticks, floor, why):
+    assert _stall_tick_floor(baseline_ticks) == floor, (
+        f"{why}: _stall_tick_floor({baseline_ticks}) returned "
+        f"{_stall_tick_floor(baseline_ticks)}, expected {floor}")
+
+
+def test_an_inline_freeze_cannot_meet_any_calibrated_floor():
+    """0 ticks — the inline shape's own count — is below every live floor.
+
+    The sentinel is the ONLY value a 0-tick run can meet, and the caller reads
+    it as INCONCLUSIVE (a skip), not as a pass — so the guard can never report
+    green over a frozen loop, which is what would make this whole file vacuous.
+    """
+    assert _stall_tick_floor(0) == 0
+    for baseline in (1, 2, 4, 16, 18, 100, 1000):
+        assert _stall_tick_floor(baseline) > 0, (
+            f"baseline={baseline} produced a non-positive floor — a 0-tick "
+            f"inline freeze would satisfy it")
