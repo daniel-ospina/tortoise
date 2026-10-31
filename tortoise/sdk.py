@@ -5408,6 +5408,73 @@ _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
 
 
+#: §9.1's narrative key, and the two spellings of the SESSION it must name.
+#: Module-level names rather than inline literals because TWO doors refuse with
+#: this vocabulary and one projection (`record_projection._NARRATIVE_KEY`) files
+#: by it — a second hand-written copy is how the pair drifts apart.
+_NARRATIVE_PROP = "story_arc"
+_NARRATIVE_SESSION_KEYS: tuple[str, ...] = ("sessionId", "session_id")
+
+
+def _refuse_unpaired_narrative(props: dict, *, door: str) -> None:
+    """§9.1's narrative must NAME its session, or it has no home at all (#10000).
+
+    THE RULE, verbatim (`docs/architecture/STORAGE-ARCHITECTURE.md` §9.1/D1):
+    "The S1 narrative (the connected prose form of a captured session) is stored
+    as **text in Postgres, together with the raw agent-session transcript it was
+    derived from** — not in the graph, not a `Document` node, not a `Point`."
+    The PAIRING is the session: `record_projection._narrative_statements` is
+    shape-keyed and files a narrative under `_session_coordinate(record)`
+    (`sessionId`/`session_id`). A narrative that names no session therefore
+    matches nothing, and the graph refuses the key on BOTH folds (§9.1's other
+    half, `projection.entities._EVENT_HANDLED` /
+    `_DOC_PASSTHROUGH_HANDLED`) — so the call stores §9.1's text NOWHERE its own
+    readers look.
+
+    MEASURED, Arm B (`tortoise_record_app`, so the record ACCEPTS the write),
+    same prose, one variable — the session coordinate:
+
+        create_event(..., story_arc=<prose>, sessionId='nstory-door-session-1')
+          journal : EventRecorded carries story_arc + sessionId
+          Postgres: public.session_narrative = (session_id, 91 chars, the prose)
+          graph   : prose hits 0 (fingerprint Event 2 + Meta 1 — not empty)
+
+        create_event(..., story_arc=<prose>)            # the unpaired call
+          journal : EventRecorded carries story_arc, sessionId NULL
+          Postgres: NO row (the shape rule has no coordinate to key on)
+          graph   : dropped by the fold — one warning, no error, no store
+
+    ⇒ The unpaired shape is the ONLY one with nowhere to go, and before this
+    guard it was accepted and dropped (silent in effect: the caller's 2xx says
+    nothing about §9.1's home). It is REFUSED here instead.
+
+    ⛔ AT THE DOOR, NEVER IN THE FOLD. The fold that drops the key is also the
+    REPLAY fold (`rebuild_all`, `recover_from_log`, `backup.restore`), so a
+    refusal there would redden every rebuild of a journal holding a legacy
+    `story_arc` line. A legacy line replays to the fold's named warning, which
+    is the declared trade; a NEW write is refused before anything is written.
+
+    ⚠️ Scope: it refuses the KEY when it is unpaired. A paired narrative is
+    untouched and takes the record seam unchanged — this adds no writer, no
+    record type, and no SDK/MCP surface.
+    """
+    if not isinstance(props, dict) or not props.get(_NARRATIVE_PROP):
+        return
+    if any(isinstance(props.get(k), str) and props[k].strip()
+           for k in _NARRATIVE_SESSION_KEYS):
+        return
+    raise ValueError(
+        f"{_NARRATIVE_PROP!r} names no session, so §9.1's narrative has nowhere "
+        f"to go (#10000): the record files it under its session "
+        f"(`public.session_narrative`, keyed by session_id) and the graph "
+        f"refuses the key on every fold, so {door} would store the prose in no "
+        f"store at all. Pass {' or '.join(_NARRATIVE_SESSION_KEYS)!r} naming the "
+        f"session this narrative was distilled from (that is the transcript it "
+        f"is paired with, §9.1), or write the narrative through the capture / "
+        f"commit path that carries its own session."
+    )
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
                     reject_claim_class: bool = False) -> dict:
@@ -37626,6 +37693,12 @@ class TortoiseSDK:
         # closes open under another name; and it runs BEFORE any write, so a
         # refusal leaves the graph untouched.
         self._refuse_unapproved_kinds_in_props(props)
+        # #10000 / §9.1: a narrative must NAME its session or it is stored
+        # nowhere — see `_refuse_unpaired_narrative`. This funnel is where every
+        # create door MEETS (`create_entity`, `create_event`, `create_document`,
+        # `create_source`), and the refusal runs BEFORE any write, so nothing is
+        # applied and nothing is journalled.
+        _refuse_unpaired_narrative(props, door=f"create_{label.lower()}")
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
         # ``create_entity("Point", …)`` raises `unknown type`
@@ -38417,6 +38490,12 @@ class TortoiseSDK:
         # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
         # create doors because it is the SAME helper.
         self._refuse_unapproved_kinds_in_props(props)
+        # #10000 / §9.1: the UPDATE door has the same hole as the create doors —
+        # measured at #10389's head, `update_entity(<event>, story_arc=<prose>)`
+        # is dropped by `_EVENT_SERVER_MANAGED_PROPS` (the prose is refused, and
+        # rightly) while the record gets nothing, because the write names no
+        # session. Same rule, same refusal, same helper.
+        _refuse_unpaired_narrative(props, door="update_entity")
         # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
         # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
         # ``_update_entity``) and it writes caller props with a live
