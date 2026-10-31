@@ -1297,6 +1297,87 @@ def test_the_changelog_entry_names_the_section_the_stamp_actually_left():
     )
 
 
+#: An `#issuecomment-N` citation. It is the ONE citation shape this file cannot
+#: RESOLVE: `_LINE_CITATION` reads `file.py:NNNN`, `_SYMBOL_CITATION` reads
+#: `module.py::symbol`, and a comment id can only be dereferenced over the
+#: network — which this file is offline by design, so no resolver is possible.
+_COMMENT_CITATION = re.compile(r"#issuecomment-(\d+)")
+
+
+def test_every_overrides_marker_the_design_documents_cite_is_the_one_the_code_cites():
+    """An `OVERRIDES:` marker is an issue COMMENT, so cite the code's own comment id.
+
+    THE DEFECT THIS PINS, measured at `#10389`'s review head. The §9.1 carrier
+    entry told a reader the `:Event` departure is *"marked there with an
+    `OVERRIDES:` line"* and cited `#issuecomment-6544603121` — which is not a
+    marker at all but a 13-byte shell artefact on `#228` whose body is literally
+    `@/tmp/o228.md` (a botched `-F` invocation, posted 53 s before the real
+    comment; the stub was deleted in this same pass, so it can no longer be
+    opened — the pre-fix citation is quoted here and preserved in the
+    changelog's own git history). The genuine marker is `#issuecomment-6544613785`, and the code that
+    implements the departure already cited it (`projection/entities.py`). So the
+    doc and the code disagreed about WHICH comment governs, and nothing in this
+    repo could see it: the citation guards resolve paths and symbols, and a
+    comment id is outside both.
+
+    Why a dead id is not a typo (`AGENTS.md`): the marker exists so a later
+    reader weighing `#228`'s passthrough against this code can FIND the ruling —
+    *"a marker that lives only in a ledger is invisible to the lane holding the
+    vendor page"*. A reader who follows this citation lands on garbage and cannot
+    tell a deliberate one-key departure from an accident, which is the failure the
+    marker was introduced to prevent. The changelog is the document that must keep
+    the record, so a dead id there is rot, not cosmetics.
+
+    WHAT IS ASSERTED, and why it is the right offline proxy: every comment id the
+    entry cites must also be cited by the implementation under `tortoise/`. That
+    is the cross-reference the repo CAN check without the network, and it is
+    exactly the relation that broke — the code said `6544613785`, the doc said
+    `6544603121`. Non-vacuity MEASURED: before this PR's fix the entry carries
+    `6544603121`, which appears in no module, so this test reds naming it; after
+    it, both ids (`6540959107` for the document fold, `6544613785` for the
+    `:Event` pair) resolve to the code comments that record the same ruling.
+
+    NOT promised: that the cited comment still EXISTS or still carries an
+    `OVERRIDES:` line — that needs the GitHub API, and a static guard that
+    silently skips when a token is unset is worse than none. Nothing here asserts
+    the marker's text either; it asserts that the doc and the code name the SAME
+    comment, which is the half a repo can hold itself to.
+
+    BOTH artifacts are read, because the rule places the marker where a reader
+    MEETS the departure and this PR meets it twice: §9.1(b) of the design doc
+    states the two `:Event` denies in prose, and the changelog entry records how
+    they landed. §9.1(b) carried the document fold's marker and NOT the `:Event`
+    one until this pass — the same invisibility one document over — so the two
+    are checked together rather than the changelog alone.
+    """
+    entry = _changelog_entry("carrier paragraph")
+    section_9_1 = _section_body(STORAGE, "9.1")
+    cited = sorted({*_COMMENT_CITATION.findall(entry), *_COMMENT_CITATION.findall(section_9_1)})
+    assert len(cited) >= 2, (
+        "the design documents no longer cite the two `OVERRIDES:` markers the "
+        "§9.1 departures are recorded on (the document fold's and the `:Event` "
+        "pair's), so this guard would pass vacuously — it parsed "
+        f"{cited} across §9.1 and the carrier changelog entry"
+    )
+
+    implementation = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "tortoise").rglob("*.py"))
+    )
+    orphaned = [f"#{cid}" for cid in cited if cid not in implementation]
+    assert not orphaned, (
+        "§9.1 or its changelog entry cites an `OVERRIDES:` comment id that NO "
+        f"module under `tortoise/` cites: {', '.join(orphaned)}. A marker is only "
+        "findable if it points at the real comment, and the code that implements "
+        "the departure already names it — cite THAT id. Two ways this goes "
+        "wrong, both measured on `#10389`: a botched `gh issue comment -F` leaves "
+        "a stub comment (`@/tmp/o228.md`) whose id is not a marker, and a doc and "
+        "its code drift onto DIFFERENT comments for the same ruling. If the id "
+        "is genuinely not cited from the implementation, state why in this "
+        "assertion rather than widening the guard to accept prose."
+    )
+
+
 # The two statements the entry once attributed to §9.1 *"in that place"* and that
 # `STORAGE-ARCHITECTURE.md` does NOT carry: the torn-tail TOLERATED decision (its
 # home is `tortoise/log.py:204`) and the tenant precedence the store decision asks

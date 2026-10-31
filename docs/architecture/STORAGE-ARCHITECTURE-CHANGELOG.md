@@ -1874,7 +1874,8 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   replays. `story_arc` joins `_EVENT_HANDLED`. MEASURED through the SDK door behind
   `tortoise_create_event`, one call, before: `e.story_arc` = `NARRATIVE-EVENT-DOOR-PROSE`; after:
   `None`, with `e.project` = `kept-228` still landing — one key, not a blanket refusal (`#228`, marked
-  there with an `OVERRIDES:` line, `#issuecomment-6544603121`).
+  there with an `OVERRIDES:` line, `#issuecomment-6544613785` — the same marker governs the tenant
+  route below, which is `:Event`'s second mount, and `projection/entities.py` cites it at both).
 - **The `:Event` tenant route — a SECOND door the fold entry cannot reach (`#10428`).**
   `_update_entity` writes caller props with a live `SET n += $props` and consults no label skip-set, so
   `update_entity(<agentSession eventId>, story_arc=…)` was ACCEPTED, journalled into an
