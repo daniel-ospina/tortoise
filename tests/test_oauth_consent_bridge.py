@@ -2959,6 +2959,13 @@ _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
     "website/website_architecture.md",
     "tests/test_pages_bindings.py",
     "tests/test_oauth_consent_bridge.py",              # this file's own §2.3 comments (2072 chars)
+    # ⛔ The two Supabase homes. Added during THIS PR's review: the sweep corrected the sentence
+    # in nine homes and left the identical claim sitting in the migration's RLS justification and
+    # its pgTAP suite's header — where neither the corpus nor any such scan could see it, so the
+    # gate above reported clean on text carrying its own denylist entry. Round 11's lesson repeats
+    # in a new direction: a corpus is only as good as the homes it enumerates.
+    "supabase/migrations/20261030000001_oauth_consent_tickets.sql",  # the RLS block's premise
+    "supabase/tests/20261030000001_oauth_consent_tickets.sql",       # its pgTAP suite's header
 )
 
 
@@ -2978,7 +2985,7 @@ def _false_anon_key_claims(text: str) -> list[str]:
 
 
 def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
-    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the nine homes.
+    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the eleven homes.
 
     Why this is a test and not a review note: round 11 measured the false premise in FIVE homes
     after a previous round had already corrected the same family, and it is the *justification*
@@ -2995,7 +3002,7 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     corpus = {rel: (REPO / rel).read_text(encoding="utf-8").split(_PREMISE_GATE_MARKER)[0]
               for rel in _ANON_KEY_PREMISE_CORPUS}
     assert sum(len(t) for t in corpus.values()) > 100_000, (
-        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these nine "
+        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these eleven "
         "files, so a clean result below would prove nothing")
 
     for rel, text in corpus.items():

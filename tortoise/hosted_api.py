@@ -41670,9 +41670,16 @@ async def oauth_authorize(request: Request):
         (`consent_bounce_url`), so nothing has to be reconstructed from memory
         on the way back.
 
-    An attempt key is not a credential: a forged one renders a page whose mint
-    answers `403 no_authorize_attempt`, which is a typed refusal on the page and
-    never a code. What it does establish is that the app itself wrote this URL.
+    An attempt key is not a credential, and its PRESENCE proves nothing about
+    who wrote this URL: the AS only tests that the parameter is non-empty, so a
+    guessed one renders the page exactly like a real one. Presence selects the
+    BRANCH — page vs. sign-in bounce — and nothing else. The ownership proof
+    happens at the mint, on the session origin, which compares
+    `attempt_key_hash` against the recorded attempt row and answers
+    `403 no_authorize_attempt` on a mismatch (`api/consent/token.ts`), a typed
+    refusal on the page and never a code. A forged key therefore buys a dead
+    end, not a flow: do NOT read this parameter as evidence the app wrote the
+    URL.
 
     The params are validated BEFORE the bounce, so a malformed authorize request
     still gets its RFC 6749 §4.1.2.1 error (redirect-vs-JSON, unchanged) instead
