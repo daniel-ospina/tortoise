@@ -752,7 +752,15 @@ class SyncResult(NamedTuple):
 
 
 def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
-    """Re-cut the derived `.skill` archives for the served copies just written.
+    """Re-cut every derived `.skill` archive that is stale under `root`.
+
+    ⛔ NOT "for the served copies just written" — that narrower summary is what
+    review finding F3 was about, and it contradicts this function's own body
+    (below) and its call site (`sorted(manifest["skills"])`, not `changed`). A
+    maintainer reading only this line would narrow the call to `changed` and
+    silently delete the behaviour
+    `test_4643_sync_re_cuts_a_stale_archive_whose_served_copy_it_did_not_write`
+    exists to pin.
 
     ⛔ The served copy is the archive's ONLY source (`build_skill_archives.py`),
     so re-deriving it without re-cutting the archive leaves the tree RED on
