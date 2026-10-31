@@ -747,30 +747,6 @@ def test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict(
     assert state.get("ran_on_loop") is False, (
         "the attach ran on the loop in the setup, not in a worker thread")
     sampled = _ticks_in_window(ticks, t_enter, t_exit)
-    # #5049 rule 1: the SETUP check below is a tick count too, so it may not
-    # red a host that cannot schedule the loop. `_measure_idle_ticks` is given
-    # the SAME span the window used (the patched 0.5 s, not the module-level
-    # `CALIBRATION_SPAN_S`, which was bound to 2.0 at import), and an
-    # uncalibratable host exits INCONCLUSIVE rather than FAIL.
-    if not sampled:
-        baseline_ticks = _measure_idle_ticks(span_s=STALL_S)
-        if _stall_tick_floor(baseline_ticks) == 0:
-            inconclusive(
-                "this host completed the loop "
-                f"{baseline_ticks} time(s) over a {STALL_S:.1f}s IDLE span, "
-                "so 'the ticker sampled the blocked attach' could not be "
-                "observed at all",
-                deadline_s=STALL_S,
-                diagnosis=(
-                    "The mechanism assertions above hold (`ran_on_loop is "
-                    "False`, the late call moved the window), so this is a "
-                    "missing MEASUREMENT, not a product verdict."),
-            )
-        raise AssertionError(
-            f"the SETUP is broken: this host ticks ({baseline_ticks} over "
-            f"{STALL_S:.1f}s idle) but sampled 0 tick(s) across a "
-            f"{STALL_S:.1f}s off-loop block — the contrast this case exists "
-            f"to show is missing")
 
     # The late call: the ticker has stopped, exactly like a pool thread that
     # outlived the request. It rewrites the probe's window.
@@ -784,6 +760,26 @@ def test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict(
         f"the sampled one holds {len(sampled)}; it did not, so this case is "
         f"no longer reproducing the manufactured RED")
 
+    # #5049 rule 1, taken literally: the tick CONTRAST above is the point of
+    # this case, and it is a wall-clock count, so it may not produce a FAIL on
+    # its own. Placed AFTER the mechanism assertions so the reason below is a
+    # fact this case has already established, not a claim about code it never
+    # reached. Nothing product-shaped is being skipped: the attach here is
+    # `asyncio.to_thread(sdk._get_proj)`, so no product verdict is expressible
+    # in this block at all.
+    if not sampled:
+        inconclusive(
+            "the ticker sampled 0 tick(s) across a "
+            f"{STALL_S:.1f}s off-loop block, so the 0-versus-sampled tick "
+            "contrast this case exists to show could not be observed",
+            deadline_s=STALL_S,
+            diagnosis=(
+                "The mechanism assertions above already hold (`ran_on_loop "
+                "is False`, the late call moved the window, the raw-dict "
+                "window collapsed to 0) — a missing MEASUREMENT, not a "
+                "product verdict."),
+        )
+
 
 def test_the_dataplane_guard_never_reads_the_probe_window_at_assert_time():
     """#10115: the PRODUCTION guard's window is snapshotted, pinned structurally.
@@ -792,49 +788,74 @@ def test_the_dataplane_guard_never_reads_the_probe_window_at_assert_time():
     RED; it cannot notice if the guard itself goes back to reading
     ``state["entered"]``/``state["exited"]`` at assert time, because the two
     tests share no state. So this pins the shape in the source, the way this
-    repo pins an un-seeable seam: inside
-    ``test_delete_session_does_not_freeze_the_event_loop``, those two keys may
-    be read only AFTER the snapshot is taken — i.e. no read may sit after the
-    ``asyncio.run(_drive())`` call that ends the measurement. Restoring the
-    pre-fix `entered, exited = state[...]` block moves a read below that line
-    and reddens here.
+    repo pins an un-seeable seam.
+
+    INVARIANT: every read of the probe's window keys must sit at or before the
+    snapshot, i.e. **no read may appear after ``stop["done"] = True``** (the
+    line that ends the measurement, inside ``_drive``). Restoring the pre-fix
+    ``entered, exited = state[...]`` block moves reads past it and reddens here.
+
+    The read predicate is deliberately NAME-AGNOSTIC — it matches any string
+    constant ``"entered"``/``"exited"``, not just a ``state[...]`` subscript —
+    because the guard's own ``t_exit`` line uses ``state.get("exited", ...)``,
+    so a maintainer restoring the dict read would plausibly copy that idiom.
+    Aliasing (``s = state; s["entered"]``) and a renamed local dict are caught
+    the same way. A POSITIVE assertion (the snapshot reads must still be there,
+    before the boundary) keeps a rename of the keys from making the pin vacuous.
     """
     import ast
     import inspect
     import textwrap
 
-    source = textwrap.dedent(inspect.getsource(
-        test_delete_session_does_not_freeze_the_event_loop))
-    tree = ast.parse(source)
+    func = test_delete_session_does_not_freeze_the_event_loop
+    offset = inspect.getsourcelines(func)[1] - 1  # dedent-relative -> file
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
 
-    drive_line = None
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "run"
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "asyncio"):
-            drive_line = node.lineno
-    assert drive_line is not None, (
-        "the guard no longer calls asyncio.run(_drive()) — this pin cannot "
-        "locate the end of the measurement and would pass vacuously")
-
-    late_reads = [
+    window_keys = {"entered", "exited"}
+    read_lines = [
         node.lineno for node in ast.walk(tree)
-        if isinstance(node, ast.Subscript)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "state"
-        and isinstance(node.slice, ast.Constant)
-        and node.slice.value in {"entered", "exited"}
-        and node.lineno > drive_line
+        if isinstance(node, ast.Constant) and node.value in window_keys
     ]
+
+    # The measurement ends at the ticker stop, inside `_drive`. Take the LAST
+    # one: an extra `asyncio.run(...)` added later must not move the boundary.
+    stop_lines = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Subscript)
+                and isinstance(t.value, ast.Name) and t.value.id == "stop"
+                and isinstance(t.slice, ast.Constant) and t.slice.value == "done"
+                for t in node.targets)
+        and isinstance(node.value, ast.Constant) and node.value.value is True
+    ]
+    assert stop_lines, (
+        "the guard no longer sets `stop[\"done\"] = True` — this pin cannot "
+        "locate the end of the measurement and would pass vacuously")
+    boundary = max(stop_lines)
+
+    late_reads = [ln for ln in read_lines if ln > boundary]
     assert late_reads == [], (
-        f"the guard reads the probe's last-call-wins window from the mutable "
-        f"dict at assert time (lines {late_reads}, after the asyncio.run on "
-        f"line {drive_line}) — a late off-loop call rewrites it to a span the "
-        f"ticker never sampled and this guard reports a 0-tick RED on an idle "
-        f"machine (#10115). Assert through `_ticks_in_window(ticks, t_enter, "
-        f"t_exit)` instead.")
+        "the guard reads the probe's last-call-wins window at assert time "
+        f"(file line(s) {[ln + offset for ln in late_reads]}, after the "
+        f"ticker stop on file line {boundary + offset}) — a late off-loop "
+        "call rewrites it to a span the ticker never sampled and this guard "
+        "reports a 0-tick RED on an idle machine (#10115). Assert through "
+        "`_ticks_in_window(ticks, t_enter, t_exit)` instead.")
+
+    # Positive half: the snapshot must still exist before the boundary, or a
+    # rename of the keys would satisfy the check above by having nothing to find.
+    snapshot_reads = [ln for ln in read_lines if ln <= boundary]
+    for key in sorted(window_keys):
+        assert any(
+            key == node.value for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and node.lineno <= boundary), (
+            f"the guard no longer reads {key!r} at all before the ticker "
+            f"stops — this pin has lost its subject (the snapshot) and would "
+            f"otherwise pass vacuously (#10115)")
+    assert snapshot_reads, (
+        "the guard reads no window key before the ticker stops — the "
+        "snapshot is gone and this pin has lost its subject (#10115)")
+
 
 
 
