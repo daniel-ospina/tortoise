@@ -269,7 +269,7 @@ uv run pytest <the failing file(s)> -q
 ```bash
 git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1 || exit 1'
 git bisect reset integration/batch-1   # ⛔ REQUIRED: `bisect run` leaves HEAD DETACHED at the first bad commit
-git switch integration/batch-1         # the cheaper walk-the-merges route leaves it detached too
+git switch integration/batch-1 || exit 1   # the cheaper route leaves it detached too — HALT, or the revert commits detached
 git log --oneline -1                   # must name integration/batch-1's tip, never a bisect probe
 ```
 

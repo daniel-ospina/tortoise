@@ -97,7 +97,7 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **94 such mutants
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **103 such mutants
 measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
@@ -757,6 +757,40 @@ def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
         f"(command {min(bisects) + 1}) and the revert (command "
         f"{min(reverts) + 1}); found it at {min(returns) + 1}"
     )
+    # ...and every command that moves HEAD between the bisect and the revert must
+    # land on the branch PHASE 2 CREATES — bound from its `-C <branch>`, not from a
+    # `batch-` prefix. Repointing the documented `git switch integration/batch-1` to
+    # `integration/base-check` (which Phase 1 is required to create, so it always
+    # exists), to `main`, or to `-`, left this green while the revert committed
+    # onto the wrong branch and the batch that landed still carried the culprit.
+    started = re.search(r"git\s+bisect\s+start\s+(\S+)", _text())
+    assert started, "no `git bisect start <branch>` found — re-point this guard"
+    batch_branch = started.group(1)
+    assert re.search(
+        rf"git\s+switch\s+-C\s+{re.escape(batch_branch)}\s+\"?\$PINNED", _text()
+    ), (
+        f"the bisected branch ({batch_branch}) is not the one Phase 2 creates: the "
+        "revert would then land on a branch the gate never built"
+    )
+    window = [
+        (i, c)
+        for i, c in enumerate(commands)
+        if min(bisects) < i < min(reverts)
+        and (_MOVES_HEAD.search(_code(c)) or _code(c).startswith("git bisect reset"))
+    ]
+    wrong = [c for _, c in window if _code(c) != "git bisect reset" and batch_branch not in c]
+    assert not wrong, (
+        "every HEAD-moving command between the bisect and the revert must land on "
+        f"the branch Phase 2 creates ({batch_branch}); these do not, so the revert "
+        f"commits onto another branch and the batch still carries the culprit: {wrong}"
+    )
+    assert window, "no return to the batch branch found — re-point this guard"
+    assert _code(window[-1][1]).startswith("git bisect reset") or _halts(
+        _code(window[-1][1])
+    ), (
+        "the LAST command that moves HEAD before the revert must stay on the batch "
+        f"branch without being able to fail open: {window[-1][1]}"
+    )
 
 
 def test_reverting_a_batch_culprit_passes_a_mainline() -> None:
@@ -771,6 +805,18 @@ def test_reverting_a_batch_culprit_passes_a_mainline() -> None:
     assert not missing, (
         "a batch merge is a merge commit, so its revert needs a mainline "
         f"(-m 1) or git exits 128; these do not: {missing}"
+    )
+    # ...and it must actually COMMIT. `-n`/`--no-commit`/`--squash` apply the
+    # reverted changes to the worktree and the INDEX without committing, so the
+    # batch branch keeps the culprit while the "one more full suite run" — which
+    # measures the worktree — certifies a tree the batch does not contain.
+    uncommitted = [
+        cmd for cmd in reverts if re.search(r"(?<!\S)(?:-n|--no-commit|--squash)(?!\S)", cmd)
+    ]
+    assert not uncommitted, (
+        "the revert must COMMIT (`git revert --no-edit -m 1 <merge sha>`): with "
+        "`-n`/`--no-commit`/`--squash` the change never lands on the batch branch, "
+        f"which then still contains the culprit: {uncommitted}"
     )
 
 
