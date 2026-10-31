@@ -282,10 +282,11 @@ def override_refusal(*, source_id: str, target_ids: Sequence[str],
         f"be wired this way — on a leg this wiring FLOWS, a DERIVED claim would "
         f"override an ASSERTED one (#2351). A computed claim never overrides an "
         f"authored one — through IMPL, or as a NAND attack, which lowers the "
-        f"target's belief. Either mark the COMPUTED claim claim_class='derived' "
-        f"(if it too is computed), or restate the direction so the flowing leg "
-        f"runs asserted -> derived (a derived claim may still be "
-        f"corroborated BY an authored one)."
+        f"target's belief. Either give BOTH sides the same class (mark every claim "
+        f"on the COMPUTED side 'derived' — the marker lives only on claims that "
+        f"are computed, and its absence IS 'asserted'), or restate the direction "
+        f"so the only leg that flows is the corroboration one, asserted -> "
+        f"derived."
     )
 
 
@@ -303,7 +304,8 @@ def supersede_refusal(*, old_id: str, new_id: str) -> str:
 def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
                     new_id: str, source_id: str,
                     target_ids: Sequence[str],
-                    direction: str | None = None) -> str:
+                    direction: str,
+                    source_proven: bool = True) -> str:
     """The refusal ``supersede_point``'s OPERATOR re-point raises (#10195).
 
     A separate message from :func:`override_refusal` because the caller's ways
@@ -321,24 +323,39 @@ def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
     ``target_ids``" was backwards on the backward leg (a DERIVED *target* under
     an ASSERTED *source*) — exonerating the very claim that triggered it, in the
     message a caller reads to decide what to do (#10195 review P3).
+
+    ``direction`` is REQUIRED: the only caller feeds
+    ``_canonical_direction``'s result, which is never ``None``, and a default
+    here would be a SECOND copy of the absent->default rule (and would mislabel
+    a NAND, whose absent default is ``unidirectional``).
+
+    ``source_proven`` marks whether slot position 0 is provably the SOURCE. On
+    the unorderable-idx arm it is not — every input is a candidate — so the
+    message says so instead of asserting a slot role the door itself declined
+    to infer.
     """
+    _source_phrase = (
+        "at the SOURCE position" if source_proven
+        else "at a position the load side may read as the SOURCE (the slots "
+             "carry an idx that cannot be ordered)"
+    )
     return (
         f"supersede_point: re-pointing the OPERATOR {operator_id!r} ({op_type}, "
-        f"direction {direction or 'bidirectional'!r}) from {old_id!r} onto "
-        f"{new_id!r} would leave a DERIVED claim overriding an ASSERTED one on a "
-        f"leg this operator FLOWS (#2351) — the rebuilt factor's slots are "
-        f"{source_id!r} at the SOURCE position and {list(target_ids)!r} at the "
-        f"target position(s), and one side of that wiring is DERIVED while the "
-        f"other is ASSERTED. A computed claim never overrides an authored one — "
-        f"through IMPL, or as a NAND attack, which lowers the target's belief. A "
-        f"supersede moves the predecessor's whole edge set, so the successor "
-        f"inherits the factor with its slots rebuilt — and that rebuilt wiring "
-        f"is one create_operator refuses to write. Either create the successor "
-        f"with the class that keeps the factor's slots on one side of the "
-        f"boundary (`claim_class` is a CREATE-time marker — see the supersede "
-        f"refusal above for the override rule itself), or rebuild the operator "
-        f"on the successor before superseding. The supersede was refused BEFORE "
-        f"any mutation."
+        f"direction {direction!r}) from {old_id!r} onto {new_id!r} would leave a "
+        f"DERIVED claim overriding an ASSERTED one on a leg this operator FLOWS "
+        f"(#2351) — the rebuilt factor's slots are {source_id!r} "
+        f"{_source_phrase} and {list(target_ids)!r} at the target position(s), "
+        f"and one side of that wiring is DERIVED while the other is ASSERTED. A "
+        f"computed claim never overrides an authored one — through IMPL, or as a "
+        f"NAND attack, which lowers the target's belief. A supersede moves the "
+        f"predecessor's whole edge set, so the successor inherits the factor "
+        f"with its slots rebuilt — and that rebuilt wiring is one "
+        f"create_operator refuses to write. Either create the successor with the "
+        f"class that keeps the factor's slots on one side of the boundary "
+        f"(`claim_class` is a CREATE-time marker — see the supersede refusal "
+        f"above for the override rule itself), or rebuild the operator on the "
+        f"successor before superseding. The supersede was refused BEFORE any "
+        f"mutation."
     )
 
 

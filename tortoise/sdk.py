@@ -17760,7 +17760,8 @@ class TortoiseSDK:
                     else:
                         _slot_no = None  # cannot be ordered at all
                     _slots.append((_slot_no, new_id if _sinp == old_id else _sinp))
-                if any(_slot_no is None for _slot_no, _ in _slots):
+                _unorderable = any(_slot_no is None for _slot_no, _ in _slots)
+                if _unorderable:
                     # UNORDERABLE, not unjudgeable: no position is provably the
                     # SOURCE, so EVERY input is a candidate source and the wiring
                     # is refused if ANY candidate would override. Fail CLOSED,
@@ -17770,17 +17771,18 @@ class TortoiseSDK:
                     _candidate_sources = [i for _, i in _slots]
                 else:
                     # The load side's own rule (``ORDER BY coalesce(r.idx, 0),
-                    # c.id``): the source is the input at the LOWEST slot idx. A
-                    # slot idx carried by TWO inputs leaves the tie to the claim
-                    # id there, so BOTH are candidates and either blocking
-                    # assignment refuses.
+                    # c.id``): the source is the input at the LOWEST slot idx, and
+                    # a slot idx carried by TWO inputs is tie-broken there by the
+                    # claim ID. The door therefore takes the SAME single candidate
+                    # rather than judging every tied one — judging them all would
+                    # refuse a shape the load side keeps, which is the divergence
+                    # `claim_class` warns against (#10195 review P3).
                     _low = min(_slot_no for _slot_no, _ in _slots)
-                    _candidate_sources = [
-                        i for _slot_no, i in _slots if _slot_no == _low]
+                    _candidate_sources = sorted(
+                        {i for _slot_no, i in _slots if _slot_no == _low})[:1]
                 _slot_ids = [i for _, i in _slots]
-                # The slots are judged AS WRITTEN — every input, in idx order —
-                # which is how ``create_operator`` reads a caller's request. EP's
-                # load side additionally strips draft/terminal inputs and takes
+                # The slots are judged AS WRITTEN — every input — which is how
+                # ``create_operator`` reads a caller's request. EP's load side
                 # the first SURVIVING one as the source, but that is a reading of
                 # a factor after the fact, not the wiring the caller asked to
                 # write: a draft input can be promoted later, and the factor is
@@ -17822,6 +17824,7 @@ class TortoiseSDK:
                             raise ValueError(_claim_class.repoint_refusal(
                                 operator_id=_oid, op_type=_op_type,
                                 direction=_effective_dir,
+                                source_proven=not _unorderable,
                                 old_id=old_id, new_id=new_id,
                                 source_id=_slot_source,
                                 target_ids=_slot_targets))

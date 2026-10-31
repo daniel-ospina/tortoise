@@ -407,6 +407,11 @@ def test_supersede_repoint_coerces_a_numeric_string_slot_idx(
     computed, so the guard has nothing to say and the supersede must go through
     and carry the predecessor's slot — idx VALUE and type preserved, as 2a
     reads ``idx`` opaquely.
+
+    ⚠️ This is an ANTI-OVER-REFUSAL pin, not a discriminator: it passes on the
+    pre-fix stand-down too (a skip also lets the supersede through), so it
+    cannot witness the fail-open. `…refuses_a_raw_written_slot_idx` is the case
+    that does.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -432,7 +437,7 @@ def test_supersede_repoint_coerces_a_numeric_string_slot_idx(
     assert _operator_rows(lane, old) == []
 
 
-@pytest.mark.parametrize("raw_idx", ["1", "slot-one"])
+@pytest.mark.parametrize("raw_idx", ["1", "+-1", "slot-one"])
 def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     """#10195 crossed with a raw-written ``idx`` — the door must still refuse.
 
@@ -445,10 +450,12 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     the whole guard: the supersede minted ``derived --IMPL--> asserted`` with no
     verdict, no warning and no record.
 
-    Both unprovable-looking shapes are pinned: a numeric string naming a position
-    (coerced and judged exactly) and a value that cannot be ordered at all (which
-    is judged over EVERY candidate source and refused if any blocks —
-    fail-closed, never a silent exemption).
+    Three unprovable-looking shapes are pinned: a numeric string naming a
+    position (coerced and judged exactly), a string that only LOOKS numeric
+    (`'+-1'` — the shape that crashed the first cut of this coercion, because
+    `str.lstrip('+-').isdigit()` accepts it but `int()` refuses it), and a value
+    that cannot be ordered at all (judged over EVERY candidate source and
+    refused if any blocks — fail-closed, never a silent exemption).
 
     ⚠️ No `float` parametrization: MEASURED, FalkorDB returns `1` (an `int`) for
     a property written as `1.0`, so a float-idx case would take the int path and
@@ -475,6 +482,40 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     assert _props(lane, old).get("status") == "live"
     assert _props(lane, new).get("status") == "live"
     assert _operator_rows(lane, old) == [[op["id"], "IMPL", raw_idx]]
+    assert _operator_rows(lane, new) == []
+
+
+def test_supersede_repoint_judges_a_duplicated_slot_idx(lane):
+    """One ``idx`` carried by TWO inputs is judged on the loader's own tie-break.
+
+    Pre-fix this layout was a blanket skip, so the supersede minted
+    ``derived --IMPL--> asserted`` with no verdict. The load side does NOT skip
+    it: it builds the factor from ``ORDER BY coalesce(r.idx, 0), c.id`` and takes
+    the FIRST row's claim as the source, so the door mirrors exactly that — one
+    candidate, tie-broken by claim id — instead of either skipping (fail-open) or
+    judging every tied input (which would refuse a shape the loader keeps).
+
+    The tie-break is load-bearing here: the earlier-created ``src`` sorts first,
+    so it IS the source slot the loader reads, and once the successor is authored
+    the rebuilt factor is the derived-over-asserted wiring the door refuses.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # Collapse the target slot onto position 0: two inputs, one ``idx``.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = 1 SET r.idx = 0",
+        params={"op": op["id"]})
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", 0]]
     assert _operator_rows(lane, new) == []
 
 
