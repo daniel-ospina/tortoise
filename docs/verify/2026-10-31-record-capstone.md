@@ -200,7 +200,26 @@ whether the hosted deployment's tenant resolves for a real capture (the `no_tena
 `armed: true` and a *decline-only* counter set (`{}`), which is exactly what an inert-but-configured
 deployment also prints, so it is not evidence of a write.
 
-## 6. Reproduce
+## 6. Relationship to the 2026-10-26 capstone run (a continuation, not a second opinion)
+
+The committed `tests/test_9567_record_capstone.py` and `docs/verify/2026-10-26-record-capstone.md`
+measured D1–D5, D9 (direct connection) and D10, each with a named red. That artifact's own residual list
+names exactly the gap this run closes:
+
+> *"**D7** narrative text — the §9.1 carrier is emitted by the layer-1 commit path, not
+> `capture_session`; the reader returned `narrative=None` on a real capture"* — drive
+> `hosted_api._execute_commit_writes` with a `story_arc` against the armed record, then read
+> `session_text.narrative`.
+
+That is what Arms B/B′ did: the narrative went from `narrative=None` to a **129 B row in
+`public.session_narrative`**, written by the carrier (`sdk._emit_event("SessionNarrated")`) from the
+commit path itself, and visible through the app role's RLS boundary. So the composite D7 now reads:
+**both prose tiers land in, and read back from, the record — and the turn TIER is absent from the graph
+— while the PROSE is still reachable from two nodes.** No measurement the 2026-10-26 artifact already
+made is re-opened or contradicted; where the two overlap (D2) this run is a second, independent
+measurement of it.
+
+## 7. Reproduce
 
 ```bash
 uv run python tools/test_lane.py uri            # private FalkorDB lane; exports 3 seam vars
