@@ -18,7 +18,7 @@ version: 1
 upstream:
   repo: daniel-ospina/tortoise-skills-and-integrations
   branch: main
-  commit: 5c8d99c7c0923f5e572377d04b8b00c201cf3006
+  commit: f7fe148e0788a2059fb8f300611c772cc78f257c
 skills:
   how-to-use-tortoise:
     upstream_path: skills/how-to-use-tortoise/SKILL.md
