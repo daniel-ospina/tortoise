@@ -1188,3 +1188,90 @@ def test_the_record_type_cannot_bypass_the_replay_registry():
                          org_id="o", graph_id="g")
     assert rp.NARRATIVE_RECORD_TYPE in rp.RECORD_MUTATIONS
     assert rp.NARRATIVE_RECORD_TYPE in rp.JOURNAL_EVENT_TYPES
+
+
+# ── §6 the residual's own coverage: door 2 restores BOTH anchors ────────────
+#
+# `#10389` review P2 — "residual (b) understates door 2: the same route
+# re-materialises the prose on `:Event` too". The design document described
+# `#10394` as the `:Source` half only, and the pin in
+# `tests/test_9555_narrative_cache_rebuild.py:187` asserts a **Source** node, so
+# nothing in the suite could red on the understatement. Measured at
+# `b326d1cc4`: `public.event.story_arc` exists
+# (`supabase/migrations/20261012000001_record_event_stream.sql:237`), it is
+# classed PRIMARY in the placement table, and `projected_columns("event")`
+# keeps it — so the RECORD → CACHE restore re-materialises the prose on
+# `:Event` exactly as it does on `:Source`.
+#
+# This pin is DOC-ANCHORED on purpose. The residual is the artefact that tells
+# the next lane which routes are still open; a residual that names one anchor
+# of a two-anchor route is the "names the wrong mechanism" failure the section
+# exists to prevent. The premise half is derived from the code, not re-typed,
+# so a placement change reds here instead of silently making the prose sentence
+# stale — and the doc half reds if the wording regresses to `:Source` only
+# (which is exactly the state this pin was written against).
+
+_PLACEMENT_DOC = (
+    REPO_ROOT
+    / "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md"
+)
+_STORAGE_DOC = REPO_ROOT / "docs/architecture/STORAGE-ARCHITECTURE.md"
+
+
+def _placement_row(table: str, column: str) -> str:
+    """The placement table's row for `column` in `public.<table>` — a P row or nothing.
+
+    Read rather than restated: the residual's claim is *"the record keeps the
+    column"*, and the only authority for that is the placement table's class.
+    """
+    for line in _PLACEMENT_DOC.read_text(encoding="utf-8").splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] == f"`{column}`" and cells[1] == "P":
+            return line
+    return ""
+
+
+def test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so():
+    """The residual is the routing table for the next lane — it must be whole.
+
+    Two halves, and each is proved falsifiable in a direction the other cannot
+    reach: the PREMISE half reads the decision (placement class) and the code
+    that consumes it, so a placement change reds it; the DOC half reads §9.1's
+    residual, so a regression to the `:Source`-only wording — the shape
+    `b326d1cc4` carried — reds without any code moving.
+    """
+    from tortoise import cache_projection
+
+    # ── the premise: both record tables keep the column, and both project ──
+    for table, node_label in (("source", "Source"), ("event", "Event")):
+        assert _placement_row(table, "story_arc"), (
+            f"the placement table no longer classes `story_arc` PRIMARY for "
+            f"`public.{table}` — if that column left the record, door 2's "
+            "`:Source`/`:Event` halves no longer share one mechanism and this "
+            "pin's premise (not its doc claim) has moved")
+        assert cache_projection.NODE_TABLES[node_label] == table, (
+            f"`cache_projection.NODE_TABLES` no longer maps `:{node_label}` to "
+            f"`public.{table}` — the projection's own table map is what makes "
+            "the restore land on that label")
+        assert "story_arc" in cache_projection.projected_columns(table), (
+            f"`projected_columns({table!r})` no longer keeps `story_arc`, so the "
+            f"RECORD → CACHE restore would stop writing it onto `:{node_label}` "
+            "— the residual's claim, and the reason #10394 is a placement "
+            "decision rather than a key-set entry, would then be false")
+
+    # ── the claim: the design document names BOTH anchors ─────────────────
+    section = _STORAGE_DOC.read_text(encoding="utf-8")
+    start = section.index("(b) The key stays DECLARED")
+    residual = section[start:section.index("**Where that placement is now EXECUTABLE**", start)]
+    for anchor in ("source.story_arc", "event.story_arc"):
+        assert anchor in residual, (
+            f"§9.1's residual (b) no longer names `{anchor}` — door 2 "
+            "(`#10394`) re-materialises the prose on BOTH `:Source` and "
+            "`:Event`, and a residual that names one anchor leaves the other "
+            "route undocumented, which is exactly the understatement #10389's "
+            "review measured at `b326d1cc4`"
+        )
+    assert "public.event.story_arc" in residual, (
+        "§9.1's residual (b) does not state WHERE the `:Event` half lives — the "
+        "reader weighing `#10017`'s purge against the record needs the column, "
+        "not just the label")

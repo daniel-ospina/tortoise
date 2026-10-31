@@ -1790,9 +1790,15 @@ so legacy nodes read back, and the declaration is what makes a route possible at
   (`#issuecomment-6540959107`).
 - Door 2 — the RECORD → CACHE restore — is still OPEN, filed as `#10394`. `source.story_arc` is
   marked **PRIMARY** on `#7879`'s placement table, so `projected_columns("source")` keeps it and
-  `restore_from_record_view` / `rebuild_from_record` writes it back onto `:Source`.
+  `restore_from_record_view` / `rebuild_from_record` writes it back onto `:Source`; the SAME route
+  carries the `:Event` half — `public.event.story_arc` is PRIMARY on the same table (`:309`, open-set
+  passthrough), `projected_columns("event")` keeps it, and `NODE_TABLES` maps `Event → event`.
   `tests/test_9555_narrative_cache_rebuild.py:187` measures that lane and asserts the prose IS on the
-  rebuilt node. **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
+  rebuilt node — the `:Source` half only, which is why the understatement was measured rather than
+  assumed (`#10389` review P2: the residual had described `#10394` as the `:Source` half alone, and no
+  test could red on it; both anchors are now named in §9.1(b) and their premise pinned by
+  `tests/test_9555_narrative_carrier.py::test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so`).
+  **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
   restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
   table, plus that test's premise), which is why it is filed rather than absorbed.
 
