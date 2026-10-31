@@ -97,7 +97,7 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **86 such mutants
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **94 such mutants
 measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
@@ -132,14 +132,6 @@ EXCLUSION_TERMS = ("not track_b", "not live", "not integration")
 #: ``needs:`` of the required ``python-ci-gate``.
 TRACK_B_FILTER = "-m track_b"
 
-#: A full-suite invocation: ``pytest tests``, ``pytest tests/``, ``pytest ./tests/``
-#: — optionally followed by flags or a redirect. ``pytest <some file>`` (the
-#: bisect/blame commands) deliberately does NOT match, so it is not required to
-#: carry a full-suite marker filter.
-_FULL_SUITE = re.compile(
-    r"\bpytest\b(?:\s+-\S+)*\s+(?:\./)?tests/?\s*(?:$|[-\s>])"
-)
-
 #: The landing-time base check: compare ``origin/main`` to the pinned sha.
 _PINNED_MAIN_ASSERTION = re.compile(
     r'\[\s*"\$\(git\s+rev-parse\s+origin/main\)"\s*=\s*"\$PINNED"\s*\]'
@@ -165,8 +157,20 @@ _PIN_DEF = re.compile(
 #: The argv a suite run may carry. `pytest tests/ --co` exits 0 having collected
 #: nothing and `--lf` exits 0 having run one test, so an UNPINNED argv certifies a
 #: green on a tree no run has seen — the document's one non-negotiable rule.
-_SUITE_TARGETS = {"tests", "tests/", "./tests/", "tests/test_ingest_safety.py"}
-_SUITE_TAIL = {">", "2>&1", "&"}
+_SUITE_DIR_TARGETS = {"tests", "tests/", "./tests/"}
+_SUITE_FILE_TARGETS = {"tests/test_ingest_safety.py"}
+
+#: The VERB, with no opinion about the target. Every population this module
+#: quantifies over ("every fence that runs the full suite", "every fence that runs
+#: both halves") is derived from THIS: keying them on the target instead let one
+#: repointed token remove a fence from the population that must refuse a dirty tree.
+_SUITE_CMD = re.compile(r"^uv\s+run\s+pytest\b(?!\s+<)")  # not the <placeholder> bisect leg
+
+#: The two deliberate halves, as term MULTISETS. Order-free (a reordered `-m`
+#: passes) but exact — `… and not slow` still *contains* the three exclusion terms
+#: while silently deselecting a real marker.
+_HALF1_TERMS = ("not", "track_b", "not", "live", "not", "integration")
+_HALF2_TERMS = ("track_b",)
 
 
 def _suite_argv_ok(cmd: str) -> bool:
@@ -202,6 +206,7 @@ def _suite_argv_ok(cmd: str) -> bool:
     if tokens[:3] != ["uv", "run", "pytest"]:
         return False
     target = None
+    filters: list[str] = []
     rest = tokens[3:]
     i = 0
     while i < len(rest):
@@ -209,15 +214,24 @@ def _suite_argv_ok(cmd: str) -> bool:
         if token == "-q":
             i += 1
         elif token == "-m" and i + 1 < len(rest):
+            filters.append(rest[i + 1])
             i += 2
         elif token.startswith("--junitxml=") and token != "--junitxml=":
             i += 1
-        elif token in _SUITE_TARGETS and target is None:
+        elif token in _SUITE_DIR_TARGETS | _SUITE_FILE_TARGETS and target is None:
             target = token
             i += 1
         else:
             return False
-    return target is not None
+    if target is None or len(filters) != 1:
+        # pytest honours the LAST -m, so a second one can deselect the whole run.
+        return False
+    terms = tuple(term for term in shlex.split(filters[0]) if term != "and")
+    if sorted(terms) == sorted(_HALF2_TERMS):
+        return target in _SUITE_FILE_TARGETS
+    if sorted(terms) != sorted(_HALF1_TERMS):
+        return False
+    return target in _SUITE_DIR_TARGETS
 
 
 #: The only honest shape of the gate's poll line. Without this, `true && echo DONE`
@@ -475,12 +489,12 @@ def _fenced_commands() -> list[str]:
 
 def _deterministic_half(cmd: str) -> bool:
     """A full-suite run of the deterministic half (``-m 'not track_b …'``)."""
-    return bool(_FULL_SUITE.search(cmd)) and TRACK_B_FILTER not in cmd
+    return bool(_SUITE_CMD.match(cmd)) and TRACK_B_FILTER not in cmd
 
 
 def _full_suite_fences() -> list[list[str]]:
     """The fences that carry a full-suite run, in document order."""
-    return [fence for fence in _fences() if any(_FULL_SUITE.search(c) for c in fence)]
+    return [fence for fence in _fences() if any(_SUITE_CMD.match(c) for c in fence)]
 
 
 def _fence_index(predicate) -> int:
@@ -496,7 +510,7 @@ def test_this_guard_parses_the_document() -> None:
     commands = _fenced_commands()
     assert len(commands) >= 10, f"parsed only {len(commands)} fenced commands — re-point this guard"
     assert _fences(), "no fenced code block parsed — re-point this guard"
-    assert any(_FULL_SUITE.search(cmd) for cmd in commands)
+    assert any(_SUITE_CMD.match(cmd) for cmd in commands)
 
 
 def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
@@ -510,8 +524,8 @@ def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
     a gate member unrun. Every full-suite command must therefore be one half or
     the other, never a bare run and never a silently partial one.
     """
-    full_suite = [cmd for cmd in _fenced_commands() if _FULL_SUITE.search(cmd)]
-    # The ARGV of BOTH halves — `_FULL_SUITE` does not match the `test_ingest_safety.py`
+    full_suite = [cmd for cmd in _fenced_commands() if _SUITE_CMD.match(cmd)]
+    # The ARGV of BOTH halves — the directory form would not match `test_ingest_safety.py`
     # target, so checking `full_suite` alone left `-m track_b --co` free: it collects
     # and runs nothing, and the gate then certifies BATCH-GREEN with the MUST-PASS
     # `test-track-b` leg unrun. An appended `--co`, `--lf`, `-k`, `--ignore=`,
@@ -628,6 +642,38 @@ def test_the_track_b_gate_leg_is_run_in_the_gate_phase() -> None:
     )
 
 
+def test_the_lane_sync_is_the_one_command_that_keeps_the_extras() -> None:
+    """#2985: plain `uv sync` is a KEYWORD-ONLY product, silently.
+
+    ``uv sync --extra embeddings`` alone drops ``parity`` (and vice versa) — the
+    document names this trap two paragraphs down and then leaves its own command
+    unpinned, so a "full suite" that authorises ``BATCH-GREEN`` can be a partial run
+    with the dense-retrieval leg degraded to keyword-only.
+    """
+    syncs = [cmd for cmd in _fenced_commands() if re.match(r"uv\s+sync\b", _code(cmd))]
+    assert len(syncs) == 1, (
+        f"the doctrine must document exactly one `uv sync`: {syncs}"
+    )
+    extras = sorted(
+        token for token in shlex.split(_code(syncs[0])) if token.startswith("--extra")
+    )
+    assert extras == ["--extra embeddings", "--extra parity"] or extras == [
+        "--extra",
+        "--extra",
+        "embeddings",
+        "parity",
+    ] or sorted(shlex.split(_code(syncs[0]))[2:]) == [
+        "--extra",
+        "--extra",
+        "embeddings",
+        "parity",
+    ], (
+        "the lane install must name BOTH extras in one command: `uv sync --extra "
+        "embeddings --extra parity`. A plain or single-extra sync silently removes "
+        f"the other, and the run then measures a keyword-only product: {syncs}"
+    )
+
+
 def test_the_lane_is_selected_and_exported_before_the_first_suite_run() -> None:
     """#10399 review P1-4 / ISSUE 3: the suite is URI-required, so the lane comes first.
 
@@ -641,7 +687,7 @@ def test_the_lane_is_selected_and_exported_before_the_first_suite_run() -> None:
     """
     commands = _fenced_commands()
     exports = [i for i, cmd in enumerate(commands) if "export TORTOISE_DB_URI=" in cmd]
-    suites = [i for i, cmd in enumerate(commands) if _FULL_SUITE.search(cmd)]
+    suites = [i for i, cmd in enumerate(commands) if _SUITE_CMD.match(cmd)]
     assert exports, (
         "no fenced command exports TORTOISE_DB_URI= — the documented suite would "
         "die at session start (tests/_embedded.py::_assert_p4_uri_required)"
@@ -665,7 +711,7 @@ def test_phase_1_checks_out_the_pinned_base_before_the_baseline_suite() -> None:
     convicted). The fence must move HEAD onto ``"$PINNED"`` before the run.
     """
     fences = _fences()
-    first = _fence_index(lambda fence: any(_FULL_SUITE.search(c) for c in fence))
+    first = _fence_index(lambda fence: any(_SUITE_CMD.match(c) for c in fence))
     assert first >= 0, "no baseline fence found — re-point this guard"
     fence = fences[first]
     moves = [i for i, c in enumerate(fence) if _MOVES_HEAD.search(c) and '"$PINNED"' in c]
@@ -675,7 +721,7 @@ def test_phase_1_checks_out_the_pinned_base_before_the_baseline_suite() -> None:
         "suite; `git branch` creates the ref and leaves HEAD in the operator's "
         "own tree, so the baseline would be measured on the wrong tree"
     )
-    run = [i for i, c in enumerate(fence) if _FULL_SUITE.search(c)]
+    run = [i for i, c in enumerate(fence) if _SUITE_CMD.match(c)]
     assert min(moves) < min(run), (
         "the baseline fence checks out the pinned base only AFTER the suite run"
     )
@@ -738,7 +784,7 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     measures the lane. The clean-tree precondition is the other half of the fix.
     """
     fences = _fences()
-    first = _fence_index(lambda fence: any(_FULL_SUITE.search(c) for c in fence))
+    first = _fence_index(lambda fence: any(_SUITE_CMD.match(c) for c in fence))
     assert first >= 0, "no baseline fence found — re-point this guard"
     baseline = fences[first]
 
@@ -786,7 +832,7 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     # a refusal AFTER the suite refuses nothing. Both are pinned: the command must
     # BE the test with a non-zero halt, and it must precede the first suite line.
     for fence in fences:
-        run = [i for i, c in enumerate(fence) if _FULL_SUITE.search(c)]
+        run = [i for i, c in enumerate(fence) if _SUITE_CMD.match(c)]
         if not run:
             continue
         dirty = [i for i, c in enumerate(fence) if "git status --porcelain" in _code(c)]
@@ -815,7 +861,7 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     # between the pin switch and the first pytest line satisfies every check
     # above while the suite measures the operator's lane — verbatim the P1 this
     # file exists to prevent.
-    run = [i for i, c in enumerate(baseline) if _FULL_SUITE.search(c)]
+    run = [i for i, c in enumerate(baseline) if _SUITE_CMD.match(c)]
     assert run, "the baseline fence no longer runs the suite — re-point this guard"
     before = [c for c in baseline[: min(run)] if _MOVES_HEAD.search(_code(c))]
     assert all('"$PINNED"' in _code(c) and _re_runnable(_code(c)) for c in before), (
@@ -936,8 +982,10 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
         f"body; these definitions rewrite it: {defines}"
     )
     assert not re.search(r";|&&|\|\|", defines[0]) and re.fullmatch(
-        r'(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?'
-        r'PINNED="\$\(gh pr view .+--json body .+\)"',
+        r"(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?"
+        r"PINNED=\"\$\(gh pr view .+ --json body "
+        r"(?:--jq '\.body'|--template '\{\{\.body\}\}')\s*\|\s*"
+        r"sed -n 's/\^pinned-base: //p'\)\"",
         defines[0],
     ), (
         "the landing pin must BE the PR-body read, in one substitution — a "
