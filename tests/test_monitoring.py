@@ -842,9 +842,30 @@ class TestProbeDbBoundedAcquisition:
         ``latency_ms=309.1`` before this exclusion, against ``1.6`` for the
         equivalent ``sdk=`` shape.
 
+        ⚠️ ASSERTED AS A BRACKETED INTERVAL, NEVER AS AN ABSOLUTE MILLISECOND
+        THRESHOLD. Both bounds here used to read ``latency_ms < 250``. On the
+        loaded ``test-slow`` lane that bound reded this test as the ONLY
+        failure on an otherwise-green shard (PR #10424, run 41202945292): the
+        reported number was 583.9 ms out of a ~1084 ms call. The subtraction is
+        UNCONDITIONAL in the code at that head, so that reading cannot be the
+        acquisition leaking back in — it is a wall-clock stall charged to the
+        probe phases (the probe's real work is ~1 ms: the same call measures
+        0.9 ms unloaded). An absolute bound on a bare probe measurement
+        therefore measures the RUNNER, not this code — pytest's own flaky-test
+        guidance ("a test that relies on system state it does not control":
+        tight timing expectations are the canonical cause). The contract being
+        tested is a RELATION between two intervals read off the same clock in
+        the same call, so it is asserted that way — a stall lands on both sides
+        of the subtraction and cancels:
+
+            reported  = (call) - (acquisition)              the contract
+            excluded  = (call measured HERE) - reported
+                      = (acquisition) + this test's bracket  >= acquisition
+
         LOAD-BEARING (mutation: drop ``- acquisition_elapsed`` from the return):
-        the acquisition's ~0.5s is charged to the probe and the ``< 250``
-        assertion below reds.
+        ``excluded`` collapses to this test's own bracket (~0 s) instead of the
+        acquisition's ~0.5 s, and the assertion below reds. The discrimination
+        is the acquisition's 0.5 s, not a millisecond threshold.
         """
         # A leftover abandoned acquisition from an earlier test in this class
         # must not share the single probe slot and be charged to this probe.
@@ -858,24 +879,49 @@ class TestProbeDbBoundedAcquisition:
             acquisition["elapsed"] = time.monotonic() - began
             return FakeSDK(db_ok=True)
 
+        # The bracket: the SAME clock around the whole call, so the interval
+        # carries whatever the call cost on THIS runner — including a
+        # scheduling stall — instead of assuming how fast the runner is.
+        bracket_start = time.monotonic()
         acquired = monitoring.probe_db(acquire=slow_acquire)
+        acquired_bracket = time.monotonic() - bracket_start
         assert acquired["ok"] is True, acquired
         # The acquisition really did take the time: the exclusion below is
         # observable, not a rounding artifact.
         assert acquisition["elapsed"] >= 0.5, acquisition
-        assert acquired["latency_ms"] < 250, (
-            f"the acquire= shape reported latency_ms={acquired['latency_ms']} "
-            f"while its acquisition alone took {acquisition['elapsed']:.3f}s — "
-            "the reported field must keep meaning PROBE latency (pre-#3446 "
-            "semantics), not silently absorb the acquisition phase (#3446 "
-            "review)"
+        # How much of the call's wall clock the reported field does NOT contain.
+        # ``latency_ms`` is rounded to 0.1 ms by the production code and this
+        # interval is derived from it, so allow half a rounding step — three
+        # orders of magnitude below the 0.5 s being discriminated.
+        rounding_slack = 0.00005  # 0.05 ms
+        excluded = acquired_bracket - acquired["latency_ms"] / 1000
+        assert excluded + rounding_slack >= acquisition["elapsed"], (
+            f"the acquire= shape's call took {acquired_bracket * 1000:.1f}ms "
+            f"and reported latency_ms={acquired['latency_ms']}, so only "
+            f"{excluded * 1000:.1f}ms was excluded while its acquisition alone "
+            f"took {acquisition['elapsed']:.3f}s — the reported field must keep "
+            "meaning PROBE latency (pre-#3446 semantics), not silently absorb "
+            "the acquisition phase (#3446 review)"
         )
 
-        # The equivalent sdk= shape reports the same order: the acquisition's
-        # cost belongs to NEITHER.
+        # CONTROL, not load-bearing on the mutation above: the acquisition's
+        # cost belongs to NEITHER shape. The sdk= caller acquired OUTSIDE the
+        # measured window, so its call must carry no acquisition-sized charge —
+        # which is what makes the excluded interval above attributable to the
+        # acquisition rather than to something inherent in probe_db. Bracketed
+        # the same way, so a stall in a probe phase cancels here too.
+        supplier_start = time.monotonic()
         supplied = monitoring.probe_db(FakeSDK(db_ok=True))
+        supplied_bracket = time.monotonic() - supplier_start
         assert supplied["ok"] is True, supplied
-        assert supplied["latency_ms"] < 250, supplied
+        supplied_residual = supplied_bracket - supplied["latency_ms"] / 1000
+        assert supplied_residual < acquisition["elapsed"], (
+            f"the sdk= shape's call carried {supplied_residual * 1000:.1f}ms "
+            f"its reported latency_ms={supplied['latency_ms']} does not "
+            "account for — nothing was acquired inside that call, so the "
+            "acquire= shape's exclusion cannot be attributed to the "
+            "acquisition"
+        )
 
     def test_queued_acquisition_names_the_wait_not_an_overrun(self):
         """An acquisition that never STARTED must not read as one that ran.
