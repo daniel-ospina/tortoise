@@ -334,8 +334,11 @@ PR body (``tested-tree: <sha>``, printed by both fences that run the suite on th
 because a branch records where it is LATER while the invariant is about what was MEASURED, and the PRODUCER of every carrier the doctrine reads back out of the batch PR body (``pinned-base:`` from Phase 1, ``tested-tree:`` from Phase 3 and the post-revert re-check — a ``printf`` in an EARLIER fence, from a variable that fence DERIVES, so a hand-copied value cannot silently replace a derived one), and the skip-REASON axis per RUN rather than per fence (each half owes its own reasons, its own diff against ITS baseline, and its own halt).
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **38 checks**, **0 red**, and the head the round-35 review was taken
-at (``9f8e12192``) is **7 of 38**: the three findings of that review that red a CHECK there — the
+revision rather than asserted — **39 checks**, **0 red**. The per-revision literals in the next
+two paragraphs are the ROUND-37 measurement (taken when the guard had 38 checks) and are left as
+that round's record; the standing matrix is RE-MEASURED at 39 in *Round 38* below, which
+supersedes every ``of 38`` here. The head the round-35 review was taken
+at (``9f8e12192``) is **11 of 39**: the three findings of that review that red a CHECK there — the
 ``-m track_b`` half's missing SKIP axis, the two unhalted ``git fetch origin main`` lines the pin and
 the landing gate ride on (one check, enumerated over fences) — plus the ``batch_size`` value restated
 in prose, plus (round 36) the residual-window check, which now requires the tested tree to be
@@ -658,6 +661,78 @@ count-agnostic. Name a lane:
 on every PR run (`.github/workflows/python-ci.yml:1013-1034`, wired at `:1537-1542`) —
 so this module must stay lane-agnostic: no DB, no URI, no graph. A docs-only PR is
 `full=false`, i.e. this file's own load-bearing `tier1` run is URI-less.)
+
+**Round 38 — four findings on one head, and the check count moved 38 → 39.** Every one was a place
+where the doctrine was WEAKER than the thing it stands in for, so each fix is the doctrine asking the
+thing itself instead of re-spelling it, plus the check that would have caught the re-spelling.
+
+*The lane assertion was weaker than the gate it stands in for.* The three suite fences carried
+``[ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ]``, and
+``tests/_embedded.py::_assert_p4_uri_required`` accepts neither half of that as written: it tests
+``_uri_set_supported()`` (``is_db_uri`` over ``SUPPORTED_URI_SCHEMES`` — docker/redis/rediss) OR
+``_carve_out_opted_in()`` (``is_truthy`` — 1/true/yes/on). So a set-but-unsupported ``bolt://`` URI
+(this repo's own AGENTS.md documents it as a legal value) and ``TORTOISE_TEST_CARVE_OUT=0`` both PASSED
+the halt and then ERRORed every collected item at setup, exiting 1 — the status COMPLETED accepts — and
+the verdict was ``BATCH-GREEN`` for a tree on which nothing ran. Settled rather than read: ``bolt://``
++ ``=0`` → ``_uri_set_supported() = False``, ``_carve_out_opted_in() = False``, i.e. the fence passed
+and the suite refused the session. All four suite fences now invoke the gate's own two predicates
+(``uv run python -c '… from tests._embedded import …'``), so the scheme list and the truthy vocabulary
+have ONE home and cannot drift from the gate.
+
+*The two Phase-4 blame runs carried no lane assertion, and the grader graded a no-lane session
+``bad``.* Phase 4 is the LATEST shell of all, and pytest gives "nothing ran" and "this commit is red"
+the same status (1), so every probe read BAD and ``git bisect run`` convicted the OLDEST merge — the
+doctrine's own measured failure, one paragraph above it — and the next step drops that PR. Both blame
+fences now assert the lane and halt, and the probe captures its output and declines to convict on the
+gate's own message (``exit 125``), which is git's documented protocol (``make || exit 125``). The
+population was excluded by SPELLING, not judgement — ``_SUITE_CMD``'s ``(?!\\s+<)`` refuses the
+placeholder form and ``git bisect run`` does not start with ``uv`` — so the new
+``test_the_blame_probes_assert_the_lane_and_decline_to_convict_an_unrunnable_probe`` enumerates a
+``_BLAME_PROBE`` population of its own, and pins the decline's needle against ``tests/_embedded.py``
+so it cannot match a string no run can print.
+
+*The bounded wait was SHORTER than the run it bounds.* ``240 × 15 s = 60 min``, described as the wedge
+bound, against a command that runs the union of CI's pools in ONE process (no xdist, no leg
+partition): ``test (a…i)``'s p50s serialise to ≈91–134 min, ``test-slow`` is 37.05 min of measured
+test time, ``test-carve-out`` is 8.3–8.6 min × 3 shards ≈ 25 min — ≈153–196 min before collecting
+41.7k tests. CI gets ~37 min of WALL clock out of that only by sharding across runners, and Phase 1
+runs the byte-identical command with NO bound at all, so the same command cannot be expected to
+finish in Phase 1 and not in Phase 3. The bound is 360 × 60 s = 6 h (≈1.8× the worst documented
+composition) in both fences.
+
+*The wait's expiry was read as the run's END, and it is not.* The run is detached and outlives the
+shell, so re-running the fence ``rm -f``'d the status of a suite that was still EXECUTING, and the two
+runs then shared this batch's ``$B`` — whichever finished first owned the ledger. That is the
+per-batch-ledger collision the doctrine closes BETWEEN batches, one level down inside one batch, where
+no directory namespacing can separate them. Both fences now refuse to restart while ``$B/batch.log``
+was written in the last 10 minutes, and say to wait for the status (and to kill the suite first if it
+really is wedged).
+
+**Non-vacuity, measured against THIS guard, each red on ONE check and on nothing else:** restoring the
+``-n`` disjunction at Phase 3 reds 1 of 39 (the lane check); deleting the Phase-4 manual fence's lane
+assertion reds 1 of 39, and the bisect fence's reds 1 of 39 (the new blame check); restoring the
+pre-fix grader (``>/dev/null 2>&1``, no decline) reds 1 of 39 (the new blame check);
+``seq 1 1 … sleep 15``, ``seq 1 240 … sleep 15`` (the pre-fix 60 min) and ``seq 1 240 … sleep 1`` each
+red 1 of 39 (the bounded-wait check); deleting both live-run refusals reds 1 of 39 (the same check).
+Deleting the POST-REVERT fence's assertion reds 2 of 39 — its own check and the lane check — because
+that fence is the one the verdict is read from. Two HONEST re-spellings of the bound stay green
+(``120 × 300``, ``720 × 30``), so the check grades the arithmetic rather than the spelling.
+
+**The revision axis, RE-MEASURED at 39** (not carried — the previous matrix was taken at 38):
+``0a9ee9050`` (this round's review head) **4 of 39**; ``9f8e12192`` **11 of 39**; ``c6d4c8278``
+**7 of 39**; ``c7a772628`` / ``657a544a4`` **13 of 39**; ``4dc214c02`` **16 of 39**; ``7fb722a9a``
+**18 of 39**; ``62c79b0b8`` **19 of 39**; ``a6a71c1e5`` / ``a4028e8d7`` **20 of 39**; ``a12792afe``
+**22 of 39**; ``a17576c43`` **35 of 39**; ``f3c6c803b`` **32 of 39**; ``a8be548762`` **30 of 39**;
+``295d6d385`` **28 of 39**; ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5`` **27 of 39**;
+``ed1c03b82`` / ``c50628450`` **26 of 39**; ``a888c6980`` / ``aede4190f`` **25 of 39**.
+The deltas against round 37 are NOT uniform, which is the point of re-measuring: every pre-fix
+revision gains the new blame check (+1), the bounded-wait check now also demands the live-run refusal
+(+1 where its fence had the old bound), and the tightened ``_LANE_ASSERT`` reds the lane check — and,
+where that revision's post-revert fence used the ``-n`` spelling, the post-revert check too (+2). A
+revision already red on one of those gains nothing from it, so the observed deltas are +1..+4 and the
+review head ``0a9ee9050`` reds on exactly the FOUR defects this round fixed (lane predicate, blame
+probes, bound, live-run refusal) and on nothing else — which is the cleanest statement of the
+round's scope this file can make.
 """
 
 from __future__ import annotations
