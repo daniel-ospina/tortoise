@@ -59,12 +59,20 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
 ``result["vet"]`` at ``:8975-8979``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14399``), which copies each
-stage's own counts onto ``stats["step_witness"]`` — so this module READS that seam
-(:func:`_witness_block`) instead of citing the gap. A run measured at a stamp
-BEFORE the seam still reports S2.2/S2.3 unobserved, and that is the run's own
-answer, not a workaround: reading a wrapper's state instead is the
-instrumentation E4's row forbids.
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14555``), which copies each
+stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
+this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
+run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
+that is the run's own answer, not a workaround: reading a wrapper's state instead
+is the instrumentation E4's row forbids.
+
+⛔ THAT FOLD LINE IS TYPED HERE IN PROSE ONLY (which the bundle's cite sweep
+re-resolves), never in a cause this probe PRINTS. Every ``sdk.py`` number a cause
+emits is read off the tree at import as ``META_FOLD_CITE`` / ``LINK_SOURCE_CITE`` /
+``TURN_WRITE_CITE``, because a line cite is the one number no reader can keep true
+by hand: any commit that inserts a line above it moves it, and a stale one sends
+#9116's fixer to the wrong line. A cite that will not resolve to exactly ONE line
+makes the probe REFUSE rather than print it.
 
 📌 CITE CONVENTION (this bundle). Every ``file:line`` is re-derived from the tree
 at the head the bundle is stamped at, and is paired with the SYMBOL it names —
@@ -127,26 +135,41 @@ if str(ROOT) not in sys.path:
 def _sdk_line(code: str) -> int:
     """The ONE line of ``tortoise/sdk.py`` carrying ``code`` — READ, never typed.
 
-    The meta fold moves on every merge that touches ``sdk.py`` above it (#9964
-    inserted 326 lines; main's own commits move it too), so a typed cite in a
-    cause this probe emits is stale the moment the branch is merged — and a stale
-    cite sends the #9116 fixer to the wrong line. The SYMBOL-quoting convention
-    documented at the top of this file is what this implements: the number is a
-    convenience, re-derived from the tree on each run.
+    A line cite is the one number in this bundle no reader can keep true by hand:
+    any commit that inserts a line above the site moves it, and the meta fold has
+    moved on this branch's own history and again on ``main``'s ``#9964``. Typed,
+    the CAUSE re-stales SILENTLY — a shipped cause once named ``:13593`` for a fold
+    that had moved to ``:13611``, and the only thing that caught it was
+    ``tests/test_7949_capstone_measure.py``, which derives the line in the PIN and
+    compares. Deriving it here too means the cause a reader (and #9116's fixer)
+    actually reads cannot re-stale on a merge that touched nothing this bundle
+    owns. The SYMBOL is authoritative and the line is a convenience (the bundle's
+    own cite convention), so deriving it is the same answer Sphinx gives
+    (``py:obj`` resolves to a symbol, not a line).
+
+    ⛔ It REFUSES rather than printing a claim nothing supports: a cite that cannot
+    be resolved to exactly ONE line is not a number this run may print (the
+    ``arm:`` read-back rule, applied to a cite).
     """
+    source = ROOT / "tortoise/sdk.py"
+    if not source.exists():  # pragma: no cover - a checkout without the tree
+        raise RuntimeError(
+            f"cannot resolve a cite: {source} is not in this checkout, and a "
+            "cause that names no real line is worse than no cite (#9116)")
     hits = [n for n, line in enumerate(
-        (ROOT / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines(), 1)
+        source.read_text(encoding="utf-8").splitlines(), 1)
         if code in line]
     if len(hits) != 1:  # pragma: no cover - a moved/ambiguous cite is a refusal
-        raise AssertionError(
-            f"`{code}` is on {len(hits)} lines of sdk.py {hits} — one expected")
+        raise RuntimeError(
+            f"`{code}` is on {len(hits)} lines of sdk.py {hits} — the cause names "
+            "ONE line, so this run refuses rather than pick (#9116)")
     return hits[0]
 
 
 #: The meta fold's cite, in the exact shape the causes below print it — derived
 #: from the tree at run time (see ``_sdk_line``), never typed.
 #:
-#: The typed string is the POST-#9116 fold (``"stats":
+#: The anchor is the POST-#9116 fold (``"stats":
 #: _capture_stats_with_step_witness(out, len(extracted))``), because the merge
 #: that brought ``_sdk_line`` in also brought the seam this PR lands: the
 #: pre-seam ``"stats": out.get("stats")`` occurs on NO line of the merged tree,
@@ -190,7 +213,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2573-2598``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:14680`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:14836`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -828,9 +851,10 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596 and "
-        ":8616), and each VET pass is gated on the LIST — `if vet_enabled and "
-        "embed_list:` (:8684), `if vet_enabled and complete_list:` (:8806) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596, the "
+        "flag; :8600, the early return; :8616, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:8684), "
+        "`if vet_enabled and complete_list:` (:8806) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
         "returns {} on its fail-open path, :8478-8481)."

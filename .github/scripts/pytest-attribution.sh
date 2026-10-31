@@ -163,17 +163,10 @@ fi
 # The legs that still write `/tmp/...` literals, and still need the same change, are
 # the deliberate residual named on #10280, which carries the rest of the migration:
 #
-#   `test-d14-hosted-api`       (`/tmp/pytest-d14.log`)  — `python-ci.yml`
 #   `validate`                  (`/tmp/pmv-pytest.log`)  — `post-merge-validation.yml`
 #
-# The two legs are residual for DIFFERENT reasons, and the shapes must not be conflated
+# `validate` is residual for its LITERAL, not its redirect, and the distinction matters
 # (PR #10264 review, verified against `capture_site`):
-#
-#   `test-d14-hosted-api` captures through `| tee /tmp/pytest-d14.log`, and the tee
-#   branch is `\|\s*tee\s+(/tmp/[^\s|]+\.log)` — a `/tmp/...` LITERAL only. A migrated
-#   `tee "$PYTEST_LOG"` would therefore not be counted at all, so THIS leg owes the
-#   counter a widening (a guard whose subject is this drift must not be
-#   spelling-dependent).
 #
 #   `validate` WRITES its log with `> /tmp/pmv-pytest.log 2>&1` and is COUNTED at the
 #   separate `tail -n 300 /tmp/pmv-pytest.log` site, whose branch
@@ -181,6 +174,11 @@ fi
 #   counted without a widening. `capture_site` has NO `>` branch at all: the `>` write is
 #   not a shape it reads, which is why this leg is residual for its LITERAL, not its
 #   redirect.
+#
+# The OTHER leg #10264 named in this paragraph captures through `| tee` rather than a
+# tail, and it is MIGRATED (#7815, PR #10143) — so it is NOT residual and is deliberately
+# not named here. The counter widening it owed is recorded BELOW the delimiter that ends
+# this list, because naming a migrated leg inside the window is itself a red.
 #
 # ⛔ THIS LIST IS DERIVED, NOT REMEMBERED — do not edit it from memory. It is
 # `tests/test_pytest_attribution.py::test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals`,
@@ -190,12 +188,34 @@ fi
 # change — and naming a leg that HAS migrated is a red too, because an over-wide residual
 # sends the next lane to migrate work that is already done.
 #
-# `validate` is the warn-only job, so for it the consequence is a misleading artifact
-# rather than a false red on a required check — named anyway, so the residual reads as
-# one scope instead of a list that stops where the gate impact does.
+# `validate` is the LAST one: it is the warn-only job, so for it the consequence is a
+# misleading artifact rather than a false red on a required check — named anyway, so the
+# residual reads as one scope instead of a list that stops where the gate impact does.
 #
-# For THOSE legs the three signals below stay load-bearing, and they keep the KILL path —
-# the one that produced the "timeout flakes" — from being fooled until they get it.
+# ⚠️ THE FOUR `python-ci.yml` LEGS THIS LIST USED TO NAME — `test-concurrency-falkor`,
+# `test-track-b`, `test-carve-out` and `test-d14-hosted-api` — are MIGRATED (#7815, PR
+# #10143), which is why `test-track-b` is no longer a residual. They are migrated in TWO
+# spellings, and the difference is deliberate: #10280 moved the first three onto
+# `"$PYTEST_LOG"` / `"$PYTEST_JUNIT"` / `"$PYTEST_MANIFEST"`, resolved once in the job's
+# first step and failing CLOSED on `${RUNNER_TEMP:?}`, while `test-d14-hosted-api` keeps
+# this PR's per-step `${RUNNER_TEMP:-/tmp}/...`. Both are per-runner (a runner runs one
+# job at a time); neither writes a host-global `/tmp` artifact.
+#
+# `test-track-b` was the sharpest of the five and #10280's own
+# ROOT measurement — its shared `/tmp/expected-nodeids.txt` + `/tmp/junit.xml` produced
+# `4 expected nodeids -> 640 absent`, a false red on a required check — and that is
+# exactly what the per-job paths closed.
+#
+# `test-d14-hosted-api` owed the counter widening #10264 predicted, because it captures
+# through `| tee` rather than a tail: the `tee` branch matched a `/tmp/...` LITERAL only,
+# so a migrated `tee` would have gone UNCOUNTED and the leg's reporter obligation would
+# have stopped being checked at all. That widening is delivered in
+# `tests/test_pytest_attribution.py`'s `_TEE_SITE_RE`, which now accepts the
+# `"${RUNNER_TEMP:-/tmp}/<name>.log"` spelling as well — a guard whose subject is this
+# drift must not be spelling-dependent.
+#
+# For the legs still named above the three signals below stay load-bearing, and they keep
+# the KILL path — the one that produced the "timeout flakes" — from being fooled.
 #
 # So ownership is "PROVEN, or treated as STALE", on three independent signals:
 #
