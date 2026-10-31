@@ -97,7 +97,7 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **81 such mutants
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **86 such mutants
 measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
@@ -175,10 +175,30 @@ def _suite_argv_ok(cmd: str) -> bool:
         tokens = shlex.split(cmd)
     except ValueError:
         return False
-    for i, token in enumerate(tokens):
-        if token in _SUITE_TAIL:
-            tokens = tokens[:i]
-            break
+    # Redirections are removed from the WORD LIST, not from the tail: bash keeps
+    # every other word in argv (`printf '<%s>' A B > out 2>&1 C` prints A B C), so
+    # truncating at the first `>` let `… > /tmp/batch.log 2>&1 --co &` through as a
+    # real `--co`.
+    argv: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == ">":
+            if i + 1 >= len(tokens):
+                return False
+            i += 2  # the redirect AND its target — neither is an argument
+            continue
+        if token in {"2>&1", "2>/dev/null"}:
+            i += 1
+            continue
+        if token == "&":
+            if i != len(tokens) - 1:
+                return False
+            i += 1
+            continue
+        argv.append(token)
+        i += 1
+    tokens = argv
     if tokens[:3] != ["uv", "run", "pytest"]:
         return False
     target = None
@@ -491,10 +511,13 @@ def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
     the other, never a bare run and never a silently partial one.
     """
     full_suite = [cmd for cmd in _fenced_commands() if _FULL_SUITE.search(cmd)]
-    # The ARGV, not just the path and the filter: an appended `--co`, `--lf`, `-k`,
-    # `--ignore=`, `--deselect`, `-x` or `--maxfail=1` exits 0 on a tree no run has
-    # seen, so `BATCH-GREEN` would certify a gate that never ran.
-    unpinned_argv = [cmd for cmd in full_suite if not _suite_argv_ok(cmd)]
+    # The ARGV of BOTH halves — `_FULL_SUITE` does not match the `test_ingest_safety.py`
+    # target, so checking `full_suite` alone left `-m track_b --co` free: it collects
+    # and runs nothing, and the gate then certifies BATCH-GREEN with the MUST-PASS
+    # `test-track-b` leg unrun. An appended `--co`, `--lf`, `-k`, `--ignore=`,
+    # `--deselect`, `-x` or `--maxfail=1` exits 0 on a tree no run has seen.
+    halves = full_suite + [cmd for cmd in _fenced_commands() if TRACK_B_FILTER in cmd]
+    unpinned_argv = [cmd for cmd in halves if not _suite_argv_ok(cmd)]
     assert not unpinned_argv, (
         "a suite command carries arguments outside the documented argv — "
         "`uv run pytest <target> [-q] [-m FILTER] [--junitxml=…]`: a selector such "
@@ -508,6 +531,27 @@ def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
         "the poll line must BE `kill -0 \"$(cat /tmp/<run>.pid)\" 2>/dev/null && echo "
         f"RUNNING || echo ...`; anything else reads a half-written log as done: {bad_polls}"
     )
+    # ...and the pid it reads must be the pid the SAME fence wrote: editing
+    # `echo $! > /tmp/gate.pid` alone leaves `kill -0` failing on an absent file,
+    # and the fence then prints DONE over a half-written log.
+    for fence in _fences():
+        written = {
+            match.group(1)
+            for cmd in fence
+            if (match := re.search(r"echo\s+\$!\s*>\s*(\S+)", _code(cmd)))
+        }
+        read = {
+            match.group(1)
+            for cmd in fence
+            for match in re.finditer(r'kill\s+-0\s+"\$\(cat\s+(\S+)\)"', _code(cmd))
+        }
+        if not read:
+            continue
+        assert written and read <= written, (
+            "the poll reads a pid file this fence never wrote: editing either line "
+            f"alone makes `kill -0` fail on an absent pid and report DONE. "
+            f"writes={sorted(written)}, reads={sorted(read)}"
+        )
     assert full_suite, "the doctrine no longer documents a full-suite run — re-point this guard"
 
     bare = [cmd for cmd in full_suite if "-m" not in cmd]
@@ -720,7 +764,8 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
         _code(baseline[i])
         for i in pins
         if re.fullmatch(
-            r'(?:export\s+)?PINNED="?\$\(git\s+rev-parse\s+origin/main\)"?',
+            r"(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?"
+            r'PINNED="?\$\(git\s+rev-parse\s+origin/main\)"?',
             _code(baseline[i]),
         )
     ]
