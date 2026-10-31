@@ -56,7 +56,7 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:9052-9058`` and
 ``result["vet"]`` at ``:8975-8979``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
 ``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14722``), which copies each
@@ -852,7 +852,7 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8596, the "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:8683, the "
         "flag; :8600, the early return; :8616, its vet surface), and each VET "
         "pass is gated on the LIST — `if vet_enabled and embed_list:` (:8684), "
         "`if vet_enabled and complete_list:` (:8806) — so "
@@ -863,7 +863,7 @@ _IDLE_CITES: dict[str, str] = {
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:8565 (and set False when its classifier cannot "
+        "tortoise/extractor_v2.py:8652 (and set False when its classifier cannot "
         "be constructed, :8590), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
         "'restamp_overrides': 0, 'slot_rekeys': 0} (:8612-8615), and each "
@@ -890,7 +890,7 @@ def _pass_ran(block: dict) -> bool | None:
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8596`` and
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:8683`` and
     ``edus = _edus_from_conversation(...)`` follows at ``:8599``, whose
     ``if not edus:`` early return (``:8600``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:8616``) — with the flag ON. The
@@ -899,7 +899,7 @@ def _pass_ran(block: dict) -> bool | None:
     (``:8806``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:8478-8481``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:8562-8565``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
