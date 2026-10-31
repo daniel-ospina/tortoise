@@ -61,9 +61,13 @@ def _classify_later_off(monkeypatch):
     """Pin the contract this file asserts to the one CI renders.
 
     A truthy ambient ``TORTOISE_CLASSIFY_LATER`` flips both renderers to the
-    ``_CORE_ONLY`` template, which drops ``OUTPUT_CONTRACT`` and the
-    ``{date_anchor}`` slot from the system prompt. Two cases here read those
-    tokens in the rendered prompt, so without this the file's green would
+    ``_CORE_ONLY`` template, which swaps the contract to
+    ``OUTPUT_CONTRACT_CORE_ONLY`` (so the full ``OUTPUT_CONTRACT`` string is
+    absent) and drops the ``{chains_text}`` slot. ``{date_anchor}`` is on BOTH
+    templates — measured at this head, ``'{date_anchor}' in S2_TMPL`` and
+    ``in S2_TMPL_CORE_ONLY`` are both True — so it is FILLED rather than
+    dropped and is not a discriminator; the CONTRACT is. Two cases here read
+    those tokens in the rendered prompt, so without this the file's green would
     depend on the caller's shell — a lane that exported the flag would see
     four reds that say nothing about the framing. Same posture as
     ``tests/test_extractor_v2.py``. Pinned by
@@ -613,8 +617,16 @@ def test_the_quote_to_turn_resolver_still_anchors_through_a_framed_prompt():
     """`quote` → `source_turn_id` is deterministic and reads the EDUs, not the prompt.
 
     The envelope wraps the transcript BYTE-UNCHANGED, so the verbatim anchor that
-    resolves the turn is unaffected — the model's own index stays advisory.
+    resolves the turn is unaffected — the model's own index stays advisory. The
+    prompt is RENDERED here and the body is recovered FROM the envelope, so this
+    reds on the pre-fix code (no envelope exists to recover) instead of passing
+    against it: the claim in this test's name is what it measures.
     """
+    prompt = v2.render_s2_prompt(edus=HOSTILE_EDUS)
+    _prefix, framed_body, _suffix = _only_envelope(prompt, "SOURCE-TRANSCRIPT")
+    assert framed_body == v2._edus_to_text(HOSTILE_EDUS), (
+        "the resolver reads the EDUs, so the envelope must carry them exactly as"
+        " the unframed render did — escaping would move the anchor")
     warnings: list[str] = []
     turn = v2._resolve_source_turn({"quote": "my 5K best is 27:12",
                                     "source_turn_id": 1},
@@ -631,9 +643,10 @@ def test_the_file_is_immune_to_an_ambient_classify_later():
     """A flag in the caller's shell must not decide whether this file is green.
 
     A truthy ``TORTOISE_CLASSIFY_LATER`` swaps both renderers to the
-    ``_CORE_ONLY`` template, which drops ``OUTPUT_CONTRACT`` and the
-    ``{date_anchor}`` slot — the two tokens the parser cases above read in the
-    system prompt. Measured on the pre-fixture file: `TORTOISE_CLASSIFY_LATER=1
+    ``_CORE_ONLY`` template, whose contract is ``OUTPUT_CONTRACT_CORE_ONLY`` —
+    so the full ``OUTPUT_CONTRACT`` string the parser cases count is absent,
+    while ``{date_anchor}`` is on BOTH templates and stays FILLED (not a
+    discriminator). Measured on the pre-fixture file: `TORTOISE_CLASSIFY_LATER=1
     pytest tests/test_extractor_prompt_framing_10311.py` reds **4** cases
     (`output_contract`, `date_anchor`, and both parser round-trips), none of
     which says anything about the framing. The autouse fixture removes the var
@@ -646,8 +659,9 @@ def test_the_file_is_immune_to_an_ambient_classify_later():
     system = v2.render_s2_prompt(edus=EDUS)
     assert v2.OUTPUT_CONTRACT in system
     assert "{date_anchor}" not in system, (
-        "the base template's date slot must have been filled, i.e. the CORE_ONLY"
-        " template is not the one under test")
+        "the date slot must have been FILLED — a literal slot token means the"
+        " one-pass fill skipped it (it is on both templates, so this is not"
+        " the CORE_ONLY discriminator; `OUTPUT_CONTRACT` above is)")
 
 
 # ── 4. drops-the-clause-reddens ─────────────────────────────────────────────
