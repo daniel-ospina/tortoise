@@ -1875,32 +1875,32 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("9175", "if vet_enabled and embed_list:"),
-            ("9176", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("9297", "if vet_enabled and complete_list:"),
-            ("9298", "vet_union_stats, _w, _ = _run_vet_pass("),
+            ("9178", "if vet_enabled and embed_list:"),
+            ("9179", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("9300", "if vet_enabled and complete_list:"),
+            ("9301", "vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys close on line 9446
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("9456", 'result["classify_later"] = {'),
-            ("9466", 'result["vet"] = {'),
+            ("9459", 'result["classify_later"] = {'),
+            ("9469", 'result["vet"] = {'),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("9084", "if not edus:"),
-            ("9100", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("9087", "if not edus:"),
+            ("9103", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("9100", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("9103", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("9083", "edus = _edus_from_conversation(conversation)"),
+            ("9086", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("9466", 'result["vet"] = {'),
-            ("9470", ("exact", "}")),
+            ("9469", 'result["vet"] = {'),
+            ("9473", ("exact", "}")),
         )),
     )
     docs = dict(_BUNDLE_DOCS)

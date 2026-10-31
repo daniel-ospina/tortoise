@@ -2774,7 +2774,10 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
 
     for e in embed_list.get("entities", []) or []:
         if isinstance(e, dict) and e.get("name"):
-            _add("object", str(e["name"]))
+            # through the ONE home, like the text legs: the object width is None
+            # today, so this is behaviour-identical — and the day one is set, the
+            # derivation and the record cannot silently disagree (#5095 review).
+            _add("object", _candidate_query_text("object", e.get("name")))
     for ev in embed_list.get("events", []) or []:
         if isinstance(ev, dict) and ev.get("content"):
             _add("event", _candidate_query_text("event", ev.get("content")))
@@ -9526,8 +9529,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             result.setdefault("warnings", []).append(
                 f"S3 identity {_id['state']}{_reason}: the existing-item lookup "
                 f"did not run for {_id['unresolved_total']} of {_denominator} "
-                f"candidate(s) — their identity was not established from the "
-                f"lookup")
+                f"candidate(s)")
         else:
             # The other shape, and it is ordinary rather than broken: the budget
             # can cut only the trailing STORY-TOPIC queries, which follow every
@@ -9535,9 +9537,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             # set" here contradicted the block's own counters in the same result
             # (#5095 review round 3).
             result.setdefault("warnings", []).append(
-                f"S3 identity {_id['state']}{_reason}: the query budget cut part "
-                f"of the lookup, but every committed candidate's own query ran — "
-                f"no candidate was left unchecked")
+                f"S3 identity {_id['state']}{_reason}: part of the lookup did "
+                f"not run or did not complete, but every candidate's own query "
+                f"ran — no candidate was left unchecked")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface
