@@ -73,7 +73,8 @@ That overlap is real and must not be papered over — but it is not the same gat
 | base drift | the queue **is** the writer, so its base cannot drift under it | the batch does not own `main`, so the base **can** drift — see Landing |
 
 So: the queue owns the merge and validates a composition; the batch owns the *evidence* and validates a
-composition the queue cannot (larger than 4, chosen deliberately, measured against a baseline). Neither
+composition the queue cannot (larger than the queue's own `batch_size`, chosen deliberately, measured
+against a baseline). Neither
 substitutes for the other. The ruling above moves the **full suite** to the batch; it does not remove
 the queue, and nothing here asks for it to be removed.
 
@@ -188,7 +189,13 @@ PR *caused* from a failure that was **already there**, and you will drop an inno
 pre-existing bug inside a batch, which is scope creep with no review).
 
 ```bash
-git fetch origin main
+# ⛔ The fetch HALTS. A bare `git fetch` that fails (network, auth, DNS) leaves `origin/main` at the
+# LAST SUCCESSFUL fetch — in the normal flow, the very base this batch was pinned to — and `PINNED`
+# below then records a tree that is not current `main`. The baseline is measured on it, so `main`'s
+# own new red is absent from the baseline id set, Phase 4 classifies it `NEW`, and an innocent PR is
+# dropped: the exact outcome the baseline exists to prevent. (The mirrored failure is worse — a
+# silently-stale ref makes a Landing pin check PASS against a moved `main`.)
+git fetch origin main || { echo "the fetch FAILED — refusing to pin a stale origin/main; the last successful fetch is not current main, and every later verdict is diffed against this pin"; exit 1; }
 PINNED="$(git rev-parse origin/main)"            # PIN THIS SHA — every later comparison is against it
 # ⛔ A dirty tree defeats the switch: `git switch -C` CARRIES uncommitted and untracked files.
 [ -z "$(git status --porcelain)" ] || { echo "dirty tree — the baseline would measure it, not origin/main"; exit 1; }
@@ -215,7 +222,8 @@ B="/tmp/batch-$BATCH"
 # `pytest_sessionfinish`, so a baseline run the kernel killed leaves the PREVIOUS batch's report at
 # this path — and the count below then reads it as THIS baseline, which is the ledger every later
 # verdict is diffed against (main's own red is hidden, and an innocent PR is convicted).
-rm -f "$B/baseline-junit.xml" "$B/baseline.total" "$B/baseline.skipped" "$B/baseline.skipped-reasons"
+rm -f "$B/baseline-junit.xml" "$B/baseline.total" "$B/baseline.skipped" "$B/baseline.skipped-reasons" \
+      "$B/baseline-trackb.xml" "$B/baseline-trackb.skipped" "$B/baseline-trackb.skipped-reasons"
 # BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
 # `--junitxml` is not decoration: Phase 3 compares the gate run's test COUNT to this file,
 # because a run the kernel killed reports no summary and would otherwise read as green.
@@ -259,6 +267,21 @@ printf '%s\n' "$BASELINE_TOTAL" > "$B/baseline.total"
 SKIPPED_TOTAL="$(grep -o 'skipped="[0-9]*"' "$B/baseline-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
 printf '%s\n' "$SKIPPED_TOTAL" > "$B/baseline.skipped"
 grep -o '<skipped [^>]*' "$B/baseline-junit.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/baseline.skipped-reasons"
+# ⛔ HALF 2 gets the SAME skip ledger, and its trigger is sharper than half 1's. `-m track_b` is a
+# MUST-PASS `needs:` of the required `python-ci-gate`, and its tests skip BY DESIGN behind a feature
+# probe: `tests/test_ingest_safety.py`'s `TRACK_B_SKIP` is a `skipif` on `_TRACK_B_FULL and
+# _SENTINEL_A9`, so a constituent PR that drops `promote_source` from `create_operator`'s signature
+# (or the `DIRECT_EDGE_TRAVERSAL` sentinel) turns every `track_b` test SKIPPED on the batch tree while
+# the baseline still runs them. pytest has NO exit code for "everything was skipped" (its documented
+# contract: 0 = all collected passed, 1 = some failed, 2/3/4/5 = interrupted/internal/usage/nothing
+# collected), so the half exits 0, the COMPLETED predicate above ACCEPTS it, half 1's count is
+# untouched, and a skip carries no failure id — so the diff is empty and `BATCH-GREEN` is printed for
+# a tree on which a MUST-PASS gate member never ran. CI fails closed on exactly this (the `test-track-b`
+# job's `tools/skip-guard.py` leg), and the batch must not be weaker than the gate it stands in for.
+# Baseline-diffed for the same reason as half 1: only a NEW skip may convict.
+SKIPPED_TRACK_B="$(grep -o 'skipped="[0-9]*"' "$B/baseline-trackb.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
+printf '%s\n' "$SKIPPED_TRACK_B" > "$B/baseline-trackb.skipped"
+grep -o '<skipped [^>]*' "$B/baseline-trackb.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/baseline-trackb.skipped-reasons"
 git switch -                                      # back to the lane you came from
 ```
 
@@ -532,10 +555,23 @@ comm -13 "$B/baseline.skipped-reasons" "$B/batch.skipped-reasons" > "$B/new-skip
 # run and anything else is a run that did not finish, and the junit report is what puts its ids in
 # the Phase 4 diff. Without the report a red `track_b` half has ids in NEITHER set, so the diff
 # reads it as green — the MUST-PASS gate member the gate phase exists to observe, unobserved.
-rm -f "$B/batch-trackb.xml"
+rm -f "$B/batch-trackb.xml" "$B/batch-trackb.skipped-reasons" "$B/new-skip-reasons-trackb"
 uv run pytest tests/test_ingest_safety.py -q --junitxml="$B/batch-trackb.xml" -m track_b
 TRACK_B_RC=$?
 [ "$TRACK_B_RC" -eq 0 ] || [ "$TRACK_B_RC" -eq 1 ] || { echo "the track_b half did not COMPLETE (rc=$TRACK_B_RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+# ⛔ ...and half 2's SKIPS, exactly as half 1's — the MUST-PASS gate member is the half where a skip
+# is MOST likely and LEAST visible: `TRACK_B_SKIP` is a `skipif` on a feature probe, so a constituent
+# PR that removes the probe's subject turns all four tests SKIPPED, the half exits 0 (pytest has no
+# all-skipped exit code), its `tests=` count is unchanged and a skip carries no failure id. Without
+# these three lines the ONE half the verdict table's "it skipped tests the baseline did not skip"
+# clause cannot see is the half whose whole purpose is the gate member.
+[ -s "$B/baseline-trackb.skipped" ] || { echo "no $B/baseline-trackb.skipped — Phase 1 never recorded the track_b half's skips; re-run Phase 1 (Landing route 1)"; exit 1; }
+BASELINE_TRACK_B_SKIPPED="$(cat "$B/baseline-trackb.skipped")"
+BATCH_TRACK_B_SKIPPED="$(grep -o 'skipped="[0-9]*"' "$B/batch-trackb.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
+[ -n "$BATCH_TRACK_B_SKIPPED" ] && [ "$BATCH_TRACK_B_SKIPPED" -le "$BASELINE_TRACK_B_SKIPPED" ] || { echo "the track_b half SKIPPED $BATCH_TRACK_B_SKIPPED tests against a baseline of $BASELINE_TRACK_B_SKIPPED — the MUST-PASS gate member ran without running, and a skip carries no failure id: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+grep -o '<skipped [^>]*' "$B/batch-trackb.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/batch-trackb.skipped-reasons"
+comm -13 "$B/baseline-trackb.skipped-reasons" "$B/batch-trackb.skipped-reasons" > "$B/new-skip-reasons-trackb"
+[ -s "$B/new-skip-reasons-trackb" ] && { echo "the track_b half has SKIP REASONS the baseline did not (listed in $B/new-skip-reasons-trackb) — a gate-member test that must run did not, and no failure id records it: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
 ```
 
 A run that skips half 2 has not run the gate, so it cannot produce `BATCH-GREEN` — see the verdict
@@ -647,7 +683,8 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   [ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
   # ⛔ CLEAR BOTH halves first: these are Phase 3's paths, so a stale report from the PRE-revert run
   # would be diffed as if it were this one.
-  rm -f "$B/batch.rc" "$B/batch-junit.xml" "$B/batch-trackb.xml" "$B/batch.skipped-reasons" "$B/new-skip-reasons"
+  rm -f "$B/batch.rc" "$B/batch-junit.xml" "$B/batch-trackb.xml" "$B/batch.skipped-reasons" "$B/new-skip-reasons" \
+        "$B/batch-trackb.skipped-reasons" "$B/new-skip-reasons-trackb"
   ( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' --ignore=tests/e2e > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
   for _ in $(seq 1 240); do [ -f "$B/batch.rc" ] && break; sleep 15; done
   [ -f "$B/batch.rc" ] && echo 'RECHECK DONE — read $B/batch.rc' || echo RUNNING
@@ -670,6 +707,15 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   uv run pytest tests/test_ingest_safety.py -q --junitxml="$B/batch-trackb.xml" -m track_b
   TRACK_B_RC=$?
   [ "$TRACK_B_RC" -eq 0 ] || [ "$TRACK_B_RC" -eq 1 ] || { echo "the re-check's track_b half did not COMPLETE (rc=$TRACK_B_RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+  # ...and half 2's SKIPS here too: this is the run whose result the verdict row reads, so a skip
+  # check that exists only in Phase 3 certifies a post-revert tree on which the gate member skipped.
+  [ -s "$B/baseline-trackb.skipped" ] || { echo "no $B/baseline-trackb.skipped — Phase 1 never recorded the track_b half's skips; re-run Phase 1 (Landing route 1)"; exit 1; }
+  BASELINE_TRACK_B_SKIPPED="$(cat "$B/baseline-trackb.skipped")"
+  BATCH_TRACK_B_SKIPPED="$(grep -o 'skipped="[0-9]*"' "$B/batch-trackb.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
+  [ -n "$BATCH_TRACK_B_SKIPPED" ] && [ "$BATCH_TRACK_B_SKIPPED" -le "$BASELINE_TRACK_B_SKIPPED" ] || { echo "the re-check's track_b half SKIPPED $BATCH_TRACK_B_SKIPPED tests against a baseline of $BASELINE_TRACK_B_SKIPPED — the MUST-PASS gate member ran without running, and a skip carries no failure id: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+  grep -o '<skipped [^>]*' "$B/batch-trackb.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/batch-trackb.skipped-reasons"
+  comm -13 "$B/baseline-trackb.skipped-reasons" "$B/batch-trackb.skipped-reasons" > "$B/new-skip-reasons-trackb"
+  [ -s "$B/new-skip-reasons-trackb" ] && { echo "the re-check's track_b half has SKIP REASONS the baseline did not (listed in $B/new-skip-reasons-trackb) — a gate-member test that must run did not, and no failure id records it: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
   ```
 
   A batch that cannot be made green ships without the culprit, never with it.
@@ -725,9 +771,16 @@ Nothing else in this document is worth anything if the base moved, so check it a
 assembly time:
 
 ```bash
-git fetch origin main
-# $PINNED does NOT survive Phase 1's shell — landing is a different actor. Read it from the batch PR
-# body (Phase 1 recorded it there) and never from memory:
+# ⛔ The fetch HALTS here too, and this is the fence where a stale ref is a FALSE PASS rather than a
+# wrong ledger: with no `set -e`, a failed fetch leaves `origin/main` at the last successful fetch —
+# normally the base the batch was pinned to — so `[ "$(git rev-parse origin/main)" = "$PINNED" ]`
+# below PASSES against an unmoved local ref while live `main` has moved, the batch is un-drafted, and
+# the queue squash-merges an untested composition onto the moved base with every check in this section
+# green. That is the one failure this fence exists to prevent, so its only unhalted line cannot be the
+# fetch. (The post-merge detector's own fetch already carries `|| exit 1`.)
+git fetch origin main || { echo "the fetch FAILED — refusing to compare the pin against a stale origin/main: the last successful fetch is not current main, and a green here would certify a base that has moved"; exit 1; }
+# $PINNED does NOT survive Phase 1's shell — landing is a different actor.
+# Read it from the batch PR body (Phase 1 recorded it there) and never from memory:
 PINNED="$(gh pr view <batch PR> --json body --jq '.body' | sed -n 's/^pinned-base: //p')"
 [ -n "$PINNED" ] || { echo "no pinned-base: line in the batch PR body — the pin is unknown, re-run Phase 1"; exit 1; }
 [ "$(git rev-parse origin/main)" = "$PINNED" ] || {

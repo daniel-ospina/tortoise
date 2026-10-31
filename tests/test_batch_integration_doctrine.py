@@ -506,6 +506,24 @@ _PINNED_MAIN_ASSERTION = re.compile(
     r'\[\s*"\$\(git\s+rev-parse\s+origin/main\)"\s*=\s*"\$PINNED"\s*\]'
 )
 
+#: A refresh of ``origin/main``, halting or not — the two are NOT interchangeable, and the pre-fix
+#: locator could only see one of them: `re.fullmatch(r"git\s+fetch\s+origin(?:\s+main)?", …)`
+#: matched the BUG (a bare fetch) and DROPPED THE FIX, so halting the fetch — the repair the review
+#: asks for — red the very check that demanded a fetch. Split into shape and halt, so ordering can be
+#: asserted on every fetch while the halt is asserted on its own.
+_MAIN_FETCH = re.compile(r"^git\s+fetch\s+origin(?:\s+main)?(?=\s*(?:\|\||$))")
+_MAIN_FETCH_SUBJECT = re.compile(r"^git\s+fetch\s+origin(?:\s+main)?$")
+
+
+def _is_main_fetch(code: str) -> bool:
+    """Is this command a refresh of ``origin/main`` (halting or not)?"""
+    return bool(_MAIN_FETCH.match(_code(code)))
+
+
+def _main_fetch_halts(code: str) -> bool:
+    """Is this the ``origin/main`` refresh as ONE command that HALTS on failure?"""
+    return _is_main_fetch(code) and _halts(_code(code), subject=_MAIN_FETCH_SUBJECT)
+
 #: Commands that may share a line with a pin create without touching the tree it
 #: checked out. Anything else must BE a re-runnable pin create (see
 #: ``_ends_at_halt``) — an allowlist, because a hard reset moves the tree without
@@ -2425,7 +2443,7 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     fetches = [
         i
         for i, c in enumerate(baseline)
-        if re.fullmatch(r"git\s+fetch\s+origin(?:\s+main)?", _code(c))
+        if _is_main_fetch(c)
     ]
     pins = [
         i
@@ -2622,6 +2640,56 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     )
 
 
+def test_every_pin_reading_fence_halts_its_origin_main_fetch() -> None:
+    """the ``9f8e12192`` P2: a bare ``git fetch origin main`` makes the pin read a STALE ref.
+
+    ``git rev-parse origin/main`` reads the LOCAL remote-tracking ref. A ``git fetch`` that fails —
+    network, auth, DNS — exits non-zero and leaves that ref at the **last successful fetch**, which
+    in the normal flow is the base the batch was pinned to. Without a halt the fence continues, so
+
+    * in Phase 1 the baseline records a tree that is not current ``main``: ``main``'s own new red is
+      absent from the baseline id set, Phase 4 classifies it ``NEW``, and an innocent PR is dropped;
+    * in Landing the ``[ "$(git rev-parse origin/main)" = "$PINNED" ]`` assertion **PASSES against a
+      moved ``main``**, the batch is un-drafted, and the queue squash-merges an untested composition
+      onto it — the untested-tree landing this whole section exists to prevent, certified by its own
+      fence with every other line green.
+
+    ``AGENTS.md`` names this exact failure ("a stale sha yields a false green"). The document already
+    halts the two fetches it repaired (the reviewed PR head, the post-merge detector); these two were
+    left bare, and the pre-fix locators could not even see the repair — a ``re.fullmatch`` on the bare
+    command matched the bug and dropped the fix.
+
+    Enumerated over FENCES rather than over the two known sites, so a third pin-reading fence cannot
+    arrive without its fetch halted.
+    """
+    pin_readers = [
+        fence
+        for fence in _fences()
+        if any(_PINNED_MAIN_ASSERTION.search(_code(c)) for c in fence)
+        or any(
+            "PINNED=" in _code(c) and "origin/main" in _code(c) for c in fence
+        )
+    ]
+    assert len(pin_readers) >= 2, (
+        "expected at least the Phase 1 baseline fence and the Landing fence to read origin/main for a "
+        f"pin, parsed {len(pin_readers)} — re-point this guard"
+    )
+    for number, fence in enumerate(pin_readers, start=1):
+        codes = [_code(c) for c in fence]
+        fetches = [i for i, c in enumerate(codes) if _is_main_fetch(c)]
+        assert fetches, (
+            f"pin-reading fence {number} reads `origin/main` with no `git fetch origin main`: the "
+            "value is the LOCAL remote-tracking ref, so a moved `main` compares equal to the pin"
+        )
+        unhalted = [fence[i] for i in fetches if not _main_fetch_halts(fence[i])]
+        assert not unhalted, (
+            f"pin-reading fence {number} has an UNHALTED `git fetch origin main`: a failed fetch "
+            "leaves the ref at the last successful one, so the pin/assertion reads a stale base and "
+            "passes — the false-green `AGENTS.md` names. Halt it: "
+            '`git fetch origin main || { echo "…"; exit 1; }`: ' + repr(unhalted)
+        )
+
+
 def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     """#10399 review P1-3 / P2-1: the tested tree must be the landed tree.
 
@@ -2719,7 +2787,7 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     fetches = [
         i
         for i, c in enumerate(landing[0])
-        if re.fullmatch(r"git\s+fetch\s+origin(?:\s+main)?", _code(c))
+        if _is_main_fetch(c)
     ]
     assert fetches, (
         "the landing fence must fetch origin before comparing: `$(git rev-parse "
