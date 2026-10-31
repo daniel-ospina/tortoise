@@ -45,6 +45,37 @@ properties. Each has a test here that FAILS when the property is broken:
    UNKNOWN rather than answering them from an empty sample.
    `test_a_wall_bound_that_expires_while_listing_stops_and_says_so` fails if the bound is
    checked only inside the detail loop (it then lists all six populations).
+9. **The markdown report IS a table** — GFM refuses a table whose header and delimiter rows
+   differ in cell count, and a cell carrying a newline (an UNKNOWN reason embeds `gh`'s
+   stderr) ends its row early. `test_every_markdown_row_has_the_same_number_of_cells` and
+   `test_an_unknown_reason_cannot_break_the_row_it_is_rendered_in` fail if either returns,
+   which is the difference between #10131's acceptance artifact and 74 rows of pipe text.
+10. **EVERY cut of the sample is kept, including the last one** — `window.truncation` is the
+    paragraph a reader uses to judge how much of the sample the numbers rest on, so a cut may
+    never erase one recorded before it, and a population the API bound shortened must say so.
+    `test_a_budget_cut_keeps_the_cuts_recorded_before_it` and
+    `test_a_budget_cut_while_listing_names_the_population_it_cut` fail on the `_spend`
+    ASSIGNMENT (a budget cut wrote the field directly, erasing every earlier cut).
+11. **An EXCLUSIVE label needs a sample without gaps** — `CATCH-PUSH-ONLY` says "only on
+    main", which a recorded PR-head gap cannot support (the same asymmetry `NEVER` forbids for
+    a push attestation), and an artifact that was downloaded and opened as a valid zip cannot
+    be reported as "expired or never produced".
+    `test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main` and
+    `test_a_zip_that_lacks_the_members_is_a_READ_gap_not_an_expired_artifact` fail if either
+    reading returns.
+12. **A bound (or transport) failure while LISTING cuts the SAMPLE, never the REPORT** —
+    `list_runs` re-raises a page-1 failure, and that error reached `main`, which exited 2
+    before writing `--json-out`/`--md-out`: the one state `--max-seconds` exists for produced
+    no artifact at all, instead of the truncated report `listing_stop` discloses.
+    `test_a_walk_bound_while_listing_cuts_the_sample_instead_of_discarding_the_report`,
+    `test_the_walk_bound_while_listing_still_writes_the_report` and
+    `test_a_page_two_prose_page_truncates_the_listing_instead_of_discarding_the_walk` fail if
+    the listing call is unguarded (each raises, or loses its report, where it expects one).
+    ⛔ The rule is PAGE-GUARDED, and it covers every cut spelling in `list_runs` — the API-call
+    bound, the transport failure, a page carrying no `workflow_runs`, and an UNDECODABLE page
+    (that last one was the only unguarded raise, so a malformed page 2 discarded a walk that
+    an empty page 2 merely truncated). Page 1 is the exception for all four: nothing was
+    read, so the population is unusable and `main` must exit 2.
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -54,6 +85,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -477,6 +509,48 @@ def test_a_push_only_red_is_catch_push_only(tmp_path):
     assert [c["run_id"] for c in row["push_main_catches"]] == [str(RUN_PUSH)]
 
 
+def test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main(tmp_path):
+    """`CATCH-PUSH-ONLY` asserts an EXCLUSIVE claim, so a PR-head gap must outrank it.
+
+    ⛔ `status` returned `CATCH_PUSH_ONLY` before it consulted `unknowns`, so a row with a
+    recorded PR-head artifact gap was counted in `coverage.status_CATCH_PUSH_ONLY` and
+    printed as "*N* only on main" — the bucket a `slow_files` reopen argues from. That is
+    the same asymmetry the `NEVER` branch forbids for a push attestation (a gap is an
+    UNKNOWN, never a negative about a PR head): "it never caught on a PR head" is
+    unmeasured here, not measured-and-negative. The catch on main is still cited.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[
+            _run(RUN_PR, SHA, "pull_request", pr=71),
+            _run(RUN_PUSH, SHA, "push"),
+        ],
+        jobs={
+            # The PR head is RED with NO artifact — an unreadable PR-head sample.
+            RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")],
+            RUN_PUSH: [_check(200, RUN_PUSH, f"{family} ({leg})", "failure")],
+        },
+        artifacts={
+            (RUN_PUSH, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            ),
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN, row["status"]
+    assert [c["run_id"] for c in row["push_main_catches"]] == [str(RUN_PUSH)], (
+        "the main catch is still cited — what is withheld is the exclusive wording"
+    )
+    assert any(u["kind"] == "pr-head" for u in row["unknown"])
+    assert "withheld" in (row["note"] or "")
+    assert report["coverage"]["status_" + catch.CATCH_PUSH_ONLY] == 0, (
+        "a row with a PR-head gap must not be counted as 'only on main'"
+    )
+    assert report["coverage"]["status_" + catch.UNKNOWN] > 0
+
+
 def test_classname_is_the_fallback_when_the_file_attribute_is_absent(tmp_path):
     family, leg = _leg_of("test_billing.py")
     xml = (
@@ -634,50 +708,6 @@ def test_the_markdown_table_renders_its_citations_and_its_unknowns(tmp_path):
     assert "CATCH-PR" in table and "UNKNOWN" in table
 
 
-def test_every_table_row_declares_the_same_number_of_cells(tmp_path):
-    """The committed table must actually BE a table: header, delimiter and rows agree.
-
-    ⛔ GFM refuses a table whose header and delimiter rows differ in cell count (spec §4.10,
-    Tables: "The header row must match the delimiter row in the number of cells. If not, a
-    table will not be recognized"), and it then renders the whole thing as one paragraph of
-    pipe text — checked against GitHub's own renderer (`POST /markdown`, `mode: gfm`): a
-    9-cell delimiter returns `<p>` while a 10-cell one returns `<table>`.
-
-    That is exactly what happened when the `cleared by a re-run` column was added to the
-    header and to the data row but NOT to the hand-written delimiter (`04bfd156a`): the
-    report #10131's acceptance calls for — "a committed report with the 74-row table" —
-    rendered as prose, and no test noticed, because the existing ones assert substrings
-    (`"CATCH-PR" in table`) which are present either way. This assertion is the parity that
-    was missing: it reds on the 9-vs-10 delimiter with `{10, 9}`, and it holds for the
-    derived delimiter introduced to fix it.
-    """
-    root = _world(tmp_path, runs=[])
-    report = _report(root)
-    table = catch.render_table(report)
-    lines = table.splitlines()
-    assert len(lines) >= 3, "the header, the delimiter row and at least one data row"
-
-    header, delimiter, *_ = lines
-    assert header.startswith("|") and header.endswith("|")
-    assert [c.strip() for c in delimiter.strip().strip("|").split("|")] == [
-        "---"
-    ] * len(delimiter.strip().strip("|").split("|")), "the delimiter row is all `---`"
-
-    # ONE cell count across header, delimiter and every data row. A single dominant count
-    # means a column added to one of the three and not the others.
-    counts = {line.count("|") for line in lines}
-    assert len(counts) == 1, f"header/delimiter/data rows disagree on cell count: {sorted(counts)}"
-
-    # The filter path builds the same shape (a filtered table is still a table).
-    filtered = catch.render_table(report, only="nonpremerge").splitlines()
-    assert len({line.count("|") for line in filtered}) == 1
-
-    # And the REPORT — the artifact that is actually committed — carries that same table.
-    rendered = catch.render_report(report)
-    assert catch.render_table(report) in rendered
-    assert len({line.count("|") for line in table.splitlines()}) == 1
-
-
 def test_the_cli_writes_the_markdown_table_from_an_offline_fixture(tmp_path, capsys):
     """The documented invocation (`--offline-dir --md-out`) runs end to end — and the file it
     writes is the REPORT, not a bare table: the table, its window and its method together.
@@ -693,17 +723,113 @@ def test_the_cli_writes_the_markdown_table_from_an_offline_fixture(tmp_path, cap
     assert "| file | status | lane |" in rendered
     assert rendered.count("\n") >= 74  # one row per slow file, plus the header and method
     assert "NOT-PREMERGE" in rendered  # the non-gating lane is named in the table
-    # The file on disk is a TABLE, not a paragraph of pipe text: GFM refuses a table whose
-    # delimiter row has a different cell count from the header (see
-    # `test_every_table_row_declares_the_same_number_of_cells`), so the parity has to survive
-    # the write, not just `render_table`.
-    table_part = [line for line in rendered.splitlines() if line.startswith("|")]
-    assert len({line.count("|") for line in table_part}) == 1
     # The window and the method travel WITH the table.
     assert "## Method" in rendered
     assert "Window in one line:" in rendered
     assert "newest **ATTEMPT** decides" in rendered
     assert "regenerate it, do not edit it" in rendered
+
+
+# --- the markdown table is a TABLE ------------------------------------------
+
+
+def _cells(line: str) -> int:
+    """Cells in one markdown table row. An UNESCAPED pipe delimits; `\\|` is content."""
+    return len(re.findall(r"(?<!\\)\|", line)) - 1
+
+
+def test_every_markdown_row_has_the_same_number_of_cells(tmp_path):
+    """GFM refuses a table whose header and delimiter rows differ in cell count.
+
+    ⛔ `render_table` built its header and its delimiter row as two hand-maintained
+    literals. Adding the `cleared by a re-run` column to the header and to the data rows
+    left the delimiter at NINE cells under a TEN-cell header, so GFM (spec §4.10: "The
+    header row must match the delimiter row in the number of cells. If not, a table will
+    not be recognised") rendered #10131's own acceptance artifact — the committed 74-row
+    report — as ONE PARAGRAPH of pipe text. Both rows are generated from `TABLE_COLUMNS`
+    now; this assertion is what keeps a future column from splitting them apart again.
+    """
+    table = catch.render_table(_report(_world(tmp_path, runs=[])))
+    cells = [_cells(line) for line in table.splitlines()]
+    assert len(set(cells)) == 1, f"the rows disagree on cell count: {sorted(set(cells))}"
+    assert cells[0] == len(catch.TABLE_COLUMNS)
+    # ⛔ DERIVED, not the literal 76: 76 is today's manifest size, so a snapshot of the
+    # live config reds on any legitimate `slow_files` edit with a bare message that names
+    # no cause and gives no update guidance — the same rot #10194 caused once.
+    assert len(cells) == len(MANIFEST["slow_files"]) + 2  # header + delimiter + one row per slow file
+
+
+def test_the_counts_follow_the_manifest_not_a_literal(tmp_path):
+    """A manifest that GROWS moves the table and the coverage total with it.
+
+    ⛔ Three snapshots of "74" survived in this file (`assert total == 74`, two
+    `len(cells) == 76`) — the exact rot the 74-row test below forbids: a legitimate
+    `slow_files` add/remove reds them with a message that names no cause and gives no
+    update guidance, and the update they demand is a new constant. Pre-fix this test
+    reds on BOTH literals while the code is correct; post-fix it is the assertion that
+    keeps the derivation honest in the other direction (a row silently dropped would
+    still red it).
+    """
+    widened = dict(MANIFEST)
+    widened["slow_files"] = [*MANIFEST["slow_files"], "test_a_file_the_manifest_grew.py"]
+    root = _world(tmp_path, runs=[])
+    report = catch.build_history(widened, catch.OfflineClient(root))
+
+    expected = len(MANIFEST["slow_files"]) + 1
+    assert len(report["files"]) == expected
+    coverage = report["coverage"]
+    statuses = (
+        catch.CATCH_PR,
+        catch.CATCH_PUSH_ONLY,
+        catch.NEVER,
+        catch.UNKNOWN,
+        catch.NOT_PREMERGE,
+    )
+    assert sum(coverage[f"status_{key}"] for key in statuses) == expected
+
+    table = catch.render_table(report)
+    cells = [_cells(line) for line in table.splitlines()]
+    assert len(set(cells)) == 1, f"the rows disagree on cell count: {sorted(set(cells))}"
+    assert len(cells) == expected + 2  # header + delimiter + one row per slow file
+
+
+def test_an_unknown_reason_cannot_break_the_row_it_is_rendered_in(tmp_path):
+    """A reason embeds `gh`'s stderr, which is multi-line and can contain a `|`.
+
+    ⛔ Cells were interpolated raw, so a download failure whose message ran to two lines
+    ended the row early and a pipe inside it minted a phantom column: the committed report
+    rendered as broken markdown EXACTLY when the data was imperfect — the case it exists
+    for. Pre-fix this table's line count and its arity both disagree with its header.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=64)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")]},
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            )
+        },
+    )
+    client = catch.OfflineClient(root)
+
+    def _broke(artifact_id):
+        raise catch.ReadError(
+            "check your internet connection\npost https://api.github.com/x: 502 | gateway"
+        )
+
+    client.artifact_zip = _broke  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, client)
+    assert _row(report, "test_billing.py")["status"] == catch.UNKNOWN
+
+    table = catch.render_table(report)
+    cells = [_cells(line) for line in table.splitlines()]
+    assert len(set(cells)) == 1, f"a reason split a row: {sorted(set(cells))}"
+    assert len(cells) == len(MANIFEST["slow_files"]) + 2  # header + delimiter + one row per slow file
+    rendered = next(line for line in table.splitlines() if "`test_billing.py`" in line)
+    assert "gateway" in rendered, "the reason belongs IN the row, not dropped from it"
+    assert "\\|" in rendered, "a pipe inside a cell is escaped, so it cannot mint a column"
 
 
 # --- 5. a leg RUNNING is not a FILE running --------------------------------
@@ -1009,6 +1135,33 @@ def test_a_budget_exhausted_artifact_listing_does_not_claim_expiry(tmp_path):
     assert "could not be READ" in blocked["unknown"][0]["reason"]
 
 
+def test_a_zip_that_lacks_the_members_is_a_READ_gap_not_an_expired_artifact(tmp_path):
+    """The artifact was downloaded and IS a valid zip, so none of the expiry causes is true.
+
+    ⛔ The "carries neither member" branch appended a note but never registered the cause on
+    `RunArtifacts.download_failed`, so `unread_for(name)` stayed `None` and the row took the
+    EXPIRY arm: *"expired past the repo's N-day retention, never produced, or not a parsable
+    zip/XML"* — three causes this walk had just disproved (the artifact is in the listing, it
+    was produced, and the `ZipFile` open succeeded). The branch is reachable by design of the
+    upload it reads (`.github/workflows/python-ci.yml`: `if: always()`,
+    `if-no-files-found: ignore`, five paths), so a leg that died before the junit/manifest
+    steps uploads exactly this zip.
+    """
+    family, leg = _leg_of("test_billing.py")
+    name = catch.artifact_name(family, leg)
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=72)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")]},
+        artifacts={(RUN_PR, name): _zip_members({"pytest.log": b"collected 0 items\n"})},
+    )
+    row = _row(_report(root), "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    reason = row["unknown"][0]["reason"]
+    assert "retention" not in reason, "the artifact was downloaded — it is not expired"
+    assert "neither" in reason and "valid zip" in reason, reason
+
+
 def test_a_job_retried_many_times_marks_the_leg_unknown_once(tmp_path):
     """A retried job yields one cleared attempt per retry — and ONE UNKNOWN block per row."""
     family, leg = _leg_of("test_billing.py")
@@ -1086,7 +1239,9 @@ def test_coverage_counts_reconcile_and_never_extrapolate(tmp_path):
     coverage = report["coverage"]
     statuses = (catch.CATCH_PR, catch.CATCH_PUSH_ONLY, catch.NEVER, catch.UNKNOWN, catch.NOT_PREMERGE)
     total = sum(coverage[f"status_{key}"] for key in statuses)
-    assert total == 74
+    # ⛔ DERIVED, not the literal 74 — the manifest read is two lines up and a constant
+    # here is a snapshot that reds on a legitimate `slow_files` edit.
+    assert total == len(MANIFEST["slow_files"])
     # The leg's files carry the artifact reason; every other row is UNKNOWN for the OTHER
     # reason (nothing measured it) — the two are never collapsed into one number.
     attributed_unknown = [
@@ -1213,6 +1368,115 @@ def test_a_wall_bound_that_expires_while_listing_stops_and_says_so(tmp_path, mon
     assert not [row for row in report["files"] if row["status"] == catch.NEVER]
 
 
+class _FailingListing(catch.OfflineClient):
+    """An offline client whose Nth population listing is cut by the WALK BOUND."""
+
+    def __init__(self, root: Path, *, fail_at: int) -> None:
+        super().__init__(root)
+        self.fail_at = fail_at
+        self.listed: list[tuple[str, str | None, str]] = []
+
+    def list_runs(self, event, branch, conclusion, limit):
+        self.listed.append((event, branch, conclusion))
+        if len(self.listed) == self.fail_at:
+            raise catch.WalkBoundReached(
+                "gh api repos/o/r/actions/runs not attempted — the walk's wall-clock bound "
+                "was reached"
+            )
+        return super().list_runs(event, branch, conclusion, limit)
+
+
+def test_a_walk_bound_while_listing_cuts_the_sample_instead_of_discarding_the_report(tmp_path):
+    """⛔ `main` exited 2 with NO report when the walk bound fired DURING a listing.
+
+    `list_runs` re-raises a page-1 failure by design (a page-2+ cut is a recorded truncation,
+    page 1 leaves that population unusable) — and `build_history`'s listing loop had no
+    handler, so the error reached `main`, which returns 2 BEFORE writing `--json-out` /
+    `--md-out`. The one state `--max-seconds` exists for therefore produced nothing at all:
+    not the truncated sample `listing_stop`/`window.truncation` exist to describe, and not
+    even the `UNKNOWN` rows the module promises. The bound must cut the SAMPLE.
+
+    Reachable by arithmetic, not by contrivance: the per-population check is
+    `elapsed > max_seconds`, so a population entered with a few seconds of budget left passes
+    it, its attempt is clamped to those seconds (measured p100 ≈ 12 s on this repo), and the
+    retry's own deadline check then raises exactly this error.
+    """
+    family, _leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=7)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} (a)", "failure")]},
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, "a")): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            )
+        },
+    )
+    # pull_request/failure is read; push-main/failure is then cut by the walk's bound.
+    client = _FailingListing(root, fail_at=2)
+    report = catch.build_history(MANIFEST, client, max_seconds=90)  # pre-fix: raises
+
+    key = catch.population_key("pull_request", "failure")
+    assert len(client.listed) == 2, f"the walk kept listing past the bound: {client.listed}"
+    populations = report["window"]["populations"]
+    assert len(populations) == 6, "every population must be accounted for, read or not"
+    assert populations[key]["listed"] is True and populations[key]["read"] == 1
+    unlisted = [k for k, info in populations.items() if info["listed"] is False]
+    assert len(unlisted) == 5
+    assert all(populations[k]["read"] == 0 for k in unlisted)
+    assert all(populations[k]["hit_bound"] is False for k in unlisted)
+
+    # The cut NAMES the population it stopped at and the reason, in the paragraph a reader
+    # uses to judge how much of the sample the numbers rest on.
+    truncation = report["window"]["truncation"] or ""
+    assert "listing stopped at push-main/failure" in truncation, truncation
+    assert "wall-clock bound was reached" in truncation, truncation
+    assert "NEVER listed" in truncation, truncation
+
+    # And the consequence: an unlisted population attests NOTHING, so no row may read NEVER.
+    assert report["coverage"]["status_" + catch.NEVER] == 0
+    assert not [row for row in report["files"] if row["status"] == catch.NEVER]
+    assert any(row["status"] == catch.UNKNOWN for row in report["files"])
+
+
+def test_the_walk_bound_while_listing_still_writes_the_report(tmp_path, monkeypatch):
+    """`main` must EXIT 0 and leave the artifact when the bound fires mid-listing.
+
+    ⛔ The handler above is only half the contract: the finding's OUTCOME was "exits 2 with no
+    report at all", and `main` writes `--json-out`/`--md-out` AFTER its
+    `except ReadError: return 2`. So this drives the real `GhClient` (whose `_gh` is the thing
+    that raises) through the CLI and pins the artifact — a report per file is what those flags
+    exist for, and a bound the caller asked for must not destroy it.
+
+    ⛔ Deliberately `WalkBoundReached`, not any `ReadError`: a runs payload that IS a response
+    but is not a runs listing stays exit 2 (see
+    `test_a_runs_file_that_is_not_a_runs_listing_is_a_read_failure_not_an_empty_window`).
+    """
+    monkeypatch.setattr(catch.ci_selection, "load_manifest", lambda: MANIFEST)
+
+    def _gh(self, args, binary=False):
+        raise catch.WalkBoundReached(
+            "gh api repos/o/r/actions/runs not attempted — the walk's wall-clock bound "
+            "was reached"
+        )
+
+    monkeypatch.setattr(catch.GhClient, "_gh", _gh)
+    out = tmp_path / "catch-history.md"
+    assert catch.main(["--repo", "o/r", "--md-out", str(out)]) == 0, (
+        "pre-fix: exit 2 and no artifact"
+    )
+    text = out.read_text(encoding="utf-8")
+    assert "TRUNCATED" in text, text[:400]
+    assert "wall-clock bound was reached" in text
+
+    # The shape failure is NOT folded into this: the same transport, a payload that is not a
+    # runs listing, is still exit 2 (the guard against catching every `ReadError` here).
+    monkeypatch.setattr(
+        catch.GhClient, "_gh", lambda self, args, binary=False: '{"message": "Not Found"}'
+    )
+    assert catch.main(["--repo", "o/r"]) == 2, "a non-listing response is a read failure"
+
+
 # --- 9. NEVER is licensed by a PR-HEAD attestation only ---------------------
 
 
@@ -1315,6 +1579,205 @@ def test_a_cut_listing_reaches_the_report_window(tmp_path):
     assert long_reads
     assert truncation.count("listing stopped after page 1") == len(long_reads)
     assert "TRUNCATED" in catch.render_summary(report)
+
+
+def _prose_pager(*, prose_page: int, per_page: int = 100) -> catch.GhClient:
+    """A `GhClient` whose `_gh` serves JSON up to `prose_page`, then a non-JSON body.
+
+    ⛔ The shape is the documented hazard, not a hypothetical: every `gh` call here is
+    relayed through the fleet's rate-limit wrapper, so a prose line can precede (or replace)
+    the payload.
+    """
+    client = catch.GhClient("o/r", max_calls=10_000)
+
+    def _gh(args, binary=False):
+        page = int(args[1].rsplit("page=", 1)[1])
+        if page >= prose_page:
+            return (
+                "warning: relayed gh api call is being retried (rate limit 4/5000)\n"
+                '{"total_count": 1000, "workflow_runs": []}'
+            )
+        return json.dumps(
+            {
+                "total_count": 1000,
+                "workflow_runs": [
+                    _run(page * 1000 + i, SHA, "pull_request", pr=1) for i in range(per_page)
+                ],
+            }
+        )
+
+    client._gh = _gh  # type: ignore[method-assign]
+    return client
+
+
+def test_a_page_two_prose_page_truncates_the_listing_instead_of_discarding_the_walk(
+    tmp_path,
+):
+    """An UNDECODABLE page-2+ body is the same CUT as its three siblings, not a fatal error.
+
+    ⛔ Every other cut in `list_runs` is page-guarded — the page-1 `BudgetExhausted` re-raises,
+    the page-2+ transport `ReadError` truncates, the page-2+ missing-`workflow_runs` arm
+    truncates — but the `json.loads` raise was not. Unguarded it reached `main` as a plain
+    `ReadError`, which `build_history`'s listing handler does NOT catch (it handles
+    `WalkBoundReached`/`BudgetExhausted` only), so a walk that had already spent hundreds of
+    seconds and up to `--max-api-calls` exited 2 and discarded the report AND the page-1 data
+    it had read. An EMPTY page-2 body already truncated (it decodes to `{}` → no
+    `workflow_runs`), so an empty cut and a garbage cut behaved differently — the walk's
+    survival decided by which error the transport happened to raise.
+    """
+    client = _prose_pager(prose_page=2)
+    runs = client.list_runs("pull_request", None, "failure", 500)
+    assert len(runs) == 100, "the pages that WERE read are kept"
+    assert client.truncation is not None, "the cut was silent"
+    assert "pull_request/failure" in client.truncation
+    assert "page 1" in client.truncation
+    assert "was not decodable" in client.truncation
+
+    # The finding's own OUTCOME: a report still exists. Pre-fix this walk exited 2 with no
+    # `--json-out`/`--md-out` at all, so the assertion below is what reddens on the revert.
+    seed = _world(tmp_path, runs=[])
+    offline = catch.OfflineClient(seed)
+
+    def _list_runs(event, branch, conclusion, limit):
+        page_runs = _prose_pager(prose_page=2).list_runs(event, branch, conclusion, limit)
+        offline.truncation = client.truncation
+        return page_runs
+
+    offline.list_runs = _list_runs  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, offline)
+    assert "pull_request/failure" in (report["window"]["truncation"] or "")
+    assert "TRUNCATED" in catch.render_summary(report)
+
+    # PAGE 1 is deliberately NOT folded into this: nothing was read, so the population is
+    # unusable and `main` must exit 2 (`test_a_runs_file_that_is_not_a_runs_listing_...`).
+    page_one = _prose_pager(prose_page=1)
+    with pytest.raises(catch.ReadError) as excinfo:
+        page_one.list_runs("pull_request", None, "failure", 500)
+    assert "unparseable JSON" in str(excinfo.value)
+    assert page_one.truncation is None, "a page-1 failure is not a truncation — it is a failure"
+
+
+def test_a_budget_cut_keeps_the_cuts_recorded_before_it():
+    """`_spend` ASSIGNED `truncation`, so the budget sentence erased every earlier cut.
+
+    ⛔ Order is deterministic, not a race: `list_runs` notes its cuts and completes before the
+    detail loop spends the budget, so the LAST writer was always `_spend` — and it replaced
+    the accumulated list's rendering with its own sentence. The reachable shape: a listing
+    that stopped early on page 2, then a walk that exhausted `--max-api-calls` in the detail
+    loop, published only "API-call bound reached" and dropped the page-1 cut from the one
+    paragraph a reader uses to judge how much of the sample the numbers rest on.
+    """
+    client = catch.GhClient("o/r", max_calls=1)
+    client.note_truncation("pull_request/failure listing stopped after page 1: page cap")
+    with pytest.raises(catch.BudgetExhausted):
+        client._spend(5)
+    text = client.truncation or ""
+    assert "listing stopped after page 1" in text, "the earlier cut was erased"
+    assert "API-call bound reached (1)" in text
+
+
+def test_a_budget_cut_while_listing_names_the_population_it_cut():
+    """A population the bound cut mid-listing must not read as a population of that size.
+
+    ⛔ `list_runs`'s `except BudgetExhausted: return runs` recorded nothing, so
+    `window.populations[key]` said `read: 200, requested: 500, hit_bound: False` under a
+    caption that only flags the AT-REQUESTED case — the population read as complete.
+    """
+    client = catch.GhClient("o/r", max_calls=2)
+
+    def _gh(args, binary=False):
+        client._spend(1)  # exactly what the real `_gh` does at the top of every attempt
+        page = int(args[1].rsplit("page=", 1)[1])
+        return json.dumps(
+            {
+                "total_count": 1000,
+                "workflow_runs": [
+                    _run(page * 1000 + i, SHA, "pull_request", pr=1) for i in range(100)
+                ],
+            }
+        )
+
+    client._gh = _gh  # type: ignore[method-assign]
+    runs = client.list_runs("pull_request", None, "failure", 500)
+    assert len(runs) == 200, "the pages that WERE read are kept"
+    text = client.truncation or ""
+    assert "pull_request/failure listing stopped after page 2" in text, text
+    assert "API-call bound reached (2)" in text
+
+
+def test_a_page_one_budget_cut_marks_the_population_never_listed():
+    """A population the budget cut BEFORE page 1 published as `listed: true, read: 0`.
+
+    ⛔ `list_runs`'s `except BudgetExhausted: return runs` returned an EMPTY listing, so
+    `build_history` recorded `listed: true, read: 0` for that population and went on to the
+    next one, which returned `[]` in turn: a walk that spent its entire budget before the first
+    page published six populations that each read as *listed, and empty*. That is the opposite
+    of what happened — NOTHING was listed — and it put two meanings on `listed` in one dict.
+
+    `WalkBoundReached` is re-raised out of `list_runs` for exactly this reason (a page-1 failure
+    leaves the population unusable; only a page-2+ cut is a recorded truncation), and the
+    API-call bound is the same cut on a different counter, so it takes the same path: every
+    population the bound reached is `listed: false`, `listing_stop` names the population it
+    stopped at, every row is UNKNOWN and none is NEVER.
+    """
+    client = catch.GhClient("o/r", max_calls=1)
+
+    def _gh(args, binary=False):
+        if "actions/runs" not in args[1]:  # the retention read: not this test's surface
+            raise catch.ReadError("retention not read in this test")
+        client._spend(1)  # exactly what the real `_gh` does at the top of every attempt
+        return json.dumps({"total_count": 0, "workflow_runs": []})
+
+    client._gh = _gh  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, client)
+
+    populations = report["window"]["populations"]
+    assert len(populations) == 6, "every population must be accounted for, read or not"
+    # The first population WAS listed (an empty page is a listing, not a cut); everything the
+    # bound reached after it was never listed. Pre-fix ALL SIX read `listed: true, read: 0`.
+    assert populations["pull_request/failure"]["listed"] is True
+    reached = [k for k in populations if k != "pull_request/failure"]
+    assert all(populations[k]["listed"] is False for k in reached), populations
+    assert all(populations[k]["read"] == 0 for k in reached)
+    assert all(populations[k]["hit_bound"] is False for k in reached)
+
+    truncation = report["window"]["truncation"] or ""
+    assert "listing stopped at push-main/failure" in truncation, truncation
+    assert "API-call bound reached (1)" in truncation, truncation
+    assert "NEVER listed" in truncation, truncation
+
+    # And the consequence: nothing was attested, so no row may read a clean bill.
+    assert report["coverage"]["status_" + catch.NEVER] == 0
+    assert any(row["status"] == catch.UNKNOWN for row in report["files"])
+
+
+def test_a_budget_cut_in_the_detail_loop_keeps_the_listing_cut_in_the_window():
+    """The composition travels: `window["truncation"]` is what `render_summary` prints."""
+
+    class _CutThenBroke(catch.GhClient):
+        """A cut listing (real pager), then the budget runs out in the detail loop."""
+
+        def __init__(self) -> None:
+            super().__init__("o/r", max_calls=0)
+            self._pager = _pager(fail_page=2)
+
+        def list_runs(self, event, branch, conclusion, limit):
+            runs = self._pager.list_runs(event, branch, conclusion, limit)
+            self.truncations = list(self._pager.truncations)
+            self.truncation = self._pager.truncation
+            return runs
+
+        def jobs(self, run_id):
+            self._spend(1)  # the bound trips here, exactly as it does inside `_gh`
+            return []
+
+        def retention_days(self):
+            return 90
+
+    report = catch.build_history(MANIFEST, _CutThenBroke())
+    truncation = report["window"]["truncation"] or ""
+    assert "listing stopped after page 1" in truncation, truncation
+    assert "API-call bound reached" in truncation, truncation
 
 
 # --- 11. one bad READ of a run must not discard the walk --------------------
@@ -1486,3 +1949,155 @@ def test_the_lane_split_follows_ci_selection_instead_of_a_constant(tmp_path, mon
     row = _row(report, "test_billing.py")
     assert row["lane"] == catch.LANE_NON_GATING
     assert row["status"] == catch.NOT_PREMERGE, "a by-decision exclusion, not a gap"
+
+
+# --- 12. a malformed page body is a READ failure, never a discarded walk ---
+
+
+def _relayed_client(*, malformed: str) -> catch.GhClient:
+    """A live `GhClient` whose `_gh` answers every surface, but with a NON-JSON body on one.
+
+    ⛔ The body shape is the module's own documented hazard, not a contrivance: every `gh`
+    call here is relayed through the fleet's rate-limit wrapper, so a prose line can precede
+    (or replace) the payload — and `gh api --paginate` emits CONCATENATED page objects, whose
+    decoder fails on any trailing non-JSON text (cli/cli#8419 is the same shape from the
+    other side). `list_runs` already translates that decode failure; `_paginated` did not.
+    """
+    family, leg = _leg_of("test_billing.py")
+    client = catch.GhClient("o/r", max_calls=10_000)
+    poisoned = "warning: rate-limit guard engaged\nnot json"
+
+    def _gh(args, binary=False):
+        url = args[1]
+        if binary:  # pragma: no cover - the listing never resolves in these fixtures
+            raise catch.ReadError("no artifact bytes in this fixture")
+        if "/jobs?" in url:
+            if malformed == "jobs":
+                return poisoned
+            return json.dumps(
+                {
+                    "total_count": 1,
+                    "jobs": [_check(100, RUN_PR, f"{family} ({leg})", "failure")],
+                }
+            )
+        if "/artifacts?" in url:
+            if malformed == "artifacts":
+                return poisoned
+            return json.dumps({"total_count": 0, "artifacts": []})
+        if "retention" in url:
+            return json.dumps({"days": 90})
+        event = "pull_request" if "event=pull_request" in url else "push"
+        conclusion = url.rsplit("status=", 1)[1].split("&")[0]
+        page = int(url.rsplit("page=", 1)[1]) if "page=" in url else 1
+        if page > 1 or (event, conclusion) != ("pull_request", "failure"):
+            return json.dumps({"total_count": 0, "workflow_runs": []})
+        return json.dumps(
+            {"total_count": 1, "workflow_runs": [_run(RUN_PR, SHA, "pull_request", pr=61)]}
+        )
+
+    client._gh = _gh  # type: ignore[method-assign]
+    return client
+
+
+def test_a_non_json_jobs_page_is_a_read_failure_not_an_escape():
+    """`decode_pages` raises `JSONDecodeError`, which is neither `ReadError` nor budget.
+
+    ⛔ It was decoded OUTSIDE `_paginated`'s translation, so it escaped BOTH handlers that
+    exist to degrade one run instead of discarding the walk — the detail loop's per-run
+    `except ReadError` and `main`'s honest exit 2 — and a walk that may already have spent
+    ~1500 s / ~2000 API calls produced NO report at all. The ReadError spelling of the same
+    failure degrades correctly, so the walk's survival depended on which error type the
+    transport happened to raise.
+    """
+    client = _relayed_client(malformed="jobs")
+    with pytest.raises(catch.ReadError) as excinfo:  # pre-fix: json.JSONDecodeError
+        client.jobs(str(RUN_PR))
+    assert "unparseable JSON" in str(excinfo.value)
+
+    report = catch.build_history(MANIFEST, _relayed_client(malformed="jobs"))  # pre-fix: raises
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN, "an unread run is a gap, never a clean bill"
+    assert report["coverage"]["status_" + catch.NEVER] == 0
+    assert any("unparseable JSON" in note for note in report["window"]["api_notes"])
+
+
+def test_a_non_json_artifact_listing_degrades_to_unknown_instead_of_aborting():
+    """The `ReadError` spelling of this failure already degraded; the decode one did not."""
+    report = catch.build_history(MANIFEST, _relayed_client(malformed="artifacts"))
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    reason = row["unknown"][0]["reason"]
+    assert "the listing could not be read" in reason
+    assert "unparseable JSON" in reason, reason
+    assert "retention" not in reason, "the artifact may exist — the listing was never read"
+
+
+# --- 13. the walk's own bound bounds the CALLS, not just the loop ------------
+
+
+def test_a_stalled_call_cannot_outlive_the_walk_bound(monkeypatch):
+    """4 × `CALL_TIMEOUT_SECONDS` + backoff ≈ 1214 s — 13× a `--max-seconds 90` request.
+
+    ⛔ The per-attempt bound is right (one stalled relayed `gh` must not hang the walk), but
+    on its own it does not bound the thing it names: `--max-seconds` was consulted only
+    BETWEEN calls, so every retry took the full 300 s no matter how little of the walk's
+    budget was left. That is the same "a bound that does not bound the thing it names" shape
+    this module closed for the LISTING phase — so the deadline is propagated into the loop.
+    """
+    seen: list[float] = []
+
+    def _timeout(cmd, capture_output=False, timeout=None):
+        seen.append(timeout)
+        raise catch.subprocess.TimeoutExpired(cmd, timeout or 0)
+
+    monkeypatch.setattr(catch.subprocess, "run", _timeout)
+    monkeypatch.setattr(catch.time, "sleep", lambda _s: None)
+    client = catch.GhClient("o/r", max_calls=100, max_seconds=90)
+    with pytest.raises(catch.ReadError) as excinfo:
+        client._gh(["api", "repos/o/r/actions/runs"])
+    assert seen, "the first attempt is made"
+    assert seen[0] <= 90, f"the attempt was bounded at {seen[0]}s, not the 90 s left"
+    assert seen[0] < catch.GhClient.CALL_TIMEOUT_SECONDS
+    assert "timed out" in str(excinfo.value)
+
+
+def test_no_attempt_is_spent_once_the_walk_bound_has_passed(monkeypatch):
+    """A retry starting after the deadline would spend a call and wait to be killed."""
+    ran: list[object] = []
+    monkeypatch.setattr(catch.subprocess, "run", lambda *args, **kwargs: ran.append(args))
+    monkeypatch.setattr(catch.time, "sleep", lambda _s: None)
+    client = catch.GhClient("o/r", max_calls=100, max_seconds=90)
+    client.deadline = catch.time.monotonic() - 1  # the walk is already out of time
+    # ⛔ The exact TYPE, not just `ReadError`: `build_history`'s listing loop distinguishes a
+    # caller-requested CUT (`WalkBoundReached` → truncated report) from a surface that could
+    # not be read (`ReadError` → exit 2). If `_gh` raised the base class, a bound reached
+    # mid-listing would discard the whole report again.
+    with pytest.raises(catch.WalkBoundReached) as excinfo:
+        client._gh(["api", "repos/o/r/actions/runs"])
+    assert ran == [], "an attempt was made with no walk budget left"
+    assert client.calls == 0, "a call that was never made must not be spent"
+    assert "wall-clock bound" in str(excinfo.value)
+    assert catch.GhClient("o/r", max_seconds=0).deadline is None, "0 disables the bound"
+
+
+# --- the `durations` note re-derives its own count --------------------------
+
+
+def test_the_durations_note_counts_the_tests_this_file_actually_has():
+    """The `durations` justification cites its own derivation command — keep it true.
+
+    ⛔ `config/ci-surfaces.yml` states the wall of "its offline tests (**N** of them —
+    `grep -c '^def test_'`)". It read 29, then 32, while this file grew to 41: two separate
+    reviews filed the SAME stale number, because the comment asserts a count it also carries
+    the command to refute. So the guard RUNS that command rather than trusting the prose.
+    """
+    config = (REPO / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
+    block = re.search(r"^\s*test_ci_catch_history\.py:.*(?:\n\s*#.*)*", config, re.MULTILINE)
+    assert block, "the durations entry this note justifies is gone — re-derive the note"
+    stated = re.search(r"\b(\d+) of them", block.group(0))
+    assert stated, "the note no longer states a count — update this guard with the note"
+    actual = len(re.findall(r"^def test_", Path(__file__).read_text(encoding="utf-8"), re.MULTILINE))
+    assert int(stated.group(1)) == actual, (
+        f"config/ci-surfaces.yml claims {stated.group(1)} offline tests; the file defines "
+        f"{actual} — refresh the note (the count is asserted, so it cannot go stale silently)"
+    )

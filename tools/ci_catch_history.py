@@ -224,6 +224,21 @@ class ReadError(RuntimeError):
     """A surface could not be read. Never a value in the table."""
 
 
+class WalkBoundReached(ReadError):
+    """The walk's own ``--max-seconds`` bound stopped a read — a CUT, not a failed surface.
+
+    ⛔ A distinct type, because the two meanings have different contracts. A payload the
+    service returned but that cannot be read as a surface (an error body, a wrong
+    ``workflow_runs`` type, undecodable JSON) is exit 2 — "the report could not be read",
+    pinned by `test_an_unparseable_offline_listing_exits_2` and
+    `test_a_runs_file_that_is_not_a_runs_listing_is_a_read_failure_not_an_empty_window`.
+    A bound the CALLER asked for stopping the walk is the state `listing_stop` /
+    `window.truncation` exist to disclose, so it must cut the sample and still produce the
+    report. Collapsing the two into `ReadError` is what made a `--max-seconds` expiry during
+    the listing phase discard the whole report (exit 2, no artifact, nothing marked UNKNOWN).
+    """
+
+
 class BudgetExhausted(RuntimeError):
     """The API-call bound was reached. Truncation, reported — not a silent shrink."""
 
@@ -795,7 +810,16 @@ class FileHistory:
         if self.pr_catches:
             return CATCH_PR
         if self.push_catches:
-            return CATCH_PUSH_ONLY
+            # ⛔ "ONLY on main" is an EXCLUSIVE claim, and a recorded PR-head gap is exactly
+            # the evidence that this sample cannot support one: the PR-head read is missing,
+            # so "it never caught there" is unmeasured, not measured-and-negative. This is the
+            # same asymmetry the NEVER branch below forbids (a gap is an UNKNOWN, never a
+            # negative about a PR head) — and the label is the bucket a `slow_files` reopen
+            # argues from, so it must not outrank a gap. A push-main gap does not bind here:
+            # the claim is about PR heads.
+            if not any(u.kind == "pr-head" for u in self.unknowns):
+                return CATCH_PUSH_ONLY
+            return UNKNOWN
         if self.unknowns:
             return UNKNOWN
         if self.pr_runs_attested:
@@ -883,6 +907,14 @@ class FileHistory:
                 f"runs in the NON-GATING lane, not on a PR head — {NON_GATING_DECISION}; "
                 f"this row's question is answered by that decision, not by a measurement"
             )
+        if self.status == UNKNOWN and self.push_catches:
+            # The exclusive label was withheld, so say what the row DOES know: the catch on
+            # main is real and still cited; what the sample cannot support is "ONLY on main".
+            return (
+                f"catches on {len(self.push_catches)} main push run(s), but a PR-head gap (see "
+                f'the UNKNOWN reasons) leaves the PR-head side unmeasured — "only on main" is '
+                f"an exclusive claim this sample cannot support, so it is withheld"
+            )
         if self.status == UNKNOWN and self.lane == LANE_ORPHAN:
             return (
                 "in `slow_files` but in NO gating leg and NOT on the declared non-gating "
@@ -926,11 +958,32 @@ class GhClient:
     #: to say "the walk stopped at the bound" is never produced. ``RETRIES`` bounds the NUMBER
     #: of attempts, not their duration. 300 s is well above a healthy `gh api` call (measured
     #: p100 ≈ 12 s on this repo) and well below the default 1500 s walk bound.
+    #:
+    #: ⛔ But a per-attempt bound does NOT by itself bound the WALK: 4 × 300 s plus backoff is
+    #: ≈1214 s, 13× a `--max-seconds 90` request. That is the same "a bound that does not
+    #: bound the thing it names" shape this walk closed for the LISTING phase, so the walk's
+    #: deadline is propagated INTO this loop (`deadline`): each attempt's timeout is clamped
+    #: to the time left, the backoff is clamped to it, and an attempt that would begin after
+    #: it is not made at all.
     CALL_TIMEOUT_SECONDS = 300
 
-    def __init__(self, repo: str, max_calls: int = DEFAULT_MAX_API_CALLS) -> None:
+    #: The floor for a deadline-clamped attempt (a `timeout` of 0 is incoherent, and nothing
+    #: below this can complete a real call). A call clamped here is the last one the walk had
+    #: time for; the loop's own deadline check ends the retries.
+    MIN_ATTEMPT_TIMEOUT_SECONDS = 0.1
+
+    def __init__(
+        self,
+        repo: str,
+        max_calls: int = DEFAULT_MAX_API_CALLS,
+        max_seconds: float | None = None,
+    ) -> None:
         self.repo = repo
         self.max_calls = max_calls
+        #: The walk's wall-clock deadline as a `time.monotonic()` stamp, or None when
+        #: `--max-seconds` is disabled. `build_history` enforces the same bound BETWEEN runs;
+        #: this copy is what keeps a call already in flight from outliving it.
+        self.deadline = time.monotonic() + max_seconds if max_seconds else None
         self.calls = 0
         self.truncation: str | None = None
         #: EVERY cut, not just the last one. ``truncation`` is a single field, so a walk whose
@@ -939,17 +992,30 @@ class GhClient:
         self.truncations: list[str] = []
 
     def note_truncation(self, fact: str) -> None:
-        """Record a cut and keep it visible in the rendered ``window.truncation``."""
-        self.truncations.append(fact)
+        """Record a cut and keep it visible in the rendered ``window.truncation``.
+
+        Deduplicated: once the API budget is exhausted EVERY remaining population's listing
+        raises, so the budget sentence would otherwise be appended once per population and
+        the window would render the same sentence six times. A genuinely different cut always
+        names its own population/page, so nothing real is folded.
+        """
+        if fact not in self.truncations:
+            self.truncations.append(fact)
         self.truncation = " · ".join(self.truncations)
 
     def _spend(self, count: int = 1) -> None:
         if self.calls + count > self.max_calls:
-            self.truncation = (
+            # ⛔ COMPOSED, never assigned. `note_truncation` is the one writer that keeps every
+            # cut, and this branch runs LAST (the listing phase completes before the detail
+            # loop spends): assigning `truncation` here erased every cut already recorded, so
+            # a walk that cut a listing and THEN ran out of budget published only the budget
+            # sentence — the page-1 cut vanished from the report's own window paragraph, the
+            # one place a reader judges how much of the sample the numbers rest on.
+            self.note_truncation(
                 f"API-call bound reached ({self.max_calls}) — the sample below is the prefix "
                 f"that was read, not the window"
             )
-            raise BudgetExhausted(self.truncation)
+            raise BudgetExhausted(self.truncation or "")
         self.calls += count
 
     #: A long walk is hundreds of calls; one transient `gh` transport failure must not
@@ -957,25 +1023,47 @@ class GhClient:
     #: attempt died on page 1 of the push listing with "check your internet connection").
     RETRIES = 4
 
+    def _seconds_left(self) -> float | None:
+        """Time left before the walk's wall-clock bound, or None when it is disabled."""
+        if self.deadline is None:
+            return None
+        return self.deadline - time.monotonic()
+
+    def _attempt_timeout(self) -> float:
+        """This attempt's bound: ``CALL_TIMEOUT_SECONDS``, clamped to the walk's deadline."""
+        left = self._seconds_left()
+        if left is None:
+            return self.CALL_TIMEOUT_SECONDS
+        return max(self.MIN_ATTEMPT_TIMEOUT_SECONDS, min(self.CALL_TIMEOUT_SECONDS, left))
+
     def _gh(self, args: Sequence[str], binary: bool = False) -> bytes | str:
         last: ReadError | None = None
+        target = args[1] if len(args) > 1 else ""
         for attempt in range(self.RETRIES):
+            # ⛔ Checked BEFORE the spend and before the backoff: past the walk's deadline an
+            # attempt must not be made at all — a retry that spends a call and then sleeps 8 s
+            # to be killed still overruns the bound the report was asked to honour.
+            left = self._seconds_left()
+            if left is not None and left <= 0:
+                raise WalkBoundReached(
+                    f"gh api {target} not attempted — the walk's wall-clock bound was reached"
+                    + (f" while retrying: {last}" if last else "")
+                )
             self._spend(1)
             if attempt:  # back off only between attempts; the first call is immediate
-                time.sleep(min(2**attempt, 15))
+                delay = min(2**attempt, 15)
+                if left is not None:
+                    delay = max(0.0, min(delay, left))
+                time.sleep(delay)
+            timeout = self._attempt_timeout()
             try:
-                proc = subprocess.run(
-                    ["gh", *args], capture_output=True, timeout=self.CALL_TIMEOUT_SECONDS
-                )
+                proc = subprocess.run(["gh", *args], capture_output=True, timeout=timeout)
             except FileNotFoundError as exc:  # pragma: no cover - environment-dependent
                 raise ReadError(f"gh CLI not found: {exc}") from exc
             except subprocess.TimeoutExpired:
                 # A hung call is a failed ATTEMPT, not an unbounded wait: the retry loop (and
                 # then `main`'s exit 2) must get control back.
-                last = ReadError(
-                    f"gh api {args[1] if len(args) > 1 else ''} timed out after "
-                    f"{self.CALL_TIMEOUT_SECONDS}s"
-                )
+                last = ReadError(f"gh api {target} timed out after {timeout:g}s")
                 continue
             if proc.returncode == 0:
                 return proc.stdout if binary else proc.stdout.decode("utf-8", "replace")
@@ -989,8 +1077,23 @@ class GhClient:
 
     def _paginated(self, url: str, items_key: str) -> list[Mapping[str, Any]]:
         raw = self._gh(["api", url, "--paginate"])
-        assert isinstance(raw, str)
-        pages = decode_pages(raw)
+        if not isinstance(raw, str):  # fail closed, and not elidable under `python -O`
+            raise ReadError(f"gh api {url} returned no text payload")
+        try:
+            pages = decode_pages(raw)
+        except ValueError as exc:
+            # ⛔ `json.JSONDecodeError` IS a `ValueError`, and it is NOT a `ReadError` — so
+            # untranslated it escaped BOTH handlers that exist to degrade a run instead of
+            # discarding the walk: `RunArtifacts.get`'s ReadError arm and the detail loop's
+            # per-run `except ReadError`, taking a walk that may already have spent ~1500 s
+            # and ~2000 API calls to `main`'s exit 2 with NO report at all. The sibling read
+            # on this same transport (`list_runs`) already translates it, which is why a
+            # malformed RUNS page is a recorded truncation and this one was fatal. The shape
+            # is real, not hypothetical: every `gh` call here is relayed through the fleet's
+            # rate-limit wrapper, so a prose line can precede (or replace) the payload — and
+            # `gh api --paginate` emits concatenated pages, whose decoder fails on any
+            # trailing non-JSON text.
+            raise ReadError(f"gh api {url} returned unparseable JSON: {exc}") from exc
         self._spend(max(len(pages) - 1, 0))
         try:
             return ci_verdict.collect_items(pages, items_key, url)
@@ -1029,6 +1132,27 @@ class GhClient:
             try:
                 raw = self._gh(["api", url])
             except BudgetExhausted:
+                # ⛔ The population's OWN cut is a separate fact from the budget sentence
+                # `_spend` just recorded: the window reports `read: N, requested: M` for this
+                # population, and a reader who sees N < M must be told that N is a prefix the
+                # bound cut, not the population's size.
+                #
+                # ⛔ On PAGE 1 nothing was read at all, so this population was NEVER LISTED —
+                # the same state `WalkBoundReached` must disclose and the same reason it is
+                # re-raised here. Returning `[]` instead made it indistinguishable from an
+                # EMPTY population: `build_history` then recorded `listed: true, read: 0` for
+                # it and went on to the next population, which returned `[]` in turn, so a
+                # walk that spent its whole budget before page 1 published six populations
+                # that all read as "listed, and empty" — two meanings of `listed` in one
+                # dict. The caller's handler for `BudgetExhausted` already exists and does
+                # the honest thing: mark this population and every one after it
+                # `listed: false` and say so in `listing_stop`.
+                if page == 1:
+                    raise
+                self.note_truncation(
+                    f"{event}/{conclusion} listing stopped after page {page - 1}: "
+                    f"API-call bound reached ({self.max_calls})"
+                )
                 return runs
             except ReadError as exc:
                 if page == 1:
@@ -1044,11 +1168,39 @@ class GhClient:
                     f"{event}/{conclusion} listing stopped after page {page - 1}: {exc}"
                 )
                 break  # keep what was read; the cut is recorded above
-            assert isinstance(raw, str)
+            if not isinstance(raw, str):
+                # ⛔ An explicit branch, not `assert`: an `assert` disappears under `python -O`,
+                # and this is a fail-CLOSED guard (a `ReadError` degrades one run; an
+                # `AssertionError` escapes `main`'s handler as a traceback).
+                raise ReadError(f"gh api {url} returned no text payload")
             try:
                 payload = json.loads(raw) if raw.strip() else {}
             except ValueError as exc:
-                raise ReadError(f"gh api {url} returned unparseable JSON: {exc}") from exc
+                # ⛔ PAGE-GUARDED, exactly like the two cuts above and the missing-
+                # `workflow_runs` arm below. An undecodable page-2+ body is the same CUT they
+                # are: it is the documented hazard (`gh` is relayed through the fleet's
+                # rate-limit wrapper, so a prose line can precede — or replace — the
+                # payload), and the pages that WERE read still describe a prefix, which
+                # `note_truncation` discloses. Unguarded it reached `main` as a plain
+                # `ReadError` — which `build_history`'s listing handler does NOT catch (it
+                # handles `WalkBoundReached`/`BudgetExhausted` only) — so a walk that had
+                # already spent hundreds of seconds and up to `--max-api-calls` exited 2 and
+                # threw away the report AND the page-1 data. An EMPTY page-2 body already
+                # truncated (it decodes to `{}` → no `workflow_runs`), so before this guard
+                # an empty cut and a garbage cut behaved differently, decided only by which
+                # error the transport happened to raise.
+                # ⛔ PAGE 1 stays exit 2: nothing was read, so the population is unusable
+                # (an error body, a mis-typed payload, a relayed prose line) — the same
+                # reason the page-1 transport branch above re-raises.
+                if page == 1:
+                    raise ReadError(
+                        f"gh api {url} returned unparseable JSON: {exc}"
+                    ) from exc
+                self.note_truncation(
+                    f"{event}/{conclusion} listing stopped after page {page - 1}: page "
+                    f"{page} was not decodable — {exc}"
+                )
+                break
             batch = payload.get(ci_verdict.RUNS_KEY) if isinstance(payload, Mapping) else None
             if not isinstance(batch, list):
                 if page == 1:
@@ -1301,6 +1453,17 @@ def normalise_job(job: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def population_key(event: str, conclusion: str) -> str:
+    """The report's name for ONE listing population — one spelling, everywhere.
+
+    ⛔ THREE places name a population (`window.populations` on the time-based stop, on a
+    listing read failure, and on a successful read). A second spelling of the same key is how
+    a cut ends up naming a population that does not appear in the report, and a reader
+    reconciling `requested` against `read` would then miss the cut population entirely.
+    """
+    return f"{event}/{conclusion}" if event == "pull_request" else f"push-main/{conclusion}"
+
+
 def build_history(
     manifest: Mapping[str, Any],
     client: Any,
@@ -1359,6 +1522,7 @@ def build_history(
     read_of: dict[str, dict[str, Any]] = {}
     listing_stop: str | None = None
     for position, (event, branch, conclusion, limit) in enumerate(populations):
+        key = population_key(event, conclusion)
         # ⛔ The LISTING is where a slow cell spends its time, so the wall bound is checked
         # HERE and not only in the detail loop below. Measured 2026-10-31 on this fleet: six
         # populations / 278 runs cost ~350 s of wall clock for 10 calls, so a bound checked
@@ -1368,11 +1532,10 @@ def build_history(
         # attested, so the only reachable verdict for those files is UNKNOWN — never NEVER.
         if max_seconds and time.monotonic() - started > max_seconds:
             never_listed = [
-                f"{e}/{c}" if e == "pull_request" else f"push-main/{c}"
-                for e, _branch, c, _limit in populations[position:]
+                population_key(e, c) for e, _branch, c, _limit in populations[position:]
             ]
             for e, _branch, c, lim in populations[position:]:
-                read_of[f"{e}/{c}" if e == "pull_request" else f"push-main/{c}"] = {
+                read_of[population_key(e, c)] = {
                     "read": 0,
                     "requested": lim,
                     "hit_bound": False,
@@ -1386,9 +1549,49 @@ def build_history(
                 "nothing and the files only they could have covered stay UNKNOWN"
             )
             break
-        raw = client.list_runs(event, branch, conclusion, limit)
+        try:
+            raw = client.list_runs(event, branch, conclusion, limit)
+        except (WalkBoundReached, BudgetExhausted) as exc:
+            # ⛔ A WALK-BOUND failure used to be FATAL here. `list_runs` re-raises a page-1
+            # read failure (by design: a page-2+ cut is a recorded truncation, page 1 leaves
+            # that population unusable), and `main` turned the uncaught error into exit 2
+            # BEFORE it wrote `--json-out`/`--md-out`. So the ONE state `--max-seconds`
+            # exists for — the bound firing — discarded the whole report, after a walk that
+            # may already have spent hundreds of seconds: neither the disclosed gap
+            # `listing_stop` renders nor the truncated sample it describes.
+            #
+            # The path is arithmetic, not hypothetical: `GhClient`'s deadline is set at
+            # construction and the per-population check above is `elapsed > max_seconds`, so
+            # a population entered with a few seconds left PASSES that check, its first
+            # attempt is clamped to those seconds (p100 on this repo is ~12 s), and the
+            # retry's own deadline check then raises. The bound must cut the SAMPLE, never
+            # the REPORT — this population and every one after it were never listed, so their
+            # runs attest nothing and their files can only be UNKNOWN, exactly as the
+            # time-based stop above records them.
+            #
+            # ⛔ Deliberately NOT a bare `except ReadError`: a payload the service DID return
+            # that cannot be read as a runs listing (an API error body, a mis-typed
+            # `workflow_runs`, undecodable JSON) is still `main`'s exit 2 — pinned by
+            # `test_an_unparseable_offline_listing_exits_2` and
+            # `test_a_runs_file_that_is_not_a_runs_listing_is_a_read_failure_not_an_empty_window`.
+            # `WalkBoundReached` is the caller-requested-cut spelling, and `BudgetExhausted`
+            # is the same kind of cut on the API-call bound (a bare `RuntimeError`, so a
+            # client that does not swallow it in `list_runs` would otherwise escape `main`
+            # as an uncaught traceback rather than a report).
+            for e, _branch, c, lim in populations[position:]:
+                read_of[population_key(e, c)] = {
+                    "read": 0,
+                    "requested": lim,
+                    "hit_bound": False,
+                    "listed": False,
+                }
+            listing_stop = (
+                f"listing stopped at {key}: {exc} — that population and "
+                f"{len(populations) - position - 1} after it were NEVER listed, so their "
+                "runs attest nothing and those files stay UNKNOWN"
+            )
+            break
         picked = runs_to_refs(raw, event, since)
-        key = f"{event}/{conclusion}" if event == "pull_request" else f"push-main/{conclusion}"
         read_of[key] = {
             "read": len(picked),
             "requested": limit,
@@ -1911,8 +2114,19 @@ def _leg_evidence(
             junit_member = next((n for n in members if n.endswith(JUNIT_MEMBER)), None)
             nodeids_member = next((n for n in members if n.endswith(NODEIDS_MEMBER)), None)
             if junit_member is None and nodeids_member is None:
-                notes.append(
-                    f"artifact {name} carries neither {JUNIT_MEMBER} nor {NODEIDS_MEMBER}"
+                detail = f"artifact {name} carries neither {JUNIT_MEMBER} nor {NODEIDS_MEMBER}"
+                notes.append(detail)
+                # ⛔ Register the cause on the same channel as the sibling READ gaps (the
+                # failed download above, the bad zip below). Without it `unread_for` stayed
+                # `None` and the row fell through to the EXPIRY arm — *"expired past the
+                # repo's N-day retention, never produced, or not a parsable zip"* — three
+                # causes this walk has just disproved: the artifact IS in the listing, it WAS
+                # produced, and it IS a valid zip. The upload is `if: always()` +
+                # `if-no-files-found: ignore` over five paths, so a leg that died before the
+                # junit/manifest steps produces exactly this zip.
+                artifacts.download_failed[name] = (
+                    f"{detail} — the artifact was downloaded and is a valid zip, so this is "
+                    f"not expiry and not an unproduced artifact"
                 )
                 return None
             sources: list[str] = []
@@ -1934,6 +2148,14 @@ def _leg_evidence(
                     sources.append("expected-nodeids")
                     executed |= scoped
             if not sources:
+                # Same rule: the bytes were read and unzipped, so nothing here is expiry.
+                detail = (
+                    f"artifact {name}: its {JUNIT_MEMBER} was unparsable and no "
+                    f"{NODEIDS_MEMBER} attested the leg, so the artifact says nothing about "
+                    f"what ran"
+                )
+                notes.append(detail)
+                artifacts.download_failed[name] = detail
                 return None
             return LegEvidence(
                 failed_paths=failed,
@@ -1993,9 +2215,37 @@ def render_summary(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _cells(line: str) -> int:
-    """How many GFM table cells a pipe-delimited row declares."""
-    return len(line.strip().strip("|").split("|"))
+#: The 74-row table's columns, in order.
+#: ⛔ ONE list drives the header row AND the delimiter row. They used to be two
+#: hand-maintained literals, and adding `cleared by a re-run` to the header and the data
+#: rows only left a NINE-cell delimiter under a TEN-cell header. GFM refuses a table whose
+#: header and delimiter rows differ in cell count (spec §4.10: "If not, a table will not be
+#: recognised"), so the committed report — #10131's own acceptance artifact — rendered as
+#: one paragraph of pipe text. Generated from one list, the two cannot drift apart again.
+TABLE_COLUMNS: tuple[str, ...] = (
+    "file",
+    "status",
+    "lane",
+    "PR runs (attested)",
+    "main runs (attested)",
+    "leg runs w/o this file",
+    "PR-head catches",
+    "main catches",
+    "cleared by a re-run",
+    "UNKNOWN",
+)
+
+
+def _cell(value: object) -> str:
+    """One table cell: a single line, and no unescaped pipe.
+
+    ⛔ An UNKNOWN reason EMBEDS another process's text (`gh`'s stderr, a zip's error), which
+    is routinely multi-line and can contain a `|`. Either one breaks the row it lands in —
+    a newline ends the row early, a pipe mints a phantom column — so the table rendered as
+    broken markdown exactly when the data was imperfect, which is the case this report
+    exists for. Flatten first (all whitespace runs become one space), then escape.
+    """
+    return " ".join(str(value).split()).replace("|", "\\|")
 
 
 def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
@@ -2008,19 +2258,10 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
         "nonpremerge": NOT_PREMERGE,
     }
     wanted = alias.get(only, only)
-    # ⛔ The delimiter row is DERIVED from the header, never hand-written beside it. GFM
-    # refuses a table whose header and delimiter rows differ in cell count (spec §4.10:
-    # "If not, a table will not be recognized"), so a delimiter one cell short turns the whole
-    # committed artifact into a single paragraph of pipe text. Verified against GitHub's own
-    # renderer (`POST /markdown`, `mode: gfm`): 9 delimiter cells → `<p>…|—|…</p>`, 10 → a real
-    # `<table>`. The `cleared by a re-run` column was added to the header and the data row
-    # only, and nothing pinned the parity — so it is computed now instead of typed twice.
-    header = (
-        "| file | status | lane | PR runs (attested) | main runs (attested) "
-        "| leg runs w/o this file | PR-head catches | main catches | cleared by a re-run "
-        "| UNKNOWN |"
-    )
-    rows = [header, "|" + "---|" * _cells(header)]
+    rows = [
+        "| " + " | ".join(TABLE_COLUMNS) + " |",
+        "|" + "---|" * len(TABLE_COLUMNS),
+    ]
     for row in report["files"]:
         if wanted and row["status"] != wanted:
             continue
@@ -2040,12 +2281,21 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
         # ⛔ "attested" is per FILE (the artifact named it), never "its leg ran": the legs
         # are diff-SCOPED on tier-2, so the leg column counts runs that did NOT touch it.
         unattested = row.get("pr_leg_runs_unattested", 0) + row.get("push_leg_runs_unattested", 0)
-        rows.append(
-            f"| `{row['file']}` | {row['status']} | {row.get('lane', '-')} "
-            f"| {row.get('pr_runs_attested', 0)} | {row.get('push_runs_attested', 0)} "
-            f"| {unattested} "
-            f"| {prs} | {pushes} | {cleared} | {unknown} |"
-        )
+        # One cell per TABLE_COLUMNS entry, in the same order — a column added above with
+        # no cell here would be a short row, which MD056 reds and GFM renders off-line.
+        cells = [
+            f"`{row['file']}`",
+            row["status"],
+            row.get("lane", "-"),
+            row.get("pr_runs_attested", 0),
+            row.get("push_runs_attested", 0),
+            unattested,
+            prs,
+            pushes,
+            cleared,
+            unknown,
+        ]
+        rows.append("| " + " | ".join(_cell(c) for c in cells) + " |")
     return "\n".join(rows)
 
 
@@ -2178,7 +2428,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         client = (
             OfflineClient(args.offline_dir)
             if args.offline_dir
-            else GhClient(args.repo, max_calls=args.max_api_calls)
+            else GhClient(args.repo, max_calls=args.max_api_calls, max_seconds=args.max_seconds)
         )
         report = build_history(
             manifest,

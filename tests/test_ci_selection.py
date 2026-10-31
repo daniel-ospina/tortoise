@@ -2589,6 +2589,36 @@ def test_worktree_report_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_ci_catch_history_tool_change_selects_core_not_tier1():
+    """A change to the catch-history instrument must run the rules it pins (#10131 review P1).
+
+    `tests/test_ci_catch_history.py` is registered on the `core` surface and owns the
+    instrument's whole answer column — `NEVER` licensed only by a per-FILE PR-head
+    attestation, every read gap landing on `UNKNOWN`, the cleared-red accounting, the
+    wall bound, the lane split. That registration is INERT for a tool-only diff: `tools/`
+    is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/ci_catch_history.py`, so `select()` returned NO surface, took the docs-only
+    early return and fell to the tier-1 smoke set, which does not contain the file. The
+    most likely follow-up to this instrument IS a change to the instrument, so the diff
+    that can weaken the rule that decides "never caught anything" would have been the one
+    diff that ran none of the cases pinning it — the #1349/#3332/#3616 silent-drop
+    class.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields
+    `full: False` with no pin, so the later asserts pass unexercised. MEASURED both ways
+    at the #10359 fix head (in-process `select(...)`, not by editing the tuple): without
+    the entry `surfaces=[]  full=False  n=68  guard=ABSENT`; with it
+    `surfaces=['core']  full=False  n=706  guard=PRESENT`. No count is stated in the
+    CORE_ALSO comment or here on purpose — the pin set moves with the file, and a literal
+    would rot the way the `durations` note's count did.
+    """
+    r = _sel(["tools/ci_catch_history.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ci_catch_history.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_ax_write_eval_tool_change_selects_core_not_tier1():
     """A change to the eval instrument must run the rules it pins (#9695 review).
 
@@ -6302,6 +6332,91 @@ def test_the_paren_guard_is_not_vacuous():
     assert [k for k, _ in _durations_rows_with_unbalanced_parens(stale)] == [
         "test_a.py", "test_b.py"]
     assert _durations_rows_with_unbalanced_parens(legitimate) == []
+
+
+# ── the re-derivable CASE COUNT a row states (#10356 review P3-1) ─────────────
+# A durations row may state its file's case count as a MEASUREMENT, naming the
+# instrument: `# #5086: 35 cases (`grep -c '^def test_'` -> 35; pytest collects 35 …)`.
+# That is the one claim in this map a reader is told to re-derive rather than trust
+# (the row's own ⛔ ENTRY RULE), and the one that goes stale silently: a PR ADDS a
+# control to a file it also weighs, and the note keeps the count it had before.
+# Measured at the #10356 head: the `test_substrate_map.py` row stated 34 while the
+# file (and `pytest --collect-only`) said 35 — the tenth staleness in that one note.
+# ⛔ Only rows that CITE the instrument are judged. Every other count here is
+# provenance for a WEIGHT ("the module held **30** at the #9352 head, **31** after
+# #9358") — history that must NOT be re-derived, and a guard that read those would
+# red on correct notes.
+_CASE_COUNT_CLAIM_RE = re.compile(
+    r"`grep -c '\^def test_'`\s*(?:->|\u2192)\s*(?P<n>\d+)")
+
+
+def _durations_rows_with_a_stale_case_count(text: str, tests_dir: Path):
+    """`(key, stated, actual)` for rows whose cited `grep -c` count is wrong.
+
+    `actual` is the file's `^def test_` count — the SAME instrument the row names,
+    so a file that collects a different number through `parametrize` (none here; the
+    two rows that cite it both say so explicitly) is not silently re-based. `None`
+    means the row weighs a file that is not there, which a citation may not do.
+    """
+    out = []
+    for key, note in _durations_row_comments(text):
+        m = _CASE_COUNT_CLAIM_RE.search(note)
+        if m is None:
+            continue
+        stated = int(m.group("n"))
+        path = tests_dir / key
+        if not path.exists():
+            out.append((key, stated, None))
+            continue
+        actual = len(re.findall(
+            r"^def test_", path.read_text(encoding="utf-8"), re.M))
+        if actual != stated:
+            out.append((key, stated, actual))
+    return out
+
+
+def test_no_durations_row_states_a_stale_case_count():
+    """#10356 review P3-1: a cited `grep -c` count must match the file it weighs."""
+    offenders = _durations_rows_with_a_stale_case_count(
+        cs.MANIFEST.read_text(encoding="utf-8"), cs.TESTS_DIR)
+    assert offenders == [], (
+        "a durations row states its file's case count with the instrument the map's "
+        "ENTRY RULE tells the reader to re-derive with (`grep -c '^def test_'`) and "
+        f"the file disagrees — (key, stated, actual): {offenders}. Re-derive the "
+        "count AND extend the row's staleness chain with the cycle that moved it.")
+
+
+def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
+    """The guard above must bite on a stale citation and stay quiet on history."""
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    stale = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 3 cases (`grep -c '^def test_'` -> 3; pytest "
+        "collects 3).\n"
+        "surfaces: []\n")
+    fresh = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` \u2192 2; pytest "
+        "collects 2).\n"
+        "surfaces: []\n")
+    historical = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #9352: the module held 7 at the #9352 head and 9 after "
+        "the follow-up; no instrument is cited, so this is provenance for the WEIGHT, "
+        "not a current claim.\n"
+        "  test_other.py: 1.0  # 11 cases, re-derived by hand.\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(stale, tmp_path) == [
+        ("test_two.py", 3, 2)]
+    assert _durations_rows_with_a_stale_case_count(fresh, tmp_path) == []
+    assert _durations_rows_with_a_stale_case_count(historical, tmp_path) == []
+    gone = (
+        "durations:\n"
+        "  test_gone.py: 1.0  # (`grep -c '^def test_'` -> 4).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(gone, tmp_path) == [
+        ("test_gone.py", 4, None)]
 
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
@@ -10021,45 +10136,50 @@ def test_tortoise_oauth_change_selects_api_and_core():
     assert "test_control_plane_offload_3498.py" in selected, "api+core pinner must run"
 
 
-def test_vendored_bundle_change_selects_api_and_runs_the_version_pin():
-    # #3496: the consent page pins its browser auth client to a CDN specifier
-    # whose version must equal the VENDORED bundle the behavioural harness
-    # EXECUTES. `website/` is in NON_PYTHON_PREFIXES, so before this entry a
-    # vendor-only bump matched no pattern and fell through to tier-1 smoke: the
-    # version pin (test_oauth_consent_pkce.py::
-    # test_page_specifier_matches_the_vendored_bundle_version) and the harness
-    # that executes the very file being bumped would never run on the PR that
-    # can break them — the #1349/#3332/#4171 silent-drop class.
+def test_vendored_bundle_change_selects_api() -> None:
+    # ⚠️ #3496 registered this entry so a vendored-bundle bump would run the
+    # consent page's CDN-version pin (`test_page_specifier_matches_the_vendored_
+    # bundle_version`, in the now-deleted test_oauth_consent_pkce.py) and the
+    # harness that EXECUTED the bumped file. **#3524 §9 step 4 deleted both**: the
+    # page has no `<script src=`, so it has no CDN specifier to keep equal to a
+    # vendored build, and no Python test executes that bundle.
+    #
+    # The SOURCE_PATTERNS entry stays, for the reason that survives the deletion:
+    # `website/apps/dashboard/public/vendor/supabase-*.min.js` is still a SHIPPED
+    # dashboard artifact pinned by the dashboard's own `src/distBundle.test.js`,
+    # and `website/` is in NON_PYTHON_PREFIXES — so without the entry a vendor-only
+    # bump falls through to tier-1 smoke and NONE of the `api`-registered web
+    # guards (which scan the shipped dashboard tree) run on the PR that changes it.
     #
     # Asserted on the SURFACE, not only on the test-file list: the two derived
-    # ratchets (test_every_source_pattern_is_selectable,
-    # test_source_patterns_all_name_something_real) accept ANY non-empty
-    # surface, so re-pointing this entry at another surface list (e.g.
-    # `onboarding`) keeps them green while the api-registered pin silently
-    # stops running. Same hole `test_tortoise_oauth_change_selects_api_and_core`
-    # closes for tortoise/oauth.py, and the reason it asserts the surface too.
+    # ratchets accept ANY non-empty surface, so re-pointing this entry elsewhere
+    # keeps them green while the guards silently stop running. Same hole
+    # `test_tortoise_oauth_change_selects_api_and_core` closes for
+    # tortoise/oauth.py.
     #
-    # The bundle name is DERIVED from the vendor dir, not written down. The
-    # version in the path is irrelevant to what this test pins — `select()`
-    # matches SOURCE_PATTERNS by prefix and never touches the filesystem, so a
-    # stale or even bogus version still selects the same surface. The derivation
-    # is what makes the `assert bundle` below bite: a hardcoded path would keep
-    # passing against a vendor dir that no longer holds a bundle.
+    # The bundle name is DERIVED from the vendor dir, not written down: `select()`
+    # matches SOURCE_PATTERNS by prefix and never touches the filesystem, so the
+    # derivation is what makes the `assert bundle` below bite — a hardcoded path
+    # would keep passing against a vendor dir that no longer holds a bundle.
     vendor = REPO / "website" / "apps" / "dashboard" / "public" / "vendor"
     bundle = sorted(vendor.glob("supabase-*.min.js"))
-    assert bundle, f"no vendored bundle under {vendor} — the page executes it"
+    assert bundle, f"no vendored bundle under {vendor} — the dashboard still ships it"
     changed = str(bundle[0].relative_to(REPO))
 
     r = _sel([changed])
     assert r["surfaces"] == ["api"], (
         f"a vendored-bundle bump ({changed}) must select `api` — that is the "
-        "surface the version pin and the harness that executes the bundle are "
-        f"registered on; got {r['surfaces']}"
+        f"surface whose registered web guards scan the shipped dashboard tree; "
+        f"got {r['surfaces']}"
     )
     assert r["full"] is False
-    assert "test_oauth_consent_pkce.py" in r["test_files"], (
-        "the behavioural harness that EXECUTES the bumped bundle must run on "
-        f"the bump; selected {sorted(r['test_files'])}"
+    # NON-VACUITY: a surface match that selected nothing would read exactly like
+    # a clean run. (The specific harness this entry was created for is gone with
+    # the inline client — see the header — so the assertion is that the surface
+    # still RUNS something, not that one particular file runs.)
+    assert r["test_files"] or r["slow_selected"], (
+        "a vendored-bundle bump selected the `api` surface but NO test files — the "
+        "registration would be decorative and the bump would run nothing"
     )
 
 

@@ -2729,11 +2729,276 @@ try {
       + 'existing row untouched, as the graph\'s ON CREATE SET does');
   }
 
+  // (13) #9836 — the ID-ADDRESSED structural family, executed against Postgres.
+  //      `aboutAction`/`wasDerivedFrom` are TRANSFERRED by `supersede_point`'s 2b
+  //      leg but are NOT snapshot-derivable, so before #9836 the producer emitted
+  //      no descriptor for them: the graph moved the edge live and the record
+  //      kept its pre-supersede row, which is a `live != record-rebuild`
+  //      divergence on the whole family. The descriptor now addresses its target
+  //      by the node's OWN `id` under the label it OBSERVED live, so this case
+  //      pins BOTH halves: the row MOVES (DELETE at the superseded point + INSERT
+  //      at the successor) and it is filed with the descriptor's label.
+  //
+  //      ⛔ `wasDerivedFrom` is the case that could not be written any other way:
+  //      ONTOLOGY §3.2 declares it Object->Object while its writers type-check
+  //      nothing, so its target label is NOT a function of the rel — the label
+  //      has to travel on the descriptor. The Point target below is the shape the
+  //      class-4 mint actually produces, and a Point's `node_key` IS its id
+  //      (`NODE_TABLES`), which is what makes the id-addressed arm's resolution
+  //      file the row the graph moved.
+  const derivedTarget = {
+    type: 'PointAdded', ts: '2026-10-25T00:11:01Z', id: 'tp-9836',
+    point: { id: 'tp-9836', content: 'the raw claim', status: 'live' },
+  };
+  const derived = await run('9836-wasderivedfrom-point',
+    supersedeRecords('p1', 'p2', 'tp-9836', {
+      preamble: [derivedTarget],
+      edgeType: 'wasDerivedFrom',
+      targetLabel: 'Point',
+      link: { type: 'DirectEdgeCreated', ts: '2026-10-25T00:11:02Z',
+        id: 'p1:wasDerivedFrom:tp-9836',
+        edge_type: 'wasDerivedFrom', src: 'p1', tgt: 'tp-9836',
+        source_label: 'Point', target_label: 'Point' },
+    }));
+  if (derived.length !== 1 || derived[0].src_key !== 'p2'
+      || derived[0].tgt_label !== 'Point'
+      || derived[0].tgt_key !== 'tp-9836') {
+    throw new Error('#9836 wasDerivedFrom/Point: rows = '
+      + JSON.stringify(derived) + ' — the row must MOVE to the successor, filed '
+      + 'by the target Point\'s id. [] is the delete-without-insert shape; a '
+      + 'src_key of p1 is the plain-upsert shape #10244 retired; a tgt_key that is '
+      + 'not tp-9836 is the id-addressed arm resolving by something other than the '
+      + 'id the descriptor carried');
+  }
+
+  // (14) the SAME mutation for `aboutAction` — a second rel of the family, and
+  //      the one whose target has no natural key at all (`Point -> Point`,
+  //      ONTOLOGY §3.2). Two rels, one rule: if only (13) ran, a fix that keyed
+  //      off `wasDerivedFrom` by name would pass here and leave `aboutAction`
+  //      broken.
+  const actionTarget = {
+    type: 'PointAdded', ts: '2026-10-25T00:12:01Z', id: 'tp-9836-action',
+    point: { id: 'tp-9836-action', content: 'the legacy action', status: 'live' },
+  };
+  const action = await run('9836-aboutaction-point',
+    supersedeRecords('p1', 'p2', 'tp-9836-action', {
+      preamble: [actionTarget],
+      edgeType: 'aboutAction',
+      targetLabel: 'Point',
+      link: { type: 'DirectEdgeCreated', ts: '2026-10-25T00:12:02Z',
+        id: 'p1:aboutAction:tp-9836-action',
+        edge_type: 'aboutAction', src: 'p1', tgt: 'tp-9836-action',
+        source_label: 'Point', target_label: 'Point' },
+    }));
+  if (action.length !== 1 || action[0].src_key !== 'p2'
+      || action[0].tgt_label !== 'Point'
+      || action[0].tgt_key !== 'tp-9836-action') {
+    throw new Error('#9836 aboutAction/Point: rows = '
+      + JSON.stringify(action) + ' — `aboutAction` is the same MOVE; a rel-keyed '
+      + 'fix that only named `wasDerivedFrom` leaves this family split');
+  }
+
+  // (15) the label really does come from the DESCRIPTOR: the same rel onto an
+  //      OBJECT. `public.object.node_key` is the object's id (#9881), so a
+  //      resolver that assumed 'Point' would match nothing and land NO row while
+  //      the graph moved the edge — the exact divergence class #9836 is in.
+  const derivedObject = {
+    type: 'ObjectRegistered', ts: '2026-10-25T00:13:01Z',
+    id: 'obj-9836-alpha', name: 'Alpha Artifact', objectKind: 'doc',
+  };
+  const derivedObj = await run('9836-wasderivedfrom-object',
+    supersedeRecords('p1', 'p2', 'obj-9836-alpha', {
+      preamble: [derivedObject],
+      edgeType: 'wasDerivedFrom',
+      targetLabel: 'Object',
+      link: { type: 'DirectEdgeCreated', ts: '2026-10-25T00:13:02Z',
+        id: 'p1:wasDerivedFrom:obj-9836-alpha',
+        edge_type: 'wasDerivedFrom', src: 'p1', tgt: 'obj-9836-alpha',
+        source_label: 'Point', target_label: 'Object' },
+    }));
+  if (derivedObj.length !== 1 || derivedObj[0].src_key !== 'p2'
+      || derivedObj[0].tgt_label !== 'Object'
+      || derivedObj[0].tgt_key !== 'obj-9836-alpha') {
+    throw new Error('#9836 wasDerivedFrom/Object: rows = '
+      + JSON.stringify(derivedObj) + ' — the label rides the descriptor, so an '
+      + 'Object target must resolve through the object table (node_key = the '
+      + 'object id, #9881) and be filed as Object. 0 rows is the arm hardcoding '
+      + 'Point; a tgt_key holding the NAME would file an identity the fold does '
+      + 'not');
+  }
+
+  // (16) #9836 review P1 — a `:Source` target IS ADDRESSED, by its `url`. An
+  //      earlier revision of the arm declined this descriptor on the claim that a
+  //      Source is "outside the fold's id sweep" and therefore unaddressable —
+  //      which conflated `RECORD_ADDRESSABLE_EDGE_LABELS` (what pass-2b's
+  //      `DirectEdgeCreated` sweep can probe by `id`) with this family's
+  //      vocabulary. A Source IS addressable on the repoint route: `public.source.
+  //      node_key` IS its `url` (`chk_source_node_key_is_contract_key`), the same
+  //      identity `extractedFrom`/`aboutDocument` resolve by, and the graph's
+  //      replay arm matches `(s:Source {url:$url})`. Declining it left the row at
+  //      the superseded point while live MOVED the edge — a live ≠ record-rebuild
+  //      divergence on a reachable shape (`create_edge` type-checks nothing).
+  const srcRecords = supersedeRecords('p1', 'p2', 'https://x.test/9836', {
+    preamble: [{ type: 'SourceCreated', ts: '2026-10-25T00:14:01Z',
+      id: 'https://x.test/9836', url: 'https://x.test/9836',
+      sourceKind: 'document' }],
+    edgeType: 'wasDerivedFrom',
+    targetLabel: 'Source',
+    link: { type: 'DirectEdgeCreated', ts: '2026-10-25T00:14:02Z',
+      id: 'p1:wasDerivedFrom:https://x.test/9836',
+      edge_type: 'wasDerivedFrom', src: 'p1', tgt: 'https://x.test/9836',
+      source_label: 'Point', target_label: 'Source' },
+  });
+  const sourceMoved = await run('9836-source-target', srcRecords);
+  if (sourceMoved.length !== 1 || sourceMoved[0].src_key !== 'p2'
+      || sourceMoved[0].tgt_label !== 'Source'
+      || sourceMoved[0].tgt_key !== 'https://x.test/9836') {
+    throw new Error('#9836 Source target: rows = '
+      + `${JSON.stringify(sourceMoved)} — a url-keyed :Source target must MOVE `
+      + 'to the successor filed as Source/url. 0 rows or a row still at p1 is the '
+      + 'arm declining a descriptor BOTH routes can address (live moved the edge)');
+  }
+
+  // (17) ... while a label NEITHER route can address is still a NO-MOVE, never a
+  //      DELETE-only move. ⚠️ That refusal is NOT a PGlite case, and the reason is
+  //      a fact about the journal rather than an omission: a `DirectEdgeCreated`
+  //      naming an unknown label is ITSELF refused at the creation leg
+  //      (`_endpoint_resolution`: "edge endpoint names label 'Tag', which is not a
+  //      record node label"), so a full replay of such a journal cannot exist. The
+  //      guard is therefore pinned where it is reachable — at the descriptor's own
+  //      plan — by `tests/test_9836_id_addressed_repoint.py::
+  //      test_an_unaddressable_label_is_a_no_move`, which asserts
+  //      `_structural_repoint_statements` returns `[]` — an EMPTY MUTATION LIST,
+  //      the record's half of the graph's `continue` — and NOT `None`: `None` sends
+  //      the descriptor back to `_declared_mutations`' plain-upsert fall-through,
+  //      which has no superseded-endpoint gate, so the row would land AT the
+  //      retired point (or, for a label outside the node vocabulary, the whole
+  //      journal record would be refused with `RecordProjectionError`) while the
+  //      graph leg `continue`s. Skip-vs-write/vs-raise is not "both routes agree
+  //      on the miss", which is why that test also pins
+  //      `mutations_for(<the same descriptor>, …) == []` — the CONSEQUENCE, not
+  //      just the helper's return value.
+
+  // (18) #9836 review — an `Event` target is keyed by its `eventId`, NOT by its
+  //      `id`. This is the one label whose two candidate identities DIVERGE in a
+  //      live-reachable shape: `entities._event_guarded_merge`'s SUFFIX branch
+  //      MERGEs on the suffixed `eventId` while the props it writes keep
+  //      `id = <candidate>` (`live.py::EPISTEMIC_ID_KEYS` states it and forbids
+  //      using the coalesced value as an identity). The record files and resolves
+  //      an Event under `node_key` = `event_id`, so a descriptor carrying the
+  //      graph's `id` would resolve a DIFFERENT Event than the one the edge
+  //      points at — the record richer than the graph, the one direction
+  //      Interface A forbids. The descriptor here carries `eventId`
+  //      (`cand-9836`), and the Event row below is filed under it; `id` is the
+  //      shared candidate and must NOT be what resolves.
+  //      The record below is the SDK PRODUCER's own shape — a flat `eventId` and
+  //      NO `id` (`sdk.py`: `payload = {**inner, "eventId": resolved}` with `id`
+  //      dropped) — so `node_key` is the resolved `eventId`. That is what makes
+  //      this case discriminate: a resolver that reached for the node's `id`
+  //      finds no `id` here at all (0 rows) instead of the row the graph points at.
+  const eventTarget = {
+    type: 'EventRecorded', ts: '2026-10-25T00:17:01Z',
+    eventId: 'cand-9836-abcd1234', eventKind: 'meeting',
+  };
+  const eventMoved = await run('9836-wasderivedfrom-event',
+    supersedeRecords('p1', 'p2', 'cand-9836-abcd1234', {
+      preamble: [eventTarget],
+      edgeType: 'wasDerivedFrom',
+      targetLabel: 'Event',
+      link: { type: 'DirectEdgeCreated', ts: '2026-10-25T00:17:02Z',
+        id: 'p1:wasDerivedFrom:cand-9836-abcd1234',
+        edge_type: 'wasDerivedFrom', src: 'p1', tgt: 'cand-9836-abcd1234',
+        source_label: 'Point', target_label: 'Event' },
+    }));
+  if (eventMoved.length !== 1 || eventMoved[0].src_key !== 'p2'
+      || eventMoved[0].tgt_label !== 'Event'
+      || eventMoved[0].tgt_key !== 'cand-9836-abcd1234') {
+    throw new Error('#9836 Event target: rows = '
+      + `${JSON.stringify(eventMoved)} — an Event target is addressed by its `
+      + '`eventId` (what this route files it under) and must MOVE to the '
+      + 'successor filed as Event/<eventId>. 0 rows, or a row left at some other '
+      + 'src_key, is the arm resolving NOTHING — the MOVE never matched; a tgt_key '
+      + 'that is not the eventId is the arm resolving by `id`'
+    );
+  }
+
+  // (19) #9836 review P2 — the NO-SELF-EDGE guard's `delete_only` descriptor, on
+  //      the ID-ADDRESSED family, with the PRE-FIX journal run beside it. When the
+  //      structural target IS the successor the 2b leg deletes the edge and
+  //      transfers nothing; the graph's other two routes hold no edge afterwards
+  //      (nothing re-creates it for this family), but the `DirectEdgeCreated` fold
+  //      already wrote a relation row at the OLD point and the record has no
+  //      superseded-endpoint skip of its own — so without this descriptor
+  //      `relation` keeps an edge the graph DELETED (the pair below measures it:
+  //      `{src_key:'p1', …}` survives the pre-fix journal).
+  //      When the live leg deletes the edge and transfers nothing it journals a
+  //      `delete_only` `DirectEdgeRepoint`. For the RECORD that descriptor is not
+  //      a no-op — it is the ONLY statement that removes the row the pre-supersede
+  //      `DirectEdgeCreated` wrote at the retired point (`_relation_delete_statement`
+  //      honours `delete_only` for any rel). Emitted for the ID-ADDRESSED family
+  //      only since the review fix; before it, the row survived at `p1`.
+  //
+  //      ⛔ BOTH HALVES RUN, and the first is the PRE-FIX journal: without the
+  //      descriptor the row stays at the superseded point. Asserting only the
+  //      post-fix half would pass against a harness that deleted the row for some
+  //      other reason.
+  const selfLink = {
+    type: 'DirectEdgeCreated', ts: '2026-10-25T00:15:02Z',
+    id: 'p1:wasDerivedFrom:p2',
+    edge_type: 'wasDerivedFrom', src: 'p1', tgt: 'p2',
+    source_label: 'Point', target_label: 'Point',
+  };
+  // The producer's order, and the pre-fix journal is the SAME list with the
+  // guard's descriptor REMOVED (the `deleteOnly` flag is the only difference) —
+  // built here rather than through `supersedeRecords` because that helper always
+  // appends a MOVE descriptor, and a MOVE is exactly what this arm must not be.
+  const selfEdgeRecords = (deleteOnly) => [
+    { type: 'PointAdded', ts: '2026-10-25T00:15:00Z', id: 'p1',
+      point: { id: 'p1', content: 'the claim', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:15:01Z', id: 'p2',
+      point: { id: 'p2', content: 'the restatement', status: 'live' } },
+    selfLink,
+    { type: 'PointSuperseded', ts: '2026-10-25T00:15:03Z', id: 'p1',
+      new_id: 'p2', valid_from: '2026-10-25T00:15:03Z',
+      valid_to: '2026-10-25T00:15:04Z', expired_at: '2026-10-25T00:15:04Z' },
+    ...(deleteOnly ? [{
+      type: 'DirectEdgeRepoint', ts: '2026-10-25T00:15:04Z',
+      id: 'p1->p2:wasDerivedFrom:p2:self',
+      src: 'p1', tgt: 'p2', target_label: 'Point',
+      edge_type: 'wasDerivedFrom', delete_only: true,
+    }] : []),
+  ];
+  const noDescriptor = await run('9836-self-edge-prefix', selfEdgeRecords(false));
+  if (noDescriptor.length !== 1 || noDescriptor[0].src_key !== 'p1') {
+    throw new Error('#9836 self-edge (pre-fix journal): rows = '
+      + `${JSON.stringify(noDescriptor)} — without a delete-only descriptor the `
+      + 'row the pre-supersede `DirectEdgeCreated` wrote at p1 MUST survive there; '
+      + 'that surviving row is the `live != record-rebuild` divergence the family '
+      + 'now closes, and this half is what proves the next assertion is not vacuous');
+  }
+  const selfEdge = await run('9836-self-edge', selfEdgeRecords(true));
+  if (selfEdge.length !== 0) {
+    throw new Error('#9836 self-edge: rows = '
+      + `${JSON.stringify(selfEdge)} — a \`delete_only\` descriptor must leave the `
+      + 'record with NO row: live deleted the edge (a transfer would mint the '
+      + '(new)->(new) phantom, E2E-11.6) and the successor is the target itself, so '
+      + 'there is nothing to move. 1 row is the pre-fix shape above');
+  }
+
   console.log('✓ #9972: the FOUR resolution arms resolve — Object and Subject by '
     + '`name`, Point by `props->>\'name\'`, Source+extractedFrom by the '
     + 'canonical triple — and a name held by 2+ carriers lands nothing (#5509)');
   console.log('✓ #9973: a supersede TRANSFERS the edge — the row leaves the '
     + 'superseded point, lands on the final successor, and re-replays idempotently');
+  console.log('✓ #9836: the ID-ADDRESSED structural family (`wasDerivedFrom`, '
+    + '`aboutAction`) MOVES on the record route too — the target is resolved by '
+    + 'the descriptor\'s label — `id`, or `eventId` for an `Event`, or its `url` for a '
+    + '`:Source` — the no-self-edge descriptor DELETEs the row the graph deleted, '
+    + 'and a label outside the addressable set is a NO-MOVE, never '
+    + 'a delete-without-insert');
+  console.log('✓ #9836: the family\'s NO-SELF-EDGE descriptor removes the row at the '
+    + 'superseded point — the pre-fix journal leaves it there and that row is the '
+    + '`live != record-rebuild` divergence');
   // (12) #10139 review round 4 — the ORDERING of two descriptors that land on
   //      the same successor row. The record moves each descriptor ONE HOP, at
   //      the successor its own supersede named, exactly as the graph's replay

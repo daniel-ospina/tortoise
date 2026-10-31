@@ -1076,16 +1076,21 @@ SOURCE_PATTERNS = {
             # core-registered guard. Pinned by tests/test_ci_selection.py::
             # test_a_consent_token_only_diff_runs_the_bridge_guard.
             "tortoise/consent_token.py",
-            # #3496: the consent page pins its browser auth client to a CDN
-            # specifier whose version must equal the VENDORED bundle the
-            # behavioural harness executes (test_oauth_consent_pkce.py, api).
-            # `website/` is in NON_PYTHON_PREFIXES, so a vendor-only bump matched
-            # no pattern and fell through to tier-1 smoke — the version pin
-            # would never run on the PR that can break it, and neither would the
-            # harness that executes the very file being bumped (the
-            # #1349/#3332/#4171 silent-drop class). `_selection_relevant()` lets
-            # a SOURCE_PATTERNS match beat the prefix filter, so this entry is
-            # what makes the bump select `api`.
+            # #3496 put this entry here so a vendored-bundle bump would run the
+            # consent page's CDN-version pin and the harness that executed the
+            # bumped file. **#3524 §9 step 4 deleted both** (the page has no
+            # `<script src=`, so no CDN specifier, and no Python test executes
+            # the bundle). The entry STAYS, for the reason that survives: the
+            # vendored build is still a SHIPPED dashboard artifact (pinned by the
+            # dashboard's own `src/distBundle.test.js`), and `website/` is in
+            # NON_PYTHON_PREFIXES — so without this entry a vendor-only bump
+            # falls through to tier-1 smoke and none of the `api`-registered web
+            # guards, which scan the shipped dashboard tree, run on the PR that
+            # changes it (the #1349/#3332/#4171 silent-drop class).
+            # `_selection_relevant()` lets a SOURCE_PATTERNS match beat the
+            # prefix filter, so this entry is what makes the bump select `api`;
+            # pinned by
+            # tests/test_ci_selection.py::test_vendored_bundle_change_selects_api.
             "website/apps/dashboard/public/vendor/",
             # #4282: `tools/bridge_table.py` GENERATES `docs/product/bridge-table.md`
             # and `test_bridge_table.py` (registered in `api`) is the drift gate
@@ -2359,7 +2364,30 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # and config/ci-surfaces.yml's `core`-home row.
              # Pinned by tests/test_ci_selection.py::
              # test_substrate_map_guard_runs_on_the_diffs_it_guards.
-             "tools/substrate_map_check.py")
+             "tools/substrate_map_check.py",
+             # #10131 review P1: tools/ci_catch_history.py owns
+             # tests/test_ci_catch_history.py — registered `core` (the registration this
+             # PR adds) — but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change filtered to
+             # `changed == []`, took the docs-only early return and fell to tier-1 smoke,
+             # where that file is NOT registered. The `core` row that registers the file is
+             # CLASSIFICATION only (#4348); it does not make a `tools/` path select `core`.
+             # MEASURED before this entry: `select(["tools/ci_catch_history.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, n=68, guard
+             # ABSENT. The most likely follow-up to this exact instrument IS a change to the
+             # instrument (every finding class on #10131's reviews so far has been in a read
+             # path — `NEVER` licensing, the cleared-red loop, the wall bound), so the diff
+             # that can break the whole pin set was the one diff that ran none of it:
+             # the #1349/#3332/#3616 silent-drop class. (No count is stated here on purpose:
+             # the pin set moves with the file, and a literal would rot exactly the way the
+             # `durations` note's count did — `tests/test_ci_catch_history.py::
+             # test_the_durations_note_counts_the_tests_this_file_actually_has` RUNS its own
+             # command so that one cannot.) CORE_ALSO (not TOOL_CARVEOUTS)
+             # because the suite is hermetic (an archived runs.json, job JSON and in-memory
+             # zips — no DB, no network) and `core` is where it is registered. Pinned by
+             # tests/test_ci_selection.py::
+             # test_ci_catch_history_tool_change_selects_core_not_tier1.
+             "tools/ci_catch_history.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
