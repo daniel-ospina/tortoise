@@ -1,0 +1,102 @@
+name: playwright-install
+description: >-
+  Install a Playwright browser AND the system dependencies it needs — retrying
+  through a co-tenant's apt lock instead of losing the race against it on the
+  same runner host.
+
+  WHY (#10214). `python -m playwright install --with-deps <browser>` shells out to
+  `apt-get install` for the browser's system libraries, and apt-get's DEFAULT is
+  to fail IMMEDIATELY when another process holds `/var/lib/apt/lists/lock`. This
+  repo's `ubuntu-latest` label is answered by a self-hosted pool where many jobs
+  share ONE host (the same pool `.github/actions/ensure-rsync` documents for
+  #7026), so a co-tenant running anything apt-based reds a job whose own code is
+  fine. Measured 2026-10-30 on PR #10214 (run 41022359663, job 123952387502):
+
+      E: Could not get lock /var/lib/apt/lists/lock. It is held by process 3984745 (apt-get)
+
+  That killed the REQUIRED `legal-e2e` check at its FIRST step, so the eight steps
+  that follow — the preview boot and the entire suite the job exists to run —
+  never ran. The red described a neighbour's apt, not this branch, and re-running
+  it is a coin flip on who else is installing at that moment.
+
+  THE FIX has two parts, and apt's SOURCE says which covers which (#10337):
+
+  (a) `DPkg::Lock::Timeout` (the `Dpkg` group; apt's own default table declares
+  `Version::2.0::Dpkg::Lock::Timeout` — apt-private/private-cmndline.cc — and
+  apt's config lookup is case-insensitive, so this spelling binds) written ONCE
+  into `Dir::Etc::Parts` (`/etc/apt/apt.conf.d/`, which every apt tool reads at
+  startup), so it reaches the `apt-get` calls Playwright makes INTERNALLY — which
+  a `-o` flag on our own command line cannot, because we do not issue that call.
+  `ensure-rsync` already passes the same option for the same race; this makes it
+  the job's default.
+
+      ⚠️ WHAT IT DOES NOT COVER: not the lock the red above named. apt takes
+      `/var/lib/apt/lists/lock` through `pkgAcquire::GetLock` →
+      `::GetLock(flCombine(Lock, "lock"))`, and on the release the runners ship
+      (2.8.y, as on main) that is `GetLock(string File, bool Errors)` — there is
+      no timeout parameter on that path for this option to feed. It is a
+      `Dpkg`-group option and it stays one.
+
+  (b) The bounded 3-attempt retry below is therefore the mechanism that covers a
+  contended LISTS lock — it is not a belt-and-braces extra around (a).
+inputs:
+  browser:
+    description: Playwright browser name (chromium, firefox, webkit).
+    required: false
+    default: chromium
+  lock-timeout:
+    description: >-
+      Seconds apt may WAIT for the dpkg/apt lock. Comfortably longer than a
+      co-tenant's own install, and affordable against the job timeouts
+      (ci.yml: legal-e2e 20m, dashboard-e2e 15m, welcome-e2e 15m).
+    required: false
+    default: "600"
+runs:
+  using: composite
+  steps:
+    - name: Install ${{ inputs.browser }} + its system dependencies (#10214)
+      shell: bash
+      env:
+        BROWSER: ${{ inputs.browser }}
+        LOCK_TIMEOUT: ${{ inputs.lock-timeout }}
+      run: |
+        set -euo pipefail
+        conf=/etc/apt/apt.conf.d/99-ci-dpkg-lock-timeout
+        printf 'DPkg::Lock::Timeout "%s";\n' "$LOCK_TIMEOUT" | sudo tee "$conf" >/dev/null
+        # ASSERT against APT'S OWN CONFIGURATION SPACE, never against the file this
+        # shell wrote three lines above: a `grep "$conf"` can only fail if `tee`
+        # failed, and `set -euo pipefail` already fails the step on that — it never
+        # observes whether apt READ the fragment, so it cannot catch the outcome it
+        # was written for (a fragment apt skips reports a green step with the wait
+        # not in effect). `apt-config dump` prints the configuration space apt itself
+        # loaded (apt-config(8): "just show the contents of the configuration space"),
+        # which includes everything read from Dir::Etc::Parts — so a fragment apt
+        # skipped (unreadable, unparseable, a pruned Dir::Etc) is ABSENT here.
+        #   - `-i`: apt's config lookup is case-insensitive, so a differently-cased
+        #     binding must not red.
+        #   - the VALUE is matched too, so a default apt may ship for this key cannot
+        #     answer for a fragment that never landed.
+        #   - the dump is captured and matched as a herestring, NOT piped into
+        #     `grep -q`: grep exits at the first match, apt-config then dies of EPIPE
+        #     and `pipefail` would read that as a failure — a FALSE red on a correct
+        #     config.
+        apt_conf="$(apt-config dump)"
+        grep -qi "DPkg::Lock::Timeout \"$LOCK_TIMEOUT\"" <<<"$apt_conf" || {
+          echo "::error::apt did not load DPkg::Lock::Timeout \"$LOCK_TIMEOUT\" from $conf — apt will NOT wait for the lock"
+          exit 1
+        }
+        # Bounded retry — the only thing here that covers a contended LISTS lock
+        # (see (b) in the description: the apt.conf fragment does not reach that
+        # path, #10337). Same three-attempt shape (and backoff) as the wrangler
+        # install loops, and the last attempt is HARD — falling through would
+        # report a green step for an install that never happened, and every suite
+        # behind it would fail on a missing browser instead of saying so here.
+        for attempt in 1 2 3; do
+          if python -m playwright install --with-deps "$BROWSER"; then
+            exit 0
+          fi
+          echo "::warning::playwright install --with-deps $BROWSER failed on attempt $attempt — apt's lock was still held"
+          sleep $((attempt * 20))
+        done
+        echo "::error::python -m playwright install --with-deps $BROWSER failed after 3 attempts — apt never released its lock"
+        exit 1

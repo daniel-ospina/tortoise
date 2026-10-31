@@ -6838,6 +6838,184 @@ def _attach_source_change_notices(resp: dict, meta: dict) -> None:
         resp["source_change_notices"] = notices
 
 
+# #9116: the receipt sub-key the per-step witness rides in. It lives INSIDE the
+# existing ``stats`` key and is deliberately NOT a new top-level receipt key:
+# the receipt is the product's public write contract (the MCP/SDK surface), and
+# growing it is a decision the owner takes — while ``stats`` is already the
+# receipt's documented ADDITIVE telemetry key ("#2335 WI-1a: stats is ALWAYS
+# present on the receipt (additive meta contract)"). A sub-key inherits that
+# contract, reaches the hosted receipt for free (``hosted_api`` reads
+# ``meta["stats"]`` — so the two lanes cannot drift), and adds no verb.
+_STEP_WITNESS_KEY = "step_witness"
+
+#: The embed-list lanes the witness counts. Counts, never the structures: the
+#: receipt is serialized on the hosted lane and returned to every SDK caller,
+#: so carrying ``payload``/``embed_list``/``search`` themselves would multiply
+#: the receipt's size to answer a question counts answer.
+_STEP_EMBED_KINDS = ("entities", "events", "points", "operators")
+
+
+def _step_embed_counts(block) -> dict[str, int]:
+    """Per-lane item counts of an embed-list block ({} for a non-dict)."""
+    if not isinstance(block, dict):
+        return {}
+    return {k: len(block.get(k) or []) for k in _STEP_EMBED_KINDS}
+
+
+def _gate_counts(surface) -> dict:
+    """The COUNTS out of a VET or classify pass surface (``{}`` when nothing ran).
+
+    TWO SHAPES, and both are handled — reading only the first is what made this a
+    trap for the next caller (PR #10214 review, P3):
+
+    * ``_run_vet_pass`` returns ``{"stats": …, "batch": …, "decisions": …}``, so
+      the counts are NESTED under ``stats``.
+    * a classify pass returns its stats dict DIRECTLY — a bare counts dict with no
+      ``stats`` key at all (``extractor_v2``: ``s2_classify_stats = out["stats"]``,
+      then ``"s2": s2_classify_stats``). An earlier revision of this helper read
+      only the nested shape, so ``_gate_counts(<bare classify block>)`` answered
+      ``{}`` — a pass that DID work reported as idle, which is the misattribution
+      the three-state G5 split exists to prevent, one layer below where it was
+      fixed. It caused no wrong verdict only because ``_capture_step_witness``
+      forwards ``classify_later`` RAW; the docstring said otherwise, so the next
+      caller who trusted it would have got the silent zeros.
+
+    ``decisions``/``batch`` are never forwarded, in either shape: ``decisions`` is
+    not a stats block — ``vet_gate.vet_candidates`` builds one row PER CANDIDATE
+    carrying that candidate's own ``text`` (and, on a discard, a
+    ``counterfactual`` quoting it) — so forwarding a VET surface whole would put
+    extraction-proportional content on a receipt that is serialized on the hosted
+    lane and returned to every SDK caller, which is exactly what this seam's bound
+    forbids. ``batch`` rides the same candidate-level material.
+
+    ``stats`` is the pass's own counts and is non-empty exactly when the pass did
+    work, which is the whole question a witness asks it. The raw decisions stay on
+    the extractor's own return (``result["vet"]``), where the eval lane already
+    reads them.
+    """
+    if not isinstance(surface, dict):
+        return {}
+    stats = surface.get("stats")
+    if isinstance(stats, dict):
+        return stats
+    # The BARE shape: a classify pass's own stats dict, which is counts only. Strip
+    # the candidate-level keys anyway — a surface that carried either one is a VET
+    # surface whose ``stats`` is missing, and forwarding it would breach the bound.
+    return {key: value for key, value in surface.items()
+            if key not in _NON_COUNT_GATE_KEYS}
+
+
+#: Keys that are NOT counts on a gate surface: ``decisions``/``batch`` carry
+#: per-candidate material (candidate ``text``, counterfactuals), ``stats`` is the
+#: nesting marker of the VET shape.
+_NON_COUNT_GATE_KEYS = frozenset({"stats", "batch", "decisions"})
+
+
+def _capture_step_witness(out: dict, *, committed: int) -> dict:
+    """#9116: the facts that let a caller witness each extractor step in ONE pass.
+
+    ``extract_session_v2`` returns ``vet``/``classify_later``/``search``/
+    ``payload`` (its per-stage evidence surfaces), but ``_extract_session_v2``
+    forwarded only ``stats`` — so a caller that drives the real entry point
+    (``capture_session``) could see S0/S1/S2.1/S5 and none of S2.2/S2.3/S3/S6.
+    The capstone probe (``docs/evidence/7949-capstone/probes/capstone_run.py``)
+    hit exactly that: its G5 requires all eight, so it refused for every input
+    and reported the gap as an INSTRUMENT defect.
+
+    This is the seam: one bounded witness record, derived from the SAME ``out``
+    object the pipeline returned (never a wrapper — #7949/E4 forbids
+    monkeypatching the pipeline to watch it), placed under
+    ``meta["stats"]["step_witness"]``.
+
+    It carries FACTS, not a verdict: no step id is graded here. Each block
+    names the values that prove its stage ran (``vet.s2``/``vet.union`` — the
+    VET gate's own COUNTS; ``classify_later`` — the classify passes' own stats;
+    ``search.queries_run``/``degraded`` — S3's own report;
+    ``commit.payload_produced``/``committed`` — the Layer-1 payload's presence
+    plus the count of points the write loop RESOLVED, i.e. created or folded
+    onto an existing canonical, never a minted-only count). The caller decides
+    what it witnessed, which is what keeps the observation independent of the
+    thing observed.
+
+    Bounded by construction: counts, and the stages' own stats dicts taken
+    through :func:`_gate_counts` — never ``payload``, ``embed_list``, the
+    search rows, or a gate's per-candidate ``decisions`` (which carries the
+    candidates' own text).
+    """
+    stats = out.get("stats") or {}
+    llm = stats.get("llm") or {}
+    by_stage = llm.get("by_stage") or {}
+    vet = out.get("vet") or {}
+    classify = out.get("classify_later") or {}
+    search = out.get("search") or {}
+    payload = out.get("payload")
+    s4 = stats.get("s4_merge") or {}
+    return {
+        # S0 — the reader segmented the source (the values already on stats,
+        # mirrored so the witness is readable on its own).
+        "reader": {"edus": stats.get("edus"), "chunks": stats.get("chunks")},
+        # S1 — the first LLM call reached; ``story_arc`` is its product.
+        "story": {"by_stage_s1": bool(by_stage.get("s1")),
+                  "story_arc_chars": len(out.get("story_arc") or "")},
+        # S2.1 — the map's candidates, counted on the PRE-S4 list (``s2_embed``
+        # is S2's own output; ``embed_list`` is what S4 left of it).
+        "map": {"items": _step_embed_counts(
+            out.get("s2_embed") if out.get("s2_embed") is not None
+            else out.get("embed_list"))},
+        # S2.2 — the VET gate's own COUNTS (#5005), projected through
+        # ``_gate_counts``: the surface's ``decisions`` block mirrors the embed
+        # list's text per candidate and stays on the extractor's return.
+        # ``enabled`` False is a real answer: a flag-off pass ran no S2.2.
+        "vet": {"enabled": bool(vet.get("enabled")),
+                "s2": _gate_counts(vet.get("s2")),
+                "union": _gate_counts(vet.get("union"))},
+        # S2.3 — the classify passes' own evidence surface (#1695 Task 5).
+        "classify_later": {"enabled": bool(classify.get("enabled")),
+                           "s2": classify.get("s2") or {},
+                           "union": classify.get("union") or {}},
+        # S3 — the graph search's own report. ``queries_run`` is the budget it
+        # actually spent (0 on the extractor's two skip paths, where the
+        # backend is absent or embedded — a state the capstone's own G2 refuses
+        # before the pass runs) and ``degraded`` says an ATTEMPTED search failed
+        # rather than resolved.
+        "search": {"mode": search.get("mode"),
+                   "degraded": search.get("degraded"),
+                   "reason": search.get("reason"),
+                   "queries_run": search.get("queries_run"),
+                   "hits": {k: len(search.get(k) or [])
+                            for k in ("entities", "points", "events")}},
+        # S5 — the merge's item accounting (the same numbers E4 reads).
+        "merge": {"merged_items": s4.get("merged_items"),
+                  "s2_items": s4.get("s2_items"),
+                  "s4_items": s4.get("s4_items")},
+        # S6 — the Layer-1 payload was produced AND its points went through the
+        # commit loop. ``committed`` is what the write loop RESOLVED, never a
+        # minted-only count: ``extracted`` is appended on a dedup hit and on
+        # every surfaced consolidation fold as well as on a create, so a capture
+        # in which every point folded onto an existing canonical reports the
+        # folded count (the #2949 review F3 note on the fold path says why a
+        # consolidation fold IS a dedup hit).
+        "commit": {"payload_produced": payload is not None,
+                   "entities": len((payload or {}).get("entities") or []),
+                   "events": len((payload or {}).get("events") or []),
+                   "points": len((payload or {}).get("points") or []),
+                   "operators": len((payload or {}).get("operators") or []),
+                   "committed": committed},
+    }
+
+
+def _capture_stats_with_step_witness(out: dict, committed: int) -> dict:
+    """``out["stats"]`` + the #9116 step witness, as a NEW dict.
+
+    A copy on purpose: the extractor's own ``stats`` dict stays exactly what the
+    extractor said, so an eval/harness reader that holds ``out`` cannot see a
+    receipt-only key appear under it.
+    """
+    stats = dict(out.get("stats") or {})
+    stats[_STEP_WITNESS_KEY] = _capture_step_witness(out, committed=committed)
+    return stats
+
+
 def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
                               turns: int, meta: dict) -> None:
     """#2335 WI-1d: the structured observation leg — ONE JSON line per
@@ -14541,7 +14719,7 @@ class TortoiseSDK:
             # eval lane already surfaces it via ingest_v2; the product
             # lane dropped it here. error_census is a TOP-LEVEL out key
             # (sibling of stats) — folded separately when needed.
-            "stats": out.get("stats") or {},
+            "stats": _capture_stats_with_step_witness(out, len(extracted)),
             # #2335 WI-1a: error_census is a TOP-LEVEL extractor key
             # (sibling of stats) — folded alongside so the observation leg
             # and diagnostics can read it from the meta contract.
