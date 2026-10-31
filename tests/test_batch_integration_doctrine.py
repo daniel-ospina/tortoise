@@ -83,7 +83,7 @@ that OWNS the halt (``; git switch - || exit 1``, ``; git switch main || exit 1`
 line or behind a declarator, a pin whose source falls back
 (``… || git rev-parse origin/main``) or discards the body read
 (``… >/dev/null; git rev-parse origin/main``), a fetch to a stale ref (``|| true``,
-``--dry-run``, ``main:refs/remotes/…``), and a wrapped or negated landing carrier.
+``--dry-run``, ``main:refs/remotes/…``), a wrapped or negated landing carrier,
 an allowlisted no-op placed AFTER the subject so it owns the halt
 (``; true || exit 1``, ``; :``, ``; echo ok``, ``; cd .``, ``; printf ''``,
 ``; git fetch origin main``), the subject behind a PIPE or a JOB SEPARATOR
@@ -107,8 +107,11 @@ that have nothing to do with the doctrine. Name a lane:
 
     TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_integration_doctrine.py -q
 
-(CI is unaffected: the `core`/`tier1` surface runs in the `test` job, which exports
-`TORTOISE_DB_URI`.)
+(CI is unaffected: the `test` job runs `core`/`tier1` under the COMPUTED lane —
+`TORTOISE_DB_URI` only on the full/push arm, `TORTOISE_TEST_CARVE_OUT=1` with no URI
+on every PR run (`.github/workflows/python-ci.yml:1013-1034`, wired at `:1537-1542`) —
+so this module must stay lane-agnostic: no DB, no URI, no graph. A docs-only PR is
+`full=false`, i.e. this file's own load-bearing `tier1` run is URI-less.)
 """
 
 from __future__ import annotations
