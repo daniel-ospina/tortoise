@@ -17,7 +17,9 @@ the fix, and each half has a test that REDS without it:
          wired above an ASSERTED target — for IMPL *and* NAND (a NAND attack
          lowers the target's belief: the same override, other direction).
        * ``supersede_point`` refuses a DERIVED successor replacing an ASSERTED
-         predecessor, BEFORE any mutation.
+         predecessor, BEFORE any mutation — and (the 2a OPERATOR re-point,
+         #10195) refuses a supersede whose REBUILT operator factor would be
+         derived-over-asserted, judged with the same predicate.
        * ``TortoiseEP._affected_factors`` — the BACKSTOP for edges that predate
          the guard or were bulk-written — blocks only the leg that pushes the
          computed claim's belief INTO the authored one, KEEPS the reverse leg
@@ -259,6 +261,124 @@ def test_supersede_allows_a_derived_predecessor(lane):
     new = lane.create_point("statement", "v2", claim_class="derived")["id"]
     lane.supersede_point(old, new)
     assert _props(lane, old).get("status") == "superseded"
+
+
+# ── 3b. the 2a OPERATOR re-point door (#10195) ───────────────────────────────
+#
+# ``supersede_point``'s 2a arm re-points the predecessor's OPERATOR edges
+# ``(op)-[IMPL|NAND {idx}]->(old)`` onto the successor with a raw edge MERGE +
+# delete. Operator SLOT POSITION is what ``create_operator``'s guard reads
+# (``inputs[0]`` is the factor's SOURCE slot, the rest are targets), so
+# replacing an input can move a claim across the class boundary and mint the
+# ``derived --IMPL--> asserted`` factor that door refuses. The pre-flight
+# rebuilds each affected operator's slots with old substituted by new and
+# judges them with the SAME ``direction_blocks_create`` predicate.
+
+def _operator_rows(lane, claim_id):
+    """``(op_id, rel, idx)`` for every operator edge reaching ``claim_id``."""
+    return lane._get_proj().g.query(
+        "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->"
+        "(n:Point {id:$id}) RETURN op.id, type(r), r.idx",
+        params={"id": claim_id}).result_set
+
+
+def test_supersede_repoint_refuses_a_derived_source_over_the_successor(lane):
+    """The target-slot route: the successor's CLASS flips the factor.
+
+    Legal at creation time (both endpoints computed), then the successor is
+    AUTHORED — so re-pointing makes ``src(derived) --IMPL--> new(asserted)``,
+    the exact wiring ``create_operator`` refuses. Pre-fix the supersede
+    reported success and the graph held the refused factor.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "authored v2")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    # Refused BEFORE any mutation: neither point terminalised, the edge is
+    # still at the predecessor, and nothing was created at the successor.
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", 1]]
+    assert _operator_rows(lane, new) == []
+    # The door the re-point was imitating keeps refusing the same wiring.
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_operator("IMPL", src, [new], direction="->")
+
+
+def test_supersede_repoint_refuses_a_derived_claim_in_the_source_slot(lane):
+    """The source-slot route: the predecessor itself is at ``idx 0``.
+
+    The operator was legal while the predecessor was asserted; a producer then
+    re-stamped it DERIVED (no door accepts that — ``update_point`` refuses the
+    class outright, so this is the raw producer shape). Re-pointing moves the
+    computed claim into the factor's SOURCE slot above asserted targets.
+    """
+    old = lane.create_point("statement", "v1")["id"]
+    t1 = lane.create_point("statement", "authored target 1")["id"]
+    t2 = lane.create_point("statement", "authored target 2")["id"]
+    op = lane.create_operator("IMPL", old, [t1, t2], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
+        params={"id": old})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", 0]]
+    assert _operator_rows(lane, new) == []
+
+
+def test_supersede_repoint_judges_the_leg_that_flows(lane):
+    """A one-way corroboration survives the re-point; same-class does not care.
+
+    ``asserted --NAND(->)--> derived`` flows source→target ONLY, which is the
+    CORROBORATION leg, so it is legal and a derived successor may inherit it.
+    Judging the source slot's class alone (ignoring the direction) would refuse
+    this — the inversion the predicate exists to prevent.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("NAND", src, [old], direction="->")
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert _operator_rows(lane, new) == [[op["id"], "NAND", 1]]
+    assert _operator_rows(lane, old) == []
+
+
+def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
+    """No ``idx`` on the slot edges ⇒ neither side can name the SOURCE slot.
+
+    An idx-less (legacy) operator coalesces every input to position 0 and the
+    tie breaks lexicographically, so ``input_ids[0]`` is not provably the
+    source — the same gate the EP backstop applies (``op_idx_known``). The door
+    stands down WITH the load side rather than judging a slot it cannot name,
+    because a door refusing a shape the load side keeps is its own divergence.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL|NAND]->() REMOVE r.idx",
+        params={"op": op["id"]})
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert len(_operator_rows(lane, new)) == 1
+    assert _operator_rows(lane, old) == []
 
 
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
