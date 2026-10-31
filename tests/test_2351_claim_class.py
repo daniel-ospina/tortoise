@@ -362,9 +362,16 @@ def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
 
     An idx-less (legacy) operator coalesces every input to position 0 and the
     tie breaks lexicographically, so ``input_ids[0]`` is not provably the
-    source — the same gate the EP backstop applies (``op_idx_known``). The door
-    stands down WITH the load side rather than judging a slot it cannot name,
-    because a door refusing a shape the load side keeps is its own divergence.
+    source — the ONE condition for which the load side itself distrusts
+    position 0 (``ep.py`` clears ``op_idx_known[op_id]`` under ``if idx is
+    None``, and that flag gates its #2351 backstop). The door stands down WITH
+    the load side rather than judging a slot it cannot name, because a door
+    refusing a shape the load side keeps is its own divergence.
+
+    ⛔ This parity is NULL-``idx`` only. The TYPE leg pinned by the test below
+    is NOT a stand-down: the load side keeps judging a numeric-string ``idx``
+    (``op_idx_known`` is keyed on NULL alone), so the door judges it too —
+    standing down there was the fail-open #10195 review P2 found.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -382,22 +389,24 @@ def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
 
 
 @pytest.mark.parametrize("int_slot, str_idx", [(1, "1"), (0, "0")])
-def test_supersede_repoint_stands_down_on_a_non_int_slot_idx(
+def test_supersede_repoint_coerces_a_numeric_string_slot_idx(
         lane, int_slot, str_idx):
-    """A slot ``idx`` stored as a STRING is an UNPROVABLE layout, not a crash.
+    """A NUMERIC-STRING slot ``idx`` is a position, not a crash and not a skip.
 
-    The graph is schemaless, so any hand/foreign writer can leave
-    ``r.idx='1'`` beside an int ``idx`` on the same operator. The door sorts
-    the slot keys, and ``sorted({0: …, '1': …})`` raises ``TypeError`` — so
-    pre-fix this ENTIRELY LEGAL derived→derived supersede (nothing to do with
-    the class boundary) aborted with a traceback before any mutation, where
-    the base body simply moved the edge. Same doctrine as the ``idx is None``
-    case above: a layout that cannot prove which slot is the SOURCE is not
-    judged.
+    The graph is schemaless, so any hand/foreign writer can leave ``r.idx='1'``
+    beside an int ``idx`` on the same operator. Two failure modes sit on that
+    shape and this test pins that neither is taken:
 
-    Both mixed shapes are pinned — the string in the target slot (the
-    predecessor's own, which is the edge the re-point carries) and in the
-    source slot.
+    * sorting raw keys raises ``TypeError`` and aborts a supersede the class
+      guard is not even about (the pre-fix crash);
+    * SKIPPING the factor would be worse — EP's load side keeps it
+      (``op_idx_known`` is cleared for a NULL ``idx`` only, and ``ep.py`` orders
+      ``coalesce(r.idx, 0)``), so a skip is a fail-open exemption for the door.
+
+    So the string is COERCED and the layout judged. Here both endpoints are
+    computed, so the guard has nothing to say and the supersede must go through
+    and carry the predecessor's slot — idx VALUE and type preserved, as 2a
+    reads ``idx`` opaquely.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -421,6 +430,73 @@ def test_supersede_repoint_stands_down_on_a_non_int_slot_idx(
     assert lane.supersede_point(old, new)["edges_transferred"] == 1
     assert _operator_rows(lane, new) == [[op["id"], "IMPL", moved_idx]]
     assert _operator_rows(lane, old) == []
+
+
+@pytest.mark.parametrize("raw_idx", ["1", "slot-one"])
+def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
+    """#10195 crossed with a raw-written ``idx`` — the door must still refuse.
+
+    This is the fail-open the pre-fix stand-down opened (review P2): the door
+    skipped any operator whose slot ``idx`` was not an ``int``, justified by
+    "EP's backstop stands down on exactly that evidence" — which is FALSE.
+    ``ep.py`` clears ``op_idx_known`` under ``if idx is None`` ONLY, so it still
+    builds and JUDGES a factor whose slot carries ``r.idx='1'``. The door was
+    therefore MORE permissive than the loader, and one string property defeated
+    the whole guard: the supersede minted ``derived --IMPL--> asserted`` with no
+    verdict, no warning and no record.
+
+    Both unprovable-looking shapes are pinned: a NUMBER naming a position (which
+    is coerced and judged exactly) and a value that cannot be ordered at all
+    (which is judged over EVERY candidate source and refused if any blocks —
+    fail-closed, never a silent exemption).
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = 1 "
+        "SET r.idx = $to",
+        params={"op": op["id"], "to": raw_idx})
+    # The successor is AUTHORED — issue #10195's reproduction, plus the layout.
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    # Refused BEFORE any mutation, and the refused wiring is not in the graph.
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", raw_idx]]
+    assert _operator_rows(lane, new) == []
+
+
+def test_supersede_repoint_leaves_an_alreadyDecided_operator_alone(lane):
+    """The #1080 carve-out the pre-flight depends on, pinned.
+
+    An operator labelled ``alreadyDecided`` is NOT re-pointed by 2a (a dedup
+    context edge declares the PRIOR a duplicate, so it stays on the dead prior),
+    which is why the pre-flight filters it out of the judged set. Drop that
+    filter and this supersede — whose operator the body deliberately leaves
+    behind — is refused for a wiring that is never written.
+
+    The operator here is exactly the shape the guard refuses when it DOES move
+    (``derived --IMPL-->`` a successor that is asserted), so only the carve-out
+    stands between this call and a false refusal.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->",
+                              label="alreadyDecided")
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    # No raise: the operator is not re-pointed, so no rebuilt layout exists.
+    assert lane.supersede_point(old, new)["edges_transferred"] == 0
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", 1]]
+    assert _operator_rows(lane, new) == []
 
 
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────

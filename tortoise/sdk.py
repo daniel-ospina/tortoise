@@ -17696,44 +17696,79 @@ class TortoiseSDK:
                 "AND coalesce(op.is_operator, false) = true "
                 "WITH op "
                 "MATCH (op)-[sr:IMPL|NAND]->(inp) "
-                "RETURN op.id, op.op_type, op.direction, sr.idx, inp.id",
+                "RETURN op.id, op.op_type, op.direction, sr.idx, inp.id "
+                # Deterministic row order, so a DUPLICATED operator id (raw-write
+                # only — ids are ULIDs) cannot make the verdict, or the refusal
+                # message, depend on server row order (#10195 review P3).
+                # ⛔ ``sr.idx`` is deliberately NOT in this ORDER BY: it is the
+                # one property that may hold MIXED types, and cross-type ordering
+                # is engine-defined — the door orders slots in Python instead.
+                "ORDER BY op.id, inp.id",
                 params={"op_ids": sorted(_repoint_ops)},
             ).result_set
             _slot_map: dict[str, list] = {}
-            _op_meta: dict[str, tuple] = {}
+            _op_meta: dict[str, list] = {}
             for _srow in _slot_rows:
                 _sid, _sop_type = _srow[0], _srow[1]
                 _sdir, _sidx, _sinp = _srow[2], _srow[3], _srow[4]
-                _op_meta.setdefault(_sid, (_sop_type, _sdir))
+                _op_meta.setdefault(_sid, []).append((_sop_type, _sdir))
                 _slot_map.setdefault(_sid, []).append((_sidx, _sinp))
             for _oid in sorted(_repoint_ops):
                 _srows = _slot_map.get(_oid) or []
-                # An UNPROVABLE layout is not judged. A slot edge carrying no
-                # ``idx`` (legacy/migrated operator), one ``idx`` that is not an
-                # ``int`` (a schemaless graph accepts ``r.idx='1'`` from any
-                # hand/foreign writer, and the keys are sorted below), or one
-                # ``idx`` carried by two different inputs, means position 0 is
-                # not provably the SOURCE — and EP's backstop stands down on
-                # exactly that evidence (``op_idx_known``, #943-review). A door
-                # refusing a shape the load side keeps is the divergence this
-                # module warns against, so the same evidence silences both. The
-                # type leg is part of the SAME stand-down, not a separate rule:
-                # ``sorted({0: …, '1': …})`` raises ``TypeError`` and would turn
-                # "cannot prove it" into a traceback that aborts a supersede
-                # this guard is not even about.
-                if not _srows or any(
-                        not isinstance(_sidx, int) for _sidx, _ in _srows):
+                # ⛔ THE ONE STAND-DOWN the load side shares: a slot edge with NO
+                # ``idx`` at all. ``ep.py`` clears ``op_idx_known[op_id]`` for
+                # exactly that evidence (``if idx is None``) and that flag is what
+                # gates its #2351 backstop; every row then coalesces to position 0
+                # and the tie breaks lexicographically, so ``input_ids[0]`` is not
+                # provably the SOURCE (#943-review).
+                # ⛔ NOTHING ELSE stands down. A non-``int`` ``idx`` and one
+                # ``idx`` carried by two inputs do NOT clear ``op_idx_known`` —
+                # the load side builds the factor and judges it (`ep.py` orders
+                # ``coalesce(r.idx, 0)`` and keys the flag on NULL only), so a
+                # door that skipped those shapes would be the SAME divergence in
+                # the FAIL-OPEN direction: a supersede minting
+                # derived-over-asserted with no verdict, defeated by one string
+                # property (#10195 review P2 — this arm's earlier "the same
+                # evidence silences both" claim was false for two of its legs).
+                if not _srows or any(_sidx is None for _sidx, _ in _srows):
                     continue
-                _rebuilt: dict[int, set] = {}
+                # The rebuilt layout: ``old`` becomes ``new`` AT ITS SLOT, so what
+                # is judged below is the wiring the graph holds AFTER the write.
+                _slots: list[tuple[int | None, str]] = []
                 for _sidx, _sinp in _srows:
-                    _rebuilt.setdefault(_sidx, set()).add(
-                        new_id if _sinp == old_id else _sinp)
-                if any(len(_ids) > 1 for _ids in _rebuilt.values()):
-                    continue
-                _slot_ids = [next(iter(_rebuilt[_i])) for _i in sorted(_rebuilt)]
-                _slot_source, _slot_targets = _slot_ids[0], _slot_ids[1:]
-                if not _slot_targets:
-                    continue  # a unary factor overrides nobody
+                    _slot_no: int | None
+                    if isinstance(_sidx, int):
+                        # NB: ``bool`` is an ``int`` here and coerces harmlessly
+                        # (``True``→1), which is also how the engine compares it.
+                        _slot_no = int(_sidx)
+                    elif (isinstance(_sidx, str)
+                            and _sidx.strip().lstrip("+-").isdigit()):
+                        # A NUMERIC STRING names a position (``r.idx='1'``, the
+                        # shape a hand/foreign writer leaves in a schemaless
+                        # graph): coerce it and JUDGE — ``ep.py`` orders the same
+                        # row and reads the factor all the same.
+                        _slot_no = int(_sidx)
+                    else:
+                        _slot_no = None  # cannot be ordered at all
+                    _slots.append((_slot_no, new_id if _sinp == old_id else _sinp))
+                if any(_slot_no is None for _slot_no, _ in _slots):
+                    # UNORDERABLE, not unjudgeable: no position is provably the
+                    # SOURCE, so EVERY input is a candidate source and the wiring
+                    # is refused if ANY candidate would override. Fail CLOSED,
+                    # because the load side keeps judging this factor — the
+                    # fallback belongs to the load side's strictness, never to a
+                    # silent exemption.
+                    _candidate_sources = [i for _, i in _slots]
+                else:
+                    # The load side's own rule (``ORDER BY coalesce(r.idx, 0),
+                    # c.id``): the source is the input at the LOWEST slot idx. A
+                    # slot idx carried by TWO inputs leaves the tie to the claim
+                    # id there, so BOTH are candidates and either blocking
+                    # assignment refuses.
+                    _low = min(_slot_no for _slot_no, _ in _slots)
+                    _candidate_sources = [
+                        i for _slot_no, i in _slots if _slot_no == _low]
+                _slot_ids = [i for _, i in _slots]
                 # The slots are judged AS WRITTEN — every input, in idx order —
                 # which is how ``create_operator`` reads a caller's request. EP's
                 # load side additionally strips draft/terminal inputs and takes
@@ -17746,24 +17781,41 @@ class TortoiseSDK:
                 # #7902), and its absence must not read as the ASSERTED
                 # default. Same parity as the ingest partial-absorb door.
                 _slot_classes = _claim_class.classes_for_ids(proj.g, _slot_ids)
-                _slot_target_classes = set().union(
-                    *(_slot_classes.get(_t, set()) for _t in _slot_targets))
-                _node_op_type, _node_dir = _op_meta.get(_oid, (None, None))
-                # A node with no ``op_type`` is pre-v3.6 legacy; the rel type
-                # that carried it into this set IS its mechanism then.
-                _op_type = _node_op_type or _repoint_ops[_oid]
-                if (_op_type in ("IMPL", "NAND")
-                        and _slot_source in _slot_classes
-                        and _slot_target_classes
-                        and _claim_class.direction_blocks_create(
-                            self._canonical_direction(_op_type, _node_dir),
-                            _slot_classes.get(_slot_source),
-                            _slot_target_classes)):
-                    raise ValueError(_claim_class.repoint_refusal(
-                        operator_id=_oid, op_type=_op_type,
-                        old_id=old_id, new_id=new_id,
-                        source_id=_slot_source,
-                        target_ids=_slot_targets))
+                _meta_rows = _op_meta.get(_oid) or []
+                # Conservative on BOTH axes when a duplicated operator id leaves
+                # the stored record ambiguous: judge EVERY stored ``op_type``, and
+                # take the most permissive direction (``None`` ⇒ the per-type
+                # default ⇒ both legs judged) if the rows disagree. A node with no
+                # ``op_type`` is pre-v3.6 legacy; the rel type that carried it into
+                # this set IS its mechanism then.
+                _dirs = {_d for _, _d in _meta_rows}
+                _node_dir = next(iter(_dirs)) if len(_dirs) == 1 else None
+                _op_types = sorted({t for t, _ in _meta_rows if t}) or [
+                    _repoint_ops[_oid]]
+                for _slot_source in _candidate_sources:
+                    _slot_targets = list(_slot_ids)
+                    _slot_targets.remove(_slot_source)
+                    if not _slot_targets:
+                        continue  # a unary factor overrides nobody
+                    _slot_target_classes = set().union(
+                        *(_slot_classes.get(_t, set()) for _t in _slot_targets))
+                    for _op_type in _op_types:
+                        if (_op_type not in ("IMPL", "NAND")
+                                or _slot_source not in _slot_classes
+                                or not _slot_target_classes):
+                            continue
+                        _effective_dir = self._canonical_direction(
+                            _op_type, _node_dir)
+                        if _claim_class.direction_blocks_create(
+                                _effective_dir,
+                                _slot_classes.get(_slot_source),
+                                _slot_target_classes):
+                            raise ValueError(_claim_class.repoint_refusal(
+                                operator_id=_oid, op_type=_op_type,
+                                direction=_effective_dir,
+                                old_id=old_id, new_id=new_id,
+                                source_id=_slot_source,
+                                target_ids=_slot_targets))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
