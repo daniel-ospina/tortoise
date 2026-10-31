@@ -202,6 +202,18 @@ _PINNED_MAIN_ASSERTION = re.compile(
 #: matching ``_MOVES_HEAD``.
 #: ``cd`` is limited to the no-op forms: ``cd /other-worktree`` would relocate the
 #: fence, and worktrees share an object DB, so the pin then succeeds in another repo.
+#: The count halt's own subject: the run reported AT LEAST the baseline's tests.
+_COUNT_SUBJECT = re.compile(
+    r'\[\s+"\$BATCH_TOTAL"\s+-ge\s+"\$BASELINE_TOTAL"\s*\]'
+)
+#: The merge-ness assert's own subject — the ASSERTION only; `_MERGE_ASSERT` is the
+#: whole line and ends in `||`, so it cannot be the pre-halt segment.
+_MERGE_SUBJECT = re.compile(
+    r'\[\s+-n\s+"\$\(\s*git\s+rev-list\s+--no-walk\s+--merges\s+"\$BAD"\s*\)"\s*\]'
+)
+#: The landing pin guard's own subject: `$PINNED` is non-empty.
+_LANDING_PIN_GUARD = re.compile(r'\[\s+-n\s+"\$PINNED"\s*\]')
+
 _SAFE_SEGMENT = re.compile(
     r"^(?:git\s+fetch\b|cd\s+(?:\.|-)(?=\s|$)|echo\b|printf\b|true\b|:)\s*"
 )
@@ -415,7 +427,7 @@ def _reachable_code(code: str) -> str:
     return _unquoted(code)
 
 
-def _halts(code: str) -> bool:
+def _halts(code: str, subject: object | None = None) -> bool:
     """Does this command stop the fence on failure?
 
     A pin create is only SAFE because of its trailing halt: on a dirty lane
@@ -424,6 +436,10 @@ def _halts(code: str) -> bool:
     own comment says ``-C`` prevents. `|| true` is the negation of that, so it
     is refused even though it "contains" a halt-looking token.
     """
+    # `raw` keeps the quoted SUBJECTS (`"$BATCH_TOTAL"`, `"$PINNED"`) that the call
+    # site's subject predicate must still see; `code` is the blanked form used for every
+    # structural test. Both are the same length, so the halt's index carries across.
+    raw = code
     code = _unquoted(code)
     if "|| true" in code:
         return False
@@ -449,10 +465,28 @@ def _halts(code: str) -> bool:
     # landed-tree — the `[ -n "$PINNED" ]` guard, the count halt and the merge-ness
     # assert. This subsumes the `|| true` special case above rather than sitting
     # beside it; `echo`/`printf`/`cd .`/`git fetch` are the same family.
-    head_text = _reachable_code(code)[: match.start(0)].rstrip()
+    # A no-op between the SUBJECT and the halt leaves the halt dead (`|| : ||`,
+    # `|| /bin/true ||`). Enumerating no-ops cannot hold — `/bin/true`, `ls`,
+    # `git status --porcelain`, `[ 1 ]`, `wait` … are all the same defect one spelling
+    # over, and each was measured to survive. So when the caller knows its own SUBJECT
+    # shape (as `_ends_at_halt` already does), the segment before the halt must MATCH it;
+    # the `_SAFE_SEGMENT` refusal then only has to be right about a segment that is
+    # subject-shaped, and any segment that is not the subject at all is refused outright.
+    # Slice the RAW text: `_unquoted` blanks the quoted subjects (`"$BATCH_TOTAL"`,
+    # `"$PINNED"`) that the site predicates must still see. `_unquoted` preserves
+    # length, so the halt's index in the blanked text is the same index here.
+    head_text = raw[: match.start(0)].rstrip()
     segments = [seg.strip() for seg in re.split(r"(;|&&|\|\||\||&)", head_text)[0::2]]
     segments = [seg for seg in segments if seg]
-    return not (segments and _SAFE_SEGMENT.match(segments[-1]))
+    if not segments:
+        return True
+    if subject is not None:
+        # `_pin_subject` is a PREDICATE; `_MERGE_ASSERT` and friends are compiled
+        # patterns. Accept both rather than duplicating the sites' subject shapes.
+        if callable(subject) and not hasattr(subject, "fullmatch"):
+            return bool(subject(segments[-1]))
+        return bool(subject.fullmatch(segments[-1]))
+    return not _SAFE_SEGMENT.match(segments[-1])
 
 
 def _block(fence: list[str], i: int) -> str:
@@ -1165,7 +1199,7 @@ def test_the_blame_sha_is_bound_to_a_batch_merge() -> None:
             "on a non-merge exits 0 and reverts one COMMIT of the PR"
         )
         for cmd in asserts:
-            assert _halts(cmd), (
+            assert _halts(cmd, subject=_MERGE_SUBJECT), (
                 "the merge-ness assertion must HALT the fence: a failed non-merge check that only "
                 f"prints still lets the silent single-commit revert run: {cmd}"
             )
@@ -1260,7 +1294,7 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
         assert '-ge "$BASELINE_TOTAL"' in cmd, (
             f"the count must be compared to the BASELINE total, not merely mentioned: {cmd}"
         )
-        assert _halts(cmd), (
+        assert _halts(cmd, subject=_COUNT_SUBJECT), (
             f"a short count must HALT the fence, or the verdict proceeds on a killed run: {cmd}"
         )
     verdict_rows = [line for line in _text().splitlines() if line.startswith("| `UNPROVEN-FULL-SUITE")]
@@ -1372,7 +1406,7 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
         "as `(A || exit 1) && …`, so the halt never fires and the fence leaves the "
         f"pinned tree before the suite: {moves}"
     )
-    assert all(_halts(_code(c)) for c in moves), (
+    assert all(_halts(_code(c), subject=_pin_subject) for c in moves), (
         "a pin create must HALT on failure (`|| exit 1`): unhalted, a refused "
         f"switch leaves the fence running on the operator's branch: {moves}"
     )
@@ -1449,7 +1483,7 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     assert all(
         '"$PINNED"' in _code(c)
         and _re_runnable(_code(c))
-        and _halts(_code(c))
+        and _halts(_code(c), subject=_pin_subject)
         and _ends_at_halt(_code(c))
         for c in before_merge
     ), (
@@ -1582,7 +1616,11 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     assert carriers, (
         "the landing fence carries no executable base assertion — re-point this guard"
     )
-    unhalted = [landing[0][i] for i in carriers if not _halts(_block(landing[0], i))]
+    unhalted = [
+        landing[0][i]
+        for i in carriers
+        if not _halts(_block(landing[0], i), subject=_PINNED_MAIN_ASSERTION)
+    ]
     assert not unhalted, (
         "every landing guard must halt on failure (`|| { …; exit 1; }` — `|| true` "
         f"is not a halt): these return 1 and are discarded: {unhalted}"
@@ -1597,7 +1635,7 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
         if re.match(r'\[\s*-n\s+"\$PINNED"\s*\]', _code(c))
     ]
     assert pin_guards and all(
-        _halts(_block(landing[0], i)) for i in pin_guards
+        _halts(_block(landing[0], i), subject=_LANDING_PIN_GUARD) for i in pin_guards
     ), (
         "a guard that is not backed by a halt is an annotation: an empty $PINNED "
         "must stop the fence here, not merely fail a later comparison"
