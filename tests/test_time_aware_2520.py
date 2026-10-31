@@ -348,6 +348,59 @@ def test_live_entry_is_not_stale():
     assert not is_stale_entry({"status": "draft", "superseded_by": None})
 
 
+def test_the_annotated_pool_never_invents_an_end_for_an_undated_hit():
+    """The eval lane's producer must not spell ABSENCE as a stored ``""`` (#9202).
+
+    FAIL VALUE: ``_annotate_hits`` forwarding an absent window as ``""``. Under
+    the #9202 owner ruling (``ONTOLOGY.md`` §4.7, option B) a *stored* value that
+    names no instant is an un-datable END — ``END_UNKNOWN``, stale — while an
+    ABSENT bound is ``END_OPEN``. A producer that converts absence into ``""``
+    therefore turns EVERY undated hit stale on this surface, and
+    ``prefer_latest_order`` sees an all-stale pool → ``all-stale-never-starve``
+    → the input order, ``applied: False``: the C6 arm silently degrades to a
+    no-op and the stats reason makes it look legitimate.
+
+    Reachable: the search payload the eval lane annotates OMITS a window key
+    when the point carries no bound (``SearchResult.to_dict`` /
+    ``sdk``'s embedded fallback), which is exactly what this fixture models —
+    a hit with no window keys at all, the shape a live undated claim arrives in.
+
+    Non-vacuity: the three shapes below differ ONLY in presence, so a producer
+    that collapses them onto one spelling cannot satisfy all three.
+    """
+    from tools.longmem_eval.retrieve import _annotate_hits
+
+    # (a) no window keys at all — the payload's ABSENT-end shape.
+    undated = _annotate_hits([{"id": "live", "content": "i live in lisbon"}],
+                             {}, [])[0]
+    # The key set is unchanged (a fixed 21-key surface), so absence must ride as
+    # ``None`` rather than being dropped or blanked.
+    assert "valid_to" in undated and undated["valid_to"] is None, (
+        f"an absent end must forward as None, got {undated['valid_to']!r}")
+    assert "expired_at" in undated and undated["expired_at"] is None
+    assert "end_state" in undated and undated["end_state"] is None
+    assert not is_stale_entry(undated, question_date="2050-01-01"), (
+        "an undated live entry must stay CURRENT at every question_date")
+
+    # (b) a STORED un-datable end — present, so the ruling makes it ENDED.
+    stored_junk = _annotate_hits(
+        [{"id": "junk", "content": "x", "valid_to": "TBD"}], {}, [])[0]
+    assert stored_junk["valid_to"] == "TBD", (
+        "a present end must be forwarded verbatim, never normalised away")
+    assert is_stale_entry(stored_junk, question_date="1990-01-01")
+
+    # (c) the canonical SHAPED form — no value + the declared marker. The
+    #     payload resolves it through the state map, so ``end_state`` arrives
+    #     and must be honoured rather than recomputed from a None bound.
+    shaped = _annotate_hits(
+        [{"id": "shaped", "content": "x",
+          "valid_to_precision": "unknown", "end_state": "unknown"}],
+        {}, [])[0]
+    assert shaped["end_state"] == "unknown"
+    assert is_stale_entry(shaped, question_date="2050-01-01"), (
+        "the declared un-datable marker is ENDED, not an open window")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # prefer_latest_order
 # ══════════════════════════════════════════════════════════════════════════
