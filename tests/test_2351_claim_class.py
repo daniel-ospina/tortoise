@@ -381,6 +381,48 @@ def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
     assert _operator_rows(lane, old) == []
 
 
+@pytest.mark.parametrize("int_slot, str_idx", [(1, "1"), (0, "0")])
+def test_supersede_repoint_stands_down_on_a_non_int_slot_idx(
+        lane, int_slot, str_idx):
+    """A slot ``idx`` stored as a STRING is an UNPROVABLE layout, not a crash.
+
+    The graph is schemaless, so any hand/foreign writer can leave
+    ``r.idx='1'`` beside an int ``idx`` on the same operator. The door sorts
+    the slot keys, and ``sorted({0: …, '1': …})`` raises ``TypeError`` — so
+    pre-fix this ENTIRELY LEGAL derived→derived supersede (nothing to do with
+    the class boundary) aborted with a traceback before any mutation, where
+    the base body simply moved the edge. Same doctrine as the ``idx is None``
+    case above: a layout that cannot prove which slot is the SOURCE is not
+    judged.
+
+    Both mixed shapes are pinned — the string in the target slot (the
+    predecessor's own, which is the edge the re-point carries) and in the
+    source slot.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # Re-stamp ONE slot's idx as a string — no door writes this shape, which is
+    # exactly why it is the raw one a foreign writer leaves behind.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = $from "
+        "SET r.idx = $to",
+        params={"op": op["id"], "from": int_slot, "to": str_idx})
+
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    # Same class on both sides: the guard has nothing to say, so the supersede
+    # must go through and carry the predecessor's slot — idx VALUE and type
+    # preserved, as 2a reads ``idx`` opaquely.
+    moved_idx = str_idx if int_slot == 1 else 1
+    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert _operator_rows(lane, new) == [[op["id"], "IMPL", moved_idx]]
+    assert _operator_rows(lane, old) == []
+
+
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
 
 def _raw_direct_edge(lane, src, tgt, *, direction):

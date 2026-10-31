@@ -17358,13 +17358,20 @@ class TortoiseSDK:
             for _oid in sorted(_repoint_ops):
                 _srows = _slot_map.get(_oid) or []
                 # An UNPROVABLE layout is not judged. A slot edge carrying no
-                # ``idx`` (legacy/migrated operator), or one ``idx`` carried by
-                # two different inputs, means position 0 is not provably the
-                # SOURCE — and EP's backstop stands down on exactly that
-                # evidence (``op_idx_known``, #943-review). A door refusing a
-                # shape the load side keeps is the divergence this module warns
-                # against, so the same evidence silences both.
-                if not _srows or any(_sidx is None for _sidx, _ in _srows):
+                # ``idx`` (legacy/migrated operator), one ``idx`` that is not an
+                # ``int`` (a schemaless graph accepts ``r.idx='1'`` from any
+                # hand/foreign writer, and the keys are sorted below), or one
+                # ``idx`` carried by two different inputs, means position 0 is
+                # not provably the SOURCE — and EP's backstop stands down on
+                # exactly that evidence (``op_idx_known``, #943-review). A door
+                # refusing a shape the load side keeps is the divergence this
+                # module warns against, so the same evidence silences both. The
+                # type leg is part of the SAME stand-down, not a separate rule:
+                # ``sorted({0: …, '1': …})`` raises ``TypeError`` and would turn
+                # "cannot prove it" into a traceback that aborts a supersede
+                # this guard is not even about.
+                if not _srows or any(
+                        not isinstance(_sidx, int) for _sidx, _ in _srows):
                     continue
                 _rebuilt: dict[int, set] = {}
                 for _sidx, _sinp in _srows:
