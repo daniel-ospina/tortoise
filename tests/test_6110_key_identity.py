@@ -1326,3 +1326,60 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
         assert sdk._validate_bundle(
             {"points": [{"ref": "p1", "kind": "statement",
                          "content": content}]}) == []
+
+    def test_the_narrow_kind_skip_does_not_blind_the_read(self, sdk):
+        """NEGATIVE CONTROL for the skip above — and the end-to-end ingest leg.
+
+        Two things that test cannot show, and that a lazier fix would fail:
+
+        1. the skip must neither turn an array-kind row into a HIT (a fix that
+           COERCED it — ``str(kind)``, or a fallback to the item's own kind when
+           the stored one is unhashable — would resolve the wrong node and
+           over-block a legal bundle) nor suppress the STRING-kind TERMINAL twin
+           of the same content. That twin must remain the hit and the bundle
+           must still be refused: "skip non-str kinds" must not quietly disable
+           the content leg, which is the fail-open the guard exists to close.
+           Pre-fix this errors (the array-kind row is keyed before the twin is
+           ever reached).
+        2. the defect surfaced through the PUBLIC door, not only in the read:
+           the review's repro was ``sdk.ingest(...)`` raising a bare
+           ``TypeError``. So the legal bundle is committed here, and the
+           collided one raises the STRUCTURED verdict.
+        """
+        hash_ = _content_hash("ARRAY-AND-STRING-9819")
+        # The array-kind row this guard must skip …
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'arraykind-NEG-9819', "
+            "content:'ARRAY-AND-STRING-9819', content_hash:$ch, "
+            "pointKind:['x'], status:'retracted'})", params={"ch": hash_})
+        # … and a STRING-kind, TERMINAL twin of the SAME content, which is a
+        # real hit (`create_point` cannot fold onto the array-kind node — its
+        # dedup query scopes by the string kind — so this is a second node).
+        live_id = sdk.create_point("statement", "ARRAY-AND-STRING-9819")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted'",
+            params={"id": live_id})
+
+        cands = sdk._terminal_content_candidates(
+            [("ARRAY-AND-STRING-9819", "statement")])
+        hit, mints = _content_candidate_resolution(
+            cands, "ARRAY-AND-STRING-9819", "statement")
+        assert hit == live_id, (
+            "the STRING-kind terminal twin must still be the hit — the skip "
+            f"must not blind the read (got {hit!r})")
+        assert mints is False
+        with pytest.raises(BundleValidationError) as ei:
+            sdk.ingest({"points": [{"content": "ARRAY-AND-STRING-9819"}]})
+        assert "content matches terminal point" in str(ei.value)
+
+        # A bundle whose content's ONLY holder is the array-kind row is legal
+        # and must COMMIT through the public door — the exact shape the review
+        # measured raising a bare TypeError out of `ingest`.
+        only = "ARRAY-ONLY-INGEST-9819"
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'arraykind-ONLY-9819', content:$c, "
+            "content_hash:$ch, pointKind:['x'], status:'retracted'})",
+            params={"c": only, "ch": _content_hash(only)})
+        assert sdk._validate_bundle({"points": [{"content": only}]}) == []
+        out = sdk.ingest({"points": [{"content": only}]})
+        assert out, "the ingest must commit, not raise"
