@@ -98,7 +98,24 @@ or facts that were false against the tree they describe:
   executing; the mirrored case convicted an innocent PR with the peer's ids. Every artifact now
   lives under ONE per-batch directory (``B=/tmp/batch-$BATCH``), derived from a REQUIRED ``BATCH``
   and re-derived — with an absent-directory halt — by every fence that writes into it;
-* the carve-out file count was quoted from memory and was stale.
+* the carve-out file count was quoted from memory and was stale;
+* **the lane was the ONE shell-local value with no carrier, no re-derivation and no halt.** Phase 0
+  ``export``s it, and Phases 1 and 3 are usually LATER shells — the doctrine already re-derives ``$B``
+  and carries the run's status and ``$PINNED`` in files for exactly that reason. The lane had none of
+  those treatments, and its absence does not fail visibly: ``conftest.py``'s ``_p4_uri_required`` is
+  ``scope="session", autouse=True``, so pytest re-raises it **per item** — every collected test
+  ERRORs at setup and the process exits **1**, which is one of the two codes each fence's own
+  COMPLETED predicate accepts (measured: ``rc=1`` with one ``<testcase>`` per item in the report).
+  Both id sets then become all-error and identical, the Phase 4 diff is empty, and the doctrine prints
+  ``BATCH-GREEN`` for a tree on which zero tests executed. Both suite fences now ASSERT the lane —
+  present, or an explicit carve-out opt-in — and HALT on it, before they clear or write any artifact;
+* **the "jobs that declare ``needs: changes``" count was a hand-written ordinal.** The sentence said
+  nine where ``.github/workflows/python-ci.yml`` declared eight — and one of the eight
+  (``packs-compile``) is the non-test member the same bullet names eight lines above, so the **test**
+  legs that skip numbered seven. It sat four lines above the paragraph that forbids exactly this ("Do
+  not trust a count of these members written here"), and the leg check pins member NAMES, not the
+  ordinal, so nothing could red. The sentence now points at the measurement
+  (``grep -c '^    needs: changes$' .github/workflows/python-ci.yml``) and states no number.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
@@ -112,17 +129,21 @@ must sit in the *fence* they belong to, not merely somewhere in the prose, and
 the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-test
 ``packs-compile`` / ``manifest-integrity`` / ``workflow-lint`` / ``surface-guard`` /
 ``ci-introduced-failure``) whose omission
-would make the reproduced/not-reproduced list read as a complete partition.
+would make the reproduced/not-reproduced list read as a complete partition, plus the lane
+ASSERTION (``TORTOISE_DB_URI`` or an explicit carve-out, HALTING) in every fence that runs the suite
+— a SELECTION in Phase 0's fence is a different shell's environment, so it cannot substitute for one.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **23 checks** at this head, **0 red**: **1 of 23** at
-``a6a71c1e5`` (the per-batch ledger, added here — the head this round was reviewed at), **2 of 23**
-at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **4 of 23** at
+revision rather than asserted — **25 checks** at this head, **0 red**: **2 of 25** at
+``62c79b0b8`` (the lane assertion and the hand-written ordinal — the two findings of the round this
+head answers), **3 of 25** at
+``a6a71c1e5`` (the per-batch ledger, added there), **4 of 25**
+at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **6 of 25** at
 ``a12792afe`` (those plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
-the baseline report's completion check), **19 of 23** at
-``a17576c43``, **16 of 23** at ``f3c6c803b``, **14 of 23** at ``a8be548762``, **12 of 23** at
-``295d6d385``, **10 of 23** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **9 of 23** at
-``ed1c03b82`` and ``c50628450``, and **8 of 23** at ``a888c6980`` / ``aede4190f`` — where three
+the baseline report's completion check), **21 of 25** at
+``a17576c43``, **18 of 25** at ``f3c6c803b``, **16 of 25** at ``a8be548762``, **14 of 25** at
+``295d6d385``, **12 of 25** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **11 of 25** at
+``ed1c03b82`` and ``c50628450``, and **10 of 25** at ``a888c6980`` / ``aede4190f`` — where three
 are exactly that round's findings (the bisect attribution, the gate run's completion, and
 the omitted ``changes`` member) and the fourth is the exit-status-persistence requirement,
 which landed AFTER those revisions. The fourth is the rule rather than an exception: a check
@@ -131,7 +152,9 @@ findings plus the checks that did not exist yet". Every count above is measured 
 not carried forward — a carried-forward count drifts silently as checks land (six of them
 were stale here, by exactly the check the status wrapper added), which is the same defect
 class as a hard-coded bare-run ERROR count, and it is why the numbers are re-measured when a
-check is added rather than inherited. Four checks the revision matrix alone cannot red are
+check is added rather than inherited. Every revision in the list re-read at this head gained
+exactly the TWO checks this round added — the lane assertion and the ordinal — because neither
+defect was fixed before ``62c79b0b8``; that is the same rule, applied to the newest pair. Four checks the revision matrix alone cannot red are
 named rather than left implied: the parser-sanity check and the contract sentences (green by
 design — they guard against a re-pointed or deleted document, not against a bad command),
 the header-count check (green on every revision by construction: it reads THIS module's
@@ -197,6 +220,12 @@ widen its predicate to accept ``137``, and make it ``|| true``.
 (``${BATCH:-1}``) instead of requiring it, hand-type the directory (``B="/tmp/batch-1"``) instead of
 deriving it, drop the absent-directory halt, re-point ONE ``--junitxml`` back to a bare
 ``/tmp/batch-junit.xml`` (the peer-batch collision), and clear the ledger in a LATER shell.
+**4 more measured with the lane assertion and the ordinal, 4 killed**, each red on ONE check and on
+nothing else: replace a suite fence's lane halt with ``|| true``, delete the lane assertion from the
+LAST suite fence, move that assertion AFTER the suite line (all three red
+``test_the_lane_is_asserted_in_every_fence_that_runs_the_suite`` — the halting, the every-fence and
+the before-the-run halves of it), and restore the pre-fix ``the nine jobs that declare
+`needs: changes``` ordinal (red ``test_no_hand_counted_ordinal_for_the_needs_changes_jobs``).
 **The surviving CLASS — and it is the reason #10434 exists.** Earlier rounds named a
 single survivor; rounds 30-34 measured ~90 further mutants and the honest claim is
 weaker than "one survivor": the guard decides SHELL CONTROL FLOW by pattern-matching
@@ -1201,6 +1230,72 @@ def test_the_batch_lane_defaults_to_a_private_container() -> None:
         "the shared instance is admissible only under an explicit precondition; the "
         "doctrine must state it rather than leave `docker ps` to imply it"
     )
+
+
+#: The lane ASSERTION a suite fence must carry before it runs. `tests/conftest.py::_p4_uri_required`
+#: accepts a `TORTOISE_DB_URI` OR an explicit carve-out opt-in, so the assertion is the DISJUNCTION;
+#: the halt is checked separately (`_halts`), because a bare `[ -n … ]` that only prints asserts
+#: nothing.
+_LANE_ASSERT = re.compile(
+    r'\[\s*-n\s+"\$\{?TORTOISE_DB_URI:-\}?"\s*\]\s*\|\|\s*'
+    r'\[\s*-n\s+"\$\{?TORTOISE_TEST_CARVE_OUT:-\}?"\s*\]\s*\|\|'
+)
+
+
+def test_the_lane_is_asserted_in_every_fence_that_runs_the_suite() -> None:
+    """#10400 review P1: the lane was the ONE shell-local value with no carrier and no halt.
+
+    Phase 0's `export` reaches only the shell that ran it, and Phases 1 and 3 are usually LATER shells
+    — the doctrine already re-derives `$B` and carries the run's status and `$PINNED` in files for
+    exactly that reason. The lane had neither treatment. Its absence is not visible in the status:
+    `conftest.py`'s `_p4_uri_required` is `scope="session", autouse=True`, so pytest re-raises it
+    **per item** — every collected test ERRORs at setup and the process exits **1**, which is one of
+    the two codes the fence's own COMPLETED predicate accepts. Measured at this head
+    (`env -u TORTOISE_DB_URI -u TORTOISE_TEST_CARVE_OUT pytest tests/test_batch_integration_doctrine.py
+    --junitxml=…`): **rc=1**, one `<testcase>` per check in the report. Both id sets then become
+    all-error and identical, Phase 4 diffs them to no NEW ids, and the doctrine prints
+    ``BATCH-GREEN`` for a tree on which zero tests executed.
+
+    So every fence that runs the suite must ASSERT the lane — present, or an explicit carve-out —
+    and HALT on it, before it clears or writes any artifact. Checking only fence ORDER (what
+    ``test_the_lane_is_selected_and_exported_before_the_first_suite_run`` does) cannot see this: the
+    export is in Phase 0's fence, and both suite fences are later shells.
+
+    Non-vacuity, measured: at the pre-fix head (``62c79b0b8``) neither suite fence contains the
+    assertion, so this check reds on both and on nothing else; the honest head is green.
+    """
+    fences = _full_suite_fences()
+    assert len(fences) >= 2, (
+        "expected at least the Phase 1 and Phase 3 suite fences, parsed "
+        f"{len(fences)} — re-point this guard"
+    )
+    for number, fence in enumerate(fences, start=1):
+        codes = [_code(c) for c in fence]
+        asserts = [i for i, code in enumerate(codes) if _LANE_ASSERT.match(code)]
+        assert asserts, (
+            f"suite fence {number} runs the full suite without asserting a lane. Phase 0's export is "
+            "shell-local, and a run with no lane ERRORs every collected test at setup and exits 1 — "
+            "which this fence's own COMPLETED predicate ACCEPTS — so both id sets become all-error "
+            "and the Phase 4 diff is empty: BATCH-GREEN on a tree where nothing ran. Assert it IN "
+            'the fence, the way `$B` is re-derived there: `[ -n "${TORTOISE_DB_URI:-}" ] || '
+            '[ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { … exit 1; }`'
+        )
+        assert any(_halts(_block(fence, i)) for i in asserts), (
+            f"the lane assertion in suite fence {number} does not HALT: a bare `[ -n … ]`, `|| true` "
+            "or a `{ … exit 1; }` the shell never reaches all leave an unexported run certifying "
+            "every item as a COMPLETED run"
+        )
+        first_suite = min(i for i, code in enumerate(codes) if _SUITE_CMD.match(code))
+        assert min(asserts) < first_suite, (
+            f"the lane is asserted only AFTER the first suite run in fence {number}, so the run it "
+            "guards is exactly the one that certifies itself"
+        )
+        writes = [i for i, code in enumerate(codes) if "$B/" in code]
+        if writes:
+            assert min(asserts) < min(writes), (
+                f"the lane assertion sits after fence {number}'s first write into the ledger: the "
+                "artifacts are already being produced for a run that cannot mean anything"
+            )
 
 
 #: The per-batch ledger directory. `BATCH` is REQUIRED (`:?` halts on an empty one — an empty name
@@ -2341,6 +2436,46 @@ def test_the_unreproduced_gate_legs_are_named() -> None:
             "`python-ci-gate`, so omitting it makes the list read as a complete "
             "partition while a gate member goes unmentioned"
         )
+
+
+#: A stated NUMBER of the jobs that declare `needs: changes`. The count is a property of
+#: `.github/workflows/python-ci.yml`, not of the doctrine, so a literal re-stales on the next job
+#: added — measured: the sentence said nine and the workflow declared eight, and one of those eight
+#: (`packs-compile`) is a NON-test leg, so the test legs that skip were seven.
+_NEEDS_CHANGES_ORDINAL = re.compile(
+    r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+    r"jobs\b[^\n]{0,40}?needs:\s*changes",
+    re.IGNORECASE,
+)
+
+
+def test_no_hand_counted_ordinal_for_the_needs_changes_jobs() -> None:
+    """#10400 review P3: the sentence wrote a count that was wrong at the head it described.
+
+    ``:288-289`` said "the **nine** jobs that declare ``needs: changes``" while
+    ``.github/workflows/python-ci.yml`` declared **eight** — and one of the eight
+    (``packs-compile``) is the non-test member the same bullet names eight lines above, so the
+    **test** legs that skip numbered seven. The sentence sits four lines above the paragraph that
+    forbids exactly this ("Do not trust a count of these members written here — the authority is the
+    leg table"), and ``test_the_unreproduced_gate_legs_are_named`` pins the member NAMES but not the
+    ordinal, so it could not red. This is the same stale-hand-count class the module header names for
+    the bare-run ERROR literal, closed the same cheap way: the doctrine points at the measurement
+    (``grep -c '^    needs: changes$' .github/workflows/python-ci.yml``) and states no number.
+
+    Non-vacuity, measured: restoring the pre-fix ``the nine jobs that declare `needs: changes``` sentence
+    reds this check and nothing else; the honest head is green.
+    """
+    text = _text()
+    claim = _NEEDS_CHANGES_ORDINAL.search(text)
+    assert claim is None, (
+        "the doctrine states a hand-written number of jobs declaring `needs: changes` "
+        f"({claim.group(0)!r}): the count belongs to .github/workflows/python-ci.yml, so any literal "
+        "re-stales the moment a job is added — point at the measurement "
+        "(`grep -c '^    needs: changes$' .github/workflows/python-ci.yml`) and state no number"
+    )
+    assert "needs: changes" in text, (
+        "the doctrine no longer names the `needs: changes` set at all — re-point this guard"
+    )
 
 
 def test_the_live_queue_and_the_carve_out_registry_are_named() -> None:

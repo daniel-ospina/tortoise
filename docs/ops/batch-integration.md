@@ -83,8 +83,9 @@ the queue, and nothing here asks for it to be removed.
 The suite is **URI-required**. `tests/conftest.py`'s session fixture fails the whole run closed when
 `TORTOISE_DB_URI` is unset and `TORTOISE_TEST_CARVE_OUT` is not opted in
 (`tests/_embedded.py::_assert_p4_uri_required`). A suite command with no lane does not produce a
-baseline; it produces a session-start refusal. So the lane is picked and **exported once**, in the shell
-that runs every later phase.
+baseline; it produces a session-start refusal — and that refusal is **not** visible in the status. The
+lane is picked here and exported in **this** shell; every fence that runs the suite therefore *asserts*
+it, because an export does not cross a shell boundary (see *The lane is shell-local* below).
 
 Pick the lane that **isolates this batch's ledger**, and name it in the record:
 
@@ -133,6 +134,28 @@ self-cleaning**: `tools/test_lane.py down` when the batch is over.
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.
 
+**The lane is shell-local — and its ABSENCE is certified `COMPLETED`.** The `export` above reaches only
+the shell that ran it, and Phases 1 and 3 are usually LATER shells (this document already re-derives
+`$B` and carries the run's status and `$PINNED` in files, for exactly that reason). A missing lane does
+not fail visibly: `tests/conftest.py`'s `_p4_uri_required` is `scope="session", autouse=True`, so
+pytest re-raises it **per item** — every collected test `ERROR`s at setup and the process exits **1**,
+which is one of the two statuses the `COMPLETED` predicates in Phases 1 and 3 accept as a *finished*
+run. Measured at this head with
+`env -u TORTOISE_DB_URI -u TORTOISE_TEST_CARVE_OUT pytest tests/test_batch_integration_doctrine.py
+--junitxml=…`: **rc=1** and one `<testcase>` per check in the report. Two reachable outcomes, both of
+them the failure this whole document exists to prevent:
+
+- **Phase 3 loses the lane and Phase 1 had it** → every batch id is `NEW`, and Phase 4 instructs the
+  operator to bisect, attribute and **drop** PRs — convicting an innocent PR over a tree in which
+  nothing ran;
+- **both phases lose it** → the two all-error id sets are identical, so the Phase 4 diff is empty and
+  the doctrine prints **`BATCH-GREEN`** for a tree on which zero tests executed — verbatim the failure
+  the per-batch ledger above is written to prevent, one value over.
+
+So **both** suite fences assert the lane, with a halt: present as `TORTOISE_DB_URI` (or an explicit
+`TORTOISE_TEST_CARVE_OUT` opt-in), or re-derived in that shell the way `$B` is —
+`eval "$(uv run python tools/test_lane.py uri)"`.
+
 **The same lane is not enough — the LEDGER must be per-batch too.** Every artifact a verdict is built
 from lives under **one per-batch directory**, `B=/tmp/batch-$BATCH`: the two baseline reports, the
 baseline count, and the gate's status, log and two reports. `BATCH` is **required** (`${BATCH:?…}`
@@ -173,6 +196,14 @@ git switch -C integration/base-check "$PINNED" || exit 1   # ⛔ SWITCH, not `gi
 BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
 B="/tmp/batch-$BATCH"
 [ -d "$B" ] || { echo "no ledger directory $B — Phase 0 creates it, per batch; absent means BATCH is unset or names another batch"; exit 1; }
+# ⛔ The LANE is shell-local too, and an absent one is SILENT — `conftest.py`'s `_p4_uri_required` is
+# session-scoped and autouse, so pytest re-raises it PER ITEM: every collected test ERRORs at setup and
+# the process exits 1, which the COMPLETED predicate below ACCEPTS (measured at this head: rc=1, one
+# `<testcase>` per item). Both id sets then become all-error and identical, Phase 4 diffs them to no
+# NEW ids, and the verdict is BATCH-GREEN for a tree on which nothing ran. Assert it here, the way
+# `$B` is re-derived here: present, re-derived with `tools/test_lane.py uri`, or an explicit carve-out
+# (whose verdict is UNPROVEN-FULL-SUITE and no phase below can change that).
+[ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
 # ⛔ CLEAR the report and the carried count FIRST. pytest truncates a junit file only in
 # `pytest_sessionfinish`, so a baseline run the kernel killed leaves the PREVIOUS batch's report at
 # this path — and the count below then reads it as THIS baseline, which is the ledger every later
@@ -285,8 +316,13 @@ as "`python-ci-gate` passed":
   the GitHub API to separate a failure **introduced by this change** from `main`'s own pre-existing
   red. It is the rail's automated version of Phase 1 above, so no local run stands in for it — and
   `changes`, the diff selector itself: it is not in `DEFERRABLE_LEGS`, so a failure there reds the
-  required check by name, and it is the only leg whose failure makes every **test** leg skip — the nine
-  jobs that declare `needs: changes`. `manifest-integrity`, `workflow-lint` and `surface-guard` declare
+  required check by name, and it is the only leg whose failure makes every **test** leg skip — every
+  job that declares `needs: changes`. That is a count to READ FROM THE WORKFLOW, never a literal
+  written here: `grep -c '^    needs: changes$' .github/workflows/python-ci.yml` is the measurement,
+  and one member of that set (`packs-compile`) is the non-test leg already named above, so the TEST
+  legs that skip are one fewer than the grep reports. A hand-written ordinal in this sentence has
+  already been wrong once (#10400 review P3 — it named a count the workflow did not have).
+  `manifest-integrity`, `workflow-lint` and `surface-guard` declare
   no `needs:` at all (#2656 made them peers of the matrix) and `ci-introduced-failure` runs
   `if: always()`, so those four do not skip. It is still exactly
   the selection a batch's pytest run cannot exercise. Do not trust a count of these members written
@@ -366,6 +402,12 @@ Same lane, same commands, same env as the baseline — **both** halves of the de
 BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
 B="/tmp/batch-$BATCH"
 [ -d "$B" ] || { echo "no ledger directory $B — Phase 0 creates it, per batch; absent means BATCH is unset or names another batch"; exit 1; }
+# ⛔ And the LANE, for the same reason and with the same consequence: this fence is USUALLY a later
+# shell than Phase 0's, and a run with no lane ERRORs every item and exits 1 — which the COMPLETED
+# predicate below accepts, so both id sets become all-error and identical and Phase 4 diffs them to
+# BATCH-GREEN. An absent lane HALTS here; the Phase 0 export is not carried, and a carve-out is an
+# explicit opt-in whose verdict is UNPROVEN-FULL-SUITE.
+[ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
 rm -f "$B/batch.rc" "$B/batch-junit.xml"   # a stale status/report from an earlier run must not decide this one
 ( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
 [ -f "$B/batch.rc" ] && echo 'DONE — read $B/batch.rc' || echo RUNNING   # repeat until DONE
