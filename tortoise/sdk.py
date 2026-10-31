@@ -23794,16 +23794,23 @@ class TortoiseSDK:
         # prediction about a POINT WRITE, not about `create_direct_edge`, so it
         # runs on EVERY route and over EVERY `points` item — connection or not.
         #
-        # The leg above is dead by construction (#9173's own note says so): a
-        # `points` ref makes the pair Point-bearing, so the effective route is
-        # always `operator` and the `route != "direct"` gate skips it. That is
-        # correct for the CONTENT-dedup prediction it carries. It was NOT
-        # correct for the key IDENTITY, which `create_point` folds onto
-        # unconditionally — measured on this tree: a bundle whose `points` item
-        # carried a retracted point's key left that point with `batch_id`
-        # stamped and `updatedAt` moved (status still `retracted`). Scoping the
-        # key leg by route is what let a terminal point be mutated by an
-        # ingest that Phase 1 had certified.
+        # The leg above is dead as the `create_direct_edge` prediction it was
+        # written for (#9173's own note says so): a `points` ref makes the pair
+        # Point-bearing, so the effective route is always `operator` and the
+        # `route != "direct"` gate skips it. ⛔ It does NOT follow that the
+        # content fold needs no unconditional treatment — that reading is the
+        # one #9819 overturned. The POINT-WRITE half the leg used to double as
+        # is a write every route reaches, so it is covered unconditionally by
+        # the CONTENT-identity arm of the `points` loop below, beside the key
+        # leg; the leg above must not be read as the content guard (the same
+        # note the leg itself carries at the top of this method).
+        #
+        # It was likewise NOT correct for the key IDENTITY, which
+        # `create_point` folds onto unconditionally — measured on this tree: a
+        # bundle whose `points` item carried a retracted point's key left that
+        # point with `batch_id` stamped and `updatedAt` moved (status still
+        # `retracted`). Scoping the key leg by route is what let a terminal
+        # point be mutated by an ingest that Phase 1 had certified.
         #
         # A points item is checked here whether or not a connection references
         # it: step 3 writes every point item, so the fold (and the mutation)
