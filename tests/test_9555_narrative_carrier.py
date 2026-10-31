@@ -60,6 +60,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -232,16 +233,21 @@ def _record_write(outcome_name: str, *, statements: int = 1, refusal=None):
 
 
 def test_a_narrative_outside_its_record_home_is_NAMED_not_assumed(caplog):
-    """#10389 review ISSUE 2 — the three destinations, decided not guessed.
+    """#10389 review ISSUE 2 — the four destinations, decided not guessed.
 
     The terms are the contract (`narrative_not_recorded` rides the receipt for
-    the two that are not `record`):
+    the three that are not `record`):
 
     * APPLIED **and** `statements >= 1` — the fold executed something for THIS
       record. `applied` alone is not enough, which is why the empty-fold case
       below is asserted: an armed seam that folds nothing would otherwise read
       as "the record holds the narrative".
-    * APPLIED with ZERO statements — the record did not take it. Not `record`.
+    * APPLIED with ZERO statements — `unfiled`, and NOT `journal` (#10389
+      review P3-2). `statements` is what the FOLD emitted, not what the record
+      did with it, and `record_projection.replay_plan` is deterministic in the
+      record — so a replay emits the same nothing and **cannot heal it**. It
+      used to fall through to `journal`, i.e. a loss reported as a non-loss
+      with a remedial instruction (replay) that provably cannot remediate.
     * journal appended, record declined — `journal`: replay heals it from that
       same line, so this is a warning, not a loss.
     * `no_durable_journal` + a "journalled" return — `nowhere`: a scratch buffer
@@ -260,11 +266,29 @@ def test_a_narrative_outside_its_record_home_is_NAMED_not_assumed(caplog):
     assert report(session_id=SESSION,
                   outcome=_record_write("APPLIED", statements=2),
                   journalled=True) == "record"
+
+    #: ⛔ APPLIED/0 IS ITS OWN TERM, and the term is PINNED — the reviewed head
+    #: only asserted `!= "record"`, so `journal` ("the record heals on replay")
+    #: satisfied it while being false: replay re-runs the same deterministic
+    #: fold over the same journalled dict and emits the same no statements.
+    caplog.clear()
     assert report(session_id=SESSION,
                   outcome=_record_write("APPLIED", statements=0),
-                  journalled=True) != "record", (
-        "an APPLIED write that executed ZERO statements was read as 'the "
-        "record holds the narrative' — the seam was armed and folded nothing")
+                  journalled=True) == "unfiled", (
+        "an APPLIED write that executed ZERO statements was not reported as "
+        "`unfiled` — the folded-nothing case is either read as 'the record "
+        "holds the narrative' or (the reviewed defect) as `journal`, i.e. "
+        "healed by a replay that runs the SAME fold and emits the same "
+        "nothing (#10389 review P3-2)")
+    assert any(r.levelname == "ERROR" and "NO statement" in r.getMessage()
+               for r in caplog.records), (
+        "a narrative the fold applied but never filed was not reported at "
+        "ERROR — a durable journal cannot heal it, so this is a LOSS and the "
+        "WARNING channel would say otherwise")
+    assert not any("heals" in r.getMessage() for r in caplog.records), (
+        "the APPLIED/ZERO-statements report still promises a heal — replay "
+        "runs the same fold over the same record, so it can only reproduce "
+        "the same absence")
 
     caplog.clear()
     assert report(session_id=SESSION,
@@ -340,8 +364,14 @@ def test_the_reporter_reads_the_seams_refusal_vocabulary_instead_of_retyping_it(
 
 
 def test_the_receipt_says_the_narrative_is_not_in_its_record_home():
-    """The advisory a caller reads: additive, non-blocking, and it names a home."""
-    for home in ("journal", "nowhere"):
+    """The advisory a caller reads: additive, non-blocking, and it names a home.
+
+    `unfiled` is its own message (#10389 review P3-2): it must NOT tell the
+    caller to replay, because replay cannot file a record the fold emitted no
+    statement for — the only remedy it may name is re-deriving the source, and
+    it may not share `journal`'s "the record heals on replay" text.
+    """
+    for home in ("journal", "unfiled", "nowhere"):
         adv = hosted_api._narrative_home_advisory(home, SESSION)
         assert adv["code"] == hosted_api.NARRATIVE_NOT_RECORDED
         assert adv["session_id"] == SESSION
@@ -350,6 +380,23 @@ def test_the_receipt_says_the_narrative_is_not_in_its_record_home():
             "a `severity: block` here would reject a commit whose graph writes "
             "already landed — the advisory channel is warn-first (#405/#7819)")
         assert adv["message"], "an advisory with no message tells the caller nothing"
+
+    unfiled = hosted_api._narrative_home_advisory("unfiled", SESSION)["message"]
+    journal = hosted_api._narrative_home_advisory("journal", SESSION)["message"]
+    assert unfiled != journal, (
+        "`unfiled` reuses the `journal` message — the two states differ in the "
+        "one thing a caller acts on: a durable journal heals `journal` on "
+        "replay, and NOTHING heals `unfiled` (#10389 review P3-2)")
+    assert "heals" not in unfiled and "replay" in unfiled, (
+        "the `unfiled` advisory must say replay does NOT heal it — a caller who "
+        "reads a heal waits for one that cannot come")
+    assert "no durable journal holds it" not in unfiled, (
+        "the `unfiled` advisory fell through to the `nowhere` message — but "
+        "the record DID take this write and simply filed no row for it, so "
+        "'no durable journal holds it' is a different (and wrong) state")
+    assert "re-derive" in unfiled, (
+        "the `unfiled` advisory names no reachable remedy — re-deriving the "
+        "source is the only one there is")
 
 
 # ── §2 the record effect, through the shape-keyed projection ────────────────
@@ -1437,3 +1484,111 @@ def test_section_9_1b_names_the_event_routes_it_counts():
         "(`#10389`), but `_upsert_point_props` still replays the key — so the "
         "passage would read as a complete closure while a rebuild of a legacy "
         "journal still materialises the prose on a `:Point` (#10429)")
+
+
+#: The number words §9.1(b)'s count sentence may spell a count with. DIGITS are
+#: accepted too — the arithmetic is the pin, not the spelling — so a reworded
+#: passage reds only when a NUMBER disagrees with the rows.
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9}
+
+
+def _stated_count(residual: str, pattern: str) -> int:
+    """The number §9.1(b) states at `pattern`, read as an int."""
+    match = re.search(pattern, residual)
+    assert match is not None, (
+        f"§9.1(b) no longer states the count `{pattern}` — the arithmetic this "
+        "pin derives from its own enumeration cannot be checked against a "
+        "passage that drops the number (or rewords it past this pattern); "
+        "restate the count and re-point this pattern")
+    word = match.group(1).lower()
+    return int(word) if word.isdigit() else _COUNT_WORDS[word]
+
+
+def _enumerated_routes(residual: str) -> dict[str, int]:
+    """Count §9.1(b)'s bulleted routes per LABEL, off the bullet titles.
+
+    Each bullet's TITLE names the route's label (`:Event` / `:Point` / the
+    RECORD's own route / a `:Source` route by default), which is the only
+    machine-readable thing the enumeration carries — so the count is derived
+    from the rows themselves rather than from a second hardcoded table.
+    """
+    counts = {":Source": 0, ":Event": 0, ":Point": 0, "record": 0}
+    for title in re.findall(r"^- \*\*(.+?)\*\*", residual, re.M):
+        if ":Event" in title:
+            counts[":Event"] += 1
+        elif ":Point" in title:
+            counts[":Point"] += 1
+        elif "RECORD" in title:
+            counts["record"] += 1
+        else:
+            counts[":Source"] += 1
+    return counts
+
+
+def test_section_9_1b_counts_the_routes_it_actually_enumerates():
+    """§9.1(b)'s counts are DERIVED from its rows, not asserted beside them.
+
+    `#10389`'s cycle-6 review (P3) measured the defect this pins: the passage
+    stated *"four on `:Source`"* over **three** bulleted `:Source` routes, while
+    its own next clause (*"five by the projection's own sets"* = 3 + 2) agreed
+    with three. The sentence exists to state a count PER ROUTE and could not
+    count its own enumeration, and nothing in the suite could notice —
+    `test_section_9_1b_names_the_event_routes_it_counts` asserts the RETIRED
+    wording (`"FOUR routes" not in residual`) and two symbol names, so a bare
+    `four` walked past it. That is the class of defect the section was rewritten
+    to remove, one number over.
+
+    So the numbers are read out of the prose and compared against the rows that
+    follow them: every label's stated count, the denied total, and the split
+    between the projection's own deny sets and the `:Point` route's SDK doors.
+
+    (1) FAILS pre-fix: at the reviewed head the sentence said `four on :Source`
+        over three `:Source` bullets, so the first assertion below reds by one.
+    (2) FAILS the other way too — dropping a bullet without touching the count
+        leaves the same disagreement, in the other direction.
+    """
+    text = _STORAGE_DOC.read_text(encoding="utf-8")
+    start = text.index("(b) The key stays DECLARED")
+    residual = text[start:text.index("**Where that placement is now EXECUTABLE**", start)]
+
+    counted = _enumerated_routes(residual)
+    assert counted["record"] == 1, (
+        f"§9.1(b)'s enumeration no longer carries exactly ONE record-owned "
+        f"route (counted {counted['record']}: {counted}) — the count sentence "
+        "treats the RECORD's route as the one route that is not denied, so a "
+        "second record row (or none) makes every number below wrong")
+
+    stated_source = _stated_count(residual, r"\b(\w+) on `:Source`")
+    stated_event = _stated_count(residual, r"\b(\w+) on the `:Event` anchor")
+    stated_point = _stated_count(residual, r"and (\w+) on `:Point`")
+    stated_denied = _stated_count(residual, r"\b(\w+) are denied")
+    stated_sets = _stated_count(residual, r"(\w+) by the projection's own sets")
+
+    assert stated_source == counted[":Source"], (
+        f"§9.1(b) states {stated_source} `:Source` route(s) but enumerates "
+        f"{counted[':Source']} — the count and the rows it introduces "
+        "disagree, which is the defect #10389's cycle-6 review measured "
+        "(`four on :Source` over three bullets). Fix the NUMBER to the rows, "
+        "or add the missing bullet and make the totals agree")
+    assert stated_event == counted[":Event"], (
+        f"§9.1(b) states {stated_event} `:Event` route(s) but enumerates "
+        f"{counted[':Event']}: {counted}")
+    assert stated_point == counted[":Point"], (
+        f"§9.1(b) states {stated_point} `:Point` route(s) but enumerates "
+        f"{counted[':Point']}: {counted}")
+
+    node_routes = counted[":Source"] + counted[":Event"] + counted[":Point"]
+    assert stated_denied == node_routes, (
+        f"§9.1(b) says {stated_denied} routes are DENIED but its enumeration "
+        f"carries {node_routes} node routes (the RECORD's is the one that is "
+        f"not): {counted}")
+    #: The `:Point` route is denied at its two SDK WRITE DOORS rather than by a
+    #: projection set (`sdk._refuse_unpaired_narrative`), so the projection-set
+    #: half of the sentence counts the `:Source` and `:Event` rows only. A new
+    #: denial mechanism that moves a row between those two halves reds here.
+    assert stated_sets == counted[":Source"] + counted[":Event"], (
+        f"§9.1(b) says {stated_sets} routes are denied by the projection's own "
+        f"sets, but {counted[':Source'] + counted[':Event']} rows are "
+        f"`:Source`/`:Event` (the `:Point` row is denied at its SDK doors): "
+        f"{counted}")

@@ -17096,13 +17096,19 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
     which is the state the sibling pin calls out — "with the node write gone
     (#10000) the narrative would then be stored NOWHERE".
 
-    Three destinations, and the returned term is the decision (so a caller or a
+    Four destinations, and the returned term is the decision (so a caller or a
     test reads a term rather than string-matching a log line):
 
     * ``"record"`` — the Postgres fold APPLIED the carrier: §9.1's one home.
       ``applied`` alone is not enough; ``statements`` says the fold found
       something to execute FOR THIS record (the same two-part check
       ``_write_capture_turns`` gates its own store decision on).
+    * ``"unfiled"`` — the record APPLIED but the fold emitted NO statement for
+      this record, so the narrative was never filed and **a replay cannot heal
+      it**: ``record_projection.replay_plan`` is a deterministic function of the
+      record, run over the same journalled dict, so it emits the same nothing
+      (#10389 review P3). This is NOT ``"journal"`` — a durable journal only
+      heals what the fold will emit on the way back in.
     * ``"journal"`` — the record did not take it, but a DURABLE journal did, so
       `record_projection._narrative_statements` heals the record from that same
       line on the next replay. A ``no_durable_journal`` refusal is deliberately
@@ -17136,6 +17142,30 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
     #: tuple and the verdict are built from — so a rename lands here too, instead
     #: of silently routing a scratch buffer into the durable branch below.
     refusal = getattr(outcome, "refusal", None)
+    #: ⛔ APPLIED WITH ZERO STATEMENTS IS ITS OWN DESTINATION, NOT `journal`
+    #: (#10389 review P3-2). `RecordWrite.statements` counts the RECORD
+    #: MUTATIONS the fold emitted for THIS record — a property of the FOLD'S
+    #: OUTPUT, not of what the database did with it. The narrative's own
+    #: statement is an `INSERT … ON CONFLICT (org_id, graph_id, session_id) DO
+    #: UPDATE`, which acts on a row whether or not one already exists, so a zero
+    #: here can never mean "the row was already there". And
+    #: `record_projection.replay_plan` is DETERMINISTIC in the record, run over
+    #: the SAME journalled dict, so replay emits the same nothing: a durable
+    #: journal CANNOT heal this shape. Falling into the branch below read that
+    #: loss as "the record heals on replay", which is the one direction this
+    #: docstring says must never happen; the term is NAMED instead. Only
+    #: re-distilling the source recovers the prose — the fold's shape rule
+    #: (`record_projection._narrative_statements`) emitting no statement is the
+    #: defect a fix has to reach.
+    if outcome is not None and getattr(outcome, "applied", False):
+        _logger.error(
+            "commit of session %s: the record APPLIED the `SessionNarrated` "
+            "carrier but its projection emitted NO statement for it, so "
+            "§9.1's S1 narrative was never filed in public.session_narrative. "
+            "A replay runs the SAME fold over the SAME record and emits the "
+            "same nothing, so replay cannot heal it — the narrative is LOST "
+            "unless the source is re-distilled (#10000).", session_id)
+        return "unfiled"
     if journalled and refusal != NON_DURABLE_JOURNAL_REFUSAL:
         _logger.warning(
             "commit of session %s: the record did not take the S1 narrative "
@@ -17170,6 +17200,13 @@ def _narrative_home_advisory(home: str, session_id: str) -> dict:
             "the S1 narrative was not written to public.session_narrative on "
             "this commit; it is in the journal and the record heals on replay "
             "(#10000). Nothing was refused and nothing else was lost.")
+    elif home == "unfiled":
+        message = (
+            "the S1 narrative was APPLIED to the record, but its projection "
+            "emitted no statement for it, so public.session_narrative has no "
+            "row for this session. A replay runs the same fold over the same "
+            "record and files nothing either, so replay does NOT heal this "
+            "(#10000): re-derive the narrative from the session's source.")
     else:
         message = (
             "the S1 narrative reached NO store on this commit: the record did "
