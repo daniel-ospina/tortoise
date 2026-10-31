@@ -86,19 +86,41 @@ The suite is **URI-required**. `tests/conftest.py`'s session fixture fails the w
 baseline; it produces a session-start refusal. So the lane is picked and **exported once**, in the shell
 that runs every later phase.
 
-Pick the highest lane that actually works, and name it in the record:
+Pick the lane that **isolates this batch's ledger**, and name it in the record:
 
-1. `docker ps` works → the docker FalkorDB lane:
-   `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`.
-2. Docker exists but the shared instance is contended or absent → `tools/test_lane.py uri` for a
-   private container (export **all three** vars it prints).
+1. `tools/test_lane.py uri` → a **private** container for this batch. This is the **default**, and
+   export **all three** vars it prints (the URI alone is not the lane — see below).
+2. Only when you can state that **no other lane is live on this box** → the shared docker FalkorDB
+   instance, `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`.
 3. No docker → `TORTOISE_TEST_CARVE_OUT=1`. Then the verdict is `UNPROVEN-FULL-SUITE` and **no phase
    below can change that**.
 
 ```bash
-export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'   # or the test_lane.py vars
+# DEFAULT: a PRIVATE container, so no peer lane's graphs land in this batch's ledger (#5084).
+# It prints all THREE seam vars — export every one: tests that resolve their target through
+# `tests/_live_utils.py` key on TORTOISE_TEST_DOCKER_PORT, so a URI-only export leaves them
+# silently addressing the SHARED instance (`tools/test_lane.py`'s own SCOPE section).
+lane="$(uv run python tools/test_lane.py uri)" || exit 1
+eval "$lane"
+
+# Shared instance instead — ONLY when no other lane is live (see the #5084 note below):
+#   export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
+
 uv sync --extra embeddings --extra parity    # ONE command — see the extras trap below
 ```
+
+**Why the private container is the default here, and not the shared one (#5084).** A batch IS the
+multi-lane case: the assembly is agent-driven and `.mergify.yml` keeps merging to `main` throughout,
+so peer lanes are running the suite on this box while Phase 1 and Phase 3 run. The shared instance is
+not a ledger under that load — measured 2026-10-06 it had **restarted 213 times**, and a single-file
+run showed graphs appearing from *other lanes' sessions*. Interference that reds a batch run but not
+the baseline run lands in the **batch** id set only, Phase 4 classifies it `NEW`, and an innocent PR
+is convicted — "the outcome this whole phase exists to prevent". `tools/test_lane.py` exists exactly
+so that cannot happen: its container is one this tool refuses to address from any other lane. Outside
+practice agrees — the reason per-run containers are standard for test infrastructure is that shared
+resources make results non-deterministic through "data corruption and configuration drift"
+(Testcontainers, *What problems does Testcontainers solve?*). Note the container is **not
+self-cleaning**: `tools/test_lane.py down` when the batch is over.
 
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.
@@ -180,7 +202,10 @@ And the gate has legs a pytest run does **not** reproduce, in two kinds — so n
 as "`python-ci-gate` passed":
 
 - **Non-test legs**, which no pytest run can reproduce at all: `packs-compile` (whole-registry
-  `PackRegistry.load_all()`), `manifest-integrity`, `workflow-lint`, `surface-guard`.
+  `PackRegistry.load_all()`), `manifest-integrity`, `workflow-lint`, `surface-guard`, and
+  `ci-introduced-failure` — the #9984 predicate, which reads the run's own jobs and step logs through
+  the GitHub API to separate a failure **introduced by this change** from `main`'s own pre-existing
+  red. It is the rail's automated version of Phase 1 above, so no local run stands in for it.
 - **Two test legs the batch's lane SKIPS rather than runs.** `test-d14-hosted-api` runs
   `pytest tests/ -m embedded_only` **URI-less** (with `TORTOISE_TEST_CARVE_OUT=1`) and fail-closes on an
   all-skip floor precisely because those tests run in no other job — while Phase 0 above *mandates* a
@@ -189,7 +214,8 @@ as "`python-ci-gate` passed":
   `TEST_RECORD_DB_URI`; the batch's `uv sync --extra embeddings --extra parity` installs neither
   `psycopg2` nor a record DB, so those skip too.
 
-Both of those are `needs:` of the required `python-ci-gate`, so they are gate members, not formality.
+Every one of them is a `needs:` of the required `python-ci-gate`, so they are gate members, not
+formality.
 All of the above are owed by the landing rail, which still requires `python-ci-gate` (see
 [Landing](#landing--main-must-still-be-the-tree-you-tested)).
 
