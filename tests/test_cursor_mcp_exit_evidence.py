@@ -214,6 +214,12 @@ def _authorize_and_consent(tc, *, client_id: str,
         "code_challenge_method": "S256",
         "scope": "mcp",
         "state": "cursor-st-1",
+        # #3524 §9 step 4: the AS only RENDERS the page for a request the app
+        # advanced (it carries the attempt key it recorded); anything else is a
+        # 302 to the app's sign-in leg. This leg asserts the AS ACCEPTED the
+        # registered redirect, which is what it did before the bounce existed —
+        # the key keeps that assertion pointed at the same endpoint behaviour.
+        "attempt_key": "ak-cursor-exit",
     })
     assert r.status_code == 200, r.text
 

@@ -61,8 +61,9 @@ Host routing lives in `website/functions/_middleware.ts`:
   `SESSIONS` binding) and never reach the browser; revoking a session marks its row revoked
   (`revoked = 1`) — the row is retained, not deleted. Issued by
   `website/apps/dashboard/functions/_shared/auth/session.ts`. A **separate legacy** JS-readable
-  parent-domain cookie is still issued — and is still accepted by the one page that issues it
-  (the MCP consent page) — see the ruling bullet below.
+  parent-domain cookie was the last residue of the pre-#4054 design, and **#3524 §9 step 4
+  (2026-10-30) closed it**: its only writer, the MCP consent page, was deleted, so nothing issues it
+  and nothing accepts it — see the ruling bullet below.
 - **OVERRIDES:** the standard cross-subdomain session — a `Domain=.premiselabs.co` cookie shared by
   every subdomain — is **rejected**. It is JS-reachable from any subdomain and forfeits the `__Host-`
   prefix; one session-bearing origin is worth the extra 301. The recorded ruling is the auth-topology
@@ -72,20 +73,23 @@ Host routing lives in `website/functions/_middleware.ts`:
   (`website/assets/supabase-session.js`, cookie `sb-tortoise-auth-token`) was
   **DELETED** (#3559); it was already loaded by no page
   (`tests/test_cross_subdomain_cookie_sync.py` pinned `PAGES = []`, and now proves its absence).
-  The cookie is still **issued** — and still **read back as its own session**, so it still
-  authenticates — by the MCP consent page in `tortoise/oauth.py` (`/oauth/authorize` on
-  `api.premiselabs.co`, `Domain=.premiselabs.co`, JS-readable): the page's inline supabase client
-  (`storage: cookieStorage, storageKey: COOKIE_NAME`) reads the cookie and uses the session's
-  access token as the bearer for `/oauth/consent/preview` and `/oauth/consent`. No OTHER surface
-  accepts it: the blog-admin console's supabase-js data layer now rides the same-origin
-  `/api/sb/*` Token Handler (`website/apps/blog-admin/src/lib/backend.ts`, #4178 — the legacy
-  `src/lib/supabase.ts` adapter is DELETED), and
-  `website/functions/blog/_shared/admin-auth.ts`'s legacy COOKIE fallback is REMOVED (Bearer
-  only). So a JS-readable parent-domain session is still issued to — and still authenticates —
-  the consent page that writes it: exactly what this `OVERRIDES` ruling exists to prevent,
-  surviving on the one surface not yet migrated. Migrate that page off it: **#3524**. See
-  `docs/auth-architecture.md` §2.1 “Legacy cohort” and
-  §4 item 1 (now RESIDUAL, not closed).
+  The cookie's LAST writer was the MCP consent page in `tortoise/oauth.py` (`/oauth/authorize` on
+  `api.premiselabs.co`, `Domain=.premiselabs.co`, JS-readable: its inline supabase client, with
+  `storage: cookieStorage, storageKey: COOKIE_NAME`, read the cookie back as its own session and
+  used that access token as the bearer for `/oauth/consent/preview` and `/oauth/consent`). **That
+  page was DELETED by #3524 §9 step 4 (2026-10-30)**: it renders no sign-in, writes no cookie,
+  holds no credential and calls no supabase client (`grep -c sb-tortoise tortoise/oauth.py` = 0) —
+  it redeems a bound single-use consent token instead of a session. So **nothing on our side issues
+  or accepts that legacy cookie any more** — it is issued by nobody and accepted by nobody: the
+  blog-admin console's supabase-js data layer
+  rides the same-origin `/api/sb/*` Token Handler
+  (`website/apps/blog-admin/src/lib/backend.ts`, #4178 — the legacy `src/lib/supabase.ts` adapter
+  is DELETED), and `website/functions/blog/_shared/admin-auth.ts`'s legacy COOKIE fallback is
+  REMOVED (Bearer only). A browser may still hold a stale copy as **inert residue** — nothing
+  writes it, nothing accepts it, and server-side revocation governs. That is this `OVERRIDES`
+  ruling holding on EVERY surface. See `docs/auth-architecture.md` §2.1 “Legacy cohort” (the
+  closure record) and §4 item 1 (**CLOSED** by #3524), and
+  `docs/engineering/auth/consent-identity-bridge.md` for what replaced that page.
 - The raw API key (`tt_…`) **never** leaves app-origin (sessionStorage on `app.premiselabs.co` only)
 
 ---

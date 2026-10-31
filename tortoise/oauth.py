@@ -928,6 +928,20 @@ def get_client(cp, client_id: str) -> dict | None:
     return row
 
 
+def resolve_authorize_scope(requested: str | None, client: dict | None) -> str:
+    """THE scope a flow will actually be bound with: request → client default → `mcp`.
+
+    ⛔ One function, because TWO call sites must agree or the consent screen lies. The page
+    renders it (`resolved_scope`, so the visitor sees what they are granting) and the code
+    mint binds it (`/oauth/consent`); when these were two copies of the same expression, a
+    visitor could be shown `mcp` while the token carried the client's wider registered scope
+    — the under-disclosure round 9 of #10346's review measured, and the divergence a silently
+    edited copy would reintroduce (round 10). `validate_scope` still runs on the result in
+    `validate_authorize_params`, so this decides the VALUE, not the allow-list.
+    """
+    return (requested or "").strip() or (client or {}).get("scope") or "mcp"
+
+
 def resolve_client(cp, client_id: str) -> dict | None:
     """Client lookup for the authorize/token paths: registry first (DCR or
     operator-issued), then **CIMD** (#2847).
@@ -1128,7 +1142,9 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
                               response_type: str | None,
                               code_challenge: str | None,
                               code_challenge_method: str | None,
-                              scope: str | None = None) -> dict:
+                              scope: str | None = None,
+                              state: str | None = None,
+                              require_state: bool = False) -> dict:
     """Validate the /oauth/authorize request. Returns the client row.
 
     #3128: ``scope`` is the requested scope and is validated HERE — on the one
@@ -1136,6 +1152,17 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
     (code mint) — so an out-of-allow-list scope is refused before a code is
     stored. ``scope or client.get("scope")`` mirrors the mint fallback
     exactly.
+
+    #3524 §9 step 4: ``require_state`` is set by the PAGE-RENDER path only. The
+    page cannot complete a state-less flow at all — the BFF's `/api/consent/start`
+    and `/api/consent/token` use `state` as the ATTEMPT's identity and refuse an
+    empty one — so a state-less request used to reach the app's sign-in leg and
+    die there as a bare JSON 400 in the browser: no page, no link, no recovery,
+    and nothing naming the field. Refused HERE, it is the CLIENT's error
+    delivered at the client's own registered redirect (RFC 6749 §4.1.2.1), the
+    same shape every other refusal takes. ⛔ Redemption does NOT set it: §2.1's
+    `bind` admits `state: null`, and a token bound that way must still be
+    redeemable — this refusal is about the PAGE, not the flow.
     """
     client = resolve_client(cp, client_id)
     try:
@@ -1169,6 +1196,12 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
         if code_challenge_method != "S256":
             raise OAuthError(400, "invalid_request",
                              "Only code_challenge_method=S256 is supported.")
+        if require_state and not (state or "").strip():
+            raise OAuthError(
+                400, "invalid_request",
+                "state is required: this authorization server uses it as the "
+                "consent attempt's identity, so a flow without one cannot be "
+                "completed from the app's sign-in leg.")
         return client
     except OAuthError as exc:
         # #3669 finding 2: stamp the client resolved ABOVE onto the error
@@ -2157,7 +2190,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   :root {
     --bg: #060b14; --surface: #0d1a2d; --text: #cbd5e1; --text-dim: #94a3b8;
     --accent: #06b6d4; --accent-hover: #0891b2; --green: #4ade80;
-    --red: #ef4444; --gold: #f59e0b; --border: #1e293b;
+    --red: #ef4444; --border: #1e293b;
     --mono: ui-monospace,'SFMono-Regular','SF Mono',Menlo,'Cascadia Code','Fira Code','JetBrains Mono',monospace;
     --serif: 'Georgia','Times New Roman',serif;
   }
@@ -2178,917 +2211,384 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   .row .v { color: var(--text); word-break: break-all; text-align: right;
             max-width: 60%; }
   .actions { display: flex; gap: .75rem; margin-top: 1.5rem; }
-  button { font-family: var(--mono); font-size: 14px; font-weight: 600;
+  button, a.action { font-family: var(--mono); font-size: 14px; font-weight: 600;
            padding: .6rem 1rem; border-radius: 6px; border: 1px solid var(--border);
-           cursor: pointer; flex: 1; }
+           cursor: pointer; flex: 1; text-align: center; text-decoration: none;
+           background: transparent; color: var(--text); }
   .btn-auth { background: var(--accent); color: #04121a; }
   .btn-auth:hover { background: var(--accent-hover); }
+  .btn-auth:disabled { opacity: .45; cursor: not-allowed; }
   .btn-deny { background: transparent; color: var(--text-dim); }
   .error { display: none; color: var(--red); margin-top: 1rem; font-size: 13px; }
   .error.visible { display: block; }
-  input { width: 100%; background: var(--bg); border: 1px solid var(--border);
-          color: var(--text); border-radius: 6px; padding: .6rem .75rem;
-          font-family: var(--mono); font-size: 14px; margin-bottom: .75rem; }
-  .providers { display: flex; gap: .75rem; margin-bottom: .75rem; }
-  .btn-provider { background: var(--bg); color: var(--text); }
-  .btn-provider:hover { border-color: var(--accent); }
-  .btn-provider:disabled { opacity: .45; cursor: not-allowed; }
-  .warn { display: none; color: var(--gold); border: 1px solid var(--border);
-          border-radius: 6px; padding: .6rem .75rem; margin-bottom: .75rem;
-          font-size: 13px; }
+  #btn-retry, #btn-signin { display: none; width: 100%; margin-top: .75rem; }
+  #btn-retry.on, #btn-signin.on { display: block; }
+  #btn-signin { border-color: var(--accent); color: var(--accent); }
+  select { display: none; background: var(--bg); color: var(--text);
+           border: 1px solid var(--border); border-radius: 6px;
+           font-family: var(--mono); font-size: 13px; padding: 4px 6px;
+           max-width: 60%; text-align: left; }
+  select.on { display: block; }
   .spinner { color: var(--text-dim); font-size: 13px; margin-top: 1rem; }
 </style>
 </head>
 <body>
 <div class="card" id="card">
   <div class="logo">Tortoise<span>.</span></div>
-  <div id="view-consent">
-    <h1>Connect an MCP client</h1>
-    <p class="muted" id="client-line"></p>
-    <div class="row"><span class="k">Requested scopes</span><span class="v" id="scope-line"></span></div>
-    <div class="row"><span class="k">Resource</span><span class="v" id="resource-line"></span></div>
-    <div class="row"><span class="k">Org</span>
-      <span class="v" id="org-line">resolving…</span>
-      <select id="org-select" style="display:none;background:var(--bg,#0d1a2d);color:var(--text,#e2e8f0);border:1px solid var(--border,#1e293b);border-radius:6px;font-family:var(--mono);font-size:13px;padding:4px 6px;max-width:60%;text-align:left;" aria-label="Org for this connection"></select>
-    </div>
-    <div class="actions">
-      <button class="btn-deny" id="btn-deny">Deny</button>
-      <button class="btn-deny" id="btn-retry-preview" style="display:none">Retry</button>
-      <button class="btn-auth" id="btn-auth" disabled>Authorize</button>
-    </div>
+  <h1>Connect an MCP client</h1>
+  <p class="muted" id="client-line"></p>
+  <div class="row"><span class="k">Requested scopes</span><span class="v" id="scope-line"></span></div>
+  <div class="row"><span class="k">Resource</span><span class="v" id="resource-line"></span></div>
+  <div class="row"><span class="k">Org</span>
+    <span class="v" id="org-line">resolving…</span>
+    <select id="org-select" aria-label="Org for this connection"></select>
   </div>
-  <div id="view-signin" style="display:none">
-    <h1>Sign in to Tortoise</h1>
-    <p class="muted">Sign in to approve this connection.</p>
-    <p class="warn" id="signin-capability" role="status"></p>
-    <div class="providers">
-      <button class="btn-provider" id="btn-github">GitHub</button>
-      <button class="btn-provider" id="btn-google">Google</button>
-    </div>
-    <input type="email" id="email" placeholder="Email" autocomplete="email">
-    <input type="password" id="password" placeholder="Password" autocomplete="current-password">
-    <button class="btn-auth" id="btn-email">Sign in with email</button>
+  <div class="actions">
+    <button class="btn-deny" id="btn-deny">Deny</button>
+    <button class="btn-auth" id="btn-auth" disabled>Authorize</button>
   </div>
-  <div class="error" id="error"></div>
-  <!-- #5734: OUTSIDE both views, as a sibling of #error. Inside #view-signin a
-       `display:block` style would still be invisible whenever the consent view is
-       shown, so the refusal's "Retry" would name a control the user cannot see. -->
-  <button class="btn-provider" id="btn-retry-signin"
-          style="display:none;margin-top:.75rem;width:100%">Try again</button>
-  <div class="spinner" id="spinner" style="display:none">Verifying session…</div>
+  <div class="error" id="error" role="alert"></div>
+  <!-- #5734: outside .actions and always in the DOM; a refusal's remedy must be
+       a control the visitor can actually see, and the two remedies are
+       DIFFERENT (sign in again vs. retry the same check). -->
+  <button id="btn-retry">Try again</button>
+  <a class="action" id="btn-signin" role="button">Sign in</a>
+  <div class="spinner" id="spinner">Checking your session…</div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.2/dist/umd/supabase.min.js"
-        nonce="__NONCE__"
-        onerror="showError('Auth script blocked — please retry.')"></script>
 <script nonce="__NONCE__">
-  // ── authorize request params (JSON-embedded by the server; origin-safe) ──
+  // ── wiring from the server (JSON-embedded; origin-safe) ──────────────────
+  // PARAMS is the authorize request VERBATIM — `state` and `redirect_uri` are
+  // opaque to the client and compared byte-for-byte by it, so this page never
+  // trims, re-cases or re-encodes them. `redirect_target` is the destination
+  // the SERVER rebuilt from the registered URI (#3443): that is what the page
+  // navigates, never the raw request string.
   const PARAMS = __PARAMS__;
-  const SUPABASE_URL = __SUPABASE_URL__;
-  const SUPABASE_ANON_KEY = __SUPABASE_ANON_KEY__;
-  const AUTHORIZE_PATH = "/oauth/authorize";
-  // #1704: reuse the dashboard's parent-domain session cookie
-  // (sb-tortoise-auth-token on .premiselabs.co — the dashboard's supabaseStorage
-  // adapter, DELETED in #4054).
-  // The user is already signed in on app.premiselabs.co; this page must not
-  // ask for a SECOND login. persistSession stays TRUE (gotrue DISCARDS a
-  // custom storage when persistSession is false, review P0) and
-  // setItem/removeItem are REAL writes — getSession() always re-reads
-  // storage, so an ingested OAuth/email session must persist to the cookie
-  // or the sign-in fallback loops. detectSessionInUrl stays TRUE, but not to
-  // ingest a token fragment: #3496 moved this flow to PKCE, so the provider
-  // returns `?code=` in the QUERY, and the library gates the code exchange on
-  // this flag (an implicit-style fragment return is refused by the bundle).
-  // #3503: this page is the ONE place it stays true — it does NOT load the
-  // shared bridge (website/assets/supabase-session.js, DELETED in #3559, whose
-  // factory set it false because its load-time IIFE was the fragment consumer
-  // there). loadParams()
-  // below still merges the hash, because a provider REFUSAL arrives there.
-  const COOKIE_NAME = "sb-tortoise-auth-token";
-  // #1704: parent-domain cookie storage — the COOKIE mechanics (name, domain
-  // and secure attributes, size guard; getItem reads an existing dashboard
-  // session so there is no second login; setItem/removeItem are REAL writes,
-  // because getSession() always re-reads storage) were ported from the
-  // dashboard's supabaseStorage (website/assets/supabase-session.js). #3496
-  // SPLITS the provenance: the KEY-IDENTITY ROUTING below was ported from the
-  // blog-admin console's authStorage (website/apps/blog-admin/src/lib/
-  // supabase.ts) — the DASHBOARD bridge had no key routing at all: it wrote
-  // whatever key it was handed to the cookie, which is the hole this adapter
-  // now closes. Both source files were DELETED (#3559; the console adapter in
-  // #4178), so oauth.py is now the LAST copy of this contract.
-  // Method shorthand so `this` binds to the object (arrow functions
-  // would bind window). Size guard + localhost-aware domain/secure
-  // attributes mirror the canonical adapter.
-  const COOKIE_PATH = "/";
-  const COOKIE_DOMAIN = ".premiselabs.co";
-  const SIZE_GUARD = 3800;
-  // #3496 item 6: the write-path cap, DERIVED from the rule (never hardcoded —
-  // a literal previously disagreed with the rule by 4 bytes, leaving an untested
-  // band where the code wrote and the browser dropped). Mirrored
-  // website/assets/supabase-session.js:46-47 (DELETED in #3559).
-  const COOKIE_LIMIT = 4096; // bytes of `name` + '=' + `value`
-  const SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1; // largest value we may write
-  const isLocal = () => {
-    const h = window.location.hostname;
-    if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
-    if (h.startsWith("10.") || h.startsWith("192.168.")) return true;
-    return /^172\.(1[6-9]|2\d|3[01])\./.test(h);
-  };
-  const isPremiselabsHost = () => {
-    const h = window.location.hostname;
-    return h === "premiselabs.co" || h.endsWith(".premiselabs.co");
-  };
-  const domainAttr = () => (isPremiselabsHost() && !isLocal() ? "; Domain=" + COOKIE_DOMAIN : "");
-  const secureAttr = () => (isLocal() ? "" : "; Secure");
-  // #3496: the PKCE code_verifier must NEVER reach the JS-readable
-  // parent-domain jar. Key-identity routing, ported from the blog-admin
-  // console's authStorage contract (website/apps/blog-admin/src/lib/supabase.ts,
-  // DELETED in #4178 — oauth.py is the last copy):
-  // ONLY the session key may reach document.cookie; every other key is an
-  // origin-scoped aux credential. The aux chain has NO cookie leg, so the
-  // allowlist is fail-closed by construction.
-  const auxStores = () => {
-    const out = [];
-    try { if (window.sessionStorage) out.push(window.sessionStorage); } catch (e) { /* unavailable */ }
-    try { if (window.localStorage) out.push(window.localStorage); } catch (e) { /* unavailable */ }
-    return out;
-  };
-  const readAux = (key) => {
-    for (const s of auxStores()) {
-      try { const v = s.getItem(key); if (v !== null) return v; } catch (e) { /* next store */ }
-    }
-    return null;
-  };
-  // #3496 A5: the write is proven CLEANABLE in the same store, for the real value
-  // SIZE, before the credential is accepted. The pre-flight probe cannot guarantee
-  // that on its own — it writes a 160-byte payload under its own key, so a store
-  // whose accepted-size band sits between the probe and the real value (or which
-  // refuses removal only once it holds something) would pass the probe and then
-  // orphan the credential. This re-verifies per store, at write time, with a
-  // payload of the REAL length under a THROWAWAY key — and that payload is a
-  // DUMMY of the same length, never the credential itself: a store that accepts
-  // the write but SILENTLY IGNORES removal would otherwise retain the verifier
-  // under `probeKey`, a key no path can ever clean. What that probe cannot prove is
-  // REMOVABILITY OF THE REAL KEY: the credential has to be WRITTEN before its
-  // removal can be observed, so a store that accepts the credential and then
-  // refuses to remove it keeps a copy no path can clean (recorded residual R21 —
-  // a store that discriminates by key is not a conforming browser store). A
-  // re-probe on the REAL key DOES detect that store, but only AFTER the credential
-  // is already written to it, so it cannot un-write it: it skips the store and
-  // copies the same credential into the next one, leaving two copies where the
-  // throwaway-key probe leaves one. The writer therefore keeps the probe, and the
-  // real write is proven by its read-back alone.
-  const writeAux = (key, value) => {
-    const v = String(value);
-    const probe = "x".repeat(v.length);
-    const probeKey = "__tt_wprobe-" + Math.random().toString(16).slice(2).padEnd(32, "0");
-    for (const s of auxStores()) {
-      try {
-        s.setItem(probeKey, probe);
-        if (s.getItem(probeKey) !== probe) throw 0;
-        s.removeItem(probeKey);
-        if (s.getItem(probeKey) !== null) throw 0;   // silently-ignored removal
-        s.setItem(key, v);
-        if (s.getItem(key) !== v) throw 0;
-        return true;
-      } catch (e) {
-        // Best-effort cleanup — BOTH keys. `key` must be cleaned too: the failure
-        // can be the read-back AFTER a successful `setItem(key, v)` (a store that
-        // truncates or normalises what it accepted), and this loop then writes the
-        // same credential into the NEXT store, so without this the first store
-        // would retain a copy in a store that failed verification. Cleanup is not
-        // proof — the read-back above is — so a store reaching here is still skipped.
-        try { s.removeItem(probeKey); } catch (e2) { /* ignore */ }
-        try { s.removeItem(key); } catch (e3) { /* ignore */ }
-      }
-    }
-    return false;   // refuse — never fall through to the cookie jar
-  };
-  const removeAux = (key) => {
-    for (const s of auxStores()) {
-      try { s.removeItem(key); } catch (e) { /* next store */ }
-    }
-  };
-  // #5734: set when the write path REFUSES a session it cannot store (the
-  // over-SIZE_CAP branch below). The refusal is reported on the page and must
-  // SURVIVE the two transitions that can erase it: the terminal fallback (a
-  // `?code` load with no session, which is exactly what a refused write looks
-  // like from the library's side) and the messages the consent flow renders for
-  // a session the user did not just sign in as. Both are live — the second is
-  // why `showConsentOnce()` will not enter the consent view at all while a
-  // refusal is pending. See the #3496 scoping doc, Step 7, which recorded this
-  // as #5734's work rather than #3496's.
-  let writeRefused = false;
-  const cookieStorage = {
-    getItem(key) {
-      if (key !== COOKIE_NAME) return readAux(key);
-      try {
-        const parts = document.cookie.split("; ");
-        for (const p of parts) {
-          const eq = p.indexOf("=");
-          if (eq > 0 && p.slice(0, eq) === key) return decodeURIComponent(p.slice(eq + 1));
-        }
-        return null;
-      } catch (e) { return null; }
-    },
-    setItem(key, value) {
-      if (key !== COOKIE_NAME) { writeAux(key, value); return; }
-      if (!value) { this.removeItem(key); return; }
-      let encoded = encodeURIComponent(value);
-      // Size guard (#1225): a GitHub OAuth session (user_metadata +
-      // identities + provider_token) can exceed the 4096-byte cookie
-      // cap. provider tokens are only needed by the initiating flow.
-      if (encoded.length > SIZE_GUARD) {
-        try {
-          const obj = JSON.parse(value);
-          delete obj.provider_token;
-          delete obj.provider_refresh_token;
-          // #3496 item 6: port the shared bridge's non-essential-claim
-          // narrowing (website/assets/supabase-session.js:111-135, DELETED in #3559).
-          if (obj.user) {
-            delete obj.user.identities;
-            if (obj.user.user_metadata) {
-              const md = obj.user.user_metadata;
-              const keep = {};
-              if (md.display_name) keep.display_name = md.display_name;
-              if (md.avatar_url) keep.avatar_url = md.avatar_url;
-              if (md.full_name) keep.full_name = md.full_name;
-              if (md.name) keep.name = md.name;
-              obj.user.user_metadata = keep;
-            }
-          }
-          encoded = encodeURIComponent(JSON.stringify(obj));
-        } catch (e) { /* not JSON — leave as-is */ }
-        if (encoded.length > SIZE_GUARD + 100) {
-          console.warn('sb-tortoise-auth-token session exceeds cookie size cap (' + encoded.length + ' bytes) — session may not bridge subdomains');
-        }
-        if (encoded.length > SIZE_CAP) {
-          // A write past the browser's limit is a silent no-op there, so the
-          // caller would believe the session landed. Refuse and REPORT: this
-          // page has no read-back caller, so a console-only refusal is
-          // invisible by construction (#3503/#3496 item 6).
-          console.warn('sb-tortoise-auth-token session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write');
-          showSignin();
-          // #5734 (option B): the refusal names the CAUSE and the REMEDY, and
-          // stays page-scoped — the limit it hit is THIS page's cookie limit,
-          // not a claim about the browser. Rendered BEFORE `writeRefused` is set:
-          // from that point on the refusal is the page's sticky message.
-          showError("This page can't store the sign-in it just received — the session is "
-            + "larger than this page's cookie limit, so it was not saved. Retry; if it "
-            + "keeps failing, sign in with fewer linked providers.");
-          writeRefused = true;
-          showRetrySignin();
-          return;
-        }
-      }
-      const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString();
-      document.cookie = key + "=" + encoded + domainAttr() + "; Path=" + COOKIE_PATH +
-        "; SameSite=Lax" + secureAttr() + "; Expires=" + expires;
-      // #5734: a write LANDED, so no refusal is pending any more. (The paths that
-      // matter for a user moving on — a retry, the email form, a provider click —
-      // clear the flag themselves when they start; this is the semantic clear, so
-      // the flag never outlives the condition it describes.)
-      writeRefused = false;
-    },
-    removeItem(key) {
-      if (key !== COOKIE_NAME) { removeAux(key); return; }
-      document.cookie = key + "=;" + domainAttr() + "; Path=" + COOKIE_PATH +
-        "; SameSite=Lax" + secureAttr() + "; Max-Age=0";
-    },
-  };
-  let supabaseClient = null;
-  try {
-    if (typeof window.supabase !== "undefined") {
-      supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-        auth: {
-          storage: cookieStorage,
-          storageKey: COOKIE_NAME,
-          persistSession: true,   // required for the custom storage to be used
-          autoRefreshToken: false,
-          detectSessionInUrl: true,  // gates the PKCE ?code exchange (_initialize)
-          // #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
-          // browser-based client. Explicit PKCE; the code_verifier is routed to
-          // the origin-scoped aux chain by the adapter above, never the cookie.
-          flowType: "pkce",
-        },
-      });
-    } else {
-      showError("Auth is temporarily unavailable (script blocked).");
-    }
-  } catch (e) { showError("Auth init failed: " + e.message); }
+  // #3524 §9 step 4: this page holds NO credential. It cannot read the app's
+  // `__Host-session` (host-only, HttpOnly), so it does not sign anyone in — it
+  // asks the ONE origin that holds the session for a bound assertion
+  // (`POST {APP}/api/consent/token`), and hands that assertion to
+  // `POST /oauth/consent` in exchange for the code.
+  const MINT_URL = __MINT_URL__;
+  const CONSENT_URL = __CONSENT_URL__;
+  // #1701 R1's account chooser — KEPT by §9 step 4, with its data source changed
+  // along with the page's identity: the preview used to take a session JWT and
+  // this page has none, so it takes the BOUND CONSENT TOKEN in a HEADER (never a
+  // query string — it is a bearer-equivalent assertion, and a query string
+  // reaches access logs, proxy logs and `Referer`). The four authorize params
+  // ride the query because they are what the token is bound to and the AS
+  // compares them (§2.2) exactly as it does at redemption.
+  const PREVIEW_URL = __PREVIEW_URL__;
+  const CONSENT_TOKEN_HEADER = __CONSENT_TOKEN_HEADER__;
+  // The app-owned sign-in leg, pre-built by the server: the same bounce an
+  // unauthenticated authorize request takes, with this flow as its return
+  // target. It is a LINK, never an automatic redirect — the page must not bounce
+  // itself (see `mint` below), or a session that cannot mint would loop
+  // between two origins.
+  const SIGNIN_URL = __SIGNIN_URL__;
+  // The mint's per-attempt key (#10208): the app writes it onto the authorize URL
+  // (`ATTEMPT_KEY_PARAM` in functions/_shared/auth/consent-bridge.ts) because
+  // this page is the mint's ONLY caller, and the mint answers
+  // `403 no_authorize_attempt` without it. Read from THIS PAGE'S OWN URL — the
+  // server does not re-embed it, so there is exactly one carrier.
+  const ATTEMPT_KEY_PARAM = __ATTEMPT_KEY_PARAM__;
+
+  const byId = (id) => document.getElementById(id);
+  const authBtn = () => byId("btn-auth");
+  let consentToken = null;
+  // #1701 R1: orgResource is set ONLY by the picker's change handler — an
+  // untouched picker can never authorize (no silent wrong-org bind).
+  let orgResource = null;
+  // The other half of "may this click approve": a team was RESOLVED for this
+  // assertion (sole-org auto-bind, or a pick on the chooser branch). Authorize is
+  // armed from exactly `consentToken && orgReady` — ONE expression, evaluated by
+  // ONE function — so no later handler can re-arm a button while either half is
+  // missing. (Found in review: the picker's onchange re-armed the button after a
+  // 401 had deliberately disabled it, because it only looked at the pick.)
+  let orgReady = false;
+  function refreshArm() {
+    authBtn().disabled = !(consentToken && orgReady);
+  }
 
   function showError(msg) {
-    // #5734: while a refused write is pending, THE REFUSAL IS THE MESSAGE.
-    // Every other message this page can render — the consent flow's org
-    // resolution, an expired session, an authorize-request failure, a preview
-    // error from a flow that was ALREADY IN FLIGHT when the refusal landed —
-    // describes an older state, and replacing the refusal with it is exactly the
-    // eraser this issue exists to close. Routing the precedence through ONE
-    // helper is deliberate: it makes "no message replaces a pending refusal" a
-    // property of these two helpers rather than a check every call site has to
-    // remember. `writeRefused` clears when a write lands and at the start of a
-    // new user-initiated attempt, so this is not permanent.
-    //
-    // The retry affordance belongs to the refusal, and it is a sibling of #error
-    // OUTSIDE both views — so once shown it stays visible in whatever view comes
-    // next. Only a message can end its warrant, which makes these two helpers the
-    // owners of it: the refusal re-asserts it below, and every message that is
-    // NOT a refusal drops it (a caller that wants one after its own message calls
-    // `showRetrySignin()` after rendering, never before).
-    if (writeRefused) { showRetrySignin(); return; }
-    hideRetrySignin();
-    const el = document.getElementById("error");
-    el.textContent = msg; el.classList.add("visible");
+    const el = byId("error");
+    el.textContent = msg;
+    el.classList.add("visible");
   }
   function hideError() {
-    // #5734: the symmetric half of the precedence rule in `showError` — a
-    // transition must not CLEAR the refusal either, nor leave the retry control
-    // behind for a message that does not imply one. In the shipped flow no site
-    // reaches this with a refusal pending (the consent view is not entered while
-    // one is pending, and the only callers outside it — the email and
-    // retry-signin handlers — clear `writeRefused` first), so the guard is
-    // belt-and-braces for a future caller rather than a live guard; it is pinned
-    // DIRECTLY by the over-cap survival test for that reason.
-    if (writeRefused) return;
-    hideRetrySignin();
-    document.getElementById("error").classList.remove("visible");
+    const el = byId("error");
+    el.textContent = "";
+    el.classList.remove("visible");
   }
-  function spinner(on) { document.getElementById("spinner").style.display = on ? "block" : "none"; }
-  // #3443: the destination is the URL the SERVER rebuilt from the validated
-  // registered URI (`_canonical_redirect_target`), never the raw request string
-  // this page also carries — so the server's parser and the browser's can no
-  // longer disagree about the host BY CONSTRUCTION (the byte gate that used to
-  // stand in for that agreement is now defence in depth). `target` is the value
-  // returned alongside the code by POST /oauth/consent; `PARAMS.redirect_target`
-  // is the one the server embedded at authorize time, which covers the deny
-  // path (no server round trip) and a page/API version skew mid-deploy. Both
-  // are server-built; neither is `PARAMS.redirect_uri`.
+  function spinner(on) { byId("spinner").style.display = on ? "block" : "none"; }
+  function offerRetry(on) { byId("btn-retry").classList[on ? "add" : "remove"]("on"); }
+  function offerSignin(on) {
+    const el = byId("btn-signin");
+    el.classList[on ? "add" : "remove"]("on");
+    el.setAttribute("href", SIGNIN_URL);
+  }
+
+  // ── the attempt key, from this page's own URL ────────────────────────────
+  function attemptKey() {
+    return new URLSearchParams(window.location.search).get(ATTEMPT_KEY_PARAM) || "";
+  }
+
+  // ── #3443: navigate the SERVER-rebuilt target, with `state` echoed ────────
+  // `dest` is the value returned alongside the code by POST /oauth/consent, or
+  // the one the server embedded at authorize time (the deny path has no server
+  // round trip). Both are rebuilt from the registered URI; neither is
+  // `PARAMS.redirect_uri`. Falling back to the request string is the class this
+  // work exists to remove, so an absent target is a refusal, not a navigation.
   function redirectBack(params, target) {
     const dest = target || PARAMS.redirect_target;
     if (!dest) {
-      // Unreachable while /oauth/authorize keeps building the target, and
-      // fail-closed if it ever stops: `undefined` would resolve as a RELATIVE
-      // url and send the code to this page's own origin, and falling back to
-      // the request string is the class this issue exists to remove.
       spinner(false);
       showError("Return address unavailable — start the connection again from your client.");
       return;
     }
-    const sep = dest.includes("?") ? "&" : "?";
+    const sep = dest.indexOf("?") === -1 ? "?" : "&";
     window.location.href = dest + sep + new URLSearchParams(params).toString();
   }
 
-  async function fetchPreview(accessToken) {
+  // ── the org preview: which team this grant binds (D4, #1701 R1) ──────────
+  // Rendered from the AS's own resolution of the ASSERTED user — never from
+  // anything the page could name. Fail-closed in every direction: Authorize is
+  // enabled only by a resolved org (sole-org branch) or by a pick (chooser
+  // branch), so an unresolved preview cannot approve.
+  async function loadOrg(assertion) {
+    const orgLine = byId("org-line");
+    const orgSelect = byId("org-select");
+    // #1701 R1: the picker is REBUILT here, so any previous pick is gone with
+    // it. This is the only place the selection is cleared — a failed approval
+    // must keep the pick its retry will re-post (see the consent handler).
+    orgResource = null;
+    orgReady = false;
+    refreshArm();
+    orgLine.style.display = "";
+    orgSelect.classList.remove("on");
+    while (orgSelect.firstChild) orgSelect.removeChild(orgSelect.firstChild);
+    const q = new URLSearchParams({
+      client_id: PARAMS.client_id || "",
+      redirect_uri: PARAMS.redirect_uri || "",
+      code_challenge: PARAMS.code_challenge || "",
+      state: PARAMS.state || "",
+      resource: PARAMS.resource || "",
+    });
     let res;
     try {
-      res = await fetch("/oauth/consent/preview?resource=" +
-          encodeURIComponent(PARAMS.resource || ""), {
-        headers: { "Authorization": "Bearer " + accessToken },
-      });
-    } catch {
-      // network throw (offline blip, DNS, server restart) — transient:
-      // the Retry affordance must appear (never a dead-end reload).
-      const err = new Error("Could not reach Tortoise — check your connection and retry.");
-      err.transient = true;
-      throw err;
-    }
-    if (res.status === 401) return null;   // stale/rejected session
-    if (!res.ok) {
-      // Terminal 4xx (suspended org, no usable org) carries an actionable
-      // error_description — surface it verbatim; only 5xx is retryable.
-      const payload = await res.json().catch(() => null);
-      const err = new Error((payload && (payload.error_description || payload.error)) ||
-          ("Could not resolve org: " + res.status));
-      if (res.status >= 500) err.transient = true;
-      throw err;
-    }
-    return res.json();
-  }
-
-  // #1701 R1: account-chooser state. orgResource is set ONLY by the picker's
-  // change handler — an untouched picker can never authorize (no silent
-  // wrong-org bind). previewInFlight holds the RUNNING showConsent flow, so a
-  // concurrent caller is idempotent AND can await what is already running.
-  let previewInFlight = null;
-  let orgResource = null;
-  let staleRefreshes = 0;   // at most ONE refresh per stale cycle
-  const authBtn = () => document.getElementById("btn-auth");
-  function disableAuthorize() { authBtn().disabled = true; }
-  function enableAuthorize() { authBtn().disabled = false; }
-  function showRetry() { document.getElementById("btn-retry-preview").style.display = "inline-block"; }
-  function hideRetry() { document.getElementById("btn-retry-preview").style.display = "none"; }
-  function showExpiredSignin() {
-    // NEVER call the auth logout API here — the session cookie is shared
-    // with the dashboard (parent domain) and a global logout would revoke
-    // it server-side on every device. A fresh sign-in replaces the cookie.
-    showSignin();
-    showError("Your session expired — sign in again.");
-  }
-
-  async function showConsentOnce() {
-    const { data } = await supabaseClient.auth.getSession();
-    if (!data.session) { showSignin(); return "nosession"; }
-    // #5734: do NOT present consent for a superseded session. A refused write
-    // means the user's sign-in did not complete, so the only session available is
-    // an older one, and this await is where a refusal that landed DURING the
-    // exchange becomes visible to an already-running flow. Staying on the
-    // sign-in view keeps the refusal and its retry affordance in the view that is
-    // actually shown.
-    if (writeRefused) {
-      // `showSignin()` re-asserts the retry affordance while a refusal is
-      // pending, so this path needs no second call to name the same control.
-      showSignin();
-      return "refused";
-    }
-    document.getElementById("view-consent").style.display = "block";
-    document.getElementById("view-signin").style.display = "none";
-    // Also drops the retry affordance: this view's messages do not imply one,
-    // and the affordance is a sibling of #error rather than a child of a view, so
-    // it would otherwise show through here (see `showError`/`hideError`).
-    hideError();
-    document.getElementById("client-line").textContent =
-        PARAMS.client_name + " wants to access your Tortoise MCP surface.";
-    document.getElementById("scope-line").textContent = PARAMS.scope || "mcp";
-    document.getElementById("org-line").style.display = "";
-    const orgSelect = document.getElementById("org-select");
-    orgSelect.style.display = "none";
-    hideRetry();
-    try {
-      const preview = await fetchPreview(data.session.access_token);
-      if (!preview) return "stale";   // session rejected/expired
-      const memberships = preview.memberships;
-      if (memberships && memberships.length > 1) {
-        // Account chooser — options are REBUILT from scratch every run so a
-        // sequential re-run can never duplicate rows. Authorize stays disabled
-        // until the user explicitly picks an org (change event below).
-        document.getElementById("org-line").style.display = "none";
-        while (orgSelect.firstChild) orgSelect.removeChild(orgSelect.firstChild);
-        const placeholder = document.createElement("option");
-        placeholder.value = "";
-        placeholder.disabled = true;
-        placeholder.selected = true;
-        placeholder.textContent = "Choose an org…";
-        orgSelect.appendChild(placeholder);
-        memberships.forEach((m) => {
-          const opt = document.createElement("option");
-          opt.value = m.resource;
-          opt.textContent = (m.org_name || m.org_id) + " (" + m.org_id + ")";
-          orgSelect.appendChild(opt);
-        });
-        orgSelect.style.display = "block";
-        document.getElementById("resource-line").textContent =
-            "Tortoise MCP — choose the org this connection will use";
-        disableAuthorize();
-      } else if (preview.org_id) {
-        // single / sole-active-org auto-bind — the page renders EXACTLY as
-        // before R1 (byte-identical single-org contract): the resource line
-        // shows the client-declared value (or the pre-R1 default), never the
-        // resolved org URL
-        document.getElementById("resource-line").textContent =
-            PARAMS.resource || "default (sole org)";
-        document.getElementById("org-line").textContent =
-            (preview.org_name || preview.org_id) + " (" + preview.org_id + ")";
-        enableAuthorize();
-      } else {
-        disableAuthorize();
-        showError("No usable org for this account.");
-      }
-      return "ok";
+      const headers = {};
+      headers[CONSENT_TOKEN_HEADER] = assertion;
+      res = await fetch(PREVIEW_URL + "?" + q.toString(), { headers: headers });
     } catch (e) {
-      disableAuthorize();
-      showError(e.message);
-      if (e.transient) showRetry();   // terminal 4xx/network-side copy needs no retry affordance
-      return "error";
-    }
-  }
-
-  function runConsentFlow() {
-    // #5734: the concurrent guard hands back the RUNNING flow rather than bare
-    // `undefined`. Its purpose is idempotence for the caller — a second call must
-    // not run a second preview — and resolving early defeats a caller that needs
-    // the flow's RESULT: awaiting the returned promise then resolves before the
-    // flow it did not start has finished, which is a window with no observable in
-    // it. On this page the UI callers fire the flow; the harness is the caller
-    // that awaits it, and returning the in-flight promise makes "await this call"
-    // mean what it says.
-    if (previewInFlight) return previewInFlight;
-    previewInFlight = (async () => {
-      orgResource = null;         // never carry a stale selection between runs
-      staleRefreshes = 0;            // one-shot cap per cycle — never sticky across runs
-      disableAuthorize();
-      let result;
-      try {
-        result = await showConsentOnce();
-        if (result === "stale" && staleRefreshes < 1) {
-          // refresh-first recovery (NEVER sign-out): at most ONE refresh per
-          // stale cycle, and the in-flight guard stays held across it so an
-          // onAuthStateChange (INITIAL_SESSION/SIGNED_IN) racing the refresh
-          // cannot double-run and reuse the rotating refresh token.
-          staleRefreshes += 1;
-          const { error } = await supabaseClient.auth.refreshSession();
-          if (!error) result = await showConsentOnce();
-        }
-      } finally {
-        previewInFlight = null;
-      }
-      if (result === "stale") showExpiredSignin();
-    })();
-    return previewInFlight;
-  }
-
-  function showSignin() {
-    // #5734: the sign-in view's neutral state. The retry affordance is dropped
-    // here and re-asserted by whoever has a reason to offer one — and, when a
-    // REFUSAL is what is displayed, re-asserted HERE: the refusal's own copy says
-    // "Retry", so any caller that lands on the sign-in view with a refusal
-    // pending (`showExpiredSignin` after a refused refresh write, the no-session
-    // branches of `showConsentOnce` and the authorize handler) must not leave the
-    // user with an instruction and no control. A caller that clears `writeRefused`
-    // before it gets here — the retry handler, the email form, a provider click —
-    // is unaffected, and the email form is unaffected only until the write it
-    // triggers REFUSES: that re-sets the flag, and the no-session branch this
-    // caller then runs has to put the control back.
-    hideRetrySignin();
-    if (writeRefused) showRetrySignin();
-    document.getElementById("view-consent").style.display = "none";
-    document.getElementById("view-signin").style.display = "block";
-  }
-
-  // #3496: the transient params a provider round-trip may leave on the URL.
-  // Stripped with URLSearchParams.delete (not a string replace, so an encoded
-  // `%63ode=` is removed too).
-  const STRIP_PARAMS = ["code", "error", "error_code", "error_description",
-                        "error_uri", "sb_flow_id", "flow_id", "type"];
-  // #3496: defence-in-depth — the return target is rebuilt from the sanitised
-  // query so a transient is never echoed back to the provider. (GoTrue's
-  // `url.Values.Set` makes the "permanent stale-code loop" premise false; this
-  // is canonicalisation, not a loop fix.)
-  function authorizeReturnTo() {
-    const u = new URL(window.location.href);
-    STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
-    return window.location.origin + AUTHORIZE_PATH + (u.search || "");
-  }
-  // #3496: PKCE cannot be done correctly without WebCrypto (the bundle silently
-  // downgrades to `plain` when crypto.subtle is absent — reachable because this
-  // page deliberately supports LAN-http origins) and cannot be completed without
-  // a writable origin-scoped aux store. Fail CLOSED before the provider
-  // redirect: the library would otherwise navigate and lose the verifier,
-  // costing a full round trip. The probe key is randomised (localStorage is
-  // cross-tab) and LONGER than the longest real verifier key so an item-size cap
-  // cannot slip through. It deliberately does NOT carry the `-code-verifier`
-  // suffix: a store that refuses removal cannot be cleaned, and the one entry it
-  // leaks must not be mistakable for a credential.
-  function pkceIncapable() {
-    if (!(window.crypto && window.crypto.subtle && typeof TextEncoder !== "undefined")) return "no-webcrypto";
-    const payload = "v".repeat(160);
-    const sentinel = "__tt_probe-" + Math.random().toString(16).slice(2).padEnd(89, "0");
-    // The guard is a FAIL-CLOSED approximation of the writer's choice, not the same
-    // test: it probes with its own key and a fixed 160-byte payload, while the
-    // writer probes with the REAL value's length. Where a store's per-item cap sits
-    // between the two (it would hold the ~114-byte verifier but not this probe), the
-    // guard rejects that store and evaluates the next one — and refuses outright if
-    // the store that accepted the probe then cannot remove the sentinel. That is
-    // deliberately STRICTER than the writer, which would have used the first store
-    // successfully; the divergence is a known fail-closed over-refusal recorded with
-    // the refusal UX work (#5734), and it cannot leak a credential in either
-    // direction because the writer re-probes every store it takes. (A5.)
-    for (const store of auxStores()) {
-      let wrote = false;
-      try {
-        store.setItem(sentinel, payload);
-        if (store.getItem(sentinel) !== payload) throw 0;
-        wrote = true;
-        store.removeItem(sentinel);
-        if (store.getItem(sentinel) !== null) throw 0;
-        return null;
-      } catch (e) {
-        if (wrote) return "no-store";
-        try { store.removeItem(sentinel); } catch (e2) { /* best effort */ }
-      }
-    }
-    return "no-store";
-  }
-  // #5734: the page-scoped capability copy, keyed by cause. Every sentence names
-  // THIS PAGE as the subject — never the browser — because this auth surface has
-  // repeatedly asserted browser-level absolutes that a live legacy path
-  // falsified (#4678). The remedy lives in this copy; the SECURITY boundary is
-  // the re-check inside signInWithProvider below.
-  const CAPABILITY = {
-    // The cause is stated as what was OBSERVED, and it must cover BOTH conjuncts
-    // the probe tests — the secure-context crypto (`window.crypto.subtle`) absent
-    // (a non-secure origin, the dominant case) AND `TextEncoder` absent. Naming
-    // only WebCrypto asserts a cause the page's own probe contradicts — the #4678
-    // defect class: an absolute a live path falsifies. The remedy carries the
-    // dominant reason (HTTPS); the closing alternative is real, not decorative
-    // (the email path needs no PKCE).
-    //
-    // The subject of every sentence is THIS PAGE. "Open this page over HTTPS" and
-    // "Allow site storage for this page" name the remedy's target without
-    // attributing the limitation to the browser ("leave private browsing" names
-    // the user's own setting, not a browser-level incapacity).
-    "no-webcrypto": "This page can't start a secure sign-in here — the challenge it must "
-      + "build needs secure-context crypto and text encoding, and this page can't use "
-      + "them. Open this page over HTTPS and retry, or sign in with email and password "
-      + "below.",
-    "no-store": "This page can't start a secure sign-in here — it has no usable site "
-      + "storage in which to keep the sign-in verifier. Allow site storage for this page "
-      + "(or leave private browsing) and reload, or sign in with email and password below.",
-  };
-  const PROVIDER_LABEL = { github: "GitHub", google: "Google" };
-  function renderCapability(incap) {
-    const blocked = !!incap;
-    for (const id of ["btn-github", "btn-google"]) {
-      const b = document.getElementById(id);
-      b.disabled = blocked;
-      if (blocked) b.setAttribute("aria-disabled", "true");
-      else b.removeAttribute("aria-disabled");
-    }
-    const notice = document.getElementById("signin-capability");
-    notice.textContent = blocked ? (CAPABILITY[incap] || CAPABILITY["no-store"]) : "";
-    notice.style.display = blocked ? "block" : "none";
-  }
-  async function signInWithProvider(provider) {
-    // #5734: a new user-initiated attempt supersedes a pending refusal, so the
-    // capability refusal below can still report itself.
-    writeRefused = false;
-    const incap = pkceIncapable();
-    if (incap) {
-      // #5734: the load-time probe is an AFFORDANCE only — capability can change
-      // between load and click, so this re-check is the boundary. It also
-      // refreshes the inline affordance to match what is true right now.
-      showSignin();
-      renderCapability(incap);
-      showError("Can't sign in with " + (PROVIDER_LABEL[provider] || provider)
-        + " on this page — see the note above the buttons.");
-      // #5734 (B): an ATTEMPT failed, so offer the retry affordance — its handler
-      // re-probes, which is the only in-page way back after the user grants site
-      // storage (the provider buttons are disabled in this state).
-      showRetrySignin();
+      showError("Could not reach Tortoise to resolve your team — check your connection, then try again.");
+      offerRetry(true);
       return;
     }
-    const { error } = await supabaseClient.auth.signInWithOAuth({
-      provider: provider,
-      options: { redirectTo: authorizeReturnTo() },
-    });
-    if (error) showError(error.message);
+    const preview = await res.json().catch(() => null);
+    if (!res.ok) {
+      const why = (preview && (preview.error_description || preview.error))
+          || ("HTTP " + res.status);
+      showError(preview && preview.error === "invalid_token"
+          ? "Your approval expired before it was issued. Try again to re-confirm your session."
+          : why);
+      offerRetry(true);
+      return;
+    }
+    const memberships = preview && preview.memberships;
+    if (memberships && memberships.length > 1) {
+      // Account chooser — options are REBUILT from scratch every run so a
+      // sequential re-run can never duplicate rows. Authorize stays disabled
+      // until the user explicitly picks an org (change handler below).
+      orgLine.style.display = "none";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      placeholder.textContent = "Choose an org…";
+      orgSelect.appendChild(placeholder);
+      memberships.forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = m.resource;
+        opt.textContent = (m.org_name || m.org_id) + " (" + m.org_id + ")";
+        orgSelect.appendChild(opt);
+      });
+      orgSelect.classList.add("on");
+      byId("resource-line").textContent =
+          "Tortoise MCP — choose the org this connection will use";
+      return;
+    }
+    if (preview && preview.org_id) {
+      // sole active org — auto-bind, exactly as before R1: the resource line
+      // shows the client-declared value (or the pre-R1 default), never the
+      // resolved org URL.
+      byId("resource-line").textContent = PARAMS.resource || "default (sole org)";
+      orgLine.textContent = (preview.org_name || preview.org_id) +
+          " (" + preview.org_id + ")";
+      orgReady = true;          // sole active team — auto-bound, nothing to pick
+      refreshArm();
+      return;
+    }
+    showError("No usable org for this account.");
   }
 
-  document.getElementById("btn-github").onclick = () => signInWithProvider("github");
-  document.getElementById("btn-google").onclick = () => signInWithProvider("google");
-  document.getElementById("btn-email").onclick = async () => {
-    writeRefused = false;   // a new user-initiated attempt supersedes a refusal
-    hideError();
-    const email = document.getElementById("email").value.trim();
-    const password = document.getElementById("password").value;
-    if (!email || !password) { showError("Enter email and password."); return; }
-    const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
-    if (error) { showError(error.message); return; }
-    // The flow is fired, not awaited: what a caller can observe is the STATE, and
-    // the flow slot (`runConsentFlow` hands back the running flow) is what makes
-    // that state awaitable where it matters.
-    runConsentFlow();
+  byId("org-select").onchange = (ev) => {
+    orgResource = ev.target.value;
+    orgReady = !!orgResource;
+    refreshArm();               // never more than the two halves allow
   };
 
-  const orgSelectEl = document.getElementById("org-select");
-  orgSelectEl.onchange = function () {
-    orgResource = orgSelectEl.value;
-    if (orgResource) enableAuthorize(); else disableAuthorize();
-  };
-
-  document.getElementById("btn-auth").onclick = async () => {
-    hideError(); spinner(true);
-    if (authBtn().disabled) { spinner(false); showError("Resolving your org… retry in a moment."); return; }
-    const { data } = await supabaseClient.auth.getSession();
-    if (!data.session) { spinner(false); showSignin(); return; }
-    const doPost = async (accessToken) => fetch("/oauth/consent", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + accessToken,
-      },
-      body: JSON.stringify({
-        client_id: PARAMS.client_id,
-        redirect_uri: PARAMS.redirect_uri,
-        response_type: PARAMS.response_type,
-        code_challenge: PARAMS.code_challenge,
-        code_challenge_method: PARAMS.code_challenge_method,
-        state: PARAMS.state,
-        scope: PARAMS.scope,
-        resource: orgResource || PARAMS.resource || null,
-      }),
-    });
+  // ── step 1: ask the session origin for the bound assertion ────────────────
+  // Fail-closed everywhere: Authorize starts disabled and is enabled ONLY by a
+  // 200 carrying a token, every refusal is typed by status (401 = no session,
+  // 403 = not this browser's attempt, anything else = transient), and no path
+  // navigates on its own.
+  async function mint() {
+    hideError(); offerRetry(false); offerSignin(false); spinner(true);
+    authBtn().disabled = true;
+    consentToken = null;
+    const key = attemptKey();
+    if (!key) {
+      spinner(false);
+      showError("This page was opened without an approval attempt — start the connection again from your client.");
+      return;
+    }
+    let res;
     try {
-      let res = await doPost(data.session.access_token);
-      if (res.status === 401) {
-        // one refresh, one re-POST with the FRESH token (never logout)
-        const { error } = await supabaseClient.auth.refreshSession();
-        if (!error) {
-          const { data: d2 } = await supabaseClient.auth.getSession();
-          if (d2 && d2.session) res = await doPost(d2.session.access_token);
-        }
-      }
-      const payload = await res.json();
-      if (!res.ok) {
-        if (res.status === 401) { spinner(false); showExpiredSignin(); return; }
-        throw new Error(payload.error_description || payload.error || "Consent failed");
-      }
+      res = await fetch(MINT_URL, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: PARAMS.state, attempt_key: key }),
+      });
+    } catch (e) {
+      spinner(false);
+      showError("Could not reach Tortoise to confirm your session — check your connection, then try again.");
+      offerRetry(true);
+      return;
+    }
+    const payload = await res.json().catch(() => null);
+    spinner(false);
+    if (res.ok && payload && typeof payload.token === "string" && payload.token) {
+      consentToken = payload.token;
+      // Authorize stays DISABLED until the org resolves: the resource the code
+      // binds is decided there, so approving before it would send an unbound
+      // (or wrongly bound) request.
+      await loadOrg(consentToken);
+      return;
+    }
+    if (res.status === 401) {
+      showError("You are not signed in on this browser. Sign in, then approve the connection.");
+      offerSignin(true);
+      return;
+    }
+    if (res.status === 403) {
+      showError("This approval link is not yours, or it has expired. Start the connection again from your client.");
+      return;
+    }
+    // The mint answers TWO shapes: `{error, message}` for a 400 and `{error, reason}`
+    // for a 503 (`api/consent/token.ts`). Reading only `reason` showed the visitor a
+    // bare code — "Could not confirm your session (invalid_request)" — where the mint
+    // had said why (`state is required.`). `reason` first keeps the 503 detail.
+    const why = (payload && (payload.reason || payload.message || payload.error)) || ("HTTP " + res.status);
+    showError("Could not confirm your session (" + why + ").");
+    // ⛔ A 4xx that is not 401/403 is the REQUEST's fault, not a blip. `state` IS
+    // required at authorize (`validate_authorize_params(..., require_state=True)`
+    // refuses an empty or missing one BEFORE this page renders), so a state-less
+    // render is not reachable through the supported path — this branch is
+    // defence-in-depth for any other 4xx the mint can answer (a bad or expired
+    // `attempt_key` → `403`, a body it refuses → `400`). Offering "Try again"
+    // there would name a control that cannot ever help — the same dead end the
+    // render-time 503 exists to avoid. Only a 5xx or a transport failure is
+    // retryable.
+    offerRetry(res.status >= 500);
+  }
+
+  // ── step 2: hand the assertion to the AS, and go where IT says ────────────
+  authBtn().onclick = async () => {
+    if (!consentToken) return;
+    hideError(); offerRetry(false); offerSignin(false); spinner(true);
+    authBtn().disabled = true;
+    let res;
+    try {
+      res = await fetch(CONSENT_URL, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          consent_token: consentToken,
+          client_id: PARAMS.client_id,
+          redirect_uri: PARAMS.redirect_uri,
+          response_type: PARAMS.response_type || "code",
+          code_challenge: PARAMS.code_challenge,
+          code_challenge_method: PARAMS.code_challenge_method || "S256",
+          state: PARAMS.state,
+          scope: PARAMS.scope,
+          // the picker's selection wins over the client-declared indicator, and
+          // an untouched chooser cannot get here (Authorize is disabled)
+          resource: orgResource || PARAMS.resource || null,
+        }),
+      });
+    } catch (e) {
+      spinner(false);
+      refreshArm();             // the token and the pick both survive a transport blip
+      showError("Could not reach Tortoise to approve — check your connection, then try again.");
+      offerRetry(true);
+      return;
+    }
+    const payload = await res.json().catch(() => null);
+    spinner(false);
+    if (res.ok && payload && typeof payload.code === "string" && payload.code) {
+      // `state` is echoed from the AS's OWN response (it is the BOUND value),
+      // falling back to the request's byte-identical copy — never a normalised
+      // or re-derived one.
       const q = { code: payload.code };
-      if (payload.state) q.state = payload.state;
-      // #3443: the target the server computed when it minted this code.
+      if (typeof payload.state === "string") q.state = payload.state;
+      else if (PARAMS.state) q.state = PARAMS.state;
       redirectBack(q, payload.redirect_target);
-    } catch (e) { spinner(false); showError(e.message); }
+      return;
+    }
+    if (res.status === 401) {
+      // The jti is spent before the code is inserted (a post-spend refusal costs
+      // a RE-MINT, not a re-login), so the remedy is a fresh assertion. The token
+      // is DROPPED — not merely the button disabled — because the chooser is still
+      // on screen and its onchange re-derives the button state: keeping the token
+      // would let one pick re-arm a button holding a jti the AS already recorded.
+      consentToken = null;
+      refreshArm();
+      showError("Your approval expired before it was issued. Try again to re-confirm your session.");
+      offerRetry(true);
+      return;
+    }
+    // ⛔ The pick SURVIVES a failed approval. It used to be nulled here, which
+    // left the chooser DISPLAYING the user's team while the next click posted
+    // `PARAMS.resource` (or nothing) instead — a retry that is guaranteed to be
+    // refused by `_default_org` for a multi-team account, with a message that
+    // blames the client. The pick is reset where it is genuinely rebuilt: in
+    // `loadOrg()`, on the re-mint this handler offers.
+    refreshArm();
+    const why = (payload && (payload.error_description || payload.error)) || ("HTTP " + res.status);
+    showError("Approval failed (" + why + ").");
+    if (res.status >= 500) offerRetry(true);
   };
 
-  document.getElementById("btn-retry-preview").onclick = () => {
-    hideError(); hideRetry();
-    runConsentFlow();
-  };
+  byId("btn-retry").onclick = () => { mint(); };
 
-  document.getElementById("btn-retry-signin").onclick = () => {
-    // #5734: a retry re-probes capability — it may have changed since the
-    // attempt that failed (or since load). User-initiated, so it also clears a
-    // pending refusal.
-    writeRefused = false;
-    hideError();
-    renderCapability(pkceIncapable());
-    showSignin();
-  };
-
-  document.getElementById("btn-deny").onclick = () =>
+  byId("btn-deny").onclick = () =>
       redirectBack({ error: "access_denied", state: PARAMS.state });
 
-  // #1701 R1: auto-advance when a session lands after an initial null
-  // (provider redirect `?code` exchange / cookie session). runConsentFlow is
-  // in-flight guarded, so a double fire never runs two overlapping previews.
-  // #3496: one terminal state for a failed/declined/refused sign-in. Capture
-  // the load-time transient ONCE, read-only — the library has already consumed
-  // `?code` synchronously inside createClient(), so never rewrite the URL before
-  // it has attempted the code.
-  //
-  // BOTH return channels are read. supabase-js folds the fragment into the
-  // params it parses (`xr(window.location.href)` in the bundle) and
-  // `detectSessionInUrl: true` deliberately keeps the library as the fragment
-  // consumer, so a provider that returns its refusal in the hash reaches the
-  // library but never `.search`. Reading one channel only would leave a
-  // hash-carried refusal on the bare sign-in view with no explanation — the
-  // dead end this terminal state exists to remove.
-  const loadParams = () => {
-    const out = new URLSearchParams(window.location.search);
-    if (window.location.hash.length > 1) {
-      // No try/catch: `new URLSearchParams(<string>)` cannot throw (the string
-      // branch is a straight form-urlencoded parse), so a guard here would be
-      // dead code describing a state that does not exist.
-      new URLSearchParams(window.location.hash.slice(1)).forEach((v, k) => {
-        if (!out.has(k)) out.set(k, v);
-      });
-    }
-    return out;
-  };
-  const LOAD_QUERY = loadParams();
-  // #3496: a provider round trip is evidenced only by PROVIDER-owned markers.
-  // `type` and `flow_id` are generic names a benign authorize GET can carry (the
-  // server ignores unknown params and `authorizeReturnTo` preserves the rest), so
-  // treating them as evidence told a first-time visitor who had done nothing that
-  // their sign-in failed. They stay in STRIP_PARAMS — stripping is cosmetic — and
-  // no longer make `present` true.
-  const TRANSIENT_MARKERS = ["code", "error", "error_code", "error_description",
-                             "error_uri", "sb_flow_id"];
-  const LOAD_TRANSIENT = {
-    present: TRANSIENT_MARKERS.some((k) => LOAD_QUERY.has(k)),
-    error_description: LOAD_QUERY.get("error_description"),
-  };
-  const MSG_BUDGET = 300;   // the bound, in chars INCLUDING the appended ellipsis
-  function boundedText(s, limit = MSG_BUDGET) {
-    if (!s) return "";
-    const t = String(s).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, " ");
-    return t.length > limit ? t.slice(0, Math.max(0, limit - 1)) + "\u2026" : t;
-  }
-  // #5734 (option B): the post-redirect terminal state names its CAUSE and its
-  // REMEDY, per cause, in page-scoped language. A provider-supplied description
-  // is appended inside whatever room the fixed copy leaves, so the rendered
-  // message still satisfies boundedText's bound (one over-long, attacker-
-  // controllable line is why the bound exists).
-  function terminalMessage() {
-    const err = LOAD_QUERY.get("error") || "";
-    const desc = LOAD_TRANSIENT.error_description;
-    let cause, remedy;
-    if (err === "access_denied") {
-      cause = "Sign-in was declined at the provider, so nothing was connected.";
-      remedy = "Retry to pick an account and approve the connection.";
-    } else if (err === "server_error" || err === "temporarily_unavailable") {
-      cause = "The provider reported a temporary failure during sign-in.";
-      remedy = "Retry in a moment.";
-    } else if (err === "login_required" || err === "consent_required"
-               || err === "interaction_required" || err === "account_selection_required") {
-      cause = "The provider needs you to sign in there again.";
-      remedy = "Retry and finish the provider's sign-in.";
-    } else if (err) {
-      cause = "The provider refused this sign-in request (" + boundedText(err, 60) + ").";
-      remedy = "Retry — and start again from your MCP client if it keeps failing.";
-    } else if (LOAD_QUERY.has("code")) {
-      // The library consumed a `?code` and no session landed. Gated on the code
-      // ACTUALLY being present — the branch below is reached for any other
-      // transient, where no code was ever received. The cause states what THIS
-      // CONDITION establishes (a code came back; no session was established) and
-      // not the mechanism: an exchange that completed can still leave no session
-      // when the write is refused, and that case carries its own copy from the
-      // write path (`writeRefused` keeps this branch off it).
-      cause = "This page could not finish the sign-in it had started (a code came back, "
-        + "but no session was established on this page).";
-      remedy = "Retry — and if this page has no writable site storage, allow storage for "
-        + "it and reload.";
-    } else {
-      // Some other transient returned with no provider error and no session — no
-      // code, so nothing was declined and nothing was exchanged.
-      cause = "This page could not finish the sign-in it had started (no session was "
-        + "established).";
-      remedy = "Retry, and start again from your MCP client if it keeps failing.";
-    }
-    let text = cause + " " + remedy;
-    if (text.length > MSG_BUDGET) text = boundedText(text, MSG_BUDGET);
-    if (desc) {
-      const room = MSG_BUDGET - text.length - 3;
-      if (room > 0) text += " (" + boundedText(desc, room) + ")";
-    }
-    return text;
-  }
-  function showRetrySignin() {
-    document.getElementById("btn-retry-signin").style.display = "block";
-  }
-  function hideRetrySignin() {
-    document.getElementById("btn-retry-signin").style.display = "none";
-  }
-  function showTerminalFallback() {
-    showSignin();
-    // #5734: `showError` itself yields to a pending refusal (see its comment), so
-    // this call is a no-op in that state — the refused-write copy names the REAL
-    // cause, and the generic `?code` branch would replace it with one its own
-    // condition cannot establish.
-    showError(terminalMessage());
-    showRetrySignin();
-  }
-  function sanitiseUrl() {
-    try {
-      const u = new URL(window.location.href);
-      STRIP_PARAMS.forEach((k) => u.searchParams.delete(k));
-      if (u.hash.length > 1) {
-        const raw = u.hash.slice(1);
-        // A param list: every `&`-separated part is `name=value` with a NON-EMPTY
-        // name that is not path/route shaped. Testing this by comparing
-        // `new URLSearchParams(raw).toString()` to `raw` is NOT the same test —
-        // that is byte-identity after NORMALISATION, which any value carrying an
-        // escaped character fails, so a provider `error_description` with a space
-        // (`boom%20boom`) took the left-alone branch and kept the transient on the
-        // URL, which is the one case this branch exists for. The NAME test also
-        // keeps `#/route/x?a=1` and `#settings?tab=x` out: both contain `=`, so a
-        // bare "has an `=`" test would re-serialise them to `%2Froute%2Fx%3Fa=1`.
-        // A fragment that is not a param list is left alone, transient included:
-        // that is cosmetic URL-bar residue, not page state (the page derives its
-        // own transient from `LOAD_QUERY`, captured before this runs).
-        const isParamList = raw.split("&").every((p) => {
-          const i = p.indexOf("=");
-          return i > 0 && /^[^/?:=]+$/.test(p.slice(0, i));
-        });
-        if (isParamList) {
-          const h = new URLSearchParams(raw);
-          STRIP_PARAMS.forEach((k) => h.delete(k));
-          const rest = h.toString();
-          u.hash = rest ? "#" + rest : "";
-        }
-      }
-      history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
-    } catch (e) { /* leave the URL alone */ }
-  }
+  // ── render, then run ─────────────────────────────────────────────────────
+  byId("client-line").textContent =
+      (PARAMS.client_name || PARAMS.client_id || "This client") +
+      " wants to access your Tortoise MCP surface.";
+  // ⛔ THE SCOPE THAT WILL BE BOUND, not the one the request happened to send. When an
+  // authorize URL omits `scope`, the code is minted with the CLIENT's registered scope
+  // (`body.get("scope") or client.get("scope") or "mcp"`), so rendering `"mcp"` showed
+  // a narrower scope than the visitor was granting — the consent screen under-stating
+  // what it authorizes. `resolved_scope` is stamped server-side (hosted_api
+  // `oauth_authorize`), and the raw value is kept as the fallback.
+  byId("scope-line").textContent = PARAMS.resolved_scope || PARAMS.scope || "mcp";
+  byId("resource-line").textContent = PARAMS.resource || "(the MCP server, no team declared)";
 
-  // #5734 (option C): probe at LOAD, so an incapable page explains itself and
-  // disables the provider buttons BEFORE the user takes a dead-end action. The
-  // probe is an affordance, never the boundary — signInWithProvider re-checks.
-  //
-  // The probe's documented residual (#3496 R3: "one `__tt_probe-*` entry per
-  // attempt") is a leak whose CARDINALITY this call site changes: `pkceIncapable()`
-  // mints a FRESH randomised sentinel per invocation and, on a store that accepts
-  // the write but cannot remove it, returns "no-store" leaving that sentinel
-  // behind. Probing at load therefore adds one 160-byte non-credential entry per
-  // page load (and one more per click and per retry), not "at most one" — there is
-  // no way to reach a previous probe's key to clean it. It is a sentinel, never a
-  // credential (the key deliberately lacks the `-code-verifier` suffix), it occurs
-  // only on a store that cannot clean itself, and the alternative is worse: a
-  // STABLE key shared across tabs lets one tab's removal make a non-removable
-  // store look removable to another, which is a fail-OPEN on the very check this
-  // probe performs. Recorded as a residual rather than silently bounded away.
-  renderCapability(pkceIncapable());
-
-  if (supabaseClient) {
-    supabaseClient.auth.onAuthStateChange(async (event) => {
-      if (event === "INITIAL_SESSION" || event === "SIGNED_IN") {
-        if (LOAD_TRANSIENT.present) {
-          const { data } = await supabaseClient.auth.getSession();
-          if (!data || !data.session) { showTerminalFallback(); sanitiseUrl(); return; }
-        }
-        runConsentFlow();
-      }
-    });
-    runConsentFlow();
-  } else spinner(false);
+  mint();
 </script>
 </body>
 </html>
@@ -3112,23 +2612,120 @@ def _json_for_script(obj) -> str:
             .replace("\u2029", "\\u2029"))
 
 
-def consent_page_html(*, client_name: str, scope: str | None,
-                      params: dict, supabase_url: str,
-                      supabase_anon_key: str) -> tuple[str, str]:
-    """Render the branded consent page (D2). ``params`` are the raw authorize
-    query params — JSON-encoded into the page so the JS echoes them back — plus
-    the server-built ``redirect_target`` (#3443), which is the ONLY value the
-    page navigates (see `redirectBack`); the raw ``redirect_uri`` stays in the
-    page only to be posted back to /oauth/consent for validation.
+# ── the page's wiring to the app-owned bridge (#3524 §9 step 4) ────────────
+# Every path/param name the PAGE needs, declared once on this side so the
+# template carries no literal of its own. The three that mirror the TypeScript
+# half are cross-checked by `tests/test_oauth_consent_page_step4.py`:
+# `CONSENT_ATTEMPT_KEY_PARAM` against `ATTEMPT_KEY_PARAM`
+# (functions/_shared/auth/consent-bridge.ts, the authority), and the two paths
+# against the route files that serve them. A name that drifts here does not
+# red a build — it makes every mint answer `403 no_authorize_attempt` AFTER the
+# visitor has approved, which is the exact class step 4 exists to remove.
+CONSENT_ATTEMPT_KEY_PARAM = "attempt_key"
+CONSENT_MINT_PATH = "/api/consent/token"
+CONSENT_START_PATH = "/api/consent/start"
+CONSENT_SIGNIN_PATH = "/auth"
+CONSENT_PREVIEW_PATH = "/oauth/consent/preview"
+#: The header the page presents its consent token in when it asks for the org
+#: preview. A HEADER, not a query parameter: the token is a bearer-equivalent
+#: assertion, and a query string lands in access logs, proxy logs and the
+#: `Referer` of anything the page loads next.
+CONSENT_TOKEN_HEADER = "X-Consent-Token"
 
-    Returns ``(html, csp_nonce)``. The nonce is embedded in both <script>
-    tags so the caller can serve a script-src CSP that still permits the
-    inline consent logic. Attacker-controlled values (state / scope /
-    resource / client_name) are JSON-escaped for the <script> context, so a
-    ``</script>`` payload cannot break out of the block (PR #1264 review P1).
-    Placeholder substitution is a SINGLE pass, so a param value that *contains*
-    a placeholder token is inserted verbatim rather than re-expanded (#6001 —
-    see the comment at the substitution site for the failure it prevents).
+
+def consent_app_origin() -> str | None:
+    """The session origin — where the mint lives, and where a cold browser is
+    sent to sign in. ``None`` when the binding is not an absolute http(s)
+    origin.
+
+    ⛔ ONE KNOB, ONE FALLBACK: this is `consent_token_issuer()`, not a second
+    setting. The mint stamps that value as the token's ``iss`` and the AS
+    verifies it byte-exactly, so the page MUST call the mint at the same origin
+    the issuer names — a separate ``APP_ORIGIN``-style knob could point the page
+    at one deployment while the verifier expects another, with every redemption
+    answering `401 invalid_token` and no other symptom (the rule
+    `token.ts::consentTokenIssuer` records on the minting side).
+
+    ``None`` is not "defensive padding": `new URL()`-equivalent parsing is what
+    separates "this deployment cannot mint" (a typed 503 the caller can report)
+    from a redirect to an unparseable string, which reaches the browser as a
+    navigation error with nothing naming the binding.
+
+    ⛔ THE PARSE IS TOTAL — it is a `try`, not a bare `urlsplit`. `urlsplit` does
+    not merely produce a useless result for every bad binding: it RAISES
+    ``ValueError`` for a bracketed netloc that is not terminated
+    (``https://[``, ``http://[::1``), so a one-character operator typo would
+    escape this function as a ``ValueError`` out of ``GET /oauth/authorize`` and
+    be answered by the app-level handler as a bare 500 — the exact #3026 class
+    the endpoint's own ``except Exception`` net exists to close, one line above
+    this call. Both TS halves of the same knob are already total:
+    `token.ts::originVerdict` and `start.ts::parseAsOrigin` parse inside a
+    ``try``/``catch`` and answer a typed ``503``. This is the third half, and the
+    fallback is the same ``None`` → typed 503 the documented branch already owns,
+    so an unparseable binding and an unusable one are ONE outcome.
+    """
+    from urllib.parse import urlsplit
+
+    from tortoise.consent_token import consent_token_issuer
+    try:
+        parts = urlsplit(consent_token_issuer())
+    except ValueError:      # unterminated '[' netloc — unparseable, not a crash
+        return None
+    if parts.scheme in ("http", "https") and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return None
+
+
+def consent_bounce_url(app_origin: str, raw_query: str) -> str:
+    """The app-owned sign-in leg for an authorize request this server will not
+    render: ``{app}/auth?next=/api/consent/start?{raw}``.
+
+    WHY THIS EXACT SHAPE
+    --------------------
+    * The AS holds NO credential it could read (the app's ``__Host-session`` is
+      host-only AND HttpOnly), so it cannot tell a signed-in visitor from a
+      cold one. Rather than guess, it hands the COMPLETE authorize request to
+      the one origin that can answer — and the visitor with a live session is
+      forwarded straight back by the sign-in page's own session probe, with no
+      interaction.
+    * ``/auth`` is `signup.html`, whose return-to is ALLOW-LIST ONLY
+      (``APP_RETURN_ROUTES``): a ``next`` naming anything else is silently
+      dropped and the visitor lands on the app root, losing the flow. The inner
+      target is therefore `/api/consent/start`, the ONE API path that list
+      admits — step 3 added it for exactly this return leg, and
+      `tests/test_oauth_consent_page_step4.py` runs the real allowlist over the
+      URL this function emits rather than asserting a string.
+    * ``raw_query`` is the request's RAW query string, re-encoded exactly once
+      here. Re-serialising parsed params would re-encode opaque values: `state`
+      and `redirect_uri` are compared byte-for-byte by the client, and a
+      `+`/`%2B`/`%20` normalisation at this hop is the silent
+      CSRF-mismatch-after-consent class the bridge refuses everywhere else.
+    """
+    inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
+    return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
+            + urlencode({"next": inner}))
+
+
+def consent_page_html(*, client_name: str, params: dict, raw_query: str,
+                      app_origin: str) -> tuple[str, str]:
+    """Render the branded consent page (D2, rewritten by #3524 §9 step 4).
+
+    The page holds NO credential and signs NOBODY in. ``params`` are the raw
+    authorize query params — JSON-encoded into the page so the JS presents them
+    verbatim — plus ``client_name`` and the server-built ``redirect_target``
+    (#3443), which is the ONLY value the page navigates (see `redirectBack`);
+    the raw ``redirect_uri`` stays in the page only to be posted back to
+    /oauth/consent for validation. ``raw_query`` builds the page's sign-in link
+    (``consent_bounce_url``) and ``app_origin`` the mint it calls.
+
+    Returns ``(html, csp_nonce)``. The nonce gates the single inline <script>,
+    so the caller can serve a script-src CSP that still permits the consent
+    logic. Attacker-controlled values (state / scope / resource / client_name)
+    are JSON-escaped for the <script> context, so a ``</script>`` payload cannot
+    break out of the block (PR #1264 review P1). Placeholder substitution is a
+    SINGLE pass, so a param value that *contains* a placeholder token is
+    inserted verbatim rather than re-expanded (#6001 — see the comment at the
+    substitution site for the failure it prevents).
     """
     safe_params = {
         k: (v if isinstance(v, str) else "")
@@ -3153,8 +2750,12 @@ def consent_page_html(*, client_name: str, scope: str | None,
     # one place to be declared.
     mapping = {
         "__PARAMS__": _json_for_script(safe_params),
-        "__SUPABASE_URL__": _json_for_script(supabase_url.rstrip("/")),
-        "__SUPABASE_ANON_KEY__": _json_for_script(supabase_anon_key),
+        "__MINT_URL__": _json_for_script(app_origin.rstrip("/") + CONSENT_MINT_PATH),
+        "__CONSENT_URL__": _json_for_script("/oauth/consent"),
+        "__PREVIEW_URL__": _json_for_script(CONSENT_PREVIEW_PATH),
+        "__CONSENT_TOKEN_HEADER__": _json_for_script(CONSENT_TOKEN_HEADER),
+        "__SIGNIN_URL__": _json_for_script(consent_bounce_url(app_origin, raw_query)),
+        "__ATTEMPT_KEY_PARAM__": _json_for_script(CONSENT_ATTEMPT_KEY_PARAM),
         "__NONCE__": nonce,
     }
     html = re.sub(
