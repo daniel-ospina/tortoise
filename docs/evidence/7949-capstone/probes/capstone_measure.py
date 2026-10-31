@@ -57,7 +57,7 @@ longer reports them as unobservable-by-construction.** Pre-seam, ``capture_sessi
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:9432-9438`` and
-``result["vet"]`` at ``:9426-9430``) while the meta fold dropped them with
+``result["vet"]`` at ``:9442-9446``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
 ``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14765``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
@@ -853,7 +853,7 @@ _IDLE_CITES: dict[str, str] = {
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
         "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:9056, the "
-        "flag; :9044, the early return; :9076, its vet surface), and each VET "
+        "flag; :9060, the early return; :9076, its vet surface), and each VET "
         "pass is gated on the LIST — `if vet_enabled and embed_list:` (:9151), "
         "`if vet_enabled and complete_list:` (:9273) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
@@ -891,9 +891,9 @@ def _pass_ran(block: dict) -> bool | None:
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
     pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:9056`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:8781``, whose
-    ``if not edus:`` early return (``:9046``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:9060``) — with the flag ON. The
+    ``edus = _edus_from_conversation(...)`` follows at ``:9059``, whose
+    ``if not edus:`` early return (``:9060``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:9076``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
     embed_list:`` (``:9151``) and ``if vet_enabled and complete_list:``
     (``:9273``). So a session whose conversation produced no list emits

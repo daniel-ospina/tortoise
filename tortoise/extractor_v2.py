@@ -3080,7 +3080,8 @@ def _identity_report(search: dict, candidates: dict) -> dict:
     (I1's create gate) has to act on. `operators` and `retractions` are counted
     but not attributed: both name OTHER items, so their identity is the identity
     of what they reference rather than of a query of their own — a stated limit,
-    not an oversight.
+    not an oversight. **"Candidate" is the RECORD-BEARING set** — `execute_embed`'s
+    dropped-whole shapes emit no record, so they are counted in neither number.
 
     I2's *"never silently"* is the whole point: nothing here drops or suppresses
     anything. It makes the run's own record say which part of what it committed
@@ -3093,21 +3094,20 @@ def _identity_report(search: dict, candidates: dict) -> dict:
     for section, leg in _failure_policy.LEG_BY_SECTION.items():
         items = [item for item in (candidates.get(section) or [])
                  if isinstance(item, dict)]
-        counts[section] = len(items)
         text_key = {"entities": "name", "events": "content", "points": "content"}[section]
+        emitted = _emitted_candidates(section, text_key, items)
+        counts[section] = len(emitted)
         missing = 0
-        for item in items:
+        for item in emitted:
             # ⛔ the SAME text the derivation used (`_candidate_query_text`), not
             # a second width applied to a differently-stripped string — that
             # drift is what made a ran query read as unrun (#5095 review B2).
             raw = _candidate_query_text(leg, str(item.get(text_key) or ""))
-            # ⛔ NO `continue` on empty text: `execute_embed` COERCES a non-string
-            # falsy (`None` / `0` / `False`) to its text and writes it ("None"),
-            # while the derivation skipped it as falsy — so such a candidate is
-            # committed and was never checked. Skipping it here reported the run
-            # `resolved` beside a record that says `found: null`, which is the
-            # contradiction this report exists to prevent (#5095 review B1). An
-            # empty-text candidate is UNRESOLVED, not exempt.
+            # ⛔ NO `continue` on a non-string falsy: `execute_embed` COERCES
+            # `None` / `0` / `False` to its text and writes it ("None"), while the
+            # derivation skipped it as falsy — so such a candidate IS committed
+            # and was never checked; skipping it reported the run `resolved`
+            # beside a record saying `found: null` (#5095 review B1).
             if not _candidate_covered(search, leg, raw):
                 missing += 1
         unresolved[section] = missing
@@ -9488,8 +9488,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         # the ones a query can establish or fail to. `operators` and `retractions`
         # name OTHER items and are reported as counts only, so folding them in
         # here would print a share over two different populations (#5095 review
-        # B4). And the set is the run's PROPOSED candidate list, before S5's own
-        # dedup drops any of it — the text says "candidate", never "committed".
+        # B4). And the set is the candidates S5 emits a RECORD for — one it
+        # drops whole or folds onto a survivor has none (`_emitted_candidates`).
         _denominator = sum(_id["candidates"].get(section, 0)
                            for section in _failure_policy.LEG_BY_SECTION)
         _reason = f" ({_id['reason']})" if _id["reason"] else ""
@@ -11212,3 +11212,61 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
         lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
     return "\n".join(lines)
+
+
+def _emitted_candidates(section: str, text_key: str,
+                        items: list[dict]) -> list[dict]:
+    """The candidates `execute_embed` will emit a RECORD for.
+
+    ⛔ Defined at the FOOT of this module on purpose: the doc cite sweeps pin
+    `extractor_v2.py:NNNN`, so an edit that adds lines here would move every
+    citation below it. The rule this helper implements is #5095 review r3.
+
+    The population is the RECORD-BEARING one, not the proposed list, and the
+    difference is a THIRD fact beside *checked* and *unchecked*: an item whose own
+    write text is empty, or a repeat of one `execute_embed` already folded onto
+    its survivor, is **never a candidate** — S5 drops it whole and emits no
+    ``link_before_create`` entry, so a report that counts it claims a record which
+    does not exist, and one empty-content point in ``complete_list`` was enough to
+    turn a fully-covered run into a warned ``partial`` one (`plan_identity`
+    elevates on any non-zero `unresolved`). The field converges on keeping the
+    state apart: HL7 FHIR's `data-absent-reason` separates ``unknown`` (*"expected
+    to exist but is not known"*) from ``not-applicable``.
+
+    The drop rules mirrored, from `execute_embed` itself:
+
+    * an entity whose stripped ``name`` is empty (``continue``, no record);
+    * an event/point whose stripped ``content`` is empty (— `_carry_fold_supersede`
+      plus ``continue``: the supersede ref is named, nothing else is);
+    * an intra-batch repeat — keyed on ``(name, kind)`` for entities and on
+      ``_norm(content)`` for events/points — which folds onto its survivor, so
+      the SURVIVOR is the one that carries the record.
+
+    ``str(item.get(...))`` and **not** ``str(item.get(...) or "")``: that is
+    `execute_embed`'s own expression, and the difference is load-bearing — a
+    ``None`` name coerces to ``"None"`` and IS written (#5060), so it stays a
+    candidate (and a genuinely unchecked one: no query was ever derived from it),
+    while an empty or whitespace-only one is dropped whole. The coverage question
+    below still asks with the ``or ""`` form, which is what keeps "a candidate
+    with no searchable text was never tested" true by construction.
+
+    Residual, stated: two entity entries whose DIFFERENT raw ``kind`` values both
+    repair to the same fallback fold in S5 but not here, so the denominator can
+    over-count by one such pair. It never moves the numerator.
+    """
+    emitted: list[dict] = []
+    seen: set[tuple] = set()
+    for item in items:
+        write_text = str(item.get(text_key, "")).strip()
+        if not write_text:
+            continue
+        if section == "entities":
+            fold: tuple = (write_text,
+                           str(item.get("kind", "")).strip() or "core:other")
+        else:
+            fold = (_norm(write_text[:_MAX_CONTENT]),)
+        if fold in seen:
+            continue
+        seen.add(fold)
+        emitted.append(item)
+    return emitted

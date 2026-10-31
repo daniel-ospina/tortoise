@@ -532,6 +532,89 @@ class TestTheReportCannotContradictItself:
         assert partial_zero["unresolved_total"] == 0
 
 
+class TestThePopulationIsTheOneWithRecords:
+    """*(review r3)* The report's numbers must describe items that HAVE a record.
+
+    `execute_embed` drops some proposed candidates WHOLE — an entity with no
+    name, an event/point with no content, an intra-batch repeat folded onto its
+    survivor — and emits no `link_before_create` entry for them. Counting those
+    as candidates made the run's warning say *"their record says UNRESOLVED"*
+    about an item with no record, and a single empty-content point was enough to
+    elevate a fully-covered run to `partial`. *Never a candidate* is a third
+    fact beside *checked* and *unchecked* — HL7 FHIR's `data-absent-reason`
+    keeps it apart as `not-applicable` vs `unknown`.
+
+    Each test below asserts the report AND the premise (the write path really
+    emits no record), so it cannot pass by the report drifting away from S5.
+    """
+
+    def test_a_dropped_whole_candidate_is_in_NEITHER_number(self):
+        dropped = {
+            "entities": [{"name": ""}, {"name": "   "}],
+            "events": [{"content": ""}],
+            "points": [{"content": ""}, {"content": " \n\t "}],
+        }
+        report = v2._identity_report(_search(), dropped)
+        assert report["candidates"] == {"entities": 0, "events": 0, "points": 0,
+                                        "operators": 0, "retractions": 0}, report
+        assert report["unresolved_total"] == 0, report
+        assert report["state"] == fp.LOOKUP_RESOLVED, (
+            "an empty-content point can never be committed, so a fully-covered "
+            "run must not read `partial` because of one")
+        # The premise, from the write path itself: nothing is recorded for these.
+        result = v2.execute_embed(
+            {"entities": [{"name": ""}, {"name": "   "}],
+             "events": [{"content": ""}],
+             "points": [{"content": ""}, {"content": " \n\t "}],
+             "operators": [], "chain_notes": [], "link_before_create": []},
+            _search(), session_id="s1")
+        assert result["link_before_create"] == [], result["link_before_create"]
+
+    def test_a_coerced_None_is_STILL_a_candidate_the_report_owes_an_answer(self):
+        """The discriminator, pinned so the fix cannot over-reach: `str(None)`
+        is `'None'`, which `execute_embed` WRITES (`#5060`), so it stays counted
+        and stays unresolved — dropping it here re-opens review B1."""
+        report = v2._identity_report(
+            _search(), {"points": [{"content": None, "pointKind": "statement"}]})
+        assert report["candidates"]["points"] == 1, report
+        assert report["unresolved"]["points"] == 1, report
+
+    def test_an_intra_batch_duplicate_counts_once_and_has_one_record(self):
+        dup = [{"content": "the budget is 40k", "pointKind": "statement"}] * 2
+        search = _search(query_results={"ran": [], "failed": []})
+        report = v2._identity_report(search, {"points": dup})
+        assert report["candidates"]["points"] == 1, (
+            "the second occurrence is folded onto its survivor and emits no "
+            "record — counting it claims a record that does not exist")
+        assert report["unresolved"]["points"] == 1, report
+        result = v2.execute_embed(
+            {"entities": [], "events": [], "operators": [], "chain_notes": [],
+             "points": [dict(p) for p in dup]}, search, session_id="s1")
+        point_recs = [r for r in result["link_before_create"]
+                      if str(r["searched_for"]).startswith("point ")]
+        assert len(point_recs) == 1, point_recs
+
+    def test_the_warning_numerator_is_a_subset_of_the_records_the_run_emits(self):
+        """End to end on `execute_embed`'s real output: every candidate the
+        report calls UNRESOLVED must own a record saying so."""
+        embed = {
+            "entities": [{"name": "ACME Corp", "kind": "core:org"}, {"name": ""}],
+            "events": [{"content": ""}],
+            "points": [{"content": "", "pointKind": "statement"},
+                       {"content": "the budget is 40k", "pointKind": "statement"}],
+            "operators": [], "chain_notes": [], "link_before_create": [],
+        }
+        search = _search(query_results={"ran": [], "failed": []})
+        result = v2.execute_embed(embed, search, session_id="s1")
+        report = v2._identity_report(search, embed)
+        records = result["link_before_create"]
+        assert len(records) == sum(report["candidates"][s]
+                                   for s in fp.LEG_BY_SECTION), (
+            "each counted candidate must own exactly one record")
+        assert report["unresolved_total"] == sum(
+            1 for r in records if r["found"] is None), report
+
+
 # ── 9. the record the caller keeps ─────────────────────────────────────────
 
 _EMBED = {
