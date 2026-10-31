@@ -370,12 +370,11 @@ closed at both layers:
   > cut read "not addressable by `id`" as "not addressable" and declined the descriptor, which left the edge
   > moved live and absent from BOTH rebuilds. ❌ Membership of the derivable set is not what decides whether a
   > rel is journalled (`STRUCTURAL_REPOINT_RELS` is). ⛔ TWO boundaries remain, both stated: (i) a target whose
-> identity property is ABSENT — an `Event` the journal never gave an `eventId` — gets NO descriptor (it is
-> never half-journaled), so live still MOVES that edge while **both** rebuild routes hold nothing; and (ii)
-> the PRE-FIX JOURNAL: a
-  > supersede journaled before #9836
-  > carries no descriptor for these two rels, so on that journal the record keeps the row at the pre-supersede point
-  > while live moved the edge to the successor (a rebuild does not repair historical graphs).
+  > identity property is ABSENT — an `Event` the journal never gave an `eventId` — gets NO descriptor (it is
+  > never half-journaled), so live still MOVES that edge while **both** rebuild routes hold nothing; and (ii)
+  > the PRE-FIX JOURNAL: a supersede journaled before #9836 carries no descriptor for these two rels, so on
+  > that journal the record keeps the row at the pre-supersede point while live moved the edge to the successor
+  > (a rebuild does not repair historical graphs).
   > (c) **CLOSED by #9836 review round 2** — the NO-SELF-EDGE guard (the target IS the successor) now emits its
   > `delete_only` descriptor for the ID-ADDRESSED family too. On the GRAPH the delete-leg is a constrained no-op
   > for these rels (nothing re-creates the old-side edge); it is the RECORD that needed it — its
