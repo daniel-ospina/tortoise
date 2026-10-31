@@ -1212,6 +1212,36 @@ def _graph_namespace_for(cp, org_id: str, graph_id: str | None,
     return rows[0]["namespace"] if rows else None
 
 
+def default_graph_row_for(cp, org_id: str) -> dict | None:
+    """The org's CURRENT default ``public.graphs`` row — ``id`` AND ``namespace``.
+
+    THE single read for "which graph is the org's default": the predicate of
+    :func:`default_graph_id_for` (``kind='default' AND status='active'``),
+    selecting both columns a caller can need, because the two questions — "which
+    graph do I OPEN" (the namespace) and "which graph do I FILE UNDER" (the id)
+    — are answers about one row. Two reads would be two instants, and a
+    ``promote_default_graph`` commit landing between them makes a lane open the
+    DEMOTED namespace while filing every record row under the PROMOTED graph:
+    the ``derived != measured`` split #10025 exists to remove, re-created by the
+    verb #10180 adds. Callers that need both take them from ONE row here.
+
+    ``None`` on no row, and ``None`` on a read failure — fail-closed, so a
+    caller that could not read the row names no tenant rather than guessing one.
+    """
+    try:
+        rows = cp.query(
+            "graphs", select=["id", "namespace"],
+            filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
+                     ("status", "eq", "active")],
+        )
+    except Exception as e:
+        _logger.warning(
+            "graphs default-row read failed — the record tenant stays unnamed "
+            "(fail-closed; migration 20261028000001 applied?): %s", e)
+        return None
+    return dict(rows[0]) if rows else None
+
+
 def default_graph_id_for(cp, org_id: str) -> str | None:
     """The org's CURRENT default graph's stable id (#10025), or None (fail-closed).
 
@@ -1245,18 +1275,8 @@ def default_graph_id_for(cp, org_id: str) -> str | None:
     WHICH row carries it, and an absent row still returns None so the record
     keeps refusing rather than guessing.
     """
-    try:
-        rows = cp.query(
-            "graphs", select=["id"],
-            filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
-                     ("status", "eq", "active")],
-        )
-    except Exception as e:
-        _logger.warning(
-            "graphs default-row read failed — the record tenant stays unnamed "
-            "(fail-closed; migration 20261028000001 applied?): %s", e)
-        return None
-    return rows[0]["id"] if rows else None
+    row = default_graph_row_for(cp, org_id)
+    return row["id"] if row else None
 
 
 def default_graph_id_for_credential(cp, org_id: str,
