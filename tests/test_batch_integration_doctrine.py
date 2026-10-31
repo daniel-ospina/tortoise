@@ -279,7 +279,7 @@ or facts that were false against the tree they describe:
   now the halt it actually has, and the guard refuses it.
 * **the ``pinned-base:`` carrier had readers, a halt and NO producer.** Landing read the line out of
   the batch PR body and halted when it was absent, and ``:313`` told the operator to record it — but
-  no fence ever PRINTED it (five ``printf``s, the pin not among them). Landing is a different
+  no fence ever PRINTED it: its `printf`s carried other values. Landing is a different
   shell/actor, so the value is not in scope when the body is written, and the only re-derivation the
   document left reachable is ``git rev-parse origin/main``: current ``main``, which turns the
   document's "only mechanical enforcement of the invariant" into ``[ "$(git rev-parse origin/main)"
@@ -3328,9 +3328,9 @@ def test_every_carrier_line_the_doctrine_reads_back_is_printed_by_a_fence() -> N
 
     ``:313`` told the operator to *"Record `$PINNED` too — in the batch PR body, as a
     `pinned-base: <sha>` line"*, and Landing halts when the line is absent. **No fence ever PRINTED
-    it**: `grep -n '^printf' docs/ops/batch-integration.md` found five `printf`s and the pin was not
-    one of them. Landing is explicitly a different shell/actor, so the value is not in scope when
-    the body is written — and the only re-derivation the document leaves reachable is
+    it**: `grep -n '^printf' docs/ops/batch-integration.md` matched no `printf` of the pin. Landing
+    is explicitly a different shell/actor, so the value is not in scope when the body is written —
+    and the only re-derivation the document leaves reachable is
     ``git rev-parse origin/main``, which at body-writing time is CURRENT ``main``. Feed that in and
     the landing assertion becomes ``[ "$(git rev-parse origin/main)" = "$(git rev-parse
     origin/main)" ]``: always true, on a moved base, with every other check in the Landing section
