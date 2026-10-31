@@ -813,6 +813,30 @@ class FileHistory:
     pr_leg_runs_unread: int = 0
     push_leg_runs_unread: int = 0
 
+    def _pr_head_gap(self) -> str | None:
+        """Which shape leaves the PR-head side unmeasured, or ``None`` when it is measured.
+
+        ⛔ `unknowns` is NOT where a PR-head gap usually lands: only a RED leg creates an
+        `Unknown`, while a GREEN PR leg whose artifact could not be read increments a
+        counter and nothing ever turns that counter into an unknown. Reading only the
+        unknowns therefore minted `CATCH_PUSH_ONLY` on the DOCUMENTED common live shape —
+        "the leg ran green, its artifact expired past retention" — i.e. an exclusive claim
+        about PR heads from a sample in which that side was never read. The label is the
+        bucket a `slow_files` reopen argues from, so it must not outrank a read gap.
+
+        Only the READ gap is treated as a gap here. `*_unattested` is a MEASUREMENT (the
+        leg ran, its artifact was read, and it named other files — the diff-scoped
+        selection), which the row's own UNKNOWN reason already reports as its own fact.
+        """
+        if any(u.kind == "pr-head" for u in self.unknowns):
+            return "a recorded PR-head UNKNOWN"
+        if self.pr_leg_runs_unread:
+            return (
+                f"its PR leg ran {self.pr_leg_runs_unread} time(s) and the artifact could "
+                f"not be READ"
+            )
+        return None
+
     @property
     def status(self) -> str:
         # Evidence wins over the lane: a red recorded before a re-cut still counts.
@@ -826,7 +850,7 @@ class FileHistory:
             # negative about a PR head) — and the label is the bucket a `slow_files` reopen
             # argues from, so it must not outrank a gap. A push-main gap does not bind here:
             # the claim is about PR heads.
-            if not any(u.kind == "pr-head" for u in self.unknowns):
+            if not self._pr_head_gap():
                 return CATCH_PUSH_ONLY
             return UNKNOWN
         if self.unknowns:
@@ -920,9 +944,9 @@ class FileHistory:
             # The exclusive label was withheld, so say what the row DOES know: the catch on
             # main is real and still cited; what the sample cannot support is "ONLY on main".
             return (
-                f"catches on {len(self.push_catches)} main push run(s), but a PR-head gap (see "
-                f'the UNKNOWN reasons) leaves the PR-head side unmeasured — "only on main" is '
-                f"an exclusive claim this sample cannot support, so it is withheld"
+                f"catches on {len(self.push_catches)} main push run(s), but a PR-head gap "
+                f"({self._pr_head_gap()}) leaves the PR-head side unmeasured — 'only on "
+                f"main' is an exclusive claim this sample cannot support, so it is withheld"
             )
         if self.status == UNKNOWN and self.lane == LANE_ORPHAN:
             return (
@@ -2364,6 +2388,11 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
         # ⛔ "attested" is per FILE (the artifact named it), never "its leg ran": the legs
         # are diff-SCOPED on tier-2, so the leg column counts runs that did NOT touch it.
         unattested = row.get("pr_leg_runs_unattested", 0) + row.get("push_leg_runs_unattested", 0)
+        # This column is "how many runs measured this file and did not name it", and a run
+        # whose artifact could not be READ is one of those — the same gap, a different cause.
+        # It used to omit `*_unread` entirely, so a PR-head READ gap was invisible in the
+        # deliverable's own table, which then printed `CATCH-PUSH-ONLY | 0 | 0 |`.
+        gap = unattested + row.get("pr_leg_runs_unread", 0) + row.get("push_leg_runs_unread", 0)
         # One cell per TABLE_COLUMNS entry, in the same order — a column added above with
         # no cell here would be a short row, which MD056 reds and GFM renders off-line.
         cells = [
@@ -2372,7 +2401,7 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
             row.get("lane", "-"),
             row.get("pr_runs_attested", 0),
             row.get("push_runs_attested", 0),
-            unattested,
+            gap,
             prs,
             pushes,
             cleared,
@@ -2537,14 +2566,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"ci_catch_history: could not read a surface: {exc}", file=sys.stderr)
         return 2
 
-    if args.json_out:
-        Path(args.json_out).write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    try:
+        if args.json_out:
+            Path(args.json_out).write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        if args.md_out:
+            # ⛔ The COMMITTED deliverable, so it carries its own window and method — a table
+            # lifted out of context is the shape #10131's acceptance forbids.
+            Path(args.md_out).write_text(render_report(report) + "\n", encoding="utf-8")
+    except OSError as exc:
+        # ⛔ The `except OSError` above covers the READS. These two WRITES sat after it, so a
+        # missing parent directory, a permission error or a read-only mount escaped as an
+        # uncaught traceback with exit 1 — outside the documented "0 the report was produced
+        # · 2 it could not be" — and it fired AFTER a walk that may have cost ~1500 s, on the
+        # one artifact the run existed to produce.
+        print(
+            f"ci_catch_history: could not write {exc.filename or 'the report'}: {exc}",
+            file=sys.stderr,
         )
-    if args.md_out:
-        # ⛔ The COMMITTED deliverable, so it carries its own window and method — a table
-        # lifted out of context is the shape #10131's acceptance forbids.
-        Path(args.md_out).write_text(render_report(report) + "\n", encoding="utf-8")
+        return 2
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     elif args.summary:

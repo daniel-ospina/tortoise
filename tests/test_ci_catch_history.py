@@ -60,9 +60,12 @@ properties. Each has a test here that FAILS when the property is broken:
     main", which a recorded PR-head gap cannot support (the same asymmetry `NEVER` forbids for
     a push attestation), and an artifact that was downloaded and opened as a valid zip cannot
     be reported as "expired or never produced".
-    `test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main` and
+    `test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main`,
+    `test_a_green_pr_leg_with_an_unreadable_artifact_withholds_only_on_main` and
     `test_a_zip_that_lacks_the_members_is_a_READ_gap_not_an_expired_artifact` fail if either
-    reading returns.
+    reading returns. ⛔ The second one is the shape the first does NOT cover: only a RED leg
+    creates an `Unknown`, so a GREEN PR leg whose artifact expired stated the exclusive claim
+    while its PR-head side had never been read — the documented common shape live.
 12. **A bound (or transport) failure while LISTING cuts the SAMPLE, never the REPORT** —
     `list_runs` re-raises a page-1 failure, and that error reached `main`, which exited 2
     before writing `--json-out`/`--md-out`: the one state `--max-seconds` exists for produced
@@ -76,7 +79,12 @@ properties. Each has a test here that FAILS when the property is broken:
     (that last one was the only unguarded raise, so a malformed page 2 discarded a walk that
     an empty page 2 merely truncated). Page 1 is the exception for all four: nothing was
     read, so the population is unusable and `main` must exit 2.
-13. **An artifact is identified by `(run_id, name)`, never by name alone** — the live listing is
+13. **Both artifacts are WRITTEN inside the documented-exit handler** — `--json-out` and
+    `--md-out` are the reason the walk runs, and they sat outside the `except OSError` that
+    covers the reads, so an unwritable path exited 1 as a traceback after a ~1500 s walk
+    instead of the documented 2. `test_an_unwritable_output_path_is_the_documented_exit_2_not_a_traceback`
+    fails if the writes leave it.
+14. **An artifact is identified by `(run_id, name)`, never by name alone** — the live listing is
     run-scoped and every run of a leg uploads the SAME name
     (`pytest-log-<job>-<leg>`), so a name-only key is ambiguous in any archive holding two
     runs of a leg — which is every real one. The offline reader dropped the run scope and
@@ -1020,6 +1028,51 @@ def test_a_green_leg_with_no_artifact_attests_nothing(tmp_path):
 
 
 # --- 6. a red a re-run cleared is inside a GREEN run ------------------------
+
+
+def test_a_green_pr_leg_with_an_unreadable_artifact_withholds_only_on_main(tmp_path):
+    """`CATCH-PUSH-ONLY` is EXCLUSIVE, and the common live read gap was not a gap to it.
+
+    ⛔ `status` consulted `unknowns` only, but only a RED leg creates an `Unknown`: a GREEN
+    PR leg whose artifact expired increments `pr_leg_runs_unread` and nothing turns that into
+    an unknown. So the DOCUMENTED common shape ("the leg ran green, its artifact expired past
+    retention") printed "only on main" — an exclusive claim about PR heads from a sample in
+    which that side was never read, in the one bucket a `slow_files` reopen argues from. The
+    table's own gap cell omitted `*_unread` too, so the deliverable showed `| 0 |`.
+    """
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    name = catch.artifact_name(family, leg)
+    a_path = catch.to_observed("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[
+            _run(RUN_PUSH, SHA, "push"),
+            _run(RUN_PR, SHA, "pull_request", pr=78, conclusion="success"),
+        ],
+        jobs={
+            RUN_PUSH: [_check(100, RUN_PUSH, job, "failure")],
+            RUN_PR: [_check(200, RUN_PR, job, "success")],
+        },
+        # The PR leg RAN GREEN and its artifact is gone — the shape the module documents as
+        # the common one live. Only the push run's artifact survives.
+        artifacts={(RUN_PUSH, name): _zip(_junit([(a_path, "t", True)]))},
+    )
+    report = _report(root)
+    row = _row(report, a_path)
+
+    assert row["pr_leg_runs_unread"] == 1
+    assert row["status"] == catch.UNKNOWN, row["status"]
+    assert [c["run_id"] for c in row["push_main_catches"]] == [str(RUN_PUSH)], (
+        "the main catch is still cited — only the exclusive WORDING is withheld"
+    )
+    assert "could not be READ" in (row["note"] or "")
+    assert report["coverage"]["status_" + catch.CATCH_PUSH_ONLY] == 0
+
+    # And the read gap is legible in the deliverable's own gap column, not only in the JSON.
+    table = catch.render_table(report)
+    rendered = next(line for line in table.splitlines() if f"`{row['file']}`" in line)
+    assert "| 1 |" in rendered, rendered
 
 
 def test_a_red_cleared_by_a_rerun_is_visible_because_green_runs_are_read(tmp_path):
@@ -2099,6 +2152,47 @@ def test_an_unorderable_red_is_carried_as_superseded_never_as_cleared():
 
 
 # --- 13. the lane split is DERIVED, not a constant --------------------------
+
+
+def test_a_cancelled_RUN_still_cites_the_red_its_leg_completed(tmp_path):
+    """A cancelled RUN is not a cancelled JOB: a run cancelled after a leg finished RED is a catch.
+
+    ⛔ The CANCELLED population exists for exactly this (a run's conclusion is its newest
+    attempt's), and the body claims a test pins it — but no fixture had a run with
+    `conclusion="cancelled"`, so `OfflineClient.list_runs` filtered the population to nothing
+    and inserting `if ref.conclusion == "cancelled": continue` in the detail loop left the
+    whole suite green. The naive reading the body says was corrected was therefore unpinned.
+    """
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    a_path = catch.to_observed("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=79, conclusion="cancelled")],
+        jobs={RUN_PR: [_check(100, RUN_PR, job, "failure")]},
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(_junit([(a_path, "t", True)]))
+        },
+    )
+    row = _row(_report(root), a_path)
+    assert row["status"] == catch.CATCH_PR, row["status"]
+    assert [c["run_id"] for c in row["pr_head_catches"]] == [str(RUN_PR)]
+
+
+def test_an_unwritable_output_path_is_the_documented_exit_2_not_a_traceback(tmp_path, capsys):
+    """The `except OSError` covers the READS; the two WRITES sat outside it.
+
+    ⛔ A missing parent directory (or a permission error, or a read-only mount) escaped as an
+    uncaught traceback with exit 1 — outside the module's documented "0 the report was
+    produced · 2 it could not be" — and it fired AFTER a walk that may have cost ~1500 s, on
+    the one artifact the run existed to produce.
+    """
+    root = _world(tmp_path, runs=[])
+    missing = tmp_path / "no-such-directory" / "report.md"
+    code = catch.main(["--offline-dir", str(root), "--md-out", str(missing)])
+    assert code == 2, f"documented exit 2, not an uncaught traceback (got {code})"
+    err = capsys.readouterr().err
+    assert "could not write" in err and "report.md" in err
 
 
 def test_the_lane_split_follows_ci_selection_instead_of_a_constant(tmp_path, monkeypatch):
