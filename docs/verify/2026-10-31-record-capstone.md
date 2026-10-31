@@ -191,7 +191,7 @@ scenario-A pass with a role control, not a falsifier battery). Everything below 
 |---|---|
 | **D2** one `SessionRecorded` journal record produces exactly one `session` row; `record_write_failures` delta 0 | **measured green, falsifier NOT observed** — Arm B `session` 0→1, failures `{}` → `{}`; Arm B′ 1→2, failures `{}` → `{}`. Falsifier (reintroduce #9264 → `DatatypeMismatch` + `write_failed`) not run |
 | **D3** (the issue's text) *"No write path bypasses the record — assert the capture writes journal → record → cache in that order, with no cache-only path"*, falsifier: *inject a cache write that skips the record → D3 must red* | **NOT MEASURED as written** — no ordering assertion was made. What Arms A/B measure is a *different* property: the capture's store choice follows the record's capability, and a refused record falls back to the graph **loudly** (refusal text + `write_failed` counter) rather than dropping the transcript. That is the #10000 fallback, not D3's falsifier |
-| **D7** the narrative and the raw turn text come back from the record | **half, falsifier NOT observed** — both tiers are present and readable in the record, through the app role and the RLS boundary; "and nowhere else" fails on the narrative (§4.1). Falsifier (revert #9555 → the fetch must fail) not run |
+| **D7** the narrative and the raw turn text come back from the record | **half, falsifier NOT observed** — both tiers are present and readable in the record, through the app role and the RLS boundary; "and nowhere else" fails on the narrative (**§4**, item 1). Falsifier (revert #9555 → the fetch must fail) not run |
 | D1, D4–D6, D8–D12 | **NOT MEASURED here** — different scenarios (arm/replay/backup/tenancy/quota) and, for D11–D12, #9559 is still `FOLLOW` |
 
 Nothing is claimed about a *production* capture: no production credential exists on this box, so
@@ -218,10 +218,13 @@ record), but read the result as **SQL**, not through the SDK reader: the evidenc
 `tortoise_record_app` inside the RLS boundary (`R2` above). ⛔ So this run proves the **write path and
 the record contents**, and it does **not** exercise `record_read.session_text(...).narrative`
 (`tortoise/record_read.py:1029`) — that
-reader leg is still unexercised, and the prior artifact's `narrative=None` was a *reader* output, not a
-missing row. The narrative went from "not measured" to **a 129 B row in `public.session_narrative`**,
-written by the carrier (`sdk._emit_event("SessionNarrated")`) from the commit path itself and visible
-through the app role's RLS boundary. So the composite D7 now reads:
+reader leg is still unexercised **on a record that holds a narrative**: the prior run's `narrative=None`
+was that reader executing against a row whose text column was NULL (the carrier did not exist yet), not a
+row that existed and was silently dropped. This run proves the row is now written with its 129 B of
+text; it does **not** prove that `record_read.session_text` maps that text back — i.e. the "reader returns
+None for a row that holds the narrative" failure class is **neither tested nor ruled out here**. The row
+itself is written by the carrier (`sdk._emit_event("SessionNarrated")`) from the commit path and is
+visible through the app role's RLS boundary. So the composite D7 now reads:
 **both prose tiers land in the record and are readable from it as the app role, and the turn TIER is
 absent from the graph — while the PROSE is still reachable from two nodes, and the SDK reader leg is
 still unexercised.** No measurement the 2026-10-26 artifact already
