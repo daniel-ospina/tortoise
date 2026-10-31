@@ -18,9 +18,11 @@ provider keys (never exercised in CI).
 """
 from __future__ import annotations
 
+import io
 import itertools
 import json
 import sys
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -5133,16 +5135,17 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # this module exists to remove. #4821 review P2.
     #
     # ``match=`` is load-bearing (#4821 review P3): the pre-fix signature took
-    # no ``measured`` at all (`origin/main`'s `_print_winner(winner, *,
-    # ingest_mode, context_cap)`), so this call raised `unexpected keyword
-    # argument 'measured'` — NOT a missing required argument. A bare
+    # no ``measured`` at all (fixed anchor: `48d745f2e` — the commit this PR
+    # branched from — whose `_print_winner` is `(winner, *, ingest_mode,
+    # context_cap)`; do NOT cite `origin/main`, which moved the moment this
+    # work landed and now carries `measured`), so this call raised `unexpected
+    # keyword argument 'measured'` — NOT a missing required argument. A bare
     # ``pytest.raises(TypeError)`` was satisfied by that incompatible call, so
     # the arm could not tell the required-argument contract from a
     # signature that merely does not accept the keyword. The earlier comment
     # claimed the pre-fix signature "defaulted `measured=True` and printed
-    # SELECTED"; that default never existed on main or on this branch, and the
-    # assertion is now tied to the wording only the required-argument shape
-    # produces.
+    # SELECTED"; that default never existed at any commit, and the assertion is
+    # now tied to the wording only the required-argument shape produces.
     with pytest.raises(TypeError, match=r"required keyword-only argument.*measured"):
         sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
                           "context_tokens_mean": 10.0},
@@ -5223,6 +5226,28 @@ def _option_help_block(help_text, flag):
     return " ".join(" ".join(block).split())
 
 
+def _comment_blocks(source):
+    """The comment text of `source`, de-wrapped and grouped into CONTIGUOUS
+    blocks.
+
+    A claim split across a line wrap (`… (fully` / `# offline; …`) is one
+    sentence in the code, so it must be one string here — otherwise a
+    substring pin silently misses the very claim it was added for (#10348
+    review-2 P2). Blocks break at any row gap, so two unrelated comments are
+    never glued into a sentence that exists nowhere."""
+    blocks, rows = [], []
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type != tokenize.COMMENT:
+            continue
+        if rows and tok.start[0] != rows[-1][0] + 1:
+            blocks.append(" ".join(text for _, text in rows))
+            rows = []
+        rows.append((tok.start[0], " ".join(tok.string.lstrip("#").split())))
+    if rows:
+        blocks.append(" ".join(text for _, text in rows))
+    return blocks
+
+
 def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys,
                                                                   monkeypatch):
     """#4821 (`--mock` contract): since the sweep gates the dense leg BEFORE the
@@ -5233,12 +5258,13 @@ def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys,
     false; `--help` is the surface an operator consults first, and the module
     docstring is where this PR moved the sweep's contract. The **inline
     comment** beside the ingest default carried the same claim and is scanned
-    too — a docs-only pin left it standing.
+    too (as COMMENT TOKENS, so a line-wrapped claim is still seen) — a
+    docs-only pin left it standing.
 
     Non-vacuity: on the pre-fix strings (the phrase in the docstring, in
-    `--help`, or anywhere in the module source, and no waiver sentence) every
+    `--help`, or in any `--mock` comment, and no waiver sentence) every
     assertion below reds — the docstring paragraph, the `--mock` help block,
-    and the module source each still carry the claim. `--skip-preflight` is
+    and the module's `--mock` comments each still carry the claim. `--skip-preflight` is
     asserted
     inside the `--mock` block, not merely anywhere in `--help`, where its own
     option would satisfy it for free."""
@@ -5255,15 +5281,25 @@ def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys,
 
     # The false claim ALSO lived in `main()` as an inline comment beside the
     # ingest default — a surface neither the docstring nor `--help` can see, so
-    # the head commit's docs-only pin would have left it standing (#10348
-    # review P2). Scan this module's own source so all three surfaces are
-    # covered and the comment cannot drift back. Keep this module free of the
-    # pre-fix phrase "fully offline"; quote it nowhere but in a negation you
-    # deliberately rewrite.
+    # the docs-only pin would have left it standing (#10348 review P2).
+    #
+    # A COMMENT scan, not a source substring scan: the pre-fix comment was
+    # line-WRAPPED (`… (fully` / `# offline; …`), so the contiguous phrase
+    # never appeared in it and a flat `"fully offline" not in source` stayed
+    # GREEN on a byte-for-byte revert of that comment — measured (#10348
+    # review-2 P2). Joining this module's COMMENT tokens stitches the wrap, so
+    # the claim is seen however it is wrapped. Scoped to the comments that
+    # mention the flag, so prose elsewhere in the module is not a false red.
     source = Path(sg.__file__).read_text(encoding="utf-8")
-    assert "fully offline" not in source, (
-        "an inline comment/docstring still promises a fully-offline mock run, "
+    mock_comments = [block for block in _comment_blocks(source)
+                     if "--mock" in block.lower()]
+    assert mock_comments, "no `--mock` comment found — re-anchor this test"
+    joined = " ".join(mock_comments)
+    assert "fully offline" not in joined, (
+        "an inline `--mock` comment still promises a fully-offline mock run, "
         "which the dense-leg gate makes false")
+    assert "does NOT waive the dense-leg gate" in joined, (
+        "no inline `--mock` comment says the gate survives the mock run")
 
     with pytest.raises(SystemExit) as ei:
         # argparse wraps to the AMBIENT terminal width and, below ~20 columns,
