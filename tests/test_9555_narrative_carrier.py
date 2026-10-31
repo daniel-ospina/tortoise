@@ -1433,6 +1433,7 @@ def test_section_9_1b_names_the_event_routes_it_counts():
 
     assert "#10429" in residual, (
         "§9.1(b) no longer names the one route the enumeration does NOT reach "
-        "(the `:Point` passthrough). Without it the passage reads as a complete "
-        "closure while `create_point(..., story_arc=…)` still lands the prose "
-        "on a `:Point` — the same class of claim the last review red-ed")
+        "(the `:Point` passthrough). Its LIVE doors are refused at the SDK door "
+        "(`#10389`), but `_upsert_point_props` still replays the key — so the "
+        "passage would read as a complete closure while a rebuild of a legacy "
+        "journal still materialises the prose on a `:Point` (#10429)")
