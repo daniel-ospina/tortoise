@@ -110,6 +110,32 @@ _PINNED_MAIN_ASSERTION = re.compile(
 #: Commands that move HEAD onto a ref — what Phase 1 must do before its suite run.
 _MOVES_HEAD = re.compile(r"\bgit\s+(?:switch|checkout)\b")
 
+
+def _code(line: str) -> str:
+    """A fenced line's COMMAND portion — the inline comment stripped first.
+
+    ``_fences()`` drops lines that BEGIN with ``#``, but a trailing ``# ...``
+    survives, and a spelling check run against the raw line is therefore
+    satisfiable by an annotation rather than by the command
+    (``git switch -c … || exit 1   # use switch -C next time`` passed).
+    """
+    return line.rstrip().split("#", 1)[0].rstrip()
+
+
+def _re_runnable(code: str) -> bool:
+    """Is this move command idempotent — safe on a RE-baseline / RE-build?
+
+    The flag is paired to the subcommand on purpose: ``git switch -B`` is not a
+    switch option, so accepting ``-B`` for a ``switch`` would bless a command
+    that does not run.
+    """
+    if "\bswitch\b" in code or code.lstrip().startswith("git switch"):
+        return ("switch -C" in code) or ("--force-create" in code) or ("--detach" in code)
+    if code.lstrip().startswith("git checkout"):
+        return ("-B " in code) or ("--detach" in code)
+    return False
+
+
 #: The test target a marker-scoped run names (``tests/test_ingest_safety.py``).
 _TARGET_FILE = re.compile(r"\b(tests/[\w./-]+\.py)\b")
 
@@ -380,12 +406,9 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     # refuses an existing branch name, after which a fence without `set -e`
     # keeps going and the pytest lines measure whatever tree HEAD is on. Any
     # re-runnable spelling satisfies this; the one-shot form does not.
-    moves = [c for c in baseline if _MOVES_HEAD.search(c) and "$PINNED" in c]
+    moves = [c for c in baseline if _MOVES_HEAD.search(_code(c)) and "$PINNED" in _code(c)]
     assert moves, "the baseline fence no longer switches to the pinned base — re-point this guard"
-    assert all(
-        ("switch -C" in c) or ("--force-create" in c) or ("--detach" in c) or ("-B " in c)
-        for c in moves
-    ), (
+    assert all(_re_runnable(_code(c)) for c in moves), (
         "a re-baseline must be re-runnable: a one-shot create dies with 'a branch "
         "named ... already exists', and the fence then measures the wrong tree; "
         f"these moves are one-shot: {moves}"
@@ -406,11 +429,11 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
         if any("batch-1" in c and _MOVES_HEAD.search(c) and "$PINNED" in c for c in fence)
     ]
     assert batch, "the batch-assembly fence no longer creates batch-1 from the pin — re-point this guard"
-    flat = [c for fence in batch for c in fence if _MOVES_HEAD.search(c) and "$PINNED" in c]
-    assert all(
-        ("-C " in c) or ("--force-create" in c) or ("--detach" in c) or ("-B " in c)
-        for c in flat
-    ), (
+    flat = [
+        c for fence in batch for c in fence
+        if _MOVES_HEAD.search(_code(c)) and "$PINNED" in _code(c)
+    ]
+    assert all(_re_runnable(_code(c)) for c in flat), (
         "rebuilding the batch must reset the branch to the pin; a one-shot create "
         f"leaves the following --no-ff merge on the wrong branch: {flat}"
     )
