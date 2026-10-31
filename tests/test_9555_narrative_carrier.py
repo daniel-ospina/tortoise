@@ -1275,3 +1275,44 @@ def test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so():
         "§9.1's residual (b) does not state WHERE the `:Event` half lives — the "
         "reader weighing `#10017`'s purge against the record needs the column, "
         "not just the label")
+
+
+def test_the_journal_replay_drops_the_prose_and_the_residual_says_so():
+    """The `EntityMutated` replay half, named rather than left implicit.
+
+    `#10389` review P1 asked for exactly this: `story_arc` in
+    `_SOURCE_SERVER_MANAGED_PROPS` is not a write-side guard — the SAME set is
+    read by the `EntityMutated` → `:Source` replay arm
+    (`tortoise/projection/__init__.py`), which pops every member and warns. So a
+    `rebuild_all()` reclaims the prose from a node whose copy arrived through a
+    journalled `EntityMutated`, while residual (a) said only that nodes already
+    carrying the prose keep it. The two halves of that sentence are not
+    compatible, and no test pinned the replay half either way.
+
+    The membership IS the deny here — a later lane that merely removes
+    `story_arc` from the set re-enables replay of the prose with no other edit,
+    and the design document would go on claiming the route is denied. That
+    fail-open is what the code half of this pin exists to catch; the doc half
+    keeps residual (a) from reverting to the `:Source`-untouched reading.
+    """
+    from tortoise.projection import entities as _E
+
+    assert "story_arc" in _E._SOURCE_SERVER_MANAGED_PROPS, (
+        "`story_arc` left `_SOURCE_SERVER_MANAGED_PROPS` — the live tenant route "
+        "accepts it again AND the `EntityMutated` replay arm stops dropping it, "
+        "so a legacy journal line re-materialises §9.1's prose on `:Source` at "
+        "the next `rebuild_all` (the deny residual (b) says is in place)")
+    assert "story_arc" in _E._SOURCE_NODE_PROP_NAMES or "story_arc" in _E._SOURCE_NODE_PROPS, (
+        "`story_arc` left the READ declaration — legacy nodes that still carry "
+        "the prose must keep reading back (§9.1(b): DECLARED is not WRITTEN)")
+
+    text = _STORAGE_DOC.read_text(encoding="utf-8")
+    start = text.index("(a) **Nodes already carrying the prose keep it")
+    residual_a = text[start:text.index("(b) The key stays DECLARED", start)]
+    assert "rebuild_all" in residual_a and "_SOURCE_SERVER_MANAGED_PROPS" in residual_a, (
+        "§9.1's residual (a) no longer names the replay half: a `rebuild_all` "
+        "DROPS `story_arc` from a `:Source` whose copy arrived through a "
+        "journalled `EntityMutated` (the same `_SOURCE_SERVER_MANAGED_PROPS` "
+        "deny), so 'nodes already carrying the prose keep it' is true only for "
+        "copies that did not arrive that way — the contradiction `#10389`'s "
+        "review P1 measured")

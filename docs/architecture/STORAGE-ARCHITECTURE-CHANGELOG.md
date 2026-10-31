@@ -1802,6 +1802,16 @@ so legacy nodes read back, and the declaration is what makes a route possible at
   restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
   table, plus that test's premise), which is why it is filed rather than absorbed.
 
+**And the replay half of that route reclaims what a legacy journal carried.** Residual (a) said only that
+nodes already carrying the prose keep it, which is true of the copies this change stops writing and NOT
+of one that arrived through a journalled `EntityMutated`: `story_arc` is in
+`_SOURCE_SERVER_MANAGED_PROPS`, and the SAME set is read by the `EntityMutated` → `:Source` replay arm,
+which pops every member and warns (`tortoise/projection/__init__.py`). So a `rebuild_all` over such a
+journal reclaims the prose — deliberate, since it is the same deny the live route gets, and it must be
+stated because deleting it silently from the set re-enables the replay (that fail-open is what
+`tests/test_9555_narrative_carrier.py::test_the_journal_replay_drops_the_prose_and_the_residual_says_so`
+pins). This is the consequence `#10389`'s review P1 asked to be named rather than left implicit.
+
 **Why this entry exists at all.** The first draft of §9.1(b) wrote that history INTO the design
 document — `CLOSED HERE (#10403)`, `OPEN, filed as #10394`, *"three are CLOSED, one is filed and
 still OPEN"*, and the before/after measurement — and
