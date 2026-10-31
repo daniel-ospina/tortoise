@@ -2221,6 +2221,59 @@ def cmd_uri(args: argparse.Namespace) -> int:
     return cmd_up(args)
 
 
+def _names_a_pytest_path(token: str) -> bool:
+    """Does this token LOOK like a test path (a file, dir, or node id)?
+
+    Deliberately syntactic and conservative — anything that could be a path
+    counts as one:
+
+      * starts with ``-``   -> a flag, not a path
+      * contains ``::``     -> a node id
+      * contains ``/``      -> a repo-relative path
+      * ends with ``.py``   -> a file
+      * EXISTS on disk      -> a path, whatever it looks like
+    """
+    if not token or token.startswith("-"):
+        return False
+    if "::" in token or "/" in token or token.endswith(".py"):
+        return True
+    try:
+        return Path(token).exists()
+    except OSError:      # a token too long/illegal to be a path is not one
+        return False
+
+
+def _argv_names_a_target(argv: list[str]) -> bool:
+    """Would pytest treat any of these tokens as a positional TARGET?
+
+    A token that LOOKS like a path is still not a target when the token BEFORE
+    it is an option: pytest's grammar lets an option consume the next argument,
+    so ``--deselect tests/x.py::t`` and ``-k tests`` carry a PATH-SHAPED VALUE,
+    not a target. Treating those as targets handed pytest a pathless command ->
+    pytest collects from the ROOTDIR (no ``testpaths`` in pyproject.toml) -> a
+    module-level assertion in ``graph-scripts/test_6707_shock.py`` interrupts
+    collection (``42099 tests collected, 1 error``, exit 2) -> zero of the
+    suite's tests run. That is the exact failure this subcommand exists to
+    remove, so the rule is "an option eats the next token", NOT "looks like a
+    path".
+
+    KNOWN, DELIBERATE over-inclusion: a BOOLEAN flag also "eats" its next token
+    here, so ``run -- -q tests/foo.py`` appends ``tests/`` and runs the suite
+    PLUS that file (a superset, announced on stderr). The documented spelling
+    puts the target first (``run -- tests/foo.py -q``), and the asymmetry is the
+    right way round: over-running costs wall time, under-running costs the
+    verdict — a run that tested nothing reads exactly like a run where nothing
+    failed.
+    """
+    previous: str | None = None
+    for token in argv:
+        if ((previous is None or not previous.startswith("-"))
+                and _names_a_pytest_path(token)):
+            return True
+        previous = token
+    return False
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Run pytest against THIS lane's container — the invocation that cannot
     be mis-spelled by hand.
@@ -2261,14 +2314,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         # way `cargo run --` and `docker run … --` do), so the separator is
         # consumed here rather than handed to pytest as an unknown argument.
         extra = extra[1:]
-    if not extra:
-        # Bare `run` means THE SUITE — `tests/`. This is not cosmetic: with no
-        # path, pytest collects from the ROOTDIR (there is no `testpaths` in
-        # pyproject.toml), which sweeps `validation/`, `graph-scripts/`,
-        # `integrations/tests/` and emits a collection error — a run that tests
-        # none of the suite and exits 2. The help text promises this default, so
-        # the code has to BE the default.
-        extra = ["tests/"]
+    if not _argv_names_a_target(extra):
+        # No path anywhere in the argv means THE SUITE — `tests/`. This is not
+        # cosmetic: with no path pytest collects from the ROOTDIR (there is no
+        # `testpaths` in pyproject.toml), which sweeps `validation/`,
+        # `graph-scripts/`, `integrations/tests/` and emits a collection error —
+        # a run that tests none of the suite and exits 2. Flag-only calls are the
+        # common shape (`-k`, `--collect-only`, `--timeout=N`), so the check is on
+        # the whole argv, not on emptiness.
+        extra = [*extra, "tests/"]
+        print(
+            "test-lane: no test TARGET in the pytest argv — adding `tests/` (the "
+            "suite). Put a path BEFORE the flags to override, e.g. "
+            "`run -- tests/test_guard.py -q`.",
+            file=sys.stderr,
+        )
     env = {**os.environ, **lane_seam_env(port, args.graph)}
     argv = [sys.executable, "-m", "pytest", *extra]
     print(
@@ -2385,7 +2445,10 @@ def build_parser() -> argparse.ArgumentParser:
             # pytest flags it recognises and reject those it does not.
             sp.add_argument("pytest_args", nargs=argparse.REMAINDER,
                             help="pytest argv, after `--` "
-                                 "(default: tests/ — the suite)")
+                                 "(default target: tests/ — the suite). A "
+                                 "LEADING flag needs the `--` separator "
+                                 "(`run -- -q tests/`): without it argparse "
+                                 "treats it as the tool's own option")
         sp.set_defaults(func=fn)
     return p
 

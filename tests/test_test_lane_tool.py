@@ -3126,12 +3126,16 @@ def test_run_does_not_leak_the_lane_target_into_the_PARENT_environment(
     (a `down`, a second subset). Mutating `os.environ` would silently aim those
     at a container that may already be gone — the same class the tool refuses
     everywhere else by deriving its target from the worktree instead of the env.
+    The assertion is on the three SEAM keys specifically (not on a whole-environ
+    identity), so an unrelated env write by a future callee cannot red it.
     """
-    before = dict(os.environ)
+    seam = ("TORTOISE_DB_URI", "TORTOISE_TEST_DOCKER_PORT",
+            "TORTOISE_TEST_DOCKER_PASSWORD")
+    before = {key: os.environ.get(key) for key in seam}
     _stub_start(monkeypatch, port=16411)
     _capture_run(monkeypatch)
     tl.main(["run", "--", "-q"])
-    assert dict(os.environ) == before
+    assert {key: os.environ.get(key) for key in seam} == before
 
 
 def test_run_propagates_pytest_failure_unchanged(lane, monkeypatch):
@@ -3183,6 +3187,85 @@ def test_run_names_the_target_BEFORE_the_child_starts(
     assert len(at_child_start) == 1
     assert "fdb-lane-0123456789" in at_child_start[0]
     assert "TORTOISE_DB_URI=docker://:@127.0.0.1:16406/" in at_child_start[0]
+
+
+def test_flag_only_argv_still_targets_the_SUITE(lane, monkeypatch, capsys):
+    """A FLAG-ONLY call must not fall back to rootdir collection.
+
+    `run -- -k foo` / `run -- --collect-only -q` carry flags but no target, so
+    a default applied only to an EMPTY argv would hand pytest a pathless command
+    and pytest would collect from the ROOTDIR (no `testpaths` in pyproject.toml)
+    — measured at this head: `42099 tests collected, 1 error`, `Interrupted: 1
+    error during collection` on `graph-scripts/test_6707_shock.py`, exit 2, i.e.
+    zero of the suite's tests and no verdict. The default is therefore applied
+    whenever no token is a TARGET, and the call says so on stderr.
+    """
+    _stub_start(monkeypatch)
+    for argv in (["run", "--", "-k", "foo"],
+                 ["run", "--", "--collect-only", "-q"],
+                 ["run", "--", "--timeout=900"]):
+        seen = _capture_run(monkeypatch)
+        tl.main(argv)
+        assert seen["argv"] == [sys.executable, "-m", "pytest",
+                                *argv[2:], "tests/"], argv
+        assert "adding `tests/`" in capsys.readouterr().err, argv
+
+
+def test_a_PATH_SHAPED_OPTION_VALUE_is_not_a_target(lane, monkeypatch, capsys):
+    """The fix for the fix: an option EATS the next token.
+
+    `--deselect tests/x.py::t`, `-k tests`, `-W error::DeprecationWarning` all
+    carry a token that LOOKS like a path but is a flag VALUE. Reading it as a
+    target suppressed the default and handed pytest a pathless command — the
+    same "zero tests, no verdict" wall, one level deeper. None of these may
+    suppress `tests/`.
+    """
+    _stub_start(monkeypatch)
+    for argv in (
+        ["run", "--", "--deselect", "tests/test_guard.py::test_x"],
+        ["run", "--", "-k", "tests"],
+        ["run", "--", "-W", "error::DeprecationWarning"],
+        ["run", "--", "-k", "test_guard.py"],
+    ):
+        seen = _capture_run(monkeypatch)
+        tl.main(argv)
+        assert seen["argv"] == [sys.executable, "-m", "pytest",
+                                *argv[2:], "tests/"], argv
+        assert "adding `tests/`" in capsys.readouterr().err, argv
+
+
+def test_an_explicit_target_is_never_retargeted(lane, monkeypatch, capsys):
+    """A caller who NAMED a target keeps it — a file, a node id, a subdirectory.
+
+    The documented spelling puts the path FIRST, where nothing can eat it.
+    """
+    _stub_start(monkeypatch)
+    for argv in (
+        ["run", "--", "tests/test_guard.py", "-q"],
+        ["run", "--", "tests/test_guard.py::test_x"],
+        ["run", "--", "tests/eval"],
+    ):
+        seen = _capture_run(monkeypatch)
+        tl.main(argv)
+        assert seen["argv"] == [sys.executable, "-m", "pytest", *argv[2:]], argv
+        assert "adding `tests/`" not in capsys.readouterr().err, argv
+
+
+def test_a_bare_boolean_flag_before_a_path_over_runs_rather_than_under_runs(
+        lane, monkeypatch, capsys):
+    """The ONE documented asymmetry: a path after a boolean flag is read as that
+    flag's value, so `tests/` is appended and the run is a SUPERSET (announced).
+
+    This is the right way round and must stay pinned: over-running costs wall
+    time, under-running costs the verdict — and a run that tested nothing reads
+    exactly like a run where nothing failed.
+    """
+    _stub_start(monkeypatch)
+    seen = _capture_run(monkeypatch)
+    tl.main(["run", "--", "-q", "tests/test_guard.py"])
+    assert seen["argv"] == [sys.executable, "-m", "pytest",
+                            "-q", "tests/test_guard.py", "tests/"]
+    assert "adding `tests/`" in capsys.readouterr().err
 
 
 def test_bare_run_targets_the_SUITE_not_the_rootdir(lane, monkeypatch):
