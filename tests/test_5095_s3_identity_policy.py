@@ -534,7 +534,7 @@ class TestTheReportCannotContradictItself:
         assert out["identity"]["unresolved_total"] >= 1
         messages = [w for w in out["warnings"] if "S3 identity" in w]
         assert messages, out["warnings"]
-        assert "their identity was not established from the lookup" in messages[0]
+        assert "did not run for" in messages[0]
         # ⛔ and it must NOT claim what the candidate's own record says: a
         # candidate whose query was cut can still be folded onto a prior by S5
         # (`found: true`), so "their record says UNRESOLVED" was a false claim
@@ -776,7 +776,7 @@ class TestIdentityOnTheResult:
         assert out["identity"]["unresolved_total"] == 0, out["identity"]
         messages = [w for w in out["warnings"] if "S3 identity" in w]
         assert messages, out["warnings"]
-        assert "cut part of the lookup" in messages[0], messages[0]
+        assert "part of the lookup did not run or did not complete" in messages[0], messages[0]
         assert "no candidate was left unchecked" in messages[0], messages[0]
         assert "did not run over the whole candidate set" not in messages[0]
 

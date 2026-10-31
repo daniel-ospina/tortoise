@@ -1721,7 +1721,6 @@ def test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render() -> No
       see that, because the probes above stay green.
     """
     from tortoise import extractor_v2 as v2
-    from tortoise import failure_policy as fp
 
     rendered = v2._render_search_results({"degraded": True, "reason": "S3 degraded"})
     assert "assume everything is new" not in rendered, (
@@ -1733,13 +1732,21 @@ def test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render() -> No
         "the degraded render no longer says the identity is UNRESOLVED, so the "
         "assertion above is not reading the state-of-code clause"
     )
-    # The second call: the RECORD a caller keeps. `found: false` is a claim that
-    # a search ran and matched nothing; when it did not run, the third state is
-    # the only honest value (§4.4 I1).
-    record = fp.created_record("entity 'x'", query_ran=False)
-    assert record["found"] is None, (
+    # The second call: the RECORD a caller keeps — driven through the REAL write
+    # path, not the helper in isolation. A pin that only called
+    # `fp.created_record(...)` stayed green when the three create sites in
+    # `execute_embed` were reverted to their inline `found: False` dict, so it
+    # could not see the wiring it claimed to pin (#5095 review A3).
+    written = v2.execute_embed(
+        {"entities": [], "events": [], "operators": [], "chain_notes": [],
+         "points": [{"content": "a claim", "pointKind": "statement"}]},
+        {}, session_id="s1")
+    records = [r for r in written["link_before_create"]
+               if str(r.get("searched_for", "")).startswith("point ")]
+    assert records, "the write path emitted no record for the created Point"
+    assert all(r["found"] is None for r in records), (
         "the created-candidate record asserts `found: false` for a lookup that "
-        f"never ran — the caller keeps that claim (#5095): {record!r}"
+        f"never ran — the caller keeps that claim (#5095): {records!r}"
     )
     # …and the row. NOT `implemented`: I1's "never mint it" needs a create gate
     # inside S5, and §4.4's carry-forward store does not exist either.
