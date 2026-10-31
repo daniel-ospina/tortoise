@@ -715,6 +715,18 @@ The 3-point micro-test that SELECTS the granularity knob before the pilot:
 #   * third case, distinct from both: a cell that loads the embedder but embeds
 #     0 of N points (the write itself degraded) reads NOT MEASURED however the
 #     run was invoked — the dense leg did not actually run.
+#   * fourth case, distinct from all three (#10355 P3): the embedder
+#     reported available for every cell and no cell published a
+#     zero-coverage receipt, but a cell's CENSUS refused a record — the
+#     producer reported a points value that cannot be true (`points_embedded >
+#     points_total`, a bool, a negative, or a lone half that is itself
+#     impossible) — so that cell reads NOT MEASURED as well.
+#     The `dense leg:` line shows `records_refused=[...]` beside the verdict.
+#     The remedy is the census PRODUCER, not the embedder. ⚠️ The two absent
+#     causes above are a PRE-FLIGHT answer, not a write-time witness (a
+#     refused cell publishes no ratio at all, or one computed over the
+#     population its record was removed from), so treat that cell's recall as
+#     unmeasured; re-running reproduces the same verdict byte for byte.
 python -m tools.longmem_eval.sweep_granularity --data tests/fixtures/longmemeval_mini.json \
     --limit 5 --mock --skip-preflight
 
@@ -730,6 +742,13 @@ D2: **v2 mode** maximizes `evidence_recall@10` subject to
 the deterministic cell is a context-token/underfill view only. The chosen
 value feeds the pilot and the 500-Q run; the report's methodology records it
 (`chunk_turns` in the methodology).
+
+The `dense leg:` line printed ABOVE the table carries the posture the table's
+numbers are read against — `vector_strategy`, `embedding_coverage`, and, when
+any cell's census refused a record, `records_refused=[...]` — so "why did this
+sweep say NOT MEASURED?" is answered on the artifact instead of guessed from
+the host (see the fourth case above; the winner line names the cause that
+actually fired).
 
 ## Ingest cache + fast-cycle protocol (#2080)
 
