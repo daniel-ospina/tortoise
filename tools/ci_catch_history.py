@@ -555,10 +555,25 @@ class Citation:
         }
 
     def label(self) -> str:
-        # A closed PR's `pull_requests` array is often empty on the runs listing, so the
-        # branch is the honest fallback identifier — never a bare "pr-head" with no handle.
-        head = f"#{self.pr_number}" if self.pr_number else (self.branch or self.kind)
-        return f"{head}/run {self.run_id} ({self.job})"
+        return citation_label(self.to_dict())
+
+
+def citation_label(record: Mapping[str, Any]) -> str:
+    """A clickable handle for a citation — the SERIALISED row, which is what a renderer holds.
+
+    ⛔ Takes the mapping, not the dataclass: `FileHistory.to_dict()` is what a table renders,
+    and calling `.label()` on those dicts raised `AttributeError` on every row that carried a
+    citation or an UNKNOWN reason (i.e. the whole `--md-out` deliverable). One implementation,
+    two callers; `Citation.label()` delegates here so the two cannot drift.
+    """
+    # A closed PR's `pull_requests` array is often empty on the runs listing, so the branch is
+    # the honest fallback identifier — never a bare "pr-head" with no handle.
+    head = (
+        f"#{record['pr']}"
+        if record.get("pr")
+        else (record.get("branch") or str(record.get("kind") or "?"))
+    )
+    return f"{head}/run {record.get('run_id')} ({record.get('job')})"
 
 
 @dataclass(frozen=True)
@@ -589,8 +604,19 @@ class Unknown:
         }
 
     def label(self) -> str:
-        head = f"#{self.pr_number}" if self.pr_number else self.kind
-        return f"{head}/run {self.run_id} ({self.job}): {self.reason}"
+        return unknown_label(self.to_dict())
+
+
+def unknown_label(record: Mapping[str, Any]) -> str:
+    """A handle for an UNKNOWN reason — the SERIALISED row (see `citation_label`)."""
+    if record.get("pr"):
+        head = f"#{record['pr']}"
+    elif record.get("run_id"):
+        head = f"run {record['run_id']}"
+    else:
+        head = str(record.get("kind") or "window")
+    job = record.get("job")
+    return f"{head}{f' ({job})' if job else ''}: {record.get('reason')}"
 
 
 @dataclass
@@ -1443,11 +1469,13 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
     for row in report["files"]:
         if wanted and row["status"] != wanted:
             continue
-        prs = "; ".join(c.label() for c in row["pr_head_catches"]) or "-"
-        pushes = "; ".join(c.label() for c in row["push_main_catches"]) or "-"
+        prs = "; ".join(citation_label(c) for c in row["pr_head_catches"]) or "-"
+        pushes = "; ".join(citation_label(c) for c in row["push_main_catches"]) or "-"
         # A by-decision exclusion has no UNKNOWN reason and no citation — without the note
         # the cell would read "-", which is exactly the blank that hides the decision.
-        unknown = "; ".join(u.label() for u in row["unknown"]) or row.get("note") or "-"
+        unknown = (
+            "; ".join(unknown_label(u) for u in row["unknown"]) or row.get("note") or "-"
+        )
         rows.append(
             f"| `{row['file']}` | {row['status']} | {row.get('lane', '-')} "
             f"| {row['pr_leg_runs']} | {row['push_leg_runs']} "

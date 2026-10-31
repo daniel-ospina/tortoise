@@ -529,6 +529,50 @@ def test_the_bare_carve_out_job_is_shard_a_and_attributes_the_nine(tmp_path):
     assert row["pr_head_catches"][0]["job"] == "test-carve-out"
 
 
+def test_the_markdown_table_renders_its_citations_and_its_unknowns(tmp_path):
+    """`--md-out` IS the deliverable — the table must render the SERIALISED rows.
+
+    ⛔ `FileHistory.to_dict()` returns mappings, so a table that calls `.label()` on the
+    dataclasses raises `AttributeError` on every row that carries a citation or an UNKNOWN
+    reason: the empty row renders, the rows that matter do not. `render_summary(report)` was
+    asserted by another test and never touched `render_table`, so nothing caught it.
+    """
+    family, leg = _leg_of("test_billing.py")
+    other_leg = next(name for name in LEGS[family] if name != leg)
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=21)],
+        jobs={
+            RUN_PR: [
+                _check(100, RUN_PR, f"{family} ({leg})", "failure"),
+                _check(101, RUN_PR, f"{family} ({other_leg})", "failure"),  # no artifact
+            ]
+        },
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            )
+        },
+    )
+    report = _report(root)
+    table = catch.render_table(report)
+    # The CITATION row (a dataclass-free mapping) and the UNKNOWN row both render.
+    assert f"#21/run {RUN_PR} ({family} ({leg}))" in table
+    assert f"#21 ({family} ({other_leg})): artifact" in table
+    assert "CATCH-PR" in table and "UNKNOWN" in table
+
+
+def test_the_cli_writes_the_markdown_table_from_an_offline_fixture(tmp_path, capsys):
+    """The documented invocation (`--offline-dir --md-out`) runs end to end."""
+    root = _world(tmp_path, runs=[])
+    out = tmp_path / "catch.md"
+    assert catch.main(["--offline-dir", str(root), "--md-out", str(out)]) == 0
+    rendered = out.read_text(encoding="utf-8")
+    assert rendered.startswith("| file | status | lane |")
+    assert rendered.count("\n") >= 74  # header + separator + one row per slow file
+    assert "NOT-PREMERGE" in rendered  # the non-gating lane is named in the table
+
+
 # --- coverage arithmetic ---------------------------------------------------
 
 
