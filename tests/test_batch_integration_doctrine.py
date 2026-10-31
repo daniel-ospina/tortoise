@@ -375,6 +375,46 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
         "and untracked files into the baseline tree, so the run measures the lane"
     )
 
+    # The idempotency half (final-head review P2). A RE-baseline is the normal
+    # case — Landing route 1 re-runs phases 1 and 3 — and a one-shot create
+    # refuses an existing branch name, after which a fence without `set -e`
+    # keeps going and the pytest lines measure whatever tree HEAD is on. Any
+    # re-runnable spelling satisfies this; the one-shot form does not.
+    moves = [c for c in baseline if _MOVES_HEAD.search(c) and "$PINNED" in c]
+    assert moves, "the baseline fence no longer switches to the pinned base — re-point this guard"
+    assert all(
+        ("switch -C" in c) or ("--force-create" in c) or ("--detach" in c) or ("-B " in c)
+        for c in moves
+    ), (
+        "a re-baseline must be re-runnable: a one-shot create dies with 'a branch "
+        "named ... already exists', and the fence then measures the wrong tree; "
+        f"these moves are one-shot: {moves}"
+    )
+
+
+def test_the_batch_fence_rebuild_is_re_runnable() -> None:
+    """P1 (final-head review): the batch fence had the same defect, worse blast radius.
+
+    On a rebuild a one-shot create of the batch branch fails, and the following
+    ``--no-ff`` merge then lands a foreign PR head into whatever branch the
+    operator is standing on. ``-C``/``-B``/``--detach`` reset to the pin, which
+    is the intent of a rebuild.
+    """
+    fences = _fences()
+    batch = [
+        fence for fence in fences
+        if any("batch-1" in c and _MOVES_HEAD.search(c) and "$PINNED" in c for c in fence)
+    ]
+    assert batch, "the batch-assembly fence no longer creates batch-1 from the pin — re-point this guard"
+    flat = [c for fence in batch for c in fence if _MOVES_HEAD.search(c) and "$PINNED" in c]
+    assert all(
+        ("-C " in c) or ("--force-create" in c) or ("--detach" in c) or ("-B " in c)
+        for c in flat
+    ), (
+        "rebuilding the batch must reset the branch to the pin; a one-shot create "
+        f"leaves the following --no-ff merge on the wrong branch: {flat}"
+    )
+
 
 def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     """#10399 review P1-3 / P2-1: the tested tree must be the landed tree.

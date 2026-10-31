@@ -112,7 +112,7 @@ pre-existing bug inside a batch, which is scope creep with no review).
 ```bash
 git fetch origin main
 PINNED="$(git rev-parse origin/main)"            # PIN THIS SHA — every later comparison is against it
-# ⛔ A dirty tree defeats the switch: `git switch -c` CARRIES uncommitted and untracked files.
+# ⛔ A dirty tree defeats the switch: `git switch -C` CARRIES uncommitted and untracked files.
 [ -z "$(git status --porcelain)" ] || { echo "dirty tree — the baseline would measure it, not origin/main"; exit 1; }
 git switch -C integration/base-check "$PINNED" || exit 1   # ⛔ SWITCH, not `git branch` — run the suite on THIS tree.
 # `-C` (create OR reset), not `-c`: a RE-baseline is the normal case (see Landing route 1), and a
@@ -125,17 +125,25 @@ uv run pytest tests/test_ingest_safety.py -q -m track_b
 git switch -                                      # back to the lane you came from
 ```
 
-**`git switch -c`, never `git branch`.** `git branch integration/base-check "$PINNED"` creates the ref
+**`git switch -C`, never `git branch`.** `git branch integration/base-check "$PINNED"` creates the ref
 and leaves your working tree exactly where it was — so the suite runs on whatever branch you happen to
 be standing in (in this fleet, usually a lane worktree carrying unreviewed changes), while the heading
 above promises `origin/main` alone. The baseline id list is the ledger every later verdict is diffed
 against, so a polluted baseline both hides main's own red **and** convicts an innocent PR for a failure
-the lane introduced. `git switch -c` (or `git switch --detach "$PINNED"`) fixes the *wrong branch*;
-it does **not** fix a *dirty tree* — `git switch -c <branch> <commit>` re-applies local modifications
+the lane introduced. `git switch -C` (or `git switch --detach "$PINNED"`) fixes the *wrong branch*;
+it does **not** fix a *dirty tree* — `git switch -C <branch> <commit>` re-applies local modifications
 to the new tree (it refuses only where they differ between the two branches, so uncommitted work on a
 file `main` did not touch is carried silently, and untracked files are always carried). Hence the
 `git status --porcelain` precondition above: in this fleet the lane's normal state **is** a dirty tree,
 and that is exactly the work the baseline must not measure.
+
+`-C` rather than `-c` for a second reason, independent of the tree: **a re-baseline is the normal
+case** (Landing route 1 re-runs phases 1 and 3), and `git switch -c` refuses an existing branch name —
+`fatal: a branch named 'integration/base-check' already exists` — after which a fence without `set -e`
+keeps going and the pytest lines below measure whatever tree HEAD is on. `-C` (create **or reset**) is
+idempotent, and `|| exit 1` makes a failure stop the fence instead of silently measuring the wrong
+tree. Note `-C` is not `-f`: it does not discard local changes, so the dirty-tree precondition is still
+the thing that guards the tree.
 
 **The baseline runs BOTH halves.** Phase 3 runs `-m track_b` as well as the deterministic marker (see
 below), so a baseline that runs only the first half is structurally incapable of containing a
