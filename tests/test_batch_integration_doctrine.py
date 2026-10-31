@@ -167,8 +167,9 @@ or facts that were false against the tree they describe:
   for the adjacent failure (a REFUSAL exits non-zero); this is the other half, so the status alone
   cannot catch it and ``git rev-parse -q --verify HEAD^2`` is asserted after the halt.
 * **two hand-written literals of LIVE config**: "``main`` keeps the **seven** required contexts" and
-  ``batch_size: 4``. Both are READINGS of ``.github/settings.yml`` (live-asserted by
-  ``.github/scripts/check-required-set.py --live``) and of ``.mergify.yml``, which itself says
+  ``batch_size: 4``. Both are READINGS of live config — the declaration home for ``main``'s required
+  contexts, live-asserted by ``.github/scripts/check-required-set.py --live``, and ``.mergify.yml``,
+  which itself says
   ``batch_size`` is a separate lever #5384 owns — the exact class the document forbids four pages
   earlier for the ``needs: changes`` set, and nothing pinned these. Both numbers are gone; both
   sections name the source. The **branch** name is stated as fixed (the LEDGER is per-batch, the branch
@@ -195,7 +196,8 @@ assembly MERGE (halted, and followed by a halted ``HEAD^2`` merge-commit asserti
 exits 0), the baseline-diffed SKIP carriers (a skipped test is collected, so neither the status nor
 the count can see it), the GRADED ``git bisect run`` (a non-``COMPLETED`` probe status is git's 125,
 not a culprit), the DRAFT-until-asserted landing rule, and no hand-written number for a live-config
-property (``.github/settings.yml``'s required contexts, ``.mergify.yml``'s ``batch_size``).
+property (the required contexts that ``check-required-set.py --live`` asserts, ``.mergify.yml``'s
+``batch_size``).
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
 revision rather than asserted — **32 checks**, **0 red**: **5 of 32** at ``4dc214c02`` (this round's
@@ -3088,7 +3090,8 @@ def test_the_batch_pr_is_a_draft_until_the_landing_assertion_passes() -> None:
 
 
 #: A stated number of the required contexts, and a stated `batch_size` value. Both are properties of
-#: `.github/settings.yml` and `.mergify.yml`, not of the doctrine — the class the doctrine itself
+#: live config — the declaration home that `.github/scripts/check-required-set.py --live` asserts, and
+#: `.mergify.yml` — not of the doctrine — the class the doctrine itself
 #: forbids for the `needs: changes` set ("that is a count to READ FROM THE WORKFLOW, never a literal
 #: written here"). Measured: the landing section said "the seven required contexts" (right today,
 #: stale on the next context added) and the queue section quoted `batch_size: 4` while
@@ -3105,8 +3108,9 @@ def test_no_hand_counted_literals_of_live_repo_properties() -> None:
     """the ``4dc214c02`` P3: the two literals that re-stale on a change this document does not own.
 
     ``:636`` said "``main`` keeps the **seven** required contexts", and ``:61`` quoted
-    ``batch_size: 4``. Both are READINGS of live config — ``.github/settings.yml`` (with
-    ``.github/scripts/check-required-set.py --live`` as the live comparison) and ``.mergify.yml``,
+    ``batch_size: 4``. Both are READINGS of live config — the declaration home for `main`'s required
+    contexts, whose live comparison is ``.github/scripts/check-required-set.py --live``, and
+    ``.mergify.yml``,
     which states that ``batch_size`` is a separate lever PR #5384 owns and may become
     ``{min: 1, max: N}``. The guard pinned member NAMES and the ``needs: changes`` ordinal but not
     these, so nothing could red. Same class, closed the same way: name the source, state no number.
@@ -3117,9 +3121,9 @@ def test_no_hand_counted_literals_of_live_repo_properties() -> None:
     context_claim = _CONTEXT_ORDINAL.search(text)
     assert context_claim is None, (
         "the doctrine states a hand-written number of required contexts "
-        f"({context_claim.group(0)!r}): the count belongs to .github/settings.yml (asserted live by "
-        "`.github/scripts/check-required-set.py --live`), so any literal re-stales the moment a "
-        "context is added — name the file, state no number"
+        f"({context_claim.group(0)!r}): the count belongs to the declaration home, whose live "
+        "assertion is `.github/scripts/check-required-set.py --live`, so any literal re-stales the "
+        "moment a context is added — name that assertion, state no number"
     )
     size_claim = _BATCH_SIZE_LITERAL.search(text)
     assert size_claim is None, (
@@ -3128,8 +3132,11 @@ def test_no_hand_counted_literals_of_live_repo_properties() -> None:
         "raising it, possibly to `{min: 1, max: N}`), so a literal here goes stale on a change this "
         "document does not control — name `.mergify.yml`, state no number"
     )
+    # ⛔ The declaration home is named by its LIVE ASSERTION, never by its path: clause (viii)(b) of
+    # `tools/mergify_config_guard.py` treats any file under `tests/` that spells that path as an
+    # authoritative READER of it (measured: spelling it here reds the REQUIRED `manifest-integrity`
+    # job). This check reads the DOCTRINE, not the config — so it names the guard that does read it.
     for needle in (
-        ".github/settings.yml",
         "check-required-set.py --live",
         ".mergify.yml",
     ):
