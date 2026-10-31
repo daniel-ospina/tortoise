@@ -37,9 +37,14 @@ tree disagree:
      `actions/checkout` fetches ONE commit by default, so in the `test` job the
      object is absent and the question is unanswerable THERE. That is reported as
      `UNVERIFIED` — a state error (exit 2), never a drift, because the document is
-     not wrong, the clone is shallow. The claim is proved by the REQUIRED `docs`
-     job: it checks out at `fetch-depth: 0` and runs `--check` unconditionally,
-     which is also the only home a docs-only PR reaches (#4454's precedent).
+     not wrong, the clone is shallow. ⛔ The SAME holds when the object is present
+     but the graft boundary cuts the path to it: `--is-ancestor` then exits **1**,
+     the status that otherwise means drift, so a shallow clone is asked to
+     corroborate its own completeness before status 1 may call the document wrong
+     (measured on #10406 — the depth-1 `test` job reded a TRUE claim while the
+     `docs` job passed it). The claim is proved by the REQUIRED `docs` job: it
+     checks out at `fetch-depth: 0` and runs `--check` unconditionally, which is
+     also the only home a docs-only PR reaches (#4454's precedent).
 
 ⛔ What it deliberately does NOT check, and why:
 
@@ -526,11 +531,18 @@ def check_registered(doc_text: str) -> list[str]:
 def _is_shallow_clone() -> bool | None:
     """Whether this checkout is shallow; `None` when git cannot say.
 
-    Local and cheap (no network, no lazy fetch) — called only on the ancestry
-    paths that need it: where the probe could not resolve the object (status
-    128, to say WHY in the report instead of blaming the document) and where it
-    answered "not an ancestor" (status 1, which a grafted graph can say about a
-    real ancestor — #10356).
+    Local and cheap (no network, no lazy fetch) — called on BOTH ancestry
+    failure paths, to say WHY in the report instead of blaming the document:
+    when the probe could not resolve the object at all (exit 128, a missing
+    object), and when it resolved it yet answered "not an ancestor" (exit 1),
+    which a truncated history produces for a commit that is present (#10356).
+    In the second case this answer is what separates "the document is wrong"
+    from "this checkout cannot tell".
+
+    ⛔ **The answer is total over that tri-state: only the exact word `true`
+    means shallow and only the exact word `false` means complete.** Any other
+    exit-0 payload is `None`, not `False` — see the arm at the end, which is the
+    difference between "git did not say" and "git said the history is whole".
     """
     try:
         proc = subprocess.run(
@@ -545,7 +557,21 @@ def _is_shallow_clone() -> bool | None:
         return None
     if proc.returncode != 0:
         return None
-    return proc.stdout.strip() == "true"
+    answer = proc.stdout.strip()
+    if answer == "true":
+        return True
+    if answer == "false":
+        return False
+    # ⛔ An exit-0 payload that is NEITHER word is not evidence of a complete
+    # history. `return answer == "true"` — the pre-#10406 shape — reads it as
+    # `False`, i.e. as the strongest possible claim ("this clone can walk its
+    # whole history"), which promotes a status-1 answer to DRIFT and accuses a
+    # document that is right. That is the exact defect this module exists to
+    # stop, reached through the one input the docstring already reserved `None`
+    # for; the arm must not be shadowed by the `== "true"` comparison (#10406
+    # review, noted-not-a-finding: unreachable with the git versions measured
+    # today, and inverted in the unsafe direction if that ever changes).
+    return None
 
 
 def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
@@ -575,19 +601,32 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     a wrong instruction about a correct document.
 
     ⛔ **Status 1 is only DRIFT when this checkout can actually walk the
-    history** (#10356). A SHALLOW clone truncates the graph at its boundary, so
-    a commit that IS an ancestor can still come back "no" whenever its object
-    happens to be present (a deep-enough depth, a partial fetch, a pack that
-    carried it) while the commits between it and the tip are grafted away.
+    history** (#10356, #10420). A SHALLOW clone truncates the graph at its
+    boundary, so a commit that IS an ancestor can still come back "no" whenever
+    its object happens to be present (a deep-enough depth, a partial fetch, a
+    pack that carried it) while the commits between it and the tip are grafted
+    away.
+
     Measured in a real depth-1 clone of a 4-commit repo: with the target object
-    absent, `--is-ancestor` exits 128 ("Not a valid commit name"); after the
-    same object is fetched explicitly so it is present but unreachable under
-    the graft, the same call exits **1** with no error text at all. Reporting
-    that as drift redded the CI `test` job on a map that is correct (`test`
-    checks out at the default `fetch-depth: 1`; the REQUIRED `docs` job proves
-    the claim at `fetch-depth: 0`). So the shallow/absent-object test decides
-    the CHANNEL and git's status only decides within it: a shallow checkout
-    cannot adjudicate ancestry, whatever status it returns.
+    absent, `--is-ancestor` exits 128 ("Not a valid commit name"); after the same
+    object is fetched explicitly so it is present but unreachable under the
+    graft, the same call exits **1** with no error text at all. That is also what
+    happened in CI: on #10406 the depth-1 `test` job (`test (e)` in the Python CI
+    run 41183423096, head `d0cd6c38c`) reported `measured_at_commit … is not an
+    ancestor of HEAD` for a claim the fetch-depth: 0 `docs` job passed on the
+    same head — that job lives in the sibling `CI` run 41183423210, which is why
+    both run ids are named here.
+
+    So the shallow/absent-object test decides the CHANNEL and git's status only
+    decides within it: a shallow checkout cannot adjudicate ancestry, whatever
+    status it returns. ⛔ **Only a positive `false` from the completeness probe
+    may certify drift** — an answer that could not be obtained (`None`: the
+    probe timed out or errored) is NOT evidence of a complete history, so it
+    falls to the state error with the shallow case rather than through to drift.
+    Failing closed here matters because the two mistakes are not symmetric: a
+    false `UNVERIFIED` costs one deferred claim that the REQUIRED `docs` job
+    still proves at `fetch-depth: 0`, while a false `DRIFT` tells an operator to
+    distrust a document that is right.
     """
     match = _FRONTMATTER_SHA.search(doc)
     if not match:
@@ -623,25 +662,42 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     except OSError as exc:  # pragma: no cover - git absent is a state error
         raise _state_error(f"git unavailable ({exc})") from exc
     if proc.returncode == 1:
-        # Status 1 is git's "no, not an ancestor" — but only a checkout that
-        # carries the history can say that. See this function's docstring:
-        # under a shallow graft a genuine ancestor answers 1 whenever its object
-        # is present, and scoring that as drift false-reds a correct map on
-        # every PR from a `fetch-depth: 1` job (#10356).
+        # ⛔ Status 1 is "not an ancestor" only where the WALK is complete. In a
+        # shallow checkout the graft boundary truncates it, so a commit whose
+        # connecting path was cut reports 1 as well — measured on #10406: the
+        # depth-1 `test` job reported exactly this while the fetch-depth: 0
+        # `docs` job passed the same claim on the same head, and a real depth-1
+        # clone carrying the object answers `commit` to `cat-file -t` while
+        # `--is-ancestor` still exits 1. Calling that drift hands the reader
+        # "the document and the tree disagree — do not delete the row to make
+        # this green" about a document that is right, so the status is
+        # corroborated with the repository's own completeness first (#10356).
+        #
+        # ⛔ ONLY `False` certifies drift. `None` means the probe could not be
+        # answered — not that the history is complete — so it takes the state
+        # error with the shallow case. Letting `None` fall through to drift
+        # would make an unanswerable probe the one path that can accuse a
+        # correct document.
         shallow = _is_shallow_clone()
-        if shallow:
-            return (
-                [],
-                [
-                    f"measured_at_commit {sha} cannot be verified here: git "
-                    f"answered 'not an ancestor', but this checkout is SHALLOW "
-                    f"(depth 1), where a genuine ancestor reports the same "
-                    f"status once its object happens to be present — the "
-                    f"REQUIRED `docs` job runs this check at fetch-depth: 0, "
-                    f"and that is where the claim is proved"
-                ],
-            )
-        return ([f"measured_at_commit {sha} is not an ancestor of HEAD"], [])
+        if shallow is False:
+            return ([f"measured_at_commit {sha} is not an ancestor of HEAD"], [])
+        why = (
+            "git answered 'not an ancestor', but this checkout is SHALLOW, so "
+            "the graft boundary cut the path to it and a truncated walk exits "
+            "with the same status as an unrelated tree"
+            if shallow
+            else "git answered 'not an ancestor', but git could not say whether "
+            "this checkout is shallow, so a status-1 answer cannot be told "
+            "apart from a truncated walk"
+        )
+        return (
+            [],
+            [
+                f"measured_at_commit {sha} cannot be verified here: {why} (the "
+                "REQUIRED `docs` job runs this check at fetch-depth: 0, which is "
+                "where the ancestry claim is proved)"
+            ],
+        )
     if proc.returncode != 0:
         # 128 = git does not HAVE the object. That says nothing about the
         # document: `actions/checkout` fetches one commit by default, so in the
