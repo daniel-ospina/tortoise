@@ -1168,15 +1168,52 @@ def test_the_org_id_only_lanes_reuse_the_requests_own_answer(monkeypatch):
     opened = _capture_make_sdk(monkeypatch)
 
     # The auth seam publishes; the lane consumes — no read, promoted graph.
-    ha._publish_default_namespace(_credential())
-    ha._org_sdk(TEAM)                       # e.g. _org_proj / _graph_available
-    assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
+    token = ha._resolved_default_namespace.set(None)
+    try:
+        ha._publish_default_namespace(_credential())
+        ha._org_sdk(TEAM)                   # e.g. _org_proj / _graph_available
+        assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
 
-    # The hint is ORG-scoped: a different org in the same context falls back to
-    # the read (here unreadable → the historical open), never to this org's graph.
-    opened.clear()
-    ha._org_sdk(OTHER_TEAM)
-    assert opened == [{"namespace": OTHER_TEAM}]
+        # The hint is ORG-scoped: a different org in the same context falls back
+        # to the read (here unreadable → the historical open), never to this
+        # org's graph.
+        opened.clear()
+        ha._org_sdk(OTHER_TEAM)
+        assert opened == [{"namespace": OTHER_TEAM}]
+    finally:
+        ha._resolved_default_namespace.reset(token)
+
+
+def test_a_graph_bound_credential_publishes_no_default_namespace(monkeypatch):
+    """A graph-bound credential's `graph_namespace` is a CUSTOM graph's — and it
+    passes the `org_{org_id}_` shape test, so a "default graph" consumer that
+    took it would evaluate and write org-level state (the capture completion
+    gate, the onboarding projection) into the caller's own graph while every
+    org-level reader looked at the org's default.
+
+    FAIL-ON: publish unconditionally and `_org_default_namespace` answers the
+    caller's custom namespace for a never-promoted org — the R1 regression, on
+    the graph-bound capture path (`POST /v1/sessions` admits those keys, and
+    `_maybe_apply_completion` runs on every capture)."""
+    _hosted(monkeypatch)
+    opened = _capture_make_sdk(monkeypatch)
+    fake = _fake_org_row(monkeypatch, f"org_{TEAM}")   # NEVER promoted
+
+    token = ha._resolved_default_namespace.set(None)
+    try:
+        ha._publish_default_namespace(
+            _credential(graph_id=NEW_ID,
+                        graph_namespace=f"org_{TEAM}_{NEW_ID}"))
+        # Nothing published for a bound credential → the org's default is read,
+        # not the caller's binding.
+        assert ha._resolved_default_namespace.get() is None
+        ha._org_sdk(TEAM)
+        assert opened == [{"namespace": TEAM}], (
+            "an org-level lane must open the org's DEFAULT graph, never the "
+            "graph-bound credential's own graph")
+    finally:
+        ha._resolved_default_namespace.reset(token)
+    assert fake is not None
 
 
 def test_the_event_sweep_takes_the_namespace_from_its_enumeration():

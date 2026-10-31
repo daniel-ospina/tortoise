@@ -712,18 +712,33 @@ def _publish_default_namespace(org: dict) -> None:
     Purely an optimization-with-a-guarantee: the value comes from the credential
     the request was ADMITTED with, so a lane that reads it here cannot land on a
     different graph than the one the data plane opened for the same request.
+
+    ⛔ ORG-WIDE CREDENTIALS ONLY, exactly like ``_default_graph_name`` — and for
+    the same reason, which is why this is not a convenience but a correctness
+    guard: for a GRAPH-BOUND credential ``graph_namespace`` is a CUSTOM graph's
+    namespace, it passes the ``org_{org_id}_`` shape test, and a "default graph"
+    consumer that took it would evaluate and write org-level state (the capture
+    completion gate, the onboarding projection) into the caller's own graph while
+    every org-level reader looked at the org's default. Nothing is published for
+    that credential, so those lanes fall back to the control-plane read and still
+    answer "the org's default", never the caller's binding.
     """
     org_id = org.get("org_id")
-    if org_id:
+    if org_id and not org.get("graph_id"):
         _resolved_default_namespace.set((org_id, org.get("graph_namespace")))
 
 
 def _org_default_namespace(org_id: str) -> str | None:
     """`_moved_default_namespace` for a lane that holds only an ``org_id``.
 
-    One primary-key read of ``organizations.graph_name`` — the column the
-    promotion writes and §3 of ``20261028000001`` pins to the default row's
-    namespace. It exists so the lanes that build their OWN SDK (the event
+    On a REQUEST it costs nothing: the auth seam publishes the resolved
+    credential's value (`_publish_default_namespace`) and this returns that,
+    which is also what makes the answer the one the request's data plane used.
+    Otherwise — a background lane, or a GRAPH-BOUND credential, whose
+    ``graph_namespace`` is a custom graph's and must not be mistaken for the
+    default — it does one primary-key read of ``organizations.graph_name``: the
+    column the promotion writes and §3 of ``20261028000001`` pins to the default
+    row's namespace. It exists so the lanes that build their OWN SDK (the event
     sweep, the dream drain, pack install, the seed/indexing runners) resolve the
     default the same way the request path does instead of re-deriving
     ``org_{org_id}`` and writing into the graph the promotion DEMOTED.
