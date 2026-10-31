@@ -94,14 +94,17 @@ def source_path(name: str) -> Path:
 def build(name: str, source: Path | None = None) -> bytes:
     """Bytes of the `.skill` archive for `name` (a zip with ONE entry).
 
-    ``source`` overrides the served copy the payload is read from. It exists for
-    the ONE caller that derives the served copy itself
-    (`tools/served_skills_parity.py --sync`): that tool writes the mirror into a
-    root it was handed, so it must build from that root's file rather than from
-    the module-level repo path — and it must produce the SAME bytes this tool
-    writes, or the two would disagree about the derived artifact. The archive
-    entry name stays ``<name>/SKILL.md`` either way: that is the uploader's
-    layout, not the source's.
+    ``source`` overrides the file the payload is read from; the default is the
+    served copy in this checkout. It exists for a caller that has already
+    resolved a DIFFERENT root (a test zipping an arbitrary file through this
+    entry point).
+
+    ⛔ ``--sync`` does NOT use it. The sync derives the served copy itself and
+    must archive the bytes it FETCHED, so it calls ``build_from_bytes`` with the
+    payload in memory — building from this root's file is exactly the disk read
+    that made `--sync --dry-run` zip the pre-sync mirror and report "no archive
+    changes" over a stale one (#10088). Keep the two entry points agreeing about
+    what an archive is; do not route a sync through ``source``.
     """
     src = source_path(name) if source is None else source
     if not src.is_file():

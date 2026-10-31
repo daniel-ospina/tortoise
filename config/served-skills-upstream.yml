@@ -4,7 +4,8 @@ version: 1
 # MIT repo named below; this tree holds the derived MIRROR. Do not edit
 # a served skill or this pin by hand — edit the skill upstream, then run
 #   uv run python tools/served_skills_parity.py --sync
-# and commit the mirrored skills together with this file.
+# and commit the mirrored skills AND the rebuilt .skill downloads in
+# website/skills/ together with this file (`--sync` derives both).
 #
 # `commit` is a real upstream commit and every sha256 is the CONTENT of
 # that commit — `--check-upstream` re-fetches by commit and re-hashes, so

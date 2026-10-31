@@ -311,9 +311,23 @@ _DECLARED_COUNT = re.compile(r"\bthe ([A-Z]+)(?:-key table| keys)\b")
 _KEY_TOKEN = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
 
 
+def _declared_key_claims(section: str) -> list[tuple[str, int | None]]:
+    """Every cardinality the mirror states for the key set, with the word used.
+
+    The value is ``None`` for a word this gate cannot read as a number. That is
+    returned rather than RAISED: `_DECLARED_COUNT` matches any all-caps word, so
+    a reworded heading ("the ENGINE keys") would otherwise crash the gate with a
+    bare `KeyError` in the one arm whose whole job is to say “re-anchor this”
+    (#10437 review, P2).
+    """
+    return [(word, _NUMBER_WORDS.get(word))
+            for word in _DECLARED_COUNT.findall(section)]
+
+
 def _declared_key_count(section: str) -> list[int]:
-    """Every cardinality the mirror states for the key set, as integers."""
-    return [_NUMBER_WORDS[word] for word in _DECLARED_COUNT.findall(section)]
+    """Every cardinality the mirror states for the key set that IS readable."""
+    return [value for _word, value in _declared_key_claims(section)
+            if value is not None]
 
 
 def _listed_keys(section: str) -> list[str]:
@@ -387,13 +401,22 @@ def _warning_table_problems(section: str) -> list[str]:
             f"mirror is derived by `tools/served_skills_parity.py --sync` from "
             f"specs authored upstream).")
 
-    declared = _declared_key_count(section)
-    if not declared:
+    claims = _declared_key_claims(section)
+    declared = [value for _word, value in claims if value is not None]
+    unreadable = sorted({word for word, value in claims if value is None})
+    if unreadable:
+        problems.append(
+            f"the served skill states the size of the warning set as "
+            f"{unreadable}, which this gate cannot read as a number. If the "
+            f"wording changed, re-anchor `_DECLARED_COUNT` / `_NUMBER_WORDS` in "
+            f"this test — do not let the arm go dark: the declaration is what "
+            f"lets a reader tell a complete enumeration from a truncated one.")
+    if not declared and not unreadable:
         problems.append(
             "the served skill no longer states how many keys the closed set "
             "has — re-anchor this gate: the declaration is what a reader uses "
             "to tell a complete enumeration from a truncated one")
-    elif set(declared) != {len(WARNING_KEYS)}:
+    elif declared and set(declared) != {len(WARNING_KEYS)}:
         problems.append(
             f"the served skill states the warnings set has "
             f"{sorted(set(declared))} keys but the product's closed set has "
@@ -426,9 +449,13 @@ def test_served_skill_advertises_only_keys_the_product_emits():
 # Built from a template rather than from the served file so these run (and
 # RED) even where the mirror is absent or has already been fixed — the point
 # is the GATE, not the artifact of the day.
-def _synthetic_warnings_section(heading_word: str, keys: list[str],
+def _synthetic_warnings_section(heading_word: str | None, keys: list[str],
                                planned: str = _PLANNED_KEY) -> str:
     """A warnings section in the mirror's own shape.
+
+    ``heading_word=None`` renders a heading that states NO cardinality, which is
+    its own gate arm (the declaration is what separates a complete enumeration
+    from a truncated one). Otherwise the heading says “the <WORD> keys”.
 
     The planned-key blockquote sits AFTER a blank line, exactly as a mirror that
     *mentions* a key without enumerating it would: `_listed_keys` stops at the
@@ -437,8 +464,10 @@ def _synthetic_warnings_section(heading_word: str, keys: list[str],
     reason recorded there.
     """
     listed = " ·\n".join(f"`{key}`" for key in keys)
+    heading = ("## Warnings (closed set)" if heading_word is None else
+               f"## Warnings — the {heading_word} keys (closed set)")
     return (
-        f"## Warnings — the {heading_word} keys (closed set)\n\n"
+        f"{heading}\n\n"
         "`warnings` entries are key-prefixed strings. A key outside this "
         "table is a\ndivergence — report it:\n\n"
         f"{listed}\n\n"
@@ -486,6 +515,38 @@ def test_10437_warning_table_gate_reds_on_a_declared_count_mismatch():
     problems = _warning_table_problems(section)
     assert problems, "a miscounted closed set passed every arm"
     assert str(len(keys)) in "\n".join(problems)
+
+
+def test_10437_warning_table_gate_reds_on_an_undeclared_count():
+    """The fourth arm: a truncated enumeration under a heading that states NO
+    cardinality. Nothing else can catch it — the subset arm is silent (nothing
+    advertised) and the count arm has no declaration to compare — so the “no
+    longer states how many keys” branch is the only thing that reds it. Without
+    this case that branch could be deleted with every other test still green
+    (#10437 review, P2).
+    """
+    keys = sorted(WARNING_KEYS)
+    section = _synthetic_warnings_section(None, keys[:-1])
+
+    assert _declared_key_count(section) == []
+    assert not [key for key in _listed_keys(section) if key not in WARNING_KEYS]
+
+    problems = _warning_table_problems(section)
+    assert any("no longer states how many keys" in problem
+               for problem in problems), problems
+
+
+def test_10437_warning_table_gate_reds_on_an_unreadable_count():
+    """A cardinality word the gate cannot read is a PROBLEM, not a traceback:
+    a reworded heading must red with an instruction to re-anchor (#10437
+    review, P2).
+    """
+    keys = sorted(WARNING_KEYS)
+    section = _synthetic_warnings_section("ENGINE", keys)
+
+    problems = _warning_table_problems(section)
+    assert any("cannot read as a number" in problem for problem in problems), \
+        problems
 
 
 def test_10437_warning_table_gate_is_clean_on_the_mirror_shape():

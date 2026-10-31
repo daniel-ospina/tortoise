@@ -277,7 +277,8 @@ def dump_manifest(manifest: dict) -> str:
         "# MIT repo named below; this tree holds the derived MIRROR. Do not edit",
         "# a served skill or this pin by hand — edit the skill upstream, then run",
         "#   uv run python tools/served_skills_parity.py --sync",
-        "# and commit the mirrored skills together with this file.",
+        "# and commit the mirrored skills AND the rebuilt .skill downloads in",
+        "# website/skills/ together with this file (`--sync` derives both).",
         "#",
         "# `commit` is a real upstream commit and every sha256 is the CONTENT of",
         "# that commit — `--check-upstream` re-fetches by commit and re-hashes, so",
@@ -794,8 +795,13 @@ def _rebuild_archives(root: Path, manifest: dict, payloads: dict[str, bytes],
     pytest test, so the sanctioned remedy produced a red tree (#10088: both parity
     arms green, CI `1 failed, 2869 passed`).
 
-    Skills are taken from the PIN (not from the builder's own list) so a pin that
-    serves a subset never gains an archive here.
+    Skills are the INTERSECTION of the pin's entries and this repo's
+    `build_skill_archives.SKILL_NAMES` — enumerated from `SKILL_NAMES` (the
+    builder owns what an archive exists for) and filtered by the pin (a pin that
+    serves a subset never gains an archive here). A pinned skill with no
+    `SKILL_NAMES` entry is therefore not archived, and that is NOT silent: it is
+    reported as a note, because a new pinned skill needs its archive name added
+    in the same change rather than being dropped by a bare `continue`.
 
     ``payloads`` is the bytes ``sync`` fetched, keyed by skill name — NOT the
     file under ``root``. In a writing run those are the same bytes (``sync``
@@ -808,6 +814,12 @@ def _rebuild_archives(root: Path, manifest: dict, payloads: dict[str, bytes],
     """
     bsa = _build_skill_archives()
     moved: list[str] = []
+    for name in sorted(set(manifest["skills"]) - set(bsa.SKILL_NAMES)):
+        _note(f"{name}: pinned but NOT archivable — no entry in "
+              "build_skill_archives.SKILL_NAMES, so no website/skills/"
+              f"{name}.skill is derived for it. Add the name there if it should "
+              "ship as a download; a pinned skill with no archive is exactly "
+              "the stale-derived-artifact shape this tool exists to close.")
     for name in bsa.SKILL_NAMES:
         if name not in manifest["skills"]:
             continue
@@ -996,10 +1008,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  pin moved {result.previous[:12]} -> {result.target[:12]}")
             for line in result.changed:
                 print(f"  ~ {line}")
-            if result.archives:
-                print(f"  {verb} {len(result.archives)} .skill archive(s)")
-                for line in result.archives:
-                    print(f"  ~ {line}")
+            # Unconditional, INCLUDING zero: a run that rewrites no archive must
+            # still say the archives were derived and are current. Suppressing
+            # the line at zero leaves an operator unable to tell "checked, all
+            # current" from "this pin has no archives" — the unreported derived
+            # artifact is the shape this PR exists to close.
+            print(f"  {verb} {len(result.archives)} .skill archive(s)")
+            for line in result.archives:
+                print(f"  ~ {line}")
             if result.at_head is False:
                 _note(
                     f"{result.target[:12]} is NOT upstream HEAD: the currency arm "
