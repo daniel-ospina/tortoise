@@ -445,10 +445,16 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     the whole guard: the supersede minted ``derived --IMPL--> asserted`` with no
     verdict, no warning and no record.
 
-    Both unprovable-looking shapes are pinned: a NUMBER naming a position (which
-    is coerced and judged exactly) and a value that cannot be ordered at all
-    (which is judged over EVERY candidate source and refused if any blocks —
+    Both unprovable-looking shapes are pinned: a numeric string naming a position
+    (coerced and judged exactly) and a value that cannot be ordered at all (which
+    is judged over EVERY candidate source and refused if any blocks —
     fail-closed, never a silent exemption).
+
+    ⚠️ No `float` parametrization: MEASURED, FalkorDB returns `1` (an `int`) for
+    a property written as `1.0`, so a float-idx case would take the int path and
+    "pass" on the pre-fix code too — a non-discriminating case is not coverage.
+    The door still coerces `float` defensively (a driver that returned one would
+    otherwise be pushed onto the unorderable arm).
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
