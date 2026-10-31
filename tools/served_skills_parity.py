@@ -266,7 +266,8 @@ def dump_manifest(manifest: dict) -> str:
         "# MIT repo named below; this tree holds the derived MIRROR. Do not edit",
         "# a served skill or this pin by hand — edit the skill upstream, then run",
         "#   uv run python tools/served_skills_parity.py --sync",
-        "# and commit the mirrored skills together with this file.",
+        "# and commit the mirrored skills, the re-cut `website/skills/*.skill`",
+        "# archives that same command derives, and this file — all three together.",
         "#",
         "# `commit` is a real upstream commit and every sha256 is the CONTENT of",
         "# that commit — `--check-upstream` re-fetches by commit and re-hashes, so",
@@ -668,8 +669,11 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
             f"      The MIT repo is the AUTHOR: this skill changed there and the "
             f"served copy here was never re-derived.\n"
             f"      Fix: `uv run python tools/served_skills_parity.py --sync` "
-            f"and commit the mirrored skills + the pin. (#4643 target 2 — this "
-            f"is the drift that must not ship behind a green deploy.)")
+            f"and commit the mirrored skills, the re-cut `website/skills/*.skill` "
+            f"archives it derives, and the pin. Committing only the mirror + pin "
+            f"leaves the archive stale, which is the SAME red one gate later. "
+            f"(#4643 target 2 — this is the drift that must not ship behind a "
+            f"green deploy.)")
     if not drifted and not unread:
         # Green, but say WHY it is green — otherwise a reader sees the pin's
         # commit differ from HEAD and has to re-derive that it is harmless.

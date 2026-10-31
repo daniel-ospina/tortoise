@@ -224,6 +224,32 @@ def test_4643_the_pin_is_exactly_what_the_generator_writes():
         "re-cut it with `uv run python tools/served_skills_parity.py --sync`")
 
 
+def test_4643_the_pin_header_names_every_artifact_the_same_command_writes():
+    """The header is the operator's COMMIT instruction — it must name the archive too.
+
+    Review finding F3 (P2) was that the write surface was stated more narrowly
+    than the code in three places; the generated pin header is the fourth and the
+    one an operator reads first. `sync()` re-cuts `website/skills/<name>.skill` as
+    part of the same derivation (`_rebuilt_archives`), but the header said
+    "commit the mirrored skills together with this file". An operator who follows
+    that literally commits the served copy + pin and leaves the re-cut archive
+    UNCOMMITTED — which is byte-for-byte the stale-derived-artifact red this PR
+    exists to clear (`f045ac953`, and `cd7410b80` a day earlier), one gate later.
+
+    Asserted on the GENERATOR's output so the pin on disk cannot drift from it,
+    and on the pin on disk so a hand-edit cannot narrow the instruction either.
+    """
+    generated = sp.dump_manifest(sp.load_manifest(MANIFEST))
+    header = generated.split("\nupstream:")[0]
+    assert "--sync" in header, header
+    assert "archive" in header and ".skill" in header, (
+        "the pin's commit instruction does not name the derived .skill archives "
+        f"that `--sync` re-cuts, so following it commits a stale archive:\n{header}")
+    on_disk = MANIFEST.read_text(encoding="utf-8").split("\nupstream:")[0]
+    assert "archive" in on_disk and ".skill" in on_disk, (
+        "the committed pin's header is narrower than the derivation it documents")
+
+
 # ── the fail-closed directions (watched failing, not asserted in prose) ────
 
 def test_4643_a_served_copy_edited_in_place_is_caught(tmp_path):
@@ -417,6 +443,14 @@ def test_4643_an_upstream_push_past_the_pin_is_the_stale_mirror(monkeypatch, tmp
     assert len(problems) == 1, problems
     assert "MIRROR IS STALE" in problems[0] and "tortoise-decide" in problems[0]
     assert "--sync" in problems[0]
+    # The printed remedy is what the operator actually acts on, so it must name
+    # every artifact the command it names rewrites: this PR made `--sync` re-cut
+    # the derived archives too, and a remedy that says "mirror + pin" leaves the
+    # re-cut archive uncommitted — the same red one gate later (review finding,
+    # F3 class: prose narrower than the write surface).
+    assert "archive" in problems[0] and ".skill" in problems[0], (
+        "the remedy prints a command whose derived output it does not tell the "
+        f"operator to commit: {problems[0]}")
 
 
 def test_4643_an_upstream_commit_that_cannot_change_what_we_serve_is_not_drift(
