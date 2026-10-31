@@ -824,9 +824,20 @@ class FileHistory:
         about PR heads from a sample in which that side was never read. The label is the
         bucket a `slow_files` reopen argues from, so it must not outrank a read gap.
 
-        Only the READ gap is treated as a gap here. `*_unattested` is a MEASUREMENT (the
-        leg ran, its artifact was read, and it named other files — the diff-scoped
-        selection), which the row's own UNKNOWN reason already reports as its own fact.
+        ⛔ Every shape in which the PR-head side was not MEASURED is a gap here, and there
+        are three. `*_unattested` is deliberately NOT one of them as a *licence*: the leg ran
+        and named other files (the diff-scoped selection), which means the file did not
+        EXECUTE on that PR head — a fact about the leg, not a measurement of this file. So
+        `*_unattested` cannot by itself make the PR-head side measured, and it is reported
+        through the check below rather than through a counter of its own.
+
+        ⛔ And the ZERO-MEASUREMENT shape outranks both: a row with a push catch and **no
+        PR run of any kind** (nothing attested, nothing unread, nothing unattested — the
+        population was never SAMPLED) passed both checks above and minted the exclusive
+        claim. That is strictly WEAKER evidence than a read gap — there the leg at least
+        ran — so if a read gap must withhold the label, an unsampled side must too. The
+        precondition is `pr_runs_attested`, the same per-FILE standard the `NEVER` branch
+        requires.
         """
         if any(u.kind == "pr-head" for u in self.unknowns):
             return "a recorded PR-head UNKNOWN"
@@ -835,6 +846,8 @@ class FileHistory:
                 f"its PR leg ran {self.pr_leg_runs_unread} time(s) and the artifact could "
                 f"not be READ"
             )
+        if not self.pr_runs_attested:
+            return "no PR run attests this file"
         return None
 
     @property
@@ -894,8 +907,12 @@ class FileHistory:
                     f"window.api_notes), so nothing is known about it"
                 )
             if self.push_runs_attested and not self.pr_runs_attested:
+                # ⛔ NOT "attested clean": this row usually CITES the main run as a RED (a push
+                # catch requires the artifact to name the file), so "clean" contradicted the
+                # very citation beside it in the same table row. What is true in both shapes is
+                # that the file was MEASURED on main pushes — green or red — and not on a PR.
                 parts.append(
-                    f"it is attested clean on {self.push_runs_attested} main push run(s) but "
+                    f"it was measured on {self.push_runs_attested} main push run(s) but "
                     f"on NO PR head — a push runs the whole gating pool, so that is not "
                     f"evidence about a PR head (an UNKNOWN, never NEVER)"
                 )
@@ -903,7 +920,16 @@ class FileHistory:
                 {
                     "kind": "window",
                     "reason": (
-                        "no per-file evidence in the window that this FILE executed"
+                        # ⛔ The leading clause must not contradict the parts appended to it:
+                        # when a push run ATTESTED this file, "no per-file evidence that this
+                        # FILE executed" is false by construction — the branch condition below
+                        # proves it executed, on main. Narrow the clause to the fact that
+                        # actually is missing (the PR-head side) whenever main evidence exists.
+                        (
+                            "no per-file evidence in the window that this FILE executed"
+                            if not self.push_runs_attested
+                            else "no per-file PR-HEAD evidence that this FILE executed"
+                        )
                         + (
                             " — " + "; ".join(parts)
                             if parts

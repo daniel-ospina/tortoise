@@ -66,6 +66,13 @@ properties. Each has a test here that FAILS when the property is broken:
     reading returns. ⛔ The second one is the shape the first does NOT cover: only a RED leg
     creates an `Unknown`, so a GREEN PR leg whose artifact expired stated the exclusive claim
     while its PR-head side had never been read — the documented common shape live.
+    ⛔ **A gap the population never sampled outranks every other gap** — the rule is stated
+    generally here and the two shapes above are only the ones that had been OBSERVED. A row
+    with a push catch and NO PR run of any kind (nothing attested, nothing unread, nothing
+    unattested) has no PR-head sample at all, so it cannot state an exclusive claim about PR
+    heads; `test_a_push_only_red_with_no_pr_run_at_all_is_not_called_only_on_main` fails if the
+    label comes back, and `test_a_push_only_red_is_catch_push_only` is the genuinely-sampled
+    counterpart that must KEEP it.
 12. **A bound (or transport) failure while LISTING cuts the SAMPLE, never the REPORT** —
     `list_runs` re-raises a page-1 failure, and that error reached `main`, which exited 2
     before writing `--json-out`/`--md-out`: the one state `--max-seconds` exists for produced
@@ -587,10 +594,15 @@ def test_a_pr_row_is_attested_from_the_pr_runs_own_artifact_not_the_push_runs(tm
     b_row = _row(report, b_path)
 
     # `a` was executed only on the push run: the PR leg's own artifact names `b`, so there
-    # is no PR-head attestation — and its main red must survive as CATCH-PUSH-ONLY.
+    # is no PR-head attestation — the diff-scoped selection never EXECUTED `a` pre-merge, so
+    # "only on main" would be an EXCLUSIVE claim about a file the PR sample never measured.
+    # Its main red still survives, cited: only the exclusive WORDING is withheld.
     assert a_row["pr_runs_attested"] == 0, "a push artifact is not PR-head evidence"
-    assert a_row["status"] == catch.CATCH_PUSH_ONLY
+    assert a_row["status"] == catch.UNKNOWN, a_row["status"]
     assert a_row["status"] != catch.NEVER
+    assert [c["run_id"] for c in a_row["push_main_catches"]] == [str(RUN_PUSH)], (
+        "the main catch is still cited — only the exclusive wording is withheld"
+    )
     # `b` IS attested — by the PR run that actually uploaded it.
     assert b_row["pr_runs_attested"] == 1, "the PR run's own artifact names this file"
 
@@ -599,19 +611,90 @@ def test_a_pr_row_is_attested_from_the_pr_runs_own_artifact_not_the_push_runs(tm
 
 
 def test_a_push_only_red_is_catch_push_only(tmp_path):
+    """The GENUINELY-SAMPLED shape: the file was measured on a PR head and caught nothing.
+
+    ⛔ This fixture used to carry `runs=[_run(RUN_PUSH, SHA, "push")]` — NO PR run at all —
+    and still asserted `CATCH_PUSH_ONLY`. It therefore PINNED the defect as intended: the
+    exclusive label over a population that was never sampled. The PR run below is what makes
+    the exclusive claim supportable, and it is the difference between this test and
+    `test_a_push_only_red_with_no_pr_run_at_all_is_not_called_only_on_main`.
+    """
     family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    name = catch.artifact_name(family, leg)
     root = _world(
         tmp_path,
-        runs=[_run(RUN_PUSH, SHA, "push")],
-        jobs={RUN_PUSH: [_check(100, RUN_PUSH, f"{family} ({leg})", "failure")]},
+        runs=[
+            _run(RUN_PUSH, SHA, "push"),
+            # The PR-head side IS sampled — green, and it names this file.
+            _run(RUN_PR, SHA, "pull_request", pr=79, conclusion="success"),
+        ],
+        jobs={
+            RUN_PUSH: [_check(100, RUN_PUSH, job, "failure")],
+            RUN_PR: [_check(200, RUN_PR, job, "success")],
+        },
+        # The SAME artifact name in both runs, which is the real upload shape.
         artifacts={
-            (RUN_PUSH, catch.artifact_name(family, leg)): _zip(_junit([("tests/test_billing.py", "t", True)])),
+            (RUN_PUSH, name): _zip(_junit([("tests/test_billing.py", "t", True)])),
+            (RUN_PR, name): _zip(_junit([("tests/test_billing.py", "t", False)])),
         },
     )
     row = _row(_report(root), "test_billing.py")
-    assert row["status"] == catch.CATCH_PUSH_ONLY
+    assert row["pr_runs_attested"] == 1, "the PR run's own artifact names this file"
+    assert row["status"] == catch.CATCH_PUSH_ONLY, row["status"]
     assert row["pr_head_catches"] == []
     assert [c["run_id"] for c in row["push_main_catches"]] == [str(RUN_PUSH)]
+
+
+def test_a_push_only_red_with_no_pr_run_at_all_is_not_called_only_on_main(tmp_path):
+    """The ZERO-MEASUREMENT shape: nothing ran on a PR head, so nothing can be `ONLY on main`.
+
+    ⛔ `_pr_head_gap()` knew two shapes — a recorded `pr-head` `Unknown`, and a READ gap
+    (`pr_leg_runs_unread`). Neither fires when the population was never SAMPLED at all: a row
+    with a push catch, **zero PR runs of any kind and zero counters** is `None` from the gap
+    check, so `status` minted `CATCH_PUSH_ONLY` — an EXCLUSIVE claim about a population that was
+    never sampled. That is strictly WEAKER evidence than the read gap the gap check already
+    refuses (there the leg at least ran), and doctrine #11 at the top of this file states the
+    rule generally: *"An EXCLUSIVE label needs a sample without gaps"*. The two landed fixes
+    covered only the two shapes that had been observed; this one is the same asymmetry, one
+    step further back.
+
+    It is scored, not merely labelled: `render_summary` prints it into the summary total as
+    `"N only on main"` (cited by SYMBOL, never by line — this fix grows the file, so a
+    numeral written here is stale the moment it lands),
+    and `CATCH_PUSH_ONLY` is the bucket a `slow_files` reopen argues from — so an unsampled
+    PR-head side must not be scored as a measured negative about PR heads.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        # NO PR run exists in this world at all — the population was never sampled.
+        runs=[_run(RUN_PUSH, SHA, "push")],
+        jobs={RUN_PUSH: [_check(100, RUN_PUSH, f"{family} ({leg})", "failure")]},
+        artifacts={
+            (RUN_PUSH, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            ),
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+
+    assert row["pr_runs_attested"] == 0, "no PR run exists to attest it"
+    assert row["pr_leg_runs_unread"] == 0 and row["pr_leg_runs_unattested"] == 0, (
+        "neither existing gap shape fires — this is the uncovered one"
+    )
+    assert row["status"] == catch.UNKNOWN, (
+        f"an exclusive claim over an unsampled population: {row['status']}"
+    )
+    assert [c["run_id"] for c in row["push_main_catches"]] == [str(RUN_PUSH)], (
+        "the main catch is still cited — only the exclusive WORDING is withheld"
+    )
+    assert "no PR run attests this file" in (row["note"] or ""), row["note"]
+    assert report["coverage"]["status_" + catch.CATCH_PUSH_ONLY] == 0, (
+        "a row with no PR-head sample must not be counted as 'only on main'"
+    )
+    assert report["coverage"]["status_" + catch.UNKNOWN] > 0
 
 
 def test_a_push_only_catch_over_a_pr_head_gap_is_not_called_only_on_main(tmp_path):
