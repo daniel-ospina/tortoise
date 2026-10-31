@@ -523,6 +523,120 @@ class TestPhase1GuardSeesTheContentIdentity:
         ).result_set
         assert {r[0] for r in rows} == {"retracted", "live"}
 
+    def test_empty_content_matching_a_terminal_point_is_a_phase1_violation(
+            self, sdk):
+        """#9819 review P1: the content leg must NOT gate on TRUTHINESS.
+
+        ``""`` is CONTENT to the writer, not "absent": ``_check_item_shape``
+        admits it (only ``None``/non-str is refused) and ``create_point``'s only
+        content boundary is ``isinstance(content, str)`` — so
+        ``create_point("statement", "")`` mints a real point with
+        ``content_hash = sha256("")``, and once retracted it is a terminal
+        point like any other. Reading the item's content with ``and content``
+        skipped the graph read AND the ``minted_terminal_content`` record, so
+        this bundle FOLDED onto the retracted point and ``_stamp_batch_id``
+        rewrote it — the #9819 hazard through a legal bundle item.
+
+        Discriminating: pre-fix the ``pytest.raises`` fails (the ingest is
+        ACCEPTED and the assertions below see a stamped ``batch_id``).
+        """
+        terminal = sdk.create_point("statement", "")["id"]
+        sdk.retract_point(terminal)
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": ""}]})
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "the content fold stamped the retracted empty-content point "
+            "(#9819 P1 — the leg gated on truthiness)")
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_double_wrapped_status_is_not_recorded_as_a_terminal_mint(self, sdk):
+        """#9819 review P2: the bundle-order record predicts a MINT, and a mint
+        stores the status after ``create_point``'s ONE fold.
+
+        ``create_point`` pops ``status`` BEFORE its dedup branch (a dedup hit
+        must never forward the caller's status into ``update_point``, #1905),
+        so a status nested TWO ``props`` deep is never stored: measured,
+        ``{"props": {"props": {"status": "retracted"}}}`` lands ``status='live'``.
+        Reading the recorded status at ``_POINT_ITEM_FLATTEN_DEPTH`` (2) saw the
+        unwritten ``retracted`` and refused the NEXT item under the same content
+        with "mints with status 'retracted'" — a wrong message on a bundle the
+        writer completes.
+
+        Discriminating: pre-fix the bundle is REFUSED with `reuses content`.
+        """
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "DW-STATUS",
+                 "props": {"props": {"status": "retracted"}}},
+                {"ref": "p2", "kind": "statement", "content": "DW-STATUS"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 1
+        assert res["deduped"]["points"] == 1
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'DW-STATUS' RETURN n.status"
+        ).result_set
+        assert [r[0] for r in rows] == ["live"], (
+            "the double-wrapped status was never stored, so nothing minted "
+            "terminal (#9819 P2)")
+
+
+class TestContentIdentityReadIsBatched:
+    """#9819 review P2: the content identity must not cost a graph read PER
+    ITEM.
+
+    ``_find_terminal_dedup_hit`` is THREE queries (terminal-hash,
+    unfiltered-hash, hash-less A10 fallback) and ``_check_endpoints`` called it
+    once per ``points`` item, so ``_validate_bundle`` went linear in bundle
+    size on the common ingest path — measured on the pre-batch head: 200
+    fresh-content points 3.01 s vs 0.00 s on ``origin/main``; 200 live-content
+    hits 2.08 s; a 200-item ingest 19.89 s.
+
+    Pinned as a COUNT, not a timing: a duration assertion on embedded FalkorDB
+    is machine-dependent and would flake, while the query count IS the defect.
+    """
+
+    @staticmethod
+    def _count_queries(sdk, bundle):
+        """(all graph queries, content-identity queries) for one bundle.
+
+        Patches the ``_GuardedGraph`` CLASS, not the instance: the handle
+        declares ``__slots__``, so an instance attribute is read-only.
+        """
+        import unittest.mock as mock
+
+        proj = sdk._get_proj()
+        calls: list[str] = []
+        real = type(proj.g).query
+
+        def spy(self, q, **kwargs):
+            calls.append(q)
+            return real(self, q, **kwargs)
+
+        with mock.patch.object(type(proj.g), "query", spy):
+            sdk._validate_bundle(bundle)
+        return len(calls), sum(1 for q in calls if "content_hash" in q)
+
+    def test_bundle_query_count_does_not_grow_with_item_count(self, sdk):
+        one = {"points": [{"ref": "p1", "kind": "statement",
+                           "content": "BATCH-FRESH-1"}]}
+        many = {"points": [{"ref": f"p{i}", "kind": "statement",
+                            "content": f"BATCH-FRESH-{i}"} for i in range(6)]}
+        one_total, one_content = self._count_queries(sdk, one)
+        many_total, many_content = self._count_queries(sdk, many)
+        assert many_content == one_content == 1, (
+            "the content identity is read per item, not once per bundle: "
+            f"1 item -> {one_content}, 6 items -> {many_content} (#9819 P2)")
+        assert many_total == one_total, (
+            f"_validate_bundle cost scales with bundle size: {one_total} -> "
+            f"{many_total} queries (#9819 P2)")
+
 
 class TestNoInBundleDedupEscape:
     """#8400 review P2: the refusal told callers to "pass a fresh key with

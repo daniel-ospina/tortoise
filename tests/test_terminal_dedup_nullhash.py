@@ -232,7 +232,7 @@ class TestIngestGuardAfterRebuild:
         assert after.get("updatedAt") == before.get("updatedAt"), (
             "the content fold moved updatedAt on the terminal point (#9819)")
 
-    def test_bundle_local_ref_to_rebuilt_terminal_point_routed_via_operator(self, tmp_path):
+    def test_bundle_local_ref_to_rebuilt_terminal_point_refused_on_operator_route(self, tmp_path):
         """(d) Indicator 2, PRIMARY path: create a terminal point, rebuild the
         graph, then assert the guard still MATCHES a bundle-local ref that
         resolves to that point (the cycle-17/18 dedup-hit PREDICATE), and that
@@ -272,7 +272,7 @@ class TestIngestGuardAfterRebuild:
         finally:
             sdk.close()
 
-    def test_bundle_local_ref_to_hashless_terminal_point_routed_via_operator(self, tmp_path):
+    def test_bundle_local_ref_to_hashless_terminal_point_refused_on_operator_route(self, tmp_path):
         """(e) Indicator 2, FALLBACK path: the #2971 hash-less fallback is
         still exercised end-to-end. After the rebuild, ``content_hash`` is
         nulled DIRECTLY — the deliberate stand-in for a crash between the node
@@ -306,7 +306,7 @@ class TestIngestGuardAfterRebuild:
         finally:
             sdk.close()
 
-    def test_bundle_local_ref_to_superseded_point_routed_via_operator(self, tmp_path):
+    def test_bundle_local_ref_to_superseded_point_refused_on_operator_route(self, tmp_path):
         """(f) Indicator 1, REAL flow: ``supersede_point`` stamps
         ``status='superseded'`` AND ``outdated=true`` — the pair the guard
         existed for and, pre-#3142, could not see. Uses the real lifecycle
@@ -350,7 +350,7 @@ class TestIngestGuardAfterRebuild:
         finally:
             sdk.close()
 
-    def test_bundle_local_ref_to_invalidated_live_point_routed_via_operator(self, tmp_path):
+    def test_bundle_local_ref_to_invalidated_live_point_refused_on_operator_route(self, tmp_path):
         """(g) Indicator 2, REAL flow: ``invalidate_point`` leaves ``status``
         untouched and sets ONLY the terminal marker ``outdated=true`` (status
         unmodified; its other writes — ``updatedAt``/``validTo``/``expiredAt``
@@ -477,7 +477,7 @@ class TestLegacyPropertyAbsentShape:
             content, pointKind="statement") is None
         assert sdk._find_terminal_dedup_hit(content, "statement") is None
 
-    def test_ingest_legacy_property_absent_terminal_point_routed_via_operator(
+    def test_ingest_legacy_property_absent_terminal_point_refused_on_operator_route(
             self, sdk):
         """End-to-end: the guard MATCHES a bundle whose local ref resolves to
         a legacy property-absent terminal point — the exact state that failed

@@ -778,7 +778,7 @@ class TestTerminalStatusGuard:
         res = sdk.ingest(bundle)
         assert res["created"]["connections"] == 1
 
-    def test_bundle_local_point_hitting_terminal_dedup_routed_via_operator(
+    def test_bundle_local_point_hitting_terminal_dedup_refused_on_operator_route(
             self, sdk):
         # cycle-17/18: a bundle-local point item whose (content_hash, kind)
         # dedup-hits an EXISTING terminal point.
