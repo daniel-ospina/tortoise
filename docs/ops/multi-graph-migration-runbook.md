@@ -227,14 +227,17 @@ Local: `npm --prefix supabase/tests/pglite run validate`.
 - **docs:** schema details in `docs/registry-graph-schema.md`; the key
   permission model in `docs/auth-architecture.md` §6.
 
-## 6. The default graph is TWO facts, and nothing can move either (#10180)
+## 6. The default graph is TWO facts — and one verb now moves both (#10180)
 
-**Measured 2026-10-27, line numbers at the head that ships this section** (each
-row also names its symbol, so a later drift is visible rather than silent). #10180
+**Measured 2026-10-27, line numbers at the head that first shipped this section**
+(each row also names its symbol, so a later drift is visible rather than silent;
+⚠️ the row `file:line` values are that head's, not live). #10180
 asks for the one step a team needs
 to start using a new graph: a verb that moves the DEFAULT. Building it surfaced
 that "the default graph" is not one fact in this codebase — it is **two**,
-resolved in two unrelated ways — and that is why no verb exists.
+resolved in two unrelated ways — and that is why **no verb existed until
+`20261102000001`** (see the last subsection for what shipped and why it is not
+option 1 below).
 
 | # | reader (file:line) | the question it answers | its source |
 |---|---|---|---|
@@ -312,8 +315,12 @@ Every coherent promotion shape moves Fact A. A promotion that moves **only** Fac
 A leaves an org-wide credential **filing its record under the new graph while
 writing its data into the old graph's physical store** — the
 two-answers-to-one-question split #10025 exists to remove, one level up. So the
-verb cannot be added without deciding how Fact B follows Fact A, and that
-decision reopens #2023's pin.
+verb cannot be added without deciding how Fact B follows Fact A — and, as
+written, the obvious answer (option 1 below, Fact B reads the row
+**unconditionally**) reopens #2023's pin, which is an owner decision, not a
+lane's. That is why this was blocked, and the subsection at the end of §6 is the
+shape that gets past both: Fact B follows the row **only when the data has
+moved**, so no existing org is affected and no recorded decision is reversed.
 
 ### The options (owner decision on #10180)
 

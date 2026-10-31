@@ -219,6 +219,11 @@ routes:
     path: /v1/graphs/{graph_id}/packs
     class: tenant
   - method: POST
+    # #10180 — make an existing graph the org's DEFAULT graph (moves
+    # `kind='default'` and `organizations.graph_name` in one transaction).
+    path: /v1/graphs/{graph_id}/promote
+    class: tenant
+  - method: POST
     path: /v1/index/docs
     class: tenant
   - method: GET

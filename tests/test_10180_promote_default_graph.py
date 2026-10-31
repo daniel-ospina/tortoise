@@ -637,10 +637,25 @@ def test_org_sdk_falls_back_to_the_historical_open_when_the_read_fails(monkeypat
     assert opened == [{"namespace": TEAM}]
 
 
+def _credential(**over) -> dict:
+    """A RESOLVED credential dict, in the shape the auth seams actually build.
+
+    ⚠️ Deliberately no `graph_name` key: an earlier version of this test used
+    one, so the gate's no-read shortcut never fired and the assertion passed on
+    a shape production cannot produce (`resolve_api_key`, `_session_user_org`
+    and the OAuth resolver all stamp `graph_namespace`).
+    """
+    org = {"org_id": TEAM, "graph_id": None,
+           "graph_namespace": f"org_{TEAM}_{NEW_ID}", "scopes": [],
+           "legacy_full_access": True, "delegation_depth": None}
+    org.update(over)
+    return org
+
+
 def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     """The money gate. `_check_org_limit` must hand the counter the DEFAULT
     graph's SDK: counting the demoted graph admits an org past its real cap
-    (fail-open) or refuses writes it is under."""
+    (fail-open, revenue) or refuses writes it is under (customer)."""
     import tortoise.quota as quota
 
     _hosted(monkeypatch)
@@ -649,18 +664,42 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
         quota, "enforce_org_limit",
         lambda limits, resource, sdk=None, **kw: seen.update(
             {"resource": resource, "sdk": sdk}))
-    org = {"org_id": TEAM, "graph_name": f"org_{TEAM}_{NEW_ID}"}
+    # A read here would also break the gate's fail-CLOSED contract: a read
+    # failure would fall back to the demoted graph, i.e. count the wrong graph
+    # silently. Prove there is no read at all.
+    monkeypatch.setattr(
+        ha, "_org_default_namespace",
+        lambda oid: pytest.fail("the quota gate must not read the control plane"))
 
     opened = _capture_make_sdk(monkeypatch)
-    ha._check_org_limit(org, "points")
+    ha._check_org_limit(_credential(), "points")
     assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}], (
         "the points cap must count the graph the writes land in")
     assert seen["sdk"] is not None
 
     # A control-plane-counted resource must not pay for an SDK it never touches.
     opened.clear()
-    ha._check_org_limit(org, "api_keys")
+    ha._check_org_limit(_credential(), "api_keys")
     assert opened == [] and seen["sdk"] is None
+
+
+def test_a_graph_bound_credential_keeps_the_historical_quota_count(monkeypatch):
+    """A graph-bound credential's `graph_namespace` IS a custom graph's — the
+    default-graph question does not apply to it, and `_default_graph_name`
+    answering it would count a graph the credential never bound."""
+    import tortoise.quota as quota
+
+    _hosted(monkeypatch)
+    monkeypatch.setattr(
+        quota, "enforce_org_limit", lambda *a, **k: None)
+    opened = _capture_make_sdk(monkeypatch)
+    ha._check_org_limit(
+        _credential(graph_id=NEW_ID,
+                    graph_namespace=f"org_{TEAM}_{NEW_ID}"), "points")
+    assert opened == [{"namespace": TEAM}]
+    assert ha._default_graph_name(
+        _credential(graph_id=NEW_ID,
+                    graph_namespace=f"org_{TEAM}_{NEW_ID}")) is None
 
 
 def test_the_mcp_lane_follows_a_promoted_default(monkeypatch):
@@ -726,8 +765,10 @@ def test_the_mcp_lane_is_unchanged_for_an_unpromoted_org(monkeypatch):
 # historical. A new one fails here, so the class cannot silently re-open.
 
 _ORG_WIDE_OPENER_ALLOWLIST = {
-    # → the resolver's own historical arm (the definition of "not moved").
+    # → the resolvers' own historical arm (the definition of "not moved");
+    #   `_org_sdk_for_credential` is the credential-shaped twin the quota gate uses.
     "_org_sdk": 1,
+    "_org_sdk_for_credential": 1,
     # → the credential path's historical arm; the moved arm calls
     #   `_make_sdk(graph_name=...)` above it.
     "_data_sdk": 1,
@@ -750,6 +791,21 @@ _ORG_WIDE_OPENER_ALLOWLIST = {
     "provision_tenant": 1,
     "register_user": 3,
     "_eager_provision_org_graph": 2,
+}
+
+
+_OTHER_FILE_ALLOWLIST = {
+    # `quota.py` is a LEAF consumer (it must not import hosted_api), and this
+    # fallback is only reached when a caller passes no `sdk=`. Every REST caller
+    # now passes the default-graph SDK (`hosted_api._check_org_limit`), so this
+    # arm survives for direct callers only — and it is the same historical open
+    # it always was. Converting it would duplicate the gate in a module that
+    # cannot import it.
+    "tortoise/quota.py": {"_count_resource": 1},
+    # Provisioning: the default row is MINTED by the flow these run in, so no
+    # promotion can predate them.
+    "tortoise/supabase_control.py": {"provision_org": 1,
+                                     "_ensure_onboarding_node_after_provision": 2},
 }
 
 
@@ -805,6 +861,42 @@ def test_every_org_wide_opener_is_converted_or_accounted_for():
     assert found == _ORG_WIDE_OPENER_ALLOWLIST, (
         "an org-wide `_make_sdk(namespace=<org>)` opener changed — convert it to "
         f"`_org_sdk` or record why it must stay historical. Found: {found}")
+
+    # The class spans `tortoise/`, not just this file (quota's counter and the
+    # provisioning post-steps) — pinned too, so a NEW one there is caught.
+    repo_root = Path(__file__).resolve().parent.parent
+    for rel, expected in _OTHER_FILE_ALLOWLIST.items():
+        other = ast.parse((repo_root / rel).read_text(encoding="utf-8"))
+        o_parents: dict = {}
+        for _n in ast.walk(other):
+            for _c in ast.iter_child_nodes(_n):
+                o_parents[_c] = _n
+
+        def _enc(node, _p=o_parents) -> str:
+            cur = node
+            while cur in _p:
+                cur = _p[cur]
+                if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return cur.name
+            return "<module>"
+
+        wide: dict[str, int] = {}
+        for node in ast.walk(other):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            callee = (fn.id if isinstance(fn, ast.Name)
+                      else fn.attr if isinstance(fn, ast.Attribute) else None)
+            kw = next((k for k in node.keywords if k.arg == "namespace"), None)
+            if callee != "_make_sdk" or kw is None:
+                continue
+            if isinstance(kw.value, ast.Constant) and kw.value.value in (
+                    "registry", None):
+                continue
+            wide[_enc(node)] = wide.get(_enc(node), 0) + 1
+        assert wide == expected, (
+            f"the org-wide opener class changed in {rel} — see "
+            f"_OTHER_FILE_ALLOWLIST. Found: {wide}")
 
 
 # ── 10. The two holes a review found in the first cut of this verb ────────
@@ -942,3 +1034,81 @@ def test_soft_delete_cannot_tombstone_a_graph_that_became_the_default(
     assert [g["status"] for g in fake.tables["graphs"]
             if g["id"] == NEW_ID] == ["active"]
     assert len(_defaults(fake)) == 1
+
+
+# ── 12. Every hosted auth seam carries the namespace the resolver reads ────
+# The resolver is only as good as the FIELD the credential carries. A seam that
+# omits `graph_namespace` silently keeps the historical open — the demoted graph
+# after a promotion — while its record tenant (resolved from the row) names the
+# promoted one. That is how the `oat_` class was missed on the first pass.
+
+def test_the_oauth_lane_carries_the_default_namespace(monkeypatch):
+    """`resolve_oauth_access_token` must stamp `graph_namespace`.
+
+    FAIL-ON: drop the stamp (or `graph_name` from `oauth._org_row`) and an
+    `oat_` MCP credential resolves to `namespace=org_{org_id}` — the graph a
+    promotion DEMOTED — while `record_tenant_for` files its rows under the
+    promoted id (`default_graph_id` is stamped right beside it).
+    """
+    from tortoise import oauth
+
+    _hosted(monkeypatch)
+    promoted = f"org_{TEAM}_{NEW_ID}"
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
+                             "org_memberships": [], "invitations": [],
+                             "graphs": []})
+    _seed(fake)
+    fake.rpc("promote_default_graph",
+             {"p_org_id": TEAM, "p_graph_id": NEW_ID}, representation=True)
+    assert fake.tables["organizations"][0]["graph_name"] == promoted
+    token = "oat_" + "c" * 40
+    fake.seed("oauth_access_tokens", [{
+        "token_hash": oauth._sha256(token), "client_id": "client-10180",
+        "user_id": OWNER, "org_id": TEAM, "scope": "mcp",
+        "expires_at": "2099-01-01T00:00:00+00:00", "revoked_at": None,
+    }])
+    # No live network: the resolver otherwise reaches GoTrue for the owner
+    # email (the #4387 egress guard blocks it). Same wiring the #10046 suite
+    # uses for this seam.
+    from tortoise import hosted_api as _ha
+    from tortoise import supabase_control as _sc
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setattr(_sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(_sc, "get_control_plane", lambda: fake)
+
+    async def _noop(*a, **kw):
+        return None
+
+    monkeypatch.setattr(_ha, "_abuse_post_auth", _noop)
+    monkeypatch.setattr(_ha, "_org_node_sync_limits", lambda oid: {})
+    org = oauth.resolve_oauth_access_token(fake, token)
+    assert org is not None, "the credential did not resolve"
+    assert org["graph_namespace"] == promoted, (
+        "the OAuth credential must carry the org's DEFAULT namespace")
+    assert org["default_graph_id"] == NEW_ID
+    # …and the seam the MCP lane reads answers with it.
+    assert ha._default_graph_name(org) == promoted
+
+
+def test_every_hosted_auth_seam_stamps_the_same_field():
+    """Source pin for the CLASS: each hosted seam that resolves an org-wide
+    credential must put `graph_namespace` on the dict, because the resolver
+    reads that field and nothing else.
+
+    FAIL-ON: a new seam (or a reverted stamp) that resolves an org-wide
+    credential without it silently keeps the historical open.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "tortoise"
+    seams = {
+        "supabase_control.py": '"graph_namespace": graph_namespace',
+        "hosted_api.py": '"graph_namespace": row.get("graph_name")',
+        "oauth.py": 'org["graph_namespace"] = _default_ns',
+    }
+    for rel, needle in seams.items():
+        src = (root / rel).read_text(encoding="utf-8")
+        assert needle in src, (
+            f"{rel} no longer stamps the org-wide `graph_namespace`: the "
+            "default-graph resolver reads that field and would silently open "
+            "the demoted graph after a promotion")
