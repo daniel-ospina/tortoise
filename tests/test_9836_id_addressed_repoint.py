@@ -30,25 +30,28 @@ more rows in `STRUCTURAL_REL_LABELS`:
   `create_edge`) type-check nothing, and the class-4 mint produces the Point
   shape.
 
-So the target is addressed the way every other epistemic endpoint in this tree
-is: by its OWN identity property — the label's own key
-(`ID_ADDRESSED_TARGET_ID_PROPS`: `id`, or `eventId` for an `Event`, whose `id`
-the meeting guard can share between two distinct nodes) — with the label the
-descriptor OBSERVED live riding `target_label` (the field's own meaning on the
-structural route). Both routes
-resolve `(label, identity)` — the graph through `resolve_structural_target(..., by_id=
-True)`, the record by delegating to `_endpoint_resolution`, the same resolution
-every other edge endpoint uses.
+So the target is addressed the way every other endpoint in this tree is: by its
+OWN identity property under the label the descriptor OBSERVED live
+(`ID_ADDRESSED_TARGET_ADDRESSING`) — `id` for Point/Subject/Object, `eventId` for
+an `Event` (whose `id` the meeting guard can share between two distinct nodes),
+`url` for a `:Source` — with that label riding `target_label` (the field's own
+meaning on the structural route). Both routes resolve `(label, key)` — the graph
+through `resolve_structural_target(... by_id=True | by_url=True)`, the record by
+delegating to `_endpoint_resolution`, the same resolution every other edge
+endpoint uses. ⚠️ The url arm is not optional: "not addressable by `id`" is NOT
+"not addressable", and declining a `:Source` target left the edge moved live and
+present on neither rebuild.
 
 THE ACCEPTANCE BAR is `live == journal-rebuild == record-rebuild`, so this module
 measures the LIVE and JOURNAL halves end to end (embedded graph, real journal,
 real `rebuild_all`) and pins the RECORD half where it can be pinned without a
 database: the PLAN the record emits for a descriptor. The row-count facts are
 measured against real Postgres by `supabase/tests/pglite/validate.mjs` cases
-13-17 (moves to the successor, filed under the descriptor's label; an
-unaddressable label is a NO-MOVE, never delete-without-insert; and the no-self-edge
-guard's delete-only descriptor removes the pre-supersede row) — a pytest leg
-cannot assert a row count, and a plan-text assertion cannot see one.
+13-19 (moves to the successor, filed under the descriptor's label — Point,
+Object, **Event by its `eventId`** and **Source by its url**; the no-self-edge
+`delete_only` DELETE; and an unknown label is a NO-MOVE, never
+delete-without-insert) — a pytest leg cannot assert a row count, and a plan-text
+assertion cannot see one.
 """
 from __future__ import annotations
 
@@ -63,7 +66,7 @@ from tortoise.projection.edges import (
     DERIVABLE_STRUCTURAL_RELS,
     EPISTEMIC_LABEL_ORDER,
     ID_ADDRESSED_STRUCTURAL_RELS,
-    ID_ADDRESSED_TARGET_ID_PROPS,
+    ID_ADDRESSED_TARGET_ADDRESSING,
     RECORD_ADDRESSABLE_EDGE_LABELS,
     STRUCTURAL_REPOINT_RELS,
     id_addressed_target,
@@ -155,54 +158,81 @@ def test_a_supersede_MOVES_the_edge_and_the_journal_rebuild_agrees(
 
 
 @pytest.mark.parametrize("rel", FAMILY)
-def test_the_descriptor_is_NOT_emitted_when_the_target_cannot_be_addressed(
-        edge_sdk, rel):
-    """The RESIDUAL pin: a target this family cannot NAME is not half-journaled.
+def test_a_SOURCE_targeted_edge_MOVES_and_both_routes_agree(edge_sdk, rel):
+    """A `:Source` target is ADDRESSED — by its `url` — not "unaddressable".
 
-    A `:Source` endpoint is url-keyed and outside `RECORD_ADDRESSABLE_EDGE_LABELS`,
-    so a descriptor for it is un-replayable on BOTH routes (the graph's by_id arm
-    allowlists the label before it interpolates it; the record's id arm refuses a
-    label outside `_ID_ADDRESSED_TARGET_LABELS`). The emission therefore skips it
-    COMPLETELY — no partial descriptor — exactly as `stub_key` skips an
-    unresolvable natural key for the derivable family. Filing one anyway is how
-    the record would become RICHER than the graph, the one direction Interface A
-    forbids.
+    The P1 this pins (review, measured): `create_edge(rel, point, <source url>)`
+    type-checks nothing, so the shape is producible; the emission then read "not
+    addressable by `id`" as "not addressable" and declined the descriptor, so
+    `supersede_point` moved the edge live and NOTHING journalled it. Before this
+    leg, the census read:
 
-    ⛔ #9836 REVIEW (P2): the consequent DIVERGENCE is asserted here rather than
-    left implied, because the code before it is correct and the divergence is the
-    thing a reader needs to know: live still MOVES the edge (the transfer is
-    unconditional) while BOTH rebuild routes hold nothing. This is the residual
-    the docs name (04-projection.md / 08-hosted-prerequisites.md / ONTOLOGY.md),
-    and it is #9834's to close (making `:Source` addressable is a FOLD change).
-    This leg is a RESIDUAL pin, not a claim of parity: when #9834 lands it must be
-    UPDATED to require the descriptor, and it will red until someone does.
+        aboutAction    -> Source : LIVE [(new, url)]  JREBUILD []   AGREE False
+        wasDerivedFrom -> Source : LIVE [(new, url)]  JREBUILD []   AGREE False
+
+    Both routes DO address a `:Source`: the graph through
+    `resolve_structural_target(..., by_url=True)` (an exact
+    `MATCH (s:Source {url:$url})`), the record through `node_key`, which IS a
+    Source's url — the same identity `extractedFrom`/`aboutDocument` already
+    resolve by. So the descriptor carries `(target_label='Source', tgt=url)` and
+    the rebuild agrees with live.
     """
     sdk, journal, tmp_path = edge_sdk
     ids = _world(sdk)
-    src = sdk.create_source("https://9836.test/doc", sourceKind="document")
-    url = src.get("url") or src.get("id")
+    url = sdk.create_source("https://9836.test/doc",
+                            sourceKind="document").get("url")
+    assert url, "the Source must carry the url the edge is keyed by"
     assert sdk.create_edge(rel, ids["old"], url)["created"] is True
     sdk.supersede_point(ids["old"], ids["new"])
-    assert [r for r in _repoints(journal) if r.get("edge_type") == rel] == []
 
-    # (1) live MOVED it — the skip is the producer's, not live's.
-    live = {(row[0], row[1]) for row in sdk._proj.g.query(
-        f"MATCH (s)-[r:{rel}]->(t) RETURN s.id, t.url").result_set}
-    assert live == {(ids["new"], url)}, (
-        f"live = {live} — the supersede transfer is unconditional; if live did NOT "
-        "move this edge the residual below is a different (smaller) divergence "
-        "and this pin is measuring nothing")
-    # (2) …and BOTH rebuild routes lose it. That is the residual, stated.
+    live = _edges(sdk._proj, rel)
+    assert live == {(ids["new"], url)}, live
+    reps = [r for r in _repoints(journal) if r.get("edge_type") == rel]
+    assert len(reps) == 1, (
+        f"{rel}: a `:Source`-targeted edge moved live ({live}) and journalled "
+        f"{len(reps)} repoints — a Source is addressable by its url, so the "
+        "emission must journal the move, not decline it")
+    assert reps[0]["target_label"] == "Source", reps[0]
+    assert reps[0]["tgt"] == url, reps[0]
+
     rebuilt = FalkorProjection(str(tmp_path / "rebuilt.db"))
     try:
         rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
-        assert {(row[0], row[1]) for row in rebuilt.g.query(
-            f"MATCH (s)-[r:{rel}]->(t) RETURN s.id, t.url").result_set} == set(), (
-            "a `:Source`-targeted edge now SURVIVES the journal rebuild — that is "
-            "the #9834 fix landing: update this residual pin (and the docs) to "
-            "require the descriptor instead of its absence")
+        assert _edges(rebuilt, rel) == live, (
+            f"{rel} -> Source: the journal rebuild disagrees with the live graph "
+            "— the url-keyed descriptor is what carries the move")
     finally:
         rebuilt.close()
+
+
+def test_an_unaddressable_target_is_not_half_journaled():
+    """A target with NO addressable identity is NOT journalled.
+
+    `id_addressed_target` returning ``None`` is what makes the emission SKIP such
+    a target instead of filing a descriptor the record cannot apply (a record
+    RICHER than the graph, the one direction Interface A forbids).
+
+    ⛔ THE ONE REMAINING SHAPE IS AN `Event` WITH NO `eventId` — the residual the
+    docs name. Since the url arm landed, every OTHER label a `create_edge` can
+    resolve a target to is addressable: `ID_ADDRESSED_TARGET_ADDRESSING` is
+    exactly `_RESOLVE_BRANCHES`' vocabulary (Point, Subject, Object, Event,
+    Source). An `Event` is keyed by its `eventId`, NOT by its `id`, because the
+    meeting guard can give two distinct Events one `id` — so an Event node the
+    journal never gave an `eventId` has no identity this family can name, and
+    that is the shape this guard catches. The live consequence is asymmetric and
+    is stated in the docs: live still MOVES that edge while both rebuild routes
+    hold nothing.
+    """
+    assert id_addressed_target(["Tag"], {"id": "x"}) is None
+    assert id_addressed_target(["Source"], {"id": "no-url-here"}) is None
+    # The residual: an Event carries `id` but the journal gave it no `eventId`.
+    assert id_addressed_target(["Event"], {"id": "evt-1"}) is None
+    # …and the moment it HAS one, that — never `id` — is its identity, so two
+    # guarded-merge Events sharing one `id` still name themselves.
+    assert id_addressed_target(
+        ["Event"], {"id": "cand", "eventId": "cand-abcd1234"}) == (
+            "Event", "cand-abcd1234")
+    assert set(ID_ADDRESSED_TARGET_ADDRESSING) > RECORD_ADDRESSABLE_EDGE_LABELS
 
 
 @pytest.mark.parametrize("rel", FAMILY)
@@ -440,22 +470,35 @@ def test_the_record_applies_the_descriptor_as_a_MOVE(rel):
     ("Point", "node_key"),
     ("Object", "id"),
     ("Subject", "id"),
+    ("Source", "node_key"),
 ])
 def test_the_target_is_resolved_by_the_labels_own_canonical_key(label, column):
     """The id-addressed arm delegates to `_endpoint_resolution` (one rule).
 
     `relation.tgt_key` is a composite FK into `node_identity`, so the endpoint
     must be filed by the label's CANONICAL key: `Point`/`Session`/`Event` →
-    `node_key`, `Object`/`Subject` → `id` (#9881). A restated resolution here
-    would be a second rule for the same fact.
+    `node_key`, `Object`/`Subject` → `id` (#9881), `Source` → `node_key` (= its
+    `url`). A restated resolution here would be a second rule for the same fact.
+    ⛔ The Source case is the url arm: `node_key` ALONE, never the label's default
+    `id OR node_key` union — a descriptor keyed by a url must not be able to
+    resolve onto some Source's `id` (the `_endpoint_resolution` docstring's own
+    extractedFrom hazard).
     """
     sql, params = rp._structural_target_resolution(
         "o", "g", label, "wasDerivedFrom", "tp-9836", "tgt", by_id=True)
     assert f"{column} = %s" in sql, sql
     assert params == ["o", "g", "tp-9836"], params
-    # The graph's twin match — same label, same id — so one descriptor cannot
+    # The graph's twin match — same label, same key — so one descriptor cannot
     # resolve onto two different nodes.
     assert sql.count("%s") == 3
+    if label == "Source":
+        # ONE key predicate, and it is `node_key` (org + graph + key = 3 binds).
+        # The label's DEFAULT match is `id = %s OR node_key = %s` — 4 binds and an
+        # `OR` — which would let a url-keyed descriptor resolve onto some
+        # Source's `id` row.
+        assert sql.count(" = %s") == 3, sql
+        assert " OR " not in sql, sql
+        assert "node_key = %s" in sql, sql
 
 
 def test_an_unaddressable_label_is_a_no_move():
@@ -468,7 +511,7 @@ def test_an_unaddressable_label_is_a_no_move():
     the same no-move the fold performs.
     """
     doc = _descriptor("wasDerivedFrom", tgt="https://x.test/d",
-                      target_label="Source")
+                      target_label="Tag")
     assert rp._structural_repoint_statements("o", "g", doc) is None
 
 
@@ -512,7 +555,14 @@ def test_the_record_mirrors_the_folds_own_rel_set_and_labels():
     the package), so the pin is what keeps the restatement honest.
     """
     assert rp._ID_ADDRESSED_STRUCTURAL_RELS == ID_ADDRESSED_STRUCTURAL_RELS
-    assert rp._ID_ADDRESSED_TARGET_LABELS == RECORD_ADDRESSABLE_EDGE_LABELS
+    assert rp._ID_ADDRESSED_TARGET_ADDRESSING == ID_ADDRESSED_TARGET_ADDRESSING
+    # The fold's id SWEEP is still the four epistemic labels — a `:Source` is
+    # addressed on the repoint route by its url, not by the `DirectEdgeCreated`
+    # sweep, so widening the repoint vocabulary must not widen this set.
+    assert frozenset(
+        {"Point", "Subject", "Object", "Event"}) == RECORD_ADDRESSABLE_EDGE_LABELS
+    assert set(ID_ADDRESSED_TARGET_ADDRESSING) == (
+        RECORD_ADDRESSABLE_EDGE_LABELS | {"Source"})
 
 
 def test_the_label_order_is_the_folds_sweep_order():
@@ -570,8 +620,13 @@ def test_id_addressed_target_picks_the_labels_own_key():
     # An Event the journal never gave an `eventId` is unaddressable — SKIP, never
     # a descriptor keyed on the property that is ambiguous.
     assert id_addressed_target(["Event"], {"id": "cand"}) is None
-    # A node the record cannot address → no descriptor at all.
-    assert id_addressed_target(["Source"], {"url": "u"}) is None
+    # A `:Source` is addressed by its url — NOT declined (review P1: "not
+    # addressable by id" is not "not addressable").
+    assert id_addressed_target(["Source"], {"url": "u"}) == ("Source", "u")
+    # An epistemic label wins over a co-resident Source label, in the fold's own
+    # order — the same first-wins rule the 2a-DIRECT transfer applies.
+    assert id_addressed_target(["Source", "Point"],
+                               {"id": "x", "url": "u"}) == ("Point", "x")
     assert id_addressed_target(["Point"], {}) is None
     assert id_addressed_target([], {"id": "x"}) is None
 
@@ -579,7 +634,7 @@ def test_id_addressed_target_picks_the_labels_own_key():
 def test_the_identity_property_is_the_labels_CANONICAL_one():
     """⛔ The key must be the identity BOTH routes already agree on.
 
-    `ID_ADDRESSED_TARGET_ID_PROPS` decides two things at once — the property the
+    `ID_ADDRESSED_TARGET_ADDRESSING` decides two things at once — the property the
     graph's replay matches and the value the record resolves — so a row that
     disagreed with the tree's canonical identity tables would put one descriptor
     on two different nodes. Pinned to the two existing authorities rather than
@@ -588,18 +643,26 @@ def test_the_identity_property_is_the_labels_CANONICAL_one():
     (`NODE_TABLES['event']` keys on `event_id`, which `node_key` mirrors under
     `chk_event_node_key_is_contract_key`, and `_ENTITY_MATCH_COLUMNS['event']`
     resolves by `node_key`).
+
+    ⛔ The map is a SUPERSET of `RECORD_ADDRESSABLE_EDGE_LABELS`, not equal to it:
+    `:Source` is addressable HERE (by its url, which is its `node_key`) and is
+    deliberately outside that set, which answers a different question (which
+    labels pass-2b's `DirectEdgeCreated` sweep can probe by `id`).
     """
     from tortoise.projection import _CANONICAL_ENTITY_ID_PROPS
 
     canonical = dict(_CANONICAL_ENTITY_ID_PROPS)
-    assert set(ID_ADDRESSED_TARGET_ID_PROPS) == set(RECORD_ADDRESSABLE_EDGE_LABELS)
-    for label, prop in ID_ADDRESSED_TARGET_ID_PROPS.items():
+    assert set(ID_ADDRESSED_TARGET_ADDRESSING) > RECORD_ADDRESSABLE_EDGE_LABELS
+    assert set(ID_ADDRESSED_TARGET_ADDRESSING) - RECORD_ADDRESSABLE_EDGE_LABELS == {"Source"}
+    for label, prop in ID_ADDRESSED_TARGET_ADDRESSING.items():
+        if label == "Source":
+            continue  # not an epistemic node; its identity is its url, not `id`
         assert prop == canonical[label], (
             f"{label} is addressed by {prop!r} here and by {canonical[label]!r} in "
             "the fold's own identity table — one of the two replay routes would "
             "resolve a different node")
     # The record half of the same fact, for the one label where it is not `id`.
-    assert ID_ADDRESSED_TARGET_ID_PROPS["Event"] == "eventId"
+    assert ID_ADDRESSED_TARGET_ADDRESSING["Event"] == "eventId"
     assert rp.NODE_TABLES["event"] == ("Event", "event_id")
     assert rp._ENTITY_MATCH_COLUMNS["event"] == ("node_key",)
 

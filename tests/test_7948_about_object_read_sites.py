@@ -628,7 +628,13 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     ),
     "projection/__init__.py::FalkorProjection._rebuild_all_replay": (
         'if (isinstance(etype, str) and etype in STRUCTURAL_REPOINT_RELS',
-        'or etype not in DERIVABLE_STRUCTURAL_RELS',
+        # ⚠️ Widened from `DERIVABLE_STRUCTURAL_RELS` by #9836 review round 2:
+        # the ID-ADDRESSED family's `delete_only` descriptors are applied here
+        # too, so the gate is the UNION of the two families. The witness moves
+        # with the code — a row pinned to the retired subset would have gone on
+        # PASSING only because the string survived elsewhere in the file, which
+        # is the false PASS this table's `_NON_LITERAL` spans exist to stop.
+        'or etype not in STRUCTURAL_REPOINT_RELS',
         'f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "',
     ),
     # An ALL-EDGE walk: no rel-type filter anywhere, so the edge is read
