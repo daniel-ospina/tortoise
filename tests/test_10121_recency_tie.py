@@ -763,7 +763,7 @@ class _LegScript:
         self.outcomes = list(outcomes)
         self.calls = 0
 
-    def query(self, cypher, params=None, timeout=None):  # noqa: ARG002
+    def query(self, cypher, params=None, timeout=None):
         out = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
         self.calls += 1
         if isinstance(out, BaseException):

@@ -759,7 +759,10 @@ def test_a_selected_custom_graph_names_the_record_tenant(monkeypatch):
     try:
         assert mcp_auth.record_tenant_for_graph(FUND_A) == (ORG_A, "g_fund_a")
         assert mcp_auth.record_tenant_for_graph(DEFAULT) is None, (
-            "the default graph's tenant is #9188's open question — never guessed here")
+            "DEFAULT needs no install HERE: the credential's own "
+            "`default_graph_id` already names it, and #10047/#10046 closed the "
+            "lanes that carried no credential — CORRECT BY CONSTRUCTION, not "
+            "an open question (tortoise/mcp_auth.py::record_tenant_for_graph)")
         assert mcp_auth.record_tenant_for_graph(None) is None
     finally:
         mcp_auth._current_org_id.reset(org)
@@ -794,7 +797,9 @@ def test_the_dispatch_installs_the_record_tenant_for_a_custom_graph(monkeypatch)
     try:
         assert asyncio.run(_dispatch("g_fund_a")) == (ORG_A, "g_fund_a")
         assert asyncio.run(_dispatch("default")) is None, (
-            "the default graph's record tenant is #9188's open question")
+            "DEFAULT needs no record scope here: the credential's own "
+            "`default_graph_id` names it (#10047/#10046), so a second write of "
+            "the same scope would only be able to disagree with it")
     finally:
         mcp_auth._current_org_id.reset(org)
 
