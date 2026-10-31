@@ -41,7 +41,7 @@ properties. Each has a test here that FAILS when the property is broken:
    open.
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
-(`runs.json`, `check-runs/<sha>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
+(`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
 pin the reviewer-reproducible path.
 """
 from __future__ import annotations
@@ -765,6 +765,205 @@ def test_a_red_cleared_by_a_rerun_is_visible_because_green_runs_are_read(tmp_pat
     assert window["success_runs"] == 1
     assert window["rerun_success_runs"] == 1
     assert "success-conclusion runs: 1 read (1 of them re-runs" in catch.render_summary(report)
+
+
+def test_a_cleared_red_whose_attempt_artifact_is_gone_is_unknown_not_never(tmp_path):
+    """The LIVE shape of a cleared red, and the one that used to be dropped silently.
+
+    GitHub's artifact listing is PER RUN (`actions/runs/<id>/artifacts`, no attempt parameter),
+    so after the only failing job is re-run green the artifact at `pytest-log-<job>-<leg>`
+    holds that PASSING attempt — its JUnit names no failure. The cleared-red loop read it,
+    found no failing path, and `continue`d: no citation, no UNKNOWN, nothing. The file then
+    read `NEVER` ("we ran it and it caught nothing") for a leg that went RED on that very PR
+    head, while `coverage.reds_cleared_by_a_rerun` counted the red just discarded.
+
+    ⛔ The assertion that bites is `status != NEVER`: pre-fix this row is NEVER, because the
+    green run attests the file executed and nothing recorded the red.
+    """
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    green_run = _run(RUN_PR, SHA, "pull_request", pr=56, conclusion="success")
+    green_run["run_attempt"] = 2
+    root = _world(
+        tmp_path,
+        runs=[green_run],
+        jobs={
+            RUN_PR: [
+                _check(100, RUN_PR, job, "failure"),
+                _check(200, RUN_PR, job, "success"),  # the re-run that replaced the artifact
+            ]
+        },
+        artifacts={
+            # The surviving artifact is the PASSING attempt: no failure to attribute.
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", False)])
+            )
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+    assert row["status"] != catch.NEVER, "a red on this PR head is not a clean bill"
+    assert row["status"] == catch.UNKNOWN
+    assert row["flake_cleared"] == []
+    assert any("re-measured" in u["reason"] for u in row["unknown"])
+    # The red is still ACCOUNTED FOR (never silently dropped), and it is not a catch either.
+    assert report["coverage"]["reds_cleared_by_a_rerun"] == 1
+    assert row["pr_head_catches"] == []
+
+
+def test_an_archived_runs_listing_shorter_than_its_total_count_is_read_not_crashed(tmp_path):
+    """An archive of a `--paginate` read is shorter than `total_count` — and that is normal.
+
+    In an `actions/runs` listing `total_count` is the POPULATION's size; the service refuses
+    page >10, so a busy window's archived page set is always short. The live client reads that
+    payload happily (its pager never consults the total), so the offline path must not refuse
+    it — and it must not escape as a `SurfaceReadError` traceback + exit 1 either, which is
+    neither of the two documented exits.
+    """
+    root = _world(tmp_path, runs=[_run(RUN_PR, SHA, "pull_request", pr=5)])
+    (root / "runs.json").write_text(
+        json.dumps(
+            {"total_count": 2500, "workflow_runs": [_run(RUN_PR, SHA, "pull_request", pr=5)]}
+        ),
+        encoding="utf-8",
+    )
+    assert catch.main(["--offline-dir", str(root), "--summary"]) == 0
+    report = _report(root)
+    assert report["window"]["populations"]["pull_request/failure"]["read"] == 1
+
+
+def test_a_truncated_offline_jobs_listing_is_a_read_failure_not_a_traceback(tmp_path, capsys):
+    """A short `jobs/<run_id>.json` is a READ failure: reported, never a traceback.
+
+    ⛔ Unlike the runs listing, one run's job listing has `total_count` describing exactly that
+    read, so a short page set means the archive is incomplete and the attempt reduction would
+    run on a partial surface. Before the fix this escaped as an uncaught `SurfaceReadError` — a
+    `RuntimeError` `main` did not catch — i.e. a traceback + exit 1, which is neither documented
+    exit and reads as a crash rather than an UNKNOWN.
+
+    The run-level read failure is the one `build_history` already handles: the run's slow legs
+    become UNKNOWN with an `api_notes` entry, and the report still produces (exit 0). A whole
+    listing that cannot be parsed is the exit-2 case (below), where no report is possible.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=5)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")]},
+    )
+    (root / "jobs" / f"{RUN_PR}.json").write_text(
+        json.dumps(
+            {"total_count": 99, "jobs": [_check(100, RUN_PR, f"{family} ({leg})", "failure")]}
+        ),
+        encoding="utf-8",
+    )
+    assert catch.main(["--offline-dir", str(root), "--summary"]) == 0
+    printed = capsys.readouterr().out
+    assert "jobs for run 1001 unreadable" in printed
+    assert "TRUNCATED" in printed
+    _row(_report(root), "test_billing.py")  # the table is still produced
+    assert _row(_report(root), "test_billing.py")["status"] == catch.UNKNOWN
+
+
+def test_an_unparseable_offline_listing_exits_2(tmp_path, capsys):
+    """A payload set that cannot be decoded is exit 2 — the documented "could not read" code."""
+    root = _world(tmp_path, runs=[_run(RUN_PR, SHA, "pull_request", pr=5)])
+    (root / "runs.json").write_text("{not json at all", encoding="utf-8")
+    assert catch.main(["--offline-dir", str(root), "--summary"]) == 2
+    assert "could not read a surface" in capsys.readouterr().err
+
+
+def test_a_runs_file_that_is_not_a_runs_listing_is_a_read_failure_not_an_empty_window(tmp_path):
+    """Dropping the `total_count` refusal must not drop the SHAPE witness with it.
+
+    `total_count` is the POPULATION's size (and the service caps at page 10), so an archived
+    busy-window page set is legitimately short — but an API error body (`{"message": …}`) or a
+    mistyped `workflow_runs` is not an empty window. Reading it as one would exit 0 with
+    "the report was produced" for a surface that was never read at all.
+    """
+    for label, payload in (
+        ("error-body", {"message": "Not Found"}),
+        ("total-only", {"total_count": 2500}),
+        ("wrong-type", {"total_count": 3, "workflow_runs": {"a": 1}}),
+    ):
+        root = _world(tmp_path / label, runs=[_run(RUN_PR, SHA, "pull_request", pr=5)])
+        (root / "runs.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert catch.main(["--offline-dir", str(root), "--summary"]) == 2, label
+
+
+def test_a_budget_exhausted_artifact_listing_does_not_claim_expiry(tmp_path):
+    """An unread listing is not an expired artifact — the row reason must say which it is.
+
+    ⛔ `GhClient.artifacts` swallowed `BudgetExhausted` and returned `{}`, so the listing note
+    was unreachable and every red leg of that run read UNKNOWN with "expired past the repo's
+    N-day retention" — the report asserting an artifact is gone when it was never looked up.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=57)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")]},
+    )
+    client = catch.OfflineClient(root)
+
+    def _broke(run_id: str) -> dict:
+        raise catch.BudgetExhausted("API-call bound reached (1)")
+
+    client.artifacts = _broke  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, client)
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    reason = row["unknown"][0]["reason"]
+    assert "retention" not in reason, "the artifact was never looked up — it is not expired"
+    assert "budget exhausted" in reason.lower()
+    assert any("budget exhausted" in note for note in report["window"]["api_notes"])
+
+    # The same rule one level down: the LISTING was read, the DOWNLOAD was not. The row must
+    # not claim expiry for bytes that were never fetched either.
+    downloaded = catch.OfflineClient(root)
+    downloaded.artifacts = lambda run_id: {  # type: ignore[method-assign]
+        catch.artifact_name(family, leg): {"name": catch.artifact_name(family, leg), "id": "x"}
+    }
+
+    def _no_download(artifact_id: str) -> bytes:
+        raise catch.BudgetExhausted("API-call bound reached (2)")
+
+    downloaded.artifact_zip = _no_download  # type: ignore[method-assign]
+    blocked = _row(catch.build_history(MANIFEST, downloaded), "test_billing.py")
+    assert blocked["status"] == catch.UNKNOWN
+    assert "retention" not in blocked["unknown"][0]["reason"]
+    assert "could not be READ" in blocked["unknown"][0]["reason"]
+
+
+def test_a_job_retried_many_times_marks_the_leg_unknown_once(tmp_path):
+    """A retried job yields one cleared attempt per retry — and ONE UNKNOWN block per row."""
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    green_run = _run(RUN_PR, SHA, "pull_request", pr=58, conclusion="success")
+    green_run["run_attempt"] = 4
+    root = _world(
+        tmp_path,
+        runs=[green_run],
+        jobs={
+            RUN_PR: [
+                _check(100, RUN_PR, job, "failure"),
+                _check(150, RUN_PR, job, "failure"),
+                _check(180, RUN_PR, job, "failure"),
+                _check(200, RUN_PR, job, "success"),
+            ]
+        },
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", False)])
+            )
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    assert len(row["unknown"]) == 1, "one block per leg, not one per retried attempt"
+    # Every cleared red is still COUNTED even though only one block is written.
+    assert report["coverage"]["reds_cleared_by_a_rerun"] == 3
 
 
 # --- 7. a tree that cannot answer the lane question fails closed ------------
