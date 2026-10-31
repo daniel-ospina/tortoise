@@ -233,12 +233,70 @@ def test_numeric_epoch_windows_normalize():
                               question_date="2026-09-25")
 
 
-def test_unparseable_window_is_not_stale():
-    """FAIL VALUE: demoting on a value we cannot read (fail-closed is the
-    conservative direction here)."""
-    assert not is_stale_entry({"valid_to": "not-a-date"},
+def test_an_undatable_end_is_stale_but_an_absent_or_future_one_is_not():
+    """A PRESENT-but-un-orderable end means ENDED — never "still true" (#9202).
+
+    FAIL VALUE: the pre-#9202 reading, which treated every unparseable window
+    value as NOT stale. That made such a window indistinguishable from an OPEN
+    one — no ``question_date`` could ever close it — so it covered every later
+    instant and always ranked as a current version of its fact. It is the same
+    fabricated-coverage hazard ``ONTOLOGY.md`` §4.7 names, and it contradicted
+    the owner ruling recorded there (*an end that is stored but names no instant
+    is an un-datable END: the fact ended, at a time we cannot pin*).
+
+    The four cases are kept together so the gate cannot be satisfied by a
+    blanket "demote anything that does not parse": absent, valid-and-future, and
+    valid-and-past must all keep their ruled readings.
+    """
+    # (a) PRESENT and un-orderable, in every spelling the ontology names, and
+    #     STALE AT EVERY question_date — including a far-future one, which is
+    #     what "covers every later instant" means operationally.
+    for junk in ("not-a-date", "someday", "TBD", ""):
+        for qd in ("2026-09-25", "2050-01-01", None):
+            assert is_stale_entry({"valid_to": junk}, question_date=qd), (
+                f"valid_to={junk!r} at question_date={qd!r} must read as ENDED")
+    # the canonical SHAPED form (#10079 stores a marker as no value + the
+    # declared marker) is the same END_UNKNOWN, and must read the same way
+    assert is_stale_entry({"valid_to_precision": "unknown"},
+                           question_date="2026-09-25")
+    assert is_stale_entry({"valid_to": None, "valid_to_precision": "unknown"},
+                           question_date="2026-09-25")
+
+    # (b) ABSENT — no end was recorded, so the window is still open.
+    assert not is_stale_entry({}, question_date="2050-01-01")
+    assert not is_stale_entry({"valid_to": None}, question_date="2050-01-01")
+    assert not is_stale_entry({"end_state": "open"}, question_date="2050-01-01")
+
+    # (c) PRESENT and VALID, in the future — scheduled end, still current.
+    assert not is_stale_entry({"valid_to": "2026-12-31T00:00:00+00:00"},
                               question_date="2026-09-25")
-    assert not is_stale_entry({"valid_to": "someday"})
+
+    # (d) PRESENT and VALID, in the past — closed at a known instant.
+    assert is_stale_entry({"valid_to": "2026-01-01T00:00:00+00:00"},
+                          question_date="2026-09-25")
+
+    # (e) A garbage/legacy precision token must not make this predicate RAISE:
+    #     it runs inside the retrieval ranking, where an exception degrades the
+    #     whole selection rather than answering one entry.
+    assert isinstance(is_stale_entry({"valid_to": "2026-01-01",
+                                      "valid_to_precision": "bogus"},
+                                     question_date="2026-09-25"), bool)
+    assert is_stale_entry({"valid_to": "2030-01-01",
+                           "valid_to_precision": True},
+                          question_date="2026-09-25") is False
+
+
+def test_an_undatable_end_is_not_rescued_by_a_dated_question_date():
+    """The discriminator for THIS bug: no ``question_date`` closes a junk end.
+
+    A fix that merely compared a junk end against the question string would pass
+    case (d) above and still leave the interval unbounded. This asserts the
+    behaviour is date-INDEPENDENT, which is what "covers every later instant"
+    actually asserts.
+    """
+    junk = {"valid_to": "not-a-date"}
+    assert all(is_stale_entry(junk, question_date=qd) for qd in (
+        "1990-01-01", "2026-09-25", "2050-01-01", None))
 
 
 # ══════════════════════════════════════════════════════════════════════════
