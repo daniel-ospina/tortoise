@@ -247,7 +247,7 @@ or facts that were false against the tree they describe:
   moved ``main`` and lets the batch land onto a composition no run has seen. Both now halt. And the
   tree assertion that the gate fence carries was pinned by PRESENCE only: pasting ``main`` in as the
   compared value — the gate run required to happen ON ``main`` — kept the branch name in the echo
-  prose, kept the halt, and measured **0 of 36 red**; the check now reads the SUBJECT (the fence's own
+  prose, kept the halt, and measured **0 red**; the check now reads the SUBJECT (the fence's own
   ``switch -C`` branch where it creates one, else a real non-``main`` ref). Finally, the section that
   promises it "never restates" ``.mergify.yml``'s ``batch_size`` restated it in prose fifteen lines
   later, which the YAML-only literal could not see.
@@ -283,40 +283,43 @@ property (the required contexts that ``check-required-set.py --live`` asserts, `
 ``batch_size``).
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **36 checks**, **0 red**, and the head this round's review was taken
-at (``9f8e12192``) is **4 of 36**: exactly that review's four findings (the ``-m track_b`` half's
-missing SKIP axis, the two unhalted ``git fetch origin main`` lines the pin and the landing gate ride
-on, the tree assertion's unpinned SUBJECT, and the ``batch_size`` value restated in prose) and nothing
-else. The ``c7a772628`` / ``657a544a4`` head is **9 of 36** (this round's four plus the five red-capable
-checks added since — the residual-window check, the ``a66387f9f`` round's CI-population, exported-ledger
-name and fenced post-revert re-run checks, and the TIGHTENED argv on
-``test_every_full_suite_command_is_one_of_the_two_deliberate_halves``), **13 of 36** at ``4dc214c02``
-(that round's five — the skip carriers, the graded bisect, the halted merge + ``HEAD^2`` assert, the
-draft-until-asserted landing rule, the live-config literals — plus this round's four and four of the
-five that did not exist then), **16 of 36** at ``7fb722a9a`` (plus the gate fence's TREE assertion, the
-bounded wait before the status read, and the reviewed-head fetch's force + halt), **18 of 36** at
-``62c79b0b8`` (plus the lane assertion and the hand-written ordinal — the two findings of the round
-that preceded it), **19 of 36** at ``a6a71c1e5`` (the per-batch ledger, added there) and at
-``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation, which this round's SKIP-axis
-requirement now also reds), **21 of 36** at ``a12792afe`` (those plus the baseline count's carrier and
-the baseline report's completion check), **32 of 36** at ``a17576c43``, **29 of 36** at ``f3c6c803b``,
-**27 of 36** at ``a8be548762``, **26 of 36** at ``295d6d385`` / ``32a2dc87d`` / ``ba7f83feb`` /
-``64ae70fc5``, **25 of 36** at ``ed1c03b82`` and ``c50628450``, and **24 of 36** at ``a888c6980`` and
-``aede4190f`` — where three are exactly that round's findings (the bisect attribution, the gate run's
-completion, and the omitted ``changes`` member) and the fourth is the exit-status-persistence
-requirement, which landed AFTER those revisions. The fourth is the rule rather than an exception, and
-it is also what a TIGHTENED check does: a check added or widened later reds on every revision older
-than the change, so a revision's count is "its own round's findings plus the checks that did not exist
-(or did not yet demand the property) then". Every count above is re-measured at THIS head, not carried
-forward — a carried-forward count drifts silently as checks land (six of them were stale by exactly the
-check the status wrapper added), which is the same defect class as a hard-coded bare-run ERROR count,
-and it is why the numbers are re-measured when a check is added or tightened rather than inherited. The
-deltas against the previous recording were measured, not assumed, and are NOT uniform: **+4** where
-this round's four tightenings are all new reds (``c7a772628``, ``657a544a4``, ``484a4911d``), **+3** at
-``4dc214c02`` (its landing fence already trips the tree check), **+2** at ``a4028e8d7`` and later
-through ``aede4190f`` (two of the four are new there), and **+0`` from ``a17576c43`` down through
-``a8be548762`` (those revisions already red the fetch, tree and skip checks for other reasons). That is
-the same rule, applied to the newest set. Four checks the revision matrix
+revision rather than asserted — **37 checks**, **0 red**, and the head this round's review was taken
+at (``9f8e12192``) is **3 of 37**: the three findings of that review that red a CHECK there — the
+``-m track_b`` half's missing SKIP axis, the two unhalted ``git fetch origin main`` lines the pin and
+the landing gate ride on (one check, enumerated over fences) — plus the ``batch_size`` value restated
+in prose. The fourth, the tree assertion's unpinned SUBJECT, is GREEN on that document by
+construction (it asserts a non-``main`` ref), which is exactly why it is pinned by a MUTANT rather
+than by the revision axis: pasting ``main`` in as the compared ref measured 0 of 37 red. The
+P1+P2 repair head, ``c6d4c8278``, is **0 of 37**; the ``c7a772628`` / ``657a544a4`` head is
+**8 of 37** (the checks that did not exist yet — the residual-window check, the ``a66387f9f``
+round's CI-population, exported-ledger-name and fenced post-revert re-run checks, the pin-reading
+fetch check, the tightened argv on ``test_every_full_suite_command_is_one_of_the_two_deliberate_halves``,
+and this round's SKIP-axis and ``batch_size`` tightenings), **12 of 37** at ``4dc214c02`` (that
+round's five — the skip carriers, the graded bisect, the halted merge + ``HEAD^2`` assert, the
+draft-until-asserted landing rule, the live-config literals — plus the ones that did not exist then),
+**15 of 37** at ``7fb722a9a`` (plus the gate fence's TREE assertion, the bounded wait before the
+status read, and the reviewed-head fetch's force + halt), **17 of 37** at ``62c79b0b8`` (plus the lane
+assertion and the hand-written ordinal — the two findings of the round that preceded it), **18 of 37**
+at ``a6a71c1e5`` (the per-batch ledger, added there) and at ``a4028e8d7`` (that one plus the
+``-m track_b`` instrumentation, which this round's SKIP-axis requirement now also reds), **20 of 37**
+at ``a12792afe`` (those plus the baseline count's carrier and the baseline report's completion
+check), **33 of 37** at ``a17576c43``, **30 of 37** at ``f3c6c803b``, **28 of 37** at
+``a8be548762``, **26 of 37** at ``295d6d385``, **25 of 37** at ``32a2dc87d`` / ``ba7f83feb`` /
+``64ae70fc5``, **24 of 37** at ``ed1c03b82`` and ``c50628450``, and **23 of 37** at ``a888c6980``
+and ``aede4190f`` — where three are exactly that round's findings (the bisect attribution, the gate
+run's completion, and the omitted ``changes`` member) and the fourth is the exit-status-persistence
+requirement, which landed AFTER those revisions. That fourth is the rule rather than an exception,
+and it is also what a TIGHTENED check does: a check added or widened later reds on every revision
+older than the change, so a revision's count is "its own round's findings plus the checks that did not
+exist (or did not yet demand the property) then". Every count above is re-measured at THIS head, not
+carried forward — a carried-forward count drifts silently as checks land (six of them were stale by
+exactly the check the status wrapper added), which is the same defect class as a hard-coded bare-run
+ERROR count, and it is why the numbers are re-measured when a check is added or tightened rather than
+inherited. The deltas against the previous recording are NOT uniform and are not claimed to be:
+a revision whose fence already tripped the tree, fetch or skip requirement gains nothing from
+tightening it, and a revision that predates a check gains all of it — which is why every number here
+was re-measured at this head, revision by revision, rather than derived by adding a constant.
+Four checks the revision matrix
 alone cannot red are
 named rather than left implied: the parser-sanity check and the contract sentences (green by
 design — they guard against a re-pointed or deleted document, not against a bad command),
@@ -405,8 +408,8 @@ pre-fix ``|| exit 1`` bisect grader; keep the grading but drop ``exit 125``. Del
 paragraph; name a draft rule and a ``queue_conditions`` entry in UNRELATED sentences (so the
 mechanism is not identified — the check reads one sentence, not two words anywhere). Restore "the
 seven required contexts"; restore ``batch_size: 4``; delete the concurrent-batch clause. The honest
-document is **0 of 36 red**, and the review's own head ``4dc214c02`` is **10 of 36** — exactly
-these five findings plus the five checks that did not exist yet, and nothing else.
+document is **0 red**, and the review's own head ``4dc214c02`` is **12 of 37** — exactly
+these five findings plus the checks that did not exist yet, and nothing else.
 
 **The ``a66387f9f`` round** (three checks and the tightened suite argv) carries its own
 measurements in its commit; the revision deltas above are where THIS file re-measures them at
@@ -430,22 +433,23 @@ the first, which reds its own check plus the argv allowlist that now requires th
 ``--ignore=tests/e2e`` from a ``tests/`` run (2 red); restore *"The filter is what makes the run
 comparable to CI at all."* (1 red); make the Phase 0 ledger name a plain assignment again (1 red); and
 delete the post-revert re-check fence, leaving the prose (1 red). The revision axis agrees: the head
-the review sat at, ``484a4911d``, is **8 of 36** — the three new checks plus the argv check plus this
-round's four tightenings, which did not exist as requirements at that head — and nothing else.
+the review sat at, ``484a4911d``, is **7 of 37** — the three new checks plus the argv check plus this
+round's tightenings, which did not exist as requirements at that head — and nothing else.
 
 **10 more measured with the ``9f8e12192`` round, 10 killed** (each red on ONE check and on nothing
 else): delete the gate fence's half-2 skip block; delete the baseline's half-2 skip recording; delete
 the post-revert half-2 skip block; flip the half-2 count comparison to ``-ge`` (which refuses a clean
 run and passes a dirty one); delete the half-2 reason diff — all five red
 ``test_the_track_b_half_is_completion_checked_like_the_deterministic_half``; unhalt the Phase-1
-``git fetch origin main`` with ``|| true`` (red ``test_the_baseline_refuses_a_dirty_tree``); unhalt the
-Landing fetch the same way (red ``test_landing_asserts_main_is_still_the_pinned_base``); paste ``main``
-in as the gate fence's asserted ref, and again in the post-revert fence (both red
-``test_every_full_suite_fence_names_the_tree_it_runs_on``); restore the prose "larger than 4" (red
-``test_no_hand_counted_literals_of_live_repo_properties``). The tree mutant is the one that mattered
-most: the pre-fix check read only the PRESENCE of ``git rev-parse --abbrev-ref HEAD``, and the branch
-name survived in the line's ``echo`` prose, so requiring the gate to run on ``main`` measured **0 of
-36 red** — it certified exactly the failure the check was written for.
+``git fetch origin main`` with ``|| true``, and the Landing fetch the same way (both red
+``test_every_pin_reading_fence_halts_its_origin_main_fetch``, the fence-enumerated form this round's
+sibling commit ``c6d4c8278`` introduced — the per-fence inline form was dropped in the merge rather
+than kept twice); paste ``main`` in as the gate fence's asserted ref, and again in the post-revert
+fence (both red ``test_every_full_suite_fence_names_the_tree_it_runs_on``); restore the prose "larger
+than 4" (red ``test_no_hand_counted_literals_of_live_repo_properties``). The tree mutant is the one
+that mattered most: the pre-fix check read only the PRESENCE of ``git rev-parse --abbrev-ref HEAD``,
+and the branch name survived in the line's ``echo`` prose, so requiring the gate to run on ``main``
+measured **0 of 37 red** — it certified exactly the failure the check was written for.
 
 **The `7fb722a9a` review's P2 is recorded as MEASURED FALSE, not "fixed".** It reported that
 ``ci-introduced-failure`` and ``DEFERRABLE_LEGS`` "do not exist" and that the leg-table pointer is out
@@ -546,6 +550,24 @@ TRACK_B_FILTER = "-m track_b"
 _PINNED_MAIN_ASSERTION = re.compile(
     r'\[\s*"\$\(git\s+rev-parse\s+origin/main\)"\s*=\s*"\$PINNED"\s*\]'
 )
+
+#: A refresh of ``origin/main``, halting or not — the two are NOT interchangeable, and the pre-fix
+#: locator could only see one of them: `re.fullmatch(r"git\s+fetch\s+origin(?:\s+main)?", …)`
+#: matched the BUG (a bare fetch) and DROPPED THE FIX, so halting the fetch — the repair the review
+#: asks for — red the very check that demanded a fetch. Split into shape and halt, so ordering can be
+#: asserted on every fetch while the halt is asserted on its own.
+_MAIN_FETCH = re.compile(r"^git\s+fetch\s+origin(?:\s+main)?(?=\s*(?:\|\||$))")
+_MAIN_FETCH_SUBJECT = re.compile(r"^git\s+fetch\s+origin(?:\s+main)?$")
+
+
+def _is_main_fetch(code: str) -> bool:
+    """Is this command a refresh of ``origin/main`` (halting or not)?"""
+    return bool(_MAIN_FETCH.match(_code(code)))
+
+
+def _main_fetch_halts(code: str) -> bool:
+    """Is this the ``origin/main`` refresh as ONE command that HALTS on failure?"""
+    return _is_main_fetch(code) and _halts(_code(code), subject=_MAIN_FETCH_SUBJECT)
 
 #: Commands that may share a line with a pin create without touching the tree it
 #: checked out. Anything else must BE a re-runnable pin create (see
@@ -755,10 +777,27 @@ _CLEAR = re.compile(r"rm\s+-f\s+(.*)$")
 
 
 def _cleared(codes: list[str]) -> set[str]:
-    """The paths a fence's `rm -f` lines name (quotes stripped)."""
+    """The paths a fence's `rm -f` lines name (quotes stripped).
+
+    ``\\``-CONTINUED lines are JOINED first. A fence may split one ``rm -f`` across two lines —
+    ``rm -f a b \\`` / ``      c d`` — which bash reads as ONE command and a per-line scan reads as a
+    clear that names only half its paths (measured on ``c6d4c8278``: the baseline's half-2 skip
+    carriers were cleared exactly that way, and the skip axis reported them as never cleared — the
+    guard refusing its own honest remedy, one spelling over).
+    """
+    joined: list[str] = []
+    pending = ""
+    for code in codes:
+        if code.rstrip().endswith("\\"):
+            pending += code.rstrip()[:-1] + " "
+            continue
+        joined.append(pending + code)
+        pending = ""
+    if pending:
+        joined.append(pending)
     return {
         token.strip("\"'")
-        for code in codes
+        for code in joined
         for match in _CLEAR.finditer(code)
         for token in match.group(1).split()
     }
@@ -1129,26 +1168,6 @@ def _allows_dirty_test(segment: str) -> bool:
 #: eligibility invariant (`headRefOid` == the reviewed head) broken one phase before Landing can
 #: see it, and Phase 3 certifying a tree built from heads nobody reviewed.
 _PR_HEAD_FETCH = re.compile(r"\bgit\s+fetch\b[^|&;]*\bpull/")
-
-#: The origin fetch a PIN depends on: ``git fetch origin`` or ``git fetch origin main``, as ONE
-#: command (the pre-halt command, no separator before it) and optionally HALTED. Pinned as a
-#: predicate rather than a bare ``fullmatch`` because the halt is required of it in the two fences
-#: whose ``origin/main`` read is the ledger or the landing gate — a fetch that is REFUSED silently
-#: leaves the local remote-tracking ref at the last success, and both fences then compare against a
-#: stale base and print green (the ``9f8e12192`` P2). The dual fetch of the post-merge detector
-#: (``git fetch origin main integration/batch-1``) is deliberately NOT this shape.
-_ORIGIN_MAIN_FETCH = re.compile(r"^git\s+fetch\s+origin(?:\s+main)?(?:\s*$|\s*\|\|)")
-
-
-def _origin_main_fetch(code: str) -> bool:
-    """Is this the plain ``git fetch origin [main]`` command (halted or not)?"""
-    return bool(_ORIGIN_MAIN_FETCH.match(code))
-
-
-def _is_origin_main_fetch_segment(segment: str) -> bool:
-    """Is this segment the ``git fetch origin [main]`` itself (the halt's subject)?"""
-    return bool(re.match(r"^git\s+fetch\s+origin\b", segment))
-
 
 #: The whole COMMAND of the reviewed-head fetch: ONE command (no separator before the halt),
 #: a refspec naming a pull head, then a HALT at the end of the line.
@@ -1669,7 +1688,7 @@ _TREE_SWITCH = re.compile(
 #: The SUBJECT of a tree assertion: the ref ``HEAD`` is compared to. At ``9f8e12192`` the guard read
 #: only the PRESENCE of ``git rev-parse --abbrev-ref HEAD``, so pasting ``main`` in as the compared
 #: value — ``[ "$(git rev-parse --abbrev-ref HEAD)" = main ] || { … exit 1; }``, i.e. requiring the
-#: gate run to happen on ``main`` — left the module 36 of 36 GREEN: the branch name still appeared in
+#: gate run to happen on ``main`` — left the module GREEN check-for-check: the branch name still appeared in
 #: the line's ``echo`` prose, and the halt was intact. That reproduces the exact failure this check's
 #: own docstring says it was written for (a gate run on ``main`` certifying the batch), which is the
 #: subject-vs-mention shape the branch has already fixed three times (``_COUNT_SUBJECT``,
@@ -1751,7 +1770,7 @@ def test_every_full_suite_fence_names_the_tree_it_runs_on() -> None:
         # ⛔ ...and the SUBJECT of that assertion, not merely its presence. A fence that only ASSERTS
         # its tree never says which ref HEAD must BE; `= main` keeps the branch name in the message,
         # satisfies every line above, and makes the gate run on `main` certify the batch — measured at
-        # `9f8e12192`: 0 of 36 red. So the compared ref must be the branch THIS fence's own
+        # `9f8e12192`: 0 red. So the compared ref must be the branch THIS fence's own
         # `switch -C` created when it creates one, and otherwise a real non-`main` ref.
         created = {m.group("branch") for c in codes if (m := _TREE_SWITCH.match(c))}
         for code in asserts:
@@ -2437,7 +2456,7 @@ _TRACK_B_RC_CAPTURE = re.compile(r"^(?P<var>[A-Z][A-Z0-9_]*_RC)=\$\?$")
 #: MUST-PASS half to SKIPPED on the batch tree while the baseline still runs it: rc is 0 (pytest has
 #: no all-skip exit code), ``tests=`` is untouched, a skip carries no failure id, and ``BATCH-GREEN``
 #: is printed for a tree on which a ``python-ci-gate`` member never ran. Measured: that tree left
-#: this module 36 of 36 GREEN. CI fails closed on exactly this class
+#: this module GREEN check-for-check. CI fails closed on exactly this class
 #: (``.github/workflows/python-ci.yml``'s skip-fail guard, ``tools/skip-guard.py``).
 _TRACK_B_SKIP_COUNT_SRC = re.compile(
     r"grep\s+-o\s+'skipped=\"\[0-9\]\*\"'\s+\"?(?P<path>" + _LEDGER + r')"?'
@@ -2653,7 +2672,7 @@ def test_the_track_b_half_is_completion_checked_like_the_deterministic_half() ->
     decorates all four of its tests with ``TRACK_B_SKIP``, so a constituent PR that removes
     ``promote_source``/``promote_point`` or the A9 sentinel flips the whole MUST-PASS half to
     SKIPPED while the baseline still runs it, and ``BATCH-GREEN`` is printed for a tree on which a
-    ``python-ci-gate`` member never ran. Measured at that head: 36 of 36 GREEN. So every fence that
+    ``python-ci-gate`` member never ran. Measured at that head: GREEN check-for-check. So every fence that
     runs half 2 also owes the skip axis, in the same two shapes half 1 spells — the BASELINE recording
     (count + reason multiset, cleared first) and the gate's baseline-DIFF (absent-carrier halt, ``-le``
     count halt, ``comm -13`` reason diff with its own halt).
@@ -2745,7 +2764,7 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     fetches = [
         i
         for i, c in enumerate(baseline)
-        if _origin_main_fetch(_code(c))
+        if _is_main_fetch(c)
     ]
     pins = [
         i
@@ -2776,20 +2795,6 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
         "it pins $PINNED: a stale remote-tracking ref makes the pin the OLD main, "
         f"and the baseline — the ledger — is then measured on the wrong base. "
         f"fetches={[baseline[i] for i in fetches]}, pins={[baseline[i] for i in pins]}"
-    )
-    # …and that fetch must HALT (#10400 review P2): a REFUSED fetch (network, auth, DNS) leaves
-    # `origin/main` at the last success in a fence with no `set -e`, the pin below then reads THAT
-    # sha as current `main`, and the baseline becomes a confident ledger of the wrong tree — main's
-    # own new red absent from the id set, so Phase 4 classes it NEW and convicts an innocent PR.
-    unhalted = [
-        c
-        for c in (baseline[i] for i in fetches)
-        if not _halts(c, subject=_is_origin_main_fetch_segment)
-    ]
-    assert not unhalted, (
-        "the baseline's `git fetch origin [main]` carries no halt: on a refused fetch the pin below "
-        "reads the LAST successful fetch as current main, so the baseline is a ledger of a tree that "
-        f"is not main — and every later verdict is diffed against it: {unhalted}"
     )
     # A MENTION is not a refusal — `[ -z "$(git status --porcelain)" ]` alone,
     # `|| true`, and an `echo '[ -z … ] || exit 1'` all "contain" the tokens — and
@@ -2956,6 +2961,56 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     )
 
 
+def test_every_pin_reading_fence_halts_its_origin_main_fetch() -> None:
+    """the ``9f8e12192`` P2: a bare ``git fetch origin main`` makes the pin read a STALE ref.
+
+    ``git rev-parse origin/main`` reads the LOCAL remote-tracking ref. A ``git fetch`` that fails —
+    network, auth, DNS — exits non-zero and leaves that ref at the **last successful fetch**, which
+    in the normal flow is the base the batch was pinned to. Without a halt the fence continues, so
+
+    * in Phase 1 the baseline records a tree that is not current ``main``: ``main``'s own new red is
+      absent from the baseline id set, Phase 4 classifies it ``NEW``, and an innocent PR is dropped;
+    * in Landing the ``[ "$(git rev-parse origin/main)" = "$PINNED" ]`` assertion **PASSES against a
+      moved ``main``**, the batch is un-drafted, and the queue squash-merges an untested composition
+      onto it — the untested-tree landing this whole section exists to prevent, certified by its own
+      fence with every other line green.
+
+    ``AGENTS.md`` names this exact failure ("a stale sha yields a false green"). The document already
+    halts the two fetches it repaired (the reviewed PR head, the post-merge detector); these two were
+    left bare, and the pre-fix locators could not even see the repair — a ``re.fullmatch`` on the bare
+    command matched the bug and dropped the fix.
+
+    Enumerated over FENCES rather than over the two known sites, so a third pin-reading fence cannot
+    arrive without its fetch halted.
+    """
+    pin_readers = [
+        fence
+        for fence in _fences()
+        if any(_PINNED_MAIN_ASSERTION.search(_code(c)) for c in fence)
+        or any(
+            "PINNED=" in _code(c) and "origin/main" in _code(c) for c in fence
+        )
+    ]
+    assert len(pin_readers) >= 2, (
+        "expected at least the Phase 1 baseline fence and the Landing fence to read origin/main for a "
+        f"pin, parsed {len(pin_readers)} — re-point this guard"
+    )
+    for number, fence in enumerate(pin_readers, start=1):
+        codes = [_code(c) for c in fence]
+        fetches = [i for i, c in enumerate(codes) if _is_main_fetch(c)]
+        assert fetches, (
+            f"pin-reading fence {number} reads `origin/main` with no `git fetch origin main`: the "
+            "value is the LOCAL remote-tracking ref, so a moved `main` compares equal to the pin"
+        )
+        unhalted = [fence[i] for i in fetches if not _main_fetch_halts(fence[i])]
+        assert not unhalted, (
+            f"pin-reading fence {number} has an UNHALTED `git fetch origin main`: a failed fetch "
+            "leaves the ref at the last successful one, so the pin/assertion reads a stale base and "
+            "passes — the false-green `AGENTS.md` names. Halt it: "
+            '`git fetch origin main || { echo "…"; exit 1; }`: ' + repr(unhalted)
+        )
+
+
 def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     """#10399 review P1-3 / P2-1: the tested tree must be the landed tree.
 
@@ -3053,28 +3108,12 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     fetches = [
         i
         for i, c in enumerate(landing[0])
-        if _origin_main_fetch(_code(c))
+        if _is_main_fetch(c)
     ]
     assert fetches, (
         "the landing fence must fetch origin before comparing: `$(git rev-parse "
         "origin/main)` reads the LOCAL remote-tracking ref, so without a fetch a "
         "moved main compares equal and the assertion passes"
-    )
-    # …and it must HALT (#10400 review P2). This is the fence the tested-tree invariant rides on:
-    # no `set -e`, so a refused fetch leaves `origin/main` at the batch's own pinned base — the
-    # normal flow's last success — the pin check then PASSES against a stale ref while live `main`
-    # has moved, and the batch is squash-merged onto the untested composition with every check in
-    # this section green.
-    unhalted = [
-        c
-        for c in (landing[0][i] for i in fetches)
-        if not _halts(_code(c), subject=_is_origin_main_fetch_segment)
-    ]
-    assert not unhalted, (
-        "the landing fence's `git fetch origin main` carries no halt: a refused fetch leaves "
-        "origin/main at the last success (in the normal flow, the pinned base itself), so the pin "
-        "check PASSES on a moved main and the batch lands onto a composition no full-suite run has "
-        f"seen: {unhalted}"
     )
     carriers = [
         i for i, c in enumerate(landing[0]) if _PINNED_MAIN_ASSERTION.search(_code(c))
@@ -3761,7 +3800,7 @@ def test_the_residual_landing_window_is_stated_and_detected() -> None:
 #: READ FROM THE WORKFLOW, never a literal written here"). Measured: the landing section said "the
 #: seven required contexts" (right today, stale on the next context added), the queue section quoted
 #: `batch_size: 4`, and — at `9f8e12192` — the same section restated the value fifteen lines after
-#: promising it never does ("larger than 4"), which the YAML-only spelling could not see: 0 of 36 red.
+#: promising it never does ("larger than 4"), which the YAML-only spelling could not see: 0 red.
 _CONTEXT_ORDINAL = re.compile(
     r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
     r"(?:required\s+|check-success\s+)?contexts\b",
