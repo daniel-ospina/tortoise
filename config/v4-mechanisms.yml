@@ -620,7 +620,9 @@ mechanisms:
       The renderer no longer invites `new`, `execute_embed`'s
       `link_before_create` reports `found: null` for a candidate whose own query
       did not run (per candidate, not per run), and `extract_session_v2` carries
-      an always-present `identity` block plus a loud warning.
+      an always-present `identity` block plus a warning that fires when a candidate's
+      own identity query did not run (a budget cut that touches only non-candidate
+      queries gets its own sentence — the two are different facts).
       ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
       `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
       needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function

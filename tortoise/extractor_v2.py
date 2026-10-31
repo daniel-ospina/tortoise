@@ -2684,6 +2684,28 @@ _QUERY_TEXT_WIDTH: dict[str, int | None] = {
 }
 
 
+def _candidate_text(value: object) -> str:
+    """The text `execute_embed` will USE for a candidate — the writer's OWN
+    coercion, not a second opinion about it.
+
+    ⛔ `str(value)` and **never** `str(value or "")`: `#5060` made a falsy content
+    WRITABLE as its coerced text, so a `None` content is committed as `"None"`
+    while `""` and whitespace-only content are **dropped** (`if not content:
+    continue`). That asymmetry is what tells a candidate S5 writes from one it
+    never writes, and reading it wrong in either direction makes the identity
+    report lie:
+
+    * counting a DROPPED (empty) candidate made the report fire on a healthy run
+      and assert a record the run never emitted (#5095 review round 3);
+    * skipping a COERCED (`None`) candidate hid a committed Point whose identity
+      was never established (#5095 review round 2).
+
+    One home: the derivation, the coverage question, the report and the record all
+    read this.
+    """
+    return str(value).strip()
+
+
 def _candidate_query_text(entity_type: str, raw: str) -> str:
     """The text a candidate's OWN derived query is built from — ONE home, in this
     order: **strip, then cut to the leg's width**.
@@ -2699,7 +2721,7 @@ def _candidate_query_text(entity_type: str, raw: str) -> str:
     candidate query (the derivation, the coverage question, the record) goes
     through this function.
     """
-    text = (raw or "").strip()
+    text = _candidate_text(raw)
     width = _QUERY_TEXT_WIDTH.get(entity_type)
     return text[:width] if width else text
 
@@ -2755,10 +2777,10 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
             _add("object", str(e["name"]))
     for ev in embed_list.get("events", []) or []:
         if isinstance(ev, dict) and ev.get("content"):
-            _add("event", _candidate_query_text("event", str(ev["content"])))
+            _add("event", _candidate_query_text("event", ev.get("content")))
     for p in embed_list.get("points", []) or []:
         if isinstance(p, dict) and p.get("content"):
-            _add("point", _candidate_query_text("point", str(p["content"])))
+            _add("point", _candidate_query_text("point", p.get("content")))
     for t in _story_topics(story):
         _add("point", t)
     return queries
@@ -3093,23 +3115,25 @@ def _identity_report(search: dict, candidates: dict) -> dict:
     for section, leg in _failure_policy.LEG_BY_SECTION.items():
         items = [item for item in (candidates.get(section) or [])
                  if isinstance(item, dict)]
-        counts[section] = len(items)
         text_key = {"entities": "name", "events": "content", "points": "content"}[section]
         missing = 0
+        counted = 0
         for item in items:
-            # ⛔ the SAME text the derivation used (`_candidate_query_text`), not
-            # a second width applied to a differently-stripped string — that
-            # drift is what made a ran query read as unrun (#5095 review B2).
-            raw = _candidate_query_text(leg, str(item.get(text_key) or ""))
-            # ⛔ NO `continue` on empty text: `execute_embed` COERCES a non-string
-            # falsy (`None` / `0` / `False`) to its text and writes it ("None"),
-            # while the derivation skipped it as falsy — so such a candidate is
-            # committed and was never checked. Skipping it here reported the run
-            # `resolved` beside a record that says `found: null`, which is the
-            # contradiction this report exists to prevent (#5095 review B1). An
-            # empty-text candidate is UNRESOLVED, not exempt.
+            # ⛔ S5's OWN admission test (`_candidate_text`): a candidate it will
+            # DROP (`""` / whitespace-only content — `if not content: continue`)
+            # is not a candidate. Counting one fired the warning on a healthy run
+            # and asserted a record the run never emitted (#5095 review round 3),
+            # while skipping the ones it COERCES and writes (`None` -> "None")
+            # hid a committed candidate whose identity was never established
+            # (#5095 review round 2). Both directions are the same mistake about
+            # the same asymmetry, and it lives in ONE place now.
+            raw = _candidate_query_text(leg, item.get(text_key, ""))
+            if not raw:
+                continue
+            counted += 1
             if not _candidate_covered(search, leg, raw):
                 missing += 1
+        counts[section] = counted
         unresolved[section] = missing
     for section in ("operators", "retractions"):
         counts[section] = len([item for item in (candidates.get(section) or [])
@@ -9494,22 +9518,26 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                            for section in _failure_policy.LEG_BY_SECTION)
         _reason = f" ({_id['reason']})" if _id["reason"] else ""
         if _id["unresolved_total"]:
-            # A zero numerator is a DIFFERENT run and gets a different sentence
-            # (#5095 review B2): the budget can cut only the story-topic queries
-            # that follow every candidate query, so `partial` with nothing
-            # unchecked is the ordinary shape — and telling an operator that
-            # candidates "were recorded as UNRESOLVED" then is a false claim
-            # emitted by the very channel this change made truthful.
+            # ⛔ Two sentences, never one generalised over both, and NEITHER
+            # asserts what a candidate's own `link_before_create` says: a
+            # candidate whose query was cut can still be folded onto a prior by
+            # S5 (`found: true`), so "their record says UNRESOLVED" was a false
+            # claim about that candidate's record (#5095 review round 3).
             result.setdefault("warnings", []).append(
-                f"S3 identity {_id['state']}{_reason}: "
-                f"{_id['unresolved_total']} of {_denominator} candidate(s) were "
-                f"never checked against the graph — their record says UNRESOLVED, "
-                f"never 'not found'")
+                f"S3 identity {_id['state']}{_reason}: the existing-item lookup "
+                f"did not run for {_id['unresolved_total']} of {_denominator} "
+                f"candidate(s) — their identity was not established from the "
+                f"lookup")
         else:
+            # The other shape, and it is ordinary rather than broken: the budget
+            # can cut only the trailing STORY-TOPIC queries, which follow every
+            # candidate query. Saying "the lookup did not run over the candidate
+            # set" here contradicted the block's own counters in the same result
+            # (#5095 review round 3).
             result.setdefault("warnings", []).append(
-                f"S3 identity {_id['state']}{_reason}: the lookup did not run "
-                f"over the whole candidate set, but every committed candidate's "
-                f"own query DID run — no candidate was left unchecked")
+                f"S3 identity {_id['state']}{_reason}: the query budget cut part "
+                f"of the lookup, but every committed candidate's own query ran — "
+                f"no candidate was left unchecked")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface

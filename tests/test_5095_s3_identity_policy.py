@@ -148,6 +148,17 @@ class TestLookupState:
         search["degraded"] = True
         assert fp.lookup_state(search) == fp.LOOKUP_UNRESOLVED
 
+    def test_an_incomplete_report_is_PARTIAL_not_resolved(self):
+        """A report with `ran` but no `derived`/`failed` defaulted those to 0 and
+        read "the whole derived set ran" from a report that never said what was
+        derived — the unmeasured-absence claim this module removes (#5095 review
+        round 3). All three parts are required."""
+        for coverage in ({"ran": {"point": 3}},
+                         {"derived": {"point": 3}, "ran": {"point": 3}},
+                         {"derived": {"point": 3}, "failed": {"point": 0}}):
+            assert fp.lookup_state(_search(query_coverage=coverage)) == \
+                fp.LOOKUP_PARTIAL, coverage
+
     def test_no_derived_queries_is_resolved(self):
         """An empty candidate set derives nothing — there is nothing to establish."""
         empty = {"derived": {}, "ran": {}, "failed": {}}
@@ -497,7 +508,9 @@ class TestTheReportCannotContradictItself:
     def test_a_coerced_falsy_candidate_is_reported_unresolved(self):
         candidates = {"entities": [{"name": "ACME Corp"}],
                       "points": [{"content": None, "pointKind": "statement"}]}
-        report = v2._identity_report(_search(), candidates)
+        ran = [v2._query_key("object", v2._candidate_query_text("object", "ACME Corp"))]
+        report = v2._identity_report(
+            _search(query_results={"ran": ran, "failed": []}), candidates)
         assert report["candidates"]["points"] == 1
         assert report["unresolved"]["points"] == 1, report
         assert report["state"] == fp.LOOKUP_PARTIAL, (
@@ -521,8 +534,12 @@ class TestTheReportCannotContradictItself:
         assert out["identity"]["unresolved_total"] >= 1
         messages = [w for w in out["warnings"] if "S3 identity" in w]
         assert messages, out["warnings"]
-        assert "never checked against the graph" in messages[0]
-        assert "never 'not found'" in messages[0]
+        assert "their identity was not established from the lookup" in messages[0]
+        # ⛔ and it must NOT claim what the candidate's own record says: a
+        # candidate whose query was cut can still be folded onto a prior by S5
+        # (`found: true`), so "their record says UNRESOLVED" was a false claim
+        # about that record (#5095 review round 3).
+        assert "their record says" not in messages[0]
         # the zero-numerator shape is a DIFFERENT sentence, never the one above
         partial_zero = fp.plan_identity(
             _search(query_coverage={"derived": {"point": 13},
@@ -650,6 +667,42 @@ class TestTheRemainingAbsence:
         assert payload["entities"], "no entity was committed for an UNRESOLVED lookup"
 
 
+class TestS5sOwnAdmissionTest:
+    """A candidate S5 DROPS is not a candidate; one it COERCES and writes is.
+
+    (#5095 review round 3.) `execute_embed` writes `str(value).strip()` when that
+    is non-empty — so a `None` content is committed as `"None"` — and drops `""`
+    and whitespace-only content on `if not content: continue`. The report must use
+    the SAME test, or it fires on a healthy run and asserts a record the run never
+    emitted (that was the empty case), or it hides a committed candidate (that was
+    the coerced one, fixed in round 2).
+    """
+
+    def test_a_whitespace_or_empty_candidate_is_not_counted(self):
+        candidates = {"points": [{"content": "the budget is 40k", "pointKind": "statement"},
+                                 {"content": "   ", "pointKind": "statement"},
+                                 {"content": "", "pointKind": "statement"}]}
+        report = v2._identity_report(_search(), candidates)
+        assert report["candidates"]["points"] == 1, report
+        assert report["unresolved"]["points"] == 0, report
+        assert report["state"] == fp.LOOKUP_RESOLVED, (
+            "a candidate S5 will DROP must not flip a healthy run to `partial`")
+
+    def test_a_whitespace_candidate_gets_no_record_and_no_point(self):
+        embed = {"entities": [], "events": [], "operators": [], "chain_notes": [],
+                 "points": [{"content": "   ", "pointKind": "statement"}]}
+        result = v2.execute_embed(embed, _search(), session_id="s1")
+        assert result["payload"]["points"] == []
+        assert result["link_before_create"] == []
+
+    def test_the_two_shapes_are_one_predicate(self):
+        """`_candidate_text` IS the writer's coercion: `None` -> "None", empty -> ""."""
+        assert v2._candidate_text(None) == "None"
+        assert v2._candidate_text("") == ""
+        assert v2._candidate_text("   ") == ""
+        assert v2._candidate_text(" claim ") == "claim"
+
+
 # ── 10. the run's own report ───────────────────────────────────────────────
 
 
@@ -685,7 +738,7 @@ class TestIdentityOnTheResult:
         assert block["candidates"]["entities"] >= 1
         assert block["candidates"]["points"] >= 1
         assert block["unresolved_total"] >= 1
-        assert any("S3 identity" in w and "UNRESOLVED" in w
+        assert any("S3 identity" in w and "did not run for" in w
                    for w in out["warnings"]), out["warnings"]
         # I2: nothing was DROPPED — the candidates are still in the list.
         assert out["embed_list"]["entities"], (
@@ -701,6 +754,31 @@ class TestIdentityOnTheResult:
         assert out["identity"]["unresolved_total"] == 0
         assert not any("S3 identity" in w for w in out["warnings"]), (
             "an empty run has no candidates to warn about")
+
+    def test_a_budget_cut_that_spares_every_candidate_gets_its_own_sentence(self):
+        """The ordinary shape: the budget cuts only trailing story-topic queries,
+        so `partial` with NOTHING unchecked. Claiming "the lookup did not run over
+        the candidate set" there contradicted the block's own counters (#5095
+        review round 3)."""
+        original_search = v2.search_graph
+        cover = {"derived": {"object": 1, "point": 3},
+                 "ran": {"object": 1, "point": 2}, "failed": {"object": 0, "point": 0}}
+        keys = [v2._query_key("object", "ACME Corp"),
+                v2._query_key("point", "the budget is 40k")]
+        v2.search_graph = lambda *a, **k: _search(
+            query_coverage=cover,
+            query_results={"ran": [k for k in keys if k], "failed": []})
+        try:
+            out = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
+        finally:
+            v2.search_graph = original_search
+        assert out["identity"]["state"] == fp.LOOKUP_PARTIAL
+        assert out["identity"]["unresolved_total"] == 0, out["identity"]
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert messages, out["warnings"]
+        assert "cut part of the lookup" in messages[0], messages[0]
+        assert "no candidate was left unchecked" in messages[0], messages[0]
+        assert "did not run over the whole candidate set" not in messages[0]
 
     def test_a_resolved_run_reports_resolved_and_does_not_warn(self):
         """The flag-side of R1: the disposition must not fire on a healthy run.

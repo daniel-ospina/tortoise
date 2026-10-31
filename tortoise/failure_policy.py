@@ -188,6 +188,15 @@ def lookup_state(search: object) -> str:
     derived = coverage.get("derived")
     ran = coverage.get("ran")
     failed = coverage.get("failed")
+    # ⛔ FAIL-CLOSED on an INCOMPLETE report, not only on an unreadable one: a
+    # report with `ran` but no `derived`/`failed` otherwise defaults those to 0
+    # per leg and reads `r >= d, f == 0` -> `resolved`, i.e. "the whole derived
+    # set ran" asserted from a report that never said what was derived — the
+    # unmeasured-absence claim this module exists to remove (#5095 review
+    # round 3). All three parts are required; the producer always emits them.
+    if not (isinstance(derived, Mapping) and isinstance(ran, Mapping)
+            and isinstance(failed, Mapping)):
+        return LOOKUP_PARTIAL
     legs = set()
     for part in (derived, ran, failed):
         if isinstance(part, Mapping):
