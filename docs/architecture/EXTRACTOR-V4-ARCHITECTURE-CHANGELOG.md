@@ -1270,7 +1270,7 @@ regression:** read at the document's own pin (`c79ba1cf2`) they land exactly on 
 (the `_norm(content)`/`point_ids` within-batch fold inside `execute_embed`, and
 `classify_consolidation`). The defect was narrower and worse — neither row named a symbol, so there
 was nothing to check them against at ANY pin, and a re-verify at HEAD lands those two numbers on
-code the rows do not name (a docstring inside `_apply_entity_resolution`, and `render_s4_prompt`),
+code the rows do not name (the `DecisionRecord` class docstring, and `render_s4_prompt`),
 which reads exactly like rot.
 
 **What changed: design document, two cells, no number moved.** Each row now leads with its symbol,
@@ -1285,6 +1285,7 @@ no `file.py:NNNN` cite, so it does not license a post-pin symbol inside a pin-sc
 and §4.2 is not one of the header's later-pin passages. The paraphrase-NOOP arm alone is pin-true;
 the guard's provenance and mechanism stay recorded in this file and in `near_dup_detect`'s row.
 `D-c` was
-re-verified against the pin and left as written. ⚠️ **The `where` column still has no reader** — no
-guard requires a row's cell to carry a resolvable symbol, which is why two symbol-less cells sat in
-a load-bearing table; the proposal to close that lives on the issue, not in this file.
+re-verified against the pin and left as written. ⚠️ **No guard requires the `where` column to carry
+a resolvable symbol** — the citation-rot guard resolves a cell only when one is there, which is why
+two symbol-less cells sat in a load-bearing table; the proposal to close that lives on the issue,
+not in this file.
