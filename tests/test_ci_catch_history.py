@@ -67,9 +67,15 @@ properties. Each has a test here that FAILS when the property is broken:
     `list_runs` re-raises a page-1 failure, and that error reached `main`, which exited 2
     before writing `--json-out`/`--md-out`: the one state `--max-seconds` exists for produced
     no artifact at all, instead of the truncated report `listing_stop` discloses.
-    `test_a_listing_read_failure_cuts_the_sample_instead_of_discarding_the_report` and
-    `test_the_walk_bound_while_listing_still_writes_the_report` fail if the listing call is
-    unguarded (both raise where they expect a report).
+    `test_a_walk_bound_while_listing_cuts_the_sample_instead_of_discarding_the_report`,
+    `test_the_walk_bound_while_listing_still_writes_the_report` and
+    `test_a_page_two_prose_page_truncates_the_listing_instead_of_discarding_the_walk` fail if
+    the listing call is unguarded (each raises, or loses its report, where it expects one).
+    ⛔ The rule is PAGE-GUARDED, and it covers every cut spelling in `list_runs` — the API-call
+    bound, the transport failure, a page carrying no `workflow_runs`, and an UNDECODABLE page
+    (that last one was the only unguarded raise, so a malformed page 2 discarded a walk that
+    an empty page 2 merely truncated). Page 1 is the exception for all four: nothing was
+    read, so the population is unusable and `main` must exit 2.
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -1573,6 +1579,82 @@ def test_a_cut_listing_reaches_the_report_window(tmp_path):
     assert long_reads
     assert truncation.count("listing stopped after page 1") == len(long_reads)
     assert "TRUNCATED" in catch.render_summary(report)
+
+
+def _prose_pager(*, prose_page: int, per_page: int = 100) -> catch.GhClient:
+    """A `GhClient` whose `_gh` serves JSON up to `prose_page`, then a non-JSON body.
+
+    ⛔ The shape is the documented hazard, not a hypothetical: every `gh` call here is
+    relayed through the fleet's rate-limit wrapper, so a prose line can precede (or replace)
+    the payload.
+    """
+    client = catch.GhClient("o/r", max_calls=10_000)
+
+    def _gh(args, binary=False):
+        page = int(args[1].rsplit("page=", 1)[1])
+        if page >= prose_page:
+            return (
+                "warning: relayed gh api call is being retried (rate limit 4/5000)\n"
+                '{"total_count": 1000, "workflow_runs": []}'
+            )
+        return json.dumps(
+            {
+                "total_count": 1000,
+                "workflow_runs": [
+                    _run(page * 1000 + i, SHA, "pull_request", pr=1) for i in range(per_page)
+                ],
+            }
+        )
+
+    client._gh = _gh  # type: ignore[method-assign]
+    return client
+
+
+def test_a_page_two_prose_page_truncates_the_listing_instead_of_discarding_the_walk(
+    tmp_path,
+):
+    """An UNDECODABLE page-2+ body is the same CUT as its three siblings, not a fatal error.
+
+    ⛔ Every other cut in `list_runs` is page-guarded — the page-1 `BudgetExhausted` re-raises,
+    the page-2+ transport `ReadError` truncates, the page-2+ missing-`workflow_runs` arm
+    truncates — but the `json.loads` raise was not. Unguarded it reached `main` as a plain
+    `ReadError`, which `build_history`'s listing handler does NOT catch (it handles
+    `WalkBoundReached`/`BudgetExhausted` only), so a walk that had already spent hundreds of
+    seconds and up to `--max-api-calls` exited 2 and discarded the report AND the page-1 data
+    it had read. An EMPTY page-2 body already truncated (it decodes to `{}` → no
+    `workflow_runs`), so an empty cut and a garbage cut behaved differently — the walk's
+    survival decided by which error the transport happened to raise.
+    """
+    client = _prose_pager(prose_page=2)
+    runs = client.list_runs("pull_request", None, "failure", 500)
+    assert len(runs) == 100, "the pages that WERE read are kept"
+    assert client.truncation is not None, "the cut was silent"
+    assert "pull_request/failure" in client.truncation
+    assert "page 1" in client.truncation
+    assert "was not decodable" in client.truncation
+
+    # The finding's own OUTCOME: a report still exists. Pre-fix this walk exited 2 with no
+    # `--json-out`/`--md-out` at all, so the assertion below is what reddens on the revert.
+    seed = _world(tmp_path, runs=[])
+    offline = catch.OfflineClient(seed)
+
+    def _list_runs(event, branch, conclusion, limit):
+        page_runs = _prose_pager(prose_page=2).list_runs(event, branch, conclusion, limit)
+        offline.truncation = client.truncation
+        return page_runs
+
+    offline.list_runs = _list_runs  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, offline)
+    assert "pull_request/failure" in (report["window"]["truncation"] or "")
+    assert "TRUNCATED" in catch.render_summary(report)
+
+    # PAGE 1 is deliberately NOT folded into this: nothing was read, so the population is
+    # unusable and `main` must exit 2 (`test_a_runs_file_that_is_not_a_runs_listing_...`).
+    page_one = _prose_pager(prose_page=1)
+    with pytest.raises(catch.ReadError) as excinfo:
+        page_one.list_runs("pull_request", None, "failure", 500)
+    assert "unparseable JSON" in str(excinfo.value)
+    assert page_one.truncation is None, "a page-1 failure is not a truncation — it is a failure"
 
 
 def test_a_budget_cut_keeps_the_cuts_recorded_before_it():

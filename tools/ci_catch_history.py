@@ -1077,7 +1077,8 @@ class GhClient:
 
     def _paginated(self, url: str, items_key: str) -> list[Mapping[str, Any]]:
         raw = self._gh(["api", url, "--paginate"])
-        assert isinstance(raw, str)
+        if not isinstance(raw, str):  # fail closed, and not elidable under `python -O`
+            raise ReadError(f"gh api {url} returned no text payload")
         try:
             pages = decode_pages(raw)
         except ValueError as exc:
@@ -1167,11 +1168,39 @@ class GhClient:
                     f"{event}/{conclusion} listing stopped after page {page - 1}: {exc}"
                 )
                 break  # keep what was read; the cut is recorded above
-            assert isinstance(raw, str)
+            if not isinstance(raw, str):
+                # ⛔ An explicit branch, not `assert`: an `assert` disappears under `python -O`,
+                # and this is a fail-CLOSED guard (a `ReadError` degrades one run; an
+                # `AssertionError` escapes `main`'s handler as a traceback).
+                raise ReadError(f"gh api {url} returned no text payload")
             try:
                 payload = json.loads(raw) if raw.strip() else {}
             except ValueError as exc:
-                raise ReadError(f"gh api {url} returned unparseable JSON: {exc}") from exc
+                # ⛔ PAGE-GUARDED, exactly like the two cuts above and the missing-
+                # `workflow_runs` arm below. An undecodable page-2+ body is the same CUT they
+                # are: it is the documented hazard (`gh` is relayed through the fleet's
+                # rate-limit wrapper, so a prose line can precede — or replace — the
+                # payload), and the pages that WERE read still describe a prefix, which
+                # `note_truncation` discloses. Unguarded it reached `main` as a plain
+                # `ReadError` — which `build_history`'s listing handler does NOT catch (it
+                # handles `WalkBoundReached`/`BudgetExhausted` only) — so a walk that had
+                # already spent hundreds of seconds and up to `--max-api-calls` exited 2 and
+                # threw away the report AND the page-1 data. An EMPTY page-2 body already
+                # truncated (it decodes to `{}` → no `workflow_runs`), so before this guard
+                # an empty cut and a garbage cut behaved differently, decided only by which
+                # error the transport happened to raise.
+                # ⛔ PAGE 1 stays exit 2: nothing was read, so the population is unusable
+                # (an error body, a mis-typed payload, a relayed prose line) — the same
+                # reason the page-1 transport branch above re-raises.
+                if page == 1:
+                    raise ReadError(
+                        f"gh api {url} returned unparseable JSON: {exc}"
+                    ) from exc
+                self.note_truncation(
+                    f"{event}/{conclusion} listing stopped after page {page - 1}: page "
+                    f"{page} was not decodable — {exc}"
+                )
+                break
             batch = payload.get(ci_verdict.RUNS_KEY) if isinstance(payload, Mapping) else None
             if not isinstance(batch, list):
                 if page == 1:
