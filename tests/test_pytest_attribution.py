@@ -1309,6 +1309,89 @@ def test_the_stated_inventory_matches_the_workflows() -> None:
     )
 
 
+def test_no_two_legs_capture_the_same_host_global_log() -> None:
+    """A host-global log path may belong to ONE leg — two owners is not a red, it is NO VERDICT.
+
+    This is the invariant the per-leg MIGRATION is for, stated directly instead of being
+    reached through the migration's own bookkeeping (a count can be updated in step with a
+    regression and stay green). Two jobs that capture the same `/tmp/*.log` on a host whose
+    runner installs share one `/tmp` overwrite each other's file: the second writer TRUNCATES
+    the first's header away, and every reader of that path — the `tail`, the reporter's
+    session-ownership check, the `grep '^(FAILED|ERROR) '` that the admin rail derives a
+    failure SET from, and the skip-guard's manifest — then describes a session the leg did
+    not run.
+
+    ⛔ MEASURED, and the reason this pin exists (run 40985248910 ATTEMPT 3, PR #10214).
+    `test-concurrency-falkor` (runner `cmux`, attempt 3) read `/tmp/pytest.log` as a
+    19-minute session from `test-carve-out`: the carve-out leg wrote over the
+    concurrency leg's 3-minute window, and the concurrency job's log IS the carve-out
+    session — `288 passed`, `test_smoke_embedded`, `test_eval_ingest_retry`, none of
+    them its own tests, with `grep` reporting `binary file matches` over the NUL
+    holes. Its reporter said `test leg INCOMPLETE — no pytest summary; failure set
+    unobservable` (correct, fail-closed), and `ci-introduced-failure` then BLOCKED the
+    PR on those three FOREIGN nodeids — a required check decided by a log its leg
+    never wrote. WHICH leg wrote it is an inference from this file's inventory (a
+    truncated log cannot name its other writer), which is why the pin below does not
+    depend on identifying one: it derives ownership from the workflows.
+
+    The migration has moved `test`, `test-slow`, `test-concurrency-falkor` and
+    `test-carve-out` to the per-runner `"$PYTEST_LOG"`; the rest (`test-track-b`,
+    `test-d14-hosted-api`, `validate`) is #10280. This pin is what makes the next
+    leg's migration non-optional: a NEW job that reuses an existing host-global path
+    reds here even if every stated count was updated to match.
+
+    ⛔ TWO ARMS, because ONE ownership key is not one leg (PR #10214 review, P2). The
+    dictionary below keys on the YAML JOB NAME, and a `strategy.matrix` job expands
+    into N legs that run CONCURRENTLY — GitHub's own semantics, and the reason the
+    self-hosted pool shows `test (b)`, `test (h)` and `test (c)` on different runner
+    installs of ONE host in the same attempt. Every shard of a matrix is therefore the
+    string `test-carve-out`, so `len(owners[target]) > 1` cannot see that leg collide
+    with ITSELF: two shards writing one `/tmp/pytest.log` overwrite each other exactly
+    as two jobs do, and the first arm would report nothing. The second arm reds a
+    matrix job that captures a host-global path at all, and it is what carried this
+    migration: `test-carve-out` was the one leg it fired on before the fix, and it
+    goes quiet only because that leg now writes `$RUNNER_TEMP`.
+    """
+    owners: dict[str, set[str]] = {}
+    matrix_sites: list[tuple[str, str]] = []
+    for workflow in ATTRIBUTION_WORKFLOWS:
+        matrix_jobs = _matrix_job_keys(workflow)
+        for job, target in _capture_site_jobs(workflow):
+            # A per-runner target is already per-job unique — only host-global paths can
+            # collide, and a site attributed to no job cannot be reasoned about here.
+            if job is None or not target.startswith("/tmp/"):
+                continue
+            owners.setdefault(target, set()).add(job)
+            if job in matrix_jobs:
+                matrix_sites.append((job, target))
+    shared = {target: sorted(jobs) for target, jobs in owners.items() if len(jobs) > 1}
+    assert shared == {}, (
+        "two legs capture ONE host-global log path, so neither leg's file is its own — "
+        "its tail, its attribution read and its failure set describe the co-tenant "
+        f"(#10280): {shared}. Give the leg a per-runner path under $RUNNER_TEMP."
+    )
+    assert matrix_sites == [], (
+        "a MATRIX job captures a host-global log path: `strategy.matrix` runs N legs "
+        "CONCURRENTLY, so its shards are N owners of one file that the job-key check "
+        "above reads as ONE — two shards on the same host truncate each other's log "
+        "(#10280), and the failure set the admin rail derives from it belongs to a "
+        f"sibling: {matrix_sites}. Give the leg a per-runner path under $RUNNER_TEMP."
+    )
+
+
+def _matrix_job_keys(workflow: Path) -> set[str]:
+    """The job keys in ``workflow`` that declare ``strategy.matrix`` — i.e. N legs.
+
+    Read from the parsed YAML, not from the text: the question is structural ("does
+    this job expand?"), and a matrix spelled `${{ fromJSON(needs.changes.outputs...
+    ) }}` still answers it — the KEY's presence is the fact, not its value.
+    """
+    jobs = yaml.safe_load(workflow.read_text()).get("jobs") or {}
+    return {job for job, config in jobs.items()
+            if isinstance(config, dict)
+            and (config.get("strategy") or {}).get("matrix") is not None}
+
+
 def _capture_site_jobs(workflow: Path) -> list[tuple[str | None, str]]:
     """``(job, capture target)`` for every log-capture site in ``workflow``.
 
@@ -1406,6 +1489,9 @@ def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() ->
     migrated = {job for job, target in sites} - set(residual)
     # The delivered state, not a bound: a further migration changes this set and must
     # update the header's scope in the same change (that is the point of the pin).
+    # `test-carve-out` left it when its MATRIX artifacts moved to `$RUNNER_TEMP`
+    # (#10280's matrix half): a matrix job's shards are concurrent owners of one
+    # host-global file, so it could not stay a residual of a `.log`-only migration.
     assert residual == [
         "validate",
     ], (
