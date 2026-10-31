@@ -608,6 +608,15 @@ def reduce_attempts(
             for attempt, name in reds:
                 if name != group.job or attempt.run_id != run_id:
                     continue
+                # ⛔ An UNORDERABLE attempt cannot be "older". `_check_id` maps an
+                # unparseable id to `-1`, and `-1 < latest.check_id` is true for EVERY
+                # latest — so a red of unknown age was emitted as `cleared` ("a clean
+                # re-measurement happened") on no evidence of order at all, the exact
+                # fabricated clean the numeric-string guard below exists to prevent. It is
+                # left unaccounted, so it lands in `superseded`: still counted, never called
+                # cleared.
+                if attempt.check_id < 0 or latest.check_id < 0:
+                    continue
                 if attempt.check_id < latest.check_id:
                     cleared.append(attempt)
                     accounted.add(attempt.check_id)
@@ -947,6 +956,43 @@ def decode_pages(raw: str) -> list[Any]:
     return out
 
 
+def _latest_artifact_per_name(
+    items: Iterable[Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    """One entry per artifact NAME: the newest attempt a re-run uploaded.
+
+    ⛔ A re-run is a NEW ATTEMPT OF THE SAME RUN ID, so its artifacts arrive under the same
+    ``(run_id, name)`` and the listing carries two of them. Keying by name with
+    ``{name: item for item in items}`` kept whichever the API happened to return LAST — not
+    the newest — so which attempt's JUnit a red was attributed from was decided by listing
+    order. That is the same attempt-identity rule the rest of this tool delegates to
+    `ci_verdict.group_latest_attempts` (a newer attempt supersedes an older one), applied to
+    the artifact listing instead of the check-runs.
+
+    Ordering is ``(not expired, created_at, id)``: a non-expired artifact beats an expired
+    sibling (a re-run re-uploads after the first one ages out, and an expired winner is
+    dropped to UNKNOWN by `RunArtifacts.get`), then the newest ``created_at`` wins, and `id`
+    breaks a tie deterministically so the read never depends on response order. When EVERY
+    copy is expired the winner is still expired — the row must then say so rather than read
+    as an artifact that was never produced.
+    """
+    best: dict[str, tuple[tuple[Any, ...], Mapping[str, Any]]] = {}
+    for item in items:
+        name = str(item.get("name"))
+        key = (item.get("expired") is not True, str(item.get("created_at") or ""), _as_id(item))
+        if name not in best or key > best[name][0]:
+            best[name] = (key, item)
+    return {name: entry[1] for name, entry in best.items()}
+
+
+def _as_id(item: Mapping[str, Any]) -> int:
+    """An artifact id as an int for tie-breaking, or ``-1`` when it is not one."""
+    try:
+        return int(item.get("id"))
+    except (TypeError, ValueError):
+        return -1
+
+
 class GhClient:
     """Read-only GitHub reads through `gh`, with a hard call budget."""
 
@@ -1072,7 +1118,10 @@ class GhClient:
                 f"gh api {args[1] if len(args) > 1 else ''} failed (rc={proc.returncode})"
                 + (f": {detail[-1][:300]}" if detail else "")
             )
-        assert last is not None
+        if last is None:  # pragma: no cover - needs a retry loop that never ran
+            # ⛔ NOT `assert`: `python -O` elides it, and the read path below a fail-closed
+            # guard is the last place an assertion may stand in for a raise.
+            raise ReadError(f"gh api {target} was never attempted")
         raise last
 
     def _paginated(self, url: str, items_key: str) -> list[Mapping[str, Any]]:
@@ -1251,13 +1300,20 @@ class GhClient:
         items = self._paginated(
             self.ARTIFACTS_URL.format(repo=self.repo, run_id=run_id), "artifacts"
         )
-        return {str(item.get("name")): item for item in items}
+        return _latest_artifact_per_name(items)
 
     def artifact_zip(self, artifact_id: str | int) -> bytes:
         raw = self._gh(
             ["api", f"repos/{self.repo}/actions/artifacts/{artifact_id}/zip"], binary=True
         )
-        assert isinstance(raw, bytes)
+        if not isinstance(raw, bytes):  # fail closed, and not elidable under `python -O`
+            # ⛔ `assert` here was elided under `-O`, and the bytes feeding `zipfile` then
+            # raised inside `_leg_evidence`'s NON-zip handlers — a traceback out of `main`
+            # instead of the documented exit, on the one call that reads a red's evidence.
+            raise ReadError(
+                f"gh api artifact {artifact_id} zip returned "
+                f"{type(raw).__name__}, not bytes"
+            )
         return raw
 
     def retention_days(self) -> int | None:
@@ -1369,15 +1425,42 @@ class OfflineClient:
         directory = self.root / "artifacts" / run_id
         if not directory.is_dir():
             return {}
+        # ⛔ The id carries the RUN, because the artifact's identity IS `(run_id, name)`.
+        # The LIVE listing is run-scoped (`actions/runs/<id>/artifacts`, and there is no
+        # attempt-specific sibling), so `run_id` is half of what identifies an artifact — and
+        # `python-ci.yml` names EVERY run's leg artifact identically
+        # (`pytest-log-<job>-<leg>`), so a bare name is ambiguous in any archive holding two
+        # runs of a leg, i.e. in every real one. Collapsing it to `path.stem` here let
+        # `artifact_zip` resolve the name by globbing across every run directory and return
+        # the first `scandir` match: a green run read a red run's zip (a CATCH-PR citation
+        # attributed to the WRONG run), and a red run read a green run's zip (its leg parsed
+        # with no failing file, so a real red was downgraded to UNKNOWN). This is the path
+        # the module advertises for reviewer reproduction, and the one the whole suite runs
+        # on.
         return {
-            path.stem: {"name": path.stem, "id": path.stem, "expired": False}
+            path.stem: {
+                "name": path.stem,
+                "id": f"{run_id}/{path.stem}",
+                "expired": False,
+            }
             for path in sorted(directory.glob("*.zip"))
         }
 
     def artifact_zip(self, artifact_id: str | int) -> bytes:
-        for path in (self.root / "artifacts").glob(f"*/{artifact_id}.zip"):
-            return path.read_bytes()
-        raise ReadError(f"offline fixture has no artifact {artifact_id}")
+        """Read the archived bytes of ``<run_id>/<name>`` — scoped to that run, only."""
+        run_id, _, name = str(artifact_id).partition("/")
+        if not name:
+            # ⛔ A bare name is REFUSED, not resolved. Accepting it is the cross-run read this
+            # change removes: the only way to satisfy it is to guess which run the caller
+            # meant, and a wrong guess is a silent mis-attribution of a red.
+            raise ReadError(
+                f"offline artifact id {artifact_id!r} is not run-scoped — expected "
+                f"'<run_id>/<artifact-name>' (see the OfflineClient layout)"
+            )
+        path = self.root / "artifacts" / run_id / f"{name}.zip"
+        if not path.is_file():
+            raise ReadError(f"offline fixture has no artifact {artifact_id}")
+        return path.read_bytes()
 
     def retention_days(self) -> int | None:
         path = self.root / "retention.json"

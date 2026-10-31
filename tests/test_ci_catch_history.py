@@ -76,6 +76,16 @@ properties. Each has a test here that FAILS when the property is broken:
     (that last one was the only unguarded raise, so a malformed page 2 discarded a walk that
     an empty page 2 merely truncated). Page 1 is the exception for all four: nothing was
     read, so the population is unusable and `main` must exit 2.
+13. **An artifact is identified by `(run_id, name)`, never by name alone** — the live listing is
+    run-scoped and every run of a leg uploads the SAME name
+    (`pytest-log-<job>-<leg>`), so a name-only key is ambiguous in any archive holding two
+    runs of a leg — which is every real one. The offline reader dropped the run scope and
+    resolved the name by globbing every run directory, so one run read another run's bytes:
+    a green run read a red run's zip (a `CATCH-PR` citation attributed to the WRONG run), a
+    red run read a green run's zip (a real red downgraded to UNKNOWN).
+    `test_the_offline_client_reads_an_artifact_from_the_run_that_listed_it` and
+    `test_a_pr_row_is_attested_from_the_pr_runs_own_artifact_not_the_push_runs` fail if the
+    id stops carrying the run.
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -488,6 +498,93 @@ def test_an_unattributable_red_is_scoped_to_its_leg(tmp_path):
     # (nothing measured it) and no citation pointing at this run.
     elsewhere = _row(report, other_file)
     assert all(u["run_id"] != str(RUN_PR) for u in elsewhere["unknown"])
+
+
+# --- 3b. an artifact is identified by (run_id, name), not by name --------
+
+
+def test_the_offline_client_reads_an_artifact_from_the_run_that_listed_it(tmp_path):
+    """Two runs, one leg name, different bytes: each read must return ITS run's artifact.
+
+    ⛔ `OfflineClient.artifacts()` reduced the listing to `{path.stem: ...}`, throwing away
+    the run it had just scoped to, and `artifact_zip()` then resolved that bare name with
+    `(root / "artifacts").glob(f"*/{name}.zip")` — the FIRST match in `scandir` order,
+    across every run. `python-ci.yml` names every run's leg artifact identically
+    (`pytest-log-<job>-<leg>`, which is why `artifact_name()` exists), so *any* archive with
+    two runs of a leg — i.e. every real one — read the wrong run's bytes.
+
+    Both reads are asserted, and that is what makes this order-independent: pre-fix both
+    listings hand out the SAME id string, so one call cannot return two different payloads
+    and at most one of the two assertions can hold, whichever zip the glob happened to hit.
+    """
+    family, leg = _leg_of("test_billing.py")
+    name = catch.artifact_name(family, leg)
+    a_path = catch.to_observed("test_billing.py")
+    b_path = sorted(LEGS[family][leg] - {a_path})[0]
+    push_zip = _zip(_junit([(a_path, "t", True)]))
+    pr_zip = _zip(_junit([(b_path, "t", False)]))
+    root = _world(
+        tmp_path,
+        runs=[],
+        artifacts={(RUN_PUSH, name): push_zip, (RUN_PR, name): pr_zip},
+    )
+    client = catch.OfflineClient(root)
+
+    push_id = client.artifacts(str(RUN_PUSH))[name]["id"]
+    pr_id = client.artifacts(str(RUN_PR))[name]["id"]
+    assert push_id != pr_id, "the id must carry the run: the name alone is ambiguous"
+    assert client.artifact_zip(push_id) == push_zip
+    assert client.artifact_zip(pr_id) == pr_zip
+
+    # A bare name is REFUSED rather than resolved — accepting it can only guess a run.
+    with pytest.raises(catch.ReadError, match="not run-scoped"):
+        client.artifact_zip(name)
+    # And a run that never uploaded it is a READ failure, not the other run's bytes.
+    with pytest.raises(catch.ReadError, match="no artifact"):
+        client.artifact_zip(f"{RUN_OTHER_WORKFLOW}/{name}")
+
+
+def test_a_pr_row_is_attested_from_the_pr_runs_own_artifact_not_the_push_runs(tmp_path):
+    """The end-to-end consequence: push evidence must not become a PR-head attestation.
+
+    ⛔ Measured pre-fix on this exact shape: the file executed ONLY on the push run came out
+    `pr_runs_attested=1`, `status=NEVER` — a clean bill of health on a PR head minted purely
+    from push evidence, which is the route `status`'s NEVER branch forbids — while the file
+    the PR artifact DID name read UNKNOWN for "its artifact named none of it". Two runs of
+    one leg share `pytest-log-<job>-<leg>`, so the PR leg read the push run's zip.
+    """
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    name = catch.artifact_name(family, leg)
+    a_path = catch.to_observed("test_billing.py")
+    b_path = sorted(LEGS[family][leg] - {a_path})[0]
+    root = _world(
+        tmp_path,
+        runs=[
+            _run(RUN_PUSH, SHA, "push"),
+            _run(RUN_PR, SHA, "pull_request", pr=77, conclusion="success"),
+        ],
+        jobs={
+            RUN_PUSH: [_check(100, RUN_PUSH, job, "failure")],
+            RUN_PR: [_check(200, RUN_PR, job, "success")],
+        },
+        # The SAME artifact name in BOTH runs, which is the real upload shape.
+        artifacts={
+            (RUN_PUSH, name): _zip(_junit([(a_path, "t", True)])),
+            (RUN_PR, name): _zip(_junit([(b_path, "t", False)])),
+        },
+    )
+    report = _report(root)
+    a_row = _row(report, a_path)
+    b_row = _row(report, b_path)
+
+    # `a` was executed only on the push run: the PR leg's own artifact names `b`, so there
+    # is no PR-head attestation — and its main red must survive as CATCH-PUSH-ONLY.
+    assert a_row["pr_runs_attested"] == 0, "a push artifact is not PR-head evidence"
+    assert a_row["status"] == catch.CATCH_PUSH_ONLY
+    assert a_row["status"] != catch.NEVER
+    # `b` IS attested — by the PR run that actually uploaded it.
+    assert b_row["pr_runs_attested"] == 1, "the PR run's own artifact names this file"
 
 
 # --- attribution through the job's own JUnit ------------------------------
@@ -1842,7 +1939,7 @@ def test_a_failed_download_is_not_quoted_as_another_legs_reason(tmp_path):
     real = client.artifact_zip
 
     def _broke(artifact_id):
-        if str(artifact_id) == a_name:
+        if str(artifact_id) == f"{RUN_PR}/{a_name}":
             raise catch.ReadError("boom")
         return real(artifact_id)
 
