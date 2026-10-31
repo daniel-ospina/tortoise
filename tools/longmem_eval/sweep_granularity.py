@@ -105,7 +105,14 @@ def _aggregate_embedding_coverage(outcomes: list[dict]) -> float | None:
     implies a truthy ``points_total``. The fallback was also the one path
     that could publish a NUMERIC coverage while ``_points_census`` reported
     the cell unknown, which would have silently defeated
-    ``_dense_leg_verified``'s zero-coverage arm."""
+    ``_dense_leg_verified``'s zero-coverage arm.
+
+    The number is over the records the census ADMITTED. A record the pair
+    rule refused contributes to neither half, so this ratio describes the
+    admitted population only — excluding a record can raise it, never lower
+    it. That is why the verdict is not read off this number alone:
+    ``_dense_leg_verified`` consumes ``records_refused`` and fails the cell
+    closed (#10355 review P3, refused-record fail-open)."""
     census = _points_census(outcomes)
     if not census["points_total"]:
         return None
@@ -115,9 +122,38 @@ def _aggregate_embedding_coverage(outcomes: list[dict]) -> float | None:
 def _points_census(outcomes: list[dict]) -> dict:
     """The raw point census behind a cell's rolled-up coverage.
 
-    Derived as ONE pair, never two independent sums (#4821 review P2). The
-    sum of ``points_embedded`` is ``0`` whenever the cell's outcomes carry no
-    census at all — so pairing it with ``points_total: None`` published
+    Derived as ONE pair, never two independent sums (#4821 review P2): only an
+    outcome that knows BOTH halves contributes, so a cell whose records mix
+    known and unknown censuses cannot publish a coverage assembled from two
+    different populations. The pair must also be POSSIBLE — two ints, not
+    bools, with ``0 <= points_embedded <= points_total`` — because a pair that
+    is impossible per record (``(3, 7)``, ``(True, 5)``, ``(-5, 5)``) rolls up
+    to a coverage above 1.0 or below 0.0, and ``_dense_leg_verified``'s
+    zero-coverage arm only fires on ``== 0.0`` with a positive total, so an
+    impossible receipt would be certified as a dense MEASUREMENT — the exact
+    class this receipt exists to close (#10355 review P2). A record that fails
+    either half of the rule is excluded as a record; it is never half-counted.
+
+    What the rule BUYS, stated exactly (#10355 review P3). Excluding a record
+    is not by itself enough, and an earlier version of this docstring claimed
+    a closed class it did not close. Dropping an impossible record leaves
+    ``None/None`` — which the coverage arm does not refute (an unknown
+    population is not a miss) — so a cell whose ONLY record was impossible
+    still read MEASURED; and in a mixed cell the refused points vanished from
+    the population, so the published coverage could only move UP. Both
+    directions are fail-open. So the refusal is CARRIED OUT of this function
+    as ``records_refused`` and consumed as a refutation by
+    ``_dense_leg_verified``: the cell is then NOT MEASURED, and the exclusion
+    stays auditable in the row (the census is the artifact published *for*
+    auditability). This is the standard split — an UNKNOWN (a half-known pair,
+    an absent key, a pre-R3 resume) is excluded from the aggregate, the way
+    ``SQL`` aggregates skip ``NULL``; an IMPOSSIBLE value is a value the
+    producer had no business emitting, and the convention for that is to
+    fail loudly rather than to silently ignore it (why ``numpy.nanmean`` is a
+    separate function from ``numpy.mean``). Kept apart deliberately: the
+    first is an absence of data, the second is a broken producer.
+    The sum of ``points_embedded`` is ``0`` whenever
+    the cell's outcomes carry no census at all — so pairing it with ``points_total: None`` published
     ``{points_total: None, points_embedded: 0}``, where a consumer summing
     ``points_embedded`` across cells reads "0 embedded" for a population it
     does not know. That is indistinguishable from "N points, none embedded",
@@ -127,19 +163,58 @@ def _points_census(outcomes: list[dict]) -> dict:
     halves, and a cell that embedded none of N reports ``(N, 0)`` — a real
     zero, which ``_dense_leg_verified`` reads as not-measured.
 
-    One honest wrinkle (#4821 review P3): a cell whose outcomes all report
-    ``points_total == 0`` is a KNOWN zero and lands in the same ``None/None``
-    shape as an unknown. Harmless here — a cell with no points can neither
-    reach the context cap nor produce evidence recall, so it is never a
-    winner — but it means "unknown" in this pair covers two states, and the
-    coverage arm treats both as un-refuted rather than inventing a zero."""
-    totals = [o.get("points_total") for o in outcomes]
-    embedded = [o.get("points_embedded") for o in outcomes]
-    known_total = sum(t for t in totals if isinstance(t, int))
-    known_embedded = sum(e for e in embedded if isinstance(e, int))
+    One honest wrinkle (#4821 review P3). The ``None/None`` shape covers four
+    states, and this function alone cannot tell them apart: (a) a cell whose
+    outcomes all report ``points_total == 0`` — a KNOWN zero; (b) a cell whose
+    records carry no census at all; (c) a cell that knows its total but not how
+    many of its points were embedded — excluded as a pair, so the half it does
+    know is not published as a whole; and (d) a record whose pair is impossible
+    (``points_embedded > points_total``, a bool, a negative) — refused.
+    ``records_refused`` is what separates (d) from (a)-(c), and that separation
+    is now load-bearing rather than cosmetic: a cell with no points can neither
+    reach the context cap nor produce evidence recall, so it is never a winner,
+    and (a)-(c) are absences of data — the coverage arm leaves them un-refuted
+    instead of inventing a zero, which is the documented rule for an unknown
+    population (see ``_dense_leg_verified``). (d) is unreachable from a real
+    report — ``retrieve.py`` derives both halves from ONE Cypher row
+    (``count(p), count(p.embedding)``), so ``0 <= points_embedded <=
+    points_total`` holds by construction — but if it ever happens, the producer
+    is lying about a number it published, and the cell is REFUTED rather than
+    quietly shrunk."""
+    # ONE pair per outcome: an outcome that knows its total but not how many
+    # of its points were embedded is excluded from BOTH halves, never counted
+    # on one side only — that is what "one pair, never two independent sums"
+    # buys, and it is why this sums a filtered list instead of summing two
+    # independently filtered lists. The pair is also checked for POSSIBILITY
+    # (ints, not bools, 0 <= embedded <= total): a per-record lie rolls up to
+    # a coverage outside [0, 1] that the zero-coverage arm cannot see, i.e. an
+    # impossible receipt certified as a MEASUREMENT (#10355 review P2).
+    #
+    # A refused record is COUNTED OUT, not just dropped (#10355 review P3):
+    # ``records_refused`` rides the published row so ``_dense_leg_verified``
+    # can refute the cell and an auditor can see the population a published
+    # coverage was computed over. Only a record that CLAIMS a pair (both
+    # halves integers — ``bool`` included, since ``True`` is exactly the lie
+    # the value rule catches) can be refused; a half-known or absent pair is
+    # an UNKNOWN and stays uncounted, because it is an absence of data rather
+    # than a false one.
+    pairs = [(o.get("points_total"), o.get("points_embedded")) for o in outcomes]
+    known: list[tuple[int, int]] = []
+    records_refused = 0
+    for total, embedded in pairs:
+        claims_pair = isinstance(total, int) and isinstance(embedded, int)
+        if claims_pair and not isinstance(total, bool) \
+                and not isinstance(embedded, bool) and 0 <= embedded <= total:
+            known.append((total, embedded))
+        elif claims_pair:
+            records_refused += 1
+    known_total = sum(t for t, _ in known)
+    known_embedded = sum(e for _, e in known)
     if not known_total:
-        return {"points_total": None, "points_embedded": None}
-    return {"points_total": known_total, "points_embedded": known_embedded}
+        return {"points_total": None, "points_embedded": None,
+                "records_refused": records_refused}
+    return {"points_total": known_total, "points_embedded": known_embedded,
+            "records_refused": records_refused}
 
 
 def _dense_leg_verified(results: list[dict]) -> bool:
@@ -180,6 +255,17 @@ def _dense_leg_verified(results: list[dict]) -> bool:
     resume) is not refuted by this arm; the ``vector_strategy`` arm still
     governs it.
 
+    An UNKNOWN census and a REFUSED one are different states, and only the
+    second refutes the cell (#10355 review P3). ``records_refused`` is
+    ``_points_census``'s count of records whose pair was impossible
+    (``embedded > total``, a bool, a negative). Excluding such a record would
+    leave the cell's published coverage computable over the records that
+    happened to survive, and an exclusion can only inflate coverage — the
+    fail-open direction — while a cell whose only record was impossible would
+    report ``None/None`` and slip past the zero-coverage arm. So this arm
+    fails it closed. (Absences stay uncounted: a half-known or absent pair is
+    data the cell does not have, not data that is wrong.)
+
     KNOWN RESIDUAL (recorded, not implied — #4821 review P3). This predicate
     reads the WRITE-time witness only. A cell with full write coverage whose
     QUERY-side encode degrades (the vector leg skipped, an FTS-only pool)
@@ -197,6 +283,16 @@ def _dense_leg_verified(results: list[dict]) -> bool:
         total = r.get("points_total")
         if r.get("embedding_coverage") == 0.0 and isinstance(total, int) \
                 and total > 0:
+            return False
+        # A census that REFUSED a record refutes the cell (#10355 review P3).
+        # An impossible pair (``embedded > total``, a bool, a negative) is a
+        # producer contract violation, and excluding it is not neutral: the
+        # refused points leave the population, so the published coverage can
+        # only be INFLATED by the exclusion, and a cell whose only record was
+        # impossible reports ``None/None``, which the arms above cannot see.
+        # Failing the cell closed is what makes the census rule actually close
+        # the class it names, instead of moving the lie into a smaller number.
+        if r.get("records_refused"):
             return False
     return True
 
@@ -323,9 +419,16 @@ def _print_table(results: list[dict], *, ingest_mode: str,
     # reader takes as a measurement.
     strategies = sorted({str(r.get("vector_strategy")) for r in results})
     coverages = [r.get("embedding_coverage") for r in results]
+    verdict = ("MEASURED" if _dense_leg_verified(results)
+               else "NOT MEASURED")
+    # #10355 review P3: a refused census record makes the cell NOT MEASURED
+    # while its coverage can still read numeric, so the reason is printed
+    # beside the verdict instead of leaving the operator to guess why.
+    refused = [r.get("records_refused") for r in results]
+    refused_note = (f"  records_refused={refused}"
+                    if any(refused) else "")
     print(f"dense leg: vector_strategy={','.join(strategies)}  "
-          f"embedding_coverage={coverages}  "
-          f"({'MEASURED' if _dense_leg_verified(results) else 'NOT MEASURED'})")
+          f"embedding_coverage={coverages}  ({verdict}){refused_note}")
     print("=" * 88)
     header = (f"{'chunk_turns':>11}  {'ev_recall@10':>13}  "
               f"{'chunk_ev@10':>12}  {'sess_rec@10':>12}  "
@@ -348,8 +451,88 @@ def _print_table(results: list[dict], *, ingest_mode: str,
           f"chunk_turns (D2 #1540)")
 
 
+# The causes of ``measured=False``, as FACTS ABOUT THE RESULT ROWS rather than
+# about the code path that produced them. They are named because the operator
+# line is built from them: before the refused-census arm landed, ``measured``
+# was False for exactly two causes and BOTH implied keyword-only recall, so the
+# line could assert that story unconditionally. The third cause (#10355 review
+# P3) implies the opposite — the embedder ran and the recall is a hybrid run's
+# — so the clauses are gated on the cause that actually holds.
+UNMEASURED_EMBEDDER = "embedder_unavailable"
+UNMEASURED_ZERO_COVERAGE = "no_vectors_written"
+UNMEASURED_CENSUS = "census_refused"
+
+
+def _unmeasured_causes(results: list[dict]) -> set[str]:
+    """Which arms of :func:`_dense_leg_verified` refuted this sweep.
+
+    Read from the SAME per-cell receipts the predicate reads and mirroring its
+    arms EXACTLY, on purpose: the reason the winner line prints must not be
+    able to drift from the verdict that produced it. If the predicate gains an
+    arm, it belongs here in the same commit or the operator is told a cause
+    that is not the one that fired.
+
+    Empty is a legitimate answer for one state — a sweep with no result rows
+    at all (``_dense_leg_verified`` refuses an empty list) — and the caller
+    then prints the cause-agnostic warning alone rather than inventing a
+    cause. A MEASURED sweep also returns no causes, which is why the caller
+    must read this only under ``not measured``.
+    """
+    causes: set[str] = set()
+    for r in results:
+        if r.get("vector_strategy") != "enabled":
+            causes.add(UNMEASURED_EMBEDDER)
+        total = r.get("points_total")
+        if r.get("embedding_coverage") == 0.0 and isinstance(total, int) \
+                and total > 0:
+            causes.add(UNMEASURED_ZERO_COVERAGE)
+        if r.get("records_refused"):
+            causes.add(UNMEASURED_CENSUS)
+    return causes
+
+
+def _publishes_a_ratio(row: dict) -> bool:
+    """Does this ONE cell publish a real coverage ratio on the ``dense leg:``
+    line? ``None`` (an absent census) and ``bool`` (not a ratio) do not."""
+    coverage = row.get("embedding_coverage")
+    return isinstance(coverage, (int, float)) and not isinstance(coverage, bool)
+
+
+def _census_refusal_coverage(results: list[dict]) -> tuple[int, int]:
+    """Of the cells that REFUSED a census record, how many still publish a
+    real ratio, and how many publish none? ``(with_ratio, without_ratio)``.
+
+    PER CELL, on purpose (#10355 review P3). The question the winner line asks
+    here is "which refusing cell has no ratio to distrust", and that is a
+    per-record question: ``all(...)`` over the sweep — the gate this replaces —
+    answers "no cell failed to publish a ratio", which is a DIFFERENT claim
+    and cannot name the record that failed. It is the same distinction SQL
+    draws between ``bool_and``/``every`` (one boolean over the set, naming no
+    row: "true if all non-null input values are true") and
+    ``count("any")`` ("the number of input rows in which the input value is
+    not null"), and why attributing an exclusion takes a per-row FILTER rather
+    than an aggregate. Concretely, a sweep mixing an ABSENT census
+    (``embedding_coverage=None``, ``records_refused=0`` — a pre-R3 resume) with
+    a REFUSED one (numeric coverage, ``records_refused=1``) has
+    ``_unmeasured_causes(...) == {UNMEASURED_CENSUS}`` and a sweep-wide
+    ``all(...)`` of ``False``, so the sweep-wide gate printed the "a cell whose
+    only record was refused publishes NO ratio" sentence about a run with no
+    such cell — pointing the operator at ``records_refused`` for a cell whose
+    ``records_refused`` is ``0``.
+
+    Mirroring ``_dense_leg_verified``'s census arm in scope: only a cell whose
+    ``records_refused`` is truthy is counted here, so an un-refused absence can
+    never be mistaken for a refusal. ``(0, 0)`` means no cell reported a
+    refusal — the source of the row set is then what to look at, not a cell.
+    """
+    refused = [r for r in results if r.get("records_refused")]
+    with_ratio = sum(1 for r in refused if _publishes_a_ratio(r))
+    return with_ratio, len(refused) - with_ratio
+
+
 def _print_winner(winner: dict | None, *, ingest_mode: str,
-                  context_cap: int, measured: bool) -> None:
+                  context_cap: int, measured: bool,
+                  results: list[dict]) -> None:
     """Print the winner line — the ONLY artifact an operator sees.
 
     ``measured`` is a REQUIRED keyword-only argument (PEP 3102: no default
@@ -358,6 +541,14 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
     forgets would get the SELECTED vocabulary — handing a knob to the pilot
     (step 3) and the 500-Q run (step 5) on no evidence — which is exactly the
     permissive default this module exists to remove. #4821 review P2.
+
+    ``results`` is required for the same kind of reason (#10355 review P3):
+    ``measured=False`` has THREE causes now, and they call for opposite
+    sentences and opposite remedies, so the line cannot be written from the
+    flag alone. Passing the rows the verdict was computed over is what lets
+    :func:`_unmeasured_causes` name the one that actually fired instead of
+    defaulting to the keyword-only story — a default that would tell an
+    operator their embedder is missing about a run whose embedder worked.
     """
     if ingest_mode != "v2":
         print("\nDeterministic mode: the selection metric is knob-insensitive "
@@ -375,18 +566,95 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
     # vocabulary for a run that did not measure the dense leg — otherwise a
     # keyword-only sweep hands a choice to the pilot + the 500-Q run.
     if not measured:
-        print("\n⚠ DENSE LEG NOT MEASURED (--skip-preflight waiver, or no "
-              "embedder): this sweep is NOT A MEASUREMENT — the recall "
-              "values above are keyword-only and are not comparable to a "
-              "hybrid run.", file=sys.stderr)
+        causes = _unmeasured_causes(results)
+        # The headline is cause-AGNOSTIC on purpose (#10355 review P3). It
+        # used to assert "the recall values above are keyword-only and are not
+        # comparable to a hybrid run" as fact — true for the two original
+        # causes, FALSE for a refused census, where the embedder ran and the
+        # values are a hybrid run's. The clauses that are cause-specific now
+        # follow, each gated on the cause `_dense_leg_verified` actually fired.
+        print("\n⚠ DENSE LEG NOT MEASURED: this sweep is NOT A MEASUREMENT — "
+              "do not read the recall values above as one, and do not feed "
+              "them anywhere. The `dense leg:` line above carries the "
+              "reason; the causes are a --skip-preflight waiver / no "
+              "embedder, no vectors written, or a census the producer "
+              "contradicted (records_refused).", file=sys.stderr)
         print(f"UNMEASURED candidate granularity: chunk_turns = "
               f"{winner['chunk_turns']} "
               f"(evidence_recall@10 = {winner['evidence_recall@10']:.3f}, "
               f"context_tokens_mean = {winner['context_tokens_mean']:.1f})")
-        print("→ NOT selected: do NOT feed this to the pilot (step 3) or the "
-              "500-Q run (step 5). Install the pinned embedder (uv sync "
-              "--group dev --extra embeddings) and re-run without "
-              "--skip-preflight.", file=sys.stderr)
+        if causes & {UNMEASURED_EMBEDDER, UNMEASURED_ZERO_COVERAGE}:
+            print("   the dense leg wrote no vectors for at least one cell "
+                  "(no embedder, a waived pre-flight, or a vector leg that "
+                  "was never exercised), so the recall values above are "
+                  "keyword-only and are not comparable to a hybrid run.",
+                  file=sys.stderr)
+        if UNMEASURED_CENSUS in causes:
+            print("   at least one cell REFUSED a census record "
+                  "(records_refused on the `dense leg:` line): the producer "
+                  "reported a points pair that cannot be true "
+                  "(points_embedded > points_total, a bool, a negative), so "
+                  "that cell's coverage was computed over a population the "
+                  "record was removed from. The defect is in the census "
+                  "PRODUCER, so re-running cannot change this verdict.",
+                  file=sys.stderr)
+            if UNMEASURED_EMBEDDER not in causes \
+                    and UNMEASURED_ZERO_COVERAGE not in causes:
+                # "its coverage is numeric" is NOT implied by the cause set,
+                # and neither is "the refusing cell published no ratio"
+                # (#10355 review P3): a cell whose ONLY record was refused
+                # publishes no ratio at all, and its cause is this same one.
+                # Claim exactly what the cause set proves — and claim it of the
+                # cells that REFUSED, not of the sweep: the sweep-wide gate
+                # this replaces printed the no-ratio sentence for a run whose
+                # refusing cell published a ratio and whose ratio-less cell
+                # refused nothing, which is the same "the diagnostic asserts a
+                # fact its gate does not prove" class this PR removes.
+                refused_with_ratio, refused_without_ratio = \
+                    _census_refusal_coverage(results)
+                if refused_with_ratio and not refused_without_ratio:
+                    coverage_note = (
+                        "Each cell that refused a record still publishes a "
+                        "real ratio — its coverage is numeric — so what is "
+                        "contradicted is the census, never the leg.")
+                elif refused_without_ratio and not refused_with_ratio:
+                    coverage_note = (
+                        "A cell whose only record was refused publishes NO "
+                        "ratio at all (embedding_coverage=None), so read "
+                        "records_refused rather than embedding_coverage "
+                        "for it.")
+                elif refused_without_ratio:
+                    coverage_note = (
+                        "The cells that refused a record are MIXED: some "
+                        "still publish a numeric coverage, others publish "
+                        "NO ratio at all (embedding_coverage=None) — read "
+                        "records_refused per cell: a numeric one was "
+                        "computed over the population its refused record "
+                        "was removed from, and a None one has no ratio to "
+                        "trust.")
+                else:
+                    coverage_note = (
+                        "Read records_refused per cell on the `dense leg:` "
+                        "line to see which census was refused.")
+                print("   the other two causes do NOT hold here: the "
+                      "embedder ran for every cell and no cell wrote zero "
+                      "vectors, so these recall values ARE a hybrid run's "
+                      "— they are refused because the census contradicts "
+                      "itself, not because the leg was missing. "
+                      + coverage_note,
+                      file=sys.stderr)
+        remedy = ("→ NOT selected: do NOT feed this to the pilot (step 3) or "
+                  "the 500-Q run (step 5).")
+        if causes & {UNMEASURED_EMBEDDER, UNMEASURED_ZERO_COVERAGE}:
+            remedy += (" Install the pinned embedder (uv sync --group dev "
+                       "--extra embeddings) and re-run without "
+                       "--skip-preflight.")
+        if UNMEASURED_CENSUS in causes:
+            remedy += (" Fix the census producer that emitted the impossible "
+                       "pair and re-run — installing the embedder, or "
+                       "re-running as it stands, reproduces this verdict "
+                       "byte for byte.")
+        print(remedy, file=sys.stderr)
         return
     print(f"\nSELECTED granularity: chunk_turns = {winner['chunk_turns']} "
           f"(evidence_recall@10 = {winner['evidence_recall@10']:.3f}, "
@@ -443,8 +711,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="temp dir for per-question graphs")
     args = p.parse_args(argv)
 
-    # --mock implies deterministic ingest when the mode is unset (fully
-    # offline; real v2 sweeps need --extractor-model/keys).
+    # --mock implies deterministic ingest when the mode is unset (a mock run
+    # needs no provider keys; real v2 sweeps need --extractor-model/keys). It
+    # does NOT waive the dense-leg gate (#4718) — --skip-preflight does (#4821).
     ingest_mode = args.ingest_mode or ("deterministic" if args.mock else "v2")
     if args.mock and ingest_mode == "v2":
         raise SystemExit("--mock implies deterministic ingest; pass "
@@ -490,7 +759,8 @@ def main(argv: list[str] | None = None) -> int:
                  context_cap=args.context_cap,
                  max_chunks_per_session=args.max_chunks_per_session)
     _print_winner(winner, ingest_mode=ingest_mode,
-                  context_cap=args.context_cap, measured=measured)
+                  context_cap=args.context_cap, measured=measured,
+                  results=results)
 
     payload = {
         "selection_rule": ("v2: maximize evidence_recall@10 subject to "
