@@ -170,6 +170,66 @@ def test_ingest_main_guard():
         shutil.rmtree(d, ignore_errors=True)
 
 
+
+# ── the standalone runner's own precondition (#10010 review F3) ─────────
+#
+# A whole family of files in this directory offers TWO execution modes: pytest,
+# and `python tests/<file>.py`, which runs `_run_all()`. That runner discovers
+# its tests from `globals()` AT CALL TIME — so an `if __name__ == "__main__"`
+# guard placed ABOVE a later test block executes NONE of it, while still
+# printing its cheerful "all … passed". That is not hypothetical: on 2026-10-31
+# `tests/test_embeddings.py` had its six new `#10296` pins appended below the
+# guard (they were exactly the pins for a performance decision, i.e. the ones a
+# developer would reach for the standalone mode to run), and `tests/test_api.py`
+# had nine below its own guard. pytest still ran them, so CI was never falsely
+# green — the file's SECOND mode silently lost them.
+#
+# The invariant is mechanical, so it is pinned mechanically: for every test file
+# that uses this runner shape, no `def test_` may be defined after its
+# `if __name__ == "__main__"` guard.
+
+_STANDALONE_RUNNER = "sorted(globals().items())"
+
+
+def test_no_standalone_runner_defines_tests_after_its_guard():
+    """#10010: a `__main__` guard above a test block runs none of it.
+
+    Non-vacuous: with `tests/test_embeddings.py`'s guard put back above its
+    `#10296` block (the pre-fix shape), this reports 6 tests stranded below the
+    guard and reds; so did `tests/test_api.py`'s nine before the same move.
+    """
+    import re as _re
+    from pathlib import Path as _Path
+
+    here = _Path(__file__).resolve().parent
+    stranded = []
+    scanned = 0
+    for path in sorted(here.glob("test_*.py")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if not any(_STANDALONE_RUNNER in line for line in lines):
+            continue
+        guard = next(
+            (i for i, line in enumerate(lines)
+             if _re.match(r"if __name__ ==", line)), None)
+        if guard is None:
+            stranded.append(f"{path.name}: runner with no __main__ guard")
+            continue
+        scanned += 1
+        after = [i + 1 for i, line in enumerate(lines)
+                 if i > guard and _re.match(r"def test_", line)]
+        if after:
+            stranded.append(
+                f"{path.name}: guard at :{guard + 1} strands "
+                f"{len(after)} test(s) at {after} — `python {path.name}` would "
+                f"print 'all passed' having run none of them")
+
+    assert scanned >= 10, (
+        f"only {scanned} standalone-runner files found — the sweep stopped "
+        f"matching, so this pin would pass vacuously")
+    assert not stranded, "\n".join(stranded)
+    print("PASS test_no_standalone_runner_defines_tests_after_its_guard")
+
+
 def _run_all():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

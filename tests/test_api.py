@@ -388,18 +388,6 @@ def test_projection_matches_log_after_every_mutation():
     print("PASS test_projection_matches_log_after_every_mutation")
 
 
-# ── runner ────────────────────────────────────────────────────────────
-
-def _run_all():
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-    print("\nall API coverage tests passed")
-
-
-if __name__ == "__main__":
-    _run_all()
-
 
 # ------------------------------------------------------------------ #125 capture API
 
@@ -547,3 +535,15 @@ def test_add_operator_single_string_input_not_char_split():
     assert op["inputs"] == [a], f"bare string was char-split: {op['inputs']!r}"
     print("PASS test_add_operator_single_string_input_not_char_split")
 
+
+# ── runner ────────────────────────────────────────────────────────────
+
+def _run_all():
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+    print("\nall API coverage tests passed")
+
+
+if __name__ == "__main__":
+    _run_all()

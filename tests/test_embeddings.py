@@ -363,19 +363,6 @@ def test_embedder_constants():
     print("PASS test_embedder_constants")
 
 
-# ── runner ───────────────────────────────────────────────────────────
-
-def _run_all():
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-    print("\nall embedding tests passed")
-
-
-if __name__ == "__main__":
-    _run_all()
-
-
 # ── 14. #10296: the intra-op thread pin ───────────────────────────────
 #
 # torch's intra-op pool defaults to nproc, and for the short-text calls this
@@ -579,3 +566,23 @@ def test_ensure_embed_threads_rebounds_a_thread_that_set_its_own_count():
     finally:
         torch.set_num_threads(saved_threads)
         _restore_env(saved)
+
+
+# ── runner ───────────────────────────────────────────────────────────
+#
+# LAST in the file, on purpose (#10010 review F3): ``_run_all`` discovers the
+# tests from ``globals()`` AT CALL TIME, so a guard placed above a later test
+# block silently runs none of it — the standalone mode this module's docstring
+# promises would print "all embedding tests passed" having executed only the
+# tests above the guard. Keeping the guard at EOF is what makes adding a test
+# below it impossible.
+
+def _run_all():
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+    print("\nall embedding tests passed")
+
+
+if __name__ == "__main__":
+    _run_all()
