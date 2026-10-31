@@ -614,19 +614,38 @@ def record_tenant_for_graph(plan: dict | None) -> tuple[str, str] | None:
     single-tenant env pair, under graph Y). That divergence is the same
     silent-wrong-target class this function exists to close.
 
-    The DEFAULT graph is deliberately still None HERE, but no longer because
-    it lacks a row or because its credential cannot name it: `20261028000001`
-    mints an active `kind='default'` row per organization (provisioning mints
-    it forward, with an auth-time self-heal), and every credential resolver
-    stamps that row's id as `default_graph_id` — `resolve_api_key` since
-    #10025, `hosted_api._session_user_org` and
-    :func:`tortoise.oauth.resolve_oauth_access_token` since #10046. So a
-    DEFAULT selection does not need THIS seam to install anything: it enters
-    no scope, and the ambient scope `OrgResolutionMiddleware` already installed
-    from the credential names the same default graph. Wiring this branch
-    explicitly is #10047's scope — a deferral of this seam only; the lanes that
-    build their own SDK and write the org DEFAULT graph are #10047 too, and they
-    are named there rather than here.
+    The DEFAULT graph is deliberately still None HERE, and that is CORRECT BY
+    CONSTRUCTION rather than a deferral (#10047 closed the other half; this
+    branch is the half that needs no install). Read the two shapes that reach
+    this function and the ambient scope that already covers each:
+
+    * ``ref is None`` — no selection at all, the common path — returns a
+      ``None`` plan, so nothing about the credential changes and its own
+      ``default_graph_id`` stands: `20261028000001` mints an active
+      ``kind='default'`` row per organization (provisioning mints it forward,
+      with an auth-time self-heal) and every credential resolver stamps that
+      row's id — `resolve_api_key` since #10025, `hosted_api._session_user_org`
+      and :func:`tortoise.oauth.resolve_oauth_access_token` since #10046.
+    * a ``kind='default'`` PLAN — which ``graph="default"`` never produces:
+      :func:`plan_graph_target` answers that ref with ``None``, and refuses it
+      whenever ``_current_graph_id`` is set, because its default-ref branch
+      compares the bound id against the ``"default"`` SENTINEL
+      (`_DEFAULT_GRAPH_ID`, :316) while a resolved credential carries a real
+      ``public.graphs`` id. A bound credential is therefore REFUSED there
+      rather than resolved, INCLUDING one bound to the default graph's own row
+      (pinned by ``test_9340_graph_tool_argument.py``::
+      ``test_a_bound_credential_cannot_ask_for_the_default_graph``). So the
+      ``kind='default'`` row handled below reaches this function only for a
+      credential bound to that very row, or for one with no binding at all —
+      and in both shapes the ambient scope already names ``(org, default)``.
+
+    Installing a tenant here would therefore be a SECOND write of the same
+    scope, and the only way it could differ is by disagreeing with the answer
+    the credential already gave — a worse answer, not a better one. The lanes
+    that genuinely needed an install are the ones with NO ambient scope at all
+    (they build their own SDK from an ``org_id`` alone); they are installed at
+    their own construction site by
+    ``hosted_api._bind_default_graph_record_tenant`` (#10047, five lanes).
     """
     if plan is None or (plan.get("kind") or "") == "default":
         return None

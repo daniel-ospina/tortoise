@@ -407,26 +407,38 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   a literal `SET node_key = node_key`), so only that shape leaves an
 #:   un-supersede unrecorded. Do not generalise one shape into "the record cannot
 #:   express un-superseded"; it can, via the carriers.
-#: * **⚠️ NOT SOUND FOR A CARRIER SET WITHOUT THE STATUS FOLD — a LIVE-WRITER
-#:   divergence, measured and OWNED BY #10192.** A carrier present does NOT imply
-#:   the node's `status` is `'superseded'`. Measured on a live engine at this
-#:   head, all three ACCEPTED by `update_entity`:
+#: * **⚠️ ONCE SOUND TO FAIL: a CARRIER SET WITHOUT THE STATUS FOLD — a
+#:   LIVE-WRITER divergence, measured under and CLOSED AT THE WRITE DOOR by
+#:   #10192.** A carrier present does NOT by itself imply the node's `status` is
+#:   `'superseded'`. Measured on a live engine BEFORE the guard, all three
+#:   ACCEPTED by `update_entity` (and by `create_object`; both doors now refuse
+#:   them unless the same call supplies `status='superseded'` —
+#:   `sdk._refuse_bare_lifecycle_carrier`). ⚠️ The refusal keys on the record's
+#:   carrier COLUMN through `record_projection.snake`, not on a list of prop
+#:   names, so it covers `superseded_by`/`superseded_at` as well as
+#:   `supersededBy`/`supersededAt` — the camel-only list was inert against the
+#:   snake spelling, which reaches this very column (PR #10379 review P1):
 #:
 #:       update_entity(obj, supersededBy='v2')                  -> status='live', supersededBy='v2'
 #:       update_entity(obj, supersededAt='2026-01-01T00:00:00Z') -> status='live', supersededAt='…'
 #:       update_entity(obj, supersededBy='')                    -> status='live', supersededBy=''
 #:       update_entity(obj, status='superseded', supersededBy='p-v2') -> status='superseded'  (the coherent pair)
 #:
-#:   The record writes the carrier (`op=supersede` is the classifier's reading of
+#:   The record wrote the carrier (`op=supersede` is the classifier's reading of
 #:   that write), so a rebuild would materialize a TERMINAL node for an entity
 #:   the live graph holds LIVE — `live._terminal_excluded` drops it from recall
-#:   and `entity_identity.resolve_entity_id` refuses its name. BOTH carriers are
+#:   and `entity_identity.resolve_entity_id` refuses its name. BOTH carriers were
 #:   exposed; the empty-carrier case is the one this table escapes (see (b)
-#:   above), and the non-empty cases are #10192's, which owns the fix (a write-door
-#:   coherence guard vs a change to the record's fold — its decision, not this
-#:   table's). This table does not try to compensate: it cannot see the graph, and
-#:   inventing a second rule here would give the cache and the record two
-#:   different folds — the defect #9974 is about.
+#:   above), and the non-empty cases were #10192's, settled on the WRITE-DOOR
+#:   half (the record's fold cannot be changed: it is a view over
+#:   `public.object` and cannot see the graph, and a second rule here would give
+#:   the cache and the record two different folds — the defect #9974 is about).
+#:   ⚠️ The refusal closes the DOOR, not the rows: a `public.object` row written
+#:   before the guard still carries a bare carrier (and the record still mints
+#:   one through the legacy id-only `ObjectSuperseded`, which writes the carrier
+#:   PAIR coherently with `status`), so this table's derivation stays the right
+#:   reading of the record — it is no longer fed a row where it disagrees with a
+#:   node the tenant doors made LIVE.
 #: * **NOT DERIVED — `superseded`, and every other `restatus` value
 #:   (`deprecated`/`archived`/`retracted`/`draft`).** The event-kind
 #:   vocabularies this bullet used to name are now derived from the record's
