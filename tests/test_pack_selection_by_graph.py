@@ -471,12 +471,12 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     `RedisMixin.__init__`), which is OUTSIDE the `redis_dir` that
     `RedisMixin._cleanup` `rmtree`s — `dbdir` equals `redis_dir` only through
     `__init__`'s `if not self.dbdir:` fallback, which no explicit filename can
-    reach. Measured inside
-    pytest at this head, the pre-fix shape reds with `.settings` STILL PRESENT,
-    NO RDB written at all, and `RedisMixin._cleanup` never entered (traced) — so
-    no teardown ran, and the rows were never deleted. What did happen is the
-    server IDENTITY: the seeder's release — through `tortoise.FalkorDB.close()`,
-    the seam that neutralizes first — reclaims its ephemeral socket dir
+    reach. Measured inside pytest at this head, the pre-fix shape reds with
+    `.settings` STILL PRESENT, NO RDB written at all, and
+    `RedisMixin._cleanup` never entered (traced) — so no teardown ran, and the
+    rows were never deleted. What did happen is the server IDENTITY: the
+    seeder's release — through `tortoise.FalkorDB.close()`, the seam that
+    neutralizes first — reclaims its ephemeral socket dir
     (`_remove_ephemeral_socket_dir`) while the daemon is still ALIVE, and
     neutralizes `RedisMixin._cleanup` (`_neutralize_redislite_cleanup`), so the
     daemon is ORPHANED — store unreachable, no save taken. `.settings` survives
@@ -485,8 +485,8 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     empty server (different pid) instead of joining the live one: **0** rows,
     the rows stranded on a server the app never talks to. That is the failure
     this guard names, and it is what its `app_server=(socket=…, pid=…)`
-    evidence is for. The 404 that reddened
-    CI `test (c)` of run `41210146871`
+    evidence is for. The 404 that reddened CI `test (c)` of run
+    `41210146871`
     (`TestGraphPacksRest::test_graph_bound_key_reads_only_its_own_graph`) is the
     same symptom.
 
@@ -522,7 +522,10 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     handle, so the store has a live client that outlasts the seeder. WHY the
     close is the load-bearing half: the guard runs BEFORE the release, so it
     cannot see a miss the RELEASE causes (with only the guard, the seed checks
-    out, the handle is then dropped, and the rows are gone by assertion time).
+    out, the handle is then dropped, and the rows are gone by assertion time),
+    and a release that never goes through `tortoise.FalkorDB.close()` is the
+    seam #3653 exists to make safe — dropping the handle leaves the store's
+    teardown to redislite's own paths, which that seam's guard does not cover.
     The guard is the DIAGNOSIS — it converts a recurrence into a named
     `SeedVisibilityError` carrying the identity evidence, which is what a bare
     404 on an unrelated assertion cost a cycle to reach — and the close is what
@@ -531,15 +534,34 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     `patched_tortoise_sdk` closes the anchor at fixture exit, so no extra server
     lifetime escapes the fixture.
 
-    THE MECHANISM IS THE CO-TENANT GUARD, NOT A SNAPSHOT (#10424 review P3,
-    re-measured against `RedisMixin._cleanup` on this head): `RedisMixin._cleanup()`
-    — the ONE teardown both paths reach — issues `shutdown(save=True, now=True,
+    ⚠️ THE CO-TENANT GUARD IS NOT THE WHOLE STORY — MEASURED CAVEAT (#10424
+    review cycle 5, from the same mutation harness as the table above). The
+    claim below that "with no co-tenant the guard does not fire, so
+    `sdk.close()` is exactly as destructive as dropping the handle" does not
+    survive the close-only row of that table: with the GUARD REMOVED there is no
+    co-tenant at all when the release runs, and the test is still green. What
+    `close()` does in that shape is write the store: after the release the db
+    file is ON DISK (`probe.db` present, no `.settings`-only state) and the
+    next construction starts a NEW server (different pid) that loads the rows
+    from it. So BOTH paths preserve the rows — the co-tenant guard keeps the
+    original daemon reachable, and a close with no co-tenant leaves a store a
+    later construction can reopen. Which of the two carried a given shape is
+    what the table distinguishes; the daemon-orphaning reading is the one
+    measured for the PRE-FIX shape. Recorded as an open measurement rather than
+    settled prose, because the two paths are indistinguishable from the outside
+    (same 1 row) and only differ in whether the pid changes.
+
+    THE MECHANISM THE FIX RELIES ON (#10424 review P3, re-measured against
+    `RedisMixin._cleanup` on this head): `RedisMixin._cleanup()` — the ONE
+    teardown both paths reach — issues `shutdown(save=True, now=True,
     force=True)`, so "an explicit SAVE instead of a GC-timed NOSAVE teardown" is
     false in BOTH halves, and `RedisMixin.__del__` calls that same
-    `_cleanup`. With no co-tenant the guard does not fire, so `sdk.close()` is
-    exactly as destructive as dropping the handle: this close is safe HERE
-    because the store already has a second client, and it is not a standing fix
-    for the `Unknown organization` 404 class. `tests/_http_fixtures.py:25`
+    `_cleanup`. With no co-tenant `cotenant_holds_server()` is false, so
+    `sdk.close()` takes the teardown path — which is why the close-only row
+    above is green on the store it LEAVES BEHIND rather than on the live daemon
+    — so this close is safe HERE because the store already has a second client,
+    and it is NOT a standing fix for the `Unknown organization` 404 class.
+    `tests/_http_fixtures.py:25`
     carries the same "SHUTDOWN SAVE" framing for its anchor close.
     """
     if not _app_addresses(db_path):
