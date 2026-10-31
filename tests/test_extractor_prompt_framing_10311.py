@@ -353,8 +353,17 @@ def test_a_non_str_untrusted_body_raises():
         v2.render_s4_prompt(None, {}, {})
     with pytest.raises(TypeError):
         v2.run_s2(_Model(_RESPONSE), None)
-    # the empty body is still the no-region path, not an error
-    assert v2.render_s4_prompt("", {}, {}) == v2.render_s4_prompt("", {}, {})
+    # The empty body is still the NO-REGION path, not an error: `if not body:
+    # return ""` runs before any clause or marker is built, so the empty-story
+    # S4 render carries neither. Asserted against the framing artifacts
+    # themselves — comparing two calls to the same render is a tautology that
+    # passes however the empty path behaves (ruff PLR0124, comparison-with-
+    # itself), and this is the only pin the empty-region byte identity has.
+    empty_story = v2.render_s4_prompt("", {}, {})
+    assert "UNTRUSTED" not in empty_story, (
+        "an empty story region must render NO framing — the no-region path is "
+        "what keeps the empty-story user turn byte-identical to pre-#10311")
+    assert v2.UNTRUSTED_DATA_CLAUSE.format(label="S1 STORY") not in empty_story
     assert v2._render_untrusted_block("S1 STORY", "") == ""
 
 
