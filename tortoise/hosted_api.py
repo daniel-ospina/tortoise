@@ -734,10 +734,13 @@ def _org_sdk(org_id: str, *, namespace: str | None = None) -> TortoiseSDK:
     the read and goes through the same decision. Omitting it costs one
     primary-key read — and a promoted org whose control plane is unreadable then
     falls back to the historical graph, i.e. the DEMOTED one. That residual is
-    accepted only for the lanes below (see `_org_default_namespace`); the
-    request data plane and the quota gate do NOT come through here — they use
-    the credential's own value (`_default_graph_name` /
-    `_org_sdk_for_credential`), so they cannot fail open.
+    accepted only for the lanes that call THIS form (see
+    `_org_default_namespace`): background/sweep/dream/webhook/indexing passes and
+    the org-import endpoint, all of which are retry-or-abandon and already do
+    blocking graph work. The request data plane, the MCP lane and the quota gate
+    do NOT come through here — they use the credential's own value
+    (`_default_graph_name` / `_org_sdk_for_credential`), so they cannot fail
+    open.
 
     For every organization that has not promoted, this returns byte-for-byte
     what ``_make_sdk(namespace=org_id)`` returns — same graph, same SDK
@@ -752,12 +755,12 @@ def _org_sdk_for_credential(org: dict) -> TortoiseSDK:
     """The DEFAULT-graph SDK for an already-resolved credential dict — NO I/O.
 
     The credential carries ``graph_namespace`` (resolved once, at auth), so this
-    is the same decision as `_org_sdk` taken from a value already in hand. Used
-    by the quota gate, whose contract is fail-CLOSED (#686): a path that could
-    fail to read the default must never be introduced there, because falling
-    back to the historical open would count the DEMOTED graph — a stale-low
-    count admits an org past its cap (revenue) and a stale-high one 402s writes
-    it is under (customer).
+    is the same decision as `_org_sdk` taken from a value already in hand. It is
+    what the REQUEST paths use — the capture/data plane, the quota gate (whose
+    contract is fail-CLOSED, #686: falling back to the historical open would
+    count the DEMOTED graph — a stale-low count admits an org past its cap
+    (revenue) and a stale-high one 402s writes it is under (customer)), the pack
+    catalog/install, the Overview count and the onboarding PATCH.
 
     A GRAPH-BOUND credential answers the historical `namespace=org_id` count
     `_count_resource` has always done for it — `_default_graph_name` is None
@@ -1293,7 +1296,10 @@ def _iter_registered_orgs(*, require_complete: bool = False) -> list[dict] | Non
                 # advanced `last_id`.
                 asked_for_count = last_id is None
                 page, page_total = _read_page(
-                    "organizations", select=["id", "name"],
+                    # #10180: `graph_name` rides the same page so the
+                    # event-retention sweep can resolve each org's DEFAULT graph
+                    # without a second read per org (`_org_sdk(..., namespace=)`).
+                    "organizations", select=["id", "name", "graph_name"],
                     filters=page_filters,
                     # A stable `order` is REQUIRED: keyset paging is only sound
                     # if the cursor column is the sort key.
@@ -1660,7 +1666,7 @@ def _sweep_events() -> None:
             if existing is not None and f"org_{org['org_id']}" not in existing:
                 continue
             try:
-                sdk = _org_sdk(org["org_id"])
+                sdk = _org_sdk(org["org_id"], namespace=org.get("graph_name"))
                 proj = sdk._get_proj()
                 purge_expired(proj, retention_days=days)
                 purge_overflow(proj, max_events=cap)
@@ -10740,7 +10746,7 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # to the burn-down tracker rather than left here alone: #3718,
     # issuecomment-6305730612 (DECISION RELAY).
     sdk = await _graph_offload(
-        lambda: _org_sdk(org["org_id"]), op="org_sdk")
+        lambda: _org_sdk_for_credential(org), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
     # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
     # — the Overview memory digest (this count) presents the user's own
@@ -11213,7 +11219,9 @@ async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
         raise HTTPException(status_code=401, detail="Authentication required")
     _reject_graph_bound_org_surface(org, "pack catalog")
     from tortoise.pack_state import get_tenant_packs
-    sdk = _org_sdk(org_id)
+    # Credential in hand → no control-plane read (and nothing that can fail
+    # open onto the demoted graph): #10180.
+    sdk = _org_sdk_for_credential(org)
     try:
         # to_thread (contextvars-propagating, py3.9+) — never
         # run_in_executor (does NOT propagate; cpython#78195).
@@ -11318,7 +11326,7 @@ async def upload_pack_manifest(
     # #2781: the pre-check seeds the tenant's own installed manifests, exactly
     # as the install below does — a pre-check that could not see them would
     # refuse the very manifests it exists to admit.
-    sdk = _org_sdk(org_id)
+    sdk = _org_sdk_for_credential(org)
     result = validate_manifest_for_tenant(sdk, manifest_yaml)
     if not result.ok:
         raise HTTPException(status_code=422,
@@ -27214,7 +27222,7 @@ async def import_org(org_id: str, request: Request,
             get_control_plane,
             is_supabase_enabled,
         )
-        sdk = _org_sdk(org_id)
+        sdk = await _cp_offload(lambda: _org_sdk(org_id), op="org_sdk")
         registry_sdk = None
         try:
             if is_supabase_enabled():
@@ -32901,7 +32909,7 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             # 4). None (probe failed / not listed) → the inline construction,
             # unchanged. Closed in the finally below either way.
             _node_sdk = (_open_org_graph_sdk(org["org_id"])
-                         or _org_sdk(org["org_id"]))
+                         or _org_sdk_for_credential(org))
             # The WORKER owns the close: it runs in the worker's own
             # ``finally``, so the SDK is closed exactly once there whether the
             # read succeeds, raises, or the request is cancelled (the worker
@@ -37266,7 +37274,7 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     terminal_status: str | None = None
     terminal_error: str | None = None
     try:
-        org_sdk = _org_sdk(org_id)
+        org_sdk = await _cp_offload(lambda: _org_sdk(org_id), op="org_sdk")
         # #10047: the walk is a DETACHED task carrying only `org_id`, so it
         # cannot see the credential that started it; it opens the org's DEFAULT
         # graph, so that graph's record tenant is the answer for every Object /
@@ -37839,7 +37847,7 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
               "blobs_skipped_oversized": 0, "repos_processed": 0,
               "repos_total": 0, "errors": [], "quota_hit": False}
     try:
-        org_sdk = _org_sdk(org_id)
+        org_sdk = await _cp_offload(lambda: _org_sdk(org_id), op="org_sdk")
         # #10047: same detached-task reason as `_run_indexing` — the docs walk
         # writes the org's DEFAULT graph and carries no credential to resolve a
         # tenant from.

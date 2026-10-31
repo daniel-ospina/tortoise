@@ -5952,12 +5952,19 @@ def tortoise_session_capture(conversation: list[dict],
     # C6 #2115 (D-C6-4): a graph-bound key's capture must land in ITS graph
     # — carry the resolution ContextVars into the impl's org dict so
     # _data_sdk routes there (and the per-graph recording gate reads the
-    # key's override). Session/OAuth/org-wide resolutions have empty
-    # context → no graph fields → default graph (unchanged).
+    # key's override).
+    # #10180: the ORG-WIDE classes (session / OAuth / legacy key) carry the
+    # DEFAULT namespace too, unconditionally — a promotion MOVES it, and this
+    # bridge is what `_data_sdk`/`_data_graph_name` read. Without it those
+    # captures kept writing the graph the promotion DEMOTED while the ambient
+    # `_record_tenant_scope` filed their record rows under the promoted one
+    # (`_current_graph_id` is None for exactly those classes, so gating on it —
+    # as this block used to — skipped the one field they needed).
     _gid = _current_graph_id.get()
     if _gid:
         org["graph_id"] = _gid
-        org["graph_namespace"] = _current_graph_namespace.get()
+    org["graph_namespace"] = _current_graph_namespace.get()
+    if _gid:
         org["scopes"] = _current_scopes.get() or []
         org["legacy_full_access"] = bool(_current_legacy_full_access.get())
     if limits.get("max_points") is not None:

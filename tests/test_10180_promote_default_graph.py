@@ -1112,3 +1112,29 @@ def test_every_hosted_auth_seam_stamps_the_same_field():
             f"{rel} no longer stamps the org-wide `graph_namespace`: the "
             "default-graph resolver reads that field and would silently open "
             "the demoted graph after a promotion")
+
+
+def test_the_mcp_capture_bridge_carries_the_default_namespace():
+    """The MCP capture tool hands `_capture_session_impl` a dict it BUILDS, not
+    the resolved credential — and an org-wide MCP credential has no `graph_id`,
+    so gating the namespace on `graph_id` (as that bridge used to) dropped it on
+    exactly the class a promotion moves. The capture then wrote the DEMOTED
+    graph while the ambient `_record_tenant_scope` filed its record rows under
+    the promoted one.
+
+    FAIL-ON: move the stamp back inside `if _gid:` (indent it one level) and this
+    goes red — the MCP lane, which is the surface agents write through."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "tortoise"
+           / "mcp_server.py").read_text(encoding="utf-8")
+    bridge = src.split("_gid = _current_graph_id.get()", 1)[1].split(
+        'if limits.get("max_points")', 1)[0]
+    stamps = [ln for ln in bridge.splitlines()
+              if 'org["graph_namespace"]' in ln]
+    assert stamps, "the MCP capture bridge no longer carries graph_namespace"
+    assert stamps[0].startswith('    org["graph_namespace"]'), (
+        "the stamp must be UNCONDITIONAL (4-space body indent), not nested "
+        f"under `if _gid:`: {stamps[0]!r}")
+    # …and the graph-bound half still carries the scope fields.
+    assert 'org["graph_id"] = _gid' in bridge
