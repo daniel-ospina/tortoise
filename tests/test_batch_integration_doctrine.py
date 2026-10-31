@@ -88,6 +88,16 @@ or facts that were false against the tree they describe:
   stayed reachable on a tree whose gate member was red; and no status capture, so a half the kernel
   killed (measured on #10399: five ``python`` processes in 23 minutes) read exactly like a finished
   one. Half 1 had both treatments; the half whose whole purpose is the gate member had neither;
+* **every verdict-bearing artifact was a host-global ``/tmp`` path**: the run's status
+  (``/tmp/batch.rc``), the gate run's id report, the baseline count and their four siblings were
+  unnamespaced, while the doctrine's own premise is that peer lanes run the suite on this box during
+  Phases 1 and 3 — so a peer **batch** finishing its run during this one's wrote the same two files:
+  the poll read ``DONE``, ``$RC`` was the peer's status (honestly a *complete* run, just not this
+  one), ``$BATCH_TOTAL`` was the peer's count (real and coherent, so the count halt passed), and
+  Phase 4 diffed the peer's green ids to print ``BATCH-GREEN`` for a tree whose own run was still
+  executing; the mirrored case convicted an innocent PR with the peer's ids. Every artifact now
+  lives under ONE per-batch directory (``B=/tmp/batch-$BATCH``), derived from a REQUIRED ``BATCH``
+  and re-derived — with an absent-directory halt — by every fence that writes into it;
 * the carve-out file count was quoted from memory and was stale.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
@@ -105,13 +115,14 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-tes
 would make the reproduced/not-reproduced list read as a complete partition.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **22 checks** at this head, **0 red**: **1 of 22** at
-``a4028e8d7`` (the ``-m track_b`` instrumentation, added here), **3 of 22** at
-``a12792afe`` (that one plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
-the baseline report's completion check), **18 of 22** at
-``a17576c43``, **15 of 22** at ``f3c6c803b``, **13 of 22** at ``a8be548762``, **11 of 22** at
-``295d6d385``, **9 of 22** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **8 of 22** at
-``ed1c03b82`` and ``c50628450``, and **7 of 22** at ``a888c6980`` / ``aede4190f`` — where three
+revision rather than asserted — **23 checks** at this head, **0 red**: **1 of 23** at
+``a6a71c1e5`` (the per-batch ledger, added here — the head this round was reviewed at), **2 of 23**
+at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **4 of 23** at
+``a12792afe`` (those plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
+the baseline report's completion check), **19 of 23** at
+``a17576c43``, **16 of 23** at ``f3c6c803b``, **14 of 23** at ``a8be548762``, **12 of 23** at
+``295d6d385``, **10 of 23** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **9 of 23** at
+``ed1c03b82`` and ``c50628450``, and **8 of 23** at ``a888c6980`` / ``aede4190f`` — where three
 are exactly that round's findings (the bisect attribution, the gate run's completion, and
 the omitted ``changes`` member) and the fourth is the exit-status-persistence requirement,
 which landed AFTER those revisions. The fourth is the rule rather than an exception: a check
@@ -180,6 +191,12 @@ widen its predicate to accept ``137`` (SIGKILL/OOM), and make the predicate ``||
 delete the gate half's ``--junitxml``, delete the baseline half's ``--junitxml``, stop clearing
 the gate half's report, move that clear to AFTER the run, drop the ``TRACK_B_RC=$?`` capture,
 widen its predicate to accept ``137``, and make it ``|| true``.
+**5 more measured with the per-batch ledger (`a6a71c1e5`'s P2), 5 killed**, each red on
+``test_every_verdict_artifact_lives_in_a_per_batch_directory`` (the later-shell one on
+``test_every_full_suite_command_is_one_of_the_two_deliberate_halves`` too): default the name
+(``${BATCH:-1}``) instead of requiring it, hand-type the directory (``B="/tmp/batch-1"``) instead of
+deriving it, drop the absent-directory halt, re-point ONE ``--junitxml`` back to a bare
+``/tmp/batch-junit.xml`` (the peer-batch collision), and clear the ledger in a LATER shell.
 **The surviving CLASS — and it is the reason #10434 exists.** Earlier rounds named a
 single survivor; rounds 30-34 measured ~90 further mutants and the honest claim is
 weaker than "one survivor": the guard decides SHELL CONTROL FLOW by pattern-matching
@@ -187,13 +204,13 @@ text, so any ONE-LINE edit that changes a subject's INPUTS rather than its wordi
 leaves a textually perfect halt bash-dead. Measured witness: inserting
 ``BASELINE_TOTAL=0`` between the fence's own ``[ "$BASELINE_TOTAL" -gt 0 ]`` guard and
 the count halt makes the count halt dead (``bash`` prints CONTINUED) with the guard
-**0 of 22 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
+**0 of 23 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
 ``unset``, deleting the ``-gt 0`` line). No accumulation of spellings closes it; the
 closure is to EXECUTE the fences under a stubbed PATH and assert the fence STOPS,
 which is #10434. One instance of that class is still named explicitly below:
 ``git switch --detach -C <branch> "$PINNED"``, which git refuses outright (rc=128) and
 whose ``|| exit 1`` halts — a predicate-tightness miss, not a broken invariant — and
-the honest document is 0 of 22 red.
+the honest document is 0 of 23 red.
 
 Two more classes belong to that list: an append-a-mover SUFFIX on any of
 those lines — `git bisect reset <branch> && git switch main`, `git log --oneline -1
@@ -304,12 +321,21 @@ _SUITE_FILE_TARGETS = {"tests/test_ingest_safety.py"}
 #: repointed token remove a fence from the population that must refuse a dirty tree.
 _SUITE_CMD = re.compile(r"^(?:\(\s*)?uv\s+run\s+pytest\b(?!\s+<)")  # not the <placeholder> bisect leg
 
+#: ONE ledger-artifact path, as the doctrine spells it. Since the #10400 P2 (host-global ledger) every
+#: verdict-bearing artifact lives under a per-batch directory, so a path is either that directory's own
+#: `$B/<file>` (optionally braced/quoted) or a literal `/tmp[/<dir>]/<file>`. Pinning `/tmp/<file>` alone
+#: made the honest fix INEXPRESSIBLE — measured: namespacing the launch and the poll alone reds two
+#: checks — which is the same "the guard refuses its own remedy" shape this file has fixed three times.
+_LEDGER = r'(?:\$\{?B\}?/[\w.-]+|/tmp/[\w./-]+)'
+
 #: The status wrapper that makes a DETACHED run's exit status survive the shell boundary. `wait`
 #: cannot: the poll happens in a LATER shell, where the pid is not a child (measured, bash 5.2:
 #: `bash: wait: pid N is not a child of this shell`, rc=127) — a completed, green run then read as
 #: UNPROVEN with a kill diagnosis printed. The run's OWN shell writes `$?` to a file instead.
 _STATUS_WRAPPER = re.compile(
-    r"^\(\s*(?P<suite>uv\s+run\s+pytest\b.*?)\s*;\s*echo\s+\$\?\s*>\s*(?P<rc>/tmp/[\w.-]+)\s*\)\s*&$"
+    r"^\(\s*(?P<suite>uv\s+run\s+pytest\b.*?)\s*;\s*echo\s+\$\?\s*>\s*\"?(?P<rc>"
+    + _LEDGER
+    + r')\"?\s*\)\s*&$'
 )
 
 #: The two deliberate halves, as term MULTISETS. Order-free (a reordered `-m`
@@ -389,7 +415,9 @@ def _suite_argv_ok(cmd: str) -> bool:
 #: wrote. A `kill -0` probe answers "is the pid gone", which is the same answer for a finished run and
 #: for an OOM-killed one; `true && echo DONE` answers nothing at all.
 _RC_POLL = re.compile(
-    r"^\[\s*-f\s+/tmp/[\w.-]+\s*\]\s*&&\s*echo\s+(?:'[^']*'|\"[^\"]*\")\s*"
+    r"^\[\s*-f\s*\"?"
+    + _LEDGER
+    + r"\"?\s*\]\s*&&\s*echo\s+(?:'[^']*'|\"[^\"]*\")\s*"
     r"\|\|\s*echo\s+(?:'[^']*'|\"[^\"]*\"|\S+)$"
 )
 
@@ -422,17 +450,36 @@ _STATUS_TAIL = re.compile(
 #: `BASELINE_TOTAL` back with `cat`. A carrier that is neither written nor cleared is the same defect
 #: as a status file the poll never wrote.
 _CARRIER_WRITE = re.compile(
-    r'^printf\s+\S+\s+"?\$BASELINE_TOTAL"?\s*>\s*(?P<path>/tmp/[\w.-]+)$'
+    r'^printf\s+\S+\s+"?\$BASELINE_TOTAL"?\s*>\s*"?(?P<path>' + _LEDGER + r')"?$'
 )
 _CARRIER_BIND = re.compile(
-    r'^BASELINE_TOTAL="?\$\(\s*cat\s+(?P<path>/tmp/[\w.-]+)\s*\)"?$'
+    r'^BASELINE_TOTAL="?\$\(\s*cat\s+"?(?P<path>' + _LEDGER + r')"?\s*\)"?$'
 )
-_CARRIER_TEST = re.compile(r"^\[\s*-s\s+(?P<path>/tmp/[\w.-]+)\s*\]")
+_CARRIER_TEST = re.compile(r'^\[\s*-s\s+"?(?P<path>' + _LEDGER + r')"?\s*\]')
+
+
+#: Every path an `rm -f` in a fence names, with surrounding quotes STRIPPED. The doctrine quotes its
+#: per-batch paths (`rm -f "$B/batch.rc"`), and a naive `.split()` leaves the quote on the token, so a
+#: cleared-set comparison silently misses the file it is supposed to prove was cleared.
+_CLEAR = re.compile(r"rm\s+-f\s+(.*)$")
+
+
+def _cleared(codes: list[str]) -> set[str]:
+    """The paths a fence's `rm -f` lines name (quotes stripped)."""
+    return {
+        token.strip("\"'")
+        for code in codes
+        for match in _CLEAR.finditer(code)
+        for token in match.group(1).split()
+    }
 
 #: The baseline fence's own report, and the two halves of the same rule the gate already applies:
 #: clear it (pytest truncates a junit file only in `pytest_sessionfinish`, so a killed run leaves the
 #: PREVIOUS report at the path) and refuse anything but a COMPLETED status.
-_BASELINE_JUNIT = "--junitxml=/tmp/baseline-junit"
+#: The baseline fence's own report, identified by its BASENAME — so the guard accepts both the bare
+#: `/tmp/baseline-junit.xml` and the per-batch `$B/baseline-junit.xml` the doctrine uses. Pinning the
+#: whole `/tmp/...` path here is what made the per-batch fix inexpressible.
+_BASELINE_JUNIT = "baseline-junit"
 _BASELINE_RC_CAPTURE = re.compile(r'^(?:BASELINE_RC|RC)=\$\?$')
 _BASELINE_RC = "BASELINE_RC"
 
@@ -971,16 +1018,11 @@ def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
         if not written:
             continue
         read = {
-            m.group(1)
+            m.group(1).strip("\"'")
             for c in codes
-            for m in re.finditer(r"\[\s*-f\s+(/tmp/[\w.-]+)\s*\]", c)
+            for m in re.finditer(r"\[\s*-f\s+\"?(" + _LEDGER + r")\"?\s*\]", c)
         }
-        cleared = {
-            token
-            for c in codes
-            for m in re.finditer(r"rm\s+-f\s+(.*)$", c)
-            for token in m.group(1).split()
-        }
+        cleared = _cleared(codes)
         assert read and read <= written, (
             "the poll reads a status file this fence never writes: editing either line alone leaves "
             f"the poll on an absent file and reports DONE. writes={sorted(written)}, reads={sorted(read)}"
@@ -1159,6 +1201,128 @@ def test_the_batch_lane_defaults_to_a_private_container() -> None:
         "the shared instance is admissible only under an explicit precondition; the "
         "doctrine must state it rather than leave `docker ps` to imply it"
     )
+
+
+#: The per-batch ledger directory. `BATCH` is REQUIRED (`:?` halts on an empty one — an empty name
+#: addresses a bare /tmp path every batch on the box writes), and `$B` is DERIVED from it, so every
+#: fence and every later shell reproduces the same directory without carrying anything.
+_LEDGER_NAME = re.compile(r'^BATCH="\$\{BATCH:\?[^}]*\}"$')
+_LEDGER_DIR = re.compile(r'^B="/tmp/batch-\$\{?BATCH\}?"$')
+_LEDGER_CREATE = re.compile(r'^mkdir\s+-p\s+"?\$\{?B\}?"?\s*\|\|\s*exit\s+[1-9]\d*$')
+_LEDGER_PRESENT = re.compile(
+    r'^\[\s*-d\s+"?\$\{?B\}?"?\s*\]\s*\|\|\s*\{[^{}]*exit\s+[1-9]\d*\s*;?\s*\}$'
+)
+
+#: A HOST `/tmp` path: the `tmp` must start the token, so a git ref (`refs/tmp/pr-<N>`) is not one.
+_HOST_TMP = re.compile(r'(?:^|[\s"\'=>(])/tmp/')
+
+
+def test_every_verdict_artifact_lives_in_a_per_batch_directory() -> None:
+    """the ``a6a71c1e5`` P2: the ledger was host-global, so a PEER batch decided this batch's verdict.
+
+    All seven artifacts the verdict is built from were literal, unnamespaced ``/tmp`` paths —
+    ``/tmp/batch.rc`` (the status), ``/tmp/batch-junit.xml`` (the ids), ``/tmp/baseline.total`` (the
+    count) and their four siblings. The doctrine's own premise (#5084, above) is that peer lanes run
+    the suite on this box while Phase 1 and Phase 3 run, so a peer batch finishing DURING this one's
+    run writes the same two files:
+
+    1. the poll reads ``DONE`` (the file exists) and ``$RC`` is the peer's status — honestly a
+       COMPLETE run, just not this one;
+    2. ``$BATCH_TOTAL`` is the peer's count, a real and coherent number, so the count halt — the last
+       mechanical "did it finish" detector — passes;
+    3. Phase 4 diffs the peer's green ids against this baseline and prints ``BATCH-GREEN`` for a tree
+       whose own run is still executing. The mirrored case convicts an innocent PR with its ids.
+
+    ``rm -f`` closes only the already-finished direction; the finishing-during-my-run direction is
+    untouched, and the window is the whole duration of the run, not a race of milliseconds. The repo
+    has measured the class: ``python-ci.yml`` records a fully GREEN leg that still concluded
+    ``failure`` because a sibling leg's ``> /tmp/pytest.log`` truncated the file between this leg's
+    ``tail`` and its attribution read (run 40808264676), and #10028's fix refuses the shortcut
+    outright (``base="${RUNNER_TEMP:?…}"``). So the ledger follows the container into per-batch
+    isolation: ONE directory, defined once, REQUIRED by name, re-derived by every fence that writes
+    into it, with an absent directory a HALT — never a write at ``$B``'s path with ``$B`` empty.
+    """
+    codes = _fenced_commands()
+    names = [c for c in codes if _LEDGER_NAME.match(_code(c))]
+    dirs = [c for c in codes if _LEDGER_DIR.match(_code(c))]
+    assert names, (
+        "the doctrine defines no per-batch ledger NAME: every verdict artifact must live under one "
+        'per-batch directory addressed by a required name — `BATCH="${BATCH:?…}"` (an unset one '
+        "silently addresses the bare /tmp path every batch on this box writes)"
+    )
+    assert dirs, (
+        'no `B="/tmp/batch-$BATCH"` derivation: the directory must be DERIVABLE in every fence (and '
+        "in every later shell), not carried from Phase 0's"
+    )
+    assert len(set(dirs)) == 1, (
+        f"the ledger directory is derived more than one way: {sorted(set(dirs))}"
+    )
+
+    # 1a. Every fence that derives the directory derives it from a REQUIRED name. A DEFAULT is not a
+    #     weaker version of the rule, it is the defect: `${BATCH:-1}` silently picks another batch's
+    #     directory the moment the name is forgotten.
+    defining = [
+        fence
+        for fence in _fences()
+        if any(_LEDGER_NAME.match(_code(c)) or _LEDGER_DIR.match(_code(c)) for c in fence)
+    ]
+    assert defining, "no fence defines the ledger directory — re-point this guard"
+    for fence in defining:
+        fence_codes = [_code(c) for c in fence]
+        assert any(_LEDGER_NAME.match(c) for c in fence_codes), (
+            'a ledger directory is derived without a REQUIRED name (`BATCH="${BATCH:?…}"`): a '
+            "default (`${BATCH:-1}`, or a bare `BATCH=1`) falls back to another batch's ledger "
+            f"when the name is forgotten: {fence_codes[:3]}"
+        )
+        assert any(_LEDGER_DIR.match(c) for c in fence_codes), (
+            f"a fence requires the ledger name but never derives `$B` from it: {fence_codes[:3]}"
+        )
+
+    # 1. NO verdict-bearing artifact may be a bare host-global /tmp path. The only literal `/tmp/`
+    #    left in the fences is the directory ITSELF (`B="/tmp/batch-$BATCH"`). A git REF
+    #    (`refs/tmp/pr-<N>`) is not a host path, so the `/tmp/` must START the token.
+    bare = [
+        c
+        for c in codes
+        if _HOST_TMP.search(c) and not _LEDGER_DIR.match(_code(c))
+    ]
+    assert not bare, (
+        "a verdict-bearing artifact is written to a host-global /tmp path: a peer batch on this box "
+        "writes the same file, so the poll reads ITS status, the count reads ITS report and Phase 4 "
+        "diffs ITS ids — `BATCH-GREEN` printed for a tree whose own run is still executing. Put "
+        f"every artifact under `$B`: {bare}"
+    )
+
+    # 2. Every fence that writes into the ledger HALTS on an absent directory: Phase 1 and Phase 3
+    #    may be LATER shells than Phase 0's, where `$B` is empty.
+    users = [fence for fence in _fences() if any("$B/" in _code(c) for c in fence)]
+    assert users, "no fence uses the per-batch ledger directory — re-point this guard"
+    for fence in users:
+        fence_codes = [_code(c) for c in fence]
+        derive = [
+            i
+            for i, c in enumerate(fence_codes)
+            if _LEDGER_NAME.match(c) or _LEDGER_DIR.match(c)
+        ]
+        assert len(derive) >= 2, (
+            "a fence writes into the ledger without re-deriving it: in a later shell `$B` is empty, "
+            f"so its `rm -f`/write lands at the host root: {fence_codes[:3]}"
+        )
+        guards = [
+            i
+            for i, c in enumerate(fence_codes)
+            if _LEDGER_CREATE.match(c) or _LEDGER_PRESENT.match(c)
+        ]
+        assert guards, (
+            'a fence writes into the ledger without asserting the directory exists (`mkdir -p "$B"` '
+            'in Phase 0, `[ -d "$B" ] || { … exit 1; }` in every later phase): an absent one must '
+            "HALT, never write at `$B`'s path with `$B` empty"
+        )
+        first_use = min(i for i, c in enumerate(fence_codes) if "$B/" in c)
+        assert max(derive) < first_use and min(guards) < first_use, (
+            "the ledger directory is derived or checked AFTER the first write into it, so the write "
+            "goes to whatever `$B` happened to be"
+        )
 
 
 def test_phase_1_checks_out_the_pinned_base_before_the_baseline_suite() -> None:
@@ -1403,7 +1567,7 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
     gates = [
         fence
         for fence in _fences()
-        if any("--junitxml=/tmp/batch-junit" in _code(c) for c in fence)
+        if any("--junitxml=" in _code(c) and "batch-junit" in _code(c) for c in fence)
     ]
     assert gates, "the gate run no longer writes a junit report — re-point this guard"
     codes = [code for fence in gates for code in (_code(c) for c in fence)]
@@ -1417,7 +1581,7 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
         "returns 127, not the run's status"
     )
     assert any(
-        re.fullmatch(rf'RC="\$\(\s*cat\s+{re.escape(rc)}\s*\)"', c)
+        re.fullmatch(rf'RC="\$\(\s*cat\s+"?{re.escape(rc)}"?\s*\)"', c)
         for c in codes
         for rc in rc_files
     ), (
@@ -1529,12 +1693,7 @@ def test_the_baseline_count_carries_across_shells() -> None:
             "the carried value must be the BASELINE's own total, computed from its junit report in "
             "the same fence — a carrier written from anywhere else measures a different run"
         )
-        cleared = {
-            token
-            for c in codes
-            for match in re.finditer(r"rm\s+-f\s+(.*)$", c)
-            for token in match.group(1).split()
-        }
+        cleared = _cleared(codes)
         assert carrier in cleared, (
             f"{carrier} must be CLEARED before the baseline run (`rm -f … {carrier}`): a previous "
             "batch's total survives a killed baseline and Phase 3 then compares against it"
@@ -1608,14 +1767,10 @@ def test_the_baseline_report_is_cleared_and_its_status_checked() -> None:
         codes = [_code(c) for c in fence]
         runs = [i for i, c in enumerate(codes) if _SUITE_CMD.match(c) and _BASELINE_JUNIT in c]
         assert runs, "no baseline suite command writes the report — re-point this guard"
-        cleared = {
-            token
-            for c in codes
-            for match in re.finditer(r"rm\s+-f\s+(.*)$", c)
-            for token in match.group(1).split()
-        }
-        assert "/tmp/baseline-junit.xml" in cleared, (
-            "the baseline must CLEAR its junit report before the run (`rm -f /tmp/baseline-junit.xml`): "
+        cleared = _cleared(codes)
+        assert any(token.endswith("baseline-junit.xml") for token in cleared), (
+            "the baseline must CLEAR its junit report before the run "
+            "(`rm -f \"$B/baseline-junit.xml\"`): "
             "pytest truncates it only in `pytest_sessionfinish`, so a baseline the kernel killed "
             "leaves the PREVIOUS batch's report there and the count reads it as THIS baseline"
         )
@@ -1688,19 +1843,14 @@ def test_the_track_b_half_is_completion_checked_like_the_deterministic_half() ->
         codes = [_code(c) for c in fence]
         runs = [i for i, c in enumerate(codes) if _SUITE_CMD.match(c) and TRACK_B_FILTER in c]
         for run_at in runs:
-            report = re.search(r"--junitxml=(/tmp/[\w.-]+)", codes[run_at])
+            report = re.search(r'--junitxml="?(' + _LEDGER + r')"?', codes[run_at])
             assert report, (
                 "the `-m track_b` run writes no junit report: its failure ids then reach NEITHER "
                 "side of the Phase 4 diff, so a red MUST-PASS gate member cannot be classified "
                 f"BASELINE or NEW and the verdict reads green: {codes[run_at]}"
             )
             path = report.group(1)
-            cleared = {
-                token
-                for c in codes
-                for match in re.finditer(r"rm\s+-f\s+(.*)$", c)
-                for token in match.group(1).split()
-            }
+            cleared = _cleared(codes)
             assert path in cleared, (
                 f"the `-m track_b` report ({path}) is never cleared: pytest truncates a junit file "
                 "only in `pytest_sessionfinish`, so a killed half 2 leaves the PREVIOUS run's report "

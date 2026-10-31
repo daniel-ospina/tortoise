@@ -107,6 +107,14 @@ eval "$lane"
 #   export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
 
 uv sync --extra embeddings --extra parity    # ONE command — see the extras trap below
+
+# ⛔ ONE LEDGER DIRECTORY PER BATCH — every artifact a verdict is built from lives under it (see
+# "The ledger is per-batch, not per-box" below). The NAME is required (`:?`): an unset one would put
+# the artifacts at a bare /tmp path that every batch on this box writes, so the poll could read a
+# PEER batch's status and the count could read its report.
+BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
+B="/tmp/batch-$BATCH"
+mkdir -p "$B" || exit 1
 ```
 
 **Why the private container is the default here, and not the shared one (#5084).** A batch IS the
@@ -125,6 +133,24 @@ self-cleaning**: `tools/test_lane.py down` when the batch is over.
 The **same lane** must serve Phase 1 and Phase 3. A batch measured on a different lane from its
 baseline is not comparable to it.
 
+**The same lane is not enough — the LEDGER must be per-batch too.** Every artifact a verdict is built
+from lives under **one per-batch directory**, `B=/tmp/batch-$BATCH`: the two baseline reports, the
+baseline count, and the gate's status, log and two reports. `BATCH` is **required** (`${BATCH:?…}`
+halts on an empty one) and `$B` is *derived* from it, so every fence — and every later shell —
+reproduces the same directory without carrying anything.
+
+A bare `/tmp/batch.rc` is not a ledger under that load: it is what the **box** has. A peer batch
+finishing its own run while this one polls is indistinguishable from this one finishing — the poll
+reads `DONE`, `$RC` is the peer's status (honestly a *complete* run, just not this one), and
+`$BATCH_TOTAL` is the peer's count, a real and coherent number, so the count halt passes too. Phase 4
+then diffs the peer's green ids against this batch's baseline and prints `BATCH-GREEN` for a tree
+whose own run is still executing; the mirrored case convicts an innocent PR with the peer's ids. The
+window is not a race of milliseconds — it is the whole duration of the run, and two batches started
+together finish together. This is the container argument one layer down, and this repo has already
+measured the class: `python-ci.yml` records a fully GREEN leg that still concluded `failure` because
+*"a sibling leg's `> /tmp/pytest.log` truncated the file between this leg's `tail` and its attribution
+read"* (run 40808264676), and #10028's fix refuses the shortcut outright — `base="${RUNNER_TEMP:?RUNNER_TEMP is not set — refusing to fall back to a host-global /tmp artifact path}"`.
+
 ### 1. Baseline — run the suite on `origin/main` ALONE, first
 
 Non-negotiable, and the cheapest step to skip wrongly. Without a baseline you cannot tell a failure a
@@ -141,15 +167,21 @@ git switch -C integration/base-check "$PINNED" || exit 1   # ⛔ SWITCH, not `gi
 # bare `-c` dies with `fatal: a branch named 'integration/base-check' already exists` — after which,
 # in a fence with no `set -e`, the pytest lines below run on whatever tree HEAD happens to be on.
 # `|| exit 1` makes that impossible: the fence stops instead of measuring the wrong tree.
+# ⛔ Re-derive the ledger directory: this fence may be a LATER shell than Phase 0's. `$B` is a
+# DERIVATION, not a carrier — the same lines reproduce it — and an absent directory HALTS instead of
+# writing at `$B`'s path with `$B` empty (which is `/baseline-junit.xml`, at the host root).
+BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
+B="/tmp/batch-$BATCH"
+[ -d "$B" ] || { echo "no ledger directory $B — Phase 0 creates it, per batch; absent means BATCH is unset or names another batch"; exit 1; }
 # ⛔ CLEAR the report and the carried count FIRST. pytest truncates a junit file only in
 # `pytest_sessionfinish`, so a baseline run the kernel killed leaves the PREVIOUS batch's report at
 # this path — and the count below then reads it as THIS baseline, which is the ledger every later
 # verdict is diffed against (main's own red is hidden, and an innocent PR is convicted).
-rm -f /tmp/baseline-junit.xml /tmp/baseline.total
+rm -f "$B/baseline-junit.xml" "$B/baseline.total"
 # BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
 # `--junitxml` is not decoration: Phase 3 compares the gate run's test COUNT to this file,
 # because a run the kernel killed reports no summary and would otherwise read as green.
-uv run pytest tests/ -q --junitxml=/tmp/baseline-junit.xml -m 'not track_b and not live and not integration'
+uv run pytest tests/ -q --junitxml="$B/baseline-junit.xml" -m 'not track_b and not live and not integration'
 BASELINE_RC=$?
 # ⛔ COMPLETED is not merely finished. pytest exits 0 (passed) or 1 (tests failed) on a COMPLETED
 # run, and 2/3/4/5 — or 128+N — when it was interrupted, misconfigured or KILLED. A killed baseline
@@ -160,17 +192,17 @@ BASELINE_RC=$?
 # member, and a half whose run is never status-checked and never writes an id artifact fails open —
 # a killed `-m track_b` run is indistinguishable from a finished one, and a red one contributes no
 # ids to EITHER side of the Phase 4 diff, so the verdict diff never sees the gate member at all.
-rm -f /tmp/baseline-trackb.xml
-uv run pytest tests/test_ingest_safety.py -q --junitxml=/tmp/baseline-trackb.xml -m track_b
+rm -f "$B/baseline-trackb.xml"
+uv run pytest tests/test_ingest_safety.py -q --junitxml="$B/baseline-trackb.xml" -m track_b
 BASELINE_TRACK_B_RC=$?
 [ "$BASELINE_TRACK_B_RC" -eq 0 ] || [ "$BASELINE_TRACK_B_RC" -eq 1 ] || { echo "the baseline's track_b half did not COMPLETE (rc=$BASELINE_TRACK_B_RC; 137=SIGKILL/OOM) — that half has no ledger, so Phase 4 cannot classify a track_b id at all"; exit 1; }
-BASELINE_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/baseline-junit.xml | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
+BASELINE_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/baseline-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
 [ -n "$BASELINE_TOTAL" ] && [ "$BASELINE_TOTAL" -gt 0 ] || { echo "no baseline junit total — the baseline run wrote no report"; exit 1; }
 # ⛔ CARRY the total to Phase 3 in a FILE, not a shell variable. Phase 3 runs in a LATER shell (the
 # same reason the run's status and `$PINNED` are carried in files): there `[ "$BATCH_TOTAL" -ge
 # "$BASELINE_TOTAL" ]` compares against the empty string, bash rejects the expression (rc=2), and
 # the count halt reports "SHORTER than the baseline" on a complete, green batch.
-printf '%s\n' "$BASELINE_TOTAL" > /tmp/baseline.total
+printf '%s\n' "$BASELINE_TOTAL" > "$B/baseline.total"
 git switch -                                      # back to the lane you came from
 ```
 
@@ -206,12 +238,13 @@ the batch PR body, as a `pinned-base: <sha>` line — because landing is a diffe
 
 **Everything this phase must hand to a later phase goes into a FILE, never into a shell variable.**
 The doctrine already carries `$PINNED` in the batch PR body and the gate run's exit status in
-`/tmp/batch.rc` for exactly this reason — a plain variable is gone the moment the operator opens the
+`$B/batch.rc` for exactly this reason — a plain variable is gone the moment the operator opens the
 next shell, and nothing requires phases 1-3 to share one. `$BASELINE_TOTAL` is the third: it is
-written to `/tmp/baseline.total` here and read back in Phase 3, because the count halt is the only
+written to `$B/baseline.total` here and read back in Phase 3, because the count halt is the only
 mechanical detector left for a run that finished but reported too few tests. An absent carrier is a
 halt, not an empty comparison: `[ "$BATCH_TOTAL" -ge "" ]` is `rc=2`, which a naive fence then reports
-as a short run on a batch that was in fact complete.
+as a short run on a batch that was in fact complete. `$BATCH` is the one value that needs no carrier,
+because `$B` is a DERIVATION of it — the same two lines in every fence reproduce the same directory.
 
 **The baseline's own report is cleared and completion-checked, like the gate's.** `pytest` truncates a
 junit file only in `pytest_sessionfinish`, so a run killed mid-flight (measured on #10399: five
@@ -326,25 +359,32 @@ Same lane, same commands, same env as the baseline — **both** halves of the de
 # above (`never one blocking call`). Measured (bash 5.2): `bash: wait: pid N is not a child of this
 # shell`, rc=127 — so `wait` declared a COMPLETED, green run UNPROVEN and printed the wrong diagnosis.
 # The subshell writes `$?` to a file, so no step here is shell-local.
-rm -f /tmp/batch.rc /tmp/batch-junit.xml   # a stale status/report from an earlier run must not decide this one
-( uv run pytest tests/ -q --junitxml=/tmp/batch-junit.xml -m 'not track_b and not live and not integration' > /tmp/batch.log 2>&1; echo $? > /tmp/batch.rc ) &
-[ -f /tmp/batch.rc ] && echo 'DONE — read /tmp/batch.rc' || echo RUNNING   # repeat until DONE
+# ⛔ Re-derive the ledger directory: this fence is usually a LATER shell than Phase 0's, and `$B` is
+# a DERIVATION, not a carrier. A fence that skipped this would `rm -f` and write at `$B`'s path with
+# `$B` empty — a bare /tmp name that a peer batch writes too, i.e. exactly the ledger sharing this
+# section exists to prevent.
+BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
+B="/tmp/batch-$BATCH"
+[ -d "$B" ] || { echo "no ledger directory $B — Phase 0 creates it, per batch; absent means BATCH is unset or names another batch"; exit 1; }
+rm -f "$B/batch.rc" "$B/batch-junit.xml"   # a stale status/report from an earlier run must not decide this one
+( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
+[ -f "$B/batch.rc" ] && echo 'DONE — read $B/batch.rc' || echo RUNNING   # repeat until DONE
 
 # ⛔ DONE is not PASSED. A pid that goes away fails exactly as fast for a run the kernel OOM-killed as
 # for one that finished — measured on #10399, five `python` processes were killed in 23 minutes — and a
 # killed run prints no summary, hence carries no failure ids, so Phase 4 would diff it straight to
 # BATCH-GREEN. The status the run itself wrote is the only thing that separates them; require a
 # COMPLETED report:
-[ -f /tmp/batch.rc ] || { echo "no /tmp/batch.rc — the gate run was never launched in this shell: launch it above, then poll"; exit 1; }
-RC="$(cat /tmp/batch.rc)"
+[ -f "$B/batch.rc" ] || { echo "no $B/batch.rc — the gate run was never launched in this shell: launch it above, then poll"; exit 1; }
+RC="$(cat "$B/batch.rc")"
 [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || { echo "the gate run did not COMPLETE (rc=$RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
 # ⛔ The baseline TOTAL does not survive Phase 1's shell either: Phase 3 may be a LATER shell, where
 # the comparison below would run against an empty string (bash: `integer expression expected`, rc=2)
 # and the halt would report a COMPLETE, green run as SHORTER than the baseline. Read the file Phase 1
 # wrote, exactly as the status and the pin are read, and refuse an absent one.
-[ -s /tmp/baseline.total ] || { echo "no /tmp/baseline.total — Phase 1 never recorded the baseline count; re-run Phase 1 (Landing route 1)"; exit 1; }
-BASELINE_TOTAL="$(cat /tmp/baseline.total)"
-BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/batch-junit.xml | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
+[ -s "$B/baseline.total" ] || { echo "no $B/baseline.total — Phase 1 never recorded the baseline count; re-run Phase 1 (Landing route 1)"; exit 1; }
+BASELINE_TOTAL="$(cat "$B/baseline.total")"
+BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/batch-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
 [ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the gate run reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — SHORTER than the baseline: investigate (a killed run, or a diff that legitimately removes or moves tests) — and never call it green: UNPROVEN-FULL-SUITE(<lane>)"; exit 1; }
 
 # Half 2 — the track_b leg CI runs as its own MUST-PASS, gate-member job (`-m track_b`).
@@ -352,8 +392,8 @@ BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/batch-junit.xml | grep -o '[0-9]*' 
 # run and anything else is a run that did not finish, and the junit report is what puts its ids in
 # the Phase 4 diff. Without the report a red `track_b` half has ids in NEITHER set, so the diff
 # reads it as green — the MUST-PASS gate member the gate phase exists to observe, unobserved.
-rm -f /tmp/batch-trackb.xml
-uv run pytest tests/test_ingest_safety.py -q --junitxml=/tmp/batch-trackb.xml -m track_b
+rm -f "$B/batch-trackb.xml"
+uv run pytest tests/test_ingest_safety.py -q --junitxml="$B/batch-trackb.xml" -m track_b
 TRACK_B_RC=$?
 [ "$TRACK_B_RC" -eq 0 ] || [ "$TRACK_B_RC" -eq 1 ] || { echo "the track_b half did not COMPLETE (rc=$TRACK_B_RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
 ```
@@ -363,8 +403,8 @@ table and the `UNPROVEN-FULL-SUITE(<lane>)` rule.
 
 ### 4. Compare to the baseline and blame
 
-- **The id sets are the junit reports, one per half**: `/tmp/batch-junit.xml` **and**
-  `/tmp/batch-trackb.xml`, against `/tmp/baseline-junit.xml` **and** `/tmp/baseline-trackb.xml`.
+- **The id sets are the junit reports, one per half**: `$B/batch-junit.xml` **and**
+  `$B/batch-trackb.xml`, against `$B/baseline-junit.xml` **and** `$B/baseline-trackb.xml`.
   Diffing the deterministic half alone leaves every `track_b` id in neither set — which is how a red
   MUST-PASS gate member reads as green.
 - **A failure id that is in the baseline set is a `BASELINE(<ids>)` failure.** Not a PR's fault. Do not
