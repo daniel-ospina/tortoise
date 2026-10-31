@@ -456,7 +456,9 @@ to green the row, because the artifact counts atomic *Points*, not surviving pla
 frozen denominator is the **14 value-bearing units** derived by §3.3's rule ("`verbatim_anchor`
 contains a digit" minus two named exclusions) — and **no committed artifact counts it**. The
 artifact's no-loss control (42/42 value literals, 90/90 real facts) is consistent with E2a but
-does not compute it. #9775 records that the state-value carve-out is absent on one render path.
+does not compute it. #9775's render half — the state-value carve-out on every prompt-building path —
+is closed (PR #10382); what still blocks E2 is `#10360`: nothing enforces retention, and the 1-of-14
+value loss sits upstream of the filter.
 
 **What E1 would take, precisely.** The measurement run DOES produce a pre-registered-corpus
 population large enough to score E1 — **50 `:Object` nodes**, and this pass's bare-definite share
@@ -703,7 +705,7 @@ gated the pass off, or the stage produced nothing.
 | `#9736` E3's denominator vs the owner-approved model | **OPEN** — E3's blocker |
 | `#9738` E5's disclosure and population reconciliation | **OPEN** — E5's blocker |
 | `#5333` may any pass remove/relocate an Object (owner ruling) | **OPEN** — E1's blocker (the mechanism that must move the share) |
-| `#9775` the state-value carve-out on one render path | **OPEN** — E2's blocker |
+| `#10360` nothing enforces the state-value guarantee on the write path | **OPEN** — E2's blocker (the render half is closed: PR `#10382` on `#9775`) |
 | `#8503` the planted operator edges are not formed | **OPEN** — E4's blocker |
 | `#9596` the operator receipt's retrievability is unmeasured | **OPEN** — the E4 artifact's own caveat |
 
