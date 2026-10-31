@@ -355,7 +355,9 @@ projects:
       # one gets loosened. A token signed with a key the AS does not hold is simply refused
       # (`401 invalid_token` on every redemption) — an outage, not an oracle: it cannot
       # assert a `sub` the AS accepts. The control that stops a key being reused from the
-      # ANON key (public — the consent page embeds it in HTML) or the service-role key is
+      # ANON key (public — the API still reads SUPABASE_ANON_KEY to REFUSE a collision with it,
+      # though the consent page no longer embeds it: #3524 §9 step 4 deleted the inline client)
+      # or the service-role key is
       # `consent_token_secret_problem()` in `tortoise/consent_token.py`, which refuses a
       # blank, padded, too-short or reused value; that function is what the operator note
       # below points at, and it is where a "just set something" shortcut must be stopped.
@@ -372,9 +374,10 @@ projects:
           HMAC-SHA256 key for the consent bridge's session-origin assertion
           (tortoise/consent_token.py; minted by functions/api/consent/token.ts).
           DEDICATED and >= 32 UTF-8 bytes: §2.3 forbids the service-role key and
-          the anon key (public — the consent page embeds it in HTML), and the API
-          treats a reused or short value as UNPROVISIONED with a typed 503 that
-          names the reason. The SAME value must be set on the hosted API (Fly,
+          the anon key (public, and still read by the API to refuse a collision
+          with it; the consent page no longer embeds it since #3524 §9 step 4),
+          and the API treats a reused or short value as UNPROVISIONED with a
+          typed 503 that names the reason. The SAME value must be set on the hosted API (Fly,
           via gh-secret:CONSENT_TOKEN_SECRET in
           .github/scripts/fly-managed-secrets.txt) — the BFF mints with it and
           the AS verifies with it, so a mismatch makes every redemption

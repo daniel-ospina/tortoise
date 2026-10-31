@@ -14,10 +14,12 @@
 --     exactly ONE row. Deleting `ON CONFLICT` (or its `RETURNING`) reds it.
 --   * SECTION 1 — the privileges: `anon`/`authenticated` must hold neither
 --     EXECUTE on the function nor DELETE on the table, RLS must be on, and the
---     service_role policy must exist. The anon key is PUBLIC (the consent page
---     embeds it in HTML), so a reader holding it could otherwise delete a spent
---     nonce and replay the token into a SECOND authorization code — the exact
---     replay §2.2's `jti` exists to bound.
+--     service_role policy must exist. The anon key is public BY CONSTRUCT
+--     (Supabase designs it for browser exposure and bounds it only by Row Level
+--     Security), so a reader HOLDING it could otherwise delete a spent nonce and
+--     replay the token into a SECOND authorization code — the exact replay
+--     §2.2's `jti` exists to bound. ⛔ Not because this app put it in a browser:
+--     #3524 §9 step 4 deleted the consent page and its inline client.
 --
 -- HONEST LIMIT: PGlite is SINGLE-CONNECTION, so this suite cannot stage two
 -- genuinely concurrent claimants. The atomicity that matters is therefore pinned
