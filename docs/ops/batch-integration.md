@@ -117,10 +117,10 @@ uv sync --extra embeddings --extra parity    # ONE command — see the extras tr
 # PEER batch's status and the count could read its report.
 # ⛔ `export`, not a bare assignment — the NAME is a CARRIER, and this is the one fence that can
 # export it. Phases 1 and 3 are usually LATER shells, where a plain assignment made here has not
-# survived; there `BATCH="${BATCH:?…}"` then HALTS the fence before anything runs — so a
-# "the name carries itself" claim would be false in exactly the normal case, and the operator would
-# be told to set a name the doctrine never asked them to carry. A later PLAIN re-assignment PRESERVES
-# the export attribute in bash, so the three fences below re-derive it with `:?` and stay exported.
+# survived; there `BATCH="${BATCH:?…}"` then HALTS the fence before anything runs, so the operator is
+# told to set a name the doctrine never carried — the value crosses no shell boundary at all. A later
+# PLAIN re-assignment PRESERVES the export attribute in bash, so the three fences below re-derive it
+# with `:?` and stay exported.
 export BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
 B="/tmp/batch-$BATCH"
 mkdir -p "$B" || exit 1
@@ -321,10 +321,10 @@ next shell, and nothing requires phases 1-3 to share one. `$BASELINE_TOTAL` is t
 written to `$B/baseline.total` here and read back in Phase 3, because the count halt is the only
 mechanical detector left for a run that finished but reported too few tests. An absent carrier is a
 halt, not an empty comparison: `[ "$BATCH_TOTAL" -ge "" ]` is `rc=2`, which a naive fence then reports
-as a short run on a batch that was in fact complete. `$BATCH` is a carrier like the rest, and Phase 0
-is the one fence that can `export` it: `$B` is a DERIVATION of the name, but the name itself does not
-cross a shell boundary, so Phase 1's own shell re-derives it with `:?` and HALTS on an empty one —
-fail-closed, and the reason the export is not optional.
+as a short run on a batch that was in fact complete. `$BATCH` carries itself differently: Phase 0
+**exports** it, and every later fence re-derives `$B` from it with `:?` — so a shell that did not
+inherit the name HALTS before it writes anything, rather than writing into another batch's ledger.
+That is a halt, not a carrier: nothing here may assume the export reached the shell it is running in.
 
 **The baseline's own report is cleared and completion-checked, like the gate's.** `pytest` truncates a
 junit file only in `pytest_sessionfinish`, so a run killed mid-flight (measured on #10399: five
@@ -573,15 +573,14 @@ BATCH_TRACK_B_SKIPPED="$(grep -o 'skipped="[0-9]*"' "$B/batch-trackb.xml" | grep
 grep -o '<skipped [^>]*' "$B/batch-trackb.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/batch-trackb.skipped-reasons"
 comm -13 "$B/baseline-trackb.skipped-reasons" "$B/batch-trackb.skipped-reasons" > "$B/new-skip-reasons-trackb"
 [ -s "$B/new-skip-reasons-trackb" ] && { echo "the track_b half has SKIP REASONS the baseline did not (listed in $B/new-skip-reasons-trackb) — a gate-member test that must run did not, and no failure id records it: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
-# ⛔ PUBLISH the tree this fence just judged. The Landing detector diffs the landed commit against
-# `origin/integration/batch-1`, and a branch that exists only in this checkout does not exist for the
-# landing actor — `git switch -C` in Phase 2 is a LOCAL ref. Unpushed, that fetch fails on a missing
-# refspec; and on the drop path the ref is the PRE-revert head, so the detector reports "main moved
-# inside the queue's cycle" on a PERFECT landing — the real violation then reads exactly like a false
-# alarm. Placement is load-bearing: the push comes AFTER every detector, so the ref it publishes is
-# the tree this fence certified. (`--force-with-lease` is for a REBUILD only — route 1's `switch -C`
-# resets the branch, and git REFUSES the resulting non-fast-forward.)
-git push origin integration/batch-1 || { echo "the push FAILED — the Landing detector compares the landed tree to origin/integration/batch-1, so an unpushed batch branch reads as a moved base (or an absent ref) after a perfect landing: fix the push, never skip the detector"; exit 1; }
+# ⛔ RECORD the TESTED TREE by VALUE — copy the printed line into the batch PR body beside
+# `pinned-base:`. This is what Landing's post-merge detector compares the landed commit's tree
+# against, and it cannot be a branch: `integration/batch-1` is a LOCAL ref nothing in this doctrine
+# pushes, and a ref records where the branch is LATER (after a revert, or after any commit) rather
+# than the tree this run measured. Everything above has now been verified at this tip, so this is it.
+TESTED_TREE="$(git rev-parse "integration/batch-1^{tree}")" || exit 1
+[ -n "$TESTED_TREE" ] || { echo "the batch branch has no readable tree — nothing to record, and Landing would have nothing to compare the landing against"; exit 1; }
+printf 'tested-tree: %s\n' "$TESTED_TREE"
 ```
 
 A run that skips half 2 has not run the gate, so it cannot produce `BATCH-GREEN` — see the verdict
@@ -726,11 +725,11 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   grep -o '<skipped [^>]*' "$B/batch-trackb.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/batch-trackb.skipped-reasons"
   comm -13 "$B/baseline-trackb.skipped-reasons" "$B/batch-trackb.skipped-reasons" > "$B/new-skip-reasons-trackb"
   [ -s "$B/new-skip-reasons-trackb" ] && { echo "the re-check's track_b half has SKIP REASONS the baseline did not (listed in $B/new-skip-reasons-trackb) — a gate-member test that must run did not, and no failure id records it: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
-  # ⛔ PUBLISH the re-tested tree, exactly as Phase 3 does and for the same reason: the revert just
-  # MOVED the batch branch, so the ref the Landing detector reads is now the pre-revert head and a
-  # perfect landing would be reported as a moved base. After every detector, so only a certified tree
-  # is published.
-  git push origin integration/batch-1 || { echo "the push FAILED — the Landing detector compares the landed tree to origin/integration/batch-1, so a reverted batch branch that was never re-pushed reads as a moved base after a perfect landing: fix the push, never skip the detector"; exit 1; }
+  # ⛔ RE-RECORD the tested tree: the revert just changed it, so the line Phase 3 printed now names a
+  # tree nobody will land. Landing compares the landed tree against THIS one.
+  TESTED_TREE="$(git rev-parse "integration/batch-1^{tree}")" || exit 1
+  [ -n "$TESTED_TREE" ] || { echo "the reverted batch branch has no readable tree — nothing to record, and Landing would have nothing to compare the landing against"; exit 1; }
+  printf 'tested-tree: %s\n' "$TESTED_TREE"
   ```
 
   A batch that cannot be made green ships without the culprit, never with it.
@@ -762,8 +761,10 @@ drops `parity` (pyarrow). The extras are part of the lane definition, not setup 
 ## Aftermath
 
 - The batch PR body is the **evidence**: constituent PRs, conflicts dropped and why, the
-  `pinned-base: <sha>` line the Landing check reads, baseline vs batch matrix, per-PR attribution,
-  verdict. Written with `--body-file`, never an inline body.
+  `pinned-base: <sha>` line the Landing check reads, the `tested-tree: <sha>` line its post-merge
+  detector reads (Phase 3 prints it; re-record it whenever the batch branch's tree changes, i.e.
+  after a revert), baseline vs batch matrix, per-PR attribution, verdict. Written with
+  `--body-file`, never an inline body.
 - The record of a *review* is not the record of a *batch*. Do not record a review of your own work
   (#825).
 - Landing the batch is a separate, human-routed step — and the batch PR is opened as a **draft**,
@@ -792,7 +793,8 @@ assembly time:
 # below PASSES against an unmoved local ref while live `main` has moved, the batch is un-drafted, and
 # the queue squash-merges an untested composition onto the moved base with every check in this section
 # green. That is the one failure this fence exists to prevent, so its only unhalted line cannot be the
-# fetch. (The post-merge detector's own fetch already carries `|| exit 1`.)
+# fetch. (The post-merge detector's own fetch halts the same way, and for its own version of the
+# same reason: it would otherwise judge the landing against a stale `origin/main`.)
 git fetch origin main || { echo "the fetch FAILED — refusing to compare the pin against a stale origin/main: the last successful fetch is not current main, and a green here would certify a base that has moved"; exit 1; }
 # $PINNED does NOT survive Phase 1's shell — landing is a different actor.
 # Read it from the batch PR body (Phase 1 recorded it there) and never from memory:
@@ -855,20 +857,34 @@ describes has passed.
 post-merge detector.** The freeze (route 2) is the only route that makes the base unable to move
 inside the queue's cycle, and it is the route to take whenever the batch must land unattended. Where
 the window is left open, do not paper over it: a squash-merge onto `PINNED` reproduces the tested
-tree exactly, so the landed commit's **tree** must equal the batch branch's tree — and that is
-checkable the moment it lands. This is a *detector* in the gate/detector split this document opens
-with: it does not prevent the landing, it refuses to let the violation pass **silently**.
+tree exactly, so the landed commit's **tree** must equal the tree the suite **measured** — the one
+Phase 3 prints as `tested-tree: <sha>` (re-printed by Phase 4 after a revert) — and that is checkable
+the moment it lands. It is compared **by value**, never by branch: the batch branch is a local ref
+nothing here pushes, and a branch records where it is *later*, not what was tested. This is a
+*detector* in the gate/detector split this document opens with: it does not prevent the landing, it
+refuses to let the violation pass **silently**.
 
 ```bash
-# Run AFTER the queue has landed the batch PR. Nothing here is carried from an earlier shell —
-# which is why `origin/integration/batch-1` must be a PUSHED ref: the gate fence and the post-revert
-# re-check each push the branch they judged precisely so this comparison has a tree to compare
-# against, and the landing actor (a different shell, often a different clone) gets it from the remote.
-git fetch origin main integration/batch-1 || { echo "the fetch FAILED — refusing to compare the landed tree against a ref that may not be current: an absent origin/integration/batch-1 means the batch branch was never pushed (nothing is carried between shells), and a stale one compares main to a tree the batch no longer has"; exit 1; }
+# Run AFTER the queue has landed the batch PR. Nothing here is carried from an earlier shell.
+# ⛔ The fetch HALTS. With no `set -e`, a refused fetch (network, auth, DNS) leaves `origin/main` at
+# the LAST SUCCESSFUL fetch — in the normal flow the pinned base itself — so the detector below would
+# judge the landing against a commit that is not current `main`.
+git fetch origin main || { echo "the fetch FAILED — refusing to compare against a stale origin/main: the last successful fetch is not current main, and this detector would then judge the wrong landing"; exit 1; }
 LANDED="$(git rev-parse origin/main)"
 [ -n "$(git rev-parse -q --verify "$LANDED^{commit}")" ] || { echo "origin/main does not resolve to a commit — re-fetch before concluding anything about the landing"; exit 1; }
-git diff --quiet origin/integration/batch-1 "$LANDED" || {
-  echo "the landed tree is NOT the tested tree — main moved inside the queue's cycle: report it as a process failure, never validate it after the fact; re-baseline and re-run phases 1-3"; exit 1
+# ⛔ The TESTED tree, carried BY VALUE in the batch PR body — never a branch and never a remote ref.
+# `integration/batch-1` is a LOCAL branch that no step here pushes, so `origin/integration/batch-1`
+# is either ABSENT (the landing actor is usually in a fresh clone — and the fetch then dies on a
+# refspec nobody wrote, while a stale one makes a PERFECT landing read as a process failure: it
+# differs by exactly the PR the revert dropped) or, worse, live but the WRONG OBJECT: a ref records
+# where the branch is NOW, so one commit made after the run moves it while the tested tree stays
+# behind, and the comparison then certifies a landing no run has seen. Phase 3 prints this line and
+# Phase 4 re-prints it after a revert; it is read here, mechanically, and an absent line HALTS.
+TESTED_TREE="$(gh pr view <batch PR> --json body --jq '.body' | sed -n 's/^tested-tree: //p')"
+[ -n "$TESTED_TREE" ] || { echo "no tested-tree: line in the batch PR body — Phase 3 prints it and Phase 4 re-prints it after a revert; without it the landing cannot be checked at all, and an unchecked landing is how an untested composition reaches main"; exit 1; }
+LANDED_TREE="$(git rev-parse "$LANDED"^{tree})" || exit 1
+[ "$LANDED_TREE" = "$TESTED_TREE" ] || {
+  echo "the landed tree is NOT the tree the suite tested — main moved inside the queue's cycle, or the batch branch changed after the run; report it as a process failure, never validate it after the fact; re-baseline and re-run phases 1-3"; exit 1
 }
 ```
 
