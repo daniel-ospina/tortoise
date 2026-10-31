@@ -1,8 +1,9 @@
 # The record, proven end to end on a live box — #9567 capstone (run 2026-10-31)
 
 **Verdict: `PARTIAL` — turns as a graph tier are REMOVED and both prose tiers' record home is proven,
-while the PROSE's absence from the graph is NOT proven on either tier (that needs #10389 + #10428 and
-the `:Source.summary` route).**
+while the PROSE's absence from the graph is NOT proven on either tier (the `story_arc` route was closed
+by #10389, which landed on `main` **after** this run; the `create_event` door #10428 and the
+`:Source.summary` route remain open).**
 
 Read that precisely: **no turn `Point` node and no turn `CONTAINS` edge exists on the armed arm** — that
 is what was measured, and it is the tier §9.1/D1 names. The *prose itself* still reaches two nodes
@@ -127,9 +128,9 @@ Q2 Session's outgoing edges          : CONTAINS -> Point cap9567a-session_t0 (87
 ⇒ **The role decides whether the write lands; the store decision follows the write's own outcome.**
 Armed as the app role the write lands — turns in Postgres, no turn node, no turn `CONTAINS` edge. Armed
 with a role that bypasses RLS the seam refuses (below), and `sdk._write_capture_turns`'s post-write
-fallback (`tortoise/sdk.py:3438-3482`) puts the turns in the graph, per turn. Not the preflight:
+fallback (`tortoise/sdk.py:3463-3487`) puts the turns in the graph, per turn. Not the preflight:
 `record_writer.record_holds_turns` asks journal-configured + armed + tenant + breaker and never reads
-the role (`tortoise/record_writer.py:1358-1361`), which is why Arm A's two turn nodes exist **only**
+the role (`tortoise/record_writer.py:1372-1375`), which is why Arm A's two turn nodes exist **only**
 because the fallback re-created them after the refusal.
 
 ## 3. The refusal proof — an unsupported shape is refused LOUDLY, and nothing is dropped
@@ -165,20 +166,24 @@ under `SET ROLE` and assert the effective `current_user`*; Supabase: *`service_r
 `bypassrls`, never hand it to a client*). Our seam goes one step further than the convergent advice
 and **refuses** the bypassing role rather than merely testing under a different one.
 
-## 4. Residuals measured in the SAME armed run (both already tracked — not new roots)
+## 4. Residuals measured in the SAME armed run (both tracked, not new roots — item 1's root has since landed)
 
 1. **The narrative is still in BOTH stores.** `public.session_narrative` holds the 129 B (✅) **and**
    the `:Event` node carries the same 129 B in `story_arc`, as does the transcript `:Source` (`Q1` shows
    the `Source` hit; `Q3` on Arm B reads
    `[['d8f1e0377…', 129, 'NARRATIVE-ZEBRA-9567 the connected prose form'], ['ev_1a123a32…', 0, ''],
-   ['ev_1edf43f6…', 0, '']]`). Root: the commit phase's raw-Cypher `SET … story_arc=$arc` on two nodes — the change
-   **PR #10389** deletes (`Refs #10000`, `MERGEABLE`; its check surface at 2026-10-31T21:33Z carried two
-   failing `test-slow` shards on run 41240532814 — `(d)` at 21:24:26Z, `(a)` at 21:32:42Z — with others
-   still queued; another lane owns its forward merge, and this artifact does not read that rollup as a
-   verdict). The `create_event` door is tracked
-   separately as **#10428**. ⚠️ The citation is **time-scoped on purpose**: a later shard (`test-slow
-   (e)`) also failed, at 21:41:27Z, after the instant pinned here — this artifact reports the surface it
-   read at 21:33Z and never the rollup's current colour.
+   ['ev_1edf43f6…', 0, '']]`). Root: the commit phase's raw-Cypher `SET … story_arc=$arc` on two nodes,
+   which **PR #10389** deletes. ⚠️ **That change has since LANDED on `main`** — `718ee3b49`,
+   `fix(10000): the S1 narrative leaves the graph — the record is its only home` — so at this head
+   `hosted_api._execute_commit_writes` carries neither SET and the `SessionNarrated` carrier is the
+   narrative's only writer (#10389 measured its own before/after on the shipped path: `sum(size(n.story_arc))`
+   334 B on 2 nodes → **0 B**, with `public.session_narrative` unchanged). The two-node measurement above
+   is therefore a statement about the trees the arms actually ran on — this branch **before** that merge,
+   and the deployed sha `b101355a8` — and re-proving the prose's graph absence on a post-#10389 tree is
+   **not** done here. While the arms ran, #10389 was still `MERGEABLE` and its check surface at
+   2026-10-31T21:33Z carried failing `test-slow` shards on run 41240532814 (`(d)` 21:24:26Z, `(a)`
+   21:32:42Z, and later `(e)` 21:41:27Z) — a surface read this artifact never treated as a verdict. The
+   `create_event` door is tracked separately as **#10428**.
 2. **A `:Source` still carries raw TURN text in `summary`** — 80 B, `'TURN-ZEBRA-9567 the raw transcript
    text …'` — written by the capture path itself (`sdk._session_source_metadata`). Not new information:
    it is recorded on **#10000** (last comment) as the second prose passthrough onto a node, and this
@@ -186,8 +191,10 @@ and **refuses** the bypassing role rather than merely testing under a different 
 
 ⇒ **`PARTIAL`**, and specifically: **the turn TIER is gone from the graph (no turn node, no turn
 `CONTAINS` edge) and both prose tiers have a working Postgres home — proven; the prose's ABSENCE from
-the graph is not proven on either tier.** The gaps are #10389 (+#10428) for `story_arc`, and the
-`:Source.summary` route recorded on #10000, not this measurement. The probe was **not** narrowed to
+the graph is not proven on either tier.** The `story_arc` gap was #10389 — **landed on `main` as
+`718ee3b49` after this run**, so it is closed on `main` and still open on the `b101355a8` tree these arms
+measured (§4, item 1). Still open: the `create_event` door (**#10428**) and the `:Source.summary` route
+recorded on #10000, not this measurement. The probe was **not** narrowed to
 make the composite claim pass.
 
 ## 5. What this covers of #9567's DoD, and what it does not
