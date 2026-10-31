@@ -198,6 +198,38 @@ or facts that were false against the tree they describe:
   an authoritative READER of it, and this round's first cut spelled it — reddening the REQUIRED
   ``manifest-integrity`` job, exactly the defect ``dbd79ba07`` fixed one check over. Caught by the
   guard's own ``--static`` run, not by CI.
+* **the two ``pytest tests/`` runs were a SUPERSET of the gate's population, and the doctrine credited
+  the marker filter with a comparability it does not have.** ``python-ci.yml``'s deterministic lanes do
+  not run ``tests/``: they run a **file list** from ``tools/ci_selection.py``, which skips the
+  ``tests/e2e/`` prefix **by path** (#1349) — and the workflow says why, *"Without browsers they only
+  ever ERROR here"*. So ``:308-311``'s claim (*"The filter is what makes the run comparable to CI at
+  all"*) was false, and the difference is the worst possible one for a ledger built from failure IDs:
+  no browsers → dozens of ``ERROR`` ids that no healthy batch can clear, so plain ``BATCH-GREEN`` is
+  unreachable; browsers installed (this fleet installs them for ``app-test``) → those tests RUN and
+  default to **live targets** (``tests/e2e/test_welcome_page.py`` points ``WELCOME_URL`` at the
+  deployed site), so one flaky id is NEW and the prescribed remedy is to **drop an innocent PR**.
+  Both runs now carry ``--ignore=tests/e2e``, the comparability sentence names the path selection
+  beside the marker filter, and ``_suite_argv_ok`` — which refused the argv that fixes it — now ADMITS
+  and REQUIRES that one selector on the ``tests/`` half.
+* **``$BATCH`` was assigned, never EXPORTED — the one value the doctrine claimed "needs no carrier".**
+  All three occurrences were plain assignments, and a plain assignment is not in the environment a new
+  shell inherits (measured: ``BATCH=1 sh -c 'B=2; sh -c "echo ${B:-UNSET}"'`` → ``UNSET``). Phases 1
+  and 3 are, by the doctrine's own premise, LATER shells — so in the normal case the name is empty
+  there and Phase 1 halts at its own ``:?`` line before anything runs. Fail-closed, but the claim is
+  exactly what the run does not do, and it is the same shell-local class the doc spends twenty lines
+  on for ``TORTOISE_DB_URI``. Phase 0 now ``export``s it (a later plain re-assignment preserves the
+  attribute), and ``_LEDGER_NAME`` tolerates the declarator prefix — anchoring it at ``^BATCH="`` made
+  the honest export INEXPRESSIBLE, the guard-refuses-its-own-remedy shape ``_PIN_DEF`` already closes.
+* **the run that ISSUES the verdict after a drop was PROSE.** *"Then re-run only the failed files,
+  then one more full suite run — both halves"* was a sentence, so the one run whose result is read into
+  the Phase 5 verdict row carried **none** of the detectors: no lane assertion, no tree assertion, no
+  detached status with the ``rc ∈ {0,1}`` COMPLETED predicate, no ``tests=`` count against the
+  baseline, no skip carriers. And its id source was ambiguous: Phase 4 says the id sets ARE
+  ``$B/batch-junit.xml`` and ``$B/batch-trackb.xml``, but after a revert those files still hold the
+  PRE-revert run — so the diff a reader is told to perform compares the baseline against the tree that
+  still contained the culprit. It is now a fence that asserts clean-tree, tree and lane, launches
+  detached with a bounded wait and a COMPLETED predicate, compares count and skips against the
+  baseline, runs BOTH halves, and writes those same two reports after CLEARING them.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
@@ -220,7 +252,11 @@ assembly MERGE (halted, and followed by a halted ``HEAD^2`` merge-commit asserti
 exits 0), the baseline-diffed SKIP carriers (a skipped test is collected, so neither the status nor
 the count can see it), the GRADED ``git bisect run`` (a non-``COMPLETED`` probe status is git's 125,
 not a culprit), the DRAFT-until-asserted landing rule, the RESIDUAL-WINDOW detector that answers the
-window a draft cannot close (the landed tree against the tested tree, halted), and no hand-written
+window a draft cannot close (the landed tree against the tested tree, halted), the PATH EXCLUSION that
+makes a ``tests/`` run CI's population (``--ignore=tests/e2e``, required on that half and refused on the
+single-file half), the EXPORTED ledger name (``export BATCH="${BATCH:?…}"``; a later plain
+re-assignment preserves the attribute), the post-revert RE-CHECK (a fence after the revert, with every
+detector, clearing the two reports Phase 4 diffs), and no hand-written
 number for a live-config
 property (the required contexts that ``check-required-set.py --live`` asserts, ``.mergify.yml``'s
 ``batch_size``).
@@ -361,6 +397,14 @@ trees. The detector's own semantics were reproduced in a scratch remote rather t
 honest landing (base == pin at merge time) → ``git diff --quiet`` ``rc=0``, and a base moved by an
 unrelated merge before the landing → ``rc=1`` with the untested file in the diff — the direction the
 fence halts on, and the direction it must not halt on.
+
+**4 more measured this round, 4 killed** (each red on the check it targets and on nothing else, except
+the first, which reds its own check plus the argv allowlist that now requires the exclusion): drop
+``--ignore=tests/e2e`` from a ``tests/`` run (2 red); restore *"The filter is what makes the run
+comparable to CI at all."* (1 red); make the Phase 0 ledger name a plain assignment again (1 red); and
+delete the post-revert re-check fence, leaving the prose (1 red). The revision axis agrees: the head
+the review sat at, ``484a4911d``, is **4 of 36** — the three new checks plus the argv check — and
+nothing else.
 
 **The `7fb722a9a` review's P2 is recorded as MEASURED FALSE, not "fixed".** It reported that
 ``ci-introduced-failure`` and ``DEFERRABLE_LEGS`` "do not exist" and that the leg-table pointer is out
