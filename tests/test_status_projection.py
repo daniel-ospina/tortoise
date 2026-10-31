@@ -952,3 +952,308 @@ class TestReadSide:
                 f"missing {terminal_names - with_all}")
         finally:
             sdk.close()
+
+
+# ── #10192: a lifecycle CARRIER requires the STATUS it implies ─────────────
+#
+# The record never stores `status` (`record_projection`'s `never_store` for both
+# layer tables; the schema refuses the name in `props`), so the record's
+# procedural fold (`public.object_current_status` / `subject_current_status`,
+# `20261012000004_record_procedural.sql`) derives it from the CARRIERS alone:
+# `superseded_by IS NOT NULL OR superseded_at IS NOT NULL -> 'superseded'`.
+# A carrier written WITHOUT the status was therefore persisted, the record
+# answered `'superseded'` for a node the graph holds `'live'`, and a
+# record-sourced rebuild materialized it TERMINAL (`DA#9974`'s
+# `cache_projection.DERIVED_FROM_RECORD` derives from the same carriers;
+# `live._terminal_excluded` then drops it from recall and
+# `entity_identity.resolve_entity_id` refuses its name).
+#
+# These tests pin BOTH halves of the fix: the incoherent write is now REFUSED at
+# both entity doors (and leaves the graph and the journal untouched), and every
+# coherent shape stays writable — the record's fold and the graph then agree.
+
+
+def _carrier_row(sdk, label: str, name: str):
+    """`(id, status, supersededBy, supersededAt)` for a fixture node (tuple)."""
+    rows = sdk._get_proj().g.query(
+        f"MATCH (n:{label} {{name:$n}}) "
+        "RETURN n.id, n.status, n.supersededBy, n.supersededAt",
+        params={"n": name}).result_set
+    return tuple(rows[0]) if rows else None
+
+
+def _records(journal) -> list[dict]:
+    from tortoise.log import EventLog
+    return list(EventLog(str(journal)).read_all())
+
+
+def _make_carrier_entity(sdk, label: str, name: str) -> str:
+    """Create the Object/Subject a carrier write will target; return its id."""
+    if label == "Subject":
+        sdk.create_subject(name, "core:organization")
+    else:
+        sdk.create_object(name, "core:strategy")
+    row = _carrier_row(sdk, label, name)
+    assert row, f"fixture did not create {label} {name!r}"
+    return row[0]
+
+
+#: Every carrier shape measured as ACCEPTED (and record-divergent) before the
+#: #10192 guard: a pointer/stamp alone, a BLANK pointer (the record view's
+#: `IS NOT NULL` reads `''` as a carrier), a carrier with an explicit LIVE status,
+#: and a carrier with an explicit null status.
+_BARE_CARRIER_SHAPES = [
+    pytest.param({"supersededBy": "v2"}, id="pointer-only"),
+    pytest.param({"supersededAt": "2026-01-01T00:00:00Z"}, id="stamp-only"),
+    pytest.param({"supersededBy": ""}, id="empty-pointer"),
+    pytest.param({"status": "live", "supersededBy": "v2"},
+                 id="live-status-with-pointer"),
+    pytest.param({"status": None, "supersededBy": "v2"},
+                 id="null-status-with-pointer"),
+]
+
+
+class TestLifecycleCarrierCoherence:
+    """#10192 — a POINTER without a STATUS is unwritable at both entity doors."""
+
+    @pytest.mark.parametrize("label", ["Object", "Subject"])
+    @pytest.mark.parametrize("carriers", _BARE_CARRIER_SHAPES)
+    def test_a_bare_carrier_is_refused_and_writes_nothing(
+            self, tmp_path, label, carriers):
+        """The refused write is ATOMIC: no graph change, no journal record.
+
+        The journal matters as much as the graph — it is the record's only
+        producer, so "nothing journaled" is the row-level half of proof that no
+        carrier can reach `public.object`/`public.subject` (no Postgres in this
+        lane; the census query is handed over on the issue).
+        """
+        events = tmp_path / "events"
+        events.mkdir()
+        journal = events / "events.jsonl"
+        sdk = TortoiseSDK(str(tmp_path / "t10192u.db"),
+                          event_log_path=str(journal))
+        try:
+            oid = _make_carrier_entity(sdk, label, "zeta")
+            before_row = _carrier_row(sdk, label, "zeta")
+            before = len(_records(journal))
+            with pytest.raises(ValueError) as exc:
+                sdk.update_entity(oid, **carriers)
+            msg = str(exc.value)
+            carrier_keys = sorted(k for k in carriers if k.startswith("superseded"))
+            assert carrier_keys[0] in msg, (
+                f"the refusal must NAME the carrier it refused: {msg!r}")
+            assert "status='superseded'" in msg, (
+                f"the refusal must name the coherent triple: {msg!r}")
+            assert "#10192" in msg, msg
+            assert _carrier_row(sdk, label, "zeta") == before_row, (
+                f"a REFUSED carrier write mutated the node: "
+                f"{before_row} -> {_carrier_row(sdk, label, 'zeta')}")
+            after = _records(journal)
+            assert len(after) == before, (
+                "a REFUSED carrier write appended journal records "
+                f"{[r.get('type') for r in after[before:]]} — the record would "
+                "receive the carrier it just refused")
+            assert not [r for r in after
+                        if r.get("type") == "EntityMutated"
+                        and r.get("op") == "supersede"], (
+                "a REFUSED write journaled an EntityMutated op=supersede")
+        finally:
+            sdk.close()
+
+    def test_the_create_door_refuses_a_bare_carrier(self, tmp_path):
+        """The CREATE door is the second way in — and it reaches EXISTING nodes.
+
+        `_upsert_object`/`_upsert_subject` MERGE, so an ON-MATCH re-create lands
+        on a live node too; a guard on `update_entity` alone was bypassable in
+        one call. The refusal precedes the write, so the node is never minted.
+        """
+        events = tmp_path / "events"
+        events.mkdir()
+        journal = events / "events.jsonl"
+        sdk = TortoiseSDK(str(tmp_path / "t10192c.db"),
+                          event_log_path=str(journal))
+        try:
+            before = len(_records(journal))
+            with pytest.raises(ValueError, match="lifecycle CARRIER"):
+                sdk.create_object("eta", "core:strategy", supersededBy="eta-v2")
+            assert _carrier_row(sdk, "Object", "eta") is None, (
+                "a refused create_object(props={'supersededBy': ...}) minted "
+                "the node anyway")
+            with pytest.raises(ValueError, match="lifecycle CARRIER"):
+                sdk.create_subject("eta-subj", "core:organization",
+                                   supersededBy="eta-v3")
+            assert _carrier_row(sdk, "Subject", "eta-subj") is None
+            assert len(_records(journal)) == before, (
+                "a refused create appended journal records")
+
+            # …and the EXISTING-node route the MERGE opens is closed too: a
+            # re-create by NAME of a live node cannot smuggle the carrier in.
+            sdk.create_object("eta", "core:strategy")
+            live_row = _carrier_row(sdk, "Object", "eta")
+            with pytest.raises(ValueError, match="lifecycle CARRIER"):
+                sdk.create_object("eta", "core:strategy", supersededBy="eta-v2")
+            assert _carrier_row(sdk, "Object", "eta") == live_row, (
+                "the ON-MATCH re-create wrote the carrier onto the live node")
+
+            # A BORN-superseded create names the status and stays writable.
+            sdk.create_object("eta2", "core:strategy", status="superseded",
+                              supersededBy="eta2-v2",
+                              supersededAt="2026-01-01T00:00:00Z")
+            row = _carrier_row(sdk, "Object", "eta2")
+            assert row[1:] == ("superseded", "eta2-v2",
+                               "2026-01-01T00:00:00Z"), row
+        finally:
+            sdk.close()
+
+    @pytest.mark.parametrize("label", ["Object", "Subject"])
+    def test_the_coherent_triple_is_accepted_and_journals_it(self, tmp_path,
+                                                             label):
+        """The shipped-producer shape (status + both carriers, ONE state map)."""
+        events = tmp_path / "events"
+        events.mkdir()
+        journal = events / "events.jsonl"
+        sdk = TortoiseSDK(str(tmp_path / "t10192t.db"),
+                          event_log_path=str(journal))
+        try:
+            oid = _make_carrier_entity(sdk, label, "alpha")
+            sdk.update_entity(oid, status="superseded", supersededBy="alpha-v2",
+                              supersededAt="2026-01-01T00:00:00Z")
+            row = _carrier_row(sdk, label, "alpha")
+            assert row[1:] == ("superseded", "alpha-v2",
+                               "2026-01-01T00:00:00Z"), row
+            records = [r for r in _records(journal)
+                       if r.get("type") == "EntityMutated"
+                       and r.get("label") == label
+                       and r.get("op") == "supersede"]
+            assert records, "the coherent triple journaled no supersede record"
+            state = records[-1]["state"]
+            assert state.get("status") == "superseded", state
+            assert state.get("supersededBy") == "alpha-v2", state
+            assert state.get("supersededAt") == "2026-01-01T00:00:00Z", state
+        finally:
+            sdk.close()
+
+    def test_clearing_a_supersession_is_still_writable(self, tmp_path):
+        """`supersededBy=None` is a CLEAR, not a carrier — never refused.
+
+        This is the record-carried un-supersede (`cache_projection`'s
+        NOT MONOTONE bullet): the mutation writes both carrier columns, so a
+        rebuild derives nothing and agrees with the graph.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t10192x.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "beta")
+            sdk.update_entity(oid, status="superseded", supersededBy="beta-v2",
+                              supersededAt="2026-01-01T00:00:00Z")
+            sdk.update_entity(oid, status="live", supersededBy=None,
+                              supersededAt=None)
+            assert _carrier_row(sdk, "Object", "beta")[1:] == ("live", None,
+                                                               None)
+        finally:
+            sdk.close()
+
+    def test_a_stamp_on_an_already_superseded_node_is_still_writable(
+            self, tmp_path):
+        """The guard tests the RESULT status, not the presence of a `status` arg.
+
+        Adding a stamp to a node that is ALREADY `'superseded'` leaves the graph
+        and the record's carrier-derived fold agreeing, so it is not a
+        divergence and must not be an over-block.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t10192s.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "gamma")
+            sdk.update_entity(oid, status="superseded", supersededBy="gamma-v2")
+            assert _carrier_row(sdk, "Object", "gamma")[1:] == ("superseded",
+                                                                "gamma-v2",
+                                                                None)
+            sdk.update_entity(oid, supersededAt="2026-02-02T00:00:00Z")
+            assert _carrier_row(sdk, "Object", "gamma")[1:] == (
+                "superseded", "gamma-v2", "2026-02-02T00:00:00Z")
+        finally:
+            sdk.close()
+
+    def test_the_mirror_shape_is_not_refused(self, tmp_path):
+        """`status='superseded'` with NO carrier is OUT of scope, by decision.
+
+        It makes a rebuild REVIVE a node rather than bury a live one, it is a
+        shape in use, and it is already named as #9974's window. Refusing it
+        here would be the over-block the change's scope contract forbids.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "t10192m.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Subject", "delta")
+            sdk.update_entity(oid, status="superseded")
+            assert _carrier_row(sdk, "Subject", "delta")[1:] == (
+                "superseded", None, None)
+        finally:
+            sdk.close()
+
+    def test_the_record_fold_and_the_graph_agree_on_the_coherent_write(
+            self, tmp_path):
+        """The RECORD half: on the accepted shape the two stores both say
+        `'superseded'`, and on the refused shape the record WOULD have said it
+        against a `'live'` graph — the divergence this guard removes.
+
+        No Postgres in this lane, so the record row is DERIVED the way the
+        projection derives it: the `EntityMutated op=supersede` mutation's own
+        columns into `cache_projection.node_from_row`, which is the same
+        derivation path `DERIVED_FROM_RECORD` feeds (and the same predicate
+        `public.object_current_status` spells in SQL).
+        """
+        from tortoise import cache_projection as cp
+        from tortoise import record_projection as rp
+
+        def record_row(state: dict, table: str = "object") -> dict:
+            stmts = rp.mutations_for(
+                {"type": "EntityMutated", "label": "Object", "op": "supersede",
+                 "state": state, "id": "obj-1"},
+                org_id="o", graph_id="g")
+            row = {c: None for c in rp.table_columns(
+                Path(__file__).resolve().parent.parent
+                / "supabase" / "migrations")[table]}
+            row[rp.snake(cp.KEY_PROPERTY["Object"])] = "obj-1"
+            row.setdefault("props", {})
+            joined = " ".join(s.sql for s in stmts)
+            assert "superseded_by" in joined, joined
+            assert "status" not in joined, (
+                "the record stored a `status` column it does not have: "
+                f"{joined}")
+            for stmt in stmts:
+                if "superseded_by" not in stmt.sql:
+                    continue
+                cols = [c.strip().split("=")[0].strip()
+                        for c in stmt.sql.split("SET", 1)[1].split("WHERE")[0]
+                        .split(",")]
+                for col, val in zip(cols, stmt.params, strict=False):
+                    if col in row:
+                        row[col] = val
+            return row
+
+        # (a) the COHERENT write: record carriers + record-derived status.
+        coherent = record_row({"status": "superseded", "supersededBy": "v2",
+                               "supersededAt": "2026-01-01T00:00:00Z"})
+        node = cp.node_from_row("Object", coherent)
+        assert node.props.get("status") == "superseded", (
+            "the record's own fold must derive 'superseded' for the coherent "
+            f"write; got {node.props.get('status')!r}")
+
+        # (b) the REFUSED write: had the door allowed it, this row is what the
+        # record would hold — a carrier with no status, i.e. the record fold
+        # saying 'superseded' for the node the live graph still calls 'live'.
+        bare = record_row({"supersededBy": "v2"})
+        bare_node = cp.node_from_row("Object", bare)
+        assert bare_node.props.get("status") == "superseded", (
+            "the record fold is supposed to derive a status from the carrier "
+            "alone — that is exactly why the door must refuse a bare carrier")
+
+        # …and the door now does refuse it, on a node the graph holds LIVE.
+        sdk = TortoiseSDK(str(tmp_path / "t10192d.db"))
+        try:
+            oid = _make_carrier_entity(sdk, "Object", "epsilon")
+            with pytest.raises(ValueError, match="lifecycle CARRIER"):
+                sdk.update_entity(oid, supersededBy="v2")
+            assert _carrier_row(sdk, "Object", "epsilon")[1] == "live", (
+                "the graph's reading of the refused node must stay 'live'")
+        finally:
+            sdk.close()
