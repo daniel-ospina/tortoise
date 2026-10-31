@@ -1138,3 +1138,60 @@ def test_the_mcp_capture_bridge_carries_the_default_namespace():
         f"under `if _gid:`: {stamps[0]!r}")
     # …and the graph-bound half still carries the scope fields.
     assert 'org["graph_id"] = _gid' in bridge
+
+
+# ── 13. The org-id-only lanes reuse the credential — no read, one answer ────
+# Round 2 of the review found the request lanes still reaching the READ form:
+# `_maybe_apply_completion` (every capture) and the onboarding projection/PATCH
+# both hold only an `org_id`, so each paid a control-plane read on the event loop
+# — and on a read failure wrote into the DEMOTED graph. The auth seam now
+# publishes the resolved value for the request and they consume it.
+
+def test_the_org_id_only_lanes_reuse_the_requests_own_answer(monkeypatch):
+    """`_org_sdk(org_id)` must not read when THIS request already resolved the
+    credential, and must open the graph that credential named.
+
+    FAIL-ON: drop the hint (or read before consulting it) and every capture's
+    completion gate and every onboarding PATCH pays a synchronous PostgREST read
+    on the loop, whose failure path writes onboarding status into the DEMOTED
+    graph while the capture's points went to the promoted one."""
+    _hosted(monkeypatch)
+
+    class _Unreadable:
+        """A control plane that RAISES: any read shows up as the fallback."""
+
+        def query(self, *a, **k):
+            raise RuntimeError("control plane unreadable (test)")
+
+    monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                        lambda: _Unreadable())
+    opened = _capture_make_sdk(monkeypatch)
+
+    # The auth seam publishes; the lane consumes — no read, promoted graph.
+    ha._publish_default_namespace(_credential())
+    ha._org_sdk(TEAM)                       # e.g. _org_proj / _graph_available
+    assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
+
+    # The hint is ORG-scoped: a different org in the same context falls back to
+    # the read (here unreadable → the historical open), never to this org's graph.
+    opened.clear()
+    ha._org_sdk(OTHER_TEAM)
+    assert opened == [{"namespace": OTHER_TEAM}]
+
+
+def test_the_event_sweep_takes_the_namespace_from_its_enumeration():
+    """The retention sweep must not pay a read per org: `graph_name` rides the
+    page it already walks, and the parse must KEEP the column.
+
+    FAIL-ON: the enumeration fetched `graph_name` and dropped it when building
+    the dict, so `_org_sdk(..., namespace=None)` took the READ branch for every
+    org every hour — and on a read failure purged the DEMOTED graph's events."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "tortoise"
+           / "hosted_api.py").read_text(encoding="utf-8")
+    assert '"organizations", select=["id", "name", "graph_name"]' in src
+    assert 'parsed.append({"org_id": rid, "name": r.get("name"),' in src, (
+        "the enumeration must carry graph_name into the dict the sweep reads")
+    # …and the sweep passes it, so no read is needed.
+    assert '_org_sdk(org["org_id"], namespace=org.get("graph_name"))' in src
