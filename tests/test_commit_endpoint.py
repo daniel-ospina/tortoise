@@ -410,10 +410,17 @@ class TestFourNodeChain:
         assert rows[0][2] is True
 
         # Document transcript — D10: a :Source keyed url=doc_<hash>
-        # (summary/story_arc/sessionId/sourcePath; NO content/doc_status).
+        # (summary/sessionId/sourcePath; NO content/doc_status).
         # #5082: the document's TYPE axis (`sourceKind='document'`) sits beside
         # the `documentKind` genre — pre-fix this writer left it NULL while
         # §4.6 marks it REQUIRED on every `:Source`.
+        # #10000: `story_arc` is ASSERTED ABSENT, not present. §9.1/D1 places the
+        # S1 narrative in Postgres ("not in the graph, not a `Document` node, not
+        # a `Point`"), and this writer used to SET it on the node — prose in the
+        # RAM-resident layer that `STORAGE-ARCHITECTURE.md` §2.1 says can never
+        # unload, with no production reader. The narrative's home is
+        # `public.session_narrative` (`tests/test_9555_narrative_carrier.py`);
+        # this pin is what reds if it comes back onto a node.
         rows = g.query(
             "MATCH (s:Source) WHERE s.sessionId='s1' "
             "AND s.documentKind IS NOT NULL "
@@ -424,7 +431,10 @@ class TestFourNodeChain:
         kind, summary, arc, srcpath, episodic, skind = rows[0]
         assert kind == "transcript"
         assert summary == "summary text"
-        assert arc == "arc text"
+        assert arc is None, (
+            "the S1 narrative must NOT be a property of the transcript :Source "
+            "(§9.1/D1, #10000) — it is stored in public.session_narrative"
+        )
         assert srcpath == "session.md"  # basename only (privacy)
         assert episodic is True
         assert skind == "document", (
@@ -432,6 +442,18 @@ class TestFourNodeChain:
             "sourceKind='document' (#5082) — a document is a :Source (§4.4) "
             "and §4.6 marks sourceKind REQUIRED on every :Source"
         )
+
+        # The AgentSession Event carries the same rule (#10000): identity +
+        # metadata (`summary`), never the narrative prose.
+        rows = g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN e.story_arc, e.summary",
+            params={"eid": eid},
+        ).result_set
+        assert rows[0][0] is None, (
+            "the S1 narrative must NOT be a property of the AgentSession :Event "
+            "(§9.1/D1, #10000)"
+        )
+        assert rows[0][1] == "summary text"
 
         # (Event)-[:produces]->(document Source)
         n = g.query(
@@ -4413,3 +4435,35 @@ class Test9876AboutMentionDisposition:
             "write that folded nothing is reported as a refused fold")
         assert SHAPE_UNREGISTERED_REFERENCE not in shapes, (
             "an about-edge MENTION was recorded as an identity refusal")
+
+
+def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source():
+    """#10000: the S1 narrative is not a node property, and NOT caller-writable.
+
+    The commit writer's raw `SET s.story_arc` is gone, but `story_arc` stays
+    DECLARED on `:Source` (legacy nodes read back; ONTOLOGY §4.4 lists it), and
+    `_update_entity` uses that declaration as its write allowlist. Without the
+    server-managed entry, `update_entity(<url>, story_arc=…)` — the generic
+    tenant route, reachable from the MCP tool `tortoise_update_entity` — would
+    persist §9.1's prose onto a node AND into the `EntityMutated` record, where a
+    rebuild restores it: the `__runId` hole (#5196 round 3) one property over.
+
+    (1) FAILS if the key is only DECLARED: the write is accepted and survives.
+    (2) REACHABLE: the refusal is checked through the real tenant surface, and
+        the node is read afterwards to prove nothing landed.
+    """
+    sdk = _team_sdk()
+    url = f"session:narr-route-{content_hash('narrative-route-probe')[:12]}"
+    sdk.create_source(url, "agentSession", contentHash="h1")
+
+    with pytest.raises(ValueError, match="server-managed"):
+        sdk.update_entity(url, story_arc="NARRATIVE-ZEBRA prose must not land")
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.story_arc", params={"u": url}
+    ).result_set
+    assert rows, "the probe Source is missing — the refusal proved nothing"
+    assert rows[0][0] is None, (
+        "the S1 narrative reached a :Source node through the tenant route — "
+        "§9.1/D1 places it in public.session_narrative only (#10000)"
+    )

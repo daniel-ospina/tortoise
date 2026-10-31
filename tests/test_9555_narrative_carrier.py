@@ -105,8 +105,12 @@ def test_the_carrier_names_its_session_and_carries_the_narrative():
 
     `sessionId` is one of the two spellings the projection accepts (the commit's
     own; the capture's is `session_id`), and `story_arc` is §9.1's narrative
-    under the graph's own name for it — the SAME key the raw Cypher writes one
-    statement earlier, so the record and the cache state one fact.
+    under the RECORD's own name for it — the column `public.session_narrative`
+    reads and the shape-keyed projection consumes. ⛔ It is NOT any more "the
+    SAME key the raw Cypher writes one statement earlier": #10000 deleted that
+    Cypher (`tests/…::test_the_commit_path_emits_the_carrier_and_writes_no_
+    narrative_onto_a_node`), so the record is the only place this fact is
+    stated at all.
     """
     carrier = _carrier()
     assert carrier is not None
@@ -129,15 +133,21 @@ def test_an_empty_narrative_EMITS_NOTHING(empty):
         empty, SUMMARY, session_id=SESSION, event_id="e", captured_at="t") is None
 
 
-def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
-    """§17.1's APPLY-FIRST lane, pinned structurally.
+def test_the_commit_path_emits_the_carrier_and_writes_no_narrative_onto_a_node():
+    """§9.1/D1's placement, pinned structurally (#9555 / #10000).
 
-    The raw `MERGE (s:Source …) SET s.story_arc=$arc` is not journalled, so the
-    record states the write that ALREADY landed — it must therefore appear after
-    it. Emitting before the write would state a narrative the commit may never
-    have stored (the write is fail-closed below), i.e. a record that outlives its
-    own fact. Line ordering is the checkable half of "apply-first"; the direction
-    is what a reviewer cannot otherwise see.
+    The narrative has exactly ONE home — `public.session_narrative`, written by
+    the `SessionNarrated` carrier — and the graph holds NONE of it. This pin is
+    what reds if the prose comes back onto a node: it walks the commit write
+    phase and refuses a `story_arc` SET on either identity anchor the phase
+    mints (the transcript `:Source`, the AgentSession `:Event`).
+
+    ⛔ THIS USED TO PIN LINE ORDER ("the carrier is emitted AFTER the raw
+    `s.story_arc=$arc` MERGE it describes"), because §17.1's apply-first lane
+    requires a record to state a write that already landed. #10000 DELETED that
+    write — §9.1/D1 forbids it — so the ordering premise is gone and the
+    invariant that remains is the placement itself: the carrier is still
+    emitted, and no narrative text reaches a node. Re-derived, not deleted.
     """
     src = (REPO_ROOT / "tortoise" / "hosted_api.py").read_text()
     tree = ast.parse(src)
@@ -145,9 +155,15 @@ def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
                if isinstance(n, ast.FunctionDef) and n.name == "_execute_commit_writes"),
               None)
     assert fn is not None, "the commit write phase is gone — re-measure #9555"
-    merge_line = min((n.lineno for n in ast.walk(fn)
-                      if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                      and "s.story_arc=$arc" in n.value), default=None)
+    narrative_node_writes = [
+        (n.lineno, n.value) for n in ast.walk(fn)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        and "story_arc" in n.value]
+    assert not narrative_node_writes, (
+        "the commit write phase writes `story_arc` again at "
+        f"{narrative_node_writes} — §9.1/D1 places the S1 narrative in Postgres "
+        "ONLY (\"not in the graph, not a `Document` node, not a `Point`\"), and "
+        "its one home is `public.session_narrative` (#10000)")
     emit_line = min((n.lineno for n in ast.walk(fn)
                      if isinstance(n, ast.Call)
                      and isinstance(n.func, ast.Attribute)
@@ -155,17 +171,138 @@ def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
                      and n.args
                      and isinstance(n.args[0], ast.Name)
                      and n.args[0].id == "NARRATIVE_RECORD_TYPE"), default=None)
-    assert merge_line is not None, (
-        "the transcript `:Source` MERGE (`s.story_arc=$arc`) is gone — the "
-        "carrier's anchor moved and this pin must be re-derived, not deleted")
     assert emit_line is not None, (
         "the commit path no longer emits the narrative carrier — that is "
         "exactly the #9555 (b) gap returning: the record keeps the COUNTS and "
-        "loses the TEXT")
-    assert emit_line > merge_line, (
-        f"the carrier is emitted at line {emit_line}, BEFORE the write it "
-        f"describes (line {merge_line}) — §17.1's apply-first lane states the "
-        "write's own result, so the record must follow it")
+        "loses the TEXT, and with the node write gone (#10000) the narrative "
+        "would then be stored NOWHERE")
+
+
+def test_the_commit_path_READS_the_record_outcome_it_cannot_assume():
+    """#10389 review ISSUE 2 — the only writer's outcome is read, not assumed.
+
+    With the node writes deleted the carrier IS the narrative's only write, and
+    `sdk._emit_event` is best-effort by contract: no journal configured returns
+    BEFORE the record leg (`sdk.py:9889-9894`), and a raising append returns
+    `False` and skips it (`sdk.py:10027`). Either lane leaves the prose in NO
+    store while the commit answers 200 — the state this pin refuses.
+
+    (1) FAILS on the pre-fix phase, on both counts: no `record_sink=` at the
+        carrier emit (so the outcome is unobservable) and no call to the
+        reporter that turns it into a log line + a receipt advisory.
+    (2) STRUCTURAL on purpose: calling `_execute_commit_writes` needs a live
+        projection, and the behaviour of the reporter itself is pinned
+        separately below — the two halves cannot cover for each other.
+    """
+    tree = ast.parse((REPO_ROOT / "tortoise" / "hosted_api.py").read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "_execute_commit_writes"),
+              None)
+    assert fn is not None, "the commit write phase is gone — re-measure #9555"
+    carrier_emits = [
+        call for call in ast.walk(fn)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "_emit_event"
+        and call.args
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "NARRATIVE_RECORD_TYPE"]
+    assert carrier_emits, "the commit path no longer emits the narrative carrier"
+    sinks = [kw.value for call in carrier_emits for kw in call.keywords
+             if kw.arg == "record_sink"]
+    assert sinks, (
+        "the carrier emit passes no `record_sink` — the commit door cannot tell "
+        "whether the narrative's ONLY writer landed, so a record that declines "
+        "it (no journal, a raising append, a non-durable journal) answers 200 "
+        "with the narrative in no store at all (#10389 ISSUE 2)")
+    reporters = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Name)
+                 and c.func.id == "_report_narrative_home"]
+    assert reporters, (
+        "the commit door collects the record's outcome and never reports it — "
+        "reading `record_sink` and doing nothing with it is the same silent "
+        "200 it was adopted to end (#10389 ISSUE 2)")
+
+
+def _record_write(outcome_name: str, *, statements: int = 1, refusal=None):
+    from tortoise.record_writer import RecordWrite, RecordWriteOutcome
+    return RecordWrite(outcome=RecordWriteOutcome[outcome_name],
+                       statements=statements, refusal=refusal)
+
+
+def test_a_narrative_outside_its_record_home_is_NAMED_not_assumed(caplog):
+    """#10389 review ISSUE 2 — the three destinations, decided not guessed.
+
+    The terms are the contract (`narrative_not_recorded` rides the receipt for
+    the two that are not `record`):
+
+    * APPLIED **and** `statements >= 1` — the fold executed something for THIS
+      record. `applied` alone is not enough, which is why the empty-fold case
+      below is asserted: an armed seam that folds nothing would otherwise read
+      as "the record holds the narrative".
+    * APPLIED with ZERO statements — the record did not take it. Not `record`.
+    * journal appended, record declined — `journal`: replay heals it from that
+      same line, so this is a warning, not a loss.
+    * `no_durable_journal` + a "journalled" return — `nowhere`: a scratch buffer
+      is not a journal and nothing about it survives the process. This is the
+      one case where the seam's own vocabulary overrides the emit return.
+    * nothing journalled and no record outcome (no journal configured, or the
+      append raised) — `nowhere`, at ERROR.
+
+    (1) FAILS pre-fix: `_report_narrative_home` does not exist, so every call
+        here is an AttributeError — the door had no such decision at all.
+    (2) REACHABLE: the outcome objects are the REAL `RecordWrite`/`
+        RecordWriteOutcome` the live seam returns, not a stand-in shape.
+    """
+    report = hosted_api._report_narrative_home
+
+    assert report(session_id=SESSION,
+                  outcome=_record_write("APPLIED", statements=2),
+                  journalled=True) == "record"
+    assert report(session_id=SESSION,
+                  outcome=_record_write("APPLIED", statements=0),
+                  journalled=True) != "record", (
+        "an APPLIED write that executed ZERO statements was read as 'the "
+        "record holds the narrative' — the seam was armed and folded nothing")
+
+    caplog.clear()
+    assert report(session_id=SESSION,
+                  outcome=_record_write("REFUSED", refusal="circuit_open"),
+                  journalled=True) == "journal"
+    assert any(r.levelname == "WARNING" and "narrative" in r.getMessage()
+               for r in caplog.records), (
+        "a record that declined the narrative while the journal held it was "
+        "not reported at all — the caller learns nothing until the verb answers "
+        "nothing for a narrative that exists")
+
+    caplog.clear()
+    assert report(session_id=SESSION,
+                  outcome=_record_write("REFUSED", refusal="no_durable_journal"),
+                  journalled=True) == "nowhere", (
+        "a NON-DURABLE journal was read as holding the narrative — nothing in "
+        "it survives the process, so replay cannot heal the record from it")
+    assert any(r.levelname == "ERROR" and SESSION in r.getMessage()
+               for r in caplog.records)
+
+    caplog.clear()
+    assert report(session_id=SESSION, outcome=None, journalled=None) == "nowhere"
+    assert any(r.levelname == "ERROR" and "NO store" in r.getMessage()
+               for r in caplog.records), (
+        "the narrative reached no store and the door said nothing — a silent "
+        "200 is the exact state #10389 ISSUE 2 reds")
+
+
+def test_the_receipt_says_the_narrative_is_not_in_its_record_home():
+    """The advisory a caller reads: additive, non-blocking, and it names a home."""
+    for home in ("journal", "nowhere"):
+        adv = hosted_api._narrative_home_advisory(home, SESSION)
+        assert adv["code"] == hosted_api.NARRATIVE_NOT_RECORDED
+        assert adv["session_id"] == SESSION
+        assert adv["advisory"] is True
+        assert "severity" not in adv, (
+            "a `severity: block` here would reject a commit whose graph writes "
+            "already landed — the advisory channel is warn-first (#405/#7819)")
+        assert adv["message"], "an advisory with no message tells the caller nothing"
 
 
 # ── §2 the record effect, through the shape-keyed projection ────────────────
@@ -729,11 +866,17 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
     the same container) cannot inherit a previous narrative and pass on it —
     the isolation is the tenant, which is what the record's own key shape gives.
 
-    ``with_source`` adds the capture's own transcript `:Source` record, which is
-    the record that carries `story_arc` onto a NODE (`hosted_api`
-    `_execute_commit_writes` step 2 does exactly that MERGE). The cache rebuild
-    needs it: without a `:Source` record there is nothing in the record for the
-    rebuild to reproduce the narrative ON, so "the cache holds the narrative" is
+    ``with_source`` adds a SYNTHETIC `SourceCreated` record carrying
+    `story_arc`, i.e. the shape `_upsert_document`'s passthrough would fold onto
+    a `:Source` node. It is deliberately NOT the shape the commit path emits any
+    more (#10000 deleted the raw `s.story_arc=$arc` MERGE), and a real
+    `SourceCreated` carrying the key is DENIED by `_upsert_source`'s
+    `allow_keys` — so this seed stands for the residual hole in the fold
+    (`_upsert_document`'s no-allowlist passthrough, reachable from
+    `tortoise_create_document`, recorded in §9.1), not for live commit
+    behaviour. The cache rebuild needs it: without some record for the narrative
+    there is nothing for the rebuild to reproduce the narrative ON, so "the
+    cache holds the narrative" is
     unmeasurable and a rebuild that writes only the turn Points satisfies every
     count.
     """
@@ -775,10 +918,11 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
             _counts_record(redactions=4, turns=2),
         ]
         if with_source:
-            # The transcript `:Source` the commit's raw MERGE writes
-            # `s.story_arc=$arc` onto — the SAME text the carrier states, so the
-            # record and the cache state one fact (and the rebuild has to
-            # reproduce it on a node, not merely re-count rows).
+            # SYNTHETIC, and named as such (#10000): a `SourceCreated` row
+            # carrying `story_arc`. The commit path no longer writes the key onto
+            # a node, and `_upsert_source` DENIES it here — this seed stands for
+            # the fold's remaining hole (`_upsert_document`'s no-allowlist
+            # passthrough), which the rebuild parity check below measures.
             records.append({
                 "type": "SourceCreated",
                 "id": f"session:{SESSION}",
