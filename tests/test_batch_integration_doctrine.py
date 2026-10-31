@@ -97,7 +97,7 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **66 such mutants
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **70 such mutants
 measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
@@ -637,6 +637,24 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     pins = [
         i for i, c in enumerate(baseline) if re.match(r"^(?:export\s+)?PINNED=", _code(c))
     ]
+    # ...and the SOURCE of the pin, not just its name: `git rev-parse HEAD` is one
+    # argument away and makes `$PINNED` the LANE's tip, so the baseline measures the
+    # lane under a heading promising `origin/main` ALONE. The ledger every later
+    # verdict is diffed against is this one line.
+    pinned_main = [
+        _code(baseline[i])
+        for i in pins
+        if re.fullmatch(
+            r'(?:export\s+)?PINNED="?\$\(git\s+rev-parse\s+origin/main\)"?',
+            _code(baseline[i]),
+        )
+    ]
+    assert len(pins) == 1 and pinned_main, (
+        "the baseline pin must BE `PINNED=\"$(git rev-parse origin/main)\"`: any "
+        "other source (`git rev-parse HEAD`, `main`, `origin/main~1`) names a tree "
+        f"that is not origin/main while every other check here stays green: "
+        f"{[baseline[i] for i in pins]}"
+    )
     assert fetches and pins and max(fetches) < min(pins), (
         "the baseline must fetch origin (a plain `git fetch origin [main]`) BEFORE "
         "it pins $PINNED: a stale remote-tracking ref makes the pin the OLD main, "
