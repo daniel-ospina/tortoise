@@ -90,18 +90,45 @@ def test_recency_boundary_day_is_inclusive():
     assert _dates(out) == ["2023/04/03 (Mon) 09:00"]
 
 
-def test_iso_control_is_unchanged():
-    """Criterion (c), the control: the ISO shapes that already worked keep
-    working byte-identically."""
+def test_iso_date_only_control_is_unchanged():
+    """A date-only ISO ``session_date`` behaves exactly as before the fix —
+    this is the control case the issue names ("no change to the ISO control
+    cases"), and it is the shape the shipped suite uses."""
     assert _apply_time_window(
         [{"session_date": "2023-04-10"}],
         TimeConstraint("recency", start="7"),
         question_date="2023-04-10") == [{"session_date": "2023-04-10"}]
     assert _apply_time_window(
-        [{"session_date": "2023-04-10T00:00:00Z"}],
+        [{"session_date": "2023-04-10"}],
         TimeConstraint("interval", start="2023-04-03", end="2023-04-10"),
-        question_date="2023-04-10") == [
-            {"session_date": "2023-04-10T00:00:00Z"}]
+        question_date="2023-04-10") == [{"session_date": "2023-04-10"}]
+
+
+def test_timestamp_shaped_iso_hit_on_the_boundary_day_is_now_kept():
+    """DECLARED behaviour change (a WIDENING, not a control): a hit whose
+    ``session_date`` carries a time component — ``2023-04-10T00:00:00Z`` — on
+    the last day of the window was DROPPED before this fix in BOTH branches
+    (the raw comparison ``"2023-04-10T00:00:00Z" <= "2023-04-10"`` fails on
+    the lexical tail), and is kept now that both sides resolve to calendar
+    dates.
+
+    This is #9182's defect seen from the ISO side: a date-only bound is
+    inclusive of the whole calendar day. Pinned explicitly so the widening is
+    visible to anyone re-cutting a TR arm comparison, instead of hiding inside
+    an assertion labelled "unchanged" (fresh-context review, P2)."""
+    hit = [{"session_date": "2023-04-10T00:00:00Z"}]
+    assert _apply_time_window(
+        hit, TimeConstraint("recency", start="7"),
+        question_date="2023-04-10") == hit
+    assert _apply_time_window(
+        hit, TimeConstraint("interval", start="2023-04-03", end="2023-04-10"),
+        question_date="2023-04-10") == hit
+    # …and the day AFTER the window is still dropped: what widened is the
+    # calendar-day boundary, not the filter.
+    assert _apply_time_window(
+        [{"session_date": "2023-04-11T00:00:00Z"}],
+        TimeConstraint("recency", start="7"),
+        question_date="2023-04-10") == []
 
 
 def test_absent_question_date_still_degrades_to_no_bound():
@@ -137,17 +164,24 @@ def test_undated_hit_never_satisfies_a_window():
     assert out == [{"session_date": "2023/04/10 (Mon) 17:50"}]
 
 
-def test_the_caller_fallback_marker_would_not_fire_on_the_producer_shape():
-    """Criterion (b), mechanism pin: the caller sets ``tr_window_fallback``
-    ONLY when this returns empty (``retrieve.py::retrieve_for_question``:
-    ``windowed = _apply_time_window(...); if windowed: annotated = windowed
-    else: tr_window_fallback = True``). Returning the in-window pool is
-    exactly what stops the marker firing on a TR question whose in-window
-    hits exist."""
-    pool = [*HITS, {"session_date": "2022-01-01"}]  # one out-of-window row
+def test_the_seam_returns_a_non_empty_window_for_the_caller_to_keep():
+    """Criterion (b), SEAM-LEVEL pin (not end-to-end): the caller sets
+    ``tr_window_fallback`` ONLY when this returns empty
+    (``retrieve.py::retrieve_for_question``: ``windowed =
+    _apply_time_window(...); if windowed: annotated = windowed else:
+    tr_window_fallback = True``). Returning the in-window pool on the producer
+    shape is what stops the marker firing.
+
+    Scope stated honestly: this pins the seam's return, so it would not notice
+    a change in the CALLER's branch. The end-to-end marker itself is pinned on
+    ISO shapes by ``tests/test_longmem_runner.py::
+    test_tr_window_filter_excludes_out_of_window_session`` (marker False) and
+    ``::test_tr_window_filter_falls_back_when_starved`` (marker True); no
+    producer-shape end-to-end pin exists — it would need the frozen dataset.
+    """
     windowed = _apply_time_window(
-        HITS + [pool[-1]], TimeConstraint("interval", start="2023-04-03",
-                                         end="2023-04-10"),
+        [*HITS, {"session_date": "2022-01-01"}],
+        TimeConstraint("interval", start="2023-04-03", end="2023-04-10"),
         question_date=QUESTION_DATE)
     assert windowed  # non-empty → the caller takes `annotated = windowed`
     assert windowed == HITS  # …and the out-of-window row IS dropped
