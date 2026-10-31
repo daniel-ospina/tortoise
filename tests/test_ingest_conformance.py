@@ -318,19 +318,76 @@ def _listed_keys(section: str) -> list[str]:
     return _KEY_TOKEN.findall("\n".join(block))
 
 
-def test_served_skill_advertises_only_keys_the_product_emits():
-    """mirror → product (#10438): the served skill's warnings section must
-    enumerate EXACTLY the product's closed set, and must state that set's size
-    correctly.
+def _warning_table_problems(section: str) -> list[str]:
+    """Every way ``section`` fails to describe the product's closed warning set.
 
-    Two arms, because each fails where the other cannot:
-      * the enumeration must be a SUBSET of `WARNING_KEYS` — a doc may not
-        advertise a key nothing emits (the 2026-10-30 regression);
+    PURE on purpose: the gate below runs it against the ONE real mirror, which
+    cannot show that it would have RED for a mirror that is wrong — the three
+    `test_10437_warning_table_gate_…` tests run the same function against
+    synthetic sections, so each arm has a case that proves it fires.
+
+    Three arms, because each fails where the others cannot:
+      * no key may be advertised that the product does not emit (the 2026-10-30
+        regression, #10438);
+      * the enumeration must be COMPLETE — the subset arm alone passes a
+        truncated list (eleven of twelve, heading still `TWELVE`), which is a
+        reader believing a key does not exist when the engine emits it;
       * every cardinality the mirror declares (“the TWELVE keys”, the
         “TWELVE-key table”) must EQUAL `len(WARNING_KEYS)` — so the count and
         the list cannot drift apart, and extending the set still costs the
         contract amendment #8499 requires (`docs/INGEST_CONTRACT.md` §3.2)
         instead of being a docs-only edit nobody notices.
+    """
+    problems: list[str] = []
+    listed = _listed_keys(section)
+
+    advertised = sorted({key for key in listed if key not in WARNING_KEYS})
+    if advertised:
+        problems.append(
+            f"the served skill advertises warning keys the product does not "
+            f"emit: {advertised}. The closed set is §3.2's "
+            f"{len(WARNING_KEYS)} keys (#8499); a key becomes servable only in "
+            f"the same change that emits it. If it is merely PLANNED, keep it "
+            f"out of the enumeration and say in prose that it is reserved/not "
+            f"emitted yet — do not count it (see specs upstream, not this "
+            f"mirror, which is derived: "
+            f"`tools/served_skills_parity.py --sync`).")
+
+    missing = sorted(WARNING_KEYS - set(listed))
+    if missing:
+        problems.append(
+            f"the served skill's enumeration is INCOMPLETE: it omits "
+            f"{missing}, which the product emits (§3.2's closed set, #8499). "
+            f"A subset check cannot see this — an integrator reading the served "
+            f"copy would treat an emitted key as a divergence "
+            f"(`docs/INGEST_CONTRACT.md` §3.2 is the authoritative list; this "
+            f"mirror is derived by `tools/served_skills_parity.py --sync` from "
+            f"specs authored upstream).")
+
+    declared = _declared_key_count(section)
+    if not declared:
+        problems.append(
+            "the served skill no longer states how many keys the closed set "
+            "has — re-anchor this gate: the declaration is what a reader uses "
+            "to tell a complete enumeration from a truncated one")
+    elif set(declared) != {len(WARNING_KEYS)}:
+        problems.append(
+            f"the served skill states the warnings set has "
+            f"{sorted(set(declared))} keys but the product's closed set has "
+            f"{len(WARNING_KEYS)} (docs/INGEST_CONTRACT.md §3.2, #8499). "
+            f"Either the enumeration above is missing a key the product emits, "
+            f"or the mirror is ahead of it — and an integrator reading the "
+            f"served copy has no way to tell which.")
+
+    return problems
+
+
+def test_served_skill_advertises_only_keys_the_product_emits():
+    """mirror → product (#10438): the served skill's warnings section must
+    enumerate EXACTLY the product's closed set, and must state that set's size
+    correctly. The three arms live in `_warning_table_problems` (see its
+    docstring), which runs here against the real mirror and in the
+    `test_10437_warning_table_gate_…` cases against synthetic sections.
     """
     text = _skill_text()
     if text is None or "promotion_policy" not in text:
@@ -338,28 +395,73 @@ def test_served_skill_advertises_only_keys_the_product_emits():
                     "absent/untracked")
     match = _WARNINGS_SECTION.search(text)
     assert match is not None, "the served skill has no “## Warnings” section"
-    section = match.group(0)
+    problems = _warning_table_problems(match.group(0))
+    assert not problems, "\n".join(problems)
 
-    advertised = [key for key in _listed_keys(section)
-                  if key not in WARNING_KEYS]
-    assert not advertised, (
-        f"the served skill advertises warning keys the product does not "
-        f"emit: {sorted(set(advertised))}. The closed set is §3.2's "
-        f"{len(WARNING_KEYS)} keys (#8499); a key becomes servable only in the "
-        f"same change that emits it. If it is merely PLANNED, keep it out of "
-        f"the enumeration and say in prose that it is reserved/not emitted yet "
-        f"— do not count it (see specs upstream, not this mirror, which is "
-        f"derived: `tools/served_skills_parity.py --sync`).")
 
-    declared = _declared_key_count(section)
-    assert declared, (
-        "the served skill no longer states how many keys the closed set has — "
-        "re-anchor this gate: the declaration is what a reader uses to tell a "
-        "complete enumeration from a truncated one")
-    assert set(declared) == {len(WARNING_KEYS)}, (
-        f"the served skill states the warnings set has "
-        f"{sorted(set(declared))} keys but the product's closed set has "
-        f"{len(WARNING_KEYS)} (docs/INGEST_CONTRACT.md §3.2, #8499). Either the "
-        f"enumeration above is missing a key the product emits, or the mirror "
-        f"is ahead of it — and an integrator reading the served copy has no way "
-        f"to tell which.")
+# ── non-vacuity: each arm reds on the mirror shape it was written for ──
+# Built from a template rather than from the served file so these run (and
+# RED) even where the mirror is absent or has already been fixed — the point
+# is the GATE, not the artifact of the day.
+def _synthetic_warnings_section(heading_word: str, keys: list[str]) -> str:
+    """A warnings section in the mirror's own shape.
+
+    The reserved-key blockquote sits AFTER a blank line, exactly as the real
+    mirror has it: `_listed_keys` stops at the first blank line, so a key
+    merely *named in prose* is not counted as enumerated.
+    """
+    listed = " ·\n".join(f"`{key}`" for key in keys)
+    return (
+        f"## Warnings — the {heading_word} keys (closed set)\n\n"
+        "`warnings` entries are key-prefixed strings. A key outside this "
+        "table is a\ndivergence — report it:\n\n"
+        f"{listed}\n\n"
+        "> A thirteenth key (`duplicate_target_deduped`) is **reserved**: it "
+        "joins this closed set when that fix lands.\n"
+    )
+
+
+def test_10437_warning_table_gate_reds_on_a_truncated_enumeration():
+    """The arm this gate was missing: eleven of twelve keys, heading still
+    `TWELVE`. The subset arm is silent (nothing advertised) and the count arm is
+    silent (it still says 12), so ONLY the completeness arm catches it.
+    """
+    keys = sorted(WARNING_KEYS)
+    section = _synthetic_warnings_section("TWELVE", keys[:-1])
+
+    # why the older two arms cannot carry this alone:
+    assert not [key for key in _listed_keys(section) if key not in WARNING_KEYS]
+    assert _declared_key_count(section) == [12]
+
+    problems = _warning_table_problems(section)
+    assert problems, "a truncated enumeration passed every arm"
+    assert keys[-1] in "\n".join(problems), (
+        f"the gate reds but does not name the omitted key {keys[-1]!r}, which "
+        f"is what tells the fixer which mirror line to add")
+
+
+def test_10437_warning_table_gate_reds_on_an_advertised_key():
+    """The 2026-10-30 regression itself (#10438): the reserved
+    `duplicate_target_deduped` INSIDE the enumeration, at a truthful count."""
+    section = _synthetic_warnings_section(
+        "THIRTEEN", [*sorted(WARNING_KEYS), "duplicate_target_deduped"])
+    problems = _warning_table_problems(section)
+    assert problems, "an advertised-but-unemitted key passed every arm"
+    assert "duplicate_target_deduped" in "\n".join(problems)
+
+
+def test_10437_warning_table_gate_reds_on_a_declared_count_mismatch():
+    """Twelve keys, heading says THIRTEEN: the count and the list must not be
+    able to drift apart in either direction."""
+    section = _synthetic_warnings_section("THIRTEEN", sorted(WARNING_KEYS))
+    problems = _warning_table_problems(section)
+    assert problems, "a miscounted closed set passed every arm"
+    assert "13" in "\n".join(problems)
+
+
+def test_10437_warning_table_gate_is_clean_on_the_mirror_shape():
+    """The control: the real mirror's shape (twelve keys, `TWELVE`, reserved
+    key only in prose) is CLEAN — so the three cases above are proving the arms
+    fire, not that the gate reds unconditionally."""
+    section = _synthetic_warnings_section("TWELVE", sorted(WARNING_KEYS))
+    assert _warning_table_problems(section) == []
