@@ -84,9 +84,18 @@ line or behind a declarator, a pin whose source falls back
 (``… || git rev-parse origin/main``) or discards the body read
 (``… >/dev/null; git rev-parse origin/main``), a fetch to a stale ref (``|| true``,
 ``--dry-run``, ``main:refs/remotes/…``), and a wrapped or negated landing carrier.
-Each one is green on the *spelling* and wrong on the *behaviour*, which is the
-only class a substring predicate cannot see. **32 such mutants measured at this
-head: 0 survive**, and the honest document is 0 of 14 red.
+an allowlisted no-op placed AFTER the subject so it owns the halt
+(``; true || exit 1``, ``; :``, ``; echo ok``, ``; cd .``, ``; printf ''``,
+``; git fetch origin main``), and the subject in a PIPELINE (``| true || exit 1``,
+which runs it in a subshell so HEAD never moves in the parent) — the same set at
+the pin creates, the batch fence and the dirty-tree refusals. Each one is green on
+the *spelling* and wrong on the *behaviour*, which is the only class a substring
+predicate cannot see. The invariant those last ones taught is **halt
+REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
+separator between the last subject segment and the ``||`` is ``&&``, no separator
+is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **45 such mutants
+measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
 session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
@@ -134,6 +143,9 @@ _PINNED_MAIN_ASSERTION = re.compile(
 #: ``_ends_at_halt``) — an allowlist, because a hard reset moves the tree without
 #: matching ``_MOVES_HEAD``.
 _SAFE_SEGMENT = re.compile(r"^(?:git\s+fetch\b|cd\s+\S+|echo\b|printf\b|true\b|:)\s*")
+
+#: The dirty-tree subject: the command whose failure must reach the halt.
+_DIRTY_TEST = re.compile(r"^(?:\[\s*-z\s|test\s+-z\s)")
 
 #: Commands that move HEAD onto a ref — what Phase 1 must do before its suite run.
 _MOVES_HEAD = re.compile(r"\bgit\s+(?:switch|checkout)\b")
@@ -215,37 +227,7 @@ def _is_refusal(fence: list[str], i: int) -> bool:
         r"^(?:\[\s*-z\s|test\s+-z\s)", code
     ):
         return False
-    return _halts(_block(fence, i))
-
-
-def _ends_at_halt(code: str) -> bool:
-    """Does the command STOP at its halt — nothing appended after it?
-
-    ``A || exit 1 && C`` parses as ``(A || B) && C``: the halt is on the left of
-    ``&&``, so it never stops the fence, and ``git switch -C … "$PINNED" ||
-    exit 1 && git switch -`` returns to the LANE before the suite runs — under a
-    heading promising ``origin/main`` ALONE. Three substring predicates could not
-    see it; the whole command has to end at the halt.
-    """
-    halt = re.fullmatch(
-        r"(?P<head>.*?)\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\})\s*", code
-    )
-    if halt is None:
-        return False
-    # `A ; B || exit 1` halts only when B fails: A's pin is abandoned and the fence
-    # runs the suite (or the merges) on whatever B left checked out. So the halt
-    # must terminate the LAST segment, and every earlier segment must either be a
-    # re-runnable pin create or not move HEAD at all.
-    head = [segment.strip() for segment in re.split(r";|&&|\|\||\|", halt.group("head"))]
-    # An ALLOWLIST, not "does not look like a mover": `; git reset --hard main`
-    # moves the tree without matching `_MOVES_HEAD`, and the denylist reading is
-    # the class that keeps being wrong. A segment may be the pin create itself or
-    # one of the few commands with no effect on the checked-out tree.
-    return all(
-        _re_runnable(segment) or _SAFE_SEGMENT.match(segment)
-        for segment in head
-        if segment
-    )
+    return _ends_at_halt(_block(fence, i), allow=_allows_dirty_test)
 
 
 def _re_runnable(code: str) -> bool:
@@ -281,6 +263,57 @@ def _re_runnable(code: str) -> bool:
         return False
     rest = code[create.end():].split()
     return bool(rest) and rest[0].strip('"').strip("'") == "$PINNED"  # START POINT, first token
+
+
+def _allows_pin_segment(segment: str) -> bool:
+    """A segment that may join a pin create: the create itself, or a no-op."""
+    return _re_runnable(segment) or bool(_SAFE_SEGMENT.match(segment))
+
+
+def _allows_dirty_test(segment: str) -> bool:
+    """A segment that may join the dirty-tree test: the test itself."""
+    return bool(_DIRTY_TEST.match(segment))
+
+
+def _ends_at_halt(code: str, allow=_allows_pin_segment) -> bool:
+    """Is the halt REACHABLE from the subject's failure — every separator `&&`?
+
+    Two things go wrong without this, and both were measured:
+
+    * ``pin ; true || exit 1`` — the halt belongs to ``true``, which never fails,
+      so the fence runs the whole suite and exits **0**; ``pin | true || exit 1``
+      is worse: the pin runs in a PIPELINE SUBSHELL and HEAD never moves in the
+      parent, so the baseline measures the operator's lane unconditionally. Every
+      word there (``true``, ``:``, ``echo``, ``cd``, ``printf``, ``git fetch``) is
+      in ``_SAFE_SEGMENT``, so an allowlist over SEGMENTS alone blesses it.
+    * ``A || exit 1 && C`` parses as ``(A || exit 1) && C``, so a suffix steals the
+      halt rather than being stopped by it.
+
+    So the SEPARATORS are kept: no pipeline at all, and every separator between the
+    last allowlisted subject and the halt must be ``&&`` — the only separator that
+    short-circuits a failure into the ``||``. ``;``/``&&`` BEFORE the subject stays
+    legal: their failure is harmless, since the subject is still halted.
+    """
+    halt = re.fullmatch(
+        r"(?P<head>.*?)\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\})\s*", code
+    )
+    if halt is None:
+        return False
+    parts = re.split(r"(;|&&|\|\||\|)", halt.group("head"))
+    segments = [piece.strip() for piece in parts[0::2]]
+    separators = parts[1::2]
+    if "|" in separators:
+        return False  # the subject would run in a subshell
+    subjects = [
+        i
+        for i, segment in enumerate(segments)
+        if segment and allow(segment) and not _SAFE_SEGMENT.match(segment)
+    ]
+    if not subjects:
+        return False
+    if any(sep != "&&" for sep in separators[max(subjects) :]):
+        return False
+    return all(allow(segment) for segment in segments if segment)
 
 
 #: The test target a marker-scoped run names (``tests/test_ingest_safety.py``).
