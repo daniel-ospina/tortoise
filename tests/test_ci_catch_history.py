@@ -634,6 +634,50 @@ def test_the_markdown_table_renders_its_citations_and_its_unknowns(tmp_path):
     assert "CATCH-PR" in table and "UNKNOWN" in table
 
 
+def test_every_table_row_declares_the_same_number_of_cells(tmp_path):
+    """The committed table must actually BE a table: header, delimiter and rows agree.
+
+    ⛔ GFM refuses a table whose header and delimiter rows differ in cell count (spec §4.10,
+    Tables: "The header row must match the delimiter row in the number of cells. If not, a
+    table will not be recognized"), and it then renders the whole thing as one paragraph of
+    pipe text — checked against GitHub's own renderer (`POST /markdown`, `mode: gfm`): a
+    9-cell delimiter returns `<p>` while a 10-cell one returns `<table>`.
+
+    That is exactly what happened when the `cleared by a re-run` column was added to the
+    header and to the data row but NOT to the hand-written delimiter (`04bfd156a`): the
+    report #10131's acceptance calls for — "a committed report with the 74-row table" —
+    rendered as prose, and no test noticed, because the existing ones assert substrings
+    (`"CATCH-PR" in table`) which are present either way. This assertion is the parity that
+    was missing: it reds on the 9-vs-10 delimiter with `{10, 9}`, and it holds for the
+    derived delimiter introduced to fix it.
+    """
+    root = _world(tmp_path, runs=[])
+    report = _report(root)
+    table = catch.render_table(report)
+    lines = table.splitlines()
+    assert len(lines) >= 3, "the header, the delimiter row and at least one data row"
+
+    header, delimiter, *_ = lines
+    assert header.startswith("|") and header.endswith("|")
+    assert [c.strip() for c in delimiter.strip().strip("|").split("|")] == [
+        "---"
+    ] * len(delimiter.strip().strip("|").split("|")), "the delimiter row is all `---`"
+
+    # ONE cell count across header, delimiter and every data row. A single dominant count
+    # means a column added to one of the three and not the others.
+    counts = {line.count("|") for line in lines}
+    assert len(counts) == 1, f"header/delimiter/data rows disagree on cell count: {sorted(counts)}"
+
+    # The filter path builds the same shape (a filtered table is still a table).
+    filtered = catch.render_table(report, only="nonpremerge").splitlines()
+    assert len({line.count("|") for line in filtered}) == 1
+
+    # And the REPORT — the artifact that is actually committed — carries that same table.
+    rendered = catch.render_report(report)
+    assert catch.render_table(report) in rendered
+    assert len({line.count("|") for line in table.splitlines()}) == 1
+
+
 def test_the_cli_writes_the_markdown_table_from_an_offline_fixture(tmp_path, capsys):
     """The documented invocation (`--offline-dir --md-out`) runs end to end — and the file it
     writes is the REPORT, not a bare table: the table, its window and its method together.
@@ -649,6 +693,12 @@ def test_the_cli_writes_the_markdown_table_from_an_offline_fixture(tmp_path, cap
     assert "| file | status | lane |" in rendered
     assert rendered.count("\n") >= 74  # one row per slow file, plus the header and method
     assert "NOT-PREMERGE" in rendered  # the non-gating lane is named in the table
+    # The file on disk is a TABLE, not a paragraph of pipe text: GFM refuses a table whose
+    # delimiter row has a different cell count from the header (see
+    # `test_every_table_row_declares_the_same_number_of_cells`), so the parity has to survive
+    # the write, not just `render_table`.
+    table_part = [line for line in rendered.splitlines() if line.startswith("|")]
+    assert len({line.count("|") for line in table_part}) == 1
     # The window and the method travel WITH the table.
     assert "## Method" in rendered
     assert "Window in one line:" in rendered

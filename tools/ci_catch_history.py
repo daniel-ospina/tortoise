@@ -1993,6 +1993,11 @@ def render_summary(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _cells(line: str) -> int:
+    """How many GFM table cells a pipe-delimited row declares."""
+    return len(line.strip().strip("|").split("|"))
+
+
 def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
     """The 74-row table. ``only`` filters to one status (``pr``/``push``/``never``/``unknown``/``nonpremerge``)."""
     alias = {
@@ -2003,12 +2008,19 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
         "nonpremerge": NOT_PREMERGE,
     }
     wanted = alias.get(only, only)
-    rows = [
+    # ⛔ The delimiter row is DERIVED from the header, never hand-written beside it. GFM
+    # refuses a table whose header and delimiter rows differ in cell count (spec §4.10:
+    # "If not, a table will not be recognized"), so a delimiter one cell short turns the whole
+    # committed artifact into a single paragraph of pipe text. Verified against GitHub's own
+    # renderer (`POST /markdown`, `mode: gfm`): 9 delimiter cells → `<p>…|—|…</p>`, 10 → a real
+    # `<table>`. The `cleared by a re-run` column was added to the header and the data row
+    # only, and nothing pinned the parity — so it is computed now instead of typed twice.
+    header = (
         "| file | status | lane | PR runs (attested) | main runs (attested) "
         "| leg runs w/o this file | PR-head catches | main catches | cleared by a re-run "
-        "| UNKNOWN |",
-        "|---|---|---|---|---|---|---|---|---|",
-    ]
+        "| UNKNOWN |"
+    )
+    rows = [header, "|" + "---|" * _cells(header)]
     for row in report["files"]:
         if wanted and row["status"] != wanted:
             continue

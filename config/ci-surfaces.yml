@@ -9121,10 +9121,14 @@ durations:
   test_ci_verdict.py: 0.2
   test_ci_catch_history.py: 8.5  # #10131: a NEW file has no CI junit measurement (a file that
   # never ran cannot appear in an artifact), so this is the LOCAL wall of its offline tests
-  # (32 of them — `grep -c '^def test_'` — 8.5-9.5 s, measured 2026-10-31 at the #10359 fix
-  # head, `-q -p no:cacheprovider`) — every
+  # (8.5-9.5 s, measured 2026-10-31 at the #10359 fix head, `-q -p no:cacheprovider`) — every
   # test is pure: an archived runs.json/jobs fixture plus in-memory JUnit zips, no DB and no
   # network. Refresh it from the first post-merge run that includes the file.
+  # ⛔ NO TEST COUNT HERE. This comment named one three times (29, then 32, then 41) and was
+  # stale at every review that read it, because a count is a fact the file keeps changing and
+  # a YAML comment is hand-maintained. The number is available where it cannot rot:
+  # `grep -c '^def test_' tests/test_ci_catch_history.py`. The wall-clock value above is the
+  # load-bearing half; the count never was, so do not re-add it.
   test_compute_attribution.py: 1.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.6
   test_connector_scope.py: 1.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_credential_store_mode_5109.py: 2.2  # #5109 (read side): 16 tests, local wall 2.16 s (measured at the #5109 lane head, 2026-10-12) — no DB, no network, every test a tmp-dir store plus a capsys read. A NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact), so this is the pre-merge estimate; refresh it from the first post-merge run that includes the file. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.2s) is a LOWER bound; kept 2.2
