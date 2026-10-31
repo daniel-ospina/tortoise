@@ -450,17 +450,26 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
 
     WHAT THIS GUARDS (measured, not inferred). `_seed_org` built a
     `TortoiseSDK(db_path=…, namespace="registry")`, wrote through it and dropped
-    it at return. In the CI window that SDK is the temp DB's ONLY client — the
-    lifespan health probe has not built its own handle yet — so the dangling
-    handle's GC teardown WAS the last-client teardown: the daemon went down on
-    that branch, and the next construction over the same path came up EMPTY —
-    the Team/Graph rows written moments earlier did not come back (`_cleanup`
-    removes the store's `.settings` and reclaims its socket dir). Measured at
-    `7a6301142` as **0** Team rows read through
-    `hosted_api._registry_anchor()` — the exact helper `_org_node` uses — for a
-    team seeded moments earlier; that is the 404 that reddened CI `test (c)` of
-    run `41210146871` at `:957`
-    (`TestGraphPacksRest::test_graph_bound_key_reads_only_its_own_graph`).
+    it at return. Measured at `7a6301142`, the Team/Graph rows written moments
+    earlier did not come back: **0** Team rows read through
+    `hosted_api._registry_anchor()` — the exact helper `_org_node` uses. That is
+    what this guard asserts, and it is the only thing this guard asserts.
+
+    ⛔ THE TEARDOWN'S OWN ARTIFACTS ARE NOT THE DISCRIMINATOR, and an earlier
+    revision of this docstring was wrong to name them (#10424 review P3,
+    measured against `redislite/client.py`). It said the rows were lost because
+    "`_cleanup` removes the store's `.settings` and reclaims its socket dir".
+    Both halves fail: `_cleanup` also issues `shutdown(save=True, now=True,
+    force=True)` (`:112`), and for a store constructed with an explicit db path
+    the RDB lives in `dbdir` = `dirname(db_filename)` (`:157-158`), which is
+    OUTSIDE the `redis_dir` that gets `rmtree`'d (`:161-164`) — `dbdir` equals
+    `redis_dir` only in the no-filename branch (`:455-458`). Measured inside
+    pytest, the pre-fix shape reds with `.settings` STILL PRESENT and no RDB
+    written at all, i.e. `_cleanup` had not run at that moment. So the failure
+    is not a teardown artifact, it is the ROWS: read them. The 404 that reddened
+    CI `test (c)` of run `41210146871` at `:957`
+    (`TestGraphPacksRest::test_graph_bound_key_reads_only_its_own_graph`) is the
+    same symptom.
     `tests/_embedded.py:204-207` names the contract: redislite's "`_cleanup()`
     last-client branch … shuts the daemon down", so "callers that need more than
     the lock must therefore ALSO verify visibility at seed time".
@@ -564,8 +573,20 @@ def test_a_seeded_team_survives_the_seeder_that_wrote_it(monkeypatch):
     """#10424: the seed's embedded server outlives the handle that wrote it.
 
     Deliberately NO `TestClient` here: this is the CI window, in which
-    `_seed_org` returns before the app's lifespan health probe has constructed
-    any handle, so the seeder IS that temp DB's only client.
+    `_seed_org` returns before the app's LIFESPAN health probe has constructed
+    any handle. It is NOT a single-client shape at this head, and an earlier
+    revision of this docstring was wrong to call it one (#10424 review P3,
+    measured): `_seed_org` runs its seed-visibility guard (`:539`) BEFORE
+    `sdk.close()` (`:545`), and that guard's read goes through
+    `ha_mod._registry_anchor()`, which constructs and caches the app's own
+    handle on the store — measured by mutating the guard's org id, whose raised
+    error reports a live `app_server=(socket=…, pid=…)`. So the close takes the
+    CO-TENANT (guarded) path, which is exactly the mechanism the docstring above
+    records, and this test pins what a reader can actually verify: the seeded
+    Team is still visible through the app's OWN anchor after `gc.collect()`.
+    The guard's read is what pins that second client; the close keeps the
+    release off the unguarded teardown path. Both halves stay load-bearing and
+    each alone keeps this green (measured at this head).
 
     FAIL-ON (MEASURED on `main`'s tree at `7a6301142`): with the seeder's SDK
     dropped rather than closed (#10424's pre-fix shape), `gc.collect()` runs the

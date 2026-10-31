@@ -28,9 +28,11 @@ production fixture used to rely on). The bound itself is unchanged.
 
 These tests are HERMETIC (per-test embedded store, no provider keys, no
 network): the query embedder is pinned to None so the sparse leg is the only one
-submitted and ranking is a pure FTS ordering, and ``TORTOISE_POOL_FLOOR`` is
-deleted so a caller's environment cannot move the window these bounds are
-measured against.
+submitted, ``TORTOISE_POOL_FLOOR`` is deleted so a caller's environment cannot
+move the window these bounds are measured against, and the BM25 lexical ARM is
+pinned OFF (``TORTOISE_BM25_LEXICAL=0`` via ``tortoise.bm25.BM25_ENV``) so
+"ranking is a pure FTS ordering" is TRUE on the shipped default too — see
+``_hermetic_pool_and_legs`` for why the arm pin is load-bearing, not tidiness.
 """
 from __future__ import annotations
 
@@ -77,7 +79,7 @@ _DOCUMENTED_PROD_POOL = 120
 
 @pytest.fixture(autouse=True)
 def _hermetic_pool_and_legs(monkeypatch):
-    """Pin BOTH knobs this module's bound depends on.
+    """Pin ALL THREE knobs this module's bound depends on.
 
     The sparse leg: with ``EmbeddingModel.get`` → None the vector strategy is
     never submitted, so FTS is the only leg and the ordering is deterministic
@@ -90,11 +92,52 @@ def _hermetic_pool_and_legs(monkeypatch):
     legitimately lets the prior into the pool. A verdict that depends on the
     caller's environment is a harness defect (#5049 doctrine), so the module
     deletes the variable and measures the product default it documents.
+
+    The BM25 lexical arm: the fixture's whole premise is that these rows score
+    ALIKE, so the shared recency-then-id tie (#10121) is what orders the window
+    and the prior is provably past the old ``limit + _PRIOR_OVERFETCH`` cut. The
+    graph-side scorer does score them alike; the arm (#8488), **ON by default
+    since #10240**, prices rarity and LENGTH, and this fixture's prior is the
+    short document: measured at this head, ``run_bm25_query`` ranks
+    ``zz_pt_real`` **first** (0.01416 vs 0.01383 for the 3x-query echoes), so the
+    old window no longer starves it and both tests below red with
+    ``it returned ['zz_pt_real']``. That is the arm working — it is not a
+    product regression and not a stale bound — which is why the fix is to hold
+    the SCORER constant rather than to re-word the assertions: with the arm off
+    the fused order is the recency tie this module documents (measured: the
+    prior lands at rank 100 of 151, behind every newer echo).
+
+    The pin uses the constant ``tortoise.bm25.BM25_ENV``, never the literal, so
+    a rename of the env var cannot silently restore the confounding. It is the
+    documented OPT-OUT of #10240's ruling (arm ON by default, ``=0`` disables),
+    NOT a re-flip of that default — the product default is untouched; this is
+    one hermetic module measuring the equal-score ordering it claims to measure.
+    ``tests/test_a4_instrument_input.py``'s ``keyword_lane`` takes the identical
+    pin for the identical reason (#10436).
     """
+    from tortoise.bm25 import BM25_ENV
+
+    monkeypatch.setenv(BM25_ENV, "0")
     monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
     from tortoise.embeddings import EmbeddingModel
     monkeypatch.setattr(EmbeddingModel, "get",
                         staticmethod(lambda load_timeout=None: None))
+
+
+def test_keyword_lane_pins_the_bm25_arm_off(_hermetic_pool_and_legs):
+    """The pin above must be IN EFFECT — with ``BM25_ENV`` rather than a
+    literal, so a rename of the env var cannot quietly bring the arm back and
+    turn this module into a measurement of BM25 instead of the tie (#10436).
+
+    Deliberately NOT an ``assert`` inside the fixture: a fixture that hard-fails
+    would turn a future mutation of the LEVER into a fixture ERROR, hiding the
+    two assertions it is supposed to discriminate.
+    """
+    from tortoise.bm25 import bm25_enabled
+    assert not bm25_enabled(), (
+        "the BM25-arm pin did not take — this module's equal-score premise is "
+        "confounded again, and the starvation it reproduces is not what it "
+        "measures")
 
 
 @pytest.fixture
