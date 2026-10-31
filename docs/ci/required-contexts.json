@@ -64,6 +64,10 @@
         "check"
       ],
       [
+        "deploy-staleness.yml",
+        "check"
+      ],
+      [
         "skip-bypass-expiry.yml",
         "check"
       ]
@@ -72,6 +76,12 @@
       [
         "supabase-deploy.yml",
         "check-drift"
+      ]
+    ],
+    "ci-introduced-failure": [
+      [
+        "python-ci.yml",
+        "ci-introduced-failure"
       ]
     ],
     "classify": [
@@ -162,6 +172,12 @@
       [
         "registry-backup-cron.yml",
         "drive"
+      ]
+    ],
+    "eval-suite": [
+      [
+        "eval-suite-manual.yml",
+        "eval-suite"
       ]
     ],
     "evals": [
@@ -507,7 +523,7 @@
       ]
     ]
   },
-  "gate_digest": "3e914d9a70183ec2b56e92a78ea9f0f8f7513796ece3e840318d8276cbd2fe82",
+  "gate_digest": "7178da29d020f179ef84b284b73169c9ccdcf495108cf27bea907dcda2701a6c",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -531,5 +547,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-25T01:38:44Z"
+  "verified_at": "2026-10-28T02:23:15Z"
 }

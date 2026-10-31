@@ -165,7 +165,16 @@ def _canonical_bundle():
     batch_id canonicalization variants. Includes a unicode diacritic in point
     content (so the NFC/NFD variant (d) is meaningful), a float confidence
     (variants (b)/(e)), refs (variant (g)), and all three shipped connection
-    routes reachable through ingest (operator + relation)."""
+    routes reachable through ingest (direct edge + operator + relation).
+
+    ⛔ #9749: the confidence-bearing connection is `c1`, a **non-Point** pair
+    (`:Subject`↔`:Subject`, so the operator-less DIRECT edge — the only route the
+    attribute has a home on). It used to ride `c1` as p1→p2, i.e. a Point↔Point
+    connection that the endpoint-kind gate (#8499) reifies: validation read it as
+    a direct-edge attribute and the operator write then DROPPED the value. That
+    is now a Phase-1 violation, so the fixture puts the float where the write
+    actually stores it — and `c2` keeps a Point↔Point plain IMPL, so the
+    isomorphism legs still exercise the promoted operator route."""
     return {
         "points": [
             {"ref": "p1", "kind": "claim",
@@ -176,16 +185,20 @@ def _canonical_bundle():
         "entities": [
             {"ref": "s1", "type": "subject", "name": "Ferra Labs",
              "subjectKind": "organization"},
+            {"ref": "s2", "type": "subject", "name": "Ferra Labs Research",
+             "subjectKind": "organization"},
         ],
         "sources": [
             {"ref": "src1", "url": "https://example.com/rust-report",
              "sourceKind": "report", "tier": "T1"},
         ],
         "connections": [
-            {"ref": "c1", "from": "p1", "to": "p2", "operator": "IMPL",
+            {"ref": "c1", "from": "s1", "to": "s2", "operator": "IMPL",
              "direction": "unidirectional", "confidence": 0.3},
-            {"ref": "c2", "from": "s1", "to": "p1", "relation": "authoredBy"},
-            {"ref": "c3", "from": "p1", "to": "src1",
+            {"ref": "c2", "from": "p1", "to": "p2", "operator": "IMPL",
+             "direction": "unidirectional"},
+            {"ref": "c3", "from": "s1", "to": "p1", "relation": "authoredBy"},
+            {"ref": "c4", "from": "p1", "to": "src1",
              "relation": "extractedFrom"},
         ],
     }
@@ -292,10 +305,23 @@ class TestModeIsomorphism:
                 "RETURN count(n)",
                 {"b": b1},
             ) == 1, "the reified operator carries the batch_id"
+            # ⛔ #9749: exactly ONE operator-less edge carries the batch_id —
+            # `c1`, the `:Subject`↔`:Subject` DIRECT edge. That is the attribute
+            # home §13 row 4 names, and the edge `create_direct_edge` writes
+            # (the `confidence` it carries is pinned in
+            # `tests/test_9749_connection_attribute_route.py`). No POINT-bearing
+            # connection lands here: those are operator-mediated, and #9749
+            # refuses an edge attribute the operator route cannot store instead
+            # of silently dropping it.
             assert _count(
                 g, "MATCH ()-[r:IMPL|NAND {batch_id:$b}]->() RETURN count(r)",
                 {"b": b1},
-            ) == 0, "no operator-less edge carries the batch_id any more"
+            ) == 1, "the Subject↔Subject direct edge is the only operator-less one"
+            assert _count(
+                g, "MATCH (a:Point)-[r:IMPL|NAND {batch_id:$b}]->(b) "
+                   "RETURN count(r)",
+                {"b": b1},
+            ) == 0, "no POINT-bearing connection is written operator-less"
             assert _count(
                 g, "MATCH (n:Point) WHERE n.batch_id IS NULL RETURN count(n)"
             ) == 1, "only the pre-seeded live anchor L is unstamped"
@@ -323,14 +349,14 @@ class TestModeIsomorphism:
         assert r_bulk["created"] == r_gran["created"]
         assert r_bulk["deduped"] == r_gran["deduped"]
         results = r_gran["results"]
-        # 2 points + 1 subject entity + 1 source + 3 connections = 7 items
-        assert isinstance(results, list) and len(results) == 7
+        # 2 points + 2 subject entities + 1 source + 4 connections = 9 items
+        assert isinstance(results, list) and len(results) == 9
         sections = [r["section"] for r in results]
         # write order: sources → points → entities → connections
         assert sections[0] == "sources"
         assert sections[1:3] == ["points", "points"]
-        assert sections[3] == "entities"
-        assert sections[4:] == ["connections", "connections", "connections"]
+        assert sections[3:5] == ["entities", "entities"]
+        assert sections[5:] == ["connections"] * 4
         # each result carries its created id + deduped flag
         assert results[1]["result"]["id"] == r_gran["ids"]["points"][0]
         assert results[1]["deduped"] is False

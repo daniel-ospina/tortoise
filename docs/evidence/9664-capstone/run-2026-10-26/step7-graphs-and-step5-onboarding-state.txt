@@ -1,0 +1,80 @@
+Now two calls, please, showing both the raw arguments and the raw results: (1) tortoise_list_graphs — I want to see exactly which graphs come back and their ids; (2) tortoise_onboarding_state — show me every step and whether it is complete or not.
+Worked for 15s
+ChatGPT said:
+1. tortoise_list_graphs
+Raw arguments
+JSON
+{}
+Raw result
+JSON
+{
+  "result": [
+    "org_2e34bf114bd077dc819619daaf"
+  ]
+}
+Finding: One graph namespace returned: org_2e34bf114bd077dc819619daaf.
+The response provides the namespace string, not a separate graph ID or display name.
+2. tortoise_onboarding_state
+Raw arguments
+JSON
+{}
+Raw result
+JSON
+{
+  "github_connected": false,
+  "issues_enabled": true,
+  "docs_enabled": true,
+  "github_indexed": false,
+  "github_indexed_at": null,
+  "github_docs_indexed": false,
+  "github_docs_indexed_at": null,
+  "demo_created": false,
+  "session_recording": true,
+  "capture_extract": true,
+  "org_created": false,
+  "prompt_pasted": false,
+  "onboarding_complete": false,
+  "github_index_cursor": null,
+  "github_legacy_backfill_done": false,
+  "capture_revised": false,
+  "capture_ask_shown": false,
+  "session_capture_receipt": null,
+  "session_capture_receipt_claude": null,
+  "session_capture_receipt_claude-desktop": null,
+  "session_capture_receipt_claude-web": null,
+  "session_capture_receipt_codex": null,
+  "session_capture_receipt_cursor": null,
+  "session_capture_receipt_pi": null,
+  "session_capture_receipt_openclaw": null,
+  "session_capture_receipt_hermes": null,
+  "session_capture_last_error_claude": null,
+  "session_capture_last_error_claude-desktop": null,
+  "session_capture_last_error_claude-web": null,
+  "session_capture_last_error_codex": null,
+  "session_capture_last_error_cursor": null,
+  "session_capture_last_error_pi": null,
+  "session_capture_last_error_openclaw": null,
+  "session_capture_last_error_hermes": null,
+  "install_probe_claude": null,
+  "install_probe_pi": null,
+  "github_issues_scope": [],
+  "github_docs_scope": [],
+  "fork": "self",
+  "status": "active",
+  "version": 1,
+  "completed_steps": [
+    "team-named",
+    "harness-connected",
+    "first-points-filed"
+  ],
+  "member_progress": {},
+  "last_decide_attempt": null,
+  "compact": false,
+  "fork_unsure_at": null,
+  "restart_pending": false
+}
+ChatGPT can make mistakes. Check important info.
+Latest response
+Thinking effort
+Medium
+Response complete

@@ -172,8 +172,13 @@ def _stub_curl(versions: list[str], http_code: int = 201) -> Path:
     return stub
 
 
-def _run_script_with_token(mode: str, repo: Path, base_sha: str,
-                           versions: list[str]) -> subprocess.CompletedProcess:
+def _run_script_with_token(
+    mode: str,
+    repo: Path,
+    base_sha: str,
+    versions: list[str],
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     stub = _stub_curl(versions)
     env = dict(os.environ)
     env["DRIFT_REPO"] = str(repo)
@@ -181,6 +186,8 @@ def _run_script_with_token(mode: str, repo: Path, base_sha: str,
     env["DRIFT_CURL"] = str(stub)
     env["DRIFT_API_URL"] = "https://api.supabase.invalid"
     env["DRIFT_TOKEN"] = "test-token"
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         ["bash", str(SCRIPT), mode],
         capture_output=True,
@@ -694,3 +701,185 @@ def test_approved_live_forward_renumber_still_allowed():
     r = _run_script_with_token("diff", d, base, versions=["20260813000098"])
     assert r.returncode == 0, r.stdout
     assert "exception" in r.stdout.lower(), r.stdout
+
+
+# ── #7628 class: which base a pull_request MERGE REF is diffed against ────────
+# CI checks out refs/pull/N/merge, so HEAD is GitHub's synthetic merge commit
+# (first parent = the base branch TIP) while DRIFT_BASE_SHA is
+# `pull_request.base.sha` = the PR's MERGE BASE (fork point). Diffed literally,
+# the base branch's own new migrations arrive as this PR's `A` — and an added
+# file at a version prod already applied is a violation, so a PR that touches no
+# migration is failed for one the base added. Measured on tortoise#10110.
+
+
+def _merge_ref_fixture(pr_change: str = "unrelated") -> tuple[Path, str]:
+    """A `pull_request` merge-ref shape: base tip + PR head, merged.
+
+    Layout (all in one fixture repo, returned at the synthetic merge commit):
+
+        B  (fork point)                     <- DRIFT_BASE_SHA in CI
+        ├── M1 on main: a NEW migration     <- the base branch's own work
+        └── P  on the PR branch: `pr_change`
+
+    The merge commit's first parent is M1, exactly as GitHub builds
+    refs/pull/N/merge. Returns (repo, fork_point_sha).
+    """
+    d = _make_repo(["20260813000099_a.sql"])
+    fork_point = _git_sha(d)
+    # The BASE branch gains a migration after the PR forked.
+    (d / MIG / "20261029000001_base_owns_this.sql").write_text("-- base branch\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "base: new migration on main")
+    # The PR branch, forked at the fork point, touches nothing under migrations.
+    _git(d, "checkout", "-q", "-b", "pr", fork_point)
+    if pr_change == "edit-base-migration":
+        # The guard's real subject: the PR EDITS a migration that is in the base
+        # tree. Narrowing the base must not hide this (the base parent is the
+        # tree the PR merges into, and the file differs from it).
+        (d / MIG / "20260813000099_a.sql").write_text("-- edited by the PR\n")
+    else:
+        (d / "unrelated.txt").write_text("pr change\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "pr change")
+    # GitHub's synthetic merge commit: first parent = base tip, second = PR head.
+    _git(d, "checkout", "-q", "main")
+    _git(d, "merge", "--no-ff", "-q", "-m", "Merge pull request", "pr")
+    return d, fork_point
+
+
+def test_merge_ref_does_not_blame_the_pr_for_the_base_branch_migration():
+    # DISCRIMINATING (#7628, tortoise#10110): DRIFT_BASE_SHA is the fork point AND
+    # the base branch added a migration afterwards. The base's migration is
+    # already applied in prod (its version is in the remote set), which is what
+    # turns the spurious `A` into a reported violation. Must be rc 0 — this PR
+    # changed nothing under supabase/migrations/.
+    d, fork_point = _merge_ref_fixture()
+    r = _run_script_with_token(
+        "diff",
+        d,
+        fork_point,
+        versions=["20260813000099", "20261029000001"],
+        extra_env=_as_merge_ref(d),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "20261029000001" not in r.stdout, r.stdout
+
+
+def test_merge_ref_still_reports_an_edit_of_a_base_tree_migration():
+    # Guard against a narrowing that silences the guard: an EDIT of a base-tree
+    # migration is still a violation on a merge-ref checkout whose
+    # DRIFT_BASE_SHA is the fork point.
+    d, fork_point = _merge_ref_fixture(pr_change="edit-base-migration")
+    r = _run_script_with_token(
+        "diff",
+        d,
+        fork_point,
+        versions=["20260813000099", "20261029000001"],
+        extra_env=_as_merge_ref(d),
+    )
+    assert r.returncode == 1, r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_plain_commit_checkout_still_diffs_against_drift_base_sha():
+    # No merge commit → DRIFT_BASE_SHA IS the base, and the base-parent derivation
+    # must NOT fire. Pinned BEHAVIOURALLY rather than by a log line: the sensitive
+    # edit sits in the FIRST of two PR commits, so a derivation that (wrongly)
+    # fell back to HEAD^1 would diff only the last commit, miss the edit and pass
+    # — an UNDER-block on a plain-commit checkout.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").write_text("-- edited\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "edit (first PR commit)")
+    (d / "unrelated.txt").write_text("second\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "second PR commit")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000099"])
+    assert r.returncode == 1, r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
+
+
+def _as_merge_ref(d: Path, n: str = "10110") -> dict[str, str]:
+    """Make the repo look like actions/checkout's `refs/pull/N/merge` checkout.
+
+    The #4396 identity, not the commit shape: the EVENT ref says refs/pull/N/merge
+    and the remote-tracking ref actions/checkout creates exists AND HEAD is it.
+    """
+    _git(d, "update-ref", f"refs/remotes/pull/{n}/merge", _git_sha(d))
+    return {"GITHUB_REF": f"refs/pull/{n}/merge"}
+
+
+def _local_merge_fixture() -> tuple[Path, str]:
+    """A LOCAL branch that merged main: the same 2-parent SHAPE as a merge ref,
+    but `HEAD^1` is the branch's own earlier commit and `HEAD^2` is main.
+
+        fork ── C1 "pr edits a landed migration"
+          └──── M  "main moves"
+        HEAD = merge(C1, main)   # created by `git merge main` on the branch
+    """
+    d = _make_repo(["20260813000099_a.sql"])
+    fork_point = _git_sha(d)
+    _git(d, "checkout", "-q", "-b", "pr", fork_point)
+    (d / MIG / "20260813000099_a.sql").write_text("-- EDITED by the PR\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "pr edits a landed migration")
+    _git(d, "checkout", "-q", "main")
+    (d / "main-moves.txt").write_text("main\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "main moves")
+    _git(d, "checkout", "-q", "pr")
+    _git(d, "merge", "--no-ff", "-q", "-m", "merge main into feature", "main")
+    assert _git_sha(d) != fork_point
+    return d, fork_point
+
+
+def test_local_merge_commit_does_not_narrow_the_base():
+    # FAIL-OPEN PIN (#10144 review P1). The commit SHAPE is not proof of the
+    # checkout: a feature branch that merged main locally has HEAD^1 = its own
+    # earlier commit, so a shape-blind narrowing diffs HEAD^1...HEAD, sees only
+    # the merge delta, and reports rc 0 for a PR that EDITED a landed migration.
+    # Without the #4396 identity the base must stay DRIFT_BASE_SHA.
+    d, fork_point = _local_merge_fixture()
+    r = _run_script_with_token("diff", d, fork_point, versions=["20260813000099"])
+    # BEHAVIOURAL, not a log marker: if the base narrowed, the edit lands in the
+    # merge's delta and the guard would report rc 0 (measured against the
+    # shape-blind draft). rc 1 AND the file named is the fail-open pin.
+    assert r.returncode == 1, r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
+
+
+def test_event_ref_alone_does_not_narrow_the_base():
+    # Same pin, second conjunct: `GITHUB_REF` names the EVENT, not the checkout.
+    # With the event ref set but HEAD NOT being refs/remotes/pull/N/merge, the
+    # base must stay DRIFT_BASE_SHA (a bare GITHUB_REF is not proof).
+    d, fork_point = _local_merge_fixture()
+    r = _run_script_with_token(
+        "diff",
+        d,
+        fork_point,
+        versions=["20260813000099"],
+        extra_env={"GITHUB_REF": "refs/pull/10110/merge"},
+    )
+    assert r.returncode == 1, r.stdout
+    assert "20260813000099" in r.stdout, r.stdout
+
+
+def test_merge_ref_checkout_narrows_only_with_the_full_identity():
+    # Positive control for the two pins above: the SAME local graph narrows once
+    # the checkout satisfies the identity (remote merge ref == HEAD) — which is
+    # what proves the pins fail for the missing conjunct, not for a broken fixture.
+    d, fork_point = _local_merge_fixture()
+    r = _run_script_with_token(
+        "diff",
+        d,
+        fork_point,
+        versions=["20260813000099"],
+        extra_env=_as_merge_ref(d),
+    )
+    # HEAD^1 is the PR's earlier commit, so the diff is the merge delta only and
+    # the edit is invisible — rc 0 is the BEHAVIOURAL signal that the identity
+    # predicate fired (and is why the two pins above must exist: the same graph
+    # without the identity must NOT narrow).
+    assert r.returncode == 0, r.stdout

@@ -268,7 +268,16 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "dedup=True (default): idempotent — returns existing Point if content matches. "
                     "Declaring extractedFrom materializes that :Source and links it (#8171); "
                     "a fresh write with no source and no provenance is advised (advisories: "
-                    "[{code: no_source, node_id, message}] — advisory only, never a block).",
+                    "[{code: no_source, node_id, message}] — advisory only, never a block). "
+                    "validTo accepts an ISO-8601 instant (representational variance such as "
+                    "'2024-3-1' or '2024/03/01' is normalised silently), or a DECLARED no-date "
+                    "value — 'unknown', TBD, TBA, TBC, N/A, NA, -, --, an em dash, or '?' — which "
+                    "is stored as the canonical un-datable end (no end plus "
+                    "validToPrecision='unknown', reading end_state='unknown') and echoed back as "
+                    "valid_to_shaped; None or omitted means the end is OPEN. An impossible "
+                    "calendar day, a month outside 01-12, an epoch passed as a string, or prose "
+                    "with no recoverable date is REFUSED, naming the fault and the accepted "
+                    "forms (#9202).",
         risk="write",
         idempotent=True,
         http_policy=True,
@@ -649,7 +658,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_update_point",
         id="surface.update_point",
-        description="Update properties on a Point. Safe — modifies one Point only.",
+        description="Update properties on a Point. Safe — modifies one Point only. "
+                    "validTo takes the same forms as tortoise_create_point: an ISO-8601 "
+                    "instant, a declared no-date value ('unknown', TBD, TBA, TBC, N/A, NA, -, "
+                    "--, — or ? — stored as no end plus validToPrecision='unknown' and echoed "
+                    "back as valid_to_shaped), or None for an OPEN end; an impossible date, a "
+                    "month outside 01-12, an epoch as a string or unreadable prose is refused "
+                    "naming the repair. Existing rows are never re-validated or migrated "
+                    "(#9202).",
         risk="destructive",
         http_policy=True,
         sdk_method="update_point",

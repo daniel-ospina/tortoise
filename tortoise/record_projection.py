@@ -118,10 +118,11 @@ SINGLE-TENANT deployment. On this tree it EXISTS — the carrier landed in #9231
   with no such row still refuses (`no_tenant`) rather than guessing. The
   hosted REST lane carries the SAME pair by value rather than through this
   `ContextVar` — `hosted_api._data_sdk` → `sdk._bind_record_tenant` — which is
-  the seam its `TortoiseSDK` reads. Unwired still: a SESSION/JWT credential and
-  an OAuth `oat_` token, neither of which carries a `default_graph_id` (#10046).
-  The lanes that build their OWN SDK — the background indexing jobs and the
-  seed runners — are wired since #10047
+  the seam its `TortoiseSDK` reads. Since #10046 every request credential is
+  named on that lane too (`hosted_api._session_user_org` and
+  `tortoise.oauth.resolve_oauth_access_token` stamp the same
+  `default_graph_id`). The lanes that build their OWN SDK — the background
+  indexing jobs and the seed runners — are wired since #10047
   (`hosted_api._bind_default_graph_record_tenant`, same `record_tenant_for`
   answer, org default graph by construction).
 * **The arming gate.** `record_tenant()` reads the `ContextVar` first and
@@ -152,16 +153,22 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 __all__ = [
+    "GRAPH_TIER",
     "JOURNAL_EVENT_TYPES",
     "NARRATIVE_RECORD_TYPE",
     "NARRATIVE_TABLE",
     "PACKAGED_MIGRATIONS",
     "RECORD_MUTATIONS",
+    "RECORD_ONLY_TIER",
     "ROLE_POSTURE_SQL",
     "TENANT_GUC",
     "TENANT_GUC_SQL",
     "TENANT_SCOPE_SQL",
     "THE_RECORD_TABLES",
+    "TURNS_RECORD_TYPE",
+    "TURNS_SNAPSHOT_KEYS",
+    "TURNS_SNAPSHOT_OPTIONAL_KEYS",
+    "TURNS_SNAPSHOT_UNATTESTABLE_KEYS",
     "RecordProjectionError",
     "RefusedJournalOperation",
     "ReplayReport",
@@ -425,6 +432,24 @@ _LABEL_TABLES: dict[str, str] = {
 #:
 #: `source` keeps both: a Source's key is `url` while its record identity is
 #: usually `id` (`add_document` emits `id` and no `url`).
+#:
+#: ⛔ NOT EVERY EDGE ENDPOINT IS ADDRESSED THIS WAY, and #9972 is what happens
+#: when one silently is. A STRUCTURAL `DirectEdgeRepoint` descriptor (pass-2b)
+#: names its target by the node's **replay key** — `stub_key`
+#: (`projection/edges.py`) emits a `name` for
+#: `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutPoint` and a `url` for
+#: `aboutDocument`/`extractedFrom` — because the GRAPH resolves it that way
+#: (`resolve_structural_target`). Resolving it through THIS table matched
+#: `object.id = 'Acme Corp'`, which is a successful 0-row statement: the
+#: successor's edge was never written, in silence. That family has its own
+#: resolver (`_structural_target_resolution`) instead.
+#:
+#: ⛔ AND THE TEMPTING FIX IS WRONG: widening `object`/`subject` to
+#: `("id", "name")` here would also loosen `EntityMutated` and `EntityLinked`,
+#: whose payloads ARE ids — an unranked `id = %s OR name = %s` is a UNION with no
+#: precedence, so it can pick a different row than the fold's `MATCH {id:$id}`
+#: (and fan an edge out over two carriers). `_endpoint_resolution`'s `prefer=`
+#: lever exists for that ordering problem; this table is not where it belongs.
 _ENTITY_MATCH_COLUMNS: dict[str, tuple[str, ...]] = {
     "point": ("node_key",),
     "session": ("node_key",),
@@ -456,6 +481,137 @@ ENVELOPE_KEYS: frozenset[str] = frozenset({
 #: `create_document(type="SourceCreated")` journal nothing at all.
 NARRATIVE_RECORD_TYPE = "SessionNarrated"
 
+#: The ONE record type whose whole job is to carry a capture's raw TURN SET into
+#: the record (#10017, step 3 of the ruling on that issue). Declared ONCE here and
+#: imported by its producer (`sdk._write_capture_turns`), for the same reason as
+#: :data:`NARRATIVE_RECORD_TYPE`: a producer and a registry that spell one type
+#: two ways is the class of defect that made
+#: `create_document(type="SourceCreated")` journal nothing at all.
+#:
+#: ⚠️ STEP 7 EMITS IT NOW (this change), and the two halves have to be read
+#: together or the swap looks like a data loss:
+#:
+#:   * the per-turn `PointAdded` records it replaces ARE the record's turn-row
+#:     write (`_write_capture_turns` issues no row statement of its own, and the
+#:     graph write is already skipped once the record is armed — measured: drop
+#:     them and the record projects zero turn rows). So the carrier must give the
+#:     record that row write in the SAME change: `_turn_row_statements`, one
+#:     `public.point` row per turn at `cache_tier = 'record_only'`.
+#:   * the GRAPH half is `projection/__init__.py::_NO_PROJECTION_FOLD` — declared
+#:     there so both replay engines treat the type as recognized-and-not-folded
+#:     instead of "unrecognized event type" / `record_non_folded`.
+#:
+#: ⛔ AND STEP 7 INHERITS A THIRD STORE, not just the two this type names. The
+#: per-turn `PointAdded` records it replaces are ALSO the `:GraphEvent` /
+#: claim-transition stream — `sdk._GRAPH_EVENT_TYPES`, `shared_state.events
+#: .CLAIM_EVENT_TYPES`, and `docs/event-catalog.md`'s `PointAdded` row ("one per
+#: `{session_id}_t{i}` turn Point") — which is what `poll_events` serves.
+#:
+#: **THE DECISION THIS CHANGE RECORDS (it was required by #10017's own
+#: instruction of 2026-10-27T03:21:55Z, "either a store-only per-turn emission or
+#: the recorded decision to drop turns from `poll_events`"): turns LEAVE
+#: `poll_events` on the record-armed lane, and NO store-only emission replaces
+#: them.** The reason is the one that decides it: on this lane the writer
+#: deliberately stores no turn NODE, so a `:GraphEvent` about a turn would
+#: advertise an entity the graph does not hold — a subscriber would be told about
+#: a Point no graph read can return. ⛔ AND NOTHING COMPENSATES FOR IT ON THE
+#: FEED: `SessionRecorded` is NOT in `_GRAPH_EVENT_TYPES` either, so it writes no
+#: `:GraphEvent` row and `poll_events` (which serves `event_store.read_after`)
+#: never sees it — on the armed lane the change feed's visibility therefore ends
+#: with the EXTRACTION lane's claim Points, which are unaffected and stay
+#: `PointAdded`. The capture's own session-level record is JSONL only (durable
+#: in `public.journal_event` / the journal file), and the whole transcript is
+#: served by `get_session_detail` from the record, which is where §9.1/D1 puts
+#: it — a READ, not an announcement. Do not write a comment here claiming the
+#: feed still announces the capture; it does not. `TurnsRecorded` must NOT be
+#: added to `_GRAPH_EVENT_TYPES` to "restore" the rows — that set's shape is a
+#: recorded decision, and adding a JSONL-only carrier to it would make an event
+#: with no entity. Pinned by `tests/test_10017_turn_carrier_replay.py`
+#: (`test_an_armed_capture_writes_NO_graph_event_for_its_turns`), so the drop is a
+#: stated decision rather than an untested side effect of a type rename.
+TURNS_RECORD_TYPE = "TurnsRecorded"
+
+#: ⛔ THE PAYLOAD IS PINNED TO THE WRITER'S, so step 7 is a MOVE and not a
+#: reshape. Each entry of the carrier's ``turns`` list is one of the
+#: ``_turn_snapshot`` dicts `sdk._write_capture_turns` builds today, verbatim —
+#: these keys ALWAYS, plus at most one branch of the optional set below, MINUS
+#: (never partially) the ``TURNS_SNAPSHOT_UNATTESTABLE_KEYS`` when the writer could
+#: not attest them. The
+#: ``contains_session`` link rides the EVENT ENVELOPE rather than the per-turn
+#: dicts, exactly as it does for `PointAdded` (#3947: it is a capture-write
+#: STRUCTURAL fact, restored by the projection's edge fold, and never a node
+#: property the live write does not set).
+#:
+#: `tests/test_10017_record_carrier.py` reads the snapshots a REAL capture emits
+#: — one with no vector, one that ENCODED one, one that PRESERVED one — and
+#: compares them to these sets, so the pin is against the producer rather than
+#: against this comment.
+TURNS_SNAPSHOT_KEYS: frozenset[str] = frozenset({
+    "id", "content", "pointKind", "speaker", "is_episodic", "status",
+    "createdAt", "embedding",
+})
+#: ``embedding_preserved`` rides a snapshot ONLY when the live write PRESERVED a
+#: prior vector instead of encoding one (#5004 round 3). The three IDENTITY
+#: stamps are the other branch: `embeddings.stamp_journal_embedding(payload,
+#: creating=True)` adds `embedding_model` / `embedding_revision` /
+#: `embedding_text_hash` to the journalled point when the write DID encode one,
+#: and deliberately withholds them from a preserved vector — that vector may come
+#: from a DIFFERENT model, so attesting the active one would record a false
+#: origin, the failure #5004/R1 exists to prevent. So these keys are optional one
+#: branch at a time, NOT absent in practice. ⛔ Step 7 must carry them VERBATIM: a
+#: carrier that kept `embedding` but dropped the identity would replay a vector
+#: with no origin, which is the silent model change the stamps expose.
+TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
+    "embedding_preserved",
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+})
+#: The keys a snapshot MAY OMIT — TOGETHER — when the writer could not attest the
+#: stored value (#10021 review P3). ``sdk._write_capture_turns`` journals
+#: ``status``/``createdAt`` as what the write LEAVES, and both folds apply them
+#: ABSOLUTELY, so a capture whose prior-row read failed must OMIT both keys
+#: (``_UNATTESTABLE``) rather than assert its own ``now``/``draft`` — which would
+#: re-stamp ``created_at`` and DEMOTE a promoted turn on the store of record.
+#:
+#: ⛔ WHAT THE OMISSION BUYS IS THE **UPDATE** ARM, NOT BOTH (#10021 review P3).
+#: ``_upsert_statement`` builds the ``INSERT ... (columns)`` list and the
+#: ``DO UPDATE SET`` list from the SAME ``col_values`` keys (its ``columns =``
+#: and ``updates =`` lines), so
+#: an omitted key is absent from both: a row that ALREADY exists keeps its values
+#: (the half the writer needs), and a row that does NOT exist takes the column's
+#: declared DEFAULT — or NULL, since ``public.point.status`` / ``created_at`` are
+#: nullable ``text`` with no default (PostgreSQL: "each column not present in the
+#: explicit or implicit column list will be filled with a default value, either
+#: its declared default value or null if there is none"). The fresh-row NULL is a
+#: RECORDED RESIDUAL, stated at its producer (`sdk._write_capture_turns`) and
+#: pinned by `tests/test_10000_turns_record_only.py::
+#: test_the_omitted_pair_is_safe_on_the_update_arm_only`. ⚠️ A `coalesce(EXCLUDED.
+#: c, point.c)` on the conflict arm would NOT close it — on a fresh insert
+#: ``EXCLUDED.c`` IS that NULL; only a column DEFAULT would.
+#:
+#: ⛔ THIS SET IS WHY THE ALWAYS-SET ABOVE CAN KEEP ITS PROMISE. Declaring
+#: ``status``/``createdAt`` unconditional while an arm omits them left the pin
+#: that reads a REAL capture (``tests/test_10017_record_carrier.py``) passing only
+#: because its leg never reached that arm — a capture that did would red it with a
+#: message naming the wrong cause. The variance is now declared here instead of
+#: living where only the writer knows it.
+TURNS_SNAPSHOT_UNATTESTABLE_KEYS: frozenset[str] = frozenset({
+    "status", "createdAt",
+})
+
+#: The `public.point.cache_tier` domain (#10017 R2). The column's own CHECK
+#: (`supabase/migrations/20261029000001_record_point_cache_tier.sql`) is the authority
+#: the database enforces; this pair is the value the PROJECTION writes, and
+#: `tests/test_10017_turn_carrier_replay.py` pins the two declarations together
+#: so a domain change cannot land on one side only.
+#:
+#:   * ``graph``       — the record and the cache both hold the row (the default,
+#:                       and every row written before the tier existed).
+#:   * ``record_only`` — the record holds it, the graph must not (§9.1's tier).
+#:                       `cache_projection.read_record_view` skips these rows, so
+#:                       `rebuild_from_record` and a journal rebuild agree.
+GRAPH_TIER = "graph"
+RECORD_ONLY_TIER = "record_only"
+
 #: The journal's record-type vocabulary. Sourced from the graph fold's own
 #: dispatch (`tortoise/projection/`) and the producers' emit sites, and pinned
 #: by `tests/test_record_projection.py` against both. A type that appears in a
@@ -483,6 +639,7 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
     "DocumentCreated",
     "SessionRecorded",
     NARRATIVE_RECORD_TYPE,
+    TURNS_RECORD_TYPE,
     "SessionDeleted",
     "EntityLinked",
     "DirectEdgeCreated",
@@ -665,6 +822,18 @@ class OpDispatch:
     `refused_props_names()`, which reads the same CHECKs from disk.
     `Point.status` is NOT in this set: a Point's lifecycle IS journaled
     (`PointRetracted`/`…Superseded`) and `point.status` is a PRIMARY column.
+
+    ⚠️ ``never_store`` is the REFUSAL half of the split and says nothing about
+    who COMPUTES the value — #9974 measured the gap that left: the record stored
+    nothing, the cache derived nothing, and a record-sourced rebuild
+    materialized a superseded entity with NO `status`, which
+    `live._terminal_excluded` reads as LIVE. The computing half is
+    `cache_projection.DERIVED_FROM_RECORD` (from this module's own PRIMARY
+    carriers, `superseded_by` / `superseded_at`, the same OR-predicate the
+    record's `public.*_current_status` views use); its docstring names the
+    statuses the record carries NO signal for at all (an explicit `restatus`,
+    whose only carrier is `public.journal_event.payload`) — those stay an
+    ownership decision, not a silent success.
     """
 
     table_for_label: Mapping[str, str]
@@ -1018,6 +1187,35 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
             "tests/test_record_projection.py's totality fixture."
         ),
     ),
+    # ── §9.1's raw-TURN carrier (#10017) ─────────────────────────────────────
+    TURNS_RECORD_TYPE: Mutation(
+        NoRecordEffect(
+            "#10017 — §9.1's raw-turn carrier: one capture's turn set on ONE "
+            "record, where the capture writer emits one `PointAdded` per turn "
+            "today. It materialises NO node, and that is the ruling rather than "
+            "an omission: §9.1's D1 places the raw transcript 'not in the "
+            "graph, not a `Document` node, not a `Point`' (owner, 2026-09-23: "
+            "the same rule applies to raw turns). Its RECORD home is "
+            "`public.point` — the table `record_read` already serves the "
+            "transcript from — with `cache_tier = 'record_only'`; NOT a new "
+            "table, and its row statement is the CARRIER-KEYED secondary "
+            "projection `_turn_row_statements` (step 7 of the ruling, landed "
+            "with the producer that emits this type). The "
+            "tier cannot ride the event payload: `_RECORD_ONLY_KEYS` strips it "
+            "before the insert, so the row statement names the COLUMN "
+            "explicitly (`_turn_row_statements`, #10070's named shape). "
+            "Declaring `NoRecordEffect` here is deliberate and is NOT the "
+            "same statement as \"the carrier writes nothing\": "
+            "`projection/__init__.py::_NO_PROJECTION_FOLD` folds the type "
+            "nowhere (the GRAPH half), while the row/home half is keyed on "
+            "the CARRIER in the shape-keyed pass — so a replay writes one "
+            "`public.point` row per turn and no node, and the two rebuild "
+            "routes agree for the right reason. A `NodeSnapshot` effect "
+            "cannot express it: the payload is a LIST of snapshots, not one. "
+            "The payload is pinned to the writer's per-turn snapshot; see "
+            "TURNS_SNAPSHOT_KEYS."
+        ),
+    ),
     "SessionDeleted": Mutation(
         NodeDelete(
             Node("session", "Session", "id"), key_from="id",
@@ -1334,8 +1532,10 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # precedent — the record strip alone was never sufficient for that key).
     # ⛔ And because this strips it, the tier can NOT be set through an event
     # payload: it is dropped before the insert, so the row lands the DEFAULT
-    # `graph` and the turn would be materialised again. Step 7 must write it as
-    # its own column statement.
+    # `graph` and the turn would be materialised again. It is written as its own
+    # column statement instead — `_turn_row_statements` below writes the
+    # `TURNS_RECORD_TYPE` carrier's rows with the tier COLUMN set for exactly
+    # this reason, and REFUSES a row it cannot place.
     "cache_tier",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
@@ -1765,15 +1965,85 @@ def _delete_statements(
     node: Node,
     key: str,
     match: tuple[str, ...] = ("node_key",),
+    cache_tier: Any = None,
 ) -> list[Statement]:
     """A hard delete: the identity parent FIRST (so the subquery sees the node
     row), then the node row. The identity delete cascades the incident edges,
     matching the graph's `DETACH DELETE`; the explicit node delete is the
-    child-first form and a no-op once the cascade has run."""
+    child-first form and a no-op once the cascade has run.
+
+    ``cache_tier`` is the #10017 R1 discriminator, and it exists because ONE op
+    cannot mean two end-states (#3300). Absent — every producer before #10017,
+    and every producer whose removal is real — the entity leaves BOTH stores.
+    ``record_only`` says the graph-tier copy is what is being removed and the
+    RECORD keeps the row: the graph fold still hard-deletes the node (it never
+    reads this key), and the record DEMOTES the row's tier instead of deleting
+    it.
+
+    ⛔ Why the demote and not the delete (`delete_point`'s `DELETE FROM
+    public.point` is the wrong shape here, and not by a little): the turns
+    #10017's purge removes from the graph are the SAME rows the copy phase just
+    put in the record, verified row-for-row by `tools/turn_parity_census.py`
+    BEFORE the delete is allowed. Deleting them would destroy the transcript the
+    purge exists to preserve — and it would happen immediately, not only on a
+    later replay, because `_emit_event` hands every appended record straight to
+    `record_writer.write_live_record` (the ONE production record door —
+    `write_records` is the batch/replay door, not this path). The demote is also
+    what keeps the two REBUILD routes agreeing: leave the row at its `graph`
+    default and `rebuild_from_record` re-creates the node the journal rebuild
+    correctly omits (`cache_projection.read_record_view`'s tier predicate is the
+    other half).
+
+    **OVERRIDES:** #10017 R1's recorded record-side mechanism (an
+    identity-then-row `DELETE`, `record_projection.py`'s `_delete_statements`
+    tier-less arm) — a tier-scoped removal's RECORD effect is a TIER DEMOTE
+    (`UPDATE public.point SET cache_tier = 'record_only'`) instead. R1's
+    premise, that journaling the removal "needs **no new mechanism**", holds on
+    the GRAPH fold (still a hard `DETACH DELETE`, unchanged) and is wrong on the
+    record fold, where it would delete the very rows the purge's census just
+    verified. Recorded on the issue (#10017) as well, which is the artifact the
+    lane that builds the gated purge tool reads first.
+
+    ``record_only`` is the only value a DELETE may carry: `graph` would name a
+    tier the row is not being left in, and the column exists only on
+    `public.point`, so a tier-scoped delete of any other label is refused rather
+    than emitted as SQL against a column that is not there.
+    """
+    if cache_tier is not None:
+        if cache_tier != RECORD_ONLY_TIER or node.table != "point":
+            raise RefusedJournalOperation(
+                f"EntityMutated op='delete' on {node.label!r} carries "
+                f"cache_tier={cache_tier!r}: the only tier-scoped removal is "
+                f"`{RECORD_ONLY_TIER}` on a `Point` (the one table with the "
+                "tier column). A `graph`-tier delete names a state the row is "
+                "not left in, and any other label has no column to demote.")
+        return [_tier_demote_statement(org_id, graph_id, key, match)]
     return [
         _identity_delete_statement(org_id, graph_id, node, key, match),
         _delete_statement(org_id, graph_id, node, key, match),
     ]
+
+
+def _tier_demote_statement(
+    org_id: str,
+    graph_id: str,
+    key: str,
+    match: tuple[str, ...] = ("node_key",),
+) -> Statement:
+    """The record's half of a graph-tier removal: the row STAYS, its tier moves.
+
+    A 0-row no-op when the record does not hold the row, which is the same
+    verdict the graph fold reaches for a delete of an absent node — a removal
+    record is never a creating record.
+    """
+    predicate = " OR ".join(f"{c} = %s" for c in match)
+    if len(match) > 1:
+        predicate = f"({predicate})"
+    return Statement(
+        "UPDATE public.point SET cache_tier = %s "
+        f"WHERE org_id = %s AND graph_id = %s AND {predicate}",
+        (RECORD_ONLY_TIER, org_id, graph_id, *([key] * len(match))),
+    )
 
 
 def _relation_coordinates(
@@ -2144,6 +2414,418 @@ def _relation_delete_statement(
     )
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# §4.4 pass-2b: a STRUCTURAL `DirectEdgeRepoint` is a MOVE, not an upsert
+# (#9972 + #9973 — the two halves of ONE mutation)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# `DirectEdgeRepoint` carries TWO descriptor shapes with DIFFERENT meanings, and
+# the record treated them as one (`RelationUpsert()` at the descriptor's own
+# `src`):
+#
+#   * 2a DIRECT (`edge_type` ∉ the structural rel set) — `src` is already the
+#     SUCCESSOR (`sdk.py` `src=new_id`) and `tgt` is an endpoint ID. An upsert at
+#     `src` is right; nothing moves.
+#   * 2b STRUCTURAL (`edge_type` ∈ the structural rel set) — `src` is the point
+#     being SUPERSEDED (`sdk.py` `src=old_id`) and `tgt` is the target's
+#     **replay key**, which `stub_key` (`projection/edges.py`) mints as a NAME
+#     for `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutPoint` and as a `url`
+#     for `aboutDocument`/`extractedFrom`. The descriptor means MOVE.
+#
+# Two silent defects followed, both measured on a real Postgres (PGlite, every
+# migration applied — `supabase/tests/pglite/validate.mjs`):
+#
+#   #9972 — the target was resolved against the label's KEY column (`object.id`)
+#           while the descriptor names its `name`, so the `INSERT … SELECT`
+#           yielded no row: a successful 0-row statement, no error, nothing on
+#           `record_write_failures`, and the graph holding the edge.
+#   #9973 — nothing was ever DELETED and the row that did land was filed at the
+#           SUPERSEDED point: `relation` kept an edge the graph removed and the
+#           successor never got it, so a record-sourced rebuild resurrects it.
+#
+# Either half alone is unobservable (a target-only fix writes the same wrong row
+# with its attributes erased by the `ON CONFLICT` path; a move-only fix deletes
+# and re-creates against a target that resolved to nothing), which is why they
+# land together. The graph side is the oracle and is mirrored, not re-invented:
+# `projection/__init__.py` pass-2b resolves the target through
+# `resolve_structural_target`, deletes the resurrection at `old`, and re-creates
+# it at its DIRECT successor — and skips the whole descriptor when
+# `_final(src) == src` or when the resolved target IS the destination (the
+# E2E-11.6 no-self-edge contract).
+
+#: rel → the label of the STRUCTURAL target, restated from
+#: `projection/edges.py::STRUCTURAL_REL_LABELS`. ⛔ The label is derived from the
+#: REL and never read off the descriptor's `target_label`: that is what the graph
+#: does (`STRUCTURAL_REL_LABELS[etype]` — the journal fold IGNORES the field), and
+#: a `target_label` that disagreed with the rel would otherwise file the row
+#: under a label the fold never resolved. The map is also the ROUTER: membership
+#: is what distinguishes a 2b structural descriptor from a 2a direct one.
+#:
+#: Restated rather than imported for the STANDALONE reason every other constant
+#: in this block is (the PGlite harness `spec_from_file_location`s this module,
+#: so a package-relative import raises there) and pinned to the fold's own map —
+#: both directions — by
+#: `tests/test_record_projection.py::test_the_structural_repoint_map_is_the_folds_own`.
+_STRUCTURAL_REL_LABELS: dict[str, str] = {
+    "aboutSubject": "Subject",
+    "aboutObject": "Object",
+    "aboutEvent": "Event",
+    "aboutPoint": "Point",
+    "aboutDocument": "Source",
+    "extractedFrom": "Source",
+}
+
+#: The five EDGE attributes a structural `DirectEdgeRepoint` carries, restated
+#: from `projection/edges.py::DIRECT_EDGE_ATTR_KEYS` — the ONE vocabulary the
+#: live carry (`sdk.supersede_point`), the pass-2b replay fold and this move all
+#: read (#10139). Restated rather than imported for the STANDALONE reason above
+#: (the PGlite harness `spec_from_file_location`s this module with the stdlib
+#: only, so a `tortoise.…` import would not resolve there) and pinned to the
+#: fold's own tuple — both directions — by
+#: `tests/test_record_projection.py::test_the_structural_carry_reads_the_folds_own_vocabulary`.
+#:
+#: ⛔ `source_version` is deliberately NOT a member, on either side: the fold
+#: writes this anchor as `sourceVersion` and its transfer/replay drops it, so a
+#: member here would make the record CARRY an attribute the graph loses — a new
+#: divergence in place of the old one. The record contract also forbids
+#: re-applying it on a re-link ("a re-link must not ADVANCE a recorded version").
+_DIRECT_EDGE_ATTR_KEYS: tuple[str, ...] = (
+    "direction", "confidence", "weight", "label", "batch_id",
+)
+
+#: The statuses the graph's terminal gate EXCLUDES, restated from
+#: `live.TERMINAL_EXCLUDED_STATUSES` (same STANDALONE reason; pinned by
+#: `test_the_terminal_status_set_is_the_canonical_ones`).
+#:
+#: It is here because the graph's structural delete-leg is guarded by
+#: `projection/__init__.py::_src_is_terminal`, which asks
+#: `live._terminal_excluded` (a code-review P1: under id-reuse `src` may be a
+#: RE-CREATED **live** incarnation whose edges are legitimately its own, and
+#: moving them clobbers a live point). `_terminal_excluded`'s vocabulary is
+#: `TERMINAL_EXCLUDED_STATUSES` — `TERMINAL_STATUS_VALUES` **plus `deprecated`**,
+#: which is not a legal create-time status (`live.py`) but IS present in legacy
+#: graphs and must never be served as current. Pinning this set to
+#: `TERMINAL_STATUS_VALUES` alone made the record's gate NARROWER than the fold's
+#: by exactly that member, so a legacy `deprecated` point was moved by the graph
+#: and skipped by the record.
+_TERMINAL_POINT_STATUSES: tuple[str, ...] = (
+    "archived", "deprecated", "outdated", "retracted", "superseded",
+)
+
+#: The bound on the `superseded_by` chase. The graph's `_final` walks its fold
+#: map, which cannot cycle; the record's is a table walk, so the recursion is
+#: both depth-bounded and `path`-guarded. The MOVE reads ONE hop (`depth = 2`,
+#: the direct successor live named); the deeper hops exist because a chain's
+#: earlier descriptors each resolve at their own successor.
+#:
+#: ⚠️ NO DESTINATION ⇒ NOTHING MOVES, and that promise is only kept because the
+#: DELETE carries the same "a destination exists" conjunct as the INSERT: gating
+#: the delete on `_src_is_terminal(src)` + "src HAS a successor" alone fired the
+#: DELETE while the INSERT's `dest` subquery was empty, so a chain the record
+#: cannot resolve DELETED the row and wrote no replacement.
+_SUPERSEDE_CHAIN_DEPTH = 32
+
+
+def _terminal_point_sql(alias: str) -> str:
+    """The TERMINAL half of `live._terminal_excluded` over one `public.point`
+    alias, as SQL.
+
+    The statuses are INLINED rather than bound: they are a fixed vocabulary this
+    module declares (never caller input), and keeping them out of the parameter
+    list is what lets the two statements below reuse one parameter block. They
+    are pinned to the canonical set by the test named on
+    :data:`_TERMINAL_POINT_STATUSES`, so an inlined literal cannot drift silently.
+
+    The legacy flag is read from the `outdated` COLUMN, not from `props`: the
+    record writes it as a column (`PointSuperseded`/`PointInvalidated` declare it
+    as a `NodePatch` literal, and `_split_properties` routes a payload key to the
+    column whenever the table has one — measured: `PointAdded{point:{…,
+    outdated:true}}` emits `(…, status, outdated, props) VALUES (…, 'live', true,
+    '{}')`). A `props ->> 'outdated'` leg is therefore DEAD — it was always NULL,
+    so a `PointInvalidated` point (flag set, status untouched) read as LIVE here
+    while the fold read it as terminal.
+    """
+    literals = ", ".join(f"'{status}'" for status in _TERMINAL_POINT_STATUSES)
+    return (f"({alias}.status IN ({literals}) "
+            f"OR coalesce({alias}.outdated, false) = true)")
+
+
+def _supersede_chain_cte(org_id: str, graph_id: str,
+                        src: str) -> tuple[str, list[Any]]:
+    """`projection/__init__.py::_final(src)` as a recursive CTE (#9973).
+
+    The record already stores the successor link the chase needs —
+    `public.point.props->>'superseded_by'`, written by the `PointSuperseded`
+    patch (`renames=(("superseded_by", "new_id"), …)`) — so no graph read is
+    involved. `node_key` IS the Point's `id`
+    (`chk_point_node_key_is_contract_key`), which is why the root of the walk and
+    its hops use the same column.
+
+    Columns: `node_key` (this hop), `next_id` (its successor, NULL at the end),
+    `depth` (1 = `src`), `path` (the cycle guard — Postgres forbids a second
+    reference to the recursive CTE, so the walk carries its own path), and
+    `terminal` (`live.is_terminal_status` for THIS hop, which is what
+    `_src_is_terminal` reads on the graph side).
+    """
+    terminal = _terminal_point_sql("n")
+    return (
+        "WITH RECURSIVE succ(node_key, next_id, depth, path, terminal) AS ("
+        "SELECT p.node_key, NULLIF(p.props ->> 'superseded_by', ''), 1, "
+        f"ARRAY[p.node_key], {_terminal_point_sql('p')} "
+        "FROM public.point p "
+        "WHERE p.org_id = %s AND p.graph_id = %s AND p.node_key = %s "
+        "UNION ALL "
+        "SELECT n.node_key, NULLIF(n.props ->> 'superseded_by', ''), "
+        f"s.depth + 1, s.path || n.node_key, {terminal} "
+        "FROM succ s JOIN public.point n "
+        "ON n.org_id = %s AND n.graph_id = %s AND n.node_key = s.next_id "
+        "WHERE s.depth < %s AND NOT (n.node_key = ANY (s.path))"
+        ") ",
+        [org_id, graph_id, src, org_id, graph_id, _SUPERSEDE_CHAIN_DEPTH],
+    )
+
+
+def _structural_target_resolution(org_id: str, graph_id: str, label: str,
+                                 rel: str, key: str,
+                                 alias: str) -> tuple[str, list[Any]]:
+    """`projection/edges.py::resolve_structural_target` as a scalar subquery.
+
+    The four name-keyed labels resolve by **`name`** — never by `id`, which is
+    the whole of #9972 — and a name held by TWO OR MORE carriers resolves to
+    NOTHING (`HAVING count(*) = 1`), never to an arbitrary pick. That is #5509's
+    discipline, which the graph applies in `_refuse_ambiguous_target` (it records
+    the non-folded entry and skips the descriptor); a name that does not name ONE
+    identity has no target, and `LIMIT 1` would let the record land an edge on a
+    different carrier than the graph did.
+
+    Per label (each verified against the fold's own arm):
+
+    * `Subject`/`Object`/`Event` → `name` (a PRIMARY column on all three).
+    * `Point` → `props->>'name'`: `public.point` has **no `name` column** (its key
+      is the id), while the graph's generic arm matches `MATCH (x:Point
+      {name:$key})` — a Point property, which the record stores in the props
+      tail. Without this arm an `aboutPoint` descriptor would fall back to an
+      id match against a NAME and land 0 rows (or worse, an unrelated point).
+    * `Source` + `aboutDocument` → `url` AND `document_kind IS NOT NULL`, the
+      kind test `resolve_structural_target` states is LOAD-BEARING on the
+      descriptor route (a descriptor keyed on `url` alone cannot tell a document
+      from a provenance `:Source`; refusing skips the descriptor instead of
+      mis-pointing it). Resolve-only, as there: never invented.
+    * `Source` + `extractedFrom` → the CANONICAL identity triple
+      (`resolve_source_key`'s precedence, the same `match`/`prefer`/`order_by`
+      the point-property family already passes) — reused rather than restated,
+      so the repoint arm and the `extractedFrom` create arm can never resolve one
+      Source identity onto two different rows.
+
+    ⛔ NOTHING IS MINTED. The fold mints a `Subject`/`Source` stub on a miss; the
+    record never does — its standing rule for every edge family is that an
+    endpoint is RESOLVED from the record's own rows and an absent endpoint lands
+    no row (`_relation_upsert_statement`). Minting from an edge directive would
+    materialize a node the journal never created, which is the divergence class
+    #9078 refuses. The residual is named rather than papered over: for the two
+    stubbable labels the GRAPH may hold a stub the RECORD does not, so a
+    descriptor that resolves in the graph can land no row here.
+    """
+    if label == "Source" and rel == "extractedFrom":
+        canonical = _normalize_source_url(key)
+        return _endpoint_resolution(
+            org_id, graph_id, label, key, alias,
+            match=("node_key", "node_key", "canonical_url"),
+            values=(key, canonical, canonical),
+            order_by="node_key",
+            prefer=("canonical_url", canonical),
+        )
+    table = _LABEL_TABLES.get(label)
+    if table is None:
+        raise RecordProjectionError(
+            f"structural edge {rel!r} names target label {label!r}, which is "
+            f"not a record node label ({sorted(_LABEL_TABLES)})"
+        )
+    if label == "Source":
+        # aboutDocument: RESOLVE-ONLY, and only a DOCUMENT. `node_key` IS the
+        # Source's `url` (`chk_source_node_key_is_contract_key`), which is the
+        # property the fold's `MATCH (s:Source {url:$url})` addresses.
+        return (
+            f"(SELECT min(t.node_key) AS node_key FROM public.{table} t "
+            "WHERE t.org_id = %s AND t.graph_id = %s AND t.node_key = %s "
+            "AND t.document_kind IS NOT NULL HAVING count(*) = 1)"
+            f"{' ' + alias if alias else ''}",
+            [org_id, graph_id, key],
+        )
+    column = "props ->> 'name'" if label == "Point" else "name"
+    return (
+        f"(SELECT min(t.node_key) AS node_key FROM public.{table} t "
+        f"WHERE t.org_id = %s AND t.graph_id = %s AND t.{column} = %s "
+        "HAVING count(*) = 1)"
+        f"{' ' + alias if alias else ''}",
+        [org_id, graph_id, key],
+    )
+
+
+def _structural_repoint_statements(
+    org_id: str,
+    graph_id: str,
+    record: Mapping[str, Any],
+    columns: Mapping[str, frozenset[str]] | None = None,
+    refused: Mapping[str, frozenset[str]] | None = None,
+) -> list[Statement] | None:
+    """The MOVE a 2b structural `DirectEdgeRepoint` describes (#9972/#9973).
+
+    Returns `None` for every other shape — a 2a direct descriptor, a malformed
+    one, or a `delete_only` guard — so those keep the existing path byte for byte
+    (a 2a `src` is ALREADY the successor and an upsert `DELETE`s nothing).
+
+    Two statements, in this order, and both gated on the SAME condition: the
+    descriptor has an effect only when `src` is (a) TERMINAL and (b) has a
+    surviving successor — i.e. exactly `_src_is_terminal(src)` and
+    `_final(src) != src` on the graph side. Without the gate the pair would
+    delete a live point's own edge and re-create it under a successor that a
+    dropped supersede fold never produced; with it, the no-move case (a live
+    re-created incarnation, a self-supersede) is a clean no-op instead of the
+    delete-then-insert churn that erased `confidence` in the measured
+    target-only attempt.
+
+    1. `DELETE` the row at the SUPERSEDED point — the resurrection the graph's
+       delete-leg removes. Keyed on the resolved target, as the fold's re-query
+       is (`MATCH (old)-[r]->(t) WHERE ID(t)=$tid`); `idx` is deliberately NOT in
+       the predicate, because the graph deletes the edge by its INTERNAL id (the
+       descriptor carries no `idx`, and the structural writers all leave it 0).
+    2. `INSERT` the same row at the DIRECT successor — `succ[src]`, the point
+       the supersede that emitted this descriptor actually named — WITH the
+       descriptor's TRANSFERRED attributes (the `⛔ #10303` block below this
+       docstring). ⛔ ONE HOP, not `_final(src)` (the terminal endpoint of the
+       chain): the graph's transfer is `supersede_point(old, new)`'s
+       `MERGE (new)-[:<rel>]->(t) ON CREATE SET nr += $attrs`, so the edge is
+       created at `new` and each LATER supersede carries it one more hop with
+       the value it holds at that moment. Resolving straight to the terminal
+       collapses a chain's descriptors onto one destination row — and a sibling
+       pair's too — and the two shapes then need OPPOSITE precedence: a chain's
+       LAST transfer created the final edge (so its payload must win), a sibling
+       pair's FIRST did (so its payload must win). One INSERT per descriptor, at
+       ITS OWN successor, gets both right for free: the `ON CONFLICT` clause does
+       the job `ON CREATE SET` does on the graph side, and the next link's DELETE
+       removes the intermediate row exactly as live's supersede removes the
+       intermediate edge.
+       `ON CONFLICT … DO NOTHING`, not `DO UPDATE`, because since `#10139` the
+       graph's transfer is `MERGE (s)-[:<rel>]->(t) ON CREATE SET nr += $attrs`
+       (`projection/__init__.py`, the pass-2b structural replay leg): `ON
+       CREATE`, so #9417's rule holds — a successor's OWN live value wins — and
+       `DO NOTHING` is that SAME precedence on this side of the house. A row the
+       successor does not have is INSERTED carrying the retired edge's
+       attributes; a row it already has is left untouched, byte for byte,
+       exactly as `ON CREATE SET` leaves it. `DO UPDATE` would overwrite the
+       successor's value with the retired point's — the measured 0.91 → 0.42
+       regression `#9417`'s review P1 exists to prevent — and `<rel>` is the
+       INTERPOLATED `etype`, not a parameter: Cypher
+       refuses a parameter as a relationship type (`-[:$param]->` is invalid —
+       Neo4j Cypher Manual, Syntax → Parameters), which is why the writer
+       f-string-formats the type into the pattern. The no-self-edge predicate
+       (`destination != resolved target`) mirrors the fold's `E2E-11.6` guard:
+       a chain that collapses the endpoints onto one node must not mint
+       `(X)-[:aboutPoint]->(X)`.
+
+    ⛔ #10303 (P1): the moved row CARRIES the transferred attributes — the same
+    `_DIRECT_EDGE_ATTR_KEYS` set the fold replays, read FLAT off the descriptor
+    exactly as `sdk.supersede_point` emits them (`_relation_upsert_statement`'s
+    consumer reads an attribute payload the same way, `{k: payload[k] for k in
+    rel.attrs}`). Before this, the descriptor carried the values (#10139) and
+    this route still wrote an empty row: the journal-rebuild and record-rebuild
+    routes then disagreed about the same journal on a data-bearing property,
+    which is the `#9553` class this module polices. They are routed by
+    `_split_properties`, not by this function: `direction`/`confidence`/
+    `weight`/`label`/`batch_id` are COLUMNS of `public.relation`, so they land on
+    the row's columns (and the `props` tail stays `{}` for them); a name with no
+    column would land in the tail instead. ⚠️ So the record's own `props` tail is
+    NOT where to look for the carry — the columns are.
+
+    ⚠️ NAMED RESIDUALS, not fixed here: (a) `sourceVersion` is NOT carried — the
+    fold's transfer and replay drop it too (a pre-existing `extractedFrom`
+    anchor loss `projection/edges.py` states), so the two routes agree by both
+    losing it rather than the record keeping an attribute the graph does not
+    have; (b) `#2488`'s
+    survivor-filtered `succ` map has no record-side expression, so an id-reuse
+    journal (a point re-created live under a used id) is resolved here as
+    `point.status` says at the moment the record runs — which is the LIVE order,
+    not the rebuild's post-filter one; (c) a CYCLIC supersede does NOT agree
+    with the graph route once it carries a descriptor PER HOP. This walk is
+    `path`-guarded and moves ONE hop per descriptor (ending at the LAST hop's
+    successor), while pass-2b's `_final` returns the first REPEATED node, so
+    `_final(src) == src` and its create is SKIPPED — after the delete-leg above
+    that guard has already removed the edge the previous hop created, leaving the
+    graph with NO edge. The two agree only on the ONE-HOP cycle the PGlite
+    `9972-cycle` case pins (both land on that hop's successor, `y`), which is
+    what live did; `#2498` makes the multi-hop shape unproducible by a live
+    writer (the closing hop is refused — a dead target cannot be
+    re-terminalized), so this is a fabricated-journal-only divergence, named
+    here rather than described as agreement. Pinned by
+    `tests/test_pointsuperseded_rebuild.py`::
+    `test_a_cycle_with_a_descriptor_per_hop_loses_the_edge_at_rebuild`.
+    """
+    etype = record.get("edge_type")
+    label = _STRUCTURAL_REL_LABELS.get(etype) if isinstance(etype, str) else None
+    if label is None:
+        return None
+    src, tgt = record.get("src"), record.get("tgt")
+    if not (isinstance(src, str) and src and isinstance(tgt, str) and tgt):
+        return None  # malformed: the existing path raises the same refusal
+    rel_type, _src_label, _src, _tgt_label, _tgt, idx = _relation_coordinates(
+        RelationUpsert(), record)
+    cte, cte_params = _supersede_chain_cte(org_id, graph_id, src)
+    # TWO renderings of the SAME resolution: the DELETE compares one column to a
+    # bare SCALAR subquery, the INSERT joins the aliased one as a FROM item. One
+    # rule, one helper — the alias is the only difference, so neither can drift.
+    tgt_scalar, tgt_scalar_params = _structural_target_resolution(
+        org_id, graph_id, label, rel_type, tgt, "")
+    tgt_select, tgt_params = _structural_target_resolution(
+        org_id, graph_id, label, rel_type, tgt, "tgt")
+    # The move exists only for a TERMINAL src with a surviving successor AND a
+    # reachable DESTINATION — the DIRECT successor's own row (`depth = 2`). The
+    # third conjunct is what makes the pair atomic: a successor whose `point` row
+    # the record does not hold (or a path-guarded cycle that never leaves `src`)
+    # leaves `dest` empty, so without it the DELETE ran and the INSERT wrote
+    # nothing: the row left the superseded point and never landed anywhere.
+    moved = ("(SELECT terminal FROM succ WHERE depth = 1) "
+             "AND EXISTS (SELECT 1 FROM succ WHERE next_id IS NOT NULL) "
+             "AND EXISTS (SELECT 1 FROM succ WHERE depth = 2)")
+    delete = Statement(
+        f"{cte}DELETE FROM public.relation "
+        "WHERE org_id = %s AND graph_id = %s AND rel_type = %s "
+        "AND src_label = 'Point' "
+        "AND src_key = (SELECT node_key FROM succ WHERE depth = 1) "
+        f"AND tgt_label = %s AND tgt_key = {tgt_scalar} "
+        f"AND {moved}",
+        [*cte_params, org_id, graph_id, rel_type, label, *tgt_scalar_params],
+    )
+    carried = {k: record[k] for k in _DIRECT_EDGE_ATTR_KEYS if k in record}
+    col_values, tail = _split_properties(
+        "relation", carried,
+        columns=columns if columns is not None else table_columns(),
+        refused=refused if refused is not None else refused_props_names(),
+    )
+    attr_columns = list(col_values)
+    insert_columns = ["org_id", "graph_id", "rel_type", "src_label",
+                      "src_key", "tgt_label", "tgt_key", "idx",
+                      *attr_columns, "props"]
+    select_list = ", ".join([
+        "%s", "%s", "%s", "'Point'", "dest.node_key", "%s", "tgt.node_key",
+        "%s", *(["%s"] * len(attr_columns)), "%s",
+    ])
+    insert = Statement(
+        f"{cte}INSERT INTO public.relation ({', '.join(insert_columns)}) "
+        f"SELECT {select_list} "
+        "FROM (SELECT node_key FROM succ WHERE depth = 2) dest, "
+        f"{tgt_select} "
+        "WHERE dest.node_key <> tgt.node_key "
+        f"AND {moved} "
+        "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, "
+        "tgt_label, tgt_key, idx) DO NOTHING",
+        [*cte_params, org_id, graph_id, rel_type, label, idx,
+         *(_jsonb_or_scalar(c, v) for c, v in col_values.items()),
+         json.dumps(tail), *tgt_params],
+    )
+    return [delete, insert]
+
+
 def _op_dispatch_statements(
     org_id: str,
     graph_id: str,
@@ -2179,7 +2861,8 @@ def _op_dispatch_statements(
         raise RecordProjectionError(f"EntityMutated op={op!r} carries no key")
     match = _ENTITY_MATCH_COLUMNS.get(table, ("node_key",))
     if op in dispatch.delete_ops:
-        return _delete_statements(org_id, graph_id, node, key, match=match)
+        return _delete_statements(org_id, graph_id, node, key, match=match,
+                                  cache_tier=payload.get("cache_tier"))
     if op in dispatch.patch_ops:
         # #9881 — `state` is the write's FULL applied map, and for a rename that
         # map contains the new `name`. It used to be filtered out of the patch
@@ -2323,6 +3006,11 @@ def _nested_node_carrier(record: Mapping[str, Any],
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
+    # #10017 R2/step 7: the carrier's turns are `public.point` rows for the SAME
+    # session the per-turn `PointAdded` records linked, so the `relation` rows the
+    # record holds are unchanged by the producer turnover — `_turn_row_statements`
+    # applies this directive once PER TURN (one envelope, N targets).
+    (TURNS_RECORD_TYPE, "contains_session", "CONTAINS", "Session", "Point"),
 )
 
 
@@ -3210,6 +3898,84 @@ def _operator_relation_statements(
     return statements
 
 
+def _turn_row_statements(
+    record: Mapping[str, Any],
+    org_id: str,
+    graph_id: str,
+    columns: Mapping[str, frozenset[str]] | None = None,
+    refused: Mapping[str, frozenset[str]] | None = None,
+) -> list[Statement]:
+    """The `public.point` rows :data:`TURNS_RECORD_TYPE` contributes — its HOME.
+
+    #10017's ruling places a capture's raw turns OUTSIDE the graph and IN the
+    record (§9.1/D1, owner 2026-09-23), and `public.point` is the table
+    `record_read` already serves the transcript from. So the carrier is a
+    `NoRecordEffect` mutation on the GRAPH axis and a row writer on the HOME
+    axis, exactly as the narrative carrier is (§9555's `_narrative_statements`).
+
+    ⛔ WHY A SECONDARY PROJECTION AND NOT A `NodeSnapshot` EFFECT. The payload is
+    a ``turns`` LIST — one record per capture, main's landed shape (#10129) —
+    while a `NodeSnapshot` mutation addresses exactly one node. Keying the rows
+    on the CARRIER keeps one decision in one place and makes the live write and a
+    full replay run the SAME statement, which is what keeps the record
+    `replay(journal)`: a row written by the producer directly would leave
+    `replay` unable to reconstruct it.
+
+    ⛔ THE TIER IS STATED HERE, AND IT IS NOT OPTIONAL. It cannot ride the
+    payload (`_RECORD_ONLY_KEYS` strips `cache_tier` before `_split_properties`
+    sees it — the strip is what stops a `PointAdded` from hiding a real graph
+    point), so a row that did not state it would land the schema DEFAULT
+    `'graph'` and `read_record_view` would hand the turn to `record_plan`: the
+    record route would re-materialise the very node the carrier exists to keep
+    out of the graph (#10067). So this function REFUSES a row it cannot place
+    rather than falling back to the default.
+
+    The turn snapshot is the WRITER'S OWN (`sdk._write_capture_turns`, pinned
+    key-for-key by :data:`TURNS_SNAPSHOT_KEYS`), and it goes through the same
+    ``_split_properties`` split every other point row does — so a column the
+    snapshot carries lands as a column, an undeclared key lands in the props
+    tail, and a refused key is refused — without a second, drifting spelling of
+    that rule.
+    """
+    if record.get("type") != TURNS_RECORD_TYPE:
+        return []
+    columns = columns if columns is not None else table_columns()
+    refused = refused if refused is not None else refused_props_names()
+    turns = record.get("turns")
+    if not isinstance(turns, (list, tuple)) or not turns:
+        raise RecordProjectionError(
+            f"{TURNS_RECORD_TYPE!r} carries no `turns` list "
+            f"(got {type(turns).__name__}) — a carrier that carries no turn "
+            "would report a capture as filed while the record holds none of "
+            "its transcript")
+    node = Node("point", "Point", "id")
+    _node_table(node, columns)
+    statements: list[Statement] = []
+    for index, snapshot in enumerate(turns):
+        if not isinstance(snapshot, Mapping):
+            raise RecordProjectionError(
+                f"{TURNS_RECORD_TYPE!r} turns[{index}] is "
+                f"{type(snapshot).__name__}, not a snapshot mapping")
+        key = _key_value(node, snapshot, "id")
+        props = {k: v for k, v in snapshot.items() if k not in _RECORD_ONLY_KEYS}
+        props["id"] = key
+        col_values, tail = _split_properties(
+            node.table, props, columns=columns, refused=refused)
+        col_values[node.key_column] = key
+        # The row's own declaration that it is not graph state. Stated on the
+        # COLUMN, never in `tail` (the tail is what `cache_projection` copies
+        # back onto a node verbatim).
+        col_values["cache_tier"] = RECORD_ONLY_TIER
+        statements.append(_identity_statement(org_id, graph_id, node, key))
+        statements.append(
+            _upsert_statement(org_id, graph_id, node, key, col_values, tail))
+        # AFTER the identity + row upsert: the session endpoint must already be
+        # in `node_identity` or the composite FK refuses the insert.
+        statements.extend(_envelope_relation_statements(
+            org_id, graph_id, record, TURNS_RECORD_TYPE, key, columns, refused))
+    return statements
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -3236,6 +4002,9 @@ def mutations_for(
             columns=columns, refused=refused,
         ),
         *_narrative_statements(record, org_id, graph_id),
+        # #10017 step 7: the raw-turn carrier's HOME home — one `public.point`
+        # row per turn at `cache_tier = 'record_only'`, and no node anywhere.
+        *_turn_row_statements(record, org_id, graph_id, columns, refused),
     ]
 
 
@@ -3270,6 +4039,16 @@ def _declared_mutations(
             # delete of a resurrected phantom edge. An UPSERT here re-created
             # the edge the graph removed; a DELETE is the faithful mutation.
             return [_relation_delete_statement(org_id, graph_id, effect, record)]
+        if record_type == "DirectEdgeRepoint":
+            # #9972/#9973: the STRUCTURAL (2b) shape means MOVE — resolve the
+            # target by its replay key, remove the row at the superseded point,
+            # and re-create it at the DIRECT successor live named. `None` = not that shape (the 2a
+            # direct descriptor, whose `src` is already the successor), and it
+            # keeps the plain upsert below byte for byte.
+            moved = _structural_repoint_statements(
+                org_id, graph_id, record, columns, refused)
+            if moved is not None:
+                return moved
         return _relation_upsert_statement(org_id, graph_id, effect, record,
                                           columns, refused)
     if isinstance(effect, RelationDelete):

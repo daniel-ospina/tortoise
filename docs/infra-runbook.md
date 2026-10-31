@@ -244,8 +244,15 @@ downtime so far.
    at `origin/main@fffcc7c0` — see #8617). With the layer
    declared off, `create_acl_user()` answers `absent_by_design` *before* it
    contacts the server, the graph mints, and the absence is **recorded**: one
-   log line per process, and distinct `absent_by_design` / `denied` / `absent`
-   / `provisioned` counters in `POST /v1/internal/backups/acl-reconcile`.
+   log line per process per absence kind, and distinct `absent_by_design` /
+   `denied` / `absent` / `provisioned` counters in
+   `POST /v1/internal/backups/acl-reconcile`, with `absent_reasons`
+   (`no_uri` / `no_graph_module` / `layer_down`, summing to `absent`) naming
+   WHICH absence the bare `absent` total would otherwise hide. (`unknown` and
+   `probe_unreadable` can appear there too — treat either as a CODE DEFECT, not
+   as an operator state: a path returned `absent` without classifying it.) On
+   this lane the only reachable counter is `absent_by_design`, for every custom
+   graph.
 
    **What that costs, stated plainly:** on the hosted product there is **no
    database-level second wall** between graphs. What isolates a graph there is
@@ -253,19 +260,91 @@ downtime so far.
    against it) plus the separate `org_{org_id}_{gid}` namespace. Do not
    describe the hosted lane as having the per-graph ACL layer — it does not.
 
-   **So the credential in `FALKORDB_CLOUD_URI` must satisfy the app's DATA path
-   only:** `+MODULE|LIST` (the capability probe) and the graph verbs the data
-   plane runs (`GRAPH.QUERY` / `GRAPH.RO_QUERY` / `PING`). It does **not** need
-   `+ACL` — that is the one grant the platform refuses, and requiring it is what
-   broke graph creation.
+   **So the credential in `FALKORDB_CLOUD_URI` must cover the app's DATA path —
+   and one measurement: `GRAPH.MEMORY USAGE`.** The console's **`Write`** preset
+   covers the data path — `+GRAPH.QUERY +GRAPH.RO_QUERY +GRAPH.EXPLAIN
+   +GRAPH.PROFILE +GRAPH.LIST +GRAPH.DELETE +GRAPH.COPY +PING`, plus the key
+   verbs (`DEL` / `RESTORE` / `RENAME`) and `EXISTS` (the SDK's retry presence
+   probe). It does **not** cover the per-org
+   storage meter (`tortoise/graph_storage.py`, driven by the backup sweep): the
+   vendor makes `GRAPH.MEMORY` **Admin-only**, so on the `Write` preset every
+   org's `graph_storage_mb` reads `0.0` — permanently and silently, because a
+   failed measurement records nothing and the read side maps an absent row to
+   zero (`metering._zero_view`). That figure is the MB overage input (#5331,
+   #4495), so a quiet zero is not harmless.
+
+   ⛔ **Neither preset is right here.** `Write` alone zeroes the storage meter
+   (above); `Admin` fixes it but hands a production data-plane credential
+   `+FLUSHALL +GRAPH.CONFIG +MEMORY +MONITOR +SLOWLOG +BGREWRITEAOF` to buy the
+   one grant it needs. Send a **custom ACL: the `Write` string plus
+   `+GRAPH.MEMORY`** — the API takes a raw ACL string (`POST …/users`; there is
+   no preset field). That is the minimum that runs the data path, the restore
+   path and the storage meter.
+
+   It does **not** need:
+
+   - `+ACL` — the one grant the platform refuses; requiring it is what broke
+     graph creation.
+   - `+MODULE|LIST` — **optional ON THIS LANE, and not worth `Admin`.** The ACL
+     capability probe does not run here at all (the layer is declared off, so
+     `create_acl_user` returns before any server contact), unlike the
+     self-hosted lane where it is required. Two other probes DO read
+     `MODULE LIST`, and a refusal degrades them *safely*, not wrongly:
+     `cypher_guard`'s engine-version probe reads UNKNOWN on `NOPERM` and then
+     takes the conservative `WITH *` barrier (a measured no-op on the engines
+     that already bind, re-probed after a TTL), and the projection's version
+     probe falls back to `INFO server` and then to "undetermined" (no version
+     gate). `+MODULE|LIST` exists only in the `Admin` preset, which would hand a
+     production data-plane credential `+FLUSHALL +GRAPH.CONFIG +MEMORY
+     +MONITOR +SLOWLOG` — a larger blast radius than the conservative barrier.
+     Leave it out of the custom ACL.
+
+   Two grants are easy to drop from a hand-written "query-only" ACL, and both
+   fail LATE: **`+GRAPH.COPY`** (restore/drill swaps issue it on this lane —
+   `hosted_backup.restore_backup`), and **`+GRAPH.MEMORY`** (the storage meter,
+   which fails soft and therefore fails SILENTLY).
 
    **Self-hosted is unchanged** (#8617 ruling 2). `TORTOISE_ACL_LAYER` unset
    (the default, `strict`) still creates the per-graph user on every graph
-   mint, and *there* the credential genuinely needs `_GRAPH_COMMANDS` **plus
-   `+MODULE|LIST` and `+ACL`** — the requirement's home is
-   `tortoise/acl_graph_users.py` (`_GRAPH_COMMANDS`, `_falkordb_present`,
-   `layer_provisionable`). A `Write`-preset user is still not enough for a
-   self-hosted server.
+   mint, and *there* the **app** credential genuinely needs:
+
+   - **the vendor's `Write` preset string, VERBATIM** (the vendor's ACL page
+     prints its exact string; there is no console on a self-hosted server to
+     copy from — it already carries `GRAPH.QUERY`,
+     `GRAPH.RO_QUERY`, `GRAPH.LIST`, `GRAPH.DELETE`, `GRAPH.COPY`, `EXISTS`,
+     `INFO` and the key verbs), **plus `+GRAPH.MEMORY`** for the storage meter.
+     ⛔ Do **not** hand-write the set from a prose list, including the one in the
+     Cloud bullet: an enumeration can silently omit a verb the app does issue
+     and the omission fails LATE and QUIET — `EXISTS` is the SDK's retry
+     presence probe, and a refusal there makes the retry gate refuse to retry a
+     graph-abort and report the graph state as UNKNOWN (`sdk.py`, #7685/#7357).
+     And do **not** read `_GRAPH_COMMANDS` as this requirement: it is the
+     allowlist granted to each per-graph **tenant** user (`+GRAPH.QUERY
+     +GRAPH.RO_QUERY +PING`), which is how a self-hosted app credential ends up
+     unable to run `GRAPH.LIST`, `GRAPH.DELETE` or the restore path;
+   - **`+ACL`** — to create and rotate per-graph users at all;
+   - **`+MODULE|LIST` — REQUIRED to have the layer here.** It gates
+     `_falkordb_present`, and a refusal makes `create_acl_user` return `denied`
+     **before any `ACL SETUSER`** — so not one per-graph user is created for any
+     graph, while every mint stays green (the probe DOES log
+     `MODULE LIST refused … — the ACL credential lacks +MODULE|LIST`, so a grep
+     for it is the tell). MEASURED on this head: a `NOPERM` on `MODULE LIST` leaves the
+     server having seen `MODULE LIST` and nothing else (`status=denied`,
+     `reason=probe_denied`). That is the silent-degradation shape this whole
+     change exists to end, so it is in the list of grants the APP credential
+     needs even though the MINT alone would succeed without it. Read a refusal
+     from the `denied` counter plus its `MODULE LIST refused …` log line — the
+     reconcile breaks down `absent` by reason, not `denied`. (Only the two
+     VERSION probes degrade safely without this grant; see the Cloud bullet.)
+
+   So the self-hosted app ACL is: the vendor's `Write` string, **plus
+   `+GRAPH.MEMORY`**, **`+ACL`**, **`+MODULE|LIST`** (and `+BGSAVE` if
+   `tortoise backup` runs against this credential — the CLI issues it, and a
+   denial is loud and never corrupts the file backup). The *mechanism* that
+   consumes these lives in `tortoise/acl_graph_users.py` (`_falkordb_present`,
+   `_setuser`, `layer_mode`) — that module is where the recipe is implemented,
+   not a list of grants to copy, and `_GRAPH_COMMANDS` inside it is the TENANT
+   user's allowlist.
 2. **Update the GitHub Actions secret `FALKORDB_CLOUD_URI` first**, to the new
 user's URI. This must land before any deploy and before the old credential is
 disabled, or a push to `main` re-stages the credential you are retiring.
@@ -322,7 +401,7 @@ documented exception, not a silent one:
 |---|---|---|
 | `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `VENICE_API_KEY` | the local agent runtime + the eval/ask/longmem lanes (`tortoise/model_adapters.py`) | no remote store serves a local run; the production legs already read their own stores |
 | `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `_SECRET` | the **local** Supabase CLI / GoTrue (`supabase/config.toml:364-365`) | a CI store would serve no job; the hosted project's provider is dashboard-configured |
-| `JEV_API_KEY` | `tools/collision_preflight.py` (`$JEV_API_KEY`, else the repo-root `.env`) | the pre-dispatch gate is a local tool — the repo-root `.env` is its documented home (declared in `.env.example`) |
+| ⚠️ `TYPESAFE_API_KEY` — **its HOME is the 0600 store, not `.env`; prefer the store** (legacy name: `JEV_API_KEY`) | the fleet's Jev callers — `agent-infra/scripts/turn-classify.py`, `ask-owner.py`, `lane-actions.py` (via `state/lane-verdict.py`); real endpoint `api.typesafe.ai` | ⛔ **the 0600 store `~/.pi/agent/jev-config.json` is the key's HOME — none of those callers reads this `.env`, and the ONLY in-repo reader is `tortoise/s2_decision_seam.py` (#5087, the S2.2/S2.3 typed-decision seam — internal, OFF unless `TORTOISE_S2_DECISION_SEAM` is set; it resolves `$TYPESAFE_API_KEY` → `$JEV_API_KEY` → the 0600 store → the repo-root `.env`, and posts to `api.typesafe.ai`)** — the one consumer that read it before was deleted by #8175. `.env.example` declares the NAME; the fleet callers resolve `$TYPESAFE_API_KEY` → `$JEV_API_KEY` → the store, and the seam additionally reads the repo-root `.env` as its LAST source — so a value there is inert for the fleet callers but IS used by an armed seam, and once `mcp_server._load_dotenv` exports it, it outranks the store for every child. ⛔ **The deployed copy under `~/.pi/agent/scripts/` is a DERIVED artifact, not authored source:** `pi-bootstrap/setup.sh` copies `turn-classify.py`/`ask-owner.py`/`lane-actions.py` out of the agent-infra checkout, so running it from an **unmigrated** checkout silently reinstalls the lookalike caller — measured 2026-10-26 21:32, when an already-migrated trio was overwritten that way. The caller leg MERGED in agent-infra#2859 (`9205ab47a`) — a bootstrap from a checkout that predates it still reinstalls the lookalike caller, so fast-forward that checkout before running `pi-bootstrap/setup.sh` and assert EVERY caller with `grep -rn 'JEV_URL =' ~/.pi/agent/scripts/turn-classify.py ~/.pi/agent/scripts/ask-owner.py ~/.pi/agent/state/lane-verdict.py` — each carries its own constant, so one file's answer says nothing about the other two. ⛔ Until 2026-10-26 these callers billed against `jevtypesafeai.com`, a lookalike host that is NOT the vendor's API (tortoise#7864) |
 | `BLOG_AGENT_KEY` | the blog publish workflow — `X-Agent-Key` against the blog CMS API (`agent-infra` `skills/seo-content-generation/workflow/05-cms-publish.md`) | **it has a consumer.** The 2026-09-18 inventory recorded it as unused; re-measuring on 2026-10-14 found the publish skill reads it from this `.env` line — **do not delete it** |
 
 **Relocated off the workstation** (implemented 2026-09-19, recorded on #4030;
@@ -2671,8 +2750,11 @@ stays out-of-band: `tools/rotate-backup-keys.py --role registry_stream`.
    - **wait for the deploy job, not the run, then unset** — a `deploy-hosted`
      **run** can end RED with `[env]` already applied: since #4538 the separate,
      fail-closed `post-deploy-verify` job can leave the run red *after*
-     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and
-     `concurrency: cancel-in-progress` can cancel a run after that step too.
+     `flyctl deploy` succeeded and `[env]` was applied (§8.5), and a newer push
+     landing while a `deploy-hosted` run is still **pending** supersedes it —
+     `cancel-in-progress: false` (since #10155) stops a RUNNING deploy being
+     cancelled, but a shared group holds one pending run and the newest push
+     takes it.
      Require the `deploy-api` job's Deploy step to succeed — unsetting against a
      deploy that did **not** apply `[env]` drops the value. Only then run
      `flyctl secrets unset <NAME> --app tortoise-y4mjjq`;
@@ -2814,6 +2896,67 @@ in `deploy-api` are fail-closed and a per-gate alert would leave the same silenc
 on the rest; and it is one issue per **failing step** rather than one per run,
 because a key carrying `${{ github.run_id }}` files a new issue on every failing
 run (#2706).
+
+### 8.7 When production runs an old commit — the staleness detector (#10109)
+
+**The gap it closes.** 2026-10-26: production ran **7 commits behind**
+`origin/main` for ~9 hours while every readiness signal stayed green —
+`deploy-hosted` was red on every run (4 cancelled by its own
+`cancel-in-progress: true`, plus a migration-drift gate failing closed), but a
+deploy that cannot land **declines nothing**, and every existing instrument is a
+decline channel. This is the positive reading that was missing.
+
+- **Workflow:** `.github/workflows/deploy-staleness.yml` (schedule `7,37 * * * *` + `workflow_dispatch`;
+  its OWN concurrency group, `cancel-in-progress: false`, and NOT `push: main` — see the workflow header
+  for why it cannot be starved by the same group that ate the deploys).
+- **Logic:** `.github/scripts/check-deploy-staleness.sh` — reads the deployed commit from the public
+  `GET /v1/version` (`commit_sha`, baked by `deploy-hosted.yml` as `TORTOISE_GIT_SHA`), compares it
+  to `origin/main` with `git merge-base --is-ancestor`, and states the distance
+  `deployed=<sha> main=<sha> behind=<n> behind_deployable=<n> deployable_age_h=<n> deployable_age_s=<n>`.
+  Fails (red + ONE deduped issue) when the deployed commit diverged from main, when the revision cannot
+  be read — an unreadable revision is a RED, never a pass — when the deploy trigger's `on.push.paths`
+  cannot be parsed **unambiguously** (a PARTIAL path set would under-count the deployable lag and read
+  green while deployable commits wait, so it is a RED too) — or on **either** of two bounds:
+  - **count:** more than `vars.DEPLOY_STALENESS_MAX_BEHIND` **deployable** commits behind (default
+    **2**). *Deployable* = touching `on.push.paths` of `deploy-hosted.yml`, read from that workflow at
+    run time (never a second copy). A merge confined to `docs/`, `skills/`, `tools/`, `.github/`,
+    `website/` or `operations/` (or to `tests/` other than `tests/sample_transcript.txt`, which the
+    image copies) advances main **without deploying anything** by the pipeline's own
+    declared policy, so it is not staleness — counting it was ~14% false red over the last 300 commits
+    of main (20 false-red windows), and an alarm that cries wolf is the defect this check exists to
+    prevent.
+  - **age:** the OLDEST undeployed deployable commit older than `vars.DEPLOY_STALENESS_MAX_AGE_HOURS`
+    (default **6 h**). This is the *"the deploy is missing for ≥ T hours"* arm, and it is the one that
+    catches the #10109 shape a count bound alone reports **green forever**: one pending deployable
+    commit that never deploys. Stateless — the age comes from the commit's own committer date, not
+    from any previous tick's memory. The verdict is decided on **seconds** and `deployable_age_h` is
+    floored, so `deployable_age_s` is printed as well: an alert past the bound must never appear to
+    sit at it.
+  Both bounds are plain integers; a mangled value warns and falls back to its default rather than
+  disabling the arm.
+- **Harness:** `bash .github/scripts/check-deploy-staleness.test.sh` (the `Deploy staleness detector (#10109)`
+  step of `ops-harnesses`).
+
+**The invariant, in one sentence.** The commit production is running must be an
+ancestor of `origin/main`, and the distance must be stated. The check states it
+even when green, so the bound being approached is visible before it is crossed.
+
+**What to do when it fires.** Read the issue's `reason=` first — it names which bound crossed.
+
+- `reason=behind-deployable` — too many **deployable** commits are waiting. Check
+  `gh run list --workflow deploy-hosted.yml --limit 20`: red/cancelled deploys are the cause, and for
+  a migration-drift block the remediation is the one §8.6 prints (resolve `OUT OF ORDER` first, then
+  `gh workflow run supabase-deploy.yml --ref main`) — **never** a `supabase migration repair`, never a
+  DDL, never a production action by a lane. If there is **no run at all** for the pending commits, the
+  deploy was never triggered — look at the trigger's path filter, not the deploy's logs.
+- `reason=behind-too-long` — the count is within bound but the oldest deployable commit has been
+  undeployed past the age bound. Same investigation; the difference is that this is the *"deploys
+  stopped landing"* signal, not a burst of merges.
+- `behind=` vs `behind_deployable=` — `behind` is every commit on main, `behind_deployable` is the
+  ones that can actually change the deployment. A large `behind` with `behind_deployable=0` is **not**
+  staleness (the pipeline deliberately does not redeploy for those), and the check reports it green.
+- A *diverged* `deployed=` sha (not an ancestor) is a different failure from lag: the app is running a
+  revision main does not contain — compare the sha against `git log` before assuming a deploy backlog.
 
 ## 9. Restore a lost cache graph from the record (#9556 / R8)
 
@@ -3218,7 +3361,7 @@ text, so do not grep the 9090 listener for a counter name.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
-   `write_failed`), and this needs no auth. ⚠️ **TWO readings are not in this
+   `write_failed`), and this needs no auth. ⚠️ **THREE readings are not in this
    grep.** (a) The `no_durable_journal` decline — logged at **DEBUG**, under a
    *different* prefix (`the record write was declined (no_durable_journal)`,
    `record_writer.py`), because it is the healthy M2 path and not a failure.
@@ -3231,6 +3374,32 @@ text, so do not grep the 9090 listener for a counter name.
    it repeats at most once per window, and it is exactly the line that item 2's
    `record_position_unproven` counter is counting — grepping only the
    `did not happen` prefix for it returns nothing.
+   (c) The tenant-RESOLUTION faults — four MESSAGES, none of which this grep
+   matches (`tortoise.hosted_api`'s fail-soft path, #5148):
+   `could not resolve the record tenant for this request`
+   (`_resolve_record_tenant`, the per-request lane),
+   `could not resolve the DEFAULT-graph record tenant for org …`
+   (`_bind_default_graph_record_tenant`, the seed / indexing lanes),
+   `graphs default-row read failed — the record tenant stays unnamed`
+   (`supabase_control.default_graph_id_for` — which swallows that exception and
+   returns `None`, so on a default-row read fault NEITHER of the two
+   `could not resolve` lines above is logged at all), and
+   `control-plane offload 'default_graph_row' failed (best-effort, swallowed)`
+   (`hosted_api._cp_offload`, the session/JWT lane) — which says what the SEAM
+   did, not what the resolver did, so read which of its two outcomes you have.
+   The pool REFUSED the submission, or the bound CANCELLED it before any worker
+   picked it up: the callable did not and will not run, so no resolver was
+   entered and none of the three lines above exists. A plain bound miss on a
+   submission a worker already PICKED UP is the opposite case: the seam abandons
+   only the await (`asyncio.wait_for` cancels the await, never the worker thread
+   — CPython #87185), so that worker still runs the resolver to completion and
+   one of the lines above CAN sit beside this warning. (The
+   discriminator is the message text, not the logger: the
+   SDK's `no_journal` line, from a *different module*, IS in the grep — see the
+   ⛔ paragraph below.) The refusal each fault then produces
+   (`the record write did not happen (no_tenant)`) IS in the grep, but that is
+   the growth, not the fault; read the faults with the `grep -E` in the ⚠️
+   `no_tenant` bound below, which matches all four.
    ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
    as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
    **identical** prefix (`the record write did not happen (%s)`) — an armed
@@ -3318,16 +3487,18 @@ So the bar has **two parts, and BOTH are required**:
    empty reading has more than one cause and does not say which; take the
    journaling capture above and read again before drawing a conclusion.
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
-   documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
-   `malformed_dsn` / `circuit_open`.** ⚠️ **That `write_failed` exemption is
+   documented #9264 `write_failed` refusals, and none at all for `no_tenant`
+   (the capture's OWN — see the ⚠️ bound below) / `malformed_dsn` /
+   `circuit_open`.** ⚠️ **That `write_failed` exemption is
    BOUNDED**: it covers only the #9264 `DatatypeMismatch` refusals that recipe 1
    actually shows, and only until the R2 migration above is applied — afterwards
    **every** `write_failed` is unexpected — and a new `journal_event` / `point` row must still appear.
    The R1-without-R2 state writes nothing and counts only `write_failed`, so it
    satisfies item 1's *any reason* clause and the exemption above — **a
    deployment that writes no row at all is not passing this bar, whatever the
-   reason breakdown says.** Those three are always a fail-and-fix:
-`no_tenant` = the request carried no tenant, **or** a tenant that was not a full
+   reason breakdown says.** None of those three is an exemption of its own —
+whether a `no_tenant` growth is the capture's OWN is decided by the ⚠️ bound
+below: `no_tenant` = the request carried no tenant, **or** a tenant that was not a full
 org/graph pair, `malformed_dsn` = the value failed `record_dsn()`'s own checks —
 it does **not start with** `postgresql://` / `postgres://`, or it names no host,
 or it carries raw whitespace (`record_backup.libpq_env` refuses the same
@@ -3342,21 +3513,98 @@ happen lands in those two channels rather than in a red deploy, which is exactly
 why the two recipes above are the verification and the deploy status is not.
 
    ⚠️ **The `no_tenant` arm is BOUND to the proving capture, not to the process.**
-   `no_tenant` is ALSO the designed outcome for a credential that names no graph:
-   an org-wide / session / legacy / OAuth key, the self-host registry lane
-   (`record_writer.record_tenant_for` returns `None` by design), and the
-   onboarding-seed and background-indexing surfaces (`hosted_api._bind_record_tenant`)
-   — all documented as the fail-closed direction (#9188/#9192), not a regression.
+   `no_tenant` is ALSO the designed outcome for a credential that names no graph
+   **the record can key on**: the self-host registry lane
+   (`record_writer.record_tenant_for` returns `None` by design, #9188/#9192), not
+   a regression.
+   ⛔ A session/JWT credential and an OAuth `oat_` token are **NOT** one of those
+   sources, and since #10046 that class is gone — so do NOT read either as one.
+   `hosted_api._session_user_org` and `oauth.resolve_oauth_access_token` put the
+   org's active `kind='default'` row id on the credential as `default_graph_id`,
+   exactly as `resolve_api_key` does, and `record_tenant_for` names it. So on the
+   hosted REST, MCP and OAuth lanes a `no_tenant` from either means the default
+   row could not be NAMED (absent, tombstoned, another org's, unreadable) or the
+   tenant read was lost — a **fail-and-fix**, not a designed state (#10046).
+   ⚠️ An **org-wide API KEY is NOT one of those sources** since #10025:
+   `resolve_api_key` puts the org's active `kind='default'` row id on the
+   credential as `default_graph_id` and `record_tenant_for` names it, so an
+   org-wide key reaches `no_tenant` **only** when the control plane could name no
+   such row (absent, or the `default` sentinel) — **or** when the resolution
+   itself faults, since the fail-soft resolver below turns any exception into
+   `None`. Counting org-wide keys as designed residue would excuse real growth.
+   ⚠️ The **onboarding-seed and background-indexing runners are NOT one of
+   those sources either**, since #10087: they build their own SDK and never see
+   the request's credential, so they carry the org's DEFAULT-graph tenant from
+   their own construction site — bound by
+   `hosted_api._bind_default_graph_record_tenant` (#10047) from the SAME
+   `kind='default'` `public.graphs` row an org-wide key is named from. A
+   `no_tenant` from one of those lanes is therefore a control-plane fault (no
+   nameable default row), i.e. the same fail-and-fix as an org-wide key; listing
+   them as designed residue is the fail-open read this bound exists to close.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
-   deployment can grow `no_tenant` with nothing wrong. So make the capture
+   deployment can grow `no_tenant` with nothing wrong. ⛔ **That excuse covers
+   `no_tenant` and nothing else.** `circuit_open` reads a process-wide breaker
+   and `malformed_dsn` a process-wide setting, so a growth in either is a
+   statement about the PROCESS and not about which caller met it: other traffic
+   cannot excuse it, because that other traffic runs behind the SAME breaker and
+   the same DSN. Only `no_tenant` is per-credential, which is why it is the one
+   arm this bound qualifies. So make the capture
    **graph-bound** — a graph-bound **control-plane** credential cannot land in
-   `no_tenant` (the self-host registry lane above is a graph-bound key that
-   resolves through no control plane, so its writes are counted there by
-   design) — and treat `no_tenant` growth as the residual it then is: it is a
-   fail-and-fix only when the capture ran **unbound**, or when item 1's row did
-   not appear. ⛔ **Do
-   not try to attribute that growth per request from the log.** The line an
+   `no_tenant` except when tenant resolution itself faults
+   (`hosted_api._resolve_record_tenant` is fail-soft, #5148: the fault is logged
+   as "could not resolve the record tenant" and that write then counts
+   `no_tenant`). The self-host registry lane above is the one graph-bound key
+   that resolves through no control plane, so its writes are counted there
+   **unless the process has declared the single-tenant pair** — see the #9192
+   cross-tenant note below for what that declaration may and may not cover.
+   Treat `no_tenant` growth as the residual it then is: it is a fail-and-fix
+   only when the capture ran **unbound**, when item 1's row did not appear, or
+   when the capture's credential was refused a tenant the record CAN key on.
+   That last arm has THREE readings, because it has three causes; read all THREE
+   before you call the growth other traffic:
+   - **A resolution FAULT** logs one of FOUR messages (recipe 1's exclusion (c)
+     above) — **recipe 1's grep does NOT match** (it greps
+     `the record write did not happen`) any of them, so read the faults with
+     `fly logs -a tortoise-y4mjjq | grep -E "could not resolve the record tenant|could not resolve the DEFAULT-graph record tenant|graphs default-row read failed|default graphs? row NOT minted|control-plane offload 'default_graph_row' failed"`.
+   - **No nameable default row** (absent, inactive, or the `default` sentinel)
+     is also a refusal of a tenant the record CAN key on, so it is a
+     fail-and-fix as well — and on the seed / indexing lane it logs **NOTHING**
+     at all: `hosted_api._bind_default_graph_record_tenant` returns without a
+     word when `default_graph_id_for` yields no row, whose only other caller-side
+     trace is the mint failure. So an **empty read of that grep does not clear
+     this arm** — read the org's `kind='default'` `public.graphs` row itself
+     before calling the growth other traffic: its `status` must be `active`, and
+     its `id` must be a real `g_<hex>` (the `default` SENTINEL is a pre-#10025
+     id value, never a row NAME — the minted row is named `default`, so the name
+     tells you nothing here).
+   - **A resolution ABANDONED at the seam** is the third cause, and it is the one
+     the row reading above CANNOT clear. `hosted_api._cp_offload(... ,
+     op="default_graph_row", best_effort=True)` logs
+     `control-plane offload 'default_graph_row' failed (best-effort, swallowed)`
+     and then normalizes either return to no tenant, so the capture counts
+     `no_tenant` either way — but the warning names TWO outcomes, and only one of
+     them means the resolution did not happen, so read which one the log line
+     describes before you read the row. If the pool REFUSED the submission, or
+     the bound CANCELLED it before any worker picked it up, the resolution
+     **never ran**: no resolution line above exists, and the `kind='default'` row
+     the reading above inspects is **untouched and healthy** — it is `active` and
+     carries a real `g_<hex>` id — so that reading PASSES while the capture still
+     counts `no_tenant`. If it is a plain bound miss on a submission a worker
+     already PICKED UP, the opposite holds: the seam abandons only the await
+     (`asyncio.wait_for` cancels the await, never the worker thread — CPython
+     #87185), so that worker still runs the resolver to completion. A resolution
+     line above CAN therefore sit beside this warning — and this lane's resolver
+     is `default_graph_id_for_credential`, which **mints on a miss**, so the row
+     the reading above inspects may have been CREATED by the very resolution the
+     seam stopped waiting for. What makes both branches this cause, and what the
+     row reading cannot see, is that the tenant id is discarded at the caller
+     either way (`hosted_api` assigns `org["default_graph_id"]` only for a
+     `str`). `best_effort=True` is
+     there precisely so an offload hiccup does not 503, so this is expected
+     traffic on the session/JWT lane — and the growth is still the deployment's
+     (control-plane saturation, or a refused submission), never another tenant's.
+   ⛔ **Do not try to attribute that growth per request from the log.** The line an
    unbound capture produces carries the env-pair diagnosis and **no** request
    identity and no record type — and `no_tenant` has a second emission, for a
    malformed CARRIED tenant, that echoes only that pair — so the log cannot tell
@@ -3365,7 +3613,7 @@ why the two recipes above are the verification and the deploy status is not.
    the exception text instead, and the SDK's `no_journal` line names the record
    type inside its exception text.)
    A bar that required per-request attribution would be unexecutable and would
-   red a healthy deployment on its default branch. The route is never
+   red a healthy deployment by default. The route is never
    `TORTOISE_RECORD_SINGLE_TENANT`, which the #9192 cross-tenant note below
    forbids.
 

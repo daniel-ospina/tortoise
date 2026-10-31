@@ -189,7 +189,10 @@ mechanisms:
       - check_batch
     note: >-
       Flag-gated (`TORTOISE_VET`), off by default — the gate is off-path until
-      the flag says otherwise.
+      the flag says otherwise. `TORTOISE_S2_DECISION_SEAM` (#5087) is a SECOND
+      switch that also arms this step, overriding even an explicit
+      `TORTOISE_VET=0`: the seam IS the arbiter, and an arbiter no gate consults
+      is the inert-enforcer class.
 
   - id: source_dedup
     name: "S0a NORMALIZE + HASH → S0b SOURCE DEDUP"

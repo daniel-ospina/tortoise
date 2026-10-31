@@ -1,0 +1,63 @@
+# step 4 — the OAuth visit chain, as the browser itself recorded it
+#
+# PROVENANCE. Read-only extract of cmux's browser-history store,
+# ~/Library/Application Support/com.cmuxterm.app/browser_history.json — the APP-LEVEL store that
+# records what its browser surfaces visit. It is not scoped to one profile: it holds 65 entries back
+# to 2026-08-09, most of them unrelated browsing, which makes the absence reported below a
+# whole-store absence rather than a within-one-profile one. This is a STORE read, not a screenshot:
+# the screenshots step4e..step4j are the pixel evidence for the same
+# minutes, and this file is the URL-level chain behind them. URLs are printed VERBATIM (no
+# truncation, nothing elided); timestamps are converted from the store's Apple-epoch field
+# `lastVisited`. Extracted 2026-10-26 for the #9664 capstone run; nothing was written to the store.
+#
+# WHAT IT SHOWS, in one line: the authorize request is made twice, each time the page asks for a
+# sign-in, and after the Google round trip the authorization CODE lands on the MARKETING host
+# (tortoise.premiselabs.co) instead of the ChatGPT connector callback — which is never visited.
+#
+# The four URLs that decide step 4 are marked >>> below. One further line is marked [contrast]:
+# the 17:58:52Z account chooser is the APP's own Google login (same Supabase project, same provider),
+# and it asks the provider for `redirect_to=https://app.premiselabs.co/auth/callback` instead of an
+# `/oauth/authorize` URL — that round trip completes (the dashboard is signed in), while the
+# authorize page's one does not.
+
+| UTC | local (UTC-05) | visits | url |
+|---|---|---|---|
+| 2026-10-26T17:55:23Z | 2026-10-26 12:55:23-05 | 1 | `https://chatgpt.com/auth/login_with?callback_path=%2F&connection=google-oauth2&screen_hint=login_or_signup&ext-web-mobile-direct-social-login=true&login_hint=daniel.ospinabotero%40gmail.com&auth_session_logging_id=d7f6b4c5-10cc-4de0-aef8-1949a08e2155&ext-oai-did=187b3d8b-d874-4d52-8ceb-f43c13ad1d9c` |
+| 2026-10-26T17:56:07Z | 2026-10-26 12:56:07-05 | 1 | `https://app.premiselabs.co/auth` |
+| 2026-10-26T17:58:52Z | 2026-10-26 12:58:52-05 | 1 | `[contrast] https://accounts.google.com/v3/signin/accountchooser?client_id=541016502320-koq3fu8v54gidorl3lvgd85ds1tor38f.apps.googleusercontent.com&redirect_to=https%3A%2F%2Fapp.premiselabs.co%2Fauth%2Fcallback&redirect_uri=https%3A%2F%2Fybetwichurajbfswfeqa.supabase.co%2Fauth%2Fv1%2Fcallback&response_type=code&scope=email+profile&state=f05eff07-9bdc-4df5-9af6-061e0efcc1bc&dsh=S85107093%3A1793037531770734&o2v=2&service=lso&flowName=GeneralOAuthFlow&opparams=%253Fredirect_to%253Dhttps%25253A%25252F%25252Fapp.premiselabs.co%25252Fauth%25252Fcallback&continue=https%3A%2F%2Faccounts.google.com%2Fsignin%2Foauth%2Fv3%2Fconsent%3Fauthuser%3Dunknown%26part%3DAJi8hAOqBrIvSRnAm7yHY1iF59lbgvkltY9fzoLL5Ebcvz8uRMf4Y35GIpZ5HAxwoIzCZ5pScih69rZUozY3opIb73kBXCq80zn3qfdy7Dt1MRraSmC5ftUoRowjN9JFFZDglyi41FwEle-Ef0DsJk1JB1iI3vDIurvRKB25F2OoaSgRR_IxD1X1cHeLP5l66VgbRMMI01_fQXWG_0vP7Dm1Y4WpuyODqtG0fxi0gWALJNMjsQgLdoE9NFHufVgRc251I0fIky791k92sO2Ug1JNRrHHNOyja4OXVIb9DW6bYSFvX2RYh2peigRY6X7hKg_hFCAICWiU1wlZqwp9JN7Dkbzw2Z9f1KzDk_FGKzn0EB08OkL28kGubBR2sd_G8B8ajO_TAZWbAvXM6pRQIzSUa0pzImFxAAHoRbUH2P9SHpL7wDRugEo2dwANCgKmHtY4eoHNQ2LnjaNXuA0oIMXck0chCYLXD9tRm9HNtXtDldl7OBpPYcI%26flowName%3DGeneralOAuthFlow%26as%3DS85107093%253A1793037531770734%26client_id%3D541016502320-koq3fu8v54gidorl3lvgd85ds1tor38f.apps.googleusercontent.com%26requestPath%3D%252Fsignin%252Foauth%252Fv3%252Fconsent%23&app_domain=https%3A%2F%2Fybetwichurajbfswfeqa.supabase.co` |
+| 2026-10-26T18:07:16Z | 2026-10-26 13:07:16-05 | 2 | `https://chatgpt.com/plugins` |
+| 2026-10-26T18:07:30Z | 2026-10-26 13:07:30-05 | 2 | `https://chatgpt.com/plugins/plugin_asdk_app_6ad797fd6dc88191988ff2cdcc6abb9d` |
+| 2026-10-26T18:12:09Z | 2026-10-26 13:12:09-05 | 1 | `https://chatgpt.com/c/6adf9726-2284-83e8-9c38-cbc13751d17d` |
+| 2026-10-26T18:17:49Z | 2026-10-26 13:17:49-05 | 2 | `https://tortoise.premiselabs.co/docs#chatgpt` |
+| 2026-10-26T18:19:09Z | 2026-10-26 13:19:09-05 | 1 | `>>> https://api.premiselabs.co/oauth/authorize?response_type=code&client_id=https%3A%2F%2Fchatgpt.com%2Foauth%2Fxf4v1zmjo3-b%2Fclient.json&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fxf4v1zmjo3-b&scope=mcp&code_challenge=7jUiai4zrlkLGOGg8dAJB3YNj6fcoZS1YBjmRqdA_3c&code_challenge_method=S256&resource=https%3A%2F%2Fapi.premiselabs.co%2Fmcp&state=oauth_s_6adf999b4c008191a42c7f0373a0f6f7&ui_locales=en-US` |
+| 2026-10-26T18:30:11Z | 2026-10-26 13:30:11-05 | 4 | `https://chatgpt.com/` |
+| 2026-10-26T18:39:44Z | 2026-10-26 13:39:44-05 | 1 | `>>> https://api.premiselabs.co/oauth/authorize?response_type=code&client_id=https%3A%2F%2Fchatgpt.com%2Foauth%2Fxf4v1zmjo3-b%2Fclient.json&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2Fxf4v1zmjo3-b&scope=mcp&code_challenge=hkQ5K2b0UaleOqqqu5hh7_5xQZEK7NeSKPRrGSSEZ24&code_challenge_method=S256&resource=https%3A%2F%2Fapi.premiselabs.co%2Fmcp&state=oauth_s_6adf9e6f644081918b5865e079c073a3&ui_locales=en-US` |
+| 2026-10-26T18:49:05Z | 2026-10-26 13:49:05-05 | 1 | `>>> https://accounts.google.com/v3/signin/accountchooser?client_id=541016502320-koq3fu8v54gidorl3lvgd85ds1tor38f.apps.googleusercontent.com&redirect_to=https%3A%2F%2Fapi.premiselabs.co%2Foauth%2Fauthorize%3Fresponse_type%3Dcode%26client_id%3Dhttps%253A%252F%252Fchatgpt.com%252Foauth%252Fxf4v1zmjo3-b%252Fclient.json%26redirect_uri%3Dhttps%253A%252F%252Fchatgpt.com%252Fconnector%252Foauth%252Fxf4v1zmjo3-b%26scope%3Dmcp%26code_challenge%3DhkQ5K2b0UaleOqqqu5hh7_5xQZEK7NeSKPRrGSSEZ24%26code_challenge_method%3DS256%26resource%3Dhttps%253A%252F%252Fapi.premiselabs.co%252Fmcp%26state%3Doauth_s_6adf9e6f644081918b5865e079c073a3%26ui_locales%3Den-US&redirect_uri=https%3A%2F%2Fybetwichurajbfswfeqa.supabase.co%2Fauth%2Fv1%2Fcallback&response_type=code&scope=email+profile&state=db249f2b-0004-4d45-ab1f-4414237a8abf&dsh=S2131730222%3A1793040544041194&o2v=2&service=lso&flowName=GeneralOAuthFlow&opparams=%253Fredirect_to%253Dhttps%25253A%25252F%25252Fapi.premiselabs.co%25252Foauth%25252Fauthorize%25253Fresponse_type%25253Dcode%252526client_id%25253Dhttps%2525253A%2525252F%2525252Fchatgpt.com%2525252Foauth%2525252Fxf4v1zmjo3-b%2525252Fclient.json%252526redirect_uri%25253Dhttps%2525253A%2525252F%2525252Fchatgpt.com%2525252Fconnector%2525252Foauth%2525252Fxf4v1zmjo3-b%252526scope%25253Dmcp%252526code_challenge%25253DhkQ5K2b0UaleOqqqu5hh7_5xQZEK7NeSKPRrGSSEZ24%252526code_challenge_method%25253DS256%252526resource%25253Dhttps%2525253A%2525252F%2525252Fapi.premiselabs.co%2525252Fmcp%252526state%25253Doauth_s_6adf9e6f644081918b5865e079c073a3%252526ui_locales%25253Den-US&continue=https%3A%2F%2Faccounts.google.com%2Fsignin%2Foauth%2Fv3%2Fconsent%3Fauthuser%3Dunknown%26part%3DAJi8hAMUHkrNiezrN8zayUqZk4oSLDKT6GeA_ISiqhFcP1TsO-ByqiqNtjn-zldgv2LRquM9xzrFUBZ9BsOlBvtCc2gK21S0up3zNpOcC81ZT1qacucgHoFgY9sgDDudx7AM203uDR5NjrXHWW6_msqK7EBtR9ocyPSegAAn6bLWjXpjta3A6bhXa3fHOi3Q1yJrPQYXfvXM7TMf1N4FmFdTVpsEcAcdmABbQdUwCe2MROiZBFkpwITBMCmL-89qLaJaCu-7bPr1I26gNwJo-TMIHcY9ORhcTPyElO0C5gYG0izZW7QmPOb5dgxcaNXtSgphfvyzq6WHYHPfEkx2ujndj7HRMvnjqOMgdGY5xEoOSyCofL-v82LWTMV5--bKYEh18oIK5Xoo0Vqv4-kau0PFrOwbuZ6kRj_Z26CzxbAD4rNP1zXlW7b2v769q7E7U7JDl4TB8UHxdUwLa_mXmqR0Mt3S8pD5Jx7niqmFOTvqc5sO7uSTw0E%26flowName%3DGeneralOAuthFlow%26as%3DS2131730222%253A1793040544041194%26client_id%3D541016502320-koq3fu8v54gidorl3lvgd85ds1tor38f.apps.googleusercontent.com%26requestPath%3D%252Fsignin%252Foauth%252Fv3%252Fconsent%23&app_domain=https%3A%2F%2Fybetwichurajbfswfeqa.supabase.co` |
+| 2026-10-26T18:49:08Z | 2026-10-26 13:49:08-05 | 1 | `>>> https://tortoise.premiselabs.co/?code=50605f24-15a1-40f0-8e86-f3722cccce13#` |
+| 2026-10-26T18:50:48Z | 2026-10-26 13:50:48-05 | 6 | `https://chatgpt.com/settings/plugins-settings/plugin_asdk_app_6ad797fd6dc88191988ff2cdcc6abb9d` |
+| 2026-10-26T19:12:30Z | 2026-10-26 14:12:30-05 | 17 | `https://app.premiselabs.co` |
+
+## The negative that decides the verdict
+
+Searching the whole store (65 entries, 2026-08-09 .. 2026-10-26) for the ChatGPT connector callback
+prefix `chatgpt.com/connector/oauth`:
+
+
+    matches = 0
+
+The connector callback `https://chatgpt.com/connector/oauth/xf4v1zmjo3-b` — the `redirect_uri` the
+authorize page was handed in both requests — **was never reached**. The code was minted (so the
+authorize step ran and the user authenticated) and delivered to `https://tortoise.premiselabs.co/?code=…`,
+a marketing page that ignores the parameter (screenshot `step4i`), 3 s after the Google account
+chooser. `api.premiselabs.co/oauth/authorize` is never re-entered, so the consent view never renders
+and no token is issued; the plugin's account list is unchanged afterwards (screenshot `step4g`).
+
+## What is MEASURED vs INFERRED
+
+* MEASURED (this file + the step4* screenshots): both authorize requests; the in-page "Sign in to
+  Tortoise" view on the second one; the Google account chooser; the code arriving on the marketing
+  host; the connector callback's absence from the entire store; the plugin state unchanged.
+* INFERRED, not measured here: **why** the provider returned to the marketing host. Recorded, with the
+  code path that asks for the right return URL (`tortoise/oauth.py:2701`, `:2804-2806`) and the
+  allow-list/Site-URL mechanism, as #10088.
+

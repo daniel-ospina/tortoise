@@ -59,8 +59,17 @@
  *
  * `/admin` is the blog console SUBTREE: `functions/admin/[[path]].ts` serves the
  * console shell at any depth, so its sub-paths are real destinations.
+ *
+ * `/api/consent/start` (#3524) is the ONE API pathname admitted, and it is admitted
+ * EXACTLY — no `/api` subtree — because it is a navigational GET, not a data endpoint:
+ * it validates the authorize params, records the attempt and 302s to the AS, which is
+ * precisely what must happen to a visitor who signed in mid-consent. Without it the
+ * consent bounce is DROPPED here and the flow dies on a cold browser (the failure #3524
+ * was reopened for). `/api/consent/token` — the mint — stays unnameable: it is POST-only,
+ * so a return-to could not reach it anyway, and naming it would widen a security-relevant
+ * allowlist for nothing.
  */
-export const APP_RETURN_ROUTES = ['/welcome', '/team', '/admin']
+export const APP_RETURN_ROUTES = ['/welcome', '/team', '/admin', '/api/consent/start']
 
 /** The subset of `APP_RETURN_ROUTES` whose sub-paths are also real routes. */
 export const APP_SUBTREE_ROUTES = ['/admin']

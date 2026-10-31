@@ -49,16 +49,35 @@ What this module DELIBERATELY does not decide
   about what a token IS. Every entry point takes the tokens from
   :func:`tortoise.sparse.tokenize_sparse_query`.
 * **The numeric-token policy.** That policy (``keep_numeric``, default False)
-  is a RECORDED control — the search lane stays byte-identical — and its
-  reopen is the owner's call (#8933). This module only THREADS the caller's
-  choice: ``keep_numeric=True`` makes ``ERR-4032`` contribute its ``4032``
-  segment, ``False`` (the shipped default) keeps today's behaviour. Nothing
-  here changes the default.
+  was the search lane's byte-identity control, and the owner REOPENED it
+  (#8933 ruling, 2026-10-26) — for IDENTIFIER-shaped input only. So the
+  identifier half is no longer pending, and it is not this module's: the
+  shared tokenizer preserves an identifier by default (``ERR-4032`` ->
+  ``err4032`` plus the adjacency phrase ``"err 4032"``), switched by
+  ``TORTOISE_IDENTIFIER_TOKENS`` in ``tortoise/sparse.py`` — **not** here, and
+  not by ``keep_numeric``. ``keep_numeric`` still governs ONLY bare all-digit
+  tokens: ``keep_numeric=True`` makes a bare ``4032`` participate, ``False``
+  (the shipped default) drops it. This module only THREADS the caller's
+  choice; nothing here changes either default. The identifier control's own
+  coverage is ``tests/test_identifier_tokens_8933.py``.
+* **Which half of the identifier asymmetry a TEXT is.** ``tortoise/sparse.py``
+  ships one deliberate asymmetry — the write side is the PRECISE half
+  (``ERR-4032`` mints ``err4032``; the prose "sprint 2024" mints nothing) and
+  the read side also accepts the space-typed shape a person types. This module
+  tokenises BOTH a query and a CORPUS, so it must ask for the right half:
+  :func:`bm25_scores` tokenises the query on the read side and each DOCUMENT
+  on the WRITE side (:func:`bm25_tokens`' ``space_separated_identifiers``).
+  Getting that wrong is not cosmetic — a read-side corpus mints
+  ``sprint2024`` from the prose "sprint 2024 planning", which is exactly the
+  token the write path refuses to store, so a prose document would score as
+  if it held the code and the two lexical stacks would disagree about what a
+  document says (#10203 review round 10, F1).
 * **Whether the arm is on.** :func:`bm25_enabled` reads
-  ``TORTOISE_BM25_LEXICAL`` and the read path only swaps the lexical scorer
-  when it is explicitly enabled (fail-safe OFF, the same posture as
-  ``TORTOISE_ASK_RERANK``). The swap is a retrieval-behaviour change and #8486
-  has not yet produced a baseline to measure it against.
+  ``TORTOISE_BM25_LEXICAL``, which since #8488's owner ruling is an OPT-OUT
+  (``BM25_DEFAULT_ENABLED = True``) rather than a fail-safe-OFF switch — the
+  fail-safe-OFF posture belongs to while the arm was UNMEASURED, and the
+  reasoning for moving it, plus the #10121 tie fix it depends on, is recorded
+  on that constant.
 
 The fusion BOUND (why :func:`resolve_lexical_weight` exists)
 ------------------------------------------------------------
@@ -86,10 +105,9 @@ from __future__ import annotations
 
 import logging
 import math
-import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
-from .env_truthy import is_truthy
+from .env_truthy import env_flag
 
 logger = logging.getLogger(__name__)
 
@@ -131,27 +149,62 @@ DEFAULT_LEXICAL_WEIGHT = 1.0
 LEXICAL_WEIGHT_MAX = 1.0
 
 
+#: #8488 (owner ruling 2026-10-28): the arm is now ON by default and the
+#: variable is an OPT-OUT. Fail-safe-OFF was right while the arm was unmeasured;
+#: the owner moved it to default-ON on mechanism-level evidence (this module's
+#: own tests) with the benchmark (#8486) still pending. ``=0`` / ``false`` /
+#: ``no`` / ``off`` disables it, and an unset, blank or GARBAGE value keeps the
+#: DEFAULT — a typo must never silently change which scorer a read uses.
+#:
+#: ⛔ ORDERING, now SATISFIED: enabling the arm was only correct ON TOP OF
+#: the arm's own tie fix — ``bm25_rank`` used to tie ``(-score, id)`` ASCENDING
+#: (oldest-first), which truncated the NEWEST match at ``limit``. #10121 / PR
+#: #10150 carries that fix and it is PRESENT in this tree (``bm25_rank`` sorts
+#: through ``search_engine.recency_tie_key``, newest-first, id last), so the
+#: default may be ON. Do not re-tie ``bm25_rank`` oldest-first without also
+#: reverting this default.
+BM25_DEFAULT_ENABLED = True
+
+
 def bm25_enabled() -> bool:
     """Is the in-process BM25 lexical arm enabled for this process?
 
-    Fail-safe OFF (unset/blank/garbage → False) via the recorded truthy
-    contract in :mod:`tortoise.env_truthy` — the same spellings every other
-    lever in this tree accepts.
+    Default ON, opt-out via ``TORTOISE_BM25_LEXICAL=0``, resolved through
+    :func:`tortoise.env_truthy.env_flag` — whose contract is exactly this case:
+    unset/blank/garbage -> the DEFAULT (a typo never flips a knob), explicit
+    truthy -> True, explicit falsy -> False.
     """
-    return is_truthy(os.environ.get(BM25_ENV))
+    return env_flag(BM25_ENV, BM25_DEFAULT_ENABLED)
 
 
-def bm25_tokens(text: str, *, keep_numeric: bool = False) -> list[str]:
+def bm25_tokens(
+    text: str, *, keep_numeric: bool = False,
+    space_separated_identifiers: bool = True,
+) -> list[str]:
     """Tokenise through the ONE shared tokenizer (``tortoise.sparse``).
 
     Imported lazily: ``sparse`` is dependency-free, but importing it at module
     scope would put this module in the import graph of anything that only wants
     :func:`resolve_lexical_weight`, and the fusion helper is deliberately
     usable without the scorer.
+
+    ``space_separated_identifiers`` selects WHICH HALF of the #8933 identifier
+    asymmetry applies, and it is about the KIND of text, not a tuning knob:
+
+    * ``True`` (default) — a QUERY. The read side also accepts the space-typed
+      shape a person types (``ERR 4032`` -> ``err4032``), and a spurious alias
+      costs one extra OR term in one query.
+    * ``False`` — INDEXED TEXT (a document). Only an explicit ``-``/``_``
+      separator mints an alias, matching the write side exactly, because a
+      document saying "sprint 2024" must never behave as though it stored
+      ``sprint2024``. :func:`bm25_scores` passes this for every document.
     """
     from .sparse import tokenize_sparse_query
 
-    return tokenize_sparse_query(text, keep_numeric=keep_numeric)
+    return tokenize_sparse_query(
+        text, keep_numeric=keep_numeric,
+        space_separated_identifiers=space_separated_identifiers,
+    )
 
 
 def bm25_scores(
@@ -172,7 +225,19 @@ def bm25_scores(
         k1, b: the estimator's parameters (see the module docstring).
         keep_numeric: the caller's numeric-token policy, threaded verbatim to
             the shared tokenizer. Default False = the shipped search-lane
-            policy; this function never decides it (#8933).
+            policy; this function never decides it (#8933). It governs BARE
+            NUMERIC tokens only — the identifier control is the tokenizer's
+            (``TORTOISE_IDENTIFIER_TOKENS``) and rides both policies.
+
+    The two halves are tokenised with the ASYMMETRY the write path defines: the
+    QUERY takes the read side (a person's ``ERR 4032`` counts) and each
+    DOCUMENT takes the WRITE side (only ``ERR-4032`` does). That is not a
+    refinement — the document side is INDEXED TEXT, and a read-side corpus
+    would mint ``sprint2024`` from the prose "sprint 2024 planning", which the
+    write path deliberately does not store: a prose document would then score
+    as if it held the code, the two lexical stacks would disagree about what a
+    document says, and the bogus token would shift ``avgdl``/``df`` for every
+    score in the corpus (#10203 review round 10, F1).
 
     Returns:
         ``{doc_id: score}`` for every document that shares at least one token
@@ -186,6 +251,8 @@ def bm25_scores(
     """
     if not query or not docs:
         return {}
+    # The QUERY takes the read side of the identifier asymmetry (:func:`bm25_tokens`'
+    # default): the space-typed ``ERR 4032`` a person actually types counts.
     q_tokens = bm25_tokens(query, keep_numeric=keep_numeric)
     if not q_tokens:
         return {}
@@ -198,7 +265,10 @@ def bm25_scores(
     tokenised: list[tuple[str, list[str]]] = []
     doc_len_sum = 0
     for doc_id, text in docs:
-        toks = bm25_tokens(text or "", keep_numeric=keep_numeric)
+        toks = bm25_tokens(
+            text or "", keep_numeric=keep_numeric,
+            space_separated_identifiers=False,
+        )
         tokenised.append((doc_id, toks))
         doc_len_sum += len(toks)
     n_docs = len(tokenised)
@@ -253,16 +323,41 @@ def bm25_rank(
     k1: float = BM25_K1,
     b: float = BM25_B,
     keep_numeric: bool = False,
+    recency: Mapping[str, str] | None = None,
 ) -> list[tuple[str, float]]:
     """``[(doc_id, score), ...]`` ranked descending — the shape a leg returns.
 
-    The sort key is ``(-score, doc_id)``, not ``-score``: a score tie must not
-    fall through to insertion order (#3019 — every other leg in
-    ``search_engine`` makes the same pair, because RRF is rank-based and an
-    unstable tie makes the fused order a function of dict order).
+    The sort key is ``(score, recency, doc_id)`` — all descending — not
+    ``-score``: a score tie must not fall through to insertion order (#3019 —
+    RRF is rank-based and an unstable tie makes the fused order a function of
+    dict order), and it must not fall through to OLDEST-first either (#10121).
+
+    ``recency`` is supplied by the caller because the arm cannot derive it from
+    text: ``run_bm25_query`` projects the shared
+    ``search_engine.recency_key_expr`` (the CASE — not a bare ``coalesce``,
+    which would let an empty ``updatedAt`` suppress a valid ``createdAt``)
+    alongside each document and hands it over. A doc missing from the map sorts
+    as ``''`` — OLDEST — which is exactly how
+    :func:`tortoise.search_engine.recency_tie_clause` treats an undated row.
+
+    Why the direction matters (measured, #10121): an arm that ranks a tie
+    oldest-first returns the newest match LAST, and with a ``limit`` it drops
+    it: on a 21-row tie the just-created point was absent from
+    ``run_bm25_query(limit=5)``. Sorting the corpus window newest-first and then
+    ranking it oldest-first is how that survived the first pass at this fix.
     """
+    from .search_engine import recency_tie_key
+
     scores = bm25_scores(query, docs, k1=k1, b=b, keep_numeric=keep_numeric)
-    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+    timestamp = recency or {}
+    # The secondary keys come from the ONE Python-side twin of the cypher
+    # clause (#10121 review): a hand-written tuple here was the third
+    # implementation of the same rule.
+    ranked = sorted(
+        scores.items(),
+        key=lambda kv: (kv[1], *recency_tie_key(timestamp.get(kv[0]), kv[0])),
+        reverse=True,
+    )
     if limit is not None:
         ranked = ranked[:max(0, limit)]
     return ranked

@@ -230,6 +230,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
         "mcp-team": "team-identity", "t-bf-1": "team-identity",
     },
     "test_quota.py": {"registry": "prod-coupled"},
+    # #9567 capstone: D11/D12 drive the SHIPPED quota gate, whose resolver
+    # (`tortoise.quota.resolve_org_limits`) builds its own
+    # `_make_sdk(namespace="registry")`. So the literal IS the namespace PROD
+    # code resolves — the seed and the resolution must read one graph, exactly
+    # the `prod-coupled` class as test_quota.py beside it.
+    "test_9567_record_capstone.py": {"registry": "prod-coupled"},
     "test_sdk_legacy_coverage.py": {"team-beta": "assertion"},
     "test_writer_inventory.py": {"registry": "prod-coupled"},
     "test_ask_sdk.py": {
@@ -852,6 +858,18 @@ def test_no_redirect_stems_registry_exact():
         # working as designed, so the stem is DECLARED here rather than
         # exempted.
         "test_bm25_lexical_8488",
+        # #10122: the Point `name` advisory (a stored-but-unfindable identifier)
+        # and the FTS-gap evidence. The module carries module-level
+        # `pytestmark = pytest.mark.embedded_only` — the lane the defect was
+        # MEASURED on — so the exemption's load-bearing reason is the SKIP (a
+        # URI-set lane skips every case) *and* the REDIRECT (each case builds an
+        # embedded `TortoiseSDK(tmp_path)`; a server lane would certify the
+        # advisory against a graph the file does not target). The third leg of
+        # the three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the change — this pin
+        # reding on the addition is the pin working as designed, so the stem is
+        # DECLARED here rather than exempted.
+        "test_10122_point_name_not_indexed",
         # #9209: the write handle's NON-CYPHER verbs. The suite's
         # `sdk_with_journal` fixture asserts `proj._is_embedded` and counts
         # real nodes on that embedded projection, and the module carries
@@ -929,6 +947,29 @@ def test_no_redirect_stems_registry_exact():
         # first registration pass added the other two and missed this, reding
         # `test-slow (c)` at edd8f7ee (the pin working as designed).
         "test_mechanism_write_path_9963",
+        # #3590 round-5 review F3: the minted-identity acceptance pins build
+        # `TortoiseSDK(<tmp_path>/t.db, event_log_path=…)` BY DB PATH and drive
+        # `rebuild_all(...)` against that store, so a URI-set lane would discard
+        # the path and connect the construction to the server — the
+        # `rebuild == live` replay this file exists to prove would certify a
+        # lane the file does not target. The file carries NO module-level
+        # `embedded_only` marker, so the load-bearing reason is the REDIRECT, not
+        # a skip. Registered in all THREE homes — config/ci-surfaces.yml
+        # `carve_out:`, TEST_NO_REDIRECT_STEMS and this declaration — so the pin
+        # redin on the addition is the pin working as designed.
+        "test_3590_minted_identity_acceptance",
+        # #10121: the recency-tie pins construct per-test embedded SDKs from a
+        # tmpfile path and read the tie ORDER back off them, so the module-level
+        # `embedded_only` marker is load-bearing and the file belongs in the
+        # URI-unset carve-out lane. Caught by the SOURCE-SCAN half of
+        # `test_module_level_embedded_only_modules_are_carve_out` while the file
+        # was registered in `surfaces:` alone: it was collected by every URI-set
+        # lane and every case SKIPPED — a permanently green, permanently
+        # unexecuted gate (the #4047/#4524 shape). Registered in all three homes
+        # — config/ci-surfaces.yml `carve_out:`, TEST_NO_REDIRECT_STEMS and this
+        # declaration — so the pin reding on the addition is the pin working as
+        # designed.
+        "test_10121_recency_tie",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

@@ -201,6 +201,34 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
     # itself: the live row was written before the tear, and a torn line
     # could not be replayed anyway.
     "SessionNarrated",
+    # #10017 R2: §9.1's raw-turn carrier, TOLERATED — and this is step 7's
+    # SETTLED answer to the placeholder #10129 declared (`TURNS_RECORD_TYPE`'s
+    # "Deliberately NOT harmless" paragraph above states the open question and
+    # names the two things that decide it: the WRITE ORDER, and whether the
+    # turns survive in the record when the append tears). Both measured:
+    #
+    #   * WRITE ORDER — `sdk._emit_event` returns on an append failure
+    #     (`return False`) BEFORE `_write_record_projection` runs, so a torn
+    #     carrier line means that capture's turn rows never reached the record
+    #     EITHER. Refusing the tail recovers nothing for it — the transcript is
+    #     already lost — while `recover_from_log` then reports
+    #     `recovered=False, nodes=0` for the WHOLE journal (measured in the
+    #     placeholder's note). That is a strictly larger loss than the one
+    #     capture it protects, and it is the SIGKILL-mid-append shape #9555
+    #     added the narrative carrier to stop.
+    #   * POLARITY — the carrier is ADDITIVE: it creates rows and never removes
+    #     or re-states any. The state a tolerated torn tail could revive is a
+    #     REMOVAL's opposite (this list exists because a torn `EntityMutated`
+    #     op=delete would resurrect a deleted turn), and an additive type cannot
+    #     express a revival at all. Its loss is bounded to the capture whose
+    #     append tore.
+    #
+    # ⛔ NOT the #10017 R1 removal record (`EntityMutated` op=delete, tier
+    # `record_only`). A tolerated torn DELETE is a resurrection — the record's
+    # removal would be lost and the replayed `PointAdded` would stand. That
+    # asymmetry is the whole reason this list is an ALLOW-list of additive types
+    # rather than a deny-list of removals.
+    "TurnsRecorded",
     # Additive edge / prop writes (MERGE + SET only).
     "EntityLinked",
 })
@@ -250,6 +278,15 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                     reports success. Same root cause as #5921 (a payload-only
 #                     lifecycle property), but its harmful payload is COMMON and
 #                     it is a trailing record, so it is refused outright.
+#   TurnsRecorded — SETTLED BY STEP 7 IN FAVOUR OF TOLERATING IT (see the entry
+#                  in the set above for the measurement: the write order makes a
+#                  torn carrier already-lost, and refusing makes the WHOLE
+#                  journal unrecoverable — `recover_from_log` returns
+#                  `recovered=False, nodes=0` — for a capture that reached no
+#                  store either way). It is ADDITIVE, so the revival class this
+#                  list exists for cannot be expressed by it. #10129 declared it
+#                  a PLACEHOLDER precisely so step 7 would settle it here rather
+#                  than inherit it.
 #
 # ⛔ ``EventRecorded`` IS NOT IN THE SET, although its loss is the data-LOSS
 # direction for most records. ``_upsert_event`` →

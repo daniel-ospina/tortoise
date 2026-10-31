@@ -342,12 +342,22 @@ def test_all_three_discovery_variables_are_initialised_before_use():
     ``unbound variable``, breaking the exit-0 contract.  ``TORTOISE_MODULE``
     was initialised but by accident of ordering rather than by declaration.
 
-    Mutation: delete any of the three empty initialisers (or move one below
-    ``_resolve_discovery``) — the ordering assertion REDs."""
+    Mutation: delete any of the three initialisers (or move one below
+    ``_resolve_discovery``) — the ordering assertion REDs.
+
+    #4848: ``PYTHON_BIN`` is initialised as ``${PYTHON_BIN:-}``, not to a bare
+    empty string. It is the documented OPERATOR OVERRIDE for the interpreter
+    the seams run (the guard never probes an override, and a seam that reset it
+    to ``""`` would silently discard it), so the initialiser has to be
+    idempotent over an inherited value while still guaranteeing the variable is
+    SET — which is all this test's ``set -u`` contract asks for. Both spellings
+    satisfy it; the pin accepts either and nothing else."""
     text = SESSION_START.read_text(encoding="utf-8")
     for name in ("TORTOISE_BIN", "TORTOISE_MODULE", "PYTHON_BIN"):
-        decl = f'{name}=""'
-        assert decl in text, (
+        decl = next(
+            (d for d in (f'{name}=""', f'{name}="${{{name}:-}}"')
+             if d in text), None)
+        assert decl is not None, (
             f"{name} must be declared before use so `set -u` cannot bite a "
             "branch that skips the assignment (#3796)")
         assert text.index(decl) < text.index("_resolve_discovery()"), (

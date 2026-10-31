@@ -299,10 +299,14 @@ def _inject_session_state(session_id: str, *, value_nodes_created: int = 0,
 def _seed_objects(client, session_id: str, names: list[str]) -> None:
     """Prior-commit seeding of LIVE Objects by name — the superseded side
     must pre-exist the supersession commit (the commit under test only
-    carries the supersession records). The names ride payload.entities
-    (create_entity mints the canonical obj-<sha26(name)> ids); one net-new
-    point keeps the payload non-empty. Must 200 — a failed seed would
-    invalidate the guard under test."""
+    carries the supersession records). The names ride payload.entities and
+    `create_entity` mints an OPAQUE id for each — since #3590 it is NOT
+    derived from the name: `ids.entity_name_id` is gone, `ids.ulid()` is the
+    mint, and the `obj-<sha26(name)>` spelling survives only in
+    `legacy_ids._derived_legacy_handle` (an offline legacy-key normaliser,
+    never an entity create path) — so nothing here may assert on the id's
+    spelling. One net-new point keeps the payload non-empty. Must 200 — a
+    failed seed would invalidate the guard under test."""
     raw = _raw_payload(1, session_id=session_id, points=[
         {"id": f"pt_{content_hash('seed:' + session_id)}",
          "content": f"seed point {session_id}",
@@ -2190,7 +2194,16 @@ class Test6bEntitySupersessionGuards:
         erase it from recall's default view)."""
         _seed_objects(client, "g6e-seed", ["e-old"])
         oid = _object_row("e-old")[0][2]
-        assert oid and oid.startswith("obj-"), oid
+        # ⛔ #3590: the create mints an OPAQUE id (`ids.ulid()`), so nothing here
+        # may assert the retired `obj-<sha26(name)>` spelling — `_seed_objects`'
+        # own docstring states the same rule. What the guard needs is that the
+        # reference IS the alias (an id addressing the Object whose NAME is the
+        # successor string); asserting the two differ keeps the fixture from
+        # degenerating into the same-string case, where every successor
+        # candidate trivially equals the target for a reason that has nothing
+        # to do with the id/name alias arm under test.
+        assert oid and isinstance(oid, str), oid
+        assert oid != "e-old", oid
         r = _supersede_commit(client, "g6e-fold", oid, "e-old",
                               evidence="self-reference via id/name alias",
                               entities=[])
@@ -2432,6 +2445,11 @@ class TestCommitPointsGate:
             **TEST_TEAM, "max_points": limit}
 
     @staticmethod
+    def _set_limits(**overrides) -> None:
+        app.dependency_overrides[get_current_org] = lambda: {
+            **TEST_TEAM, **overrides}
+
+    @staticmethod
     def _seed_points(n: int) -> None:
         for i in range(n):
             _team_sdk()._get_proj().g.query(
@@ -2463,6 +2481,105 @@ class TestCommitPointsGate:
                       params={"sid": session_id}).result_set[0][0]
         return int(sess), int(ev), int(src)
 
+    def test_session_cap_is_not_the_org_limit_gate(self, client):
+        """#4051: the SESSION cap must not be consulted as a stand-in for the
+        org limit — a `max_sessions` an org could never satisfy must not refuse.
+
+        This is the removal's pin. Before it, the lane called
+        `_check_org_limit(org, "sessions")` ahead of the points gate: with
+        `max_sessions: 0` (a value that WOULD refuse) and existing Sessions, the
+        commit 402'd on a limit that #4010 made unenforceable — a guard reading
+        a number that cannot bind. Mutation REDs this: re-add that call.
+        """
+        self._set_limits(max_points=10000, max_sessions=0)
+        for i in range(3):
+            _team_sdk()._get_proj().g.query(
+                "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+                params={"sid": f"sProxyCap{i}"},
+            )
+        r = _commit(client, _raw_payload(0, session_id="sProxyCap", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 200, (
+            "a session cap refused a commit — the removed proxy is back: "
+            f"{r.text}")
+        assert self._chain_counts("sProxyCap") == (1, 1, 1)
+
+    def test_unreadable_max_points_refuses_and_mints_nothing(self, client):
+        """#4051: the org limit is read from its OWN source, and a value that
+        cannot be READ is refused — a miss is never a pass.
+
+        Scope, stated precisely: this drives the GATE's input through a
+        dependency-overridden limits dict. That override is a TEST SEAM — it
+        exercises the gate's refusal contract independently of what any one
+        production lane happens to put in the dict, which is the property that
+        keeps the contract from depending on a lane's resolver.
+        WHICH lanes arrive raw and which die earlier is stated ONCE, in
+        `quota.enforce_org_limit`'s SCOPE note — not restated here (copies
+        of that inventory drifted apart inside this change; a copy claiming the
+        `/v1/index/docs` documents gate arrives raw survived three review rounds,
+        and it is false: that lane is handled by the DERIVED branch, and
+        `resolve_org_limits` coerces `int(mp)` before any gate). It pins the
+        gate's refusal contract — name the field, write nothing — and NOT an
+        end-to-end corrupt-column path on this lane: the commit lane's own
+        dependency (`get_current_org_gated`) coerces `max_points` with `int(mp)`
+        first, so a corrupt STORED value here fails earlier, in auth, as an
+        unnamed 500. That resolver gap is tracked as #10136.
+
+        Before the gate validated its input the same dict escaped as a bare
+        `TypeError` — refused by accident, naming nothing, and outside the
+        `QuotaCheckError` contract every caller handles. Mutation REDs this:
+        delete the `int(limit)` validation in `quota.enforce_org_limit`.
+        """
+        self._set_limits(max_points="unreadable")
+        r = _commit(client, _raw_payload(0, session_id="sUnreadable", points=[],
+                                         entities=[], provenance_refs=[]))
+        assert r.status_code == 500, (
+            f"an unreadable org limit was not refused: {r.status_code} {r.text}")
+        detail = str(r.json()["detail"])
+        assert "max_points" in detail and "unreadable" in detail, (
+            f"the refusal must NAME the unreadable surface, got: {detail}")
+        assert self._chain_counts("sUnreadable") == (0, 0, 0)
+
+    def test_missing_max_points_refuses_and_mints_nothing(self, client):
+        """#4051: the presence contract RIDES on `max_points` now, so a limits
+        dict that OMITS the key must still refuse — and name it.
+
+        Removing `_check_org_limit(org, "sessions")` removed this lane's OTHER
+        presence check: it 500'd a limits dict with no `max_sessions` key
+        (#310 GAP-B). The removal is only honest while the surviving check is
+        pinned HERE — otherwise a later edit that made the points gate skip a
+        MISSING `max_points` ("a miss is never a pass") would leave this lane
+        with no fail-closed org gate at all, and every other test on the lane
+        would stay green (they all supply the key). Mutation REDs this: make
+        the missing-key branch in `quota.enforce_org_limit` `return` instead of
+        raise — the commit then 200s and mints the chain.
+
+        ⚠️ IT DOES NOT DISCRIMINATE THIS CHANGE, and says so rather than letting
+        a green run imply it: for a limits dict with no `max_points` at all, the
+        PRE-change tree also 500s naming `max_points` (the old
+        `_check_org_limit(org, "sessions")` ran first and `enforce_org_limit`'s
+        missing-key raise fires on whichever limit is asked for). Measured, not
+        assumed: revert both source files to `origin/main` and this test still
+        PASSES while
+        `test_session_cap_is_not_the_org_limit_gate` and
+        `test_unreadable_max_points_refuses_and_mints_nothing` both RED. It is a
+        guard-rail against a FUTURE edit, not evidence for this one.
+        """
+        limits = dict(TEST_TEAM)
+        del limits["max_points"]
+        app.dependency_overrides[get_current_org] = lambda: limits
+        r = _commit(client, _raw_payload(0, session_id="sMissingMaxPoints",
+                                         points=[], entities=[],
+                                         provenance_refs=[]))
+        assert r.status_code == 500, (
+            "a limits dict with no max_points key passed the gate: "
+            f"{r.status_code} {r.text}")
+        detail = str(r.json()["detail"])
+        assert "max_points" in detail, (
+            f"the refusal must NAME the missing field, got: {detail}")
+        assert self._chain_counts("sMissingMaxPoints") == (0, 0, 0), (
+            "the refused commit minted nodes")
+
     def test_at_max_points_refused_and_mints_nothing(self, client):
         """#4051: with the org AT max_points, a `points: []` commit — the
         cheapest possible loop iteration — 402s and mints no
@@ -2482,8 +2599,8 @@ class TestCommitPointsGate:
         assert self._chain_counts("sGateAt") == (0, 0, 0), (
             "a refused commit must mint no Session/Event/Source — NOT 'nothing': "
             "a :CommitRecord with status='partial' IS merged before the gate "
-            "(`store.acquire(..., status='partial')`, hosted_api.py:13006, which "
-            "runs ahead of the gate at :13061); replay-safe, and invisible to "
+            "(`store.acquire(..., status='partial')`, hosted_api.py:17865, which "
+            "runs ahead of the gate at :17968); replay-safe, and invisible to "
             "_chain_counts by design")
         assert self._point_count() == before  # no partial Point either
 
@@ -2504,15 +2621,15 @@ class TestCommitPointsGate:
         (QuotaCheckError) — never a silent pass", and that is the property the
         new gate site must inherit.
 
-        ⛔ IT MUST DISCRIMINATE THE POINTS SITE FROM THE SESSIONS SITE. The lane
-        calls `_check_org_limit(org, "sessions")` (:13023) BEFORE the #4051
-        points gate (:13061), and BOTH call the same `enforce_org_limit` — so a
-        patch that fails EVERY resource makes the SESSIONS gate raise the 500
-        first and the request never reaches the new site. That was the first cut
-        of this test, and it pinned nothing: with only the points gate made to
-        swallow its 500 it stayed GREEN (verified by mutation). The patch below
-        raises for `resource == "points"` only, so the sessions gate passes and
-        the 500 can come from the new site alone.
+        ⛔ IT MUST DISCRIMINATE THE POINTS SITE FROM ANY OTHER `_check_org_limit`
+        SITE in the handler. The patch below raises for `resource == "points"`
+        only, so every other resource-gate call passes and the 500 can come from
+        the points site alone. (When this test was written the lane still called
+        `_check_org_limit(org, "sessions")` first — a patch that failed EVERY
+        resource made the sessions gate raise the 500 and the request never
+        reached the points site, so that first cut pinned nothing and stayed
+        GREEN under mutation. #4051 has since removed the sessions call; the
+        resource filter is what keeps this test measuring the site it names.)
         """
         import tortoise.quota as quota_mod
         from tortoise.quota import QuotaCheckError
@@ -2524,7 +2641,7 @@ class TestCommitPointsGate:
         # re-raises server exceptions) — proving nothing.
         def _boom(org, resource, *, slot_credit=0, **kwargs):
             if resource != "points":
-                return  # the sessions gate must PASS — see the docstring
+                return  # every other resource-gate site must PASS — see the docstring
             raise QuotaCheckError("count unavailable")
 
         monkeypatch.setattr(quota_mod, "enforce_org_limit", _boom)
@@ -4060,3 +4177,239 @@ class Test5475CommitDoorKindRefusal:
             entities=[{"name": "EpicAlpha", "kind": "dev:epic",
                        "passes_frequency_gate": True}]))
         assert r.status_code == 200, r.text
+
+
+# ── #9876 — the create-side AMBIGUITY refusal on the hosted COMMIT path ──────
+#
+# `entity_identity.resolve_or_mint` REFUSES a name that two or more LIVE
+# entities hold (route-then-refuse, R8). `_execute_commit_writes` reaches it at
+# step 6 — after steps 2/2b/3/3b/4/5 have journaled and written — so before the
+# fix the refusal escaped as the fail-closed 500 whose detail says "the commit
+# is replay-safe (retry with the same client_commit_id)". That advice is wrong
+# twice over for this shape: the refusal is DETERMINISTIC (a same-payload retry
+# re-raises identically), and it lands on top of a half-written commit — the
+# #2422/#7925 partial-mutation class the SDK bundle door already closes with a
+# bundle-wide ambiguity loop (`sdk._validate_bundle`).
+#
+# These pins cover both halves, in the same shape #5363 uses for the inverted
+# supersede window: (A) the 422 mapping on the boundary, and (B) the PRE-WRITE
+# probe that makes the refusal write NOTHING at all.
+
+_AMBIGUOUS_NAME = "Alpha"
+
+
+def _add_idless_live_carrier(name: str) -> None:
+    """A second LIVE carrier of *name* that carries NO id — the legacy / raw
+    / foreign ``MERGE (n:Label {name:…})`` row. It is the shape that makes the
+    count and the report disagree if either filters on truthy ids (#8018), so
+    the refusal's evidence is asserted against it."""
+    _team_sdk()._get_proj().g.query(
+        # ⛔ CREATE, not MERGE: a MERGE on the name pattern would MATCH the
+        # seeded id-carrying carrier and stamp it instead of opening the second
+        # live row this shape needs.
+        "CREATE (o:Object {name:$n, status:'live'})", params={"n": name})
+
+
+def _node_counts() -> dict[str, int]:
+    g = _team_sdk()._get_proj().g
+    labels = ("Point", "Object", "Source", "Session", "CommitRecord", "Event")
+    return {label: g.query(f"MATCH (n:{label}) RETURN count(n)").result_set[0][0]
+            for label in labels}
+
+
+class Test9876AmbiguousEntityNameOnCommit:
+    """#9876 — a commit naming an entity two LIVE carriers hold is refused
+    BEFORE the first write, as an actionable 422."""
+
+    def test_a_commit_naming_a_doubly_held_entity_422s_and_writes_nothing(
+            self, client):
+        """(B) the pre-write probe: clean 422, NOTHING written — not even a
+        :CommitRecord — and the conflicting carriers are named.
+
+        Fails without the fix: the status is 500 (the retry-advising
+        fail-closed detail) and the commit is half-written (Events/Points/
+        Sources/Session/CommitRecord counts all move)."""
+        _seed_objects(client, "g9876-a", [_AMBIGUOUS_NAME])
+        _add_idless_live_carrier(_AMBIGUOUS_NAME)
+        before = _node_counts()
+        raw = _raw_payload(1, session_id="g9876-a2")
+        _finalize(raw)
+        r = client.post("/v1/sessions/commit", json=raw)
+
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["error_code"] == "AMBIGUOUS_ENTITY_NAME", r.text
+        assert detail["label"] == "Object"
+        assert detail["name"] == _AMBIGUOUS_NAME
+        # the evidence: BOTH live carriers, the id-less one NAMED rather than
+        # filtered away (the count that refused is live ROWS)
+        assert len(detail["candidate_ids"]) == 2, detail
+        assert "<id-less>" in detail["candidate_ids"], detail
+        assert "rename or retire" in detail["message"], detail
+        # a deterministic refusal must never ship the retry advice
+        assert "retry" not in json.dumps(detail).lower()
+
+        # ⛔ NOTHING of the commit landed — including the :CommitRecord, which
+        # is what makes a corrected payload a genuine FIRST attempt instead of
+        # a re-adjudication without the first-adjudication hard-25 band.
+        assert _node_counts() == before, (
+            f"the refused commit wrote: {_node_counts()} vs {before}")
+        # and it neither adopted nor minted a third carrier of the name
+        rows = _object_row(_AMBIGUOUS_NAME)
+        assert len(rows) == 2, rows
+
+    def test_a_refusal_escaping_the_precheck_is_still_a_422(self, client,
+                                                            monkeypatch):
+        """(A) the boundary of last resort — with the pre-write probe disabled
+        the refusal still reaches `sdk.create_entity` at step 6 (a concurrent
+        create between probe and write, or a leg the probe does not enumerate),
+        and it must map to the same 422, never the retry-advising 500.
+
+        Fails without the fix: the status is 500, not 422."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_refuse_ambiguous_commit_entities",
+                            lambda sdk, reconcile: None)
+        _seed_objects(client, "g9876-b", [_AMBIGUOUS_NAME])
+        _add_idless_live_carrier(_AMBIGUOUS_NAME)
+        r = _commit(client, _raw_payload(1, session_id="g9876-b2"))
+
+        assert r.status_code == 422, r.text
+        detail = r.json()["detail"]
+        assert detail["error_code"] == "AMBIGUOUS_ENTITY_NAME", r.text
+        assert detail["name"] == _AMBIGUOUS_NAME
+        assert len(detail["candidate_ids"]) == 2, detail
+        assert "retry" not in json.dumps(detail).lower()
+
+    def test_a_terminal_carrier_beside_a_live_one_is_not_a_refusal(
+            self, client):
+        """Over-fix guard: a TERMINAL carrier of the same name does not block
+        the create (R5 — another incarnation), so the commit must still land.
+
+        FAIL-ON: a probe that counts ROWS instead of LIVE rows (`MATCH
+        (o:Object {name:$n})` with no terminal exclusion) 422s a legal commit
+        the writer accepts."""
+        _seed_objects(client, "g9876-c", [_AMBIGUOUS_NAME])
+        _team_sdk()._get_proj().g.query(
+            "CREATE (o:Object {name:$n, status:'superseded', "
+            "               id:'obj-buried-alpha'})",
+            params={"n": _AMBIGUOUS_NAME})
+        r = _commit(client, _raw_payload(1, session_id="g9876-c2"))
+        assert r.status_code == 200, r.text
+        assert r.json()["duplicate"] is False, r.text
+
+    def test_an_idempotent_repost_is_never_refused(self, client):
+        """Over-fix guard on the PLACEMENT: the probe sits AFTER the L1 replay
+        return, so re-POSTing an already-written payload still answers
+        `duplicate:true` even once the name it names has become doubly held.
+
+        FAIL-ON: probe placed above the replay return → the same re-POST 422s
+        and a client's documented idempotent retry fails on a commit that
+        already succeeded."""
+        first = _raw_payload(1, session_id="g9876-d")
+        assert _commit(client, first).status_code == 200
+        assert _commit_record(first["client_commit_id"])[0] == "fully_written"
+        # the name the committed payload created is now doubly held
+        _add_idless_live_carrier(_AMBIGUOUS_NAME)
+
+        again = dict(first)  # identical payload ⇒ identical client_commit_id
+        r = client.post("/v1/sessions/commit", json=again)
+        assert r.status_code == 200, r.text
+        assert r.json()["duplicate"] is True, r.text
+
+
+# ── #9876 review — the LIVE pass must classify an about-edge MENTION the way
+# the replay pass does ───────────────────────────────────────────────────────
+
+_ABOUT_NAME = "Ghost"
+
+
+class Test9876AboutMentionDisposition:
+    """A commit's ``events[].about_entities`` name is ATTRIBUTION, so its miss
+    takes the EXEMPT ``unfolded-mention`` shape on BOTH passes.
+
+    ``hosted_api`` step 6a resolves each deferred about name with
+    ``resolve_fold_name``. The replay pass resolves the same reference with
+    ``mention=True`` (``projection/entities.py:4896`` status-fold target,
+    ``:5275`` ``EventRecorded.object``), and D1's ``unfolded-mention`` row
+    enumerates *"an about-edge name"* as an exempt ATTRIBUTION use — so a
+    non-exempt record here is one reference with two dispositions: exactly the
+    live/replay parity break R8 forbids (*one journal → one disposition on
+    every surface*), and a report claiming a fold refused something for a write
+    where nothing was folded.
+    """
+
+    def test_a_mention_that_races_an_ambiguous_carrier_records_the_exempt_shape(
+            self, client, monkeypatch):
+        """The reachable live miss: a second carrier appears BETWEEN the
+        pre-write probe and step 6a — the race the probe/422 boundary admits by
+        design (see ``test_a_refusal_escaping_the_precheck_is_still_a_422``).
+
+        FAIL-ON (pre-fix): step 6a omits ``mention=True``, so this records
+        ``ambiguous-entity-name`` — a NON-exempt refusal — while replay of the
+        same event records the exempt shape."""
+        from tortoise.projection import nonfolded
+        from tortoise.projection.nonfolded import (
+            SHAPE_AMBIGUOUS_ENTITY_NAME,
+            SHAPE_UNFOLDED_MENTION,
+            SHAPE_UNREGISTERED_REFERENCE,
+        )
+
+        recorded: list = []
+        real_record = nonfolded.record_non_folded
+
+        def _spy(shape, **fields):
+            entry = real_record(shape, **fields)
+            recorded.append(entry)
+            return entry
+
+        # `resolve_fold_name` imports the symbol at CALL time, so patching the
+        # module attribute is what a live commit actually sees.
+        monkeypatch.setattr(nonfolded, "record_non_folded", _spy)
+
+        real_create = TortoiseSDK.create_entity
+
+        def _create_then_split(self, kind, name, **kw):
+            """Step 6 registers the entity; the SECOND live carrier of the same
+            name lands right after it, before step 6a resolves."""
+            out = real_create(self, kind, name, **kw)
+            if name == _ABOUT_NAME:
+                self._get_proj().g.query(
+                    "CREATE (o:Object {name:$n, status:'live'})",
+                    params={"n": name})
+            return out
+
+        monkeypatch.setattr(TortoiseSDK, "create_entity", _create_then_split)
+
+        raw = _raw_payload(1, session_id="g9876-e")
+        raw["entities"] = [
+            {"name": _AMBIGUOUS_NAME, "kind": "Project",
+             "passes_frequency_gate": True},
+            {"name": _ABOUT_NAME, "kind": "core:other",
+             "passes_frequency_gate": True},
+        ]
+        raw["events"] = [{
+            "id": f"ev_{content_hash('a mention of a name two carriers hold')[:62]}",
+            "eventKind": "decision",
+            "content": "a mention of a name two carriers hold",
+            "confidence": 0.5,
+            "about_entities": [_ABOUT_NAME],
+            "source_ref": "session.md",
+        }]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+
+        mentions = [e for e in recorded
+                    if f"name={_ABOUT_NAME!r}" in (e.detail or "")]
+        assert mentions, (
+            "the live about-edge miss recorded nothing — the probe below cannot "
+            "distinguish the two dispositions if step 6a never ran")
+        shapes = {e.shape for e in mentions}
+        assert SHAPE_UNFOLDED_MENTION in shapes, (
+            "the live pass recorded the about-edge mention NON-exemptly "
+            f"({sorted(shapes)}); replay records {SHAPE_UNFOLDED_MENTION} for "
+            "the same reference — one reference, two dispositions")
+        assert SHAPE_AMBIGUOUS_ENTITY_NAME not in shapes, (
+            "an about-edge MENTION was recorded as an identity refusal — a "
+            "write that folded nothing is reported as a refused fold")
+        assert SHAPE_UNREGISTERED_REFERENCE not in shapes, (
+            "an about-edge MENTION was recorded as an identity refusal")

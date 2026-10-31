@@ -892,6 +892,16 @@ def _cmd_retrofit(args) -> int:
         print(f"  (a) capture_ok=true, short turn count : "
               f"{report['short_turn_count']['capture_ok_true']} "
               f"(of {report['short_turn_count']['candidates_measured']} measured)")
+        # #10000: which store holds the turns decides what (a) can even mean.
+        # Printed unconditionally, because a reader who cannot see the mode
+        # cannot tell a clean (a) from an (a) that measured an empty half.
+        print(f"      turns held outside the graph (record armed): "
+              f"{report['short_turn_count']['turns_in_record']}")
+        print(f"  (a') zero turn nodes — record-held, NOT a shortfall : "
+              f"{report['turns_record_held']['sessions']} — "
+              f"retro_quantifiable="
+              f"{report['turns_record_held']['retro_quantifiable']} "
+              f"(the graph cannot tell an armed capture from a loss)")
         print(f"  (b) capture_ok=true (ordering-ambiguous upper bound): "
               f"{report['ordering_ambiguous']['sessions']} — "
               f"retro_quantifiable="

@@ -250,6 +250,13 @@ concurrency:
 jobs:
   ai-review-gate:
     runs-on: ubuntu-latest
+    # REQUIRED context (`queue_conditions` check-success=ai-review-gate) with no
+    # cap, so a wedged PR-body/comment read held ENTRY to the merge queue for
+    # GitHub's 360m default. Measured 2026-10-27 (40 newest runs of this
+    # workflow, completed only): p50 0.03m, p95 0.10m, max 0.13m over the 14 runs
+    # whose job executed — 15m is the runner-stall floor, not the work. See
+    # docs/ops/ci-wall-clock.md.
+    timeout-minutes: 15
     steps:
       # NOTE (#1224): the step NAME is matched verbatim by
       # tests/test_ai_review_gate_contract.py (the block is selected by name, not

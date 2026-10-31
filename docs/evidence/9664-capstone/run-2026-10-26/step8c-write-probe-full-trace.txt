@@ -1,0 +1,77 @@
+You said:
+Use the Tortoise connector to file ONE point titled "capstone-9664 write probe 2026-10-26" with content "hello from the 9664 acceptance run", then read it back (search for it) and show me the tool calls and their results.
+Worked for 26s
+ChatGPT said:
+Tortoise acceptance test: 9664
+Write succeeded
+1. Create point
+Tool: tortoise_create_point
+Arguments:
+JSON
+{
+  "kind": "fact",
+  "content": "hello from the 9664 acceptance run",
+  "props": {
+    "title": "capstone-9664 write probe 2026-10-26"
+  },
+  "dedup": false
+}
+Result:
+JSON
+{
+  "id": "1a17966af61-e7dfb7eeea90",
+  "title": "capstone-9664 write probe 2026-10-26",
+  "content": "hello from the 9664 acceptance run",
+  "pointKind": "fact",
+  "status": "live",
+  "createdAt": "2026-10-26T18:08:55.137652+00:00"
+}
+The connector returned a no_source advisory, not a write failure. The point was created successfully.
+2. Search and read back
+Read-back succeeded
+Tool: tortoise_search
+Arguments:
+JSON
+{
+  "query": "capstone-9664 write probe 2026-10-26",
+  "limit": 10
+}
+Matching result (extracted from the tool response):
+JSON
+{
+  "id": "1a17966af61-e7dfb7eeea90",
+  "content": "hello from the 9664 acceptance run",
+  "point_kind": "fact",
+  "status": "live",
+  "match_source": "rrf",
+  "similarity": 0.023809523809523808,
+  "scores": {
+    "fts": null,
+    "vector": 0.653657913208008,
+    "structural": null,
+    "rrf": 0.023809523809523808
+  }
+}
+The search returned six results. The new point appeared in position 4, with an exact ID and content match.
+Acceptance verdict
+Check
+Result
+Create one point
+ PASS
+Correct title
+ PASS
+Correct content
+ PASS
+Search returns point
+ PASS
+ID matches creation
+ PASS
+Point status
+live
+Overall: PASS. The connector successfully created and retrieved the same point.
+One notable detail: searching by the exact title found the point through vector similarity, not full-text matching, and ranked it fourth. The write/read lifecycle works, but title-search relevance deserves attention.
+ChatGPT can make mistakes. Check important info.
+Latest response
+Thinking effort
+Medium
+Response complete

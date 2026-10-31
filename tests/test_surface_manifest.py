@@ -982,7 +982,8 @@ def test_approval_status_is_the_TARGET_approval_not_a_baseline_stamp(
     """The decision #4185 encodes, pinned: the field describes the TARGET, not this snapshot.
 
     A re-cut over a baseline that is OVER target still writes `approved`, because the owner
-    approved the TARGET (26/40), not the frozen 82/150. This is deliberate, and what makes an
+    approved the TARGET (the canonical MCP target / the declared SDK methods), not the frozen
+    baseline beside it. This is deliberate, and what makes an
     expansion visible is NOT this field — it is (a) the guard reding BEFORE the re-cut when a
     tool is added, and (b) `tools/surface-target-check.py` reding on the gap. Pinned here so
     the semantics are a decision rather than an untested consequence.
@@ -2308,12 +2309,13 @@ def test_a_re_cut_re_emits_the_OVERRIDES_header(monkeypatch, tmp_path, derived_b
     # The growth pin's rationale must survive too — a re-cut that dropped it would leave the
     # next reader with no idea why `high_water_counts` cannot be edited by hand.
     assert "`high_water_counts` is a GROWTH PIN" in written
-    # …and the header must not carry a FORMATTED count of the target (`26 MCP tools` / `40 SDK`):
-    # the target lives in the product docs, read by `tools/surface-target-check.py`, and a
-    # restated literal here would go stale silently. The mandated `OVERRIDES:` marker above is
-    # the only place the owner's `26/40` appears, quoted verbatim as the approval record.
+    # …and the header must not repeat a SUPERSEDED count of the target (`26 MCP tools` /
+    # `26/40`): the counts it does carry are the owner's current ones, read from
+    # `docs/product/canonical-mcp-tools.md` and the declaration, and
+    # `test_the_overrides_marker_names_the_same_target_in_every_copy` holds every copy of
+    # them to that source rather than to a literal here.
     assert "26 MCP tools" not in sm.MANIFEST_HEADER
-    assert "40 SDK" not in sm.MANIFEST_HEADER
+    assert "26/40" not in sm.MANIFEST_HEADER
 
 
 def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
@@ -2337,6 +2339,182 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
         )
     )
 
+
+# The `OVERRIDES:` marker's homes, across the tool TRIO that enforce/consume the target.
+# `surface_manifest.py` holds the artifact copy (`MANIFEST_HEADER`) plus its two durable
+# homes; the BASE-REF-pinned `surface-guard.py` holds two more; `surface-target-check.py`
+# holds the deliberately count-free one. F4 synchronised only the first file, and the two
+# copies in the guard — the file the corrected header names as the independent enforcement —
+# kept telling the superseded `26/40` story (round-6 ISSUE 2).
+_MARKER_START = "OVERRIDES: the frozen-snapshot-as-approval-baseline practice"
+_MARKER_END = "never from a count beside them."
+_MARKER_COUNT_FREE_END = "cannot drift from them."
+_MARKER_FILES = ("surface_manifest.py", "surface-guard.py", "surface-target-check.py")
+_MARKER_EXPECTED_COUNTS = {
+    "surface_manifest.py": 3,
+    "surface-guard.py": 2,
+    "surface-target-check.py": 1,
+}
+#: Target counts that were superseded by an owner amendment. `26` was the MCP target before
+#: #3540 (2026-10-17, canonical-mcp-tools.md); no copy may still quote it.
+_SUPERSEDED_TARGET_TOKENS = ("26/40", "26 MCP tools", "26 MCP-tool", "re-confirmed 2026-10-10")
+
+
+def _marker_copies(path: Path) -> list[str]:
+    """Every `OVERRIDES:` copy in `path`, whitespace-flattened, terminator included.
+
+    Two terminators because the marker has two accepted shapes: the target-COUNTING form
+    (`… — never from a count beside them.`) and the deliberately count-free one
+    (`… so no count appears here and this file cannot drift from them.`). A copy that matches
+    neither is captured to the end of its own sentence instead of being SKIPPED — that is how
+    the superseded pre-fix text (`… re-confirmed 2026-10-10).`) reaches the comparison that
+    rejects it.
+    """
+    flat = " ".join(path.read_text(encoding="utf-8").split())
+    copies, idx = [], flat.find(_MARKER_START)
+    while idx >= 0:
+        ends = []
+        for terminator in (_MARKER_END, _MARKER_COUNT_FREE_END):
+            found = flat.find(terminator, idx)
+            if found >= 0:
+                ends.append((found, found + len(terminator)))
+        # A copy whose reason clause was REPLACED (the pre-fix text ended at
+        # `re-confirmed 2026-10-10).`) has no accepted terminator, and must not be skipped:
+        # fall back to the end of its own sentence so the copy is compared and REJECTED.
+        sentence = flat.find(". ", idx)
+        if sentence >= 0:
+            ends.append((sentence, sentence + 1))
+        assert ends, f"{path.name}: an OVERRIDES copy has no sentence end after offset {idx}"
+        _start, cut = min(ends)
+        copies.append(flat[idx:cut])
+        idx = flat.find(_MARKER_START, idx + 1)
+    return copies
+
+
+def test_the_overrides_marker_names_the_same_target_in_every_copy():
+    """#10044 F4 + round-6 ISSUE 2: the marker must not drift ACROSS the tool trio.
+
+    `MANIFEST_HEADER` is what a reader of `config/surface-manifest.yml` sees; the module
+    docstrings are "the durable homes" — the copy a maintainer actually opens. F4 fixed the
+    three copies inside `tools/surface_manifest.py` and the artifact, but the SAME marker is
+    carried by the other two tools that enforce/consume the target, and both copies in
+    `tools/surface-guard.py` still quoted the superseded `26/40`. That is the worst place to
+    leave it: the corrected header points a lane at `tools/surface-guard.py` as the
+    independent enforcement ("its step 7"), so the reader follows a pointer into the stale
+    story — the exact failure the `OVERRIDES:` marker exists to prevent.
+
+    Scanned on the marker's TEXT with whitespace flattened (the docstring copies are wrapped,
+    the header copy is one line), and every COUNT a copy states is compared to the owner's
+    target READ from its sources (`tools/surface-target-check.py::read_targets`), never to a
+    literal here — so an amendment that moves the target cannot leave this pin green.
+    RED on the pre-fix tree: five counting copies, two distinct texts, the two odd ones out
+    in `tools/surface-guard.py` still saying `26/40`.
+    """
+    tc = _load_target_check()
+    targets = tc.read_targets()
+
+    copies = {name: _marker_copies(ROOT / "tools" / name) for name in _MARKER_FILES}
+    assert {name: len(c) for name, c in copies.items()} == _MARKER_EXPECTED_COUNTS, (
+        "the OVERRIDES marker lost one of its homes: expected the artifact copy plus both "
+        "durable homes in tools/surface_manifest.py, the two in the BASE-REF-pinned "
+        f"tools/surface-guard.py, and the count-free one in tools/surface-target-check.py; "
+        f"found { {name: len(c) for name, c in copies.items()} }"
+    )
+
+    # NO COPY MAY QUOTE A SUPERSEDED TARGET. This is the arm that reds on the pre-fix tree.
+    superseded = [
+        (name, text)
+        for name, found in copies.items()
+        for text in found
+        for token in _SUPERSEDED_TARGET_TOKENS
+        if token in text
+    ]
+    assert superseded == [], (
+        "the OVERRIDES marker still quotes a superseded owner target in "
+        f"{sorted({name for name, _ in superseded})}: the MCP target is "
+        f"{targets['mcp']} tools (canonical-mcp-tools.md, #3540 amendment) and the SDK "
+        f"target is the declared {targets['sdk']} in tortoise/__all__.py:\n\n"
+        + "\n\n".join(text for _, text in superseded)
+    )
+
+    # EVERY COUNT A COPY DOES STATE IS THE OWNER'S CURRENT ONE, derived from the sources.
+    for name, found in copies.items():
+        for text in found:
+            mcp = re.search(r"(\d+)\s+MCP tools", text)
+            if mcp:
+                assert int(mcp.group(1)) == targets["mcp"], (
+                    f"{name} states an MCP target of {mcp.group(1)}; the owner's approved "
+                    f"target is {targets['mcp']} (docs/product/canonical-mcp-tools.md)"
+                )
+            sdk = re.search(r"(\d+)\s+methods", text)
+            if sdk:
+                assert int(sdk.group(1)) == targets["sdk"], (
+                    f"{name} states an SDK target of {sdk.group(1)}; the declared surface "
+                    f"in tortoise/__all__.py is {targets['sdk']} names"
+                )
+
+    # The counting copies must agree with each other: one marker, one story.
+    counting = [c for name in ("surface_manifest.py", "surface-guard.py") for c in copies[name]]
+    assert len(set(counting)) == 1, (
+        "the OVERRIDES marker names different targets in different copies of the tool trio "
+        "— a lane reading one copy is told a target another copy contradicts:\n\n"
+        + "\n\n".join(sorted(set(counting)))
+    )
+    assert counting[0] in " ".join(MANIFEST.read_text(encoding="utf-8").split()), (
+        "the committed manifest's header does not carry the marker's synchronised text"
+    )
+
+
+def test_the_approved_flag_is_DERIVED_so_a_recut_cannot_refuse():
+    """#10044 review F3(b): the header must name the mechanism that actually refuses.
+
+    The old header claimed an unapproved addition reds "the `approved` flag on a re-cut
+    row". It cannot: `approved` is a DERIVED row key, so `build_doc` computes it, `cmd_cut`
+    writes `build_doc()` verbatim, and property 12 then compares two identical derived
+    values — green by construction. What refuses is the `high_water_counts` growth pin,
+    enforced independently by the BASE-REF-pinned `tools/surface-guard.py`. This pins the
+    premise the corrected header states AND the corrected text itself (the two constants
+    are byte-identical on the pre-fix tree, so a premise-only pin was green before the
+    rewrite and stayed green when the header was reverted), so the comment cannot quietly
+    become false again.
+    """
+    sm = _load_manifest_tool()
+    assert "approved" not in sm.NON_DERIVABLE_ROW_KEYS, (
+        "`approved` is now classified non-derivable — the MANIFEST_HEADER's sentence "
+        "('`approved` is a DERIVED row key') is false and must be rewritten with the reason"
+    )
+    assert "high_water_counts" in sm.NON_DERIVABLE_DOC_KEYS, (
+        "the growth pin is no longer carried rather than re-derived — the header's "
+        "statement that `high_water_counts` is the mechanism that reds an unapproved "
+        "addition no longer holds"
+    )
+    # The two constants above are the PREMISE, and they are identical on the pre-fix tree
+    # — on their own this test was GREEN before the header was corrected and stays green
+    # if it is reverted (a comment cannot keep itself true). These three assertions pin
+    # the CORRECTED TEXT, which is what F3 changed: restore the old sentence (… the
+    # `approved` flag on a re-cut row) and the middle arm reds.
+    # MANIFEST_HEADER is the artifact's comment BLOCK, so each of its lines carries a
+    # `# ` prefix that would otherwise land between two words of the sentence pinned —
+    # strip it per line, then flatten.
+    header = " ".join(
+        " ".join(line.lstrip("#").split())
+        for line in sm.MANIFEST_HEADER.splitlines()
+    )
+    assert "`approved` is a DERIVED row key" in header, (
+        "MANIFEST_HEADER no longer states that `approved` is DERIVED — the mechanism by "
+        "which a re-cut cannot refuse an unapproved addition is no longer recorded where "
+        "the artifact's reader sees it"
+    )
+    assert "flag on a re-cut row" not in header, (
+        "MANIFEST_HEADER claims an unapproved addition reds 'the `approved` flag on a "
+        "re-cut row' — the false claim F3 corrected: `approved` is derived, so a re-cut "
+        "cannot refuse anything (property 12 compares two identical derived values)"
+    )
+    assert "high_water_counts" in header and "INDEPENDENTLY" in header, (
+        "MANIFEST_HEADER no longer names the `high_water_counts` growth pin, enforced "
+        "INDEPENDENTLY of the re-cut by the base-ref-pinned tools/surface-guard.py, as "
+        "the mechanism that actually reds an unapproved addition"
+    )
 
 def test_the_committed_manifest_carries_the_DERIVED_approval():
     """#8144: the flip has landed, so the committed copy carries the owner's approval.
@@ -3402,8 +3580,9 @@ def test_the_render_does_not_claim_a_client_cap_binds_a_smaller_surface(tmp_path
 # `tools/surface-guard.py` compares the live declaration to the FROZEN BASELINE — a
 # snapshot of the implementation. It therefore cannot see a surface 3x over the owner's
 # approved target, which is the defect this file's sibling answers:
-# `tools/surface-target-check.py` compares the LIVE surface to the TARGET (26/40) read
-# from the two product docs. Co-located here rather than in a new test module so the
+# `tools/surface-target-check.py` compares the LIVE surface to the TARGET (the MCP count
+# from the canonical doc, the SDK count from the declaration), read from the two product docs.
+# Co-located here rather than in a new test module so the
 # CI-surfaces manifest does not need a second registration for the same surface.
 
 

@@ -2319,6 +2319,12 @@ def _matrix_rows() -> dict[str, tuple[str, str, str]]:
 
 _RECORD_ARMING_HEADING = "### Arming the Postgres record"
 
+# The numeral words a count-bearing runbook list may carry, so a pin can compare the
+# LIST'S LABEL to the members that actually follow it instead of pinning one word
+# (#10083 review F1: a literal `THREE` reds an honest `FOUR` relabel while a
+# fourth member stays invisible to a fixed-name alternation).
+_NUMERALS = {"TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}
+
 
 def _record_arming_section() -> str:
     """The runbook's `Arming the Postgres record` section, verbatim.
@@ -2353,6 +2359,13 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     there, and neither may come back.
     """
     section = _record_arming_section()
+    # ⛔ The `no_tenant` pins below read a WHITESPACE-NORMALIZED copy (#10071 review
+    # F3). The repo declines to enforce hard wraps (`.markdownlint-cli2.jsonc`:
+    # `MD013: false`), so a reflow is an expected edit — and pinning the raw text
+    # made three of those four pins red on a refill that changed no word (measured:
+    # widths 76/78/82 red the `circuit_open`, `unbound` and `⛔ **Do` pins
+    # respectively). Pinning the flat text makes a pin measure the CLAIM.
+    flat = re.sub(r"\s+", " ", section)
     # No PRESCRIBED command block may read the route: the section may (and does)
     # QUOTE the broken recipe in prose to warn an operator off it, but a fenced
     # `bash` block is a command the operator is told to run.
@@ -2365,16 +2378,35 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
             "/healthz`) — it prints nothing in every state, so an empty grep reads "
             "as a pass"
         )
+    # ⛔ The PHRASE is not the READ SURFACE: `the record write did not happen`
+    # occurs four times in this section, three of them in prose, so the membership
+    # pin below is satisfied with the fenced command DELETED — measured
+    # (#10083 review cycle 2, P2: replacing the block with `echo 'no recipe here'`
+    # left the suite at 100 passed). The class the message names is "a command the
+    # operator can run", so pin one.
+    assert any(
+        re.search(r"grep[^\n]*the record write did not happen", b) for b in blocks
+    ), (
+        "no PRESCRIBED command greps the refused-write line — the section may quote "
+        "the phrase in prose, but then the reader who follows the recipe greps "
+        "nothing and the section has no read surface for a refused write"
+    )
     # ... and the check that DOES exist is named: the seam logs every non-write at
     # WARN with its reason (`tortoise/record_writer.py`).
-    assert "the record write did not happen" in section, (
+    # `flat`, not `section`: the phrase is wrappable prose (the ⚠️ `no_tenant`
+    # bound below cites it as "it greps `the record write did not happen`"), and the
+    # repo disables MD013 (`.markdownlint-cli2.jsonc`), so a refill may legally
+    # split it across a line break and red a pin that changed no word — the F3
+    # class, which this pin still carried after every other text pin had moved to
+    # `flat` (#10083 review, P2, measured on the width-76 refill).
+    assert "the record write did not happen" in flat, (
         "the section names no read surface for a refused write — the seam logs "
         "'the record write did not happen (<reason>)' and nothing greps it"
     )
     # The pass bar must state the EXPECTED non-zero baseline instead of "0":
     # a `no_durable_journal` decline is the healthy M2 capture path, and #9264's
     # `DatatypeMismatch` refusals are counted on `write_failed`.
-    assert "must stay **0**" not in section, (
+    assert "must stay **0**" not in flat, (
         "the section sets an absolute `record_write_failures == 0` bar, which a "
         "HEALTHY armed deployment fails: #9264's DatatypeMismatch refusals are "
         "counted on write_failed (and the R1-before-R2 ordering expects them)"
@@ -2397,25 +2429,30 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # counter list, the SQL block), so membership tests on them are satisfied
     # without the bar saying anything (#9585 reviews; three assertions were
     # vacuous that way). Each is mutation-proven against a meaning inversion.
-    assert re.search(r"An all-empty reading is NOT a pass", section), (
+    assert re.search(r"An all-empty reading is NOT a pass", flat), (
         "the bar never says an all-empty reading is not a pass — an unarmed "
         "deployment counts nothing at all, so a bar written only as 'no growth' "
         "is vacuously green on the silent-inert deployment this exists to detect"
     )
-    assert re.search(r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:", section), (
+    assert re.search(r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:", flat), (
         "the bar states no presence requirement — name the reading that must "
         "EXIST after a capture before the reason breakdown means anything"
     )
     # The presence LIST must be the five qualifying readings, in one clause — not
     # merely a lead-in that some other, always-true reading could be appended to.
+    # ⛔ Read the FLAT copy, like its siblings above: this pin used to read `section`,
+    # and its pattern spells the sentence out with literal single spaces, so a
+    # wording-identical refill at widths 76/78/82 broke that clause across a line
+    # boundary and reded it — measured here after the F3 fix, i.e. the file still
+    # reds a reflow F3 exists to make harmless (#10083 review P2). Normalizing is
+    # NOT a relaxation: the five readings are still required verbatim below.
     presence = re.search(
         r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:(.*?)\.\s",
-        section,
-        re.S,
+        flat,
     )
     assert presence, "the presence requirement does not enumerate its readings"
     for reading in ("record_write_failures", "record_non_journal_skips",
-                    "record_position_unproven", "journal_event"):
+                    "record_position_unproven", "journal_event", "point"):
         assert reading in presence.group(1), (
             f"the presence list omits {reading!r} — an armed deployment whose only "
             "signal is that reading is then indistinguishable from an inert one"
@@ -2431,7 +2468,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "app whose record seam is completely inert, so presence becomes "
         "trivially satisfiable and the bar greens the state it exists to catch"
     )
-    assert re.search(r"The capture that proves presence must be a\s+JOURNALING one", section), (
+    assert re.search(r"The capture that proves presence must be a\s+JOURNALING one", flat), (
         "the bar does not require the proving capture to be a JOURNALING one — a "
         "`capture_session` capture grows `no_durable_journal` at "
         "`write_live_record`'s `if not durable` branch, before any tenant "
@@ -2439,12 +2476,12 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "never reaches Postgres"
     )
     # The BEFORE-and-after baseline: "growth" has no referent without it.
-    assert re.search(r"read both counters BEFORE the\s+capture and again after", section), (
+    assert re.search(r"read both counters BEFORE the\s+capture and again after", flat), (
         "the bar says 'growth' but never tells the operator to take a reading "
         "BEFORE the capture — an absolute count left from earlier in the "
         "process's life then reads as this capture's growth"
     )
-    assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", section), (
+    assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", flat), (
         "the bar has no arm for an empty reading — an operator landing there is "
         "told nothing, and that state is the whole point of the section"
     )
@@ -2452,25 +2489,64 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # presence lead-in is. A phrase-only pin accepted "*Then*, if convenient:" and
     # "*Then*: you need not care about …" (both GREEN), i.e. the half the bar
     # depends on could be voided without a red.
-    assert re.search(r"\*Then\*:\s*\*\*no growth in a reason other than", section), (
+    assert re.search(r"\*Then\*:\s*\*\*no growth in a reason other than", flat), (
         "the bar drops or softens item 2 — with it gone, a `circuit_open` / "
         "`no_tenant` reading passes on the #9264 baseline alone, which is the "
         "state this section exists to catch"
     )
+    # "The capture's OWN" is load-bearing: item 2 is the bar a reader sees first,
+    # and an unqualified "none at all for `no_tenant`" reds a healthy deployment on
+    # the ordinary unbound traffic the ⚠️ bound below excuses — the two statements
+    # would contradict each other inside one section (#10071 review F1). The pin
+    # covers the WHOLE clause, `no_tenant` through `circuit_open`: pinning only the
+    # qualifier left the other two always-fail reasons deletable with nothing red
+    # (#10083 review F2). The qualifier is pinned EXACTLY: `[^)]*` admitted a
+    # qualifier of any wording, so the pointer to the ⚠️ bound could be replaced by
+    # anything (including nothing useful) with the pin still green (#10083 review).
     assert re.search(
-        r"none at all for `no_tenant` /\s+`malformed_dsn` / `circuit_open`", section
+        r"none at all for `no_tenant` \(the capture's OWN — see the ⚠️ bound below\) / "
+        r"`malformed_dsn` / `circuit_open`",
+        flat,
     ), (
-        "the bar no longer says the three always-fail reasons are a fail-and-fix, "
-        "so the state this section exists to catch reads as a pass"
+        "the bar reads absolute on `no_tenant` while the ⚠️ bound below says the "
+        "growth is a fail-and-fix only for the three cases the ⚠️ bound names — "
+        "a reader who "
+        "stops at item 2 fails a healthy deployment on its default traffic"
+    )
+    # ⛔ The SAME absolute, one paragraph lower (third review cycle, P1): the reason
+    # definitions were introduced by "Those three are always a fail-and-fix", which
+    # re-asserts the unqualified bar the qualifier above just removed — so a reader
+    # who stops at the definitions fails a healthy deployment on the ordinary
+    # unbound traffic the ⚠️ bound excuses, the exact defect #10071 exists to
+    # remove. Measured: the sentence could be reverted with every other pin green.
+    # ⛔ PIN THE CLAIM, NOT ONE IDIOM (#10083 review P2, measured): the positive
+    # half was a single literal phrasing, so the same ruling in another shape —
+    # `Those three are not exemptions in their own right` — red the suite with a
+    # message accusing the section of the absolute it had just kept (the F3 class
+    # this PR exists to remove). The POLARITY is what is load-bearing: the three
+    # reasons are NOT exempt on their own. Both idioms below state it; the
+    # `always` detector after them catches the contradictory absolute, which is
+    # the claim this pin actually measures.
+    assert re.search(
+        r"(?:None of those three is an exemption of its own"
+        r"|Those three are not exemptions? in their own right)",
+        flat,
+    ), (
+        "the reason definitions still introduce the three as an unconditional "
+        "fail-and-fix, contradicting the ⚠️ bound that qualifies `no_tenant`"
+    )
+    assert not re.search(r"Those three are always a fail-and-fix", flat), (
+        "the unqualified absolute is back — a `no_tenant` growth is a fail-and-fix "
+        "only on the three cases the ⚠️ bound names"
     )
     # The #9264 `write_failed` exemption bound: without it the documented
     # R1-without-R2 state (writes nothing, counts only `write_failed`) satisfies
     # item 1's *any reason* clause AND the exemption — green with zero rows.
-    assert re.search(r"a\s+deployment that writes no row at all is not passing this bar", section), (
+    assert re.search(r"a\s+deployment that writes no row at all is not passing this bar", flat), (
         "the `write_failed` exemption is unbounded — the R1-without-R2 deployment "
         "writes no row, grows only `write_failed`, and then passes both halves"
     )
-    assert re.search(r"a new `journal_event` / `point` row must still appear", section), (
+    assert re.search(r"a new `journal_event` / `point` row must still appear", flat), (
         "the bar never requires a row to exist, only that no unexpected reason "
         "grew — a deployment writing nothing satisfies that"
     )
@@ -2480,7 +2556,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # lane, `write_live_record` never entered) and `malformed_dsn` (counted when
     # the DSN fails the scheme check) both contradict. Pin the MEANING, not the
     # old phrase: the section must send the reader to the counting site instead.
-    assert re.search(r"its counting site in the code is the\s+authoritative statement", section), (
+    assert re.search(r"its counting site in the code is the\s+authoritative statement", flat), (
         "the section states no authority for the meanings it does not give — "
         "without it a common basis for the reasons is the natural (wrong) reading"
     )
@@ -2493,49 +2569,228 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # "every other malformation surfaces as `circuit_open` / `write_failed`",
     # which a hostless value no longer does. So pin BOTH refusal causes, or the
     # prose re-stales the moment the predicate grows.
-    assert "not a parseable DSN" not in section, (
+    assert "not a parseable DSN" not in flat, (
         "the section defines `malformed_dsn` as a parse failure — `record_dsn()` "
         "does no parsing, only the scheme + host checks"
     )
-    assert re.search(r"does \*\*not start with\*\*\s+`postgresql://`", section), (
+    assert re.search(r"does \*\*not start with\*\*\s+`postgresql://`", flat), (
         "`malformed_dsn` is not defined by the scheme check it actually is"
     )
-    assert re.search(r"names no host", section), (
+    assert re.search(r"names no host", flat), (
         "the section's `malformed_dsn` definition omits the HOST rule — a "
         "hostless `TORTOISE_RECORD_DSN` (`postgresql://user:pw@`, a clipped "
         "paste) is counted `malformed_dsn`, not `circuit_open`, so a reader "
         "debugging that counter is sent to the wrong cause"
     )
-    assert re.search(r"Nothing else is parsed", section), (
+    assert re.search(r"Nothing else is parsed", flat), (
         "the section does not bound the host rule, so its reader cannot tell "
         "which faults `record_dsn()` catches from the ones only a connection "
         "can find (wrong password / paused project)"
     )
     # `no_tenant` is also the DESIGNED outcome for a credential that names no
-    # graph (`record_tenant_for` returns None for org-wide / session / legacy /
-    # OAuth keys; `hosted_api._bind_record_tenant` documents the seed and
-    # background-indexing surfaces the same way, #9188/#9192), and these counters
-    # are process-global — so an absolute "none at all for `no_tenant`" reds a
-    # healthy armed deployment on ordinary traffic and offers no legitimate
-    # remedy. The bar must bound that arm to the CAPTURE and say how to attribute
-    # growth, while keeping it a fail-and-fix for the capture's own writes.
-    assert re.search(r"BOUND to the proving capture, not to the process", section), (
+    # graph the record can key on — the self-host registry lane
+    # (`record_tenant_for` returns None there because `control_plane_ids` is
+    # False, #9188/#9192) — and these counters are process-global, so an absolute
+    # "none at all for `no_tenant`" reds a healthy armed deployment on ordinary
+    # traffic and offers no legitimate remedy. The bar must bound that arm to the
+    # CAPTURE and **rule the per-request attribution out** (`record_writer` logs no
+    # request identity), keeping it a fail-and-fix for the capture's own writes.
+    # ⛔ #10046 CLOSED the session/OAuth half: `hosted_api._session_user_org` and
+    # `oauth.resolve_oauth_access_token` now stamp `default_graph_id`, so neither
+    # credential class is a designed `no_tenant` source any more and the prose
+    # must not list them as one (review P2, rebase onto main's #10090).
+    assert re.search(r"BOUND to the proving capture, not to the process", flat), (
         "the `no_tenant` arm is absolute — it fails a healthy deployment on the "
         "unbound-credential `no_tenant` the code counts by design, and the only "
         "lever the section offers (`TORTOISE_RECORD_SINGLE_TENANT`) is the "
         "#9192 cross-tenant hazard it forbids below"
     )
     # ⛔ NOT the bare token `process-global`: the section already says "env is
-    # process-global" about the #9192 env pair (line ~2960), so a bare-token arm
+    # process-global" about the #9192 env pair ("a process-global tenant on a
+    # multi-tenant process", below), so a bare-token arm
     # passed on the PRE-fix wording — a vacuous assertion, caught by the verifier
     # and re-anchored to this clause.
-    assert re.search(r"These counters are \*\*process-global\*\*", section), (
+    assert re.search(r"These counters are \*\*process-global\*\*", flat), (
         "the section does not say the counters are process-global, so a "
         "before/after delta reads as if it measured only the capture"
     )
-    assert re.search(r"graph-bound", section), (
+    # ⛔ NOT the bare token `graph-bound`: the section contains that word in the
+    # SELF-HOST registry lane's sentence too ("the one graph-bound key that resolves
+    # through no control plane"), so the token was satisfied by a sentence about a
+    # different lane while the executable REMEDY could be replaced by main's
+    # impossible "attribute … through recipe 1's log line" and stay green
+    # (#10083 review P1, measured on two variants). Pin the remedy CLAUSE, and add
+    # a negative pin so the attribution instruction cannot come back beside the ⛔
+    # prohibition below — a section that says both is green under a presence-only
+    # ⛔ pin, which is the class this PR exists to close.
+    # ⛔ The list must NOT include an org-wide API key: since #10025 that key IS
+    # named (`resolve_api_key` puts the org's active `kind='default'` row id on the
+    # credential as `default_graph_id`, `record_tenant_for` returns it —
+    # `tortoise/hosted_api.py`, `tortoise/record_writer.py`), so listing it as
+    # DESIGNED residue lets an operator excuse real `no_tenant` growth that the only
+    # remaining designed sources (#10047's shapes) do not explain — a fail-open read
+    # of the very signal this section exists to expose (#10083 review P1). The
+    # control-plane-cannot-name-a-default-row case is ONE of the TWO org-wide ones —
+    # the other is a resolution FAULT, which the fail-soft resolver turns into the
+    # same `no_tenant` — and the prose must say BOTH. ⛔ NOT "the ONLY": a comment
+    # demanding the exhaustive reading its own pin below FORBIDS is the F4 class
+    # (a lane obeying it edits `**or** when the resolution itself faults` out of the
+    # prose and reds the suite), so this comment names the arm the pin protects.
+    assert re.search(r"An \*\*org-wide API KEY is NOT one of those sources\*\* since #10025", flat), (
+        "the ⚠️ list files org-wide API keys under the DESIGNED `no_tenant` sources, "
+        "which since #10025 is false — the key is named from `default_graph_id`"
+    )
+    assert not re.search(r"an org-wide / session", flat), (
+        "REVERT-DETECTOR (one draft's exact wording — the message names a class "
+        "this pin cannot see): the pre-#10025 list is back, reading an org-wide key "
+        "as designed residue beside the session / OAuth shapes. The CLAIM is "
+        "measured by the `NOT one of those sources` pin above; keep this exact, "
+        "cheap, and honestly labelled"
+    )
+    assert re.search(
+        r"A session/JWT credential and an OAuth `oat_` token are \*\*NOT\*\* one of "
+        r"those\s+sources",
+        flat,
+    ), (
+        "the ⚠️ list files a session/JWT or OAuth `oat_` credential under the "
+        "DESIGNED `no_tenant` sources, which #10046 made false — "
+        "`hosted_api._session_user_org` and `oauth.resolve_oauth_access_token` "
+        "both stamp `default_graph_id`, so a `no_tenant` from either is the "
+        "default row failing to be NAMED, i.e. a fail-and-fix"
+    )
+    # ⛔ The claim is not the VERDICT. Measured at the merge head: inverting
+    # `a **fail-and-fix**, not a designed state` to `a **designed state**, not a
+    # fail-and-fix`, deleting it with the mechanism, or deleting ONLY the
+    # mechanism all left the suite green — so the paragraph's operative
+    # conclusion (and the evidence it rests on) could be reversed while the
+    # pinned claim sentence survived, which is how an operator gets told to
+    # IGNORE genuine `no_tenant` growth from a session/JWT or `oat_` credential.
+    # This is the class the sibling no-nameable-row VERDICT pin already closes
+    # ("so it is a fail-and-fix as well"), and the same reason the `circuit_open`
+    # EVIDENCE is pinned above: a claim whose consequence is unpinned is prose.
+    # The alternation accepts the synonyms a truthful edit may pick (`designed
+    # outcome` / `designed state`) — the F3 class in assertion form is an
+    # improving reword that reds a pin whose message names a claim it kept.
+    assert re.search(
+        r"a \*\*fail-and-fix\*\*, (?:not|rather than)\s+a designed\s+(?:state|outcome) "
+        r"\(#10046\)",
+        flat,
+    ), (
+        "the #10046 arm's VERDICT is unpinned — 'a **designed state**, not a "
+        "fail-and-fix' leaves every other pin green (measured), which tells an "
+        "operator to IGNORE genuine `no_tenant` growth from a session/JWT or "
+        "OAuth `oat_` credential"
+    )
+    # The EVIDENCE, as PRESENCE plus CONTENT — never as symbol order or grammar.
+    # Measured (#10083 review, P2): an order-anchored pattern red BOTH a reorder
+    # and a `both put the` insertion, i.e. two improving edits, while accepting
+    # `row NAME on the credential` — an assertion of the opposite of #10025's
+    # ruling (`default_graph_id_for` reads `.id` and filters `status='active'`;
+    # `record_tenant_for` refuses the `default` sentinel and demands a real
+    # `g_<hex>`), which would send a reader to check the row's NAME — always
+    # `default` on the healthy row — and clear real growth. Each symbol occurs
+    # exactly once in the section, so presence cannot be satisfied elsewhere —
+    # but the FIELD CLAUSE does not: it is word-for-word the ORG-WIDE arm's
+    # sentence too (`resolve_api_key` puts the org's active `kind='default'` row
+    # id on the credential as `default_graph_id`, line ~3515), so a bare
+    # section-wide search let the #10046 arm's clause be DELETED, reworded to
+    # `row on the credential`, or inverted to `puts no default_graph_id on the
+    # credential at all` with the suite GREEN (measured, #10083 review P2).
+    # Bind the clause to ITS OWN arm by a WINDOW after the one symbol only that
+    # arm names — 56 chars to the clause, 538 to the org-wide copy — and check the
+    # window's CONTENT order-free. An order-anchored pattern red a claim-preserving
+    # reorder (`… stamp `default_graph_id` on the credential: the org's active
+    # `kind='default'` row id …`) while its message said the arm "does not say
+    # WHICH field is stamped" when it did (measured, #10083 review P2). Reorder,
+    # insertion and grammar are all legitimate here; what must hold is that the
+    # arm's own sentence names `row id` AND `default_graph_id`, never the NAME.
+    assert "`hosted_api._session_user_org`" in flat, (
+        "the #10046 arm names no session-lane resolution site, so a reader cannot "
+        "check WHY a session/JWT credential is no longer designed residue"
+    )
+    assert "`oauth.resolve_oauth_access_token`" in flat, (
+        "the #10046 arm names no OAuth resolution site, so a reader cannot check "
+        "WHY an `oat_` credential is no longer designed residue"
+    )
+    _oauth_arm = flat.partition("`oauth.resolve_oauth_access_token`")[2][:260]
+    assert re.search(r"\brow id\b", _oauth_arm) and "`default_graph_id`" in _oauth_arm, (
+        "the #10046 arm does not say WHICH field is stamped (bound to that arm's "
+        "own sentence, not the org-wide one) — #10025's ruling is that the id is "
+        "identity and the name is a label, so 'the row' without `row id` sends "
+        "the reader to qualify on the name"
+    )
+    # `re.I`: the inversion is the CLAIM (`name` instead of `id`), not the case
+    # of the word. Case-sensitive, the same inversion in ordinary lowercase read
+    # GREEN (measured: the pattern alone, on the lowercase reword). Scoped to the
+    # same window so it cannot red a truthful mention of the NAME elsewhere (the
+    # doc's own `never a row NAME` sits ~2 500 chars away, in the `g_<hex>`
+    # sentence — the pattern alone is GREEN on the real doc; a truthful id-vs-NAME
+    # clause INSERTED into this arm's own 260-char window is what red a bare-noun
+    # `row name` (measured, #10083 review P2) — and the fix is to read the claim,
+    # not to drop the pin).
+    # The claim is a STAMPING claim: the NAME is put on the credential. So the
+    # negation-governed mentions are stripped first, the way the ruling pin below
+    # strips its noun-negated phrase: "— never the row's name on the credential —"
+    # is the RULING, and a bare-noun pin red it with a message accusing the arm of
+    # the inversion it had just refused (measured, #10083 review P2).
+    # Span-bounded rather than preposition-gated, because the inversion does not
+    # always keep the preposition in front: "… `default_graph_id` — that is, what
+    # the credential actually carries is the row's NAME, not the id" read GREEN on
+    # the preposition-gated form (measured, #10083 review P2), and an inversion
+    # like "some lanes stamp the row's NAME onto the credential" keeps `row id`
+    # earlier in the sentence, so the presence pin above cannot see it.
+    _oauth_claim = re.sub(
+        r"\b(?:never|not|no)\s+(?:an?\s+|the\s+)?row(?:['\u2019]s)?\s+name",
+        " ",
+        _oauth_arm,
+        flags=re.I,
+    )
+    assert not re.search(
+        # TWO-SIDED span, because the inversion is written both ways round: the
+        # claim "... carries is the row's NAME, not the id" puts `credential`
+        # BEFORE the name, so an after-only span read it GREEN (measured).
+        r"\brow(?:['\u2019]s)?\s+name\b(?=[^.]{0,60}?\bthe\s+credential)"
+        r"|\bthe\s+credential\b[^.]{0,60}?\brow(?:['\u2019]s)?\s+name\b",
+        _oauth_claim,
+        re.I,
+    ), (
+        "the #10046 arm says the row's NAME is stamped — the opposite of #10025's "
+        "id-vs-name ruling, and the healthy row is NAMED `default`, so a reader "
+        "checking the name clears real growth"
+    )
+    # ... and the graph-bound remedy's own EVIDENCE, for the same reason the
+    # `circuit_open` evidence is pinned above: deleting the fail-soft clause leaves
+    # the qualifier `except when tenant resolution itself faults` standing on
+    # nothing, with the suite green (measured, #10083 review P2).
+    assert re.search(r"`hosted_api\._resolve_record_tenant` is fail-soft, #5148", flat), (
+        "the graph-bound remedy's fault exception states no evidence, so a reader "
+        "cannot check that a resolution fault is what makes a bound capture land "
+        "in `no_tenant`"
+    )
+    # SCOPED to the session/OAuth arm the pre-#10046 claim was about. Section-wide
+    # this forbade a TRUE sentence about the self-host registry lane, whose
+    # credential carries no `default_graph_id` at all (only the Supabase credential
+    # resolvers stamp it) — a lane clarifying that lane red the suite with a
+    # message describing the opposite (#10083 review P2, measured).
+    assert not re.search(
+        r"(?:session/JWT|`oat_`).{0,240}carries no\s+`default_graph_id` at all",
+        flat,
+    ), (
+        "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-#10046 "
+        "'RESOLUTION gap at the credential' claim is back. The CLAIM is measured by "
+        "the `session/JWT credential and an OAuth` pin above; keep this exact, "
+        "cheap, and honestly labelled"
+    )
+    assert re.search(
+        r"So make the capture \*\*graph-bound\*\* — a graph-bound \*\*control-plane\*\* "
+        r"credential cannot land in `no_tenant` except when tenant resolution itself "
+        r"faults",
+        flat,
+    ), (
         "the section gives no way to make the capture's own `no_tenant` "
-        "impossible — a graph-bound credential is the discriminator"
+        "impossible — a graph-bound control-plane credential is the discriminator, "
+        "and dropping its fault exception restores the absolute that the fail-soft "
+        "resolver (#5148) contradicts"
     )
     # ⛔ `graph-bound` alone is NOT the discriminator, and the assertion above is
     # satisfied by the FALSE claim. The control plane is. A graph-bound SELF-HOST
@@ -2547,12 +2802,16 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # very lane as a designed `no_tenant` producer. Measured (#10071 review P2):
     # restoring that absolute wording — and separately deleting the counter-example
     # — left the suite at `99 passed`. The qualifier and the lane that proves it
-    # are the claim, so pin both.
+    # are the claim, so pin both. The `control-plane` qualifier is pinned by the
+    # assertion above; this is the COUNTER-EXAMPLE half, which had no pin of its
+    # own — merged in from `origin/main`, whose single pattern anchored both halves
+    # on the pre-#10083 wording of the sentence (`… cannot land in `no_tenant` (the
+    # self-host registry lane above is a graph-bound key that resolves through no
+    # control plane …`), which this PR's tighter bound rewrote.
     assert re.search(
-        r"graph-bound \*\*control-plane\*\* credential cannot land in\s+`no_tenant`\s+"
-        r"\(the self-host registry lane above is a graph-bound key that\s+resolves "
-        r"through no control plane",
-        section,
+        r"The self-host registry lane above is the (?:one|only) graph-bound key that "
+        r"resolves through no control plane",
+        flat,
     ), (
         "the `no_tenant` bound is stated as an absolute again — a graph-bound "
         "self-host registry credential is REFUSED and counted `no_tenant` by design "
@@ -2561,9 +2820,145 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "outcome as a fault; the counter-example that makes the qualifier "
         "checkable is missing or unravelled"
     )
-    assert re.search(r"record_tenant_for|_bind_record_tenant", section), (
-        "the bounded arm names no counting site, so a reader cannot check the "
-        "claim that `no_tenant` is designed on those lanes"
+    # ⛔ The #9192 declaration is a POLARITY, and only the clause's SHAPE was pinned:
+    # `unless` is what makes a DECLARED self-host single-tenant process stop counting
+    # `no_tenant` (`tortoise/mcp_auth.py:99-110` arms it by declaration;
+    # `record_writer.record_tenant_for` then names the pair), so inverting it to
+    # `when` — i.e. asserting the declaration CAUSES `no_tenant`, the opposite of the
+    # code — left every pin green (#10083 review, P2, measured). Pin the direction
+    # AND forbid the inversion, or F5's correction is unpinned prose.
+    assert re.search(
+        r"counted there\s+\*\*unless the process (?:has )?declare[sd] the "
+        r"single-tenant pair\*\*",
+        flat,
+    ), (
+        "the self-host lane's `unless` is unpinned — the #9192 declaration is what "
+        "CLEARS its `no_tenant`, so a reword that drops or inverts it makes the "
+        "section state the opposite of `mcp_auth.py:99-110`"
+    )
+    assert not re.search(
+        r"counted there\s+\*\*(?:when|if) the process has declared", flat
+    ), (
+        "the self-host arm is INVERTED: a declared single-tenant process is the one "
+        "case #9192 ARMS with the pair (it stops counting `no_tenant`), so 'when "
+        "declared' reads the ruling backwards"
+    )
+    # The "do not attribute growth per request" ruling is pinned ONCE, below, by a
+    # sentence-scoped scan — the narrow negative pin that lived here
+    # (`attribute (?:any|a|each|the) `no_tenant` growth`) required an article and the
+    # backticked counter, so it stayed green on `Attribute any `no_tenant` growth …`
+    # and on the document's own `Then attribute that growth per request …`
+    # (#10083 review cycle 2, P2). One stronger pin, not two overlapping ones.
+    # ⛔ `only` is not exhaustive without the fault arm: `_resolve_record_tenant`
+    # is fail-soft (#5148) and returns `None` on ANY exception, so an org-wide key
+    # whose resolution faults also lands in `no_tenant`. Dropping that clause
+    # restored the absolute this PR exists to remove, with every other pin green
+    # (#10083 review P2, measured) — so it is pinned here.
+    assert re.search(
+        r"such row \(absent, or the `default` sentinel\) — \*\*or\*\* when the\s+"
+        r"resolution itself faults, since the fail-soft resolver below turns any\s+"
+        r"exception into `None`",
+        flat,
+    ), (
+        "the org-wide-key sentence reads `only` when the control plane could name "
+        "no row — but the fail-soft resolver turns any exception into `None`, so "
+        "an org-wide key can also land in `no_tenant` by fault"
+    )
+    # Each COUNTING SITE the arm names, pinned individually. `record_tenant_for|
+    # _bind_record_tenant` was one alternation, and the bare `_bind_record_tenant`
+    # token is satisfied by this section's own seed/indexing sentence — so the
+    # self-host clause could be deleted with the pin still green (#10083 review,
+    # measured). Both halves are now anchored on their own clause.
+    assert re.search(r"`record_writer\.record_tenant_for` returns `None` by design", flat), (
+        "the bounded arm no longer names the self-host lane's counting site, so a "
+        "reader cannot check the claim that `no_tenant` is designed there"
+    )
+    # ⛔ The seed and background-indexing runners are NOT designed `no_tenant`
+    # sources: #10087 bound them to the org's DEFAULT-graph tenant at their own
+    # construction site (`hosted_api._bind_default_graph_record_tenant`, called
+    # from `_run_onboarding_seed` / `_run_starter_seed` / the indexing jobs), and
+    # `tests/test_10047_record_every_lane.py::test_the_onboarding_seed_runner_binds_
+    # the_default_graph_tenant` proves it. Filing them under "designed residue" is
+    # the same fail-open the org-wide-key correction above removes — it excuses
+    # real growth — and nothing pinned the list's MEMBERS, only its header
+    # (#10083 review P1).
+    assert re.search(
+        r"The \*\*onboarding-seed and background-indexing runners are NOT one of\s+"
+        r"those sources either\*\*, since #10087",
+        flat,
+    ), (
+        "the ⚠️ list files the seed / background-indexing runners as DESIGNED "
+        "`no_tenant` sources, which #10087 made false: they are bound to the org's "
+        "default-graph tenant, so a `no_tenant` there is a control-plane fault"
+    )
+    assert not re.search(r"deliberately NOT bound", flat), (
+        "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-#10087 "
+        "'deliberately NOT bound' claim is back. The claim it stood on is pinned "
+        "positively by the `NOT one of those sources either` assertion above"
+    )
+    # ⛔ The runners arm's VERDICT and MECHANISM, for the reason the #10046 arm
+    # needed both (#10083 review P2, measured): the stance sentence above survived
+    # `i.e. the same fail-and-fix as an org-wide key` → `i.e. a designed outcome,
+    # not a fault`, `they carry the org's DEFAULT-graph tenant` → `they carry no
+    # tenant at all`, and deletion of the `_bind_default_graph_record_tenant`
+    # evidence — every one GREEN. That inverts the arm's conclusion while its
+    # stance sentence still reads correctly, i.e. it tells an operator to IGNORE a
+    # real control-plane fault on the seed / indexing lanes.
+    assert re.search(
+        r"is therefore a control-plane (?:fault|failure) \(no[^)]*\), i\.e\. "
+        r"the same fail-and-fix as\s+an org-wide key",
+        flat,
+    ), (
+        "the runners arm's VERDICT is unpinned — 'i.e. a designed outcome, not a "
+        "fault' leaves every other pin green (measured), which reads a real "
+        "control-plane fault on the seed / indexing lanes as designed residue"
+    )
+    # Redundant AND false-reding as a section-wide detector: the ⚠️ bound itself
+    # calls the self-host lane's `no_tenant` "the designed outcome", so a truthful
+    # "a designed outcome, not a fault, for that lane" red it with a message about
+    # the RUNNERS arm (measured, #10083 review P2). The inversion it was for is
+    # already red by the positive verdict pin above; this keeps the explicit
+    # forbidding but binds it to the runners arm's own `control-plane` clause.
+    assert not re.search(
+        r"control-plane (?:fault|failure)[^.]{0,300}designed (?:outcome|residue), not a fault",
+        flat,
+    ), (
+        "REVERT-DETECTOR (one measured inversion, not a class): the runners arm is "
+        "stated backwards — a `no_tenant` there is a control-plane fault, so "
+        "calling it designed residue is the fail-open read the bound exists to close"
+    )
+    assert re.search(
+        r"bound by\s+`hosted_api\._bind_default_graph_record_tenant` \(#10047\) "
+        r"from the SAME\s+`kind='default'` `public\.graphs` row an org-wide key is "
+        r"named from",
+        flat,
+    ), (
+        "the runners arm names no binding site, so a reader cannot check WHY those "
+        "lanes are bound — deleting the mechanism leaves the verdict resting on "
+        "nothing (measured green at the previous head)"
+    )
+    assert re.search(
+        r"so they carry the org's DEFAULT-graph tenant from\s+their own construction "
+        r"site",
+        flat,
+    ), (
+        "the runners arm stops saying those lanes CARRY a tenant — the fact the "
+        "arm's verdict rests on. Inverted to 'they carry no tenant at all' it reads "
+        "as designed residue with every other pin green (measured)"
+    )
+    # The ⚠️ list files the self-host registry lane under "a credential that names
+    # no graph", while the sentence below calls that same lane "the one graph-bound
+    # key" — the two cannot both be read as true, and the CODE says the second is:
+    # the lane's credential DOES carry a `graph_id` (a Falkor `:Graph` node id,
+    # `g_<hex>`), which is exactly why `record_tenant_for` refuses it — registry
+    # graphs are never inserted into `public.graphs`, so the record cannot key on
+    # it (`tortoise/record_writer.py`, `control_plane_ids=False`; #9192's table
+    # agrees). Measured: without this pin the qualifier could be dropped back to
+    # "names no graph" and every other assertion stayed green (#10083 review F5).
+    assert re.search(r"a credential that names no graph \*\*the record can key on\*\*", flat), (
+        "the ⚠️ list calls the self-host registry lane a credential that names NO "
+        "graph while the remedy below calls it the one GRAPH-BOUND key — that "
+        "lane's credential does carry a graph_id, just not one the record can key on"
     )
     # The bounded arm must be EXECUTABLE. The first draft sent the operator to
     # "attribute any `no_tenant` growth … through recipe 1's log line", but that
@@ -2571,7 +2966,7 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # the env-pair note — no request identity, no org/graph id, not even the
     # record type — so per-request attribution is impossible from the log and the
     # arm's only remaining branch reds a healthy deployment (#9585 review P2).
-    assert re.search(r"\*\*no\*\*\s+request\s+identity", section), (
+    assert re.search(r"\*\*no\*\* request identity", flat), (
         "the section claims the `no_tenant` log line can attribute growth to a "
         "request — it carries no request identity, and of the four "
         "`record_writer` reasons only `circuit_open` carries the record type, so "
@@ -2580,11 +2975,14 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # The message above states the EVIDENCE for the impossibility (which reasons
     # carry what), so pin the evidence too — otherwise the parenthetical can be
     # deleted and the claim stands on an assertion that no longer measures it
-    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` at
-    # record_writer.py:1218; `malformed_dsn` and `write_failed` log the exception.
-    # NOT :1184 — that is the `no_durable_journal` DEBUG skip, a different site
-    # that would have made this comment claim the opposite of what it means).
-    assert re.search(r"`circuit_open` is the\s+only one that carries the record type", section), (
+    # (#10071 review P2, verified: `circuit_open` logs `record.get("type")` in its
+    # WARN; `malformed_dsn` and `write_failed` log the exception. Line numbers are
+    # deliberately not cited — they rot, and the earlier attempt cited the
+    # `no_durable_journal` DEBUG message at that line instead, #10083 review P2).
+    # (`origin/main` re-pointed this same citation at record_writer.py:1218 while
+    # this branch removed the citation instead; the removal supersedes the
+    # re-point, so no line is named here and the correction cannot rot again).
+    assert re.search(r"`circuit_open` is the only one that carries the record type", flat), (
         "the section gives no evidence for why the log cannot attribute growth — "
         "only `circuit_open` carries the record type, so a reader cannot check "
         "the claim it is asked to act on"
@@ -2592,19 +2990,810 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # ⛔ Pin the CLAUSE, not the token: `capture ran **unbound**` alone survives
     # both "it is **never** a fail-and-fix when the capture ran **unbound**" and
     # "fail-and-fix whether or not the capture ran **unbound**" — the arm inverted
-    # with the pin still green (#10071 review P1). `only when` is load-bearing.
-    assert re.search(r"fail-and-fix only\s+when the capture ran \*\*unbound\*\*", section), (
+    # with the pin still green (#10071 review P1). `only when` is load-bearing —
+    # and so is the DISJUNCTION: dropping `, when item 1's row did not appear`
+    # leaves every other pin green while the paragraph stops covering the bound
+    # capture whose row never landed (#10071 review F2), and the third disjunct is
+    # what keeps item 2 (`the capture's OWN` — see above) from contradicting a bound
+    # capture whose tenant RESOLUTION faulted, since such a write does count
+    # `no_tenant` (#10083 review F3). Pin all three parts.
+    assert re.search(
+        r"fail-and-fix only when the capture ran \*\*unbound\*\*, when item 1's "
+        r"row did not appear, or when the capture's credential was refused a "
+        r"tenant the record CAN key on",
+        flat,
+        re.I,
+    ), (
         "the section gives no executable discriminator for `no_tenant` growth — "
-        "an unbound capture is the one state that makes the growth the capture's"
+        "an unbound capture makes the growth the capture's, a bound capture whose "
+        "item-1 row never appeared is the second case, and a credential the record "
+        "CAN key on being REFUSED a tenant is the third"
+    )
+    # ⛔ The third arm must be WINDOW-scoped, not OWNERSHIP-scoped: the sentence used
+    # to read "when the capture's OWN tenant resolution faulted", which asks the
+    # operator to decide that a fault line was the capture's — the ownership
+    # judgement the ⛔ ruling below ("no request identity") declares impossible
+    # (#10083 review cycle 3, P2, measured: inverting it left all 99 green).
+    assert not re.search(r"the capture's OWN tenant resolution", flat), (
+        "REVERT-DETECTOR (one draft's exact wording, not a class): the ownership-scoped "
+        "third arm is back. A window-scoped reword ('when the capture's tenant "
+        "resolution faulted') stays green here by design — this pin cannot see that "
+        "class; the WINDOW scoping is measured by the `fail-and-fix only when` pin "
+        "above, whose third disjunct names the credential, not a request"
+    )
+    # The third disjunct must name a command that actually FINDS the fault. Recipe 1
+    # greps `the record write did not happen`, and this fault is logged under a
+    # DIFFERENT MESSAGE — "could not resolve the record tenant for this request"
+    # (`hosted_api.py`, `_resolve_record_tenant`) — so that grep never matches it:
+    # an operator who greps recipe 1, sees nothing and clears the capture passes a
+    # capture-own `no_tenant` growth as other traffic — a fail-open in the very
+    # verification this section exists to provide (#10083 review P1).
+    # ⛔ TWO causes, TWO readings — and the second one is SILENT. `no nameable
+    # default row` is a refusal of a tenant the record CAN key on, so it is a
+    # fail-and-fix; but `_bind_default_graph_record_tenant` returns without logging
+    # (`if not default_graph_id: return`, hosted_api.py), so on the seed/indexing
+    # lane NO line exists for the operator to find. A section that offered only the
+    # fault grep would present an empty read as "no fault" on a fail-and-fix case —
+    # the same fail-open, one cause further out (#10083 review cycle 3, P1).
+    # ⛔ The VERDICT is the load-bearing half, and it was pinned by a bare 3-word
+    # token (`No nameable default row`) that cannot see it (measured at this head:
+    # `so it is a fail-and-fix as well` → `so it is NOT a fail-and-fix at all`
+    # left all 100 green — #10083 review P2, unfixed across cycles 3-4). A
+    # reading whose verdict can be inverted silently is the exact class this PR
+    # closes: the arm would then contradict the summary sentence above it
+    # (`… it is a fail-and-fix only when … a tenant the record CAN key on`).
+    # The LEAD-IN is pinned with it: the count over the causes is what makes the
+    # SILENT readings executable — a lead-in that reads fewer causes lets the
+    # operator skip one and read an empty grep as 'no fault'. The count was WRONG
+    # (`TWO readings, because it has two causes`, pre-fix) while the arm had a
+    # third source of the same refusal, which is the fail-open this bound exists to
+    # close one cause further out (#10083 review, P2).
+    # ⛔ These two pins anchor the RULING and stop short of the rest of the
+    # sentence (#10083 review cycle 5, P3, measured): the parenthetical is an
+    # ENUMERATION (`absent, inactive, or the `default` sentinel`) and the tail of
+    # the lead-in is prose, neither of which carries the verdict — so a strictly
+    # IMPROVING edit, e.g. adding `tombstoned` (the word the code's own docstring
+    # uses, `hosted_api._bind_record_tenant`), reddened a verdict pin that was
+    # still intact and told the next lane to restore a verdict it never removed.
+    # A pin must red on the class its message names.
+    # ⛔ The lead-in's numeral is DERIVED from the bullets that follow it, not
+    # pinned as a WORD and not counted through a fixed name list (#10083 review F1,
+    # P2, measured). Both halves of that pin were fail-open in one direction and
+    # false-red in the other:
+    #   - a fixed-name alternation (`A resolution FAULT|No nameable default row|A
+    #     resolution ABANDONED`) can only ever return names from that set, so
+    #     `len(...) == 3` meant "the three original names are still present". A
+    #     FOURTH bullet — e.g. `A malformed CARRIED tenant`, a cause this section
+    #     itself describes — stayed GREEN while the lead-in still promised an
+    #     exhaustive THREE;
+    #   - a lane that adds a cause AND honestly relabels to `FOUR readings … read
+    #     all FOUR` was RED against the literal `THREE`, with a message telling it
+    #     the lead-in had stopped saying to read every cause — the false-red class
+    #     this PR spent cycles 7-16 removing.
+    # So parse the numerals out of the lead-in and compare them to the members that
+    # actually follow it. An honest FOUR is green; a silent fourth member is not.
+    # The LEAD-IN's casing is not part of its claim, so all three numerals are
+    # read case-insensitively (#10083 review cycle 18, P3, measured). The middle
+    # group alone was `([a-z]+)` while the two around it were `([A-Z]+)` and the
+    # very next line `.upper()`ed every group for the `_NUMERALS` lookup — i.e.
+    # any-casing was the intent and the pattern said otherwise. An honest relabel
+    # in the section's OWN count style (`FOUR readings, because it has FOUR
+    # causes; read all FOUR`) therefore missed `([a-z]+) causes`, and the pin
+    # reddened on a strict strengthening with a message accusing the lead-in of
+    # dropping the very clause it had just added — the F2 casing false-red this
+    # PR spent cycle 17 removing ten lines below. Casing is not the claim: the
+    # agreement of the three numerals with each other and with the member count
+    # below is, and that is untouched by this widening.
+    _lead_in = re.search(
+        r"That last arm has ([A-Za-z]+) readings, because it has ([A-Za-z]+) causes; "
+        r"read all ([A-Za-z]+) before you call the growth other traffic:",
+        flat,
+    )
+    assert _lead_in, (
+        "the no-nameable-row lead-in no longer says to read all N causes before "
+        "calling the growth other traffic, so a SILENT reading can be skipped and "
+        "an empty grep read as 'no fault'"
+    )
+    _lead_nums = {_NUMERALS.get(_word.upper()) for _word in _lead_in.groups()}
+    assert len(_lead_nums) == 1 and None not in _lead_nums, (
+        "the bound's own lead-in counts its causes inconsistently "
+        f"{_lead_in.groups()!r} — 'N readings … N causes … read all N' is the claim "
+        "that makes every reading executable"
+    )
+    # Count the bullets from the LIST ITSELF, scoped to the block the lead-in
+    # introduces: a `- **…**` bullet elsewhere in the section is not a cause and
+    # must not be able to red this.
+    # ⛔ And read that list off `flat`, not the RAW section (#10083 review cycle 19,
+    # P3, measured). This was the one piece of the counting machinery that had not
+    # moved to the normalised copy, although its own sibling states the principle
+    # (`_c_msgs`: "read off `flat`, so a word-preserving refill cannot move it").
+    # Measured: changing ONLY the leading whitespace of the three bullets (3 → 4
+    # spaces, not one word touched) enumerated 0 and red with "the lead-in says
+    # THREE readings but the list enumerates 0" — a claim-preserving indentation
+    # edit accused of a defect it does not have, and the indent was ALSO part of
+    # the raw window marker (`"\n   ⛔"`), where an indent change silently WIDENS
+    # the window instead of failing. Indent is a rendering-level choice, not the
+    # claim (CommonMark 0.31.2 §5.2: a list item is `<1-4 spaces><marker>`, so the
+    # nesting indent below the marker is layout), and the claim this pin measures
+    # is "the lead-in's numeral equals the number of members". So the window and
+    # the bullet pattern both come from `flat`, where any indent is a single space
+    # and the count cannot move on a reflow or a re-indent.
+    _bound_list = flat.partition("before you call the growth other traffic:")[2]
+    _bound_list, _closed, _ = _bound_list.partition("⛔")
+    if not _closed:
+        _bound_list = _bound_list[:2500]
+    _bound_bullets = re.findall(r"- \*\*(.+?)\*\*", _bound_list)
+    assert _lead_nums == {len(_bound_bullets)}, (
+        f"the `no_tenant` bound's lead-in says {_lead_in.group(1)} readings but the "
+        f"list enumerates {len(_bound_bullets)} ({_bound_bullets!r}) — the lead-in's "
+        "count and its members disagree, so an operator reads an exhaustive list "
+        "that is not exhaustive and skips a cause"
+    )
+    assert re.search(
+        r"\*\*No nameable default row\*\* \(absent[^)]*\) is also a refusal of a "
+        r"tenant the record CAN key on, so it (?:too )?is a fail-and-fix as well",
+        flat,
+    ), (
+        "the no-nameable-row arm's VERDICT is unpinned — it must be a refusal of "
+        "a tenant the record CAN key on, and therefore a fail-and-fix"
+    )
+    assert re.search(
+        r"on the seed / indexing lane it logs \*\*NOTHING\*\*\s+at all", flat
+    ), (
+        "the section does not say the no-nameable-row arm is SILENT on the "
+        "seed / indexing lane, so an empty grep read is taken as 'no fault'"
+    )
+    assert re.search(r"empty read of that grep does not clear\s+this arm", flat), (
+        "the section does not rule out the empty-read misreading — read the "
+        "`kind='default'` row, not the log"
+    )
+    # ⛔ And the THIRD cause's verdict, which is the one no other reading can
+    # reach: the resolution was ABANDONED at the seam, so the row reading PASSES on
+    # it. Without this the bound is again a two-reading procedure over a three-cause
+    # arm, and an operator who reads BOTH as prescribed is left with the paragraph's
+    # own verdict — "other traffic" — for a fail-and-fix state (#10083 review, P2).
+    assert re.search(
+        r"\*\*A resolution ABANDONED at the seam\*\* is (?:the [A-Za-z]+|a) "
+        r"cause, and it is "
+        r"the one the row reading above CANNOT clear",
+        flat,
+    ), (
+        "the abandoned-at-the-seam cause is not named as one the row reading cannot "
+        "clear — its fault is logged BEFORE the row is read, so a healthy "
+        "`kind='default'` row is exactly what that cause looks like"
+    )
+    assert re.search(
+        r"the `kind='default'` row the reading above inspects is \*\*untouched and "
+        r"healthy\*\*",
+        flat,
+    ), (
+        "the section does not say WHY the row reading passes on this cause — an "
+        "operator who finds a healthy row concludes the growth is other traffic"
+    )
+    assert re.search(
+        r"and the growth is still the deployment's\s+\(control-plane saturation, "
+        r"or a refused submission\), never another tenant's",
+        flat,
+    ), (
+        "the abandoned-at-the-seam arm's VERDICT is unpinned — the growth must be "
+        "the deployment's own fault, not another tenant's traffic"
+    )
+    # ⛔ `_cp_offload` has TWO outcomes and they differ in what the row reading
+    # above can SEE, so one consequence cannot cover both (#10083 review P2,
+    # measured — the last-cycle finding). `ControlPlaneOffloadError.refused` is
+    # `True` only for a refusal or a cancellation before any worker ran the
+    # callable (`monitoring.py:2317-2322`), where the callable did not and will
+    # not run; a plain BOUND MISS on a submission a worker already picked up is
+    # `refused=False`, `_cp_offload` returns `None` (`hosted_api.py:8734-8736`),
+    # and that worker runs the resolver to completion — `asyncio.wait_for`
+    # cancels the await, never the thread (CPython #87185). The pre-fix paragraph
+    # collapsed both into "the resolution never ran", which told an operator that
+    # one of the four fault lines (c) enumerates cannot coexist with the offload
+    # warning, and that the default row is untouched when this lane's resolver is
+    # `default_graph_id_for_credential`, which MINTS on a miss — so the row
+    # reading's PASS can be produced by the very resolution the seam stopped
+    # waiting for. Pin both branches; a single-branch claim reds here.
+    _seam = flat.partition("**A resolution ABANDONED at the seam**")[2]
+    _seam, _closed, _ = _seam.partition("⛔ **Do not try to attribute")
+    if not _closed:
+        _seam = _seam[:3000]
+    assert re.search(r"before any\s+worker\s+picked it up", _seam), (
+        "the abandoned-at-the-seam cause does not name the REFUSED / cancelled-\n"
+        "before-a-worker-ran branch, which is the only one where the callable\n"
+        "genuinely did not run (`ControlPlaneOffloadError.refused`)"
+    )
+    assert re.search(r"a worker\s+already PICKED UP", _seam) and re.search(
+        r"still runs\s+the resolver to completion", _seam
+    ), (
+        "the section collapses a plain BOUND MISS into 'the resolution never ran'\n"
+        "— on a submission already picked up the worker still runs the resolver\n"
+        "to completion (`hosted_api.py:8734-8736`, CPython #87185), so a\n"
+        "resolution-fault line CAN coexist with the offload warning and an\n"
+        "operator told otherwise stops looking"
+    )
+    assert re.search(r"\*\*mints on a miss\*\*", _seam), (
+        "the section does not say the row reading can PASS because the abandoned\n"
+        "resolution CREATED the row — this lane's resolver is\n"
+        "`default_graph_id_for_credential`, which mints on a miss, so 'untouched\n"
+        "and healthy' is only true of the refused branch"
+    )
+    # ...and the false ABSOLUTE must not come back: a bound miss is the branch
+    # where the resolution DID run. The pre-fix wording paired an unconditional
+    # "wait bound expires" with "never ran" in ONE sentence, which is the defect
+    # this pin measures (it reds on that revert, not on a reword that keeps the
+    # two branches apart).
+    assert not re.search(
+        r"wait bound\s+expires[^.]{0,300}\*\*never ran\*\*", _seam, re.I
+    ), (
+        "the section again states that an EXPIRED WAIT BOUND means the resolution\n"
+        "never ran — it does not: the bound abandons only the await, and a worker\n"
+        "that picked the submission up runs it to completion (CPython #87185)"
+    )
+    # ⛔ And the REMEDY itself, not just its lead-in: "read the row" is the only
+    # executable step for the silent arm, and it was unpinned (measured: replacing it
+    # with "read whatever the operator finds most convenient" left the suite green,
+    # #10083 review cycle 4 P2). The QUALIFIER is on the `id`, not the name: the
+    # minted row is NAMED `default` (`supabase_control.ensure_default_graph_row`,
+    # and the migration's own backfill), and the `default` sentinel is a pre-#10025
+    # value of the ID field (`record_tenant_for` refuses `default_graph_id ==
+    # "default"`). Qualifying on the name would reject the healthy row.
+    assert re.search(
+        r"read the (?:org|organi[sz]ation)'s `kind='default'` `public.graphs` row "
+        r"itself", flat
+    ), (
+        "the silent arm's remedy is not named — the operator is left with the "
+        "empty grep the paragraph above says does not clear it"
+    )
+    assert re.search(r"its `id` must be a real `g_<hex>`", flat), (
+        "the remedy does not say what a healthy default row looks like, so "
+        "'read the row' is unactionable"
+    )
+    # ...and the OTHER half of "healthy": a default row that is present but not
+    # `active` is precisely the no-nameable-default-row case the arm is about, so a
+    # remedy naming only the id form leaves the operator free to read a paused row as
+    # healthy. Measured: inverting it to `inactive` left every pin green (#10083
+    # review, P3).
+    assert re.search(r"its `status` (?:must be|must read) `active`", flat), (
+        "the remedy never says the default row must be `active` — the silent arm's "
+        "whole point is a row that exists but names nothing, so an inactive row read "
+        "as healthy clears the growth a control-plane fault produced"
+    )
+    # The BOUND's own asymmetry: `no_tenant` is qualified and the other two reasons
+    # are not, and the section must say WHY rather than leave a reader to infer it
+    # from the process-global sentence above. Without the clause, `circuit_open` /
+    # `malformed_dsn` read as absolute reds on a before/after delta the section has
+    # just conceded covers other traffic — the same contradiction F1 removes one
+    # paragraph up (#10083 review, P3).
+    assert re.search(r"That excuse covers\s+`no_tenant` and nothing else", flat), (
+        "the ⚠️ bound never says the process-global excuse is `no_tenant`-only, so "
+        "item 2's absolute bar for `circuit_open` / `malformed_dsn` reads as the "
+        "same unbounded claim the bound just qualified"
+    )
+    assert re.search(
+        r"`circuit_open` reads a process-wide breaker\s+and `malformed_dsn` a "
+        r"process-wide setting",
+        flat,
+    ), (
+        "the section gives no reason the other two arms are NOT bound — the BREAKER "
+        "and the DSN are process-wide, so other traffic cannot excuse a growth in "
+        "either (it runs behind the same breaker and the same DSN)"
+    )
+    assert not re.search(r"not the `default` name sentinel", flat), (
+        "REVERT-DETECTOR (one draft's exact wording, not a class): the pre-fix sentence "
+        "is back. A genuinely name-qualifying rewrite stays green here, so the "
+        "asymmetry is pinned POSITIVELY by the `never a row NAME` assertion below"
+    )
+    # ... and the positive half, so the asymmetry is a claim rather than only the
+    # absence of one draft's sentence (#10083 review, P3: the negative pin above
+    # reds on a revert, not on a rewrite that makes the same false qualification).
+    assert re.search(
+        r"the `default` SENTINEL is a pre-#10025\s+id value, (?:never|not) a row "
+        r"NAME", flat
+    ), (
+        "the remedy no longer says WHICH field the sentinel lives in — the minted "
+        "`kind='default'` row IS named `default` and its id is a real `g_<hex>`, so "
+        "without the id/name asymmetry an operator rejects the healthy row"
+    )
+    # ⛔ The command must match EVERY message that carries a resolution fault, not
+    # just the per-request one. There are three: `hosted_api._resolve_record_tenant`
+    # ("could not resolve the record tenant for this request"),
+    # `hosted_api._bind_default_graph_record_tenant` ("could not resolve the
+    # DEFAULT-graph record tenant for org …", the seed / indexing lanes), and
+    # `supabase_control.default_graph_id_for` ("graphs default-row read failed …"),
+    # which SWALLOWS its exception and returns None — so on a default-row read
+    # fault neither hosted_api line is emitted at all. The mint failures warn under
+    # their own message ("default graph(s) row NOT minted …", the org create/rename
+    # paths). A narrower grep sends the operator to an empty read on some of them,
+    # i.e. "no fault" on a fail-and-fix `no_tenant` growth (#10083 review cycle 2 P1,
+    # widened in cycle 3).
+    # A SET of required alternatives, not the whole command: a lane WIDENING the
+    # grep with another reachable message (`could not bind the record tenant for
+    # this request`, `hosted_api.py:6992`) is the improvement this bullet exists to
+    # encourage, and the full-command form of this pin red it while its message
+    # claimed a message was MISSING (#10083 review P3, measured).
+    # Quoting style and flag letters are NOT the claim: `grep -Ei`, `grep -nE` and a
+    # single-quoted body keep every required message, and each red the fixed
+    # `grep -E "` form of this capture with a message claiming the grep is absent
+    # (measured, #10083 review P3). Capture the pattern body regardless of where the
+    # flags sit or how the body is quoted.
+    _fault_grep = next(
+        (g for _q, g in re.findall(
+            r"""grep\s+(?:-[a-z]*\s+)*-[a-z]*E[a-z]*\s*(["'])(.+?)\1""", flat)
+         if "could not resolve the record tenant" in g or "graphs default-row" in g),
+        "",
+    )
+    assert _fault_grep, (
+        "the fault disjunct carries no `grep -E` whose pattern names a resolution-"
+        "fault message"
+    )
+    for _alt in (
+        "could not resolve the record tenant",
+        "could not resolve the DEFAULT-graph record tenant",
+        "graphs default-row read failed",
+        "default graphs? row NOT minted",
+        "control-plane offload 'default_graph_row' failed",
+    ):
+        assert re.search(re.escape(_alt), _fault_grep), (
+            f"the fault disjunct's grep misses {_alt!r}, so that fault reads as "
+            "'no fault'"
+        )
+    # ⛔ Scoped to the (c) PARAGRAPH, not the whole section: the same literals
+    # appear elsewhere in this section, so a section-wide search let (c) stop naming
+    # a member while the pin stayed green (#10083 review cycle 3, P2, measured).
+    # ALL THREE members are pinned — the per-request one was missing from this
+    # tuple, so it could be deleted (or reworded to a literal the code never emits)
+    # with the suite green (#10083 review cycle 4, P2, measured). A FOURTH (real)
+    # message is not a defect and is not forbidden; what is pinned is that these
+    # three — the ones `hosted_api`/`supabase_control` actually emit — are named,
+    # and that the count word still agrees with the member count.
+    # `partition`, NEVER `.index()`: the closing heading is prose no assertion
+    # pins, so a reword of it made this a `ValueError: substring not found`
+    # ERROR at collection — before any assertion ran, on an edit that changed no
+    # claim (measured, #10083 review P2). Absent marker now WIDENS the window
+    # (all the member pins still measure, and a widened window can only make a
+    # `not re.search` red for inspection) instead of crashing.
+    _excl_c = flat.partition("(c) The tenant-RESOLUTION faults")[2]
+    _excl_c, _closed, _ = _excl_c.partition(
+        "⛔ **`no_journal` and `seam_unimportable` ARE in it**"
+    )
+    if not _closed:
+        _excl_c = _excl_c[:2500]
+    # ⛔ The label's COUNT is DERIVED from the members it counts, not compared as
+    # two test constants against the doc's literal (#10083 review cycle 18, P3,
+    # measured). `len(_msgs) == 4` is THIS file's own tuple and `four MESSAGES`
+    # was the doc's own word, so neither side was read from the section — the
+    # exact F1 shape cycle 17 removed from the bound's bullets
+    # (`_lead_nums == {len(_bound_bullets)}`) and from the exclusion list's
+    # markers (`_NUMERALS[...] == len(_members)`). Both directions were wrong:
+    #   - a TRUTHFUL fifth message plus an honest `four`→`five` relabel red the
+    #     suite (here and at the member-presence pin below, and again on the two
+    #     inversion pins, which also hard-coded the word `four`), accusing a
+    #     section of disagreeing with a count it had just corrected — the
+    #     false-red class this PR spent cycles 7-17 removing;
+    #   - a SILENT fifth message (label untouched) stayed GREEN, so `four
+    #     MESSAGES` counted four over five members — the fail-open the exclusion
+    #     list exists to close, since an operator reads an "exhaustive" list that
+    #     is not exhaustive and skips a cause.
+    # What a MEMBER is, mechanically: a backticked log message followed by the
+    # parenthetical naming the emitter that logs it (`_resolve_record_tenant`,
+    # `_bind_default_graph_record_tenant`, `default_graph_id_for`, `_cp_offload`).
+    # That shape is what distinguishes a member from the identifiers sharing this
+    # paragraph (`None`, `grep -E`, `no_journal`, `tortoise.hosted_api`), and it is
+    # read off `flat`, so a word-preserving refill cannot move it.
+    # ⛔ CASE is not the claim (#10083 review P2, measured): `MESSAGES` → `messages`
+    # is a pure typographic edit that keeps the count, and it red this label pin
+    # with a message accusing the section of not counting its messages. The
+    # NUMERAL is what is read (and `.upper()`ed below), so the WORD's casing must
+    # not be able to red it.
+    _c_label = re.search(
+        r"\(c\) The tenant-RESOLUTION faults — ([A-Za-z]+) MESSAGES", flat, re.I
+    )
+    assert _c_label and _c_label.group(1).upper() in _NUMERALS, (
+        "the exclusion (c) label no longer counts its emitted messages, so a "
+        "reader cannot tell how many fault lines to look for"
+    )
+    _c_count_word = re.escape(_c_label.group(1))
+    _c_msgs = re.findall(r"`([^`]+)` \(", _excl_c)
+    assert _NUMERALS[_c_label.group(1).upper()] == len(_c_msgs), (
+        f"the exclusion (c) is labelled {_c_label.group(1).upper()} MESSAGES but "
+        f"enumerates {len(_c_msgs)} ({_c_msgs!r}) — a label that says FOUR over "
+        "five members is the same self-contradiction class this section exists "
+        "to remove, so a reader takes an exhaustive enumeration that is not "
+        "exhaustive and skips a cause"
+    )
+    # ⛔ ... and the two CROSS-REFERENCES that point AT (c) carry its count in words,
+    # and they were the last FREE-FLOATING numerals in this section (#10083 review
+    # cycle 19, P2, measured). The label's numeral is derived from its members
+    # (`_c_label` vs `_c_msgs`) and the bound's lead-in from its bullets
+    # (`_lead_nums` vs `_bound_bullets`), but nothing read `logs one of FOUR
+    # messages` (the bound's fault bullet) or `which matches all four` (the tail of
+    # (c) itself), so:
+    #   - relabelling (c) honestly to FIVE after adding a fifth reachable fault
+    #     message — a strictly IMPROVING widening, the very edit the fault-grep pin
+    #     above says it encourages — left both cross-references saying four, and
+    #     the operator reads the fifth fault line as "no fault" on a fail-and-fix
+    #     arm; and
+    #   - `FOUR` → `TWO` / `matches all four` → `matches three of them` stayed
+    #     GREEN with the members untouched, i.e. the numeral could go stale on its
+    #     own.
+    # The numeral is DERIVED from the same source the label is (`len(_c_msgs)`),
+    # never hard-coded, so an honest relabel keeps the three agreeing and stays
+    # GREEN — the agreement is the claim, and the wording around the numeral is
+    # not pinned beyond what identifies which set it counts.
+    _fault_refs = (
+        ("the ⚠️ `no_tenant` bound's fault bullet",
+         _bound_list, r"\bone of ([A-Za-z]+) messages\b"),
+        ("the tail of recipe 1's exclusion (c)",
+         _excl_c, r"\bwhich matches all ([A-Za-z]+)\b"),
+    )
+    for _where, _text, _num_re in _fault_refs:
+        _ref = re.search(_num_re, _text)
+        assert _ref and _ref.group(1).upper() in _NUMERALS, (
+            f"{_where} no longer states how many fault messages the fault grep "
+            "matches in a readable form (`one of N messages` / `which matches "
+            "all N`) — an unpinned count can go stale against the list it "
+            "points at and a real fault line reads as 'no fault'"
+        )
+        assert _NUMERALS[_ref.group(1).upper()] == len(_c_msgs), (
+            f"{_where} says {_ref.group(1).upper()} but recipe 1's exclusion (c) "
+            f"enumerates {len(_c_msgs)} ({_c_msgs!r}) — the cross-reference is "
+            "stale, so an operator grepping for the messages (c) names is told "
+            "the set is smaller than it is and a fault line the list names "
+            "reads as 'no fault'"
+        )
+    # Deletion of any ONE member still reds on its own literal, independently of
+    # the count above.
+    _msgs = (r"could not resolve the record tenant for this request",
+             r"could not resolve the DEFAULT-graph record tenant for org",
+             r"graphs default-row read failed — the record tenant stays unnamed",
+             r"control-plane offload 'default_graph_row' failed")
+    for _msg in _msgs:
+        assert re.search(re.escape(_msg), _excl_c), (
+            f"recipe 1's exclusion (c) does not name {_msg!r} among the resolution "
+            "faults, so a fault line an operator must grep is missing from the "
+            "list that claims to enumerate them"
+        )
+    # ⛔ The ENUMERATION is not the ARGUMENT. Measured (#10083 review P2): the
+    # count and the three literals were pinned, but the two sentences that make
+    # the enumeration do any work were not — `none of which this grep matches` →
+    # `which this grep matches`, `NEITHER of the other two is logged at all` →
+    # `BOTH … are logged as well`, and `IS in the grep` → `is NOT in the grep`
+    # were all GREEN. Each inversion tells an operator that an empty recipe-1 read
+    # clears a real resolution fault, which is the fail-open the widened `grep -E`
+    # in the bound exists to prevent.
+    # The CLASS, not one idiom: `none of which this grep matches` / `which this
+    # grep does not match` / `of which this grep matches none` / `none of which
+    # are matched by this grep` all state the same ruling, and each reword red
+    # the single-idiom pin with a message accusing the doc of the inversion it
+    # had just kept (measured, #10083 review P2 — the F3 class again). The
+    # inversion is caught by the `(?:all|each) of which` detector below, so
+    # accepting the class costs no discrimination.
+    # The COUNT WORD is taken from the label that is there (`_c_count_word`), not
+    # hard-coded `four`: the inversion these two pins measure is a property of the
+    # sentence, not of the numeral, and a literal numeral reddened an honest
+    # relabel for no claim change (#10083 review cycle 18, P3).
+    assert re.search(
+        _c_count_word + r" MESSAGES,?\s+(?:none of which\s+this grep\s+matches"
+        r"|which\s+this grep\s+does not match"
+        r"|of which\s+this grep\s+matches none"
+        r"|none of which\s+are matched by this grep)",
+        _excl_c,
+        re.I,
+    ), (
+        "exclusion (c) no longer says these faults are OUTSIDE recipe 1's "
+        "grep — inverted, it tells the reader an empty recipe-1 read clears them"
+    )
+    assert not re.search(
+        _c_count_word + r" MESSAGES, (?:all|each) of which this grep", _excl_c, re.I
+    ), (
+        "exclusion (c) claims the three resolution faults ARE in recipe 1's grep, "
+        "which is false — recipe 1 greps `the record write did not happen`"
+    )
+    assert re.search(
+        r"so on a default-row read fault neither of the (?:other three|two\s+"
+        r"`could not resolve` lines(?: above)?)\s+is\s+logged at all",
+        _excl_c,
+        re.I,
+    ), (
+        "exclusion (c) drops the consequence that makes `graphs default-row read "
+        "failed` special — `default_graph_id_for` swallows its exception, so on "
+        "that fault NEITHER hosted_api `could not resolve` line is emitted and a "
+        "grep of just those two reads empty on a real fault. Either truthful form "
+        "is accepted: `the other three` (arithmetic against the (c) label) or the "
+        "named `two `could not resolve` lines`; the pre-fix `other two` over a "
+        "FOUR-message label is the self-contradiction this pin exists to catch"
+    )
+    assert re.search(
+        r"\(`the record write did not happen \(no_tenant\)`\) IS in the grep", _excl_c
+    ), (
+        "exclusion (c) stops distinguishing the refusal (which IS in the grep) "
+        "from the fault (which is not) — inverted, a reader counts the growth as "
+        "the fault or dismisses the line as missing"
+    )
+    # ⛔ POLARITY, not vocabulary — a TWO-SIDED test, and both sides are POLARITY
+    # CLASSES rather than shape lists. The first fix pinned only the `would be
+    # unexecutable` SHAPE, so a TRUTHFUL clarification in another shape red the suite
+    # while asserting exactly the ruling ("Per-request attribution is impossible from
+    # this log line.", "There is no per-request attribution in this log line." —
+    # #10083 review, P2, measured on both), with a message telling the next lane the
+    # section "presents per-request attribution of growth as possible" when it did
+    # not. Then the accept half became a NEGATION WORD LIST, which failed the other
+    # way: seven evasions that negate something OTHER than the claim passed both
+    # halves — "Nothing prevents per-request attribution", "It is not hard to
+    # attribute that growth per request", "not out of reach", "The log does not
+    # prevent you from attributing", "not unachievable", "No obstacle prevents", and
+    # "You can attribute that growth per request, no correlation needed" (all
+    # GREEN before this pass; measured, #10083 review). Hence:
+    #
+    #   ACCEPT — the sentence carries NEGATIVE POLARITY: a prohibition, an
+    #   infeasibility, an absence, a failure, a barrier, or an inability. Any truthful
+    #   way of stating the ruling is one of those, and the class is closed under
+    #   rewording in a way a list of shapes is not.
+    #   REJECT — the sentence carries POSITIVE feasibility about the claim (bounded
+    #   to a claim word, so a truth like "no request identity is available" is not
+    #   red), or a DOUBLE NEGATIVE, i.e. negative polarity applied to a
+    #   NEGATIVE-MARKED predicate ("not impossible", "nothing prevents", "does not
+    #   prevent", "not hard", "not out of reach") — the shape that lets a sentence
+    #   carry the accept half's marker and still assert the opposite.
+    #
+    # SELECTION is by CLAIM NOUN OR VERB, not by verb alone: "A per-request breakdown
+    # of `no_tenant` growth is available from the log" and "The log line can be
+    # correlated with a request" carry no `attribut`/`assign` and state the opposite
+    # of the ruling, so a verb-only filter never scanned them (measured GREEN, #10083
+    # review). `per request` alone is deliberately NOT a selector: the hosted-lane
+    # sentence "carries its tenant **per request**, which always wins" is not a claim
+    # about attributing growth, and selecting it made the accept half red a truthful
+    # sentence (measured).
+    _claim = (r"attribut|assign|breakdown|break\s+\w+\s+down|identif|identit|"
+              r"distinguish|correlat|tells?\b[^.]{0,40}?\bapart")
+    # ⛔ SELECTION and the CHUNK BOUNDARY are two separate defects, and only the
+    # first was closed by widening `_claim`. Splitting only on `(?<=\.)\s+` fuses a
+    # sentence that FOLLOWS an emphasized ruling into the ruling's own chunk, because
+    # the ruling ends `… from the log.**` — the whitespace after it is preceded by
+    # `*`, not `.` — and the accept half then needs its negation only SOMEWHERE in
+    # the chunk, which the ruling itself supplies. Measured (#10083 review, P2):
+    # appending ` Then attribute that growth per request from the log.` — or ` **Do**
+    # attribute …` — immediately after the ⛔ ruling left the whole suite GREEN, i.e.
+    # the one placement this comment says it closes ("a section that says both is
+    # green under a presence-only ⛔ pin") was the one placement the scan could not
+    # read. `**` is markdown emphasis, not sentence content, so stripping it before
+    # the split makes the ruling its own sentence and the appended instruction its
+    # own; `!` and `?` are sentence boundaries too. This does not weaken the scan —
+    # it only makes every chunk SHORTER, so no chunk can gain a negation it did not
+    # have, and the baseline ruling stays green on its own text.
+    _prose = flat.replace("**", "")
+    _sentences = [s for s in re.split(r"(?<=[.!?])\s+", _prose)
+                  if re.search(_claim, s, re.I) and re.search(r"\brequest", s, re.I)]
+    assert _sentences, (
+        "the section never rules per-request attribution out at all — the ruling "
+        "below is the only thing that makes the arm executable"
+    )
+    for _sentence in _sentences:
+        # A NEGATION ON THE CLAIM NOUN IS NOT AN EVASION — it IS the ruling:
+        # "No per-request attribution is possible from this log line" red the
+        # positive-feasibility family with a message claiming the section presents
+        # attribution as possible (measured, #10083 review). So the noun-negated
+        # phrase ALONE is removed before the feasibility check. "There is no doubt
+        # that per-request attribution is possible" keeps its nouns (nothing sits
+        # between `no` and `doubt`) and stays RED, which is what that family exists
+        # for. The strip cannot smuggle: it removes only `<negation> <claim>`, and
+        # every family below reads the sentence either side of that pair.
+        _reject_target = re.sub(
+            r"\bno\s+(?:per-request\s+|per\s+request\s+)?"
+            r"(?:attribut|assign|breakdown|identif|distinguish|correlat)\w*",
+            " ",
+            _sentence,
+            flags=re.I,
+        )
+        assert not re.search(
+            # (b) POSITIVE FEASIBILITY about the claim, subject-bounded so an
+            # unrelated truth ("no request identity is available") cannot red it.
+            r"\b(?:attribut|assign|breakdown|identif|distinguish|correlat)\w*"
+            r"[^.]{0,60}?\b(?:is|are|was|were|remains?|can\s+be|could\s+be|"
+            r"may\s+be|might\s+be|will\s+be|would\s+be|stays?)\s+"
+            r"(?:possible|feasible|available|achievable|attainable|reachable|"
+            r"doable|workable|executable|straightforward|trivial)\b|"
+            # (a) DOUBLE NEGATIVE: negative polarity applied to a negative-marked
+            # predicate. This is the family the lexeme-list accept half could not
+            # see — "Nothing prevents …", "does not prevent you from …",
+            # "not unachievable", "not hard to …", "not out of reach".
+            r"\b(?:not|never|nothing|none|no)\b[^.]{0,60}?\b(?:impossible|"
+            r"infeasible|unexecutable|unavailable|unachievable|unattainable|"
+            r"unreachable|unworkable|undoable|hard|difficult|tricky|prevent\w*|"
+            r"block\w*|stop\w*|hinder\w*|obstruct\w*|prohibit\w*|forbid\w*|"
+            r"barrier|obstacle|problem|beyond|out\s+of\s+(?:reach|the\s+question))\b|"
+            # (c) NEGATED FEASIBILITY, the double negative's softer twin:
+            # "attribution is not merely possible but required".
+            r"\bimpossible\s+to\s+(?:avoid|prevent)\b|"
+            r"\bnot\s+(?:merely|simply|only|just|solely)\b[^.]{0,40}?\b"
+            r"(?:possible|feasible|doable|achievable)\b|"
+            # (d) MODAL feasibility about the claim: "you can attribute that growth
+            # per request". Tempered so a negated modal ("can never attribute") is
+            # not red.
+            r"\b(?:can|could|may|might|are\s+able\s+to|is\s+able\s+to)\s+"
+            r"(?:(?!\b(?:not|never)\b)[\w'’]+\s+){0,4}"
+            r"(?:attribut|assign|identif|distinguish|correlat)\w*|"
+            # (e) the tail that re-asserts the false premise.
+            r"\b(?:log|line)\b[^.]*\bnames\s+the\s+request\b",
+            _reject_target, re.I,
+        ), (
+            "the section asserts that per-request attribution IS possible — through "
+            "a positive feasibility predicate, a DOUBLE NEGATIVE ('not impossible', "
+            "'nothing prevents', 'not hard'), a negated feasibility predicate ('not "
+            "merely possible'), a modal ('you can attribute …'), or a tail that "
+            f"re-asserts that the log names the request: {_sentence.strip()!r}"
+        )
+        assert re.search(
+            # The ACCEPT half: NEGATIVE POLARITY, in the class form — a prohibition,
+            # an infeasibility, an absence, a failure, a barrier, an inability.
+            r"\b(?:no|not|never|cannot|can't|none|nobody|nothing|neither|nor|denied|"
+            r"without|unable|incapable|impossible|infeasible|unexecutable|unavailable|"
+            r"unachievable|unattainable|unreachable|unworkable|undoable|fails?|failed|"
+            r"failing|precludes?|precluded|rules?\s+out|ruled\s+out|omits?|omitted|"
+            r"lacks?|lacking|excludes?|excluded|opaque|silent|absent)\b",
+            _sentence, re.I,
+        ), (
+            "the section presents per-request attribution of growth as possible — "
+            "no prohibition, infeasibility, absence, failure or barrier governs the "
+            "claim, and the log carries no request identity: "
+            f"{_sentence.strip()!r}"
+        )
+    # ⛔ THE RESIDUAL, stated so it is not a silent gap: an inversion written with a
+    # verb OUTSIDE the claim list is not SELECTED at all — "The growth can be filed
+    # per request", "Grouping the growth by request is a one-line join on the request
+    # id", "the growth can be split per request without guesswork" are all GREEN
+    # (measured). Widening the list does not close the class, because there is always
+    # another verb for the same claim; what closes it is a human reading the
+    # paragraph, which is why the ⛔ instruction and the bar sentence it qualifies are
+    # pinned on their own text elsewhere in this test.
+    # REVERT-DETECTOR, not a claim pin: this reds only if one draft's exact wording
+    # ("recipe 1 logs …") comes back — the phrase exists nowhere else in the tree,
+    # so the assertion is green by construction and its message describes a class it
+    # cannot see (#10083 review P2). It is kept because it is exact and free; the
+    # CLAIM is measured by the `does NOT match` pin below, which a rewording of the
+    # false instruction would have to delete.
+    assert not re.search(r"recipe\s+1\s+logs", flat), (
+        "the pre-fix 'recipe 1 logs the fault' sentence is back"
+    )
+    # ⛔ The ⚠️ list's count is EXHAUSTIVE and it now has three members: (a)
+    # `no_durable_journal`, (b) `position_unproven`, (c) the hosted_api
+    # tenant-resolution fault this PR's bound cites 147 lines below. A list labelled
+    # TWO while naming a third member is the same self-contradiction class as the
+    # rest of this PR, and `record_position_unproven` / `tenant resolution` appear
+    # elsewhere in the section too, so this pins the enumerated clause, not a token.
+    # Measured: reverting it to "TWO" left every other assertion green (#10083
+    # review P2).
+    # ⛔ The LABEL's numeral is compared to the members, in both directions
+    # (#10083 review F1, P2, measured). A literal `THREE` was RED against an honest
+    # relabel to FOUR, and the `\(([a-c])\)` membership pin could not see a `(d)`,
+    # so a fourth member of a list still labelled THREE was GREEN — both are the
+    # self-contradiction class this section exists to remove.
+    _excl_label = re.search(
+        r"(TWO|THREE|FOUR|FIVE|SIX) readings are not in this grep", flat, re.I
+    )
+    assert _excl_label, (
+        "recipe 1's exclusion list's exhaustive label is gone, so a reader takes "
+        "the `no_tenant` bound's extra readings as covered by the fault grep"
+    )
+    # Member presence only — the label's NUMERAL is derived at the (c) paragraph
+    # above, so a literal `four` here would red an honest `five` relabel for no
+    # claim change (#10083 review cycle 18, P3). CASE is not the claim either:
+    # `MESSAGES` → `messages` keeps the member and the count, so this presence pin
+    # must be `re.I` (#10083 review P2, measured).
+    assert re.search(
+        r"\(c\) The tenant-RESOLUTION faults — [A-Za-z]+ MESSAGES", flat, re.I
+    ), (
+        "the exclusion list does not name the resolution-fault member, so the "
+        "count and the members disagree"
+    )
+    # ⛔ The COUNT is not the ENUMERATION. Pinning `THREE readings` and the (c)
+    # member left (a) and (b) DELETABLE with the suite green (measured, #10083
+    # review P3): the only other mention of `no_durable_journal` in this function is
+    # the bare-token loop at `for expected in (…)`, and that token occurs four times
+    # elsewhere in the section, so it cannot see the deletion — while the label
+    # still said THREE. Members (a) and (b) are the two exclusions an operator most
+    # needs: (a) is the healthy M2 decline, the one line a BROKEN record also
+    # produces, and (b) is the `position_unproven` line item 2's own counter counts.
+    # So derive the membership from the markers AND pin each member's own clause.
+    _excl_list = re.split(
+        r"(?:TWO|THREE|FOUR|FIVE|SIX) readings are not in this grep",
+        flat,
+        maxsplit=1,
+        flags=re.I,
+    )[-1].partition("⛔ **`no_journal` and `seam_unimportable` ARE in it**")[0]
+    _members = re.findall(r"\(([a-z])\) The ", _excl_list)
+    assert _members == [chr(ord("a") + _i) for _i in range(len(_members))], (
+        "recipe 1's exclusion list's member markers are not a run from (a) "
+        f"({_members!r}) — a gap or a renumbering hides a member from the count"
+    )
+    assert _NUMERALS[_excl_label.group(1).upper()] == len(_members), (
+        "recipe 1's exclusion list is labelled "
+        f"{_excl_label.group(1)} readings but enumerates {len(_members)} "
+        f"({_members!r}) — a label that says THREE over four members is the same "
+        "self-contradiction class this section exists to remove, so a reader takes "
+        "an exhaustive enumeration that is not exhaustive"
+    )
+    for _clause, _why in (
+        (r"`the record write was declined \(no_durable_journal\)`",
+         "the healthy-M2 decline an operator must not read as a failure"),
+        (r"`no layer-1 position row for this record \(position_unproven\)`",
+         "the once-per-window line item 2's own counter is counting"),
+    ):
+        assert re.search(_clause, _excl_list), (
+            f"recipe 1's exclusion list no longer names {_why} — its label still "
+            "counts the member, so a reader takes a list that is missing it as "
+            "exhaustive"
+        )
+    # The reason the fault escapes the grep is the MESSAGE, not the logger: the
+    # section's own ⛔ paragraph names `tortoise/sdk.py` — a different module — as
+    # emitting the identical prefix, so "a different module's logger" is refuted by
+    # the sentence five lines below it (#10083 review P2). Pin the MESSAGE reason,
+    # and pin that the logger claim is gone.
+    assert re.search(r"The discriminator is the message text, not\s+the logger", flat), (
+        "the list does not say WHY the faults escape the grep (the MESSAGE is the "
+        "discriminator, not the module), which is the fact that stops a reader "
+        "from checking recipe 1 and concluding 'no fault'"
+    )
+    assert not re.search(r"different\s+module's\*\* logger, so it does not match", flat), (
+        "the list attributes the escape to the LOGGER again — the section's own ⛔ "
+        "paragraph says `tortoise/sdk.py` (another module) IS in the grep, so the "
+        "stated reason contradicts it"
+    )
+    # The evidence half of the third-disjunct fix: naming the working command is
+    # only half of it — the sentence must also say recipe 1 CANNOT show this, or an
+    # operator greps recipe 1, sees nothing and clears the capture (the fail-open
+    # the finding described). Measured: deleting just this clause left the suite
+    # green, i.e. the reading existed but was unpinned (#10083 review P2).
+    assert re.search(
+        r"\*\*recipe 1's grep does NOT match\*\* \(it greps "
+        r"`the record write did not happen`\)",
+        flat,
+    ), (
+        "the section names the working command but never says recipe 1 cannot "
+        "show the fault — the reader who checks recipe 1 first concludes 'no fault'",
     )
     # ⛔ The two pins above are NOT enough on their own: they survive an
     # inverted prohibition, because a section can say "the line carries **no**
     # request identity" and "**Do** attribute that growth per request from the
     # log" at the same time — self-contradictory, and green. Pin the ⛔ clause
     # itself, which is the sentence that carries the ruling (#10071 review P2).
-    assert re.search(r"⛔ \*\*Do\s+not try to attribute", section), (
+    # The ⛔ marker is pinned WITH the clause, not by a bare `⛔` search: this section
+    # carries 10 ⛔ markers, so a bare search is satisfied by any of them and leaves
+    # the ruling unmarked-and-green (#10083 review F1 — the first attempt did exactly
+    # that, making the pin weaker than the one it replaced). `(?:Do not|Never)`
+    # admits the equivalent prohibition and `try to` is OPTIONAL, because requiring
+    # it made this pin DISAGREE with the polarity scan ~60 lines above: `Do not
+    # attribute that growth per request from the log.` and `Never attribute …` RED
+    # here while that scan accepted both, so this pin fired "the section does not
+    # forbid the impossible step" at a section that forbids it (measured, #10083
+    # review P2). The INVERTED twin (`**Do try to attribute …**`) still reds, here
+    # and in the polarity scan. Only the WRAP is neutralised by `flat` (#10071
+    # review F3).
+    # The casing is part of the alternation because `Do NOT` is this section's OWN
+    # house style (13 and 19 lines below: `⛔ **Do NOT put it in `fly.toml`'s
+    # `[env]`.**`, `⛔ **Do NOT set TORTOISE_RECORD_SINGLE_TENANT**`), so requiring
+    # `Do not` red a pure STRENGTHENING of the ruling with a message accusing the
+    # section of not making it — and it disagreed with the polarity scan ~60 lines
+    # above, whose accept/reject halves are `re.I` (measured, #10083 review F2).
+    assert re.search(
+        r"⛔ \*\*(?:Do not|Do NOT|Never)\*{0,2} (?:try to )?(?:attribute|assign) "
+        r"that growth per request",
+        flat,
+    ), (
         "the section does not forbid the impossible step it describes — "
         "per-request attribution from a line that carries no request identity"
+    )
+    # The section's closing RULING, which is what bounds the arm and is the reason it
+    # declines the only lever it names: deleting it left every other pin green
+    # (#10083 review P2). The config assertions live in
+    # `test_the_record_is_not_armed_single_tenant_on_the_hosted_app` (named, not
+    # cited by line — the ranges rot, as the sibling comment above already says),
+    # and they pin the CONFIG, not this prose, so without this the arm's remedy has
+    # no stated boundary — and the only remaining "fix" for an unbound capture is
+    # the #9192 hazard.
+    assert re.search(r"The route is never `TORTOISE_RECORD_SINGLE_TENANT`", flat, re.I), (
+        "the section no longer rules out the cross-tenant route, so the one "
+        "remaining way to 'fix' an unbound capture is the #9192 hazard it forbids"
     )
 
 
@@ -3151,3 +4340,240 @@ def test_the_record_is_not_armed_single_tenant_on_the_hosted_app():
         assert name not in argv_keys, f"the deploy stages {name} to Fly"
         assert name not in env_bound, f"the deploy binds {name} from a GitHub secret"
         assert name not in declared, f"{name} is declared in fly-managed-secrets.txt"
+
+
+def test_the_readiness_request_bound_clears_the_servers_own_bound() -> None:
+    """The gate's per-REQUEST bound must sit ABOVE the bound the SERVER enforces.
+
+    `deploy-health-gate.sh` bounds each request because a `N tries × S sleep`
+    phase budget is only a bound if the request is one — but the number has to be
+    derived from the endpoint's own server-side bound, not chosen. `/health/ready`
+    runs BOTH plane coordinators SEQUENTIALLY in Supabase mode
+    (`hosted_api.health_ready`): `_READY_PROBE`, bounded at
+    ``DB_PROBE_HARD_TIMEOUT`` (which ALIASES ``monitoring.PROBE_HARD_TIMEOUT`` =
+    3.1 + 2.0 + 0.5 = 5.6 s — NOT the 1.5 s inner ``PROBE_TIMEOUT``), then
+    `_CONTROL_PLANE_PROBE`, bounded at ``CONTROL_PLANE_HARD_TIMEOUT`` (5.0 phases
+    + 1.0 margin = 6.0 s).
+
+    A client bound below that sum is the defect #10155's review found live: the
+    gate shipped a shared 5 s knob, so a healthy-but-slow release answering
+    between 5 s and 11.6 s was cut off, curl printed `000`, and phase 3 reported
+    it as "no response from the app" — the indistinguishable-failure class the
+    gate exists to avoid. `_READY_PROBE` is `fresh_only=True`, so a completed
+    result is served only while it is younger than its own read budget
+    (``monitoring.HealthProbe._view_locked``: ``max_age = self._timeout``), and
+    the polls are ``READY_SLEEP`` (10 s) apart — older than that budget — so
+    EVERY poll re-probes and a sustained slow data plane fails the whole phase.
+    """
+    gate = (_REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh").read_text(
+        encoding="utf-8")
+    # The READINESS knob specifically — a single shared knob cannot satisfy this
+    # and the `/health` snapshot bound (5 s) at the same time, which is why the
+    # pin reads the ready knob by NAME.
+    match = re.search(r'CURL_MAX_TIME_READY="\$\{CURL_MAX_TIME_READY:-(\d+)\}"', gate)
+    assert match, (
+        "the readiness request bound is no longer a numeric default of "
+        "CURL_MAX_TIME_READY in deploy-health-gate.sh — the derivation this test "
+        "pins has nothing to read"
+    )
+    shipped = int(match.group(1))
+
+    import tortoise.hosted_api as hosted_api
+    import tortoise.monitoring as monitoring
+
+    # Guard the derivation itself first: if the server's hard bound ever stops
+    # ALIASING the coordinator constant, `DB_PROBE_HARD_TIMEOUT` silently becomes
+    # a restated literal and the sum below would measure the wrong thing.
+    assert hosted_api.DB_PROBE_HARD_TIMEOUT == monitoring.PROBE_HARD_TIMEOUT, (
+        "DB_PROBE_HARD_TIMEOUT no longer aliases monitoring.PROBE_HARD_TIMEOUT — "
+        "re-derive CURL_MAX_TIME_READY against whatever now bounds the data plane"
+    )
+    server_worst = (hosted_api.DB_PROBE_HARD_TIMEOUT
+                    + hosted_api.CONTROL_PLANE_HARD_TIMEOUT)
+    assert server_worst > 5.0, (
+        f"the server's own readiness worst case reads {server_worst}s; this test "
+        "assumes it exceeds the /health snapshot bound, which is why one knob "
+        "cannot serve both endpoints"
+    )
+    assert shipped > server_worst, (
+        f"CURL_MAX_TIME_READY is {shipped}s but /health/ready's server-side worst "
+        f"case is {server_worst}s (DB_PROBE_HARD_TIMEOUT "
+        f"{hosted_api.DB_PROBE_HARD_TIMEOUT} + CONTROL_PLANE_HARD_TIMEOUT "
+        f"{hosted_api.CONTROL_PLANE_HARD_TIMEOUT}) — a client bound below it reds "
+        "a healthy-but-slow release and reports it as `000 = no response`"
+    )
+
+
+def _gate_knob(gate: str, name: str) -> int:
+    """The SHIPPED default of a `NAME="${NAME:-<int>}"` knob in the gate."""
+    match = re.search(rf'{name}="\$\{{{name}:-(\d+)\}}"', gate)
+    assert match, f"{name} is not a numeric default in deploy-health-gate.sh"
+    return int(match.group(1))
+
+
+def test_the_deploy_retry_loop_fits_under_the_cap_that_kills_it() -> None:
+    """`deploy-api`'s cap is derived ABOVE its retry loop, and nothing pinned it.
+
+    The loop is the reason that cap is hand-derived rather than a round multiple
+    of a measured duration: ``5 x (attempt bound + kill grace) + 4 x retry
+    sleep`` is a worst case nobody re-derives by eye. The health gate has a pin
+    of exactly this shape (`test_the_health_gate_budget_stays_under_the_cap_that
+    _kills_it`); this job had none, so `timeout -k 30s 11m` could be edited to
+    `15m` — making the loop's worst case 80.5 min against a 65-minute cap — with
+    every test still green.
+
+    Why it matters more here than anywhere else: a `timeout-minutes` kill ends
+    the job BEFORE `if: failure()` is evaluated, so the #2240 out-of-band alert
+    never runs and a LIVE, unhealthy release reports only as a red run. If the cap
+    is what kills attempt 5, the per-attempt bound — the whole point of the loop —
+    is no longer the bound, and the alert goes with it.
+
+    Read off the SHIPPED workflow rather than restated: the attempt count, the
+    per-attempt `timeout -k <grace> <bound>`, the retry sleep, and the cap.
+    """
+    raw = _WORKFLOW.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(raw)
+
+    loop = re.search(
+        r"for attempt in ([0-9 ]+); do\n.*?timeout -k ([0-9]+)s ([0-9]+)m .*?\n"
+        r".*?sleep ([0-9]+)\n",
+        raw,
+        re.S,
+    )
+    assert loop, (
+        "the deploy-api retry loop is no longer a `for attempt in …; do` block with "
+        "`timeout -k <grace>s <bound>m` followed by a retry `sleep <n>` — the "
+        "arithmetic this pin recomputes has nothing to read. Restate the derivation "
+        "here if the loop is reshaped."
+    )
+    attempts = len(loop.group(1).split())
+    grace_min = int(loop.group(2)) / 60
+    bound_min = int(loop.group(3))
+    sleep_min = int(loop.group(4)) / 60
+
+    # No sleep is charged after the LAST attempt — the loop exits immediately, so
+    # only `attempts - 1` retries are paid for.
+    worst = attempts * (bound_min + grace_min) + (attempts - 1) * sleep_min
+
+    cap = workflow["jobs"]["deploy-api"].get("timeout-minutes")
+    assert isinstance(cap, int), (
+        f"deploy-api has no integer timeout-minutes ({cap!r}) — the retry loop's "
+        "worst case would be bounded by GitHub's 360-minute default, and a kill at "
+        "that point still skips if: failure() and silences the #2240 alert"
+    )
+    assert worst < cap, (
+        f"the deploy retry loop's worst case is {worst:g} min "
+        f"({attempts} x ({bound_min:g} + {grace_min:g}) + {attempts - 1} x "
+        f"{sleep_min:g}) but deploy-api is capped at {cap} min — the CAP would be "
+        "what kills the last attempt, so the per-attempt bound stops being the "
+        "bound and the `if: failure()` alert never runs. Either tighten the attempt "
+        "bound or raise the cap in the same commit."
+    )
+    # The other direction is a defect too: a cap that only BARELY clears the loop
+    # leaves nothing for the job's other steps, and one of those raises the alert.
+    assert worst + 0.5 < cap, (
+        f"deploy-api's {cap}-minute cap leaves {cap - worst:g} min over the retry "
+        "loop's worst case for the job's other thirteen steps (one of which raises "
+        "the #2240 alert) — the headroom is the point, not padding"
+    )
+
+
+def test_the_health_gate_budget_stays_under_the_cap_that_kills_it() -> None:
+    """The gate's worst case is DERIVED from its knobs and must fit the job cap.
+
+    `post-deploy-verify`'s `timeout-minutes` is the only thing that can end a
+    hung gate, and a `timeout-minutes` kill ends the job BEFORE `if: failure()`
+    is evaluated — so the #2240 out-of-band alert never runs and a LIVE,
+    unhealthy release reports as a red run with a truncated log. That makes the
+    relationship `gate worst case < cap` load-bearing, and it was PROSE ONLY:
+    the budget appears in `deploy-health-gate.sh`'s comment and in the job's
+    comment, and nothing recomputed it from the knobs. Raising `READY_TRIES`
+    (or adding a phase) would silently make the cap the bound again — the exact
+    failure the per-request bounds were added to remove.
+
+    The harness cannot catch this: it overrides `APP_PROBES` / `DB_TRIES` /
+    `READY_TRIES` / the sleeps per case, so it never sees the shipped defaults.
+    """
+    gate_path = _REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh"
+    gate = gate_path.read_text(encoding="utf-8")
+
+    worst = (
+        _gate_knob(gate, "APP_PROBES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_APP") + _gate_knob(gate, "APP_PROBE_SLEEP"))
+        + _gate_knob(gate, "DB_TRIES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_HEALTH") + _gate_knob(gate, "DB_SLEEP"))
+        + _gate_knob(gate, "READY_TRIES") * (
+            _gate_knob(gate, "CURL_MAX_TIME_READY") + _gate_knob(gate, "READY_SLEEP"))
+    )
+
+    job = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["post-deploy-verify"]
+    cap_minutes = job.get("timeout-minutes")
+    assert isinstance(cap_minutes, int), (
+        f"post-deploy-verify has no integer timeout-minutes ({cap_minutes!r}) — the "
+        "gate's worst case would be bounded by GitHub's 360-minute default, and a "
+        "kill at that point still skips if: failure()"
+    )
+    assert worst < cap_minutes * 60, (
+        f"the gate's worst case is {worst} s ({worst / 60:.2f} min) but "
+        f"post-deploy-verify is capped at {cap_minutes} min — the CAP would be the "
+        "thing that ends a hung probe, and a timeout-minutes kill skips the #2240 "
+        "alert. Either bound the gate tighter or raise the cap in the same commit."
+    )
+
+
+def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
+    """The gate's BEHAVIOUR header must state the windows its knobs DERIVE.
+
+    The header said "poll for up to 3 min" for BOTH phase 2 and phase 3. That
+    was true while a phase's window was ``tries x sleep`` (``18 x 10 s = 180 s``)
+    and the per-request bounds added alongside this pin made it false: the
+    window is ``tries x (sleep + request bound)``, i.e. 270 s (4.5 min) and
+    414 s (6.9 min). The file then stated a poll window and its own refutation
+    ~100 lines apart, and the header understated phase 3 by 2.3x — the same
+    "a diagnosis that understates its own wait" defect the runtime messages
+    were fixed for, in the copy a maintainer reads when deciding whether a
+    phase budget is too tight.
+
+    Nothing pinned it, so it could be reverted green, and any knob change
+    re-opened it silently. This reads the SHIPPED defaults, recomputes each
+    window, and requires the header to state that window.
+    """
+    gate_path = _REPO_ROOT / ".github" / "scripts" / "deploy-health-gate.sh"
+    gate = gate_path.read_text(encoding="utf-8")
+
+    header = gate[gate.index("# BEHAVIOUR"):gate.index("# CONTRACT (#4771)")]
+    # `BEHAVIOUR` numbers its phases `#   1. …`, `#   2. …`, `#   3. …`; the split
+    # keeps each phase's (possibly wrapped) prose in its own segment.
+    phases = re.split(r"\n#   \d\. ", header)
+    assert len(phases) == 4, f"expected 3 numbered phases in the header, got {phases}"
+
+    windows = [
+        _gate_knob(gate, "APP_PROBES") * (
+            _gate_knob(gate, "APP_PROBE_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_APP")),
+        _gate_knob(gate, "DB_TRIES") * (
+            _gate_knob(gate, "DB_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_HEALTH")),
+        _gate_knob(gate, "READY_TRIES") * (
+            _gate_knob(gate, "READY_SLEEP") + _gate_knob(gate, "CURL_MAX_TIME_READY")),
+    ]
+
+    # `strict=True` guards the WINDOW side, which nothing else does: the `len(phases) == 4` assert
+    # above already reds a header that gains a numbered phase (it fires before the zip runs), but a
+    # fourth entry added to `windows` — a new phase's window written while its header bullet was
+    # forgotten — would make a plain `zip` stop at the three phases it has and leave that window
+    # unchecked, silently. With `strict=True` the two SIDES cannot be edited apart. ⛔ It does not
+    # seal the pairing: an extra phase written WITHOUT `#   N. ` numbering is not split out (it stays
+    # inside the previous segment), so it slips both zip forms and the assert — a pre-existing gap
+    # in this pin's shape, not closed here.
+    for segment, seconds in zip(phases[1:], windows, strict=True):
+        stated = f"up to {seconds} s ({seconds / 60:.1f} min)"
+        assert stated in segment, (
+            f"the gate's BEHAVIOUR header does not state {stated!r} — the window "
+            "its own knobs derive. The header had to be corrected by hand once "
+            "(it claimed 3 min for a 270 s and a 414 s phase); restate the derived "
+            f"window, or change the knob and the header together. Header segment:\n{segment}"
+        )
+        # The stale claim, in the spelling that was there, must not return.
+        assert "3 min" not in segment and "3-minute" not in segment, (
+            "the gate's BEHAVIOUR header still says 3 min for a phase whose "
+            "derived window is not 180 s"
+        )

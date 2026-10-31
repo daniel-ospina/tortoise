@@ -33,6 +33,129 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.31 (2026-10-26 — issue #9202 — the END's state is SETTLED, and the write door SHAPES or REFUSES):**
+>
+> **Owner rulings, 2026-10-26 (Daniel Ospina): the spec text approved verbatim, then the STRUCTURE of where it
+> lives ruled on.** This entry records the model statement that replaces the sentence *"Whether that state
+> should instead read `unknown` / `open` is **#9202's owner decision** and is NOT settled by the gate"* —
+> the gate question that had been open since the 2026-10-20 coverage entry and the 2026-10-24 write-door
+> entry below — and records the second ruling that split ONE approved package into its three homes.
+> **`ONTOLOGY.md` is bumped v3.30 → v3.31** (a model change moves the version), the bump approved as its
+> own item because that document's CRITICAL RULE gates its own version/`updated:` lines. **This file carries
+> its own *"no modification without approval"* line; the 2026-10-26 ruling REQUIRES this entry and records
+> that this file is not gated** — stated here so the conflict is visible rather than assumed away.
+>
+> **Where this lives (the 2026-10-26 structure ruling — this is a MOVED change, not a re-decided one).**
+> `ONTOLOGY.md` is canonical and states the **model only**: the in-line §4.7 edit states that an end which is
+> stored but names no instant is an un-datable END reading `end_state: "unknown"`, that `END_KNOWN` means
+> **dated** not **present**, and that `END_OPEN` stays reserved for an ABSENT end. Everything that is
+> **agent-UX behaviour** — the marker vocabulary, the shape rule, the receipt, the refusal wording, and the
+> logging/counting — is annotated at the **decision site** (`validity.read_caller_end`,
+> `validity.END_UNKNOWN_MARKERS`, `validity.END_WRITE_OUTCOMES`, `sdk._shape_or_refuse_caller_end`,
+> `sdk._with_end_receipt`) and documented on the **tool surface** (`config/surface-manifest.yml`'s
+> `tortoise_create_point` / `tortoise_update_point` `job` cells, and the `valid_to_shaped` rows in
+> `docs/product/mcp-sdk-surface.md`). None of that text is new: it was already written at those homes, and
+> the ontology's copy of it is withdrawn rather than re-homed. The `agent-UX` paragraph that stood in §4.7
+> for one commit was 45 added lines (a marker catalogue, the receipt, the refusal narrative, the
+> logging sentence and a test-name catalogue); the in-line replacement is 20 lines, and every sentence withdrawn
+> from it is accounted for in the PR's triage table.
+>
+> **The model statement.** `END_KNOWN` now means **dated**, not **present**. `validity.end_state` gates
+> it on the bound's own orderability (`_names_an_instant`, the `_created_sort_key` measure
+> `effective_precision` and `_covers` already order with), so a stored end that names no instant reads
+> **`end_state: "unknown"`** — an **un-datable END**: the fact ended, at a time we cannot pin. It is the
+> same state the DECLARED marker (`validToPrecision = "unknown"`, no `validTo`) produces, and it fires
+> the same reply-level `end_state_unknown` / `indeterminate_end_ids` flags. `END_OPEN` stays reserved
+> for an **ABSENT** end: a column carrying a value is an ASSERTED end, so "no end was recorded" is a
+> claim the record contradicts, and reading a present-but-un-datable end as still-true is the
+> fabricated-coverage hazard the vocabulary exists to prevent (#2349/#2350). This also closes the
+> contradiction where the same read block reported `valid_to_precision: null` beside `end_state:
+> "known"`.
+>
+> **What ELSE changed — the write door, on the existing caller-bound gate.** `create_point` and
+> `update_point` now read a caller's `validTo` for INTENT on the way in, on that same orderability
+> measure, and tell three kinds of input apart. **A recognisable instant is accepted**, and
+> representational variance is **normalised silently** (`2024-3-1`, `2024/03/01` → `2024-03-01`): the
+> caller finished their sentence, so there is nothing to report. **A value that declares no date**
+> — blank, or a human uncertainty marker (`TBD`, `TBA`, `TBC`, `unknown`, `N/A`, `NA`, `-`, `--`, `—`,
+> `?`; case- and whitespace-insensitive) — is **SHAPED** into the canonical un-datable form: no end
+> value plus `validToPrecision = "unknown"`, with **the caller's token echoed in the write reply** as
+> `valid_to_shaped`. **A value that attempts an instant and fails, or carries no recoverable intent** —
+> an impossible calendar day (`2026-02-30`), a month 13, an epoch supplied as a **string**,
+> `"not-a-date"` — is **REFUSED**, naming the fault, the repair, and the forms the field accepts. Shape
+> and refuse are both logged and **counted** (`validity.END_WRITE_OUTCOMES`): the ruling's own test for
+> a vocabulary that is still too narrow is "the same refusal recurring for the same caller shape", and
+> only a count can show that.
+>
+> **The receipt is what makes shaping defensible.** Shaping without an echo would merge a real typo
+> (a `-` typed where a dash between two dates was meant) into "the author did not know", leaving no
+> trace. The receipt is that trace, and it is why the *stored* form may be filled in at all: "ended, and
+> I cannot say when" is exactly what the caller said, so the filled-in meaning and the caller's meaning
+> are the same claim. That is the only place filling in is legitimate.
+>
+> **⛔ Two invariants that are not negotiable.** (1) **Every shaped token reads `unknown`, never
+> `open`.** Mapping any token to `open` would alter a reading the 2026-10-25 ruling pinned — a second
+> decision smuggled in as a side effect. (2) **Pre-existing rows are never re-validated and never
+> migrated.** A row written before this change keeps its literal end and keeps reading
+> `end_state: "unknown"`; the read path does not care which form a row carries, which is what keeps the
+> two dialects byte-identical. A backfill would be a **new** decision, not a tidy-up.
+>
+> **OVERRIDES:** the repo's *"accept the caller's bound verbatim and only warn — never refuse"* (#6140,
+> both ends) — a recognised uncertainty marker is shaped to the canonical un-datable form and an
+> illegible attempted instant is refused, because a stored end is an **authored belief about when a fact
+> stopped being true**, so finishing a caller's sentence for them can record a claim they never made.
+> The protection that ruling existed for is untouched: it was there so a legacy record carrying junk
+> would stay **supersedable**, and refusing here only ever blocks a value a caller supplies **now** —
+> existing rows are never re-validated, and `supersede_point` resolves the predecessor's end from its own
+> chain, not from a caller's `validTo`. **The constraint that produced the old rule is absent at this
+> door**; that, not a change of mind, is why the reversal is safe.
+>
+> **Two reversals, recorded rather than quietly edited.** (1) *"stored verbatim"* (the write-door ruling
+> of 2026-10-24, the entry below) — superseded by shaping. (2) *"a warning, never a refusal"* (#6140) —
+> superseded **for this class only**, by the two refuse paths.
+>
+> **What did NOT change.** The `validFrom` (START) ruling: it keeps its #6140 **warning**, because that
+> ruling named the start and nothing has reversed that half — shaping the start would re-open a reading
+> it deliberately pinned. Coverage is unchanged (`_covers` skipped an unorderable end before and skips an
+> absent one now — #9408). Every read surface is unchanged. `supersede_point`'s window resolution is
+> unchanged: a predecessor whose end is canonically un-datable is dated by the successor's resolved
+> start, and its `validToPrecision` marker is **cleared** rather than left beside the new date (measured;
+> `supersede_point(..., valid_to_precision="unknown")` keeps it un-datable instead) — no inconsistent
+> triple, and no caller `validTo` is consulted on that path.
+>
+> **Residuals, stated not fixed.** The unguarded `update_entity` Point arms remain a live route to a junk
+> end (#9649), and `supersede_point`'s numeric-`valid_from` kwarg exemption is not a caller `validTo`
+> write — so **the refusal is not airtight**. That caution is stated at the decision site (the
+> `sdk._shape_or_refuse_caller_end` docstring) and here, not in §4.7: a residual is build state, and the
+> canonical model document does not carry scope caveats about its own tool surface. The new reply field is
+> a field on the two existing write doors, not a new tool or public SDK method; `tools/surface_manifest.py
+> check` and `tools/surface-guard.py` both stay green, with the field recorded in the manifest's
+> `response_fields` block.
+>
+> **Surface.** No tool or public method added, removed, or renamed. Two tool DESCRIPTIONS gained the
+> accepted-`validTo` documentation §2 requires, which moves their derived `job` cells in
+> `config/surface-manifest.yml` and their rendered rows in `docs/product/mcp-sdk-surface.md` — no
+> re-cut, no counting change (81 tools / 147 public SDK methods unchanged).
+>
+> Pinned by `tests/test_validity_windows.py`: the **shaping matrix** over the marker vocabulary (canonical
+> form + receipt), the **refusal matrix** (one row per named fault), a **control** that a real date and a
+> readable format variant stay untouched and silent, and the reading pins left **green and unmoved** —
+> plus `test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`,
+> `test_an_un_datable_end_reads_unknown_and_fires_the_flags`,
+> `test_the_two_un_datable_spellings_stay_distinguishable` and
+> `test_the_un_datability_gate_does_not_widen_end_state`. §4.7 cites ONE of the four —
+> `test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`, the coverage pin, in the
+> same single-pointer style as the START paragraph above it — because a catalogue of test names is a build
+> record, not the model. The write-door pin was **re-stated, never deleted**: under this ruling some of its
+> rows are refused rather than stored, and a "simplification" that drops the matrix drops the only thing that
+> would catch a silent reversion to verbatim storage.
+>
+> ⚠️ **Supersedes, in time order,** `## §4.7 — the write door says what an un-datable END means (#9202,
+> write-door half, 2026-10-24)` near the end of this file, which still reads *"the END's reported state is
+> still the owner's call"* and lists `end_state` under "What did NOT change". That entry was accurate on
+> 2026-10-24 and is not rewritten; **its `end_state` claim and its "stored verbatim" shape are the two
+> things this ruling reversed.**
+>
 > **Changelog v3.30 (2026-10-21 — issue #8745 — §4.6's `rawState` row states the model, not the build):**
 >
 > **The row no longer carries build status or tracker references.** Removed from it: *"no reader supplies an
@@ -1158,3 +1281,9 @@ Pinned by `tests/test_validity_windows.py`
 (`test_an_unorderable_valid_to_warns_at_the_write_boundary` — an 11-row value matrix, and
 `test_the_end_warning_is_scoped_like_the_start_warning` — caller-value-only, update leg, dedup
 re-entry once).
+
+⚠️ **Superseded in time order by the 2026-10-26 entry at the top of this file.** Its two load-bearing
+claims are the two the owner reversed there: the END now reads `end_state: "unknown"` (settled, not the
+owner's open call), and a caller end that declares no date is **shaped**, while one that attempts an
+instant and fails is **refused** — no longer "stored verbatim, merely warned about". This entry stands as
+the record of what was true on 2026-10-24; it is not rewritten.

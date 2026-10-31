@@ -82,8 +82,8 @@ on:
       # here would add no coverage and cost a RED push run per migrations-only
       # merge: `supabase-deploy` deploys on `workflow_dispatch` only, so this
       # file's fail-closed `Check migration drift` exits 1 for every repo-ahead
-      # BLOCKING migration until an operator applies it — and the run's
-      # `cancel-in-progress` can cancel an in-flight co-move flip. The
+      # BLOCKING migration until an operator applies it — and a run landing on a
+      # constant group supersedes a co-move flip that is still PENDING. The
       # schema→app coupling is already handled by `supabase-deploy`'s own
       # `Dispatch deploy-hosted (the app flip)` step. Both halves are pinned by
       # `tests/test_9231_record_migrations_trigger.py`, which also measures the
@@ -193,9 +193,84 @@ on:
         default: 'false'
         type: boolean
 
+# ⛔ A DEPLOY MUST NEVER BE CANCELLED MIDWAY. `cancel-in-progress: false` is the
+# rule `supabase-deploy.yml` ("a cancelled migration apply leaves the schema
+# half-migrated, which no re-run repairs deterministically") and every
+# `publish-*.yml` already carry; this workflow was the one that did not.
+#
+# MEASURED, not asserted (`gh run list --workflow deploy-hosted.yml`, 2026-10-27,
+# 30 completed runs). ⛔ THE INSTRUMENT MATTERS, and the obvious one is WRONG: a
+# cancelled run's JOB `started_at`→`completed_at` is **NOT** runner time. The API
+# reports a never-scheduled job as `conclusion: cancelled` with `runner_name: ""`
+# and `steps: []`, so that span is RUNNER-QUEUE latency — real wall clock, but it
+# costs the pool nothing (verified: run 40451731878's `deploy-api` spans 55.1 min
+# with an empty runner and zero steps; eight cancelled `packaging-smoke` jobs are
+# the same shape, 55.8 min between them). An earlier revision of this note did
+# exactly that and reported "225.1 of 295.5 completed runner-minutes" — but the
+# runner-attached share of those 19 runs is 21.9 min, so that figure
+# over-attributed pool waste by ~10×, and it also contradicted the 55.1-min
+# example cited further down this file, which is labelled "mostly runner-queue
+# latency". The numbers below are split on `runner_name`, which is the only field
+# that separates a spent runner-minute from a queued one.
+#
+# **19 of the last 30 runs were cancelled** — 16 `push`, 3 operator
+# `workflow_dispatch`. Real runner-minutes across all 30: **96.0 min**, of which
+# the cancelled 19 spent **21.9 min** (7 successful runs 40.6; 4 failures 33.5).
+# So the *pool* cost of cancellation is 23% of runner time — material, but NOT
+# the argument for this change. The argument is the other column: those same 19
+# runs accumulated **101.3 minutes of queue latency across 23 jobs that never
+# attached a runner at all**, and 19 of 30 runs (63%) published nothing. A
+# cancelled deploy is the worst shape available to DELIVERY: it burns wall clock
+# in the queue AND publishes nothing, so under a merge flood no deploy ever
+# completes. That is the recorded cause of the stale-production class — #10109:
+# "4 cancelled by its own `cancel-in-progress: true` as later merges landed",
+# production 7 commits behind for 9 hours — and it is the same reading again on
+# #10152. `supabase-deploy.yml`'s
+# own co-move message named this file's flag as the hazard, in the words this
+# change retired: "A concurrent push to main cancels an in-flight flip
+# (deploy-hosted.yml 'concurrency.cancel-in-progress')" — that text now reads
+# "supersedes it while it is still PENDING", which is what remains true.
+#
+# What `false` does and does NOT buy — be precise, because the difference IS the
+# bound: it stops cancelling a RUNNING deploy. A shared group still supersedes a
+# merely PENDING one, so a third landing cancels the second's not-yet-started run
+# and the NEWEST push always survives (the trade `redis-guard.yml` states). An
+# intermediate merge is therefore superseded BEFORE it spends a runner-minute
+# instead of after it has spent forty.
+#
+# The group stays CONSTANT rather than event-scoped on purpose: a push and a
+# manual deploy must never run concurrently, and `supabase-deploy.yml`'s co-move
+# flip dispatches THIS workflow and then watches it (#3627) — the two arms have
+# to queue behind each other, not race.
+#
+# COMPANION BOUND, required BY the change above: with no cancellation there is no
+# escape from a runaway deploy, and no job below declared `timeout-minutes`, so
+# GitHub's 360-minute default was the only bound on a hang that would hold this
+# group — and every deploy behind it — for six hours. Each job is now bounded
+# from a MEASUREMENT, and the three do not use one formula because their shapes
+# differ (measured on completed runs 2026-10-27):
+#   • `packaging-smoke` — 2× its measured max (28.2 min, n=27) → 55.
+#   • `post-deploy-verify` — 2× its worst case, which is the DB health gate's own
+#     budget, not its measured 0.4 min → 25 (see that job's comment).
+#   • `deploy-api` — loop + non-Deploy steps + margin → 65 (see that job's
+#     comment): a 2× cap over its measured maximum would red the fail-safe retry
+#     path it exists to allow, because `--wait-timeout 420` bounds only the
+#     release wait and not `flyctl deploy`'s remote build.
+#
+# ⚠️ NOTHING OUTSIDE THIS WORKFLOW IS BOUNDED BY THESE CAPS ALONE, and be precise
+# about WHAT they bound: `timeout-minutes` bounds the EXECUTION portion of a
+# run's occupancy, measured from when a runner picks the job up — it cannot bound
+# runner-QUEUE latency, which is a separate and (measured) larger term
+# (`docs/ops/ci-wall-clock.md` §1: a job that never gets a runner has no timeout
+# at all; the 167.3-min wall clock of run 40458809781 was 16.8 min of job
+# execution over 42.5 + 66.2 + 41.8 min of queueing). So `55 + 65 + 25 = 145` is
+# the worst case a run can spend EXECUTING while it holds this group — not the
+# worst case it holds the group — and `supabase-deploy.yml`'s flip watcher waits
+# on wall clock, so its 330-minute bound is justified by the `deploy` job's
+# 360-minute ceiling, NOT by 2 × 145.
 concurrency:
   group: deploy-hosted
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # #1929 (G1 gate, surface 2): the hosted image must ship the pack catalog
@@ -207,6 +282,9 @@ jobs:
   # boot, no secrets, no model load.
   packaging-smoke:
     runs-on: ubuntu-latest
+    # 2× measured max (28.2 min, n=27 completed runs) — see the workflow's
+    # `concurrency:` note for why a bound is now mandatory.
+    timeout-minutes: 55
     if: ${{ ! (inputs.skip-pack-smoke || vars.SKIP_PACK_SMOKE == 'true') }}
     # #2240: `issues: write` is for the failure alert at the end of this job —
     # a failed pack smoke leaves `deploy-api` SKIPPED, so without an alert here
@@ -325,6 +403,29 @@ jobs:
   deploy-api:
     runs-on: ubuntu-latest
     needs: packaging-smoke
+    # Bounded ABOVE this job's own worst case, NOT at a multiple of its measured
+    # maximum: the retry loop is 5 `timeout -k 30s` attempts (11 min + a 30 s
+    # kill grace each) + 4 × 45 s = 60.5 min worst case (each attempt is
+    # `timeout`-bounded — `--wait-timeout 420` bounds only the release wait, not
+    # the remote build — and `-k 30s` makes that bound unconditional), and this
+    # job has THIRTEEN other steps sharing the same budget (the dependency parity
+    # gate alone runs two `uv` commands). So:
+    #   60.5  loop worst case
+    # +  0.42 non-Deploy steps — MEASURED max over 8 deploy-api jobs 2026-10-27
+    #         (0.22, 0.27, 0.32, 0.33, 0.38, 0.40, 0.40, 0.42)
+    # = 60.92 → 65, i.e. 4.1 min of headroom (9.7× the measured non-Deploy term).
+    # ⛔ The headroom is the point, not padding: a `timeout-minutes` kill ends the
+    # job BEFORE `if: failure()` is evaluated (see the POST-DEPLOY RESIDUAL note
+    # below), so a cap the loop alone can reach silences the #2240 out-of-band
+    # alert on the very fail-safe path the retry exists to protect. The previous
+    # 60 left 2 minutes for those thirteen steps.
+    # For the record, this job's measured max is 6.68 min (n=8, run 40458809781),
+    # of which the Deploy step is 6.27 — a cap of "2× the measured job max" would
+    # be 15 and would red a single slow build.
+    # The DB health gate is NOT in this job (it moved to `post-deploy-verify` in
+    # #4538, which is where its budget is counted). See the workflow's
+    # `concurrency:` note.
+    timeout-minutes: 65
     # #2240: the failure alert files/updates a GitHub issue through the shared
     # substrate, which asserts the writer is `github-actions[bot]` — so this job
     # needs `issues: write`. `contents: read` MUST be spelled out: specifying ANY
@@ -564,6 +665,11 @@ jobs:
           [ -n "$TORTOISE_BACKUP_KEY_PREVIOUS" ] && GH_PRESENT="$GH_PRESENT TORTOISE_BACKUP_KEY_PREVIOUS"
           [ -n "$TORTOISE_ENCRYPTION_KEY" ] && GH_PRESENT="$GH_PRESENT TORTOISE_ENCRYPTION_KEY"
           [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && GH_PRESENT="$GH_PRESENT TORTOISE_LINK_INTENT_SECRET"
+          # #3524 §9 step 1: the consent token's HMAC key. Declared in
+          # .github/scripts/fly-managed-secrets.txt, so the provenance gate fails closed
+          # until this probe line exists AND the GitHub secret exists — a `gh-secret:`
+          # declaration with no probe line reads as ABSENT (#4334).
+          [ -n "$CONSENT_TOKEN_SECRET" ] && GH_PRESENT="$GH_PRESENT CONSENT_TOKEN_SECRET"
           [ -n "$TORTOISE_RECORD_DSN" ] && GH_PRESENT="$GH_PRESENT TORTOISE_RECORD_DSN"
           [ -n "$TORTOISE_SECRET_PEPPER" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
           [ -n "$TURNSTILE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
@@ -644,6 +750,9 @@ jobs:
           TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
           TORTOISE_ENCRYPTION_KEY: ${{ secrets.TORTOISE_ENCRYPTION_KEY }}
           TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
+          # #3524 §9 step 1 — CONSENT_TOKEN_SECRET is read by the provenance gate's probe
+          # above, so it must be in scope for this step as well as the propagation step.
+          CONSENT_TOKEN_SECRET: ${{ secrets.CONSENT_TOKEN_SECRET }}
           TORTOISE_RECORD_DSN: ${{ secrets.TORTOISE_RECORD_DSN }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
@@ -764,6 +873,11 @@ jobs:
           TORTOISE_AUDIT_DSN: ${{ secrets.TORTOISE_AUDIT_DSN }}
           TORTOISE_LINK_INTENT_SECRET: ${{ secrets.TORTOISE_LINK_INTENT_SECRET }}
           TORTOISE_RECORD_DSN: ${{ secrets.TORTOISE_RECORD_DSN }}
+          # #3524 §9 step 1: the PROPAGATION step's own env. Its `ARGS+=` line below reads
+          # `$CONSENT_TOKEN_SECRET` from THIS block, so omitting it here is the #4126 shape
+          # exactly — the propagation is a permanent no-op that stages nothing, the deploy
+          # stays green, and the verifier answers 503 forever with no gate able to see it.
+          CONSENT_TOKEN_SECRET: ${{ secrets.CONSENT_TOKEN_SECRET }}
           GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
@@ -905,6 +1019,11 @@ jobs:
           # BLOCKS the deploy (#4126/#4259).
           [ -n "$TORTOISE_AUDIT_DSN" ] && ARGS+=(TORTOISE_AUDIT_DSN="$TORTOISE_AUDIT_DSN")
           [ -n "$TORTOISE_LINK_INTENT_SECRET" ] && ARGS+=(TORTOISE_LINK_INTENT_SECRET="$TORTOISE_LINK_INTENT_SECRET")
+          # #3524 §9 step 1: the consent token's HMAC key. Staged like every other
+          # gh-secret: name — an unset GitHub secret stages nothing, and the verifier then
+          # answers a typed 503 `temporarily_unavailable` (fail-closed) rather than minting
+          # against a default. A HARDCODED default here would be a forgeable consent.
+          [ -n "$CONSENT_TOKEN_SECRET" ] && ARGS+=(CONSENT_TOKEN_SECRET="$CONSENT_TOKEN_SECRET")
           [ -n "$SENTRY_DSN" ] && ARGS+=(SENTRY_DSN="$SENTRY_DSN")
           # #9548 / epic #7879 R1: the Postgres record's arming surface.
           # Presence-based (`record_writer.RECORD_DSN_ENV`) — unset ⇒ NOT_ARMED ⇒
@@ -941,12 +1060,43 @@ jobs:
         # not secrets isolation. The secrets-set step above keeps the
         # full-scope FLY_API_TOKEN for cross-app/org operations.
         run: |
+          # ⛔ Each ATTEMPT is bounded, because `--wait-timeout 420` bounds only
+          # the RELEASE wait — NOT `flyctl deploy`'s remote build — so without
+          # this the loop is 5 × (unbounded build + 420 s): its worst case is not
+          # a number, and `timeout-minutes` can kill attempt 5 of a deploy that
+          # was making progress, failing the very fail-safe path the retry
+          # exists to rescue. The per-attempt bound is derived from MEASUREMENT,
+          # not back-solved from the job cap — the earlier "largest the job's 60
+          # allows" derivation made the loop 97% of the cap and left ~2 min for
+          # the job's thirteen other steps — so 11 min is 1.75× this step's
+          # measured max and the cap is derived ABOVE the loop instead (see
+          # `deploy-api`'s `timeout-minutes`).
+          # ⛔ `-k 30s` is not decoration: without `--kill-after`, `timeout` sends
+          # only SIGTERM and then WAITS for the child, so a `flyctl` that traps or
+          # ignores TERM overruns the bound indefinitely and the 65-minute job cap
+          # becomes the thing that ends the job — which is the failure this bound
+          # exists to remove (a `timeout-minutes` kill ends the job BEFORE
+          # `if: failure()`, silencing the #2240 alert). Measured semantics: a
+          # child that ignores TERM under `timeout 1s` ran 5 s and still exited
+          # 124. With the grace the loop's worst case is 5 × 11.5 + 4 × 0.75 =
+          # 60.5 min, which the 65-minute cap covers.
+          # MEASURED for THIS STEP, not the job — a `deploy-api` JOB duration
+          # says nothing about attempt length: the tempting 55.1-min example,
+          # run 40451731878, was `cancelled` with `steps=0`, so the step never
+          # started and the span is runner-QUEUE latency. The step's own
+          # completed durations: max 6.27 min (run 40458809781, 08:02:06→08:08:22),
+          # then 3.03, 2.78, 2.43, 1.63. The retry loop absorbs an attempt that
+          # really is slow.
           for attempt in 1 2 3 4 5; do
-            if flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
+            if timeout -k 30s 11m flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
               exit 0
             fi
-            echo "::warning::deploy attempt $attempt failed — waiting 45s before retry (Fly lease/API race)"
-            sleep 45
+            # No sleep after the LAST attempt: it is dead time charged against
+            # the job's 65 and buys nothing (the loop exits immediately after).
+            if [ "${attempt}" -lt 5 ]; then
+              echo "::warning::deploy attempt $attempt failed or hit its 11-minute bound — waiting 45s before retry (Fly lease/API race)"
+              sleep 45
+            fi
           done
           exit 1
         env:
@@ -1000,8 +1150,10 @@ jobs:
       #   cannot file.
       # RESIDUAL, named rather than papered over
       #   This is an IN-JOB notifier, so it cannot report a job that never reached
-      #   its last step: a runner loss, a `timeout-minutes` kill or a cancellation
-      #   (`cancel-in-progress`) ends the job before `if: failure()` is evaluated.
+      #   its last step: a runner loss, a `timeout-minutes` kill, or a run
+      #   superseded while it was still PENDING (`cancel-in-progress: false` stops
+      #   a RUNNING deploy being cancelled but cannot save a pending one) ends the
+      #   job before `if: failure()` is evaluated.
       #   A 4th job with `needs: [all three]` + `if: failure()` would cover those,
       #   but cross-job `steps.*.outcome` is not available, so it would lose the
       #   per-step attribution this design exists for — and it still would not
@@ -1082,6 +1234,24 @@ jobs:
   post-deploy-verify:
     runs-on: ubuntu-latest
     needs: deploy-api
+    # 25 is 2× the DB health gate's own worst case (12.65 min), which is this
+    # job's real worst case — its measured max (0.4 min, n=6) says nothing about
+    # a slow release, so the headroom is derived against the GATE, not against
+    # the measurement.
+    # ⛔ THAT WORST CASE WAS NOT ACTUALLY BOUNDED UNTIL #10155's review: the gate
+    # is `N tries × S sleep`, which bounds a phase only if each REQUEST is
+    # bounded — and curl has no total-transfer timeout by default, so a SLOW (not
+    # dead) endpoint made this cap the thing that ends the job. That matters more
+    # here than anywhere else in the workflow: a `timeout-minutes` kill ends the
+    # job BEFORE `if: failure()` is evaluated (see the deploy-api RESIDUAL note),
+    # so the #2240 out-of-band alert would never run and a LIVE, unhealthy
+    # release would be reported ONLY as a red run with a truncated log. Every
+    # request is now bounded, and the readiness bound is derived from the
+    # SERVER's own declared bounds (5.6 s data plane + 6.0 s control plane =
+    # 11.6 s → 13 s), so the worst case is a number:
+    #   5 × (10 + 5) + 18 × (5 + 10) + 18 × (13 + 10) = 759 s = 12.65 min,
+    # i.e. 25 is 1.98× that.
+    timeout-minutes: 25
     if: ${{ needs.deploy-api.result == 'success' }}
     # #2240: `issues: write` is for the failure alert at the end of this job —
     # a red here means the release is LIVE and unhealthy, and nothing else in
@@ -1099,7 +1269,9 @@ jobs:
         # graph DB was dead (NXDOMAIN, #1381 recurrence — /health returned
         # 200 with status:degraded). Verify the release on BOTH planes:
         # fail fast ONLY on app-unreachable (curl error); poll db.ok (the
-        # FalkorDB data plane) for >=3 min (cold-start DB connection exceeds
+        # FalkorDB data plane) over its OWN budget — 270 s, DERIVED in the
+        # gate's per-request-bound block as `DB_TRIES × (CURL_MAX_TIME_HEALTH +
+        # DB_SLEEP)`, never a literal here (cold-start DB connection exceeds
         # 60s per #338; DNS propagation after a restart runs ~2 min per
         # #1381); then poll /health/ready (it ANDs the Supabase control plane
         # + the data plane) over its OWN budget, LAST.

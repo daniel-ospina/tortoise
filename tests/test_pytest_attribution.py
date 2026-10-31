@@ -1098,6 +1098,16 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 # tests' business, above.)
 
 
+#: THE INVENTORY SPLIT BELOW IS DERIVED, NOT RESTATED (2026-10-29, #10244 review). The
+#: prose in `test_every_pytest_log_tail_is_followed_by_the_reporter` used to carry the
+#: split by hand, and it drifted the moment `test-slow` migrated: the comment still
+#: claimed 2 per-runner sites and 3 `/tmp` literals after the migration made it 3 and
+#: 2, inside the very function the next `/tmp` migrator reads. These two numbers are
+#: asserted against the workflows by `test_the_stated_inventory_matches_the_workflows`,
+#: so a further migration reds the guard instead of silently falsifying its map.
+_STATED_PER_RUNNER_PYTEST_LOG_SITES = 6
+_STATED_LITERAL_PYTEST_LOG_SITES = 0
+
 #: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
 #: workflows, so match the SHAPE, not one spelling. Anchored (`^tail`), so a comment
 #: that merely mentions the spelling cannot be counted as a site.
@@ -1112,11 +1122,28 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 _TAIL_SITE_RE = re.compile(r"^tail\s+-n?\s*\d+\s+(\S+)$")
 #: The per-runner indirection a hardened job writes through, as it appears in a `tail`.
 _RUNNER_TEMP_LOG = "\"$PYTEST_LOG\""
+#: The other per-runner spelling: a job whose log lives in its OWN
+#: `${RUNNER_TEMP}` — #7815 moved `test-d14-hosted-api` there, because a
+#: `/tmp` literal is shared between concurrent jobs on a self-hosted runner.
+#: Later migrations moved other legs onto the `"$PYTEST_LOG"` indirection instead
+#: (resolved once per job, fail-closed on `${RUNNER_TEMP:?}`), so this spelling now
+#: covers `test-d14-hosted-api` alone. The branch is kept because that leg is a real
+#: site and a guard whose subject is this drift must not be spelling-dependent — and
+#: NO COUNT is stated here on purpose: the split has moved twice, and a count in a
+#: comment is not derived by any pin, so it goes stale silently. The pins that DO
+#: derive numbers are `_STATED_PER_RUNNER_PYTEST_LOG_SITES` /
+#: `_STATED_LITERAL_PYTEST_LOG_SITES` and `test_the_stated_inventory_matches_the_workflows`;
+#: read those, never this sentence, for how many legs use which spelling.
+#: Quoting is preserved from the line it came from, so the `--log <token>` pairing
+#: below compares like with like.
+_RUNNER_TEMP_TMPL_RE = re.compile(
+    r"^\"?\$\{RUNNER_TEMP:-/tmp\}/[^\"\s|]+\.(?:log|xml)\"?$")
 #: A leg may persist its output through `| tee /tmp/x.log` instead of a tail; both are
 #: "this leg keeps a log", so both owe the reporter a call. This one has to SEARCH a
 #: longer command line (the capture sits mid-pipeline, followed by `|| rc=$?`), so it
 #: is not end-anchored — which is why comment lines are filtered out before matching.
-_TEE_SITE_RE = re.compile(r"\|\s*tee\s+(/tmp/[^\s|]+\.log)")
+_TEE_SITE_RE = re.compile(
+    r"\|\s*tee\s+(\"?\$\{RUNNER_TEMP:-/tmp\}/[^\s|]+\.log\"?|/tmp/[^\s|]+\.log)")
 
 
 def capture_site(line: str) -> str | None:
@@ -1146,6 +1173,16 @@ def capture_site(line: str) -> str | None:
         # `--log "$PYTEST_LOG"`), so the pairing is checked exactly as it is for
         # a literal `/tmp/*.log`.
         return target
+    if _RUNNER_TEMP_TMPL_RE.match(target):
+        # The `${RUNNER_TEMP:-/tmp}/<name>` spelling: ALSO per-runner. #7815 moved the
+        # hardened jobs onto it; later migrations moved most of them onto the
+        # `"$PYTEST_LOG"` indirection instead, so today this spelling covers
+        # `test-d14-hosted-api` ALONE. The branch stays because that leg is a real site
+        # and a guard whose subject is this drift must not be spelling-dependent — and
+        # no count is stated here, for the reason given on `_RUNNER_TEMP_TMPL_RE` above.
+        # Returned verbatim so the `--log <token>` pairing is the same string comparison
+        # as the literal case.
+        return target
     if not (target.startswith("/tmp/") and target.endswith(".log")):
         return None
     return target
@@ -1154,20 +1191,23 @@ def capture_site(line: str) -> str | None:
 def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     """EVERY pytest-log capture in these workflows reports through the reporter.
 
-    A capture is a `/tmp/*.log` literal OR the per-runner `"$PYTEST_LOG"` a hardened
-    leg writes through — the shape is the LOG CAPTURE, not the path, so both owe the
+    A capture is a `/tmp/*.log` literal OR a per-runner path a hardened leg writes
+    through (`"$PYTEST_LOG"`, or a job's own `${RUNNER_TEMP:-/tmp}/...`) — the shape is
+    the LOG CAPTURE, not the path, so all of them owe the
     reporter. Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
     the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
     is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
-    #9300): 5 `pytest.log`-named tails in python-ci.yml (2 of them the per-runner
-    `"$PYTEST_LOG"`, not a `/tmp` literal), 1 `trackb.log` (the must-pass
-    Track B member, whose log name does not contain "pytest" — it was the coverage
-    gap a first cut missed), 1 `pmv-pytest.log` in post-merge-validation.yml, and 1
-    `pytest-d14.log`, written through `| tee` rather than a tail (this file counts
-    both shapes; the `tee` site is the one a tail-only counter missed). The filter is
-    deliberately the LOG CAPTURE, not the file name: a leg's log name is not a
-    contract, and the rail's capture is `gh run view --log-failed` across every job,
-    so any of these legs can omit its own failure set.
+    #9300): 6 `pytest.log`-named tails in python-ci.yml — 6 of them the per-runner
+    `"$PYTEST_LOG"`, not a `/tmp` literal, see the DERIVED split pinned by
+    `test_the_stated_inventory_matches_the_workflows` — plus `pmv-pytest.log` in
+    post-merge-validation.yml, plus `pytest-d14.log`, written through `| tee` rather
+    than a tail (this file counts both shapes; the `tee` site is the one a tail-only
+    counter missed). `test-track-b`'s tail was the `trackb.log` site in an earlier
+    inventory; #10280 migrated that leg onto `"$PYTEST_LOG"`, so its log no longer
+    carries a distinct name and it is counted in the six. The filter is deliberately
+    the LOG CAPTURE, not the file name: a leg's log name is not a contract, and the
+    rail's capture is `gh run view --log-failed` across every job, so any of these legs
+    can omit its own failure set.
     """
     tails = 0
     for workflow in ATTRIBUTION_WORKFLOWS:
@@ -1182,12 +1222,13 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
                 f"{workflow.name}:{i + 1}: the `{target}` capture is not followed by the "
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
-    # The measured inventory is 8: five `pytest.log`-named tails in python-ci.yml —
-    # `test`'s last-failed pre-phase (200) and `test` (300) through the per-runner
-    # `"$PYTEST_LOG"` since #10028, then the three `/tmp/pytest.log` literals
-    # `test-slow` (300), `test-concurrency-falkor` (120) and `test-carve-out` (200) —
-    # plus `trackb.log`,
-    # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
+    # The measured inventory is 8: six `pytest.log`-named tails in python-ci.yml, ALL
+    # through the per-runner `"$PYTEST_LOG"` — `test`'s last-failed pre-phase (200),
+    # `test` (300), `test-slow` (300) (the fast job since #10028, `test-slow` since the
+    # #10028 residue that PR closed), `test-concurrency-falkor` (120),
+    # `test-carve-out` (200) and `test-track-b` (25) (those three since #10280, which
+    # also renamed the leg's log from the host-global `/tmp/trackb.log`) — plus
+    # `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
     # under this check while it stayed green (it took two losses to red it). Counting
@@ -1196,6 +1237,250 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     # A drop here means a leg was lost, not that it got safer; an ADDITION is fine,
     # which is why this is a floor.
     assert tails >= 8, f"only {tails} pytest-log sites found (expected >= 8) — a leg was renamed or dropped"
+
+
+def test_the_stated_inventory_matches_the_workflows() -> None:
+    """The inventory the floor above STATES must equal the inventory it MEASURES.
+
+    The floor is a bound; the prose above it is a MAP — "which legs are still on a
+    `/tmp/pytest.log` literal, and which moved to a per-runner path" — and
+    it is the map the next incremental `/tmp` migration reads before it edits a job.
+    A bound keeps being satisfied while the map goes wrong, which is how the pre-#10028
+    split (2 per-runner, 3 literals) survived `test-slow`'s migration: the comment sat
+    in the same function as the floor, said 2 and 3, and the truth was 3 and 2. The
+    delivered state since #7815 is 6 per-runner and ZERO literals — the count that
+    says the migration is complete rather than merely in progress. (It is SIX, not the
+    five #7815 alone produced: #10280 renamed `test-track-b`'s `trackb.log` onto the same
+    `"$PYTEST_LOG"` the other legs use, so that leg now carries the common name and is
+    counted here rather than named separately.)
+
+    The numbers are DERIVED here from `capture_site` — the same reading the floor uses —
+    rather than re-read out of the prose, so this cannot become a tautology. Stated
+    counts live in `_STATED_PER_RUNNER_PYTEST_LOG_SITES` /
+    `_STATED_LITERAL_PYTEST_LOG_SITES`; migrating one more leg without updating them
+    reds this test, and restoring the pre-fix split makes it fail on the pre-fix code.
+    """
+    per_runner = literal = 0
+    for workflow in ATTRIBUTION_WORKFLOWS:
+        for line in workflow.read_text().splitlines():
+            target = capture_site(line)
+            if target is None:
+                continue
+            # The `pytest.log`-named captures, and ONLY those: `pmv-pytest.log` and
+            # the `pytest-d14.log` tee site are the other TWO sites in the inventory
+            # (8 = these 6 + 2), named separately above the floor. `trackb.log` left the
+            # inventory when #10280 moved that leg onto `"$PYTEST_LOG"` — this line
+            # said "other three" for one head after that, which is the same
+            # restated-inventory class the derived split above exists to stop.
+            if target != _RUNNER_TEMP_LOG and not target.endswith("/pytest.log"):
+                continue
+            if target == _RUNNER_TEMP_LOG:
+                # `"$PYTEST_LOG"` IS a `pytest.log` capture; its leaf name is not in
+                # the token.
+                per_runner += 1
+                continue
+            # ⛔ COMPARE THE PATH, NOT THE TOKEN (#7815, measured). The quoted
+            # `${RUNNER_TEMP:-/tmp}/pytest.log` spelling ends with `/pytest.log"`, not
+            # `/pytest.log`, so a raw-token suffix test dropped BOTH migrated legs out
+            # of BOTH buckets: 5 pytest.log sites in the workflow, 3 counted, and the
+            # guard reported a split that omitted the two legs it was measuring.
+            token = target.strip('"')
+            if _RUNNER_TEMP_TMPL_RE.match(target):
+                if token.endswith("/pytest.log"):
+                    per_runner += 1
+                continue
+            if token.startswith("/tmp/") and token.endswith("/pytest.log"):
+                literal += 1
+
+    assert per_runner == _STATED_PER_RUNNER_PYTEST_LOG_SITES, (
+        f"the prose says {_STATED_PER_RUNNER_PYTEST_LOG_SITES} per-runner "
+        f'`"$PYTEST_LOG"` legs, the workflows have {per_runner} — update BOTH the stated '
+        "count and the comment block above the floor"
+    )
+    assert literal == _STATED_LITERAL_PYTEST_LOG_SITES, (
+        f"the prose says {_STATED_LITERAL_PYTEST_LOG_SITES} `/tmp/pytest.log` literal "
+        f"legs, the workflows have {literal} — update BOTH the stated count and the "
+        "comment block above the floor"
+    )
+    # The six `pytest.log`-named tails the inventory enumerates. Asserting the total as
+    # well means a migration that changes BOTH sides cannot pass by swapping them.
+    assert per_runner + literal == 6, (
+        f"{per_runner + literal} `pytest.log`-named tails, the inventory enumerates 6"
+    )
+
+
+def _capture_site_jobs(workflow: Path) -> list[tuple[str | None, str]]:
+    """``(job, capture target)`` for every log-capture site in ``workflow``.
+
+    The job is resolved from the file's own structure (the 2-space-indented job keys
+    under ``jobs:``), so a site added to a NEW job is attributed to that job without
+    the test naming it. A site above the first job key resolves to ``None`` — no
+    caller relies on that, it is only the honest answer for a stray capture.
+    """
+    text = workflow.read_text()
+    lines = text.splitlines()
+    job_starts: list[tuple[int, str]] = []
+    for job in (yaml.safe_load(text).get("jobs") or {}):
+        needle = f"  {job}:"
+        for i, line in enumerate(lines):
+            if line.rstrip() == needle:
+                job_starts.append((i, job))
+                break
+    job_starts.sort()
+    sites: list[tuple[str | None, str]] = []
+    for i, line in enumerate(lines):
+        target = capture_site(line)
+        if target is None:
+            continue
+        owner = None
+        for start, job in job_starts:
+            if start <= i:
+                owner = job
+        sites.append((owner, target))
+    return sites
+
+
+def test_the_residual_header_is_scoped_to_the_legs_that_still_are_residuals() -> None:
+    """The reporter's `NAMED RESIDUAL` header must describe the legs it still names.
+
+    The header is the artifact the next `/tmp` migration lane reads — `python-ci.yml`'s
+    own `test-slow` first step points a reader at it — and it sat SEVEN LINES above the
+    `⚠️ STATUS: APPLIED TO BOTH MATRIX JOBS` paragraph that retires it (PR #10244
+    review, P3). It said *"every leg writes the SAME global path"*, which stopped being
+    true when #10028 migrated the fast matrix and the `test-slow` migration in this PR
+    completed the second job, and #10280 then migrated the remaining `python-ci.yml`
+    legs: every one of them now resolves its log under `${RUNNER_TEMP}`, so no leg of
+    that workflow writes a host-global literal at all. (No count is stated here on
+    purpose — the split has moved three times and a count in prose is not derived by
+    any pin, so it goes stale silently. Read `_STATED_PER_RUNNER_PYTEST_LOG_SITES` /
+    `_STATED_LITERAL_PYTEST_LOG_SITES` and
+    `test_the_stated_inventory_matches_the_workflows` for the numbers.) A header
+    claiming the retired premise teaches the opposite of what the code does, in the
+    exact sentence the next lane quotes.
+
+    ⛔ THE DELIVERED STATE (#7815, PR #10143): Four of the five legs this pin used to
+    derive as residuals — `test-concurrency-falkor`, `test-track-b`, `test-carve-out`,
+    `test-d14-hosted-api` — are MIGRATED, so a host-global capture target survives in
+    exactly ONE leg, `post-merge-validation.yml`'s `validate` (`/tmp/pmv-pytest.log`).
+    They are migrated in TWO spellings: #10280 moved the first three onto `"$PYTEST_LOG"`
+    (resolved once per job from `${RUNNER_TEMP:?}`, fail-closed), while
+    `test-d14-hosted-api` keeps this PR's per-step `${RUNNER_TEMP:-/tmp}/...`. Both are
+    per-runner; neither writes a host-global `/tmp` artifact. That is a
+    migration's COMPLETION of §10280's list, not a regression of it.
+
+    ⛔ The set is EVERY host-global capture target, not the `/tmp/pytest.log` spelling
+    (PR #10244 review, blocking): the first version of this pin filtered on that one
+    literal, so it derived two legs and stayed green while `test-track-b`
+    (`/tmp/trackb.log`), `test-d14-hosted-api` (`/tmp/pytest-d14.log`) and
+    `post-merge-validation.yml`'s `validate` (`/tmp/pmv-pytest.log`) — all of them named
+    on #10280 — were still un-migrated. A guard whose subject is preventing this drift
+    was itself spelling-dependent, i.e. fail-open, and its own failure message told the
+    next editor the two-element list was complete.
+
+    The remaining legs are DERIVED from the workflows with `capture_site` (the same
+    reading the floor uses) and asserted to be NAMED by the header — and that the header
+    names no leg that has ALREADY migrated, since an over-wide residual sends the next
+    lane to redo finished work. Equality, in both directions, on the statement rather
+    than on a count. "Named" means named in the LIST block itself (bounded by
+    `The legs that still write` … `THIS LIST IS DERIVED`), not somewhere in the header's
+    prose: the paragraph below the list explains WHY a leg is in
+    scope, and that explanation must not be able to stand in for a list entry.
+    """
+    header = SCRIPT.read_text()
+    # MUTATION PROOF for the second half below: the pre-fix text stated the premise the
+    # STATUS paragraph retires, so this assertion fails on the pre-fix file.
+    assert "every leg writes the SAME global path" not in header, (
+        "pytest-attribution.sh: the NAMED RESIDUAL header still claims EVERY leg writes "
+        "the host-global path — #10028 migrated both matrix jobs, so the claim is false "
+        "and contradicts the STATUS paragraph seven lines below it"
+    )
+    sites = [
+        (job, target)
+        for workflow in ATTRIBUTION_WORKFLOWS
+        for job, target in _capture_site_jobs(workflow)
+        if job is not None
+    ]
+    # ANY host-global `/tmp/*.log`, NOT just the `/tmp/pytest.log` spelling: filtering on
+    # one literal is what let the four-leg residual read as a two-leg one.
+    residual = sorted({job for job, target in sites if target.startswith("/tmp/")})
+    migrated = {job for job, target in sites} - set(residual)
+    # The delivered state, not a bound: a further migration changes this set and must
+    # update the header's scope in the same change (that is the point of the pin).
+    assert residual == [
+        "validate",
+    ], (
+        "the legs still writing a host-global /tmp/*.log changed — update the "
+        f"NAMED RESIDUAL scope in pytest-attribution.sh to match: {residual}"
+    )
+    # The header's residual LIST, bounded by its own delimiters: the `NAMED RESIDUAL`
+    # paragraph sits ABOVE the STATUS paragraph and the migrated jobs' names live in
+    # STATUS (`test`, `test-slow`), so a section spanning both would credit them as
+    # residuals. Both delimiters are asserted present rather than `index()`ed blind — a
+    # reflow that drops one must red here, not raise an unhelpful ValueError.
+    #
+    # ⛔ THE SECTION MUST END WHERE THE LIST ENDS, at the `THIS LIST IS DERIVED` block.
+    # The commentary BELOW the list also names `test-track-b` and `validate` in prose
+    # (why each is in scope), so a section that ran on to `So ownership is` let the LIST
+    # lose an entry while this pin stayed green — measured, by deleting three list
+    # entries: only `test-d14-hosted-api`, the one leg the prose does not repeat, was
+    # reported missing. That is the same fail-open the widened `/tmp/*.log` derivation
+    # above fixes, one layer in: the list is the map a migrating lane reads, and prose
+    # that explains WHY a leg is listed is not a substitute for listing it.
+    start_marker = "The legs that still write"
+    end_marker = "THIS LIST IS DERIVED"
+    assert start_marker in header and end_marker in header, (
+        "pytest-attribution.sh: the NAMED RESIDUAL header lost its list delimiters "
+        f"({start_marker!r} / {end_marker!r}) — the residual scope pin cannot read the "
+        "statement it asserts"
+    )
+    section_start = header.index(start_marker)
+    section = header[section_start : header.index(end_marker, section_start)]
+
+    def _named(job: str) -> bool:
+        # Boundaries that exclude `-` as well: `test` is a substring of `test-slow` and of
+        # every hyphenated leg name, so `\b` alone would credit the wrong leg.
+        return re.search(rf"(?<![\w-]){re.escape(job)}(?![\w-])", section) is not None
+
+    unnamed = [job for job in residual if not _named(job)]
+    assert not unnamed, (
+        "pytest-attribution.sh: the NAMED RESIDUAL header does not name every leg that "
+        f"still captures a host-global /tmp log — missing {unnamed} of {residual} (#10280)"
+    )
+    stale = sorted(job for job in migrated if _named(job))
+    assert not stale, (
+        "pytest-attribution.sh: the NAMED RESIDUAL header still names legs that HAVE "
+        f"migrated to a per-runner path — drop {stale} from the residual scope (#10280)"
+    )
+
+
+def test_the_docstrings_inventory_split_is_derived_not_restated() -> None:
+    """PR #10264 review P3 (F1): the split said "2 of them the per-runner" — one leg stale.
+
+    The relocation that made `test-slow` write through `"$PYTEST_LOG"` is the SAME
+    commit that made this paragraph wrong, and nothing noticed: the sentence and the
+    closing floor comment in one docstring then stated two different inventories of
+    one file. Deriving the split from `capture_site` (the counter the floor uses)
+    means the prose cannot be true of an older head — an edit that changes either
+    shape reds HERE, with the number to write.
+
+    This pins the DOCSTRING's sentence; `test_the_stated_inventory_matches_the_workflows`
+    pins the stated CONSTANTS. They are two different artifacts of the same number, and
+    the defect this closes was in the prose — a constants-only pin would have stayed
+    green through it.
+    """
+    sites = [s for s in (capture_site(ln) for ln in WORKFLOW.read_text().splitlines())
+             if s is not None]
+    per_runner = [s for s in sites if s == _RUNNER_TEMP_LOG]
+    literal = [s for s in sites if s == "/tmp/pytest.log"]
+    # the total this sentence states, and the split it got wrong
+    assert len(per_runner) + len(literal) == 6, sites
+    flat = " ".join(
+        (test_every_pytest_log_tail_is_followed_by_the_reporter.__doc__ or "").split()
+    )
+    assert f"{len(per_runner)} of them the per-runner" in flat, (
+        f"{WORKFLOW.name} has {len(per_runner)} per-runner and {len(literal)} literal "
+        f"`/tmp/pytest.log` sites; the docstring's parenthetical must say so"
+    )
 
 
 def test_a_comment_mentioning_the_tee_shape_is_not_a_capture_site() -> None:
@@ -1318,7 +1603,16 @@ def _run_step_body(
     shim = bin_dir / "timeout"
     shim.write_text(TIMEOUT_SHIM, encoding="utf-8")
     shim.chmod(0o755)
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        # The step spells its log/junit as `${RUNNER_TEMP:-/tmp}/…` (#7815) and
+        # the body rewrite below sandboxes `/tmp/`. Pin `RUNNER_TEMP` to the
+        # EMPTY string so the `:-` fallback always wins: an ambient value would
+        # aim the step at a real directory while the sandbox is what gets
+        # rewritten, and the file the stub writes would never be the one read.
+        "RUNNER_TEMP": "",
+    }
     return subprocess.run(
         ["bash", "-e", str(script)],
         cwd=REPO,
@@ -1337,7 +1631,7 @@ def _run_step_body(
             WORKFLOW,
             "test-d14-hosted-api",
             "Run the embedded_only marker selection",
-            "/tmp/pytest-d14.log",
+            '"${RUNNER_TEMP:-/tmp}/pytest-d14.log"',
         ),
     ],
     ids=["d14"],

@@ -6,10 +6,21 @@ Why a test rather than trust
 version pin. The fallback pool has served BOTH: `scripts/ci_runner_gate.sh` attaches
 `ubuntu-latest` while the fallback is engaged, and 2026-10-24's measurement found every
 failing `finding-provenance` `classify` job that ran on `pi-runner-vm-*` holding the
-`ubuntu-24.04` pin as well — a live violation of the recorded invariant that no self-hosted
-runner claims an `ubuntu-<version>` label (`docs/ops/ci-runner-x64.md`, `MEMORY.md`, and the
-drift arm in `tests/test_ci_selection.py` that reads the GATE'S TEXT rather than the live
-label set, which is why it did not fire).
+`ubuntu-24.04` pin as well — a live violation, AT THE TIME, of the invariant that no
+self-hosted runner claims an `ubuntu-<version>` label (the drift arm in
+`tests/test_ci_selection.py` reads the GATE'S TEXT rather than the live label set, which is
+why it did not fire).
+
+⚠️ **THAT INVARIANT IS NO LONGER IN FORCE, AND THIS MEASUREMENT IS THE DOCUMENTED STATE.** Since
+the 2026-10-29 departure recorded on #6897 (`OVERRIDES:` in `docs/ops/ci-runner-x64.md` §*the label
+contract*, and `MEMORY.md` `[ci-runners]`), the pool claiming a version-pinned hosted label is an
+**explicit opt-in mitigation** (`CI_RUNNER_OS_LABEL=on|auto`, default `off`) for the deadlock where
+the pinned legs are never dispatched and every PR stays BLOCKED; `--status`' `label-coverage` block
+now reports and verdicts that state. So a runner carrying `ubuntu-24.04` is **not** a defect to
+repair — the revert is `CI_RUNNER_OS_LABEL=off` plus `--repair-labels`, never an ad-hoc label strip,
+which is how one would silently remove the mitigation. What this file still proves is the OTHER
+claim, which the departure does not touch: a pool runner is a BARE box whose service `PATH` lacks
+the hosted image's tools, so any job that can land on it must carry the tool contract.
 
 Either label can land a job on a bare runner whose service environment is a minimal
 NON-login `PATH`, where a tool of the hosted image is simply absent. Measured 2026-10-24,
@@ -445,6 +456,11 @@ _SCRIPT_GLOBS = (
 #: Labels the fallback pool has been observed to serve. Not `ubuntu-latest` only:
 #: the 2026-10-24 measurement shows the pool serving `ubuntu-24.04` as well.
 _POOLABLE_LABEL = re.compile(r"ubuntu-(latest|\d+\.\d+)")
+#: A `runs-on` VALUE the workflow text cannot resolve to a label: GitHub supports
+#: `runs-on: ${{ matrix.os }}` (its own matrix example), and the label is then
+#: decided per leg at run time. `_poolable_label` fails CLOSED on it — see the
+#: docstring — because "cannot be shown non-poolable" is not "non-poolable".
+_EXPRESSION = "${{"
 
 
 def _gh_executing_scripts() -> frozenset[str]:
@@ -504,14 +520,76 @@ def _code_only(line: str) -> str:
     return re.sub(r"'[^']*'|\"[^\"]*\"", "''", line)
 
 
+def _looks_poolable(value: str) -> bool:
+    """One `runs-on` VALUE (inline scalar or one list item): poolable, or unresolved?
+
+    An EXPRESSION value routes to `True` deliberately: a matrix/needs expression is
+    resolved per leg at run time, so the text cannot show the label to be
+    non-poolable. Admitting it is the whole point when the job uses `gh`; the cost of
+    admitting it otherwise is a FALSE POSITIVE, stated rather than waved away — an
+    expression whose every leg is non-poolable (`os: [macos-latest, windows-latest]`)
+    is admitted too, and if that job also uses `gh` the pin's message asks for a
+    declaration rather than a silent skip. That polarity is per LEG, not per shape:
+    GitHub's own examples mix classes (`os: [macos-latest, ubuntu-latest]`), and there
+    admitting the job is a TRUE positive, because the `ubuntu-latest` leg really can
+    land on the pool — do not narrow this arm by analogy with the macOS-only case.
+    Cheap in the right direction: a demanded `KNOWN_UNCOVERED` reason, never an
+    invisible job —
+    and note the remedy that message names (`ensure gh`) is Linux-only, so on a macOS
+    leg the declaration is the correct answer rather than the install step.
+    """
+    if _EXPRESSION in value:
+        return True
+    return bool(_POOLABLE_LABEL.search(value))
+
+
 def _poolable_label(text: str) -> bool:
     """Does this job's `runs-on` ask for a label the fallback pool has served?
 
-    BOTH YAML shapes: the inline scalar (`runs-on: ubuntu-latest`) and the block list
-    (`runs-on:` then `- self-hosted` / `- ubuntu-latest`). The first version read only
-    the INLINE form, so a job written as a list — the shape a `self-hosted` job usually
+    THREE YAML shapes: the inline scalar (`runs-on: ubuntu-latest`), the block list
+    (`runs-on:` then `- self-hosted` / `- ubuntu-latest`), and an EXPRESSION
+    (`runs-on: ${{ fromJSON(matrix.runner) }}`). The first version read only the
+    INLINE form, so a job written as a list — the shape a `self-hosted` job usually
     takes — was invisible and could have joined the gap with the suite green (#9939
     review).
+
+    A COMMENT is not a value: `runs-on:  # see #6897` then `- ubuntu-latest` is the
+    block-list shape, and a comment line among the items or above them must not end
+    the list. Both of those read as "no poolable label" before this arm, which is the
+    same silent skip in a comment-dense workflow — latent rather than live here (every
+    `runs-on:` in the tree is inline today), and exactly the shape this repo's style
+    invites next.
+
+    The expression arm exists for the same reason, one step further out: #10186
+    turned `test`'s literal `ubuntu-latest` into `${{ fromJSON(matrix.runner) }}`,
+    and a text reader that only matches `ubuntu-…` then answered "not poolable" for
+    the job that routes its odd legs to an explicit `self-hosted` pin. The skip is
+    the UNSAFE direction — the job did not stop being pool-eligible, it stopped
+    being visible — and nothing reds when it happens, which is why the answer for an
+    unresolvable value must be "assume it can reach the pool".
+
+    This is the same rule the installer already applies from the other side:
+    `tools/install-ci-runner-x64.sh:377-378` skips `${{ … }}` — its comment reads
+    "a matrix expression (`${{ … }}`) is not a label; it is resolved per job at run
+    time" — but that reader resolves labels against the ONLINE runner list instead.
+    This scan has no such second source, so it cannot skip: it must fail closed.
+
+    RESIDUAL — shapes this reader still does not see, all returning False (the same
+    silent skip, one shape further out): a YAML ALIAS (`runs-on: *pool_labels`), a
+    BLOCK SCALAR (`runs-on: >-` or `runs-on: |` with the label on the next line), a
+    next-line plain scalar or FLOW list (`runs-on:` then `  ubuntu-latest` /
+    `  [self-hosted, ubuntu-latest]`), a next-line nested MAP — the `group:` / `labels:`
+    pair GitHub documents as a `runs-on` value, written as `runs-on:` then
+    `  group: ubuntu-runners` / `  labels: ubuntu-24.04-16core` — and a `<<:` merge-key
+    line. The nested MAP is worth its own clause because it is ASYMMETRIC: the INLINE
+    flow spelling (`runs-on: {group: …, labels: ubuntu-24.04}`) IS answered, since the
+    inline arm text-searches the whole rest of the line, while the BLOCK one stops at
+    `group:` — no `- ` item matches, the item loop breaks, and the job comes back
+    invisible although `ubuntu-24.04` is named one line below in `labels:`. None is
+    used in the tree today — all 86 `runs-on:` keys are inline scalars, so the miss is
+    latent, not live — and they are named here so the next author writing one of them
+    knows the scan is a text reader rather than a YAML parser, and adds the shape
+    instead of assuming coverage.
     """
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -519,15 +597,16 @@ def _poolable_label(text: str) -> bool:
         if not m:
             continue
         inline = m.group(1).strip()
-        if inline:
-            return bool(_POOLABLE_LABEL.search(inline))
+        if inline and not inline.startswith("#"):
+            return _looks_poolable(inline)
         for follow in lines[i + 1 :]:
-            if not follow.strip():
+            stripped = follow.strip()
+            if not stripped or stripped.startswith("#"):
                 continue
             item = re.match(r"^\s*-\s*(.+)$", follow)
             if not item:
                 break  # the next key: the list ended with no poolable label
-            if _POOLABLE_LABEL.search(item.group(1)):
+            if _looks_poolable(item.group(1)):
                 return True
         return False
     return False
@@ -642,11 +721,70 @@ def test_a_test_module_named_like_a_helper_is_not_a_gh_hazard():
     assert _gh_hazards(['        run: python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"'], scripts)
 
 
-def test_the_poolable_label_reader_sees_both_yaml_shapes():
-    """`runs-on` as a block list is the shape a self-hosted job usually takes."""
+def test_the_poolable_label_reader_sees_every_yaml_shape():
+    """`runs-on` as a block list is the shape a self-hosted job usually takes.
+
+    The THIRD shape is an expression, and it is asserted here rather than left to the
+    scan below so the reader's contract is complete in one place: a value the text
+    cannot resolve is treated as possibly-poolable, not as a non-match. The two
+    COMMENT-bearing shapes are asserted for the same reason — a comment is not a
+    value, and reading it as one ends the block list before the labels are reached.
+    """
     inline = "    runs-on: ubuntu-latest\n    steps:\n"
     block = "    runs-on:\n      - self-hosted\n      - ubuntu-24.04\n    steps:\n"
     block_pool_free = "    runs-on:\n      - self-hosted\n      - linux\n    steps:\n"
+    expression = "    runs-on: ${{ fromJSON(matrix.runner) }}\n    steps:\n"
+    expression_in_list = (
+        "    runs-on:\n      - self-hosted\n      - ${{ matrix.arch }}\n    steps:\n"
+    )
+    block_after_inline_comment = (
+        "    runs-on:  # odd shards go to the pool\n      - self-hosted\n      - ubuntu-latest\n"
+        "    steps:\n"
+    )
+    block_after_item_comment = (
+        "    runs-on:\n      # see #6897 for the residual\n      - self-hosted\n"
+        "      - ubuntu-latest\n    steps:\n"
+    )
     assert _poolable_label(inline)
     assert _poolable_label(block)
     assert not _poolable_label(block_pool_free)
+    # An expression is UNRESOLVABLE from the text, so it must not be skipped: on the
+    # pre-fix reader both of these answered False (#10186 review).
+    assert _poolable_label(expression)
+    assert _poolable_label(expression_in_list)
+    # A comment-bearing key and a comment above the items answered False before the
+    # comment arm — the same silent skip, one shape further out.
+    assert _poolable_label(block_after_inline_comment)
+    assert _poolable_label(block_after_item_comment)
+    # …and a pool-free list stays pool-free whichever way the comments fall, so the
+    # arm cannot be satisfied by simply always answering True.
+    assert not _poolable_label(
+        "    runs-on:  # hosted class\n      - self-hosted\n      - linux\n    steps:\n"
+    )
+
+
+def test_an_expression_valued_runs_on_keeps_its_job_in_the_scan():
+    """#10186 turned `test`'s `runs-on` into an expression; the scan must still see it.
+
+    Why this is the shape that matters: under the `CI_SHARD_ROUTING=pool-split` opt-in
+    `test` routes its odd legs to an explicit `["self-hosted", "self-hosted-x64"]`
+    pin, i.e. the one job whose legs can reach a minimal-`PATH` pool runner BY NAME —
+    and it is the largest job in the tree (25 steps). Dropping it out of this scan is
+    silent: the scan can only red on jobs it looks at, so a `gh`-using step added to
+    `test` later would join the #9018 gap with the suite green. It is `gh`-free today,
+    which is why nothing reds now and why the arm has to be a pin instead of a fix to
+    a live failure.
+    """
+    seen = {
+        (path.name, job)
+        for path in sorted(WORKFLOWS.glob("*.yml"))
+        for job, body in _jobs(path)
+        if _poolable_label("\n".join(body))
+    }
+    assert ("python-ci.yml", "test") in seen, (
+        "`python-ci.yml::test` is no longer seen by the pool-eligibility scan. Its "
+        "`runs-on` is `${{ fromJSON(matrix.runner) }}`, an expression the workflow "
+        "text cannot resolve to a label — the scan must fail CLOSED on it (assume the "
+        "job can reach the pool), because a silent skip removes the job from "
+        "`test_every_pool_eligible_gh_job_is_declared`'s surface entirely (#9018)"
+    )

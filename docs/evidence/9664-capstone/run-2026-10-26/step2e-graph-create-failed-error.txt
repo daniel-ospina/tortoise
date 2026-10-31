@@ -1,0 +1,1 @@
+{"detail":"Per-graph ACL provisioning failed — the FalkorDB ACL layer rejected the graph user: ACL SETUSER failed for graph org_3326a01ea34ae595d84de5d8f9_g_f0f1139860af41b89ba0675b00 (user=tenant_g_f

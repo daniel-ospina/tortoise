@@ -669,6 +669,7 @@ def restore(backup_dir: str, db_path: str,
                 journal_first_materialization,
                 journal_hard_delete_seqs,
                 journal_object_surviving_keys,
+                journal_object_established,
                 plan_point_restamp_folds,
             )
             # #7951 §17.1: a replay's records came FROM the journal, so the
@@ -732,12 +733,23 @@ def restore(backup_dir: str, db_path: str,
                 # engine, and it replayed one record at a time with NO journal
                 # context — so `apply()`'s ObjectSuperseded refusal gate (keyed on
                 # `journal_object_surviving is not None`) was SKIPPED and an
-                # id-only absent-target supersede restored silently, while
-                # `rebuild_all` refuses the identical journal. Supply the same
-                # whole-journal keys `rebuild`/`recover_from_log` supply, and
-                # feature-detect the kwargs (an `apply(ev)`-only injected backend
-                # must not be handed a kwarg it does not accept).
+                # unaddressable supersede restored silently, while `rebuild_all`
+                # refuses the identical journal. Supply the same whole-journal
+                # keys `rebuild`/`recover_from_log` supply, and feature-detect the
+                # kwargs (an `apply(ev)`-only injected backend must not be handed
+                # a kwarg it does not accept).
+                #
+                # ⚠️ #10204: the shape this wiring protects is now
+                # `object-superseded-no-address` (and every established-address
+                # miss). An ID-ONLY record whose id nothing established is EXEMPT
+                # since the address-keyed amendment, but it is exempt only
+                # because `object_established` reaches the classifier — without
+                # this line the SAME record refuses as a plain miss, so it pins
+                # the wiring just as well as the no-address shape does.
                 journal_object_surviving = journal_object_surviving_keys(records)
+                # #3590 D2: the journal's own addressability oracle, so this
+                # engine's supersede gate agrees with `rebuild_all`'s sweep.
+                object_established = journal_object_established(records)
                 # #7719: derived from the GATED map via `_hard_deleted_any`, so an
                 # anchor-suppressed delete no longer exempts the supersede.
                 journal_object_deleted = _object_hard_deleted_ids(hard_deleted)
@@ -762,6 +774,8 @@ def restore(backup_dir: str, db_path: str,
                     _pass_seq = "journal_seq" in _apply_params
                 if "journal_existence" in _apply_params:
                     apply_kwargs["journal_existence"] = epistemic_existence
+                if "journal_object_established" in _apply_params:
+                    apply_kwargs["journal_object_established"] = object_established
                 # The refusal is a RUN BOUNDARY, exactly as on the other three
                 # engines: without the collector `record_non_folded` is a no-op
                 # and the context would change nothing. `assert_no_non_folded`

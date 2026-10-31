@@ -1528,6 +1528,66 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #:           (`test-record-postgres|…|-`), so the new armed record leg fails closed by name instead of
 #:           certifying a `skipped` shard. No `$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code
 #:           swallowing, no early-return added; the sweep's marker words are unchanged.
+#:   #10228 — `Tiered selection` + `Emit push matrix (#1472/#6135)` re-cut, and `Non-gating lanes —
+#:           what this gate does NOT run (#10194)` added, from #10206: the selector now derives the
+#:           gating slow pool as `slow_gating_files()` (slow_files − carve-out − the non-gating
+#:           eval/longmem lane). The new step runs `python3 tools/ci_selection.py
+#:           --non-gating-report`, which is REPORT-ONLY (`action="store_true"`, prints and exits 0) —
+#:           no `$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code swallowing, no early return. It sits
+#:           BEFORE the gate sentinel, and its whole definition is pinned here precisely because of
+#:           that position: it cannot be rewritten into a tree edit without reding this allow-list.
+#:           The gate step itself is unchanged (sentinel) and keeps its position.
+#:   #9984 — `python-ci-gate` → `Aggregate matrix result`: ONE row appended to the LEGS heredoc
+#:           (`ci-introduced-failure|…|-`) plus a `failure|timed_out` case that DELEGATES a failed
+#:           test arm to that job instead of reddening on it alone. The job still has exactly ONE
+#:           step — no checkout, no `uses:`, no `env:`, no `$GITHUB_ENV`/`$GITHUB_PATH` write, no
+#:           exit-code swallowing, no early return; the sweep's marker words are unchanged and its
+#:           reachability is preserved (it is gated on `RED_LEGS` being empty, i.e. it still fires
+#:           for a need no row claimed). The predicate itself lives in a SEPARATE job precisely so
+#:           this pin's allow-list never has to widen.
+#:   #9984 review — `python-ci-gate` → `Aggregate matrix result`: the identity-blind sweep's
+#:           `cancelled` half is now swept UNCONDITIONALLY (it could never be delegated, so gating
+#:           it on `RED_LEGS` being empty only blinded this layer to a leg that never ran). Still
+#:           ONE step, still no `env:`/`uses:`/`$GITHUB_ENV` write, no exit-code swallowing, no early
+#:           return; the `failure|cancelled` sweep stays a literal line of code (#9240). The sibling
+#:           half of the same review — the verdict STEP's `if:` naming `timed_out` — is in the
+#:           `ci-introduced-failure` job and is pinned (step key allow-list) by
+#:           `tests/test_ci_new_failure_gate.py`, not by this digest.
+#:   #10206 (re-cut on rebase of #10202) — `changes`: three entries, all from #10206
+#:           (`646d30f9e1ef`), which edited the `changes` job without re-cutting this allow-list and
+#:           so left `main` red on this pin (measured: 46 failures of `test_the_ci_pin_*` at
+#:           `origin/main`, reproduced on a clean main worktree).
+#:             • `Non-gating lanes — what this gate does NOT run (#10194)` — a NEW step, `{name, run}`
+#:               only, no `uses:`/`env:`/`$GITHUB_ENV`/`$GITHUB_PATH` write and no exit-code
+#:               swallowing; it prints the non-gating lane and exits 0 on every path, and its POSITION
+#:               is pinned where the workflow declares it (between `Emit push matrix` and `Tier-2
+#:               duration split`).
+#:             • `Tiered selection` + `Emit push matrix (#1472/#6135)` — digest-only movement, and it
+#:               is COMMENT-only: `_code()` is byte-identical before and after #10206 and the key
+#:               set is unchanged (`id`/`name`/`run`), because the edit only rewrote the prose
+#:               (`slow_files - carve_out` → `slow_gating_files()`). Verified by diffing `_code()`
+#:               at `646d30f9e1ef^` against `origin/main`, not by reading the patch.
+#:   #9984 review (2) — `python-ci-gate` → `Aggregate matrix result`: the identity-blind
+#:           sweep's `failure` half stops being gated on `RED_LEGS` being EMPTY and starts
+#:           being gated on a COUNT (`RESULT_FAILS > ROW_FAILS`), because emptiness asked
+#:           the wrong question — it held whenever ANY leg was delegated, which blinded
+#:           the layer to a `failure` need that had no row of its own. Still ONE step,
+#:           still no `env:`/`uses:`/`$GITHUB_ENV`/`$GITHUB_PATH` write, no exit-code
+#:           swallowing, no early return; `grep -qE 'failure|cancelled'` survives as a
+#:           literal line of code (#9240).
+#:   #10186 — `changes`: `Emit push matrix (#1472/#6135)` + `Tier-2 duration split (#1473)` — digest-only
+#:           movement, and it is the `env:` block being MOVED, not added or widened. #6897's
+#:           `CI_SHARD_ROUTING` opt-in was at JOB scope; this pin's `_SAFE_JOB_ENV` is empty and names
+#:           this job as the reason, because any key at job scope hangs over this gate step and can
+#:           hook the interpreter (`BASH_ENV`, a `PYTHONPATH` `sitecustomize.py`, `LD_PRELOAD`,
+#:           `PATH`) — so `ci_ordering_half_violations` returned one violation on the real workflow and
+#:           red a REQUIRED fast shard (`test (e)`, run `41002293616`). The SAME single key now sits on
+#:           the two steps that emit `fast_matrix` and nowhere else: both `run:` scripts are byte-identical
+#:           (`_code()` unchanged), neither writes `$GITHUB_PATH`/`$GITHUB_ENV`, neither swallows an exit
+#:           code, and the step set and order are unchanged — so the sibling-shim, shim and `_ALWAYS_RUN`
+#:           checks stay quiet and this allow-list is not widened. The lever still reaches every emitter,
+#:           pinned by `tests/test_ci_selection.py::test_the_opt_in_reaches_every_matrix_emitter_in_the_changes_job`,
+#:           and job scope is now forbidden by `test_the_changes_job_carries_no_job_scope_env`.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1538,11 +1598,22 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Install pyyaml",
          "f3950abdebf4f38e23e27bdc3a983fe91bafd42478e7ec5e5a36d8718ff6d516"),
         ("Tiered selection",
-         "6117c2a5b9988a212d952aa88ab48ee0104d40a72fb87969a670a7b5298c6e8b"),
+         "3e532b44ae1d76d09b0557c32139fdc8f0546fe5ed92bd11d1d4130f0a8d6ce8"),
         ("Emit push matrix (#1472/#6135)",
-         "749418a766ab2daf0a0f3d04b2003033ac3c16481dd333c6f0fa71e0a0c340b7"),
+         # Re-cut 2026-10-30 (PR #10186): an `env:` key added — `CI_SHARD_ROUTING`,
+         # the runner-split opt-in's ONE lever — with the `run:` script byte-identical.
+         # The lever cannot live at job scope (any job-scope key sits above the gate step
+         # and hooks its interpreter, which is what `_SAFE_JOB_ENV` refuses), so it is
+         # carried by each of this job's TWO emitters; the digests move by the env block
+         # alone, deliberately, per this pin's own instruction.
+         "f0e928484d97c448337a2110b86dc54718b6fd5e36611369ae515aafff88c3f0"),
+        ("Non-gating lanes — what this gate does NOT run (#10194)",
+         "9b6ec88d732ebef44f83fa29380ed9f73d8d9daa01cc61964939db0a1bd26bc7"),
         ("Tier-2 duration split (#1473)",
-         "b91b712a641bfdae0b02064ecdbee016bf40c87b4f02a06c34d28f3d3dfd29cb"),
+         # Re-cut 2026-10-30 (PR #10186), same env-only reason as the push emitter above:
+         # this emitter's output OVERRIDES the push matrix on tier-2 PRs, so a lever on
+         # the push step alone is dead on exactly the event every PR uses.
+         "6a2cee39ab47ddba253e5c4a46b6a01650ea4c9a58cad56f68ba9255706bb7ca"),
         ("Capstone pre-registration gate — the ordering half (#9075)", _GATE_SENTINEL),
         ("Secrets scan (evidence artifacts,",
          "81dbfb18f5279f51455a71da92c66a6754fa01a497df1b43be5f974af62569ce"),
@@ -1552,7 +1623,7 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     # deletes the whole failure sweep. Both leave every other check in this pin clean.
     "python-ci-gate": (
         ("Aggregate matrix result",
-         "3109139f187cee52e5a3b56192743f25ab7f44d691a7979176acf8f351b3f9ac"),
+         "c40947981e1f62d77e17de090244ed6e09a5877f6c61a32fbb87b31f291772d7"),
     ),
 }
 

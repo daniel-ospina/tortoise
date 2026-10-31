@@ -49,6 +49,41 @@ DERIVABLE_STRUCTURAL_RELS = frozenset({
     'aboutDocument', 'extractedFrom',
 })
 
+#: The per-edge attributes a supersede TRANSFER carries — one definition, read
+#: by every writer and replay leg that moves an edge, so they cannot drift.
+#:
+#: The consumers, all reading THIS tuple (#10139 named the structural half;
+#: before it the same five keys were also spelled out as literal tuples at each
+#: emission and replay site, which is the drift class this constant removes):
+#:
+#:   * ``sdk.supersede_point`` 2a-DIRECT descriptor emission (live read-back);
+#:   * ``sdk.supersede_point`` 2a-DIRECT live carry (``_keep``);
+#:   * ``sdk.supersede_point`` structural 2b descriptor emission;
+#:   * ``projection._rebuild_all_replay`` — the 2a-DIRECT fold and the structural
+#:     (pass-2b ``DirectEdgeRepoint``) fold, i.e. the ONE place the values are
+#:     re-applied post-rebuild.
+#:
+#: A whitelist spelled separately on each side is how a carried value becomes a
+#: dropped one: the structural replay re-created the edge BARE while the live
+#: transfer carried `confidence` (#10139), and nothing in the code said the two
+#: lists were meant to be the same list. Named `DIRECT_EDGE_ATTR_KEYS` rather
+#: than `STRUCTURAL_…` because the 2a-DIRECT legs carry it too — the tuple is
+#: the graph's edge-attribute vocabulary, not a structural-only one.
+#:
+#: ⛔ ``source_version`` is deliberately NOT a member, on either side. It is the
+#: RECORD column name (``RelationUpsert.attrs``), while the graph writes this
+#: anchor as ``sourceVersion`` (``_anchor_on_create`` below) — nothing writes
+#: ``r.source_version``, so the entry could never match and would only imply a
+#: carry that never happens. It is also the one key the record contract forbids
+#: re-applying on a re-link ("a re-link must not ADVANCE a recorded version").
+#: ⚠️ CONSEQUENCE, stated rather than implied: ``extractedFrom``'s
+#: ``sourceVersion`` anchor is dropped by a supersede transfer AND by its
+#: replay. That is a separate, pre-existing loss; this vocabulary does not own
+#: it and must not appear to.
+DIRECT_EDGE_ATTR_KEYS: tuple[str, ...] = (
+    'direction', 'confidence', 'weight', 'label', 'batch_id',
+)
+
 # rel -> entity label of the structural TARGET (label-scoped resolution). The
 # source side of a supersede transfer is always a Point. Public — sdk.py's 2b
 # emission and the projection replay both import it (no duplicate key map).
@@ -107,22 +142,79 @@ def stub_key(rel: str, target: dict):
 
 
 def _mint_subject_stub(g, name: str) -> None:
-    """MERGE the Subject stub live wiring's auto-detect fallback creates
-    (edges.py _create_about_edges) — single create path for live + replay so a
-    replayed descriptor mints a byte-identical stub to live wiring.
+    """MERGE the Subject stub the about-edge Name-CASCADE falls back to.
+
+    ⚠️ **#3590 retired this construction and the retirement was WITHDRAWN —
+    this mint stays, and both halves of why are recorded here (#8398).** The
+    branch briefly made this helper ``resolve_fold_name(..., mention=True)``,
+    i.e. resolve-only, on the argument that "the projection never mints an id"
+    (D9). That argument is true for the mint D9 forbids — an OPAQUE id minted
+    during a fold, which replay re-mints differently, so ``rebuild != live`` by
+    construction. It is FALSE for THIS construction, and applying it here broke
+    a shipped contract:
+
+    * ``MERGE (s:Subject {name:$name}) ON CREATE SET s.id=$name`` is
+      NAME-DETERMINISTIC: the id is a pure function of the MERGE key, so live
+      and replay produce the byte-identical node. It is the construction
+      ``#8398``'s replay contract is written against.
+    * It is the ONLY construction that gives a name no producer registered a
+      node at all, and the journal is append-only, so a resolve-only helper
+      makes every ``how:"name"`` record already in a journal
+      UN-REPLAYABLE (measured: ``replay_about_links`` → ``(0, 1)``, no node;
+      ``tests/test_8398_aboutobject_replay.py
+      ::test_a_LEGACY_name_link_record_still_replays``). It also contradicts
+      ``_count_about_out``'s own documented premise ("``_create_about_edges``
+      MINTS a Subject stub when nothing in the graph matches, so for any
+      writable value a name link leaves an outgoing edge") and the shipped pins
+      that read the stub: ``tests/test_projection.py
+      ::test_falkor_subject_stub_resolves_canonical_id`` and
+      ``::test_5026_b1_live_aboutdocument_ignores_non_document_source``,
+      ``tests/test_pointsuperseded_rebuild.py
+      ::test_resolver_stub_mint_equivalence_for_absent_entities``,
+      ``tests/test_9079_edge_lane_declared.py`` (this helper IS a declared
+      writer) and ``tests/test_cache_projection.py`` (the ``subjectKind`
+      literal below).
+
+    What D9 asks of the LIVE path is NOT here, and #3590 D1 (RULED 2026-10-26)
+    says it must not be: the SDK's Event door no longer registers the names its
+    record mentions (`subject` / `object` / `uses[]` / an unresolved `about*`
+    name), because "an unresolvable mention drops its link, records the miss, and
+    mints nothing". So for a name nothing registered, this helper IS the mint —
+    the fold-side creation #8914 filed as a bug — and it is kept only because
+    every `how:"name"` record already in a journal needs it to replay (the
+    shipped pins above). Moving it is #8914's work, on both passes at once; it is
+    not a producer duty the SDK door can discharge.
 
     #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
     after the wipe. Skip rather than raise.
     """
+    from tortoise.entity_identity import entity_create_lock
     from tortoise.projection import _log_identity_skip, _writable_id
     if not _writable_id(name):
         _log_identity_skip("Subject stub", name, "name (MERGE key)")
         return
-    g.query(
-        "MERGE (s:Subject {name:$name}) "
-        "ON CREATE SET s.id=$name, s.subjectKind='other'",
-        params={"name": name},
-    )
+    # ⛔ THE SAME ``(label, name)`` LOCK THE CREATE DOOR TAKES (#9876 review).
+    # This is the last name-keyed WRITE left in the tree, and the create door is
+    # id-keyed (`entity_identity.resolve_or_mint` mints an opaque id and MERGEs
+    # on it), so the two constructions no longer converge on one node by
+    # themselves — the name-keyed MERGE and the id-keyed MERGE simply address
+    # different keys. Interleaved (stub mint between the create's resolve and
+    # its write) they leave a name with TWO live carriers: one ``:Subject
+    # {name:"X"}`` with ``id="X"`` (this stub) and one with the minted id.
+    # Every later by-name create then refuses `ambiguous-entity-name`, which is
+    # NON-exempt, so `rebuild_all` stops over a name this door split.
+    #
+    # Under the shared lock the two orderings both converge: stub first -> the
+    # create's resolve finds the stub as the single live holder and ADOPTS it;
+    # create first -> this MERGE matches that node by name and creates nothing.
+    # Reentrant, and the replay callers (`replay_about_links`, create_event's
+    # fold) take it harmlessly.
+    with entity_create_lock("Subject", name):
+        g.query(
+            "MERGE (s:Subject {name:$name}) "
+            "ON CREATE SET s.id=$name, s.subjectKind='other'",
+            params={"name": name},
+        )
 
 
 def _mint_source_stub(
@@ -194,27 +286,47 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
                               mint: bool = True):
     """Resolve the label-scoped structural target node by its replay key.
 
-    Create-if-missing semantics for the ``extractedFrom`` (Source) and
-    ``aboutSubject`` (Subject) arms: those stubs MERGE by key (the live wiring
-    precedent — _create_about_edges' fallback / _link_source). **The
-    ``aboutDocument`` Source arm is an EXCEPTION — it is RESOLVE-ONLY**: a miss
-    is logged and skipped, never minted, because a phantom Source would
-    silently mis-point the resurrected edge (adversarial class B1), and D10
-    §4.4 makes the document node a ``:Source``, so this is the one label whose
-    ``rel`` decides the policy. This resolver therefore does NOT
-    create-if-missing for every Source — read the branch, not the label. NEVER
-    auto-detect labels (Subject-first auto-detect would attach an aboutObject
-    descriptor to a same-name Subject node) and NEVER mint Point stubs by name
-    (an absent Point target => skip — absent Documents/Objects/Events return
-    None too; those entities are journaled by their own creation events, and an
-    absent one is an unjournaled-producer edge that dies at rebuild).
+    Create-if-missing semantics survive for ONE arm — ``extractedFrom``
+    (Source): it MERGEs the provenance stub by ``url`` exactly as the live
+    ``_link_source`` writes it, so replay reproduces a node the live graph
+    really has, and a Source's identity IS its ``url`` (ONTOLOGY §3.2 — nothing
+    is derived from a name). Every other arm resolves only:
 
-    ``mint=False`` (#8398 review P1-2) forbids the Subject/Source stub mint and
-    leaves pure resolution. A #8398 link whose live cascade RESOLVED an
-    existing node must not mint a replacement when that node is missing at
-    replay: live created nothing, so a minted stub would be a node the live
-    graph never had. The missing endpoint is then reported as a failed link
-    instead — the honest outcome for an unjournaled producer.
+    * **``aboutSubject`` (Subject) mints its NAME-KEYED stub** when the bare
+      name has no holder — ``_mint_subject_stub``'s ``ON CREATE SET s.id=$name``
+      construction, which is name-DETERMINISTIC (so replay reproduces the same
+      node) and is what ``#8398``'s replay contract and the shipped pins are
+      written against. ⚠️ #3590 briefly made this arm resolve-only; that was
+      withdrawn — see ``_mint_subject_stub``'s docstring, which records why the
+      D9 rule against fold-time mints does not apply to a name-keyed stub.
+      ⛔ It is NOT discharged upstream: since #3590 D1 (RULED 2026-10-26) the
+      SDK's Event door registers NOTHING for a mention, so a NEW journal carries
+      no ``SubjectAdded`` for this name and this replay-time mint is the LIVE
+      mint too — a node whose `id` IS its `name`, the R1 shape, open as #8914.
+      (An earlier revision of this sentence claimed the door registered the
+      Subject; D1 deleted that door behaviour and the claim was not deleted
+      with it — #9876 review P2.)
+    * **``aboutDocument`` (Source) is RESOLVE-ONLY**, and for a sharper reason: a
+      miss is logged and skipped, never minted, because a phantom Source would
+      silently mis-point the resurrected edge (adversarial class B1). D10 §4.4
+      makes the document node a ``:Source``, so this is the ``rel`` that decides
+      the target-KIND contract — this resolver therefore does NOT
+      create-if-missing for every Source; read the branch, not the label.
+    * **every other label is RESOLVE-ONLY.** NEVER
+      auto-detect labels (Subject-first auto-detect would attach an aboutObject
+      descriptor to a same-name Subject node) and NEVER mint Point stubs by name
+      (an absent Point target => skip — absent Documents/Objects/Events return
+      None too; those entities are journaled by their own creation events, and an
+      absent one is an unjournaled-producer edge that dies at rebuild).
+
+    ``mint=False`` (#8398 review P1-2) forbids the stub mint — the
+    ``extractedFrom`` Source one and the ``aboutSubject`` one — and leaves pure
+    resolution (``resolve_source_key`` instead, which only canonicalises the
+    key). A #8398 link whose live
+    cascade RESOLVED an existing node must not mint a replacement when that node
+    is missing at replay: live created nothing, so a minted stub would be a node
+    the live graph never had. The missing endpoint is then reported as a failed
+    link instead — the honest outcome for an unjournaled producer.
 
     Returns {"internal": <FalkorDB internal node id>, "logical": <node.id>}
     or None. ``g`` is the projection graph handle (``self.g`` on
@@ -1477,6 +1589,18 @@ class _EdgeHandlers:
           every other label is resolve-only live, so minting one at replay would
           fabricate a node live never had.
 
+          ⚠️ **#3590 briefly retired the construction this flag describes, and
+          that retirement was WITHDRAWN (#8398).** ``_mint_subject_stub`` was
+          made resolve-only at that head, which made this flag inert on the
+          Subject arm and left a journaled ``mint_if_absent: true`` replaying as
+          a bare resolve — so a name no producer registered lost its link on
+          every replay, including the ``how:"name"`` records an append-only
+          journal cannot repair. The helper mints again, so the flag means what
+          it says on BOTH arms (its own docstring records the reasoning and the
+          shipped pins that depend on it). It is journaled ``true`` on the
+          Subject-stub fallback below because that is the RECORD shape
+          (``tests/test_8398_aboutobject_replay.py`` pins it).
+
         ``target_internal_ids`` — the FalkorDB internal ids the LIVE write must
         address, so the journal and the write come from ONE resolution rather
         than two reads that could disagree. A LIST because a name — or a
@@ -1511,11 +1635,23 @@ class _EdgeHandlers:
             if link is not None:
                 return link, internals
         # Nothing matched — live defaults to a Subject stub (label-agnostic
-        # source). #2489: the mint is routed through the SHARED helper
-        # (_mint_subject_stub) so live wiring and rebuild replay mint
-        # byte-identical stubs (one create path). The stub's id IS its name
-        # (`ON CREATE SET s.id=$name`), which is why the name is a valid
-        # ``targets`` value here.
+        # source). #2489 routed that mint through the SHARED helper
+        # (_mint_subject_stub) so live wiring and rebuild replay produced
+        # byte-identical stubs (one create path). ⚠️ #3590 made the helper
+        # resolve-only for a while and that is WITHDRAWN: the stub is
+        # name-KEYED, so its id is a pure function of the MERGE key and replay
+        # reproduces it exactly — the mint D9 forbids is the OPAQUE one, not
+        # this one (see the helper's docstring). ⛔ It is NOT covered upstream:
+        # since #3590 D1 (RULED 2026-10-26) the SDK's Event door registers
+        # NOTHING for a mention — "an unresolvable mention drops its link,
+        # records the miss, and mints nothing" — so a NEW journal carries no
+        # ``SubjectAdded`` for this name and DOES depend on this replay-time
+        # mint. That mint writes `id` = `name` (the R1 shape): the residual is
+        # #8914, not a producer duty the door discharges (#9876 review P2).
+        #
+        # `mint_if_absent` is True on purpose: it is the record's claim about
+        # the construction this fallback names, and BOTH arms now honour it
+        # (``resolve_structural_target(mint=…)``).
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(entity_name):
             _log_identity_skip("Subject stub", entity_name, "name (MERGE key)")
@@ -1684,8 +1820,13 @@ class _EdgeHandlers:
 
         ``target_internal`` is the id (or, for a name with several legal
         carriers, the ids) ``resolve_about_link`` resolved; ``None`` means the
-        live path must mint the ``:Subject`` stub first (the cascade's
-        fallback). Writing by the RESOLVED internal id — rather than
+        live path must RESOLVE-OR-MINT the ``:Subject`` stub the cascade's
+        fallback named (``_mint_subject_stub`` — the name-keyed construction
+        live and replay share; the caller may have registered that name already,
+        in which case this resolves that node. ⛔ NOT "the SDK door has normally
+        registered it": since D1 (RULED 2026-10-26) the door mints nothing for a
+        mention, so nothing is registered for an unregistered reference — the
+        stub is what makes the link wire on both passes). Writing by the RESOLVED internal id — rather than
         re-matching the name inside the MERGE — is what makes the journaled link
         and the edge the same decision, with no second read that could answer
         differently. Every resolved id is written, so the live edge set is

@@ -1076,11 +1076,21 @@ def _local_capture_error(harness: str,
     Any well-formed dict is returned so the report can show WHAT was found;
     the caller (:func:`_install_link`) accepts it as install-inert evidence
     only when its ``kind`` marker matches.
+
+    ``errors="replace"`` is load-bearing now that #4848 splices filesystem
+    PATHS into ``detail``: a directory name may carry a byte that is not valid
+    UTF-8 (legal on Linux), the pure-shell writer cannot transcode it, and a
+    strict decode raises ``UnicodeDecodeError`` — which IS a ``ValueError``, so
+    this function returned ``None`` and an INERT install with a pathological
+    path in its own refusal read as PROVEN. A record whose bytes cannot be
+    decoded is still evidence; a record that is not JSON is not (the
+    ``json.JSONDecodeError`` path below keeps that distinction).
     """
     try:
         data = _json.loads(
             _local_capture_error_file(
-                harness, env, kind).read_text(encoding="utf-8"))
+                harness, env, kind).read_text(
+                    encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None

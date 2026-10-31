@@ -551,3 +551,129 @@ def test_supersede_does_not_duplicate_a_prewired_operator_edge(sdk):
     assert proj.g.query(
         "MATCH (old:Point {id:$o})-[:INPUT]->(:Point {is_operator:true}) "
         "RETURN count(*)", params={"o": old["id"]}).result_set[0][0] == 0
+
+
+# ── #9417: an about* edge keeps the binder's confidence across a supersede ────
+def test_supersede_carries_about_edge_confidence(sdk):
+    """#9417: the structural transfer recreated `about*` edges with a BARE MERGE,
+    so the subject binder's `confidence` (session_link.py:381,
+    subject_binding.py:481) was dropped rather than copied. It must cross over.
+
+    Non-vacuity: with `SET nr += $attrs` removed from the transfer, the
+    transferred edge has no `confidence` key and this assertion goes red.
+    """
+    proj = sdk._get_proj()
+    old = _make_point(sdk, content="Old: the subject binding")
+    new = _make_point(sdk, content="New: the same claim, restated")
+    subject = sdk.create_point("statement", "The bound subject")
+
+    # Wire the about* edge exactly as the binder does: MERGE + SET r.confidence
+    proj.g.query(
+        "MATCH (s:Point {id:$sid}), (t:Point {id:$tid}) "
+        "MERGE (s)-[r:aboutSubject]->(t) SET r.confidence=$conf",
+        params={"sid": old["id"], "tid": subject["id"], "conf": 0.83},
+    )
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$nid})-[r:aboutSubject]->(t:Point {id:$tid}) "
+        "RETURN properties(r)",
+        params={"nid": new["id"], "tid": subject["id"]},
+    ).result_set
+    assert rows, "the aboutSubject edge was not transferred to the successor"
+    assert rows[0][0].get("confidence") == pytest.approx(0.83), (
+        "#9417: the binder's confidence was dropped on supersede — "
+        f"transferred edge properties: {rows[0][0]}"
+    )
+
+
+def test_supersede_does_not_delete_the_successors_own_confidence(sdk):
+    """#9417 review P1: the carry must not OVERWRITE the successor's own value.
+
+    `SET nr += $attrs` overwrites PER KEY. The collision is the COMMON case, not
+    an exotic one: `supersede_point` is the RESTATEMENT path, so a restated claim
+    about the same subject is bound to the same Subject by `bind_point_subjects`
+    and BOTH edges exist. With an unconditional carry the retired point's value
+    wins and the successor's live value is destroyed — and at the time the
+    `DirectEdgeRepoint` descriptor carried no `attrs`, so the overwritten value
+    was journaled nowhere and could not be rebuilt (it carries them since
+    `#10139`).
+
+    Pre-#9417 this could not happen: the transfer was a bare MERGE, which leaves a
+    pre-existing edge untouched. The carry must therefore be `ON CREATE SET`:
+    never leave a new edge bare, never clobber a live one.
+
+    Non-vacuity: with `ON CREATE SET` widened back to `SET`, the successor's 0.91
+    becomes 0.42 and the assertion below goes red. Measured before the fix:
+    old 0.42 + successor 0.91 -> 0.42, count(r) == 1.
+    """
+    proj = sdk._get_proj()
+    old = _make_point(sdk, content="Old: the subject binding")
+    new = _make_point(sdk, content="New: the same claim, restated")
+    subject = sdk.create_point("statement", "The bound subject")
+
+    # The OLD point's binding.
+    proj.g.query(
+        "MATCH (s:Point {id:$sid}), (t:Point {id:$tid}) "
+        "MERGE (s)-[r:aboutSubject]->(t) SET r.confidence=$conf",
+        params={"sid": old["id"], "tid": subject["id"], "conf": 0.42},
+    )
+    # The SUCCESSOR's OWN live binding on the SAME target — the collision.
+    proj.g.query(
+        "MATCH (s:Point {id:$sid}), (t:Point {id:$tid}) "
+        "MERGE (s)-[r:aboutSubject]->(t) SET r.confidence=$conf",
+        params={"sid": new["id"], "tid": subject["id"], "conf": 0.91},
+    )
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$nid})-[r:aboutSubject]->(t:Point {id:$tid}) "
+        "RETURN properties(r)",
+        params={"nid": new["id"], "tid": subject["id"]},
+    ).result_set
+    assert rows, "the aboutSubject edge is missing from the successor"
+    assert len(rows) == 1, (
+        f"the transfer duplicated the successor edge: {len(rows)} rows")
+    assert rows[0][0].get("confidence") == pytest.approx(0.91), (
+        "#9417 review P1: the retired point's confidence overwrote the "
+        "successor's own live value — "
+        f"transferred edge properties: {rows[0][0]}"
+    )
+
+
+def test_supersede_carries_no_dead_source_version_key(sdk):
+    """#9417 review P2: `source_version` was on the whitelist but can never match.
+
+    The graph writes the anchor as `sourceVersion` (projection/edges.py:504,
+    `_anchor_on_create`); nothing writes `r.source_version`. The entry was copied
+    from the RECORD vocabulary (`RelationUpsert.attrs`), where it means something
+    else, and re-applying it on a re-link is exactly what that contract forbids
+    ("a re-link must not ADVANCE a recorded version").
+
+    This pins the absence so the dead key cannot come back: a `source_version`
+    property on the transferred edge means the whitelist regained an entry no
+    consumer writes.
+    """
+    proj = sdk._get_proj()
+    old = _make_point(sdk, content="Old: versioned subject binding")
+    new = _make_point(sdk, content="New: same claim, restated")
+    subject = sdk.create_point("statement", "The bound subject")
+    proj.g.query(
+        "MATCH (s:Point {id:$sid}), (t:Point {id:$tid}) "
+        "MERGE (s)-[r:aboutSubject]->(t) SET r.confidence=$c, r.source_version='v1'",
+        params={"sid": old["id"], "tid": subject["id"], "c": 0.5},
+    )
+
+    sdk.supersede_point(old["id"], new["id"])
+
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$nid})-[r:aboutSubject]->(t:Point {id:$tid}) "
+        "RETURN properties(r)",
+        params={"nid": new["id"], "tid": subject["id"]},
+    ).result_set
+    assert rows, "the aboutSubject edge is missing from the successor"
+    assert "source_version" not in rows[0][0], (
+        "the dead `source_version` whitelist entry is carrying again: "
+        f"{rows[0][0]}")

@@ -671,11 +671,17 @@ class TestTheStateReadBackIsTheSameStatement:
             "the `name` branch re-keyed the node (url is a writable prop on the "
             "identity itself) and journalled NOTHING — a separate post-write "
             "read-back by the old url cannot find the re-keyed node (#4649)")
-        assert recs[0]["state"] == {"url": new}, recs[0]
+        assert recs[0]["state"] == {"url": new, "name": "Renamed"}, recs[0]
 
         proj.rebuild_all(str(events), confirm_destructive=True)
         assert _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=new), (
             "rebuild_all reverted the re-key: the state write had no record")
+        # ⛔ #3590: the same record must carry the NAME half too — a rename is a
+        # state write on the stable identity, so a record that shipped only the
+        # url would rebuild the re-key and silently lose the new name.
+        assert _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.name", u=new) \
+            == [["Renamed"]], (
+            "rebuild_all reverted the rename the same record claims to carry")
 
 
 # ══════════════════════════════════════════════════════════════════════════

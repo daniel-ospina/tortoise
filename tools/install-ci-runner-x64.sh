@@ -26,22 +26,80 @@
 #   `current_mode` read `local`, so on a healthy GitHub-hosted day the gate runs `fallback_off`.
 #   Since `agent-infra#2327` (PR #2338) that is harmless here: each body is derived from the
 #   runner's OWN host label (`labels_for`), so it strips `ubuntu-latest` and keeps `self-hosted-x64`
-#   — never stamping `self-hosted-arm64`. The label stays gate-following; see `--repair-labels`.
+#   — never stamping `self-hosted-arm64`. The label stays gate-following, but ONLY the gate can
+#   DETACH it: `--repair-labels` can add it back and can never take it away, so an explicit
+#   `--fallback off` on the repair path is REFUSED rather than accepted and then ignored (see the
+#   repair block below, and the EXIT contract).
+#
+# OVERRIDES: the rule above — that an x64 runner carrying `ubuntu-latest` is a DEFECT to be
+#   stripped, and `--repair-labels` implementing it by PUTting exactly the COMPUTED set (a
+#   REPLACE) — assumed the ARM64 pool carries the fallback label. It does not: the five ARM64
+#   runners were STRIPPED of `ubuntu-latest` on the evidence in open owner-decision issue #6897
+#   (ARM boxes won `ubuntu-latest` jobs and died in "Set up job" on a codeload timeout, turning one
+#   shard per run into a FALSE RED). So NOTHING answers `ubuntu-latest` today, while the REQUIRED
+#   aggregate `python-ci-gate` still asks for it — and a repair that REPLACES the set strips the
+#   label from the one pool left. A repair therefore UNIONS the runner's current labels with the
+#   computed set, so it can never REMOVE `ubuntu-latest` or any custom label a workflow targets.
+#   ⛔ Restoring the label on ARM is NOT part of this — #6897 measured that wrong.
+#   ⛔ AND A UNION CANNOT DETACH, so `--repair-labels --fallback off` is REFUSED (exit 2, before any
+#   read or PUT) instead of being accepted and then doing nothing to `ubuntu-latest`: on a healthy
+#   hosted day the gate's state IS `off`, and the pre-refusal path printed `removed=[]`, said
+#   `relabelled …`, and exited 0 while the label it was asked to detach stayed attached. Detaching
+#   is the gate's writer (`fallback_off`, agent-infra) and, by hand, the per-label verb
+#   `DELETE repos/$REPO/actions/runners/<id>/labels/ubuntu-latest`.
+#
+#   ⛔ THE UNION IS NOT UNCONDITIONAL, and the two exceptions are NOT the fallback label's. A
+#   literal union would also make BOTH defects below permanent, and each is a false PASS rather
+#   than a queue delay: (a) a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …) —
+#   the label a leg pins to ESCAPE this pool, so keeping it un-pins `test-slow` / `workflow-lint` /
+#   `finding-provenance` / `mirror-images` onto a bare box whose PATH lacks their tools (measured
+#   2026-10-24: exit 127, `gh: command not found`); (b) a FOREIGN ARCH MARKER (`self-hosted-arm64`
+#   on this x64 box) — the pre-#2327 damage a repair is expected to HEAL. (b) is ALWAYS dropped; (a)
+#   is KEPT only where THIS RUN's resolution claims it — `CI_RUNNER_OS_LABEL=on`, or `auto` on a host
+#   whose `/etc/os-release` reports the pinned release — and then ONLY the one spelling this box may
+#   claim, `$OS_LABEL`; another image's pin such as `ubuntu-24.04-arm` stays dropped, because a label
+#   names an IMAGE and keeping it is a false-architecture claim. The reader is `$OS_LABELS`, the
+#   RESOLUTION `resolve_labels` computed, never the flag spelling (#10275). Both are PRINTED, never
+#   silently skipped. `_preserve_labels` drops both but reads NO flag.
+#   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
+#   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
+#   `resolve_os_label` (`:306`), reached from `resolve_labels` — i.e. from install, repair and
+#   `--print-labels` — and called by `--status` to READ the intent (it registers nothing) — so
+#   a runner this script registers under `on|auto` carries `ubuntu-24.04`; the autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
+#   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
+#   timer so a scheduled fill inherits the box's choice. The READER that decides the carve-out is the
+#   `case` in the repair block below. So an UNSET flag still takes the `off` arm and DROPS the pin
+#   (a repair with no exported flag IS #6897's recorded revert: `CI_RUNNER_OS_LABEL=off` **plus**
+#   `--repair-labels`), and that is now a property of the SHELL, not of the script: which row is live
+#   on any box is a MEASUREMENT (`systemctl show -p Environment runner-autoscale.service`), never a
+#   fact this comment can hold. Export `CI_RUNNER_OS_LABEL=on` to KEEP one.
 #
 # ⛔ ARCH LABELS ARE NOT INTERCHANGEABLE. A runner is registered with `self-hosted-x64`
 #   (its own distinct pool marker, mirroring `self-hosted-arm64`) — NEVER with
-#   `self-hosted-arm64`, and never with `ubuntu-<version>`. Claiming another arch's label
-#   would let an x86 box serve an arch-specific job and produce a wrong artifact, which is a
-#   false PASS rather than a queue delay. `ubuntu-<version>` stays claimed by NO self-hosted
-#   runner: it is the version-pinned HOSTED label that `test-slow` / `workflow-lint` /
-#   `finding-provenance` / `mirror-images` are pinned to on purpose (they need the hosted
-#   class or a fresh egress IP).
+#   `self-hosted-arm64`. Claiming another arch's label would let an x86 box serve an arch-specific
+#   job and produce a wrong artifact, which is a false PASS rather than a queue delay.
+#
+# ⛔ `ubuntu-<version>` STAYS UNCLAIMED BY DEFAULT — and this script can now emit it on request.
+#   The pin is a recorded decision (#6897/#7867): the pool is ~2x slower and killed `test-slow` at
+#   its 20m watchdog, so those legs were pinned to GitHub-hosted on purpose. `CI_RUNNER_OS_LABEL`
+#   therefore defaults to `off`: nothing is claimed unless an operator asks.
+#   ⚠️ WHY THE ARM EXISTS AT ALL: a hosted-only label is only safe while hosted exists. Measured
+#   2026-10-28, hosted was effectively unavailable (1 completed job in an hour against 25 on
+#   self-hosted), so the pinned legs did not get a "queue delay" — they NEVER RAN, `python-ci-gate`
+#   waited for them forever, and EVERY PR stayed BLOCKED. The gate was found queued 8 HOURS on a run
+#   whose every other job had finished; it dispatched within a minute of `ubuntu-24.04` being added
+#   to the pool. So the arms are the documented escape from a deadlock, not a new default:
+#   `CI_RUNNER_OS_LABEL=on` (or `=auto`) claims the OS fact this box actually is (`/etc/os-release`).
+#   ⛔ THE COST IS NAMED, NOT ASSUMED AWAY: on this pool a watchdog-bounded leg can be KILLED where
+#   hosted finished it (#6897) — a red on healthy code. That is a red somebody sees, unlike a gate
+#   that is never dispatched. Choosing between the two is an owner decision, recorded in
+#   `docs/ops/ci-runner-x64.md`; this flag is how either choice is applied without another code change.
 #
 # USAGE
 #   tools/install-ci-runner-x64.sh --count 2                  # install/repair runners 1..2
 #   tools/install-ci-runner-x64.sh --count 2 --dry-run        # plan + headroom arithmetic only
-#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # re-sync labels to the gate's state
-#   tools/install-ci-runner-x64.sh --status                   # remote view + local units
+#   tools/install-ci-runner-x64.sh --status                   # remote view + label coverage + units
+#   tools/install-ci-runner-x64.sh --repair-labels --count 2  # UNION the computed labels in (drops a version pin unless THIS BOX's resolution claims it — `CI_RUNNER_OS_LABEL=on`, or `auto` on the matching release — + a foreign arch marker; refuses --fallback off — it cannot DETACH)
 #   tools/install-ci-runner-x64.sh --uninstall --count 2      # deregister + remove
 #   tools/install-ci-runner-x64.sh --print-labels             # the label set config.sh would get
 #   tools/install-ci-runner-x64.sh --help
@@ -54,14 +112,30 @@
 #   the same exit code as "the install broke".
 #     0  ok
 #     1  usage — bad flag, bad --count, bad sizing override. Nothing was attempted.
-#     2  GUARD refused — headroom / arch / undecidable fallback / a `--uninstall` target that is
-#        not provably a runner install. Nothing was downloaded, registered or removed; re-run
-#        with a smaller --count, on an x86_64 host, with an explicit --fallback, or with the
+#     2  GUARD refused — headroom / arch / undecidable fallback / `--repair-labels --fallback off`
+#        (a repair only UNIONS, so it cannot DETACH the fallback label) / an `--uninstall` target
+#        that is not provably a runner install. Nothing was downloaded, registered or removed;
+#        re-run with a smaller --count, on an x86_64 host, with --fallback auto|on, or with the
 #        right CI_RUNNER_BASE.
 #     3  OPERATION failed — download, sha256 verify, extract, token mint, config.sh, svc.sh (a
 #        failed systemd unit removal, or a failed `config.sh remove`, included — that target is then
 #        LEFT intact rather than deleted out from under an enabled unit or a live registration), a
-#        tool missing from PATH, or a failed remote read (`--status`).
+#        tool missing from PATH, a failed remote read (`--status`), or a PER-RUNNER refusal inside
+#        the repair loop (an unreadable label set, an illegal label, an empty union): that runner is
+#        skipped and the rest of the batch still runs, because an earlier runner may ALREADY have
+#        been relabelled and exit 2 promises "nothing was changed".
+#        (`--repair-labels` against a `gh` that returns no id is 3 for the same reason.)
+#     4  label-coverage could not read the workflows, so it has NO verdict — run `--status` from
+#        the directory holding `.github/workflows`. An empty read is not a clean bill of health, and
+#        neither is a PARTIAL one: a `runs-on:` whose labels are not a static label set (a `${{ … }}`
+#        expression in the value, in a member, or INSIDE one — `ubuntu-24.04-${{ matrix.arch }}` — or
+#        a spelling this parser cannot carry as one label: a space-bearing token, a YAML alias, a
+#        block-scalar indicator) is refused, never cleared.
+#     5  label-coverage WAS read and found a required label this pool is ASKED to serve with NO
+#        self-hosted answer — the erosion state: the operator opted in, and the label is not there.
+#        A zero-answer label this pool is NOT asked to serve (`CI_RUNNER_OS_LABEL=off`, the shipped
+#        default, or `auto` declining) is a REPORT, not a verdict: #6897's pin applied correctly OR
+#        erosion to zero — one shell cannot tell them apart. 0 does not mean "covered".
 set -uo pipefail
 
 # The help text is the file's OWN header, cut at the closing `set` line rather than a frozen line
@@ -71,6 +145,10 @@ set -uo pipefail
 usage() { awk '/^# USAGE/{p=1} /^set -uo pipefail$/{p=0} p' "$0" | sed 's/^# \{0,1\}//'; }
 
 REPO="${CI_RUNNER_REPO:-daniel-ospina/tortoise}"
+# ⛔ `--status`'s label-coverage block reads `.github/workflows` from the CALLER'S CWD, not from the
+# checkout this script lives in — the label contract it checks is the one in the tree you are
+# standing in. That is why it refuses (exit 4) rather than reporting coverage when there is nothing
+# to read there: run it from the repo root you mean to check.
 BASE="${CI_RUNNER_BASE:-/opt/gh-runner-x64}"
 NAME_PREFIX="${CI_RUNNER_NAME_PREFIX:-pi-runner-x64}"
 # Where `svc.sh install` writes the unit, and the ONE path this script stats to decide whether a
@@ -85,6 +163,25 @@ ARCH_LABEL="self-hosted-x64"
 ARM_POOL_LABEL="self-hosted-arm64"
 # The fallback label the gate attaches/detaches — never permanent (see header).
 FALLBACK_LABEL="ubuntu-latest"
+# ⛔ THE OS-RELEASE LABEL IS AN OS FACT, NOT A FALLBACK — and omitting it blocks EVERY PR.
+# The required legs `workflow-lint` and `test-slow (a–e)` in .github/workflows/python-ci.yml name
+# `runs-on: ubuntu-24.04`. The only other pool that answers that label is GitHub-HOSTED, and hosted
+# is effectively unavailable here (measured 2026-10-28: 1 completed hosted job/hour against 92 jobs
+# on self-hosted in 30 min). A runner that omits it therefore makes those legs UNSCHEDULABLE, and
+# `python-ci-gate` — the REQUIRED aggregate whose `needs:` includes them — is never dispatched, so
+# every PR stays BLOCKED no matter how much capacity the fleet has.
+# Measured the same night: the gate had been queued 8h on a run whose every other job had completed,
+# and it dispatched within a minute of this label being added (on pi-runner-cmux-x64-6).
+# Derived from /etc/os-release below in the `auto` arm only (`on` claims it unconditionally, which is
+# why `on` is the wrong value on a box that is not 24.04); an unrecognised value is a usage error
+# in EVERY mode, including `--status` and `--uninstall` (validated once, before the dispatch).
+OS_LABEL="ubuntu-24.04"
+# The OS NAME and OS-RELEASE reads are seams for the same reason `CI_RUNNER_ARCH` / `CI_RUNNER_NCPU`
+# are: the box that reads this code is not always the box being guarded, so the `auto` arms must be
+# exercisable on a non-Linux dev box (and on a Linux one that is not 24.04) rather than only on the
+# one host whose answer happens to be `on`. They change no behaviour on a real host.
+OS_NAME_SEAM="${CI_RUNNER_OS_NAME:-}"
+OS_RELEASE_SEAM="${CI_RUNNER_OS_RELEASE:-/etc/os-release}"
 # Measured on a real job (2026-10-22, this box, `legal-e2e`): one python process saturated a
 # core (99.3%) with apt at 46% alongside — i.e. ~1.0-1.5 cores per concurrent job, plus the
 # per-job docker/FalkorDB it starts. 2 cores/job is the sizing unit, and 2 cores are held back
@@ -189,8 +286,58 @@ fallback_engaged() {
   [ "$n" -gt 0 ] && echo on || echo off
 }
 
+# ── the OS-label mode: validated ONCE, for EVERY mode ─────────────────────────────────────────
+# ⛔ AN UNKNOWN VALUE IS REFUSED, never a silent no-op: `CI_RUNNER_OS_LABEL=true|ON|1` used to print
+# a label list with no `ubuntu-24.04` and exit 0, so an operator who mistyped believed the deadlock
+# escape was applied while every PR stayed BLOCKED — the exact silent failure this flag exists to
+# remove. Nothing has been installed at this point, so the exit is 1 (usage).
+#
+# ⛔ AND IT IS VALIDATED HERE, NOT ONLY IN `resolve_labels`. The check used to live inside
+# `resolve_os_label` — which `--status` DOES reach (its intent read), but whose `case` carries no
+# `*)` arm to complain with, so `CI_RUNNER_OS_LABEL=true --status` fell through it and exited 0 with
+# no complaint; `--uninstall` never calls the resolver at all. `--status` is the mode an operator
+# runs to VERIFY the escape is applied, so a typo was silent in exactly the one place it is looked
+# for. Same pattern as `--count` and the sizing units above: read once, before the mode dispatch.
+case "${CI_RUNNER_OS_LABEL:-off}" in
+  on|off|auto) : ;;
+  *) die "CI_RUNNER_OS_LABEL must be off|on|auto (got '$CI_RUNNER_OS_LABEL')" 1 ;;
+esac
+
+resolve_os_label() { # sets OS_LABELS ("" or ",ubuntu-24.04"); OFF by default, never guessed
+  local os_name released
+  OS_LABELS=""
+  case "${CI_RUNNER_OS_LABEL:-off}" in
+    on)  OS_LABELS=",$OS_LABEL"; return 0 ;;
+    off) return 0 ;;
+    auto)
+      # ⛔ `auto` DECLINING MUST SAY SO. It used to return 0 in silence, so a 22.04 box, a container
+      # with no /etc/os-release, or a macOS lane got `--print-labels` without `ubuntu-24.04` and no
+      # signal at all — indistinguishable from "opted out", on the one property (the host's OS
+      # version) that decides whether the deadlock escape is applied. `on`'s refusal is loud; the
+      # RECOMMENDED spelling must not be the quiet one.
+      os_name="${OS_NAME_SEAM:-$(uname -s 2>/dev/null)}"
+      if [ "$os_name" != Linux ]; then
+        say "os-label: auto DECLINED — host is ${os_name:-unknown}, not Linux; $OS_LABEL not claimed"
+        return 0
+      fi
+      # The subshell keeps os-release's NAME/VERSION_ID out of this script's environment.
+      # shellcheck disable=SC1091
+      released="$( ( . "$OS_RELEASE_SEAM" 2>/dev/null; printf '%s' "${VERSION_ID:-}" ) )"
+      if [ "$released" = "${OS_LABEL#ubuntu-}" ]; then
+        OS_LABELS=",$OS_LABEL"
+      else
+        # ⛔ NAME THE MEASUREMENT, not the expectation: "does not report VERSION_ID=24.04" is a
+        # claim about what we wanted, so an operator on a 22.04 box could not tell whether the read
+        # failed or the box really is 22.04.
+        say "os-label: auto DECLINED — $OS_RELEASE_SEAM reports VERSION_ID=${released:-<none>}, not ${OS_LABEL#ubuntu-}; $OS_LABEL not claimed"
+      fi
+      return 0 ;;
+  esac
+}
+
 resolve_labels() { # sets LABELS; exit 2 when the state cannot be read
   local engaged
+  resolve_os_label
   case "$FALLBACK" in
     on)  LABELS="$ARCH_LABEL,$FALLBACK_LABEL" ;;
     off) LABELS="$ARCH_LABEL" ;;
@@ -202,26 +349,89 @@ resolve_labels() { # sets LABELS; exit 2 when the state cannot be read
       # does not send (measured: `{self-hosted-x64}` planned, `{self-hosted-x64,ubuntu-latest}` sent
       # on an engaged pool). Repair mode calls `need gh` before this, so the read is available.
       if [ "$DRY" = 1 ] && [ "$MODE" != repair ]; then
-        LABELS="$ARCH_LABEL"
+        LABELS="$ARCH_LABEL$OS_LABELS"
         say "fallback: auto — decided at install time from the ARM64 pool's state (not read in a dry run)"
         return 0
       fi
       engaged="$(fallback_engaged)" || die "cannot read whether the ARM64 pool is carrying $FALLBACK_LABEL — refusing to guess which pool this runner joins. Re-run with --fallback on or --fallback off." 2
+      # ⛔ THE LOG MUST PRINT THE SET THAT IS REGISTERED. `LABELS` is completed by `$OS_LABELS` at the
+      # end of this function, so printing `$LABELS` here logged `labels=self-hosted-x64,ubuntu-latest`
+      # four lines before the runner was registered with `…,ubuntu-24.04` — inside ONE run, and the
+      # runbook quotes this line as recorded output, so an operator checking the log for the
+      # mitigation saw it absent and concluded the flag had not applied (the shape this whole change
+      # removes). Appending `$OS_LABELS` in the message keeps ONE append point for `LABELS`.
       if [ "$engaged" = on ]; then
         LABELS="$ARCH_LABEL,$FALLBACK_LABEL"
-        say "fallback: ENGAGED on the ARM64 pool now → labels=$LABELS"
+        say "fallback: ENGAGED on the ARM64 pool now → labels=$LABELS$OS_LABELS"
       else
         LABELS="$ARCH_LABEL"
-        say "fallback: not engaged on the ARM64 pool now → labels=$LABELS (the gate attaches $FALLBACK_LABEL when it falls back)"
+        say "fallback: not engaged on the ARM64 pool now → labels=$LABELS$OS_LABELS (the gate attaches $FALLBACK_LABEL when it falls back)"
       fi ;;
     *) die "--fallback must be auto|on|off (got '$FALLBACK')" 1 ;;
   esac
+  # The OS fact rides along on every arm: it is not a fallback state, so `--fallback off` must not
+  # drop it — dropping it is what leaves the required ubuntu-24.04 legs with no self-hosted answer.
+  LABELS="$LABELS$OS_LABELS"
+}
+
+# ── label algebra: the UNION a repair PUTs ─────────────────────────────────────
+# Host-derived labels GitHub OWNS. They come back in every runner's label list, they cannot be set
+# by hand (HTTP 422 `Cannot set labels that duplicate existing read-only labels`, measured
+# 2026-10-27), and they are not part of the custom set this script manages — so they are filtered
+# out of the PUT body. Dropping them is not a loss: GitHub re-derives them from the host.
+# ⛔ EXACT SPELLINGS ONLY, deliberately. Matching these case-insensitively (with `tr`) would also
+# swallow a CUSTOM label an operator created — e.g. a `linux` or `x64` of their own — and filtering
+# a label out of the PUT body IS a removal, which is the one thing this block must never do.
+# GitHub returns the reserved spellings below and refuses to have them re-set; nothing else is
+# touched.
+is_host_label() {
+  case "$1" in
+    self-hosted|Linux|macOS|Windows|X64|ARM64|ARM) return 0 ;;
+  esac
+  return 1
+}
+# Is $2 already in the comma-separated list $1? (`case`, not an array: bash 3.2 has no assoc arrays.)
+list_has() { case ",$1," in *",$2,"*) return 0 ;; esac; return 1; }
+# Is $1 an ARCH/POOL marker that is NOT this box's (`self-hosted-*` other than `$ARCH_LABEL`)?
+# It must be dropped by a repair: `self-hosted-arm64` is a CUSTOM label (GitHub returns only
+# `self-hosted`, `Linux`/`macOS`/`Windows` and `X64`/`ARM64`/`ARM` as read-only), so a union that
+# keeps it leaves an x86 box advertising an arm64 pool — the false PASS this file forbids at
+# `:77-80`, and the pre-#2327 stamp a repair exists to heal. `--repair-labels` therefore always
+# puts back THIS arch's marker and only this one, which is what `_preserve_labels` re-derives too. ⛔ MATCHED CASE-INSENSITIVELY (`tr`), UNLIKE `is_host_label` ABOVE — the exact-case rule does NOT transfer to this class: docs.github.com "apply labels" states "Labels are case-insensitive", and a CUSTOM label's spelling is whatever created it, so `Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64 marker and still answer a lower-case `runs-on:` — an exact-case test here is how a mixed-case stamp escapes both heal paths and keeps the false PASS alive.
+is_foreign_arch_label() {
+  case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+    "$ARCH_LABEL") return 1 ;;
+    self-hosted-*) return 0 ;;
+  esac
+  return 1
+}
+# Is $1 a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …)? Same class/shape as
+# `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two writers. The pool's
+# DEFAULT is `ubuntu-latest`, never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:87-88`: the
+# `CI_RUNNER_OS_LABEL=on|auto` suspension) — the pin a leg names to escape this pool, and
+# `ubuntu-2204-tools` is NOT in the class (boundary test in `tests/test_runner_autoscale.py`). ⛔ A
+# HERE-STRING, never a builtin writer piped into a quiet grep (#841): under `pipefail` the quiet
+# grep's early exit leaves the writer with SIGPIPE and the PIPELINE non-zero over text that DID match — a false negative here would drop this carve-out and put a version pin back on the pool. `repo-harnesses` enforces the shape.
+is_version_pinned_hosted_label() {
+  grep -qiE '^ubuntu-[0-9]+(\.[0-9]+)*(-arm)?$' <<<"$1"
+}
+
+# Print the OFFLINE half of a coverage measurement: context, never coverage. GitHub's own runner
+# status list defines `Offline` as "the runner is not connected to GitHub", so an offline runner
+# cannot be handed a job — the ONLINE count is the answer, and this line is what stops a pool of
+# carriers that have all fallen over from reading as covered. Called on every verdict arm.
+offline_context() { # $1=label  $2=offline carriers of it  $3=offline runners in the pool
+  if [ "$3" -gt 0 ]; then
+    say "     Offline, so NOT counted as an answer: $3 runner(s) in the pool are not \`online\`, $2 of them carrying $1."
+  fi
 }
 
 # ── status ─────────────────────────────────────────────────────────────────────
 if [ "$MODE" = status ]; then
   need gh
-  gh api "repos/$REPO/actions/runners?per_page=100" \
+  # `--paginate`: the same one-page truncation the coverage read below had, on the read that
+  # answers "is this runner registered and idle".
+  gh api --paginate "repos/$REPO/actions/runners" \
     --jq '.runners[] | "\(.name)\t\(.status)\tbusy=\(.busy)\t\([.labels[].name]|join(","))"' \
     || exit 3
   for i in $(seq 1 "$COUNT"); do
@@ -232,13 +442,620 @@ if [ "$MODE" = status ]; then
     state="$(systemctl is-enabled "$unit" 2>/dev/null || echo missing)/$(systemctl is-active "$unit" 2>/dev/null || echo inactive)"
     say "dir=$d unit=$unit enabled/active=$state"
   done
+  # ── label coverage: the contract this script exists to keep ──────────────────────────────────
+  # A `runs-on:` label with NO self-hosted answer can only be served by GitHub-HOSTED, and hosted is
+  # effectively unavailable here (measured 2026-10-28: 1 completed hosted job/hour against 92 jobs on
+  # self-hosted in 30 min). That is the shape that left `python-ci-gate` queued for 8 HOURS on a run
+  # whose every other job had finished: `workflow-lint` and `test-slow (a–e)` ask for `ubuntu-24.04`,
+  # no runner answered it, so the required aggregate was never dispatched and every PR stayed BLOCKED.
+  # Run this from the repo root — it reads the workflows to learn which labels must be answerable.
+  say "label-coverage — labels the workflows name vs runners answering them:"
+  # ⛔ ONE PAGINATED READ OF (name, status, labels), NOT A ONE-PAGE LABEL TALLY. `per_page=100` with
+  # no `--paginate` silently truncated a pool larger than 100 and reported a covered label as `0
+  # runners` (a false red on a large pool) — the read directly above it (`fallback_engaged`) is
+  # paginated for the same reason. The runner COUNT comes out of the same read, which is what lets
+  # the partial-coverage arm below exist at all: a label tally cannot tell 12 runners from 1.
+  # ⛔ AND THE ROW CARRIES `.status`, BECAUSE A LABEL ON AN OFFLINE RUNNER IS NOT AN ANSWER. GitHub's
+  # own runner list defines `Offline` as "the runner is not connected to GitHub" (and `Idle` as
+  # connected and ready) — an offline runner cannot be handed a job, so counting it as coverage
+  # reports the exact incident this block exists to surface as GREEN: 7 carriers of `ubuntu-24.04`,
+  # all offline, printed `7 of 7` with no `⚠️ PARTIAL` and exit 0 under `CI_RUNNER_OS_LABEL=on`.
+  # Runners go offline routinely (that is what `runner_autoscale.py::converge`'s DEAD/ORPHANED
+  # re-registration exists for), so this is a state, not an edge case. The count below is therefore
+  # ONLINE-only, and the offline rows are counted as CONTEXT and printed.
+  pool_tsv="$(gh api --paginate "repos/$REPO/actions/runners" --jq '.runners[] | [.name, .status, ([.labels[].name]|join(","))] | @tsv' 2>/dev/null)" || exit 3
+  # ⛔ THE RUNNER COUNT IS A MEASUREMENT, AND IT IS THE DENOMINATOR — so it is PASSED to the awk
+  # below, not re-inferred there. `awk` counts RECORDS, and an empty pool still feeds it ONE empty
+  # record (`printf '%s\n' ""`), so `total` came out as 1 and an empty pool printed
+  # `0 of 1 self-hosted runner(s)` — a fabricated runner, in the one block whose doctrine is "an
+  # empty read is not a coverage verdict". The correct 0 was computed here and then never read.
+  pool_total="$(printf '%s\n' "$pool_tsv" | grep -c . || true)"
+  case "$pool_total" in ''|*[!0-9]*) pool_total=0 ;; esac
+  # …and the ONLINE half of it, from the same read: the denominator of every class below is a
+  # population that can ANSWER, so it is the online population. An empty online pool keeps the
+  # pre-existing `0 of 0` reading (a measurement), never a silent fallback to the offline rows.
+  pool_online="$(printf '%s\n' "$pool_tsv" | awk -F'\t' '$2 == "online" {n++} END {printf "%d", n+0}')"
+  case "$pool_online" in ''|*[!0-9]*) pool_online=0 ;; esac
+  # ⛔ THE BARE-PIN VERDICT READS THE OPERATOR'S INTENT, NOT ONLY THE COUNT — the same predicate
+  # this block already applies to `ubuntu-latest` ("a pool carrying no `ubuntu-latest` IS the healthy
+  # state, because the gate is not routing it here"). Without it the block verdicts the CONFIGURATION
+  # #6897 REQUIRES as the incident state: the shipped default is `off`, so a pool that correctly
+  # answers no `ubuntu-24.04` — the pin, and the exact state this file's own revert recipe
+  # (`CI_RUNNER_OS_LABEL=off` plus `--repair-labels`) produces — exited 5, and the remedy it printed
+  # (`CI_RUNNER_OS_LABEL=on …`) re-applied a departure the owner has not settled. `--status` is the
+  # mode the runbook tells an operator to VERIFY with, so a permanently-red instrument there is the
+  # false red this block's neighbouring comment refuses to create for `ubuntu-latest`.
+  # The intent is READ FROM THE SAME FUNCTION THE INSTALL PATH USES (`resolve_os_label`, whose
+  # validation arm is 300 lines above), so the verdict and the label set a re-registration would
+  # actually get cannot disagree: `on` claims it, `auto` claims it only on a matching host, `off`
+  # (and `auto` declining) does not.
+  #
+  # ⛔ BUT IT IS THE INTENT OF **THIS SHELL**, WHICH IS NOT A PROPERTY OF THE POOL. A shell variable
+  # cannot say what the last installer pass, the autoscaler timer, or a peer lane asked for — so it
+  # may only ever ADD a verdict (the pool is asked ⇒ a zero answer is the incident), never SUBTRACT
+  # one. The runbook tells the operator to verify with the BARE `--status` (`docs/ops/ci-runner-x64.md`
+  # §*Verify it*), and in that invocation this variable is unset — i.e. `off` — so reading it as a
+  # pool fact made the DEFAULT invocation clear exactly the erosion this block exists to see, and
+  # made the `⚠️ PARTIAL` arm assert "this pool is not asked to serve it" on a line that had just
+  # MEASURED carriers answering it. A runner's labels are explicitly assigned (GitHub REST:
+  # `Add custom labels` / `Set custom labels` / `Remove all custom labels`; registration labels come
+  # from `config.sh --labels`), so `n > 0` is direct evidence that SOME actor asked the pool to serve
+  # the label — and a carrier outvotes a shell.
+  #
+  # So the two inputs stay SEPARATE and both are printed:
+  #   * `shell_asks_os_label` — what this shell's `CI_RUNNER_OS_LABEL` resolves to;
+  #   * `n` — the measurement. `n > 0` short-circuits the intent read at every consumer below.
+  # When the shell does not ask and `n == 0`, the honest output is the MEASUREMENT plus the
+  # ambiguity (the pin applied correctly, or erosion to zero — one shell cannot tell them apart);
+  # never an assertion of the harmless reading, which is a fail-open in the blocking direction.
+  resolve_os_label
+  case "$OS_LABELS" in
+    *",$OS_LABEL") shell_asks_os_label=1 ;;
+    *)              shell_asks_os_label=0 ;;
+  esac
+  uncovered=0
+  # ⛔ A WHOLE-LINE YAML COMMENT IS NOT A `runs-on:` LINE. Unanchored, `# legacy: runs-on: windows-2022`
+  # was counted as a required label and printed a false ⛔ UNCOVERED, and this tree's own comments
+  # name both real labels — the block printed 85/12 where the real lines are 77/9 (2026-10-29).
+  # Both arms are needed: strip whole-line comments, AND anchor to the line's first token — anchoring
+  # is what stops a TRAILING comment (`runs-on: x  # note: runs-on: y`) contributing `y`.
+  # ⛔ AND `*.yaml` IS AS REAL AS `*.yml` — GitHub accepts both. Globbing only `*.yml` read NOTHING
+  # on a repo whose workflows are `.yaml`, which the empty-read arm below then reports as exit 4 (a
+  # false failure, not a false pass) while `--status` never sees the labels it exists to check.
+  # ⛔ EXTRACTION IS A STATE MACHINE, NOT THREE GREPS. The pipeline this replaces required the
+  # value on the SAME line and unquoted DOUBLE quotes only, so three of the four DOCUMENTED
+  # `runs-on` forms were cleared to exit 0 — measured against the pre-fix script:
+  # `runs-on: ['ubuntu-24.04']` kept its single quotes, matched no class arm, fell to the `*)`
+  # report arm and left `uncovered=0`; a BLOCK sequence (`runs-on:` then `- ubuntu-24.04`) and a
+  # `group:`/`labels:` mapping yielded NOTHING AT ALL, so the label was never counted and the read
+  # looked covered. GitHub documents all four forms (a single string, an ARRAY of strings, a
+  # variable, and a `key: value` pair using `group`/`labels`), so those are not exotic spellings —
+  # they are most of the documented surface, and the incident state this block exists to surface is
+  # exactly what they express. Every one of them reported success, in the one direction the header
+  # above forbids.
+  # The arms: a same-line scalar or flow sequence; a block sequence; a mapping whose `labels:` key
+  # is a flow list, a scalar or a nested block list (`group:` names a runner GROUP, not a label, so
+  # it is consumed and never counted); and single quotes unquoted alongside double quotes.
+  # ⛔ ONE UNREADABLE MEMBER MAKES THE WHOLE BLOCK UNREADABLE — a `!` line, never a silent drop.
+  # The extractor used to print `!` only when the block yielded NOTHING (`got == 0 && !pgroup`), so
+  # any parseable sibling ABSORBED an unparsed one and the block cleared: `labels: ${{ … }}` beside
+  # `group: pool` emitted no label and no marker (the `group:` suppressed it), and
+  # `runs-on: [self-hosted, "${{ matrix.arch }}"]` emitted `self-hosted` and dropped the expression
+  # member. GitHub documents BOTH shapes — the combined `group:`/`labels:` form is its own example
+  # (`docs.github.com/…/self-hosted-runners/use-in-a-workflow`), and a matrix-ified workflow's first
+  # move is to put the OS into the label list — so a REQUIRED leg can be routed that way, and the
+  # instrument would have reported it `covered` and exited 0. That is the incident state this block
+  # exists to surface, cleared by the one arm that was meant to fail closed.
+  # So: an expression member (or a `labels:` key that yields no static label at all, even with a
+  # `group:` named beside it) prints `!`, exactly like a block with no readable label and no group.
+  # ⛔ ENUMERATE THE FILES, THEN REFUSE ON ONE THAT CANNOT BE OPENED. The raw glob with
+  # `2>/dev/null` discarded grep's per-file read error, so a workflow that could not be READ was
+  # SILENTLY DROPPED: its labels were never measured, the surviving files still produced a row set,
+  # no `!` was emitted, and the block printed a clean verdict and exited 0 over the one file it had
+  # failed to open. Measured: a `chmod 000` workflow naming `ubuntu-24.04` beside a readable
+  # `ubuntu-latest` → `ubuntu-24.04` appeared NOWHERE in the report, rc 0; restoring the mode on the
+  # same tree → rc 5. That is exactly the partial read the three exit-4 arms below exist to refuse,
+  # reached through the read they cannot see.
+  # ⛔ AND THE STATUS CANNOT BE KEYED ON GREP'S rc ALONE: with only `*.yml` present, the literal
+  # `.yaml` glob makes grep exit 2 for a reason that is NOT a read failure (measured `grep-rc=2`), so
+  # a blanket `|| exit 4` would red the normal tree. The predicate is "every ENUMERATED file could be
+  # opened", which is why the enumeration is the checkpoint — the same `[ -f ]`-per-path enumerator
+  # the pre-rewrite script had and this one replaced with a glob.
+  coverage_files=()
+  for coverage_f in .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -e "$coverage_f" ] || continue
+    if [ ! -f "$coverage_f" ] || [ ! -r "$coverage_f" ]; then
+      say "⛔ label-coverage cannot READ $coverage_f — a partial read is not a coverage verdict."
+      exit 4
+    fi
+    coverage_files+=("$coverage_f")
+  done
+  coverage_raw=""
+  coverage_rc=0
+  if [ "${#coverage_files[@]}" -gt 0 ]; then
+    coverage_raw="$(grep -hvE '^[[:space:]]*#' "${coverage_files[@]}")" || coverage_rc=$?
+  fi
+  if [ "$coverage_rc" -gt 1 ]; then
+    say "⛔ label-coverage could not read every workflow file under .github/workflows (grep rc=$coverage_rc) — a partial read is not a coverage verdict."
+    exit 4
+  fi
+  coverage="$(printf '%s\n' "$coverage_raw" | awk '
+      # ⛔ CRLF: `\r` is not `[ \t]`, so a CRLF workflow left `ubuntu-24.04\r` in the emitted
+      # label — a token that matches no class arm, so it fell to the "a report, not a block" default
+      # and the whole read silently became "not a label this pool serves", exit 0 (measured: the
+      # real carriers of that label were never read). GitHub accepts CRLF YAML.
+      function trim(s) { sub(/\r+$/, "", s); gsub(/^[ \t]+/, "", s); gsub(/[ \t]+$/, "", s); return s }
+      # ⛔ A KEY IS A NODE, NOT A SPELLING — for `group:`/`labels:` exactly as for `runs-on:`.
+      # YAML gives a plain, a single-quoted and a double-quoted key the SAME mapping key (1.2.2
+      # §7.4.2 / §8.2.2), and GitHub routes all three the same way. Matched on the SPELLING only, a
+      # quoted `labels:` was not a `labels:` key at all: it emitted no label, `plabels` stayed 0, and
+      # a `group:` in the same mapping suppressed the one refusal marker (the `finish()` condition
+      # `!pgroup || plabels`) — so a required `ubuntu-24.04` was never measured and `--status`
+      # exited 0. Measured: `runs-on: {group: pool, "labels": [ubuntu-24.04]}` → rc 0 with no
+      # `ubuntu-24.04` row; the same mapping with a plain `labels:` → rc 5.
+      function keyis(k, name) { return k ~ ("^[\"\047]?" name "[\"\047]?[ \t]*:") }
+      function unq(s) {
+        s = trim(s)
+        while (s ~ /^["\047]/) s = substr(s, 2)
+        while (s ~ /["\047]$/) s = substr(s, 1, length(s) - 1)
+        return trim(s)
+      }
+      function emit(t,   v) {
+        v = unq(t)
+        if (v == "") return
+        # ⛔ A LABEL IS CASE-INSENSITIVE, so the label set is FOLDED HERE — at the one choke point
+        # every documented form goes through — rather than at each of the four readers downstream.
+        # GitHub matches runner labels case-insensitively, and this file already relies on that in
+        # the repair block own note (`Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64
+        # marker, so a lower-case `runs-on:` still selects it); `_preserve_labels` tests with
+        # `grep -qiE` and `tools/runner_autoscale.py` with `re.IGNORECASE`, so this read was the only
+        # case-SENSITIVE member of the family. Measured before the fold, on a live pool whose two
+        # `ubuntu-24.04` carriers were online and asked: a workflow naming `Ubuntu-24.04` beside
+        # `ubuntu-latest` printed `Ubuntu-24.04 = 0 of 7`, fell to the `*)` class arm ("Not a label
+        # this pool serves … a report, not a block") and exited 0 — the incident state, cleared, on
+        # the one spelling variant Actions itself treats as identical.
+        # The fold is applied AFTER `unq()` and BEFORE the refusals below, so it cannot mask an
+        # expression, a space-bearing token, an alias or a block-scalar indicator: none of those
+        # become readable by being case-folded.
+        v = tolower(v)
+        # ⛔ `bad++`, NOT a silent `return`: a value that is not a static label is not one this pass
+        # can read, so the BLOCK has no static label set and must reach the exit-4 arm. Dropping it
+        # let a parseable sibling (`self-hosted`) answer for the whole block.
+        # ⛔ AND THE TEST IS CONTENT, NOT PREFIX. `ubuntu-24.04-${{ matrix.arch }}` is the ordinary
+        # way a required leg gets parameterised, and a prefix test (`/^\$/`) printed it as a literal
+        # label name — so the block had a readable label set, no `!` was emitted, and the one
+        # instrument meant to surface the all-PR-BLOCKED state exited 0 over it. `${{` ANYWHERE is
+        # the predicate a comparable applies (actionlint `ast.go` `ContainsExpression` is
+        # `strings.Index(s, "${{")`, not a prefix test) and what the EXIT contract in this file
+        # promises. Whitespace and a YAML alias (`*pool`) are refused for the same reason (a token
+        # word-splits through the unquoted `for label in $coverage_labels` into FABRICATED labels)
+        # — and so is a BLOCK-SCALAR INDICATOR (`>`, `>-`, `|`, `|+`): that is the scalar HEADER,
+        # not a label, so `runs-on: >-` printed `⛔ >- = 0 of 1` and exited 0 with its value unread.
+        if (v ~ /\$\{\{/ || v ~ /[ \t]/ || v ~ /^[*&]/ || v ~ /^[>|]/) { bad++; return }
+        print v; got++
+      }
+      function flowlist(s,   n, i, a) {
+        s = trim(s); sub(/^\[/, "", s); sub(/\]$/, "", s)
+        n = split(s, a, ",")
+        for (i = 1; i <= n; i++) emit(a[i])
+      }
+      function mapping(s,   m, i, c, depth, cur, parts, n, k) {
+        m = s; sub(/^\{/, "", m); sub(/\}[ \t]*$/, "", m)
+        n = 0; cur = ""; depth = 0
+        for (i = 1; i <= length(m); i++) {
+          c = substr(m, i, 1)
+          if (c == "[" || c == "{") depth++
+          else if (c == "]" || c == "}") depth--
+          if (c == "," && depth == 0) { parts[++n] = cur; cur = ""; continue }
+          cur = cur c
+        }
+        if (trim(cur) != "") parts[++n] = cur
+        for (i = 1; i <= n; i++) {
+          k = trim(parts[i])
+          if (keyis(k, "group")) pgroup = 1
+          else if (keyis(k, "labels")) { plabels = 1; value(substr(k, index(k, ":") + 1)) }
+        }
+      }
+      # ⛔ AN UNCLOSED COLLECTION IS REFUSED, NOT TRUNCATED — the same content-not-prefix rule
+      # `emit()` applies to a VALUE, applied to the FORM. `flowlist()` strips a `]` that may not be
+      # there (`sub(/\]$/, "", s)` is a silent no-op), so a multi-line flow sequence — valid YAML,
+      # and what a formatted workflow produces — was read as its opening line and `finish()`ed on
+      # the spot: `runs-on: [self-hosted,` / `ubuntu-24.04]` emitted `self-hosted`, dropped the pin
+      # on the continuation line, and exited 0. Measured: that fixture → rc 0 with NO
+      # `ubuntu-24.04` row; the identical array on one line → rc 5. Joining continuation lines would
+      # also close it; refusing is the fail-closed half of the contract stated above (exit 4, "no
+      # verdict"), and a form this pass cannot read is refused rather than cleared.
+      function value(s) {
+        s = trim(s)
+        if (s ~ /^\[/) {
+          if (s !~ /\]$/) { bad++; return }
+          flowlist(s); return
+        }
+        if (s ~ /^\{/) {
+          if (s !~ /\}$/) { bad++; return }
+          mapping(s); return
+        }
+        emit(s)
+      }
+      # ⛔ THE KEY IS A NODE, NOT A SPELLING — AND A KEY THIS PASS OPENS NO BLOCK FOR IS REFUSED.
+      # The opener below read ONE spelling (`^runs-on[ \t]*:`), so a key written as a quoted scalar
+      # (single- or double-quoted `runs-on`) or in explicit-key form (`? runs-on` then `: x`) opened
+      # no block: `finish()` never ran, so NO `!` was emitted, `runs_on_unreadable` stayed 0, and the
+      # two "no verdict" arms could not fire (this repo always names a readable label) — the block
+      # printed a clean row set and exited 0 having never measured that label. That is the false
+      # PASS this block exists to prevent, and it is the one spelling a machine-formatted workflow
+      # produces. GitHub routes all of them the same way: YAML gives a plain, a single-quoted, a
+      # double-quoted and an explicit key the SAME mapping key (1.2.2 §7.4.2 / §8.2.2 — measured
+      # with PyYAML, all four resolve to `runs-on`, value included). So the two scalar spellings are
+      # READ, and every key-shaped line is COUNTED against the blocks opened, so the form this pass
+      # still cannot carry is refused rather than clearing them all — the same content-not-prefix
+      # rule `emit()` applies to a VALUE, applied to the KEY.
+      function keylike(s) {
+        # ⛔ A KEY IN FLOW POSITION IS STILL A KEY. `keyis()` reads a `group:`/`labels:` member in a
+        # flow mapping, but the OPENER only ever saw a line that STARTS with `runs-on:`, so a job
+        # written as a flow mapping — `a: {runs-on: ubuntu-24.04, steps: [...]}`, valid GitHub YAML —
+        # opened no block. That left `keyseen` unincremented, so the END rule below had nothing to
+        # report and the block CLEARED: measured on a fixture whose only other workflow named
+        # `ubuntu-latest`, the `ubuntu-24.04` leg was absent from the report entirely and the read
+        # exited 0. This pass does not carry flow-position keys (no `!` there yet), so counting them
+        # is what turns "invisible" into "refused" — the same content-not-prefix rule the two
+        # scalar spellings were added for.
+        return (s ~ /^["\047]?runs-on["\047]?[ \t]*:/ \
+             || s ~ /^\?[ \t]+["\047]?runs-on["\047]?[ \t]*$/ \
+             || s ~ /^.*[{,][ \t]*["\047]?runs-on["\047]?[ \t]*:/)
+      }
+      function finish() {
+        if (!pend) return
+        # ⛔ `bad > 0` FIRST: an unreadable MEMBER refuses the block even when a sibling parsed, and
+        # a `labels:` key that produced no static label refuses it even when a `group:` was named
+        # (`!pgroup` alone let that shape through — the group suppressed the marker entirely).
+        # A `group:` with genuinely NO `labels:` key stays a report: there is no label there to
+        # check, which is a real read, not a failed one.
+        if (bad > 0 || (got == 0 && (!pgroup || plabels))) print "!"
+        pend = 0
+      }
+      {
+        raw = $0
+        line = raw
+        sub(/^[ \t]+/, "", line)
+        if (line == "") next
+        ind = index(raw, line) - 1
+        sub(/[ \t]+#.*$/, "", line)   # a TRAILING comment must not contribute a second label
+        line = trim(line)
+        if (line == "") next
+        if (pend && ind <= pind) finish()
+        if (keylike(line)) keyseen++
+        if (line ~ /^["\047]?runs-on["\047]?[ \t]*:/) {
+          opened++
+          finish()
+          rest = trim(substr(line, index(line, ":") + 1))
+          pend = 1; pind = ind; got = 0; pgroup = 0; bad = 0; plabels = 0
+          if (rest != "") { value(rest); finish() }
+          next
+        }
+        if (pend && ind > pind) {
+          if (line ~ /^-[ \t]/) {
+            item = trim(substr(line, 2))
+            if (keyis(item, "group")) pgroup = 1
+            else if (keyis(item, "labels")) { plabels = 1; value(substr(item, index(item, ":") + 1)) }
+            else value(item)
+          }
+          else if (keyis(line, "group")) pgroup = 1
+          else if (keyis(line, "labels")) {
+            plabels = 1
+            v = substr(line, index(line, ":") + 1)
+            if (trim(v) != "") value(v)
+          }
+          else finish()
+          next
+        }
+      }
+      END {
+        finish()
+        # One `!` per key-shaped line that opened no block: the count in the refusal message is the
+        # number of `runs-on` keys this pass could not read, not a boolean.
+        for (i = opened; i < keyseen; i++) print "!"
+      }')"
+  # ⛔ A `runs-on:` THE EXTRACTION COULD NOT READ IS `exit 4`, NEVER A SILENT 0. The two exit-4 arms
+  # below catch a read that produced NOTHING; they cannot catch one that is PARTIAL, which is what
+  # an unrecognised spelling produces whenever any other workflow names a label. A matrix expression
+  # (`runs-on: ${{ matrix.os }}`) is the same case for a different reason: its label set is not
+  # static, so there is nothing to verdict. Refusing converts the next spelling nobody thought of
+  # from a false green into an honest no-verdict — the choice every other arm here already made.
+  runs_on_unreadable="$(printf '%s\n' "$coverage" | grep -c '^!' || true)"
+  case "$runs_on_unreadable" in ''|*[!0-9]*) runs_on_unreadable=0 ;; esac
+  # ⛔ THE LABEL SET IS COLLECTED ONCE, BEFORE THE LOOP, BECAUSE THE REFUSALS BELOW MUST RUN BEFORE
+  # ANY VERDICT. Both the `labels_seen == 0` read and the loop iterate the same set, so they share
+  # this one pipeline — two readers, one read.
+  coverage_labels="$(printf '%s\n' "$coverage" | grep -v '^!' | sort -u)"
+  labels_seen=0
+  if [ -n "$coverage_labels" ]; then
+    labels_seen="$(printf '%s\n' "$coverage_labels" | grep -c . || true)"
+  fi
+  case "$labels_seen" in ''|*[!0-9]*) labels_seen=0 ;; esac
+  # ⛔ ALL THREE "NO VERDICT" ARMS RUN **BEFORE** THE LOOP THAT PRINTS VERDICTS. They used to sit
+  # after it, so a repo with ONE unreadable `runs-on:` block AND a zero-answer `ubuntu-24.04` under
+  # `CI_RUNNER_OS_LABEL=on` printed the full ⛔ UNCOVERED verdict and its `--repair-labels` remedy
+  # and THEN exited `4` — the exit code disowning the verdict it had just printed (the EXIT header
+  # and the runbook define `4` as "NO verdict"), and the printed remedy fixing nothing, since the
+  # cause is an unparsed block and relabelling runners cannot parse it. That is the same "a red
+  # whose printed remedy cannot work is a false red" rule this block applies to `ubuntu-22.04` and
+  # to the gate-owned `ubuntu-latest`. A partial read refuses before it verdicts anything.
+  # ⛔ "NOTHING TO CHECK" IS NOT "ALL COVERED". Run from a directory with no .github/workflows (or on
+  # a repo whose workflows name no single-label runs-on) the loop below prints its header, zero rows,
+  # and exits 0 — a clean bill of health from the one instrument meant to prove coverage. Refuse
+  # instead, with its own exit code so a caller can tell it apart from a real zero-answer label.
+  # ⛔ EACH GLOB IS TESTED SEPARATELY: `ls *.yml *.yaml` exits 2 when only ONE of them matches, so a
+  # repo with valid `.yaml` workflows and no `.yml` reads as "nothing there" and exits 4.
+  if [ ! -d .github/workflows ] \
+      || { ! ls .github/workflows/*.yml >/dev/null 2>&1 && ! ls .github/workflows/*.yaml >/dev/null 2>&1; }; then
+    say "⛔ label-coverage read NOTHING: no .github/workflows/*.yml|*.yaml in $(pwd) — run --status from the repo root. An empty read is not a coverage verdict."
+    exit 4
+  fi
+  # ⛔ AND A PARTIAL READ IS NOT A VERDICT EITHER. This arm is what makes the extractor's blind
+  # spots fail CLOSED: a `runs-on:` it produced no label for (an expression, or a spelling it does
+  # not parse) is no-verdict, not covered. It sits before the covered/uncovered verdict so an
+  # unreadable construct can never be outvoted by the labels that did parse.
+  if [ "$runs_on_unreadable" -gt 0 ]; then
+    say "⛔ label-coverage could not read $runs_on_unreadable runs-on: block(s) as a STATIC label set (a matrix/expression value, or a YAML spelling this parser does not understand) — a partial read is not a coverage verdict."
+    exit 4
+  fi
+  # ⛔ AND THE DIRECTORY EXISTING IS NOT THE SAME PREDICATE: a repo whose workflows are all `uses:`
+  # re-usable-workflow callers (or any shape with no single-label `runs-on:`) satisfies the arm above
+  # and still yields ZERO rows. Counting the labels the loop actually FOUND is the only read that
+  # distinguishes "covered" from "did not look" — measured: a dir with one `uses:`-only workflow
+  # printed the header, no rows, and exited 0.
+  if [ "$labels_seen" -eq 0 ]; then
+    say "⛔ label-coverage parsed .github/workflows/*.yml|*.yaml in $(pwd) and found NO runs-on label to check — an empty read is not a coverage verdict."
+    exit 4
+  fi
+  for label in $coverage_labels; do
+    # ⛔ n OF WHO? The denominator has to be the runners that COULD answer this label, or the
+    # reading is a false red on a two-arch pool: the ARM64 runners must never claim the bare
+    # `ubuntu-<version>` (that is the arch invariant `_preserve_labels` now enforces), so
+    # `7 of 12` on the live pool would read as erosion when it is exactly correct. A bare version
+    # label is measured against the x64 pool, an `-arm` spelling against the arm64 pool, and
+    # anything else against the whole pool.
+    # ⛔ THE CLASS IS DECIDED ONCE, HERE, AND THE VERDICT BELOW READS IT. Two definitions of "a
+    # bare version pin" used to sit eight lines apart — the denominator matched
+    # `^ubuntu-[0-9][0-9.]*$` while the verdict used the `case` glob `ubuntu-[0-9]*`, which is
+    # looser by whatever suffix follows: `ubuntu-2204-tools` is NOT the class (its denominator is
+    # the whole pool) yet the verdict arm claimed it, so a zero-carrier CUSTOM label exited `5` and
+    # was told "python-ci-gate is never dispatched and every PR stays BLOCKED" — a false red from
+    # the one block that must not produce one, and the mirror of the boundary
+    # `tools/runner_autoscale.py:284-287` states ("a custom label that merely starts
+    # `ubuntu-<digits>` … is NOT in the class"). One predicate, two readers.
+    # ⛔ THE NUMERATOR IS COUNTED IN THE SAME POPULATION AS THE DENOMINATOR, OR THE RATIO CAN
+    # EXCEED 1 AND THE EROSION ARM SWITCHES ITSELF OFF. The denominator was fixed to the sub-pool
+    # above; the numerator was not, so it counted EVERY carrier in the pool — including the ARM64
+    # runners whose answer that denominator explicitly does not count. Measured on a 12-runner
+    # pool shaped like the drift this PR records (3 of 7 x64 carriers + 5 arm64 runners wrongly
+    # carrying the bare pin) the pre-fix program printed `8 of 7 runner(s)` with NO `⚠️ PARTIAL`,
+    # because `n < denom` is false as soon as `denom - n_actual` foreign carriers are present —
+    # `8 > 7`, so the one read that sees erosion before the last carrier goes was unreachable, and
+    # the autoscaler could walk the x64 sub-pool to zero with this instrument green at every step.
+    # It is not hypothetical and it is not "still coverage": per the published label→arch mapping a
+    # bare `ubuntu-<version>` IS the x64 image, so an arm64 runner claiming it is a false
+    # architecture claim — the exact state `_preserve_labels` now drops on re-registration, and
+    # never evidence that the label is served. So `hit` is carried together with the class
+    # membership the loop already computes (`nx` = bare-class carriers, `na` = arm-class carriers)
+    # and the END block selects the numerator by the SAME class it selected the denominator by, so
+    # `num <= denom` holds by construction. Mutation: use `n` as the numerator again -> `8 of 7`,
+    # no PARTIAL -> tests/test_ci_runner_x64_install.py
+    # ::test_label_coverage_reports_partial_coverage_rather_than_green RED.
+    counts="$(printf '%s\n' "$pool_tsv" | awk -F'\t' -v want="$label" -v x64label="$ARCH_LABEL" -v armlabel="$ARM_POOL_LABEL" \
+      -v fallbacklabel="$FALLBACK_LABEL" -v pool_total="$pool_total" -v pool_online="$pool_online" '
+      {k=split($3,a,","); hit=0; x64=0; arm=0
+       for(i=1;i<=k;i++){ c=tolower(a[i]); if(c==want) hit=1; if(c==x64label) x64=1; if(c==armlabel) arm=1 }
+       # ⛔ ONLINE IS A GATE, NOT A DECORATION: an offline runner is "not connected to GitHub", so
+       # it cannot be handed the job. Every count below is online-only, which is what makes an
+       # all-offline pool read `0 of N` (a verdict) instead of `N of N` (a false green).
+       if ($2 == "online") { online++
+         if (hit) n++; if (x64) nx64++; if (arm) narm++
+         if (hit && x64) nx++; if (hit && arm) na++ }
+       else if (hit) offhit++ }        # carriers that CANNOT answer — context, never coverage
+      END { total = pool_total + 0   # the MEASURED runner count, never the record count above
+            denom = pool_online       # every class below is measured against online runners
+            cls = "other"
+            num = n                 # whole-pool classes count the whole pool, numerator included
+            if (want ~ /^ubuntu-[0-9][0-9.]*-arm$/) { denom = narm; cls = "arm"; num = na }
+            else if (want == fallbacklabel) cls = "fallback"
+            else if (want ~ /^ubuntu-[0-9][0-9.]*$/) { denom = nx64; cls = "bare"; num = nx }
+            # ⛔ AN EMPTY SUB-POOL IS THE INCIDENT — NEVER WIDEN THE NUMERATOR TO THE WHOLE POOL. `n`
+            # counts every online carrier, so widening (which this line did until review) counted
+            # foreign-arch runners wrongly carrying the label as coverage — 0 x64 + 5 arm64
+            # carriers read `5 of 5` / rc 0. The numerator stays class-paired: `0 of 0` is honest and
+            # the zero arm above verdicts it. No-op for `fallback`/`other`, where both were already
+            # the whole pool. Pinned by test_label_coverage_never_widens_a_class_numerator_to_foreign_arch_carriers.
+            printf "%d %d %s %d %d", num+0, denom+0, cls, offhit+0, total-online }')"
+    n="${counts%% *}"
+    rest="${counts#* }"
+    denom="${rest%% *}"
+    rest="${rest#* }"
+    label_class="${rest%% *}"
+    rest="${rest#* }"
+    off_hit="${rest%% *}"
+    off_pool="${rest#* }"
+    case "$off_hit" in ''|*[!0-9]*) off_hit=0 ;; esac
+    case "$off_pool" in ''|*[!0-9]*) off_pool=0 ;; esac
+    # ⛔ THE INTENT IS PER LABEL, NOT PER BLOCK. `resolve_os_label` can only ever set `$OS_LABEL`
+    # (`ubuntu-24.04`), but the `bare` class the awk defines is ANY `^ubuntu-[0-9][0-9.]*$` — so
+    # with the flag `on`, a workflow pinning `ubuntu-22.04` at zero took the verdict arm, exited `5`,
+    # and printed a remedy (`CI_RUNNER_OS_LABEL=on --repair-labels`) that CANNOT apply it: the
+    # installer only ever emits `$OS_LABEL`. A permanent red with an unactionable remedy is the
+    # false-red class this block refuses to create, and the drift `tools/runner_autoscale.py:284-287`
+    # names ("a custom label that merely starts `ubuntu-<digits>` … is NOT in the class") in the
+    # other direction. So `$OS_LABEL` is the ONLY label this script can be asked to serve; every
+    # other bare spelling is somebody else's registration and is reported, never verdicted.
+    lab_asked=0
+    if [ "$label" = "$OS_LABEL" ] && [ "$shell_asks_os_label" = 1 ]; then lab_asked=1; fi
+    if [ "$n" -eq 0 ]; then
+      # ⛔ WHOSE PROBLEM IS A ZERO? Only a label this pool is ASKED to serve — and the three classes
+      # answer differently, so the verdict is per-class rather than "any zero is the incident":
+      #
+      #  * a BARE `ubuntu-<version>` IS the incident class: pinned to GitHub-hosted on purpose,
+      #    hosted effectively unavailable here, so zero self-hosted answers = every PR blocked.
+      #  * `ubuntu-latest` at zero is the HEALTHY state, and it is self-proving: the gate attaches
+      #    that label to the ARM64 pool when it falls back, so a pool where NO runner carries it is
+      #    a pool the gate is not routing to. Verdicting it would make `--status` — and any
+      #    `--status && …` guard — permanently red in normal operation: the false red this
+      #    instrument must not produce. (This is why there is no "is the fallback engaged" read
+      #    here: it cannot be engaged while the label has no carrier.)
+      #  * an `-arm` spelling, `macos-*`, `windows-*` and custom labels are not this pool's to
+      #    serve; their hosted availability was never measured, so report and do not verdict.
+      #
+      # ⛔ REPORT THE MEASUREMENT, NOT A CAUSE: the line used to assert "only GitHub-hosted can
+      # answer it, and hosted is not available here" for EVERY zero-answer label.
+      say "  ⛔ $label = 0 of $denom online self-hosted runner(s) answer it."
+      # Offline carriers are printed as context on EVERY arm, because they are the one reading that
+      # distinguishes "nobody was ever asked" from "asked, and every carrier has fallen over" —
+      # the state the coverage count must never absorb as coverage.
+      offline_context "$label" "$off_hit" "$off_pool"
+      # The class came from the awk above, so this arm and the DENOMINATOR cannot disagree.
+      case "$label_class" in
+        arm)
+          say "     An ARM64 hosted spelling — not this pool's class on an x64 box (a false architecture claim). A report, not a block."
+          ;;
+        fallback)
+          say "     GitHub-hosted serves $FALLBACK_LABEL while the gate is not routing it here — a report, not a block."
+          ;;
+        bare)
+          # ⛔ WHAT WAS MEASURED, AND WHAT FOLLOWS ONLY CONDITIONALLY. The measurement is "no
+          # self-hosted runner answers this label"; "every PR stays BLOCKED" is a consequence that
+          # holds only WHILE hosted is also unavailable (the 2026-10-28 outage). On a healthy day the
+          # pinned legs dispatch on hosted by design — that is what the pin is for — so the verdict
+          # states the measurement and makes the consequence conditional instead of asserting it.
+          if [ "$label" != "$OS_LABEL" ]; then
+            say "     A bare hosted-version pin, but not the one this script registers (it only ever emits $OS_LABEL): nothing here re-applies $label, so its zero answer is not this pool's verdict — a report, not a block."
+          elif [ "$lab_asked" = 1 ]; then
+            say "     Only GitHub-hosted can answer it, and this pool IS asked to serve it (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}) — so a required leg naming it has NO self-hosted answer: the mitigation is not applied. On a hosted outage that is every PR BLOCKED; on a healthy day it is the #6897 pin in effect."
+            uncovered=1
+          else
+            # ⛔ THE SHELL'S FLAG IS NOT THE POOL'S STATE, SO A ZERO CANNOT BE NAMED. `n == 0` is
+            # consistent with BOTH "never asked" (the #6897 pin applied correctly, nothing to do)
+            # and "asked and gone" (erosion to zero — the incident, and the exact event this block
+            # was given a PARTIAL arm to see coming). This arm used to assert the harmless reading,
+            # which is a fail-open in the blocking direction: it cleared the erosion the doc says the
+            # block surfaces, in the DEFAULT invocation the runbook tells the operator to verify with
+            # (bare `--status`, variable unset ⇒ `off`). Report the measurement plus the ambiguity.
+            say "     Two readings fit that measurement, and CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} is THIS SHELL's intent — not the pool's: the #6897 pin applied correctly (nothing to do), or a pool that WAS serving it and has eroded to zero (the incident state, on a hosted outage). A zero answer cannot distinguish \"never asked\" from \"asked and gone\"."
+            say "     Runbook §*Verify it* has the read that settles it from the pool's own record; to see the verdict as if it IS asked, re-run with CI_RUNNER_OS_LABEL=on — \`--status\` is read-only, so that changes nothing on the pool. A report, not a block."
+          fi
+          ;;
+        *)
+          say "     Not a label this pool serves (hosted-only or custom), so its zero answer blocks nothing here — a report, not a block."
+          ;;
+      esac
+    elif [ "$n" -lt "$denom" ]; then
+      # ⛔ COVERED IS NOT THE SAME AS FULLY COVERED, and the difference is the whole erosion path:
+      # the scheduled autoscaler ADDS runners, and a fill/repair pass that omits the label leaves
+      # the pool drifting back to zero answers one runner at a time with this instrument green at
+      # every step. `0 < n < denom` is the only read that sees it before the last one goes.
+      say "  $label = $n of $denom online runner(s) — ⚠️ PARTIAL: the other $((denom - n)) cannot answer it."
+      offline_context "$label" "$off_hit" "$off_pool"
+      # ⛔ THE REMEDY IS CLASS-BLIND HERE TOO, AND THIS IS WHERE IT BITES. The zero-answer arm above
+      # decides per class; this one printed the bare-pin instruction for EVERY class. So a pool
+      # mid-fallback-transition printed `ubuntu-latest = 5 of 12 … re-apply with
+      # CI_RUNNER_OS_LABEL=on --repair-labels` for a label the GATE owns and toggles, and a
+      # deliberately partial custom label got the same instruction. Following it cannot work: only
+      # the bare `ubuntu-<version>` pin is re-applied by this script at all. The class is already
+      # computed (same awk as the denominator), so use it.
+      case "$label_class" in
+        bare)
+          # ⛔ THE REMEDY CARRIES THE PRECONDITION IT NEEDS, and never prescribes a side of the open
+          # decision: telling an operator whose shell says `off` to "re-apply with
+          # CI_RUNNER_OS_LABEL=on" would reverse #6897 in passing.
+          if [ "$label" != "$OS_LABEL" ]; then
+            say "     A bare hosted-version pin this script does not register (it only ever emits $OS_LABEL), so nothing here re-applies $label — a report."
+          elif [ "$lab_asked" = 1 ]; then
+            say "     A re-registration or fill that omits it erodes coverage silently; re-apply with CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} --repair-labels."
+          else
+            # ⛔ CARRIERS ARE INTENT — THIS ARM USED TO INVERT THE REMEDY ON THE OPPOSITE READING.
+            # Reaching here MEANS `n > 0`: the pool has just been MEASURED carrying the label. A
+            # runner's labels are explicitly assigned (GitHub REST: `Add custom labels` / `Set
+            # custom labels` / `Remove all custom labels`; registration labels come from `config.sh
+            # --labels`) — a runner never acquires one on its own — so the carriers are proof the
+            # pool WAS asked, and "this pool is not asked to serve it" was asserted on a line
+            # reporting three runners answering it. Worse, the remedy it printed (`--repair-labels`
+            # with the variable UNSET) PUTs a WHOLE label set (`set`, not `add`), so following it
+            # removes the label from the LAST carriers and lands the pool at `0 of $denom` — which
+            # the zero arm above would then report as intentional. That is a destructive instruction
+            # printed as the fix for an identical measurement, keyed on a shell variable that carries
+            # no pool state. State both readings and refuse to prescribe: the measurement is
+            # `n of denom carry it, flag not set in THIS shell`, and both "leftover" and "eroding"
+            # fit it — only one of them is safe to act on, so the operator decides from the pool's
+            # own record, not from here.
+            say "     $n runner(s) DO carry it, and CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} is only THIS SHELL's intent: a runner's labels are assigned explicitly, so a carrier is proof the pool WAS asked at some point. Two readings fit — a leftover from an earlier \`on\` period (the revert removes it), or erosion while the pool is still asked (re-apply)."
+            say "     ⛔ Do NOT settle it by accident: \`--repair-labels\` PUTs a WHOLE label set, so running it with the variable UNSET removes $OS_LABEL from the last $n carrier(s) and lands the pool at 0 of $denom. A report, not a block."
+          fi
+          ;;
+        arm)
+          say "     An ARM64 hosted spelling: only the arm64 pool may claim it, and nothing on this x64 box re-applies it — a report."
+          ;;
+        fallback)
+          say "     The gate attaches and detaches $FALLBACK_LABEL itself, so a partial count is the gate mid-transition — nothing to re-apply here."
+          ;;
+        *)
+          say "     A custom label this pool does not fully carry. This script does not register it; nothing to re-apply here."
+          ;;
+      esac
+    else
+      say "  $label = $n of $denom online runner(s)"
+      offline_context "$label" "$off_hit" "$off_pool"
+    fi
+  done
+  if [ "$uncovered" = 0 ]; then
+    :
+  else
+    # ⛔ THE REMEDY IS PRINTED AS A COMMAND WITH ITS PRECONDITION, not as a parenthetical. `--repair-labels`
+    # PUTs a WHOLE label set (`set`, not `add`), so running the bare command in a fresh shell — where
+    # `CI_RUNNER_OS_LABEL` is unset and therefore `off` — REMOVES $OS_LABEL from every runner and
+    # re-creates the deadlock, while the operator's intent was to fix coverage. The one instruction
+    # this instrument emits in its failure case must not be the one that undoes the mitigation.
+    # ⛔ AND IT REPEATS THE OPERATOR'S OWN SPELLING, never a hardcoded `on`: reaching this arm means
+    # the pool IS asked to serve the label, and `auto` (which may have resolved to claimed on THIS
+    # host) has to survive the re-run. Prescribing `on` would silently un-narrow an `auto` install.
+    say "⛔ UNCOVERED label(s) above. This pool IS asked to serve them and does not. To (re-)apply this script's label set INCLUDING $OS_LABEL, run:"
+    say "     CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off} $0 --repair-labels --count <N>"
+    say "   Run it with the variable UNSET and the PUT body has no $OS_LABEL in it — that REMOVES the mitigation from every runner it touches."
+  fi
+  # ⛔ THE INCIDENT STATE IS NOT SUCCESS. Exit 0 used to cover BOTH "every label covered" and "a
+  # required label has no runner at all" — so `--status && …` could not tell the state that blocks
+  # every PR from the one that does not. 4 already means "no verdict"; 5 is "a verdict, and it is
+  # bad". No caller in the tree invokes this script's `--status`: the repo-wide `--status` hits
+  # are other tools' own flags plus its tests and the runbook's examples, so none changes meaning.
+  if [ "$uncovered" = 1 ]; then exit 5; fi
   exit 0
 fi
 
 # ── repair: re-apply the gate-following label set to already-registered runners ──
-# This is the documented repair when the pre-#2327 gate has relabelled these runners: it puts
-# back the arch marker and syncs the fallback label to the gate's state, without re-registering.
+# ⛔ A REPAIR UNIONS; IT CAN NEVER REMOVE A LABEL A WORKFLOW NEEDS. This block used to PUT exactly
+# the set `resolve_labels` computed, so every repair silently REPLACED the runner's labels. With
+# the ARM64 pool stripped of `ubuntu-latest` (#6897) `--fallback auto` now computes
+# `self-hosted-x64` alone — so a repair removed `ubuntu-latest` from the x64 pool, which is the
+# label the REQUIRED `python-ci-gate` aggregate is pinned to. The run then sat `pending` with ZERO
+# materialised jobs (no red, no green, every PR blocked), and a label restored by hand did not
+# survive the next repair (measured 2026-10-27: gone within ~25 minutes, twice).
+#
+# So: read the runner's CURRENT labels, union the computed set INTO them, and PUT THAT. Two classes
+# are NOT carried into the union — a VERSION-PINNED HOSTED label (`ubuntu-<version>`, which a leg
+# pins to escape this pool) and a FOREIGN ARCH MARKER (`self-hosted-*` other than this box's) —
+# because keeping either makes a false PASS permanent; both are PRINTED on the `— not kept=` line.
+# The host-derived labels GitHub owns (`self-hosted`, `Linux`/`macOS`/`Windows`, `X64`/`ARM64`/`ARM`)
+# are not sent either: the API refuses them (HTTP 422 `Cannot set labels that duplicate existing
+# read-only labels`), and they are PRINTED, never silently dropped. The before/after sets and the
+# derived `removed=` list are printed BEFORE the PUT, so a removal is visible in the output rather
+# than inferred from a queue that never moves.
 if [ "$MODE" = repair ]; then
+  # ⛔ AN EXPLICIT `--fallback off` IS REFUSED, NOT ACCEPTED-AND-IGNORED. The union never subtracts,
+  # so this invocation cannot do the one thing it asks for: it used to print `removed=[]`, say
+  # `relabelled … → self-hosted-x64,ubuntu-latest` and exit 0 while the label stayed attached. The
+  # refusal is BEFORE any read and any PUT (exit 2 is the honest code: nothing was changed), and it
+  # names the path that CAN detach. `auto` already covers the operator's real intent — on a healthy
+  # hosted day it computes `self-hosted-x64` alone and the union simply keeps what is there.
+  if [ "$FALLBACK" = off ]; then
+    die "--repair-labels only UNIONS: it cannot DETACH $FALLBACK_LABEL, so --fallback off would be accepted and then do nothing to it. Use --fallback auto (a repair follows the gate by ADDING), or detach the label on purpose: gh api -X DELETE repos/$REPO/actions/runners/<id>/labels/$FALLBACK_LABEL" 2
+  fi
   need gh
   resolve_labels
   rc=0
@@ -246,18 +1063,180 @@ if [ "$MODE" = repair ]; then
     d="$(runner_dir "$i")"
     [ -f "$d/.runner" ] || { say "skip: $d is not configured"; continue; }
     agent="$(sed -n 's/.*"agentName": "\([^"]*\)".*/\1/p' "$d/.runner")"
-    id="$(gh api --paginate "repos/$REPO/actions/runners" --jq ".runners[]|select(.name==\"$agent\")|.id" | head -1)"
+    # ONE read, so the id and the label set cannot disagree: `id<TAB>label,label,…`.
+    detail="$(gh api --paginate "repos/$REPO/actions/runners" --jq ".runners[]|select(.name==\"$agent\")|\"\(.id)\t\([.labels[].name]|join(\",\"))\"" | head -1)"
+    id="$(printf '%s' "$detail" | cut -f1)"
+    current="$(printf '%s' "$detail" | cut -f2)"
     # An operation that was ATTEMPTED and failed is 3, never 1: the EXIT contract above reserves 1
     # for "usage — nothing was attempted", and a caller keying on it would read a failed relabel as a
     # bad flag (measured: `--repair-labels` against a `gh` that returns no id exited 1).
     case "$id" in ''|*[!0-9]*) say "WARNING: $agent not found in the repo's runners"; rc=3; continue ;; esac
-    body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$LABELS" | sed 's/,/","/g')")"
-    if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; continue; fi
-    if printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - >/dev/null 2>&1; then
-      say "relabelled $agent → $LABELS"
-    else
-      say "WARNING: relabel FAILED for $agent (id $id)"; rc=3
+    # ⛔ AN UNREADABLE LABEL SET IS A REFUSAL, NEVER "the computed set, then". Falling back to the
+    # computed set IS the replace this block exists to stop: on a failed read it would drop
+    # `ubuntu-latest` by the same silent route, with only the transport error to show for it.
+    # ⛔ AND IT REFUSES **THIS RUNNER**, NOT THE BATCH: a `die` here exits the whole script, so with
+    # `--count 2` runner 1's PUT could already have succeeded when runner 2 hit this guard and the
+    # caller would receive exit 2 = "Nothing was downloaded, registered or removed" for a run that
+    # relabelled a runner. The pre-fix loop met the analogous per-runner condition with
+    # `say WARNING; rc=3; continue`, and the three guards inside this loop keep that contract.
+    if [ -z "$current" ]; then
+      say "WARNING: cannot read the current labels of $agent (id $id) — refusing to PUT a set that may REPLACE the labels this runner already carries (a replace is how $FALLBACK_LABEL was lost). Nothing was changed for this runner; re-run once the read succeeds."; rc=3; continue
     fi
+    # ⛔ GLOBBING OFF WHILE A LABEL SET IS SPLIT. Every loop below walks a comma-separated list with
+    # an UNQUOTED expansion, so a label carrying `*`, `?` or `[` is expanded against the operator's
+    # cwd before the loop ever sees it — and the vendor's PUT schema declares no pattern, so the
+    # charset that stops one arriving is server-side only. Measured: `current=…,*` became
+    # `after=[self-hosted-x64,DECOY-1.txt,DECOY-2.log]` with `removed=[]`, and the PUT then attached
+    # the operator's own filenames to the runner as labels — a write the `removed=` line cannot show.
+    # `set -f` makes the split literal, so such a label reaches the illegal-label guard below and
+    # REFUSES the runner. It is restored after the last split (before the `relabelled` line); a
+    # `continue` on a refusal path leaves it set, and every such path either re-sets it at the top of
+    # the next iteration or leaves it to `exit` at the end of this block — nothing past the loop runs.
+    set -f
+    after=""; host_skipped=""; arch_dropped=""; pinned_dropped=""; pinned_kept=""; host_arch=""
+    for l in $(printf '%s' "$current" | tr ',' ' '); do
+      if is_host_label "$l"; then
+        # the ONE honest witness of the box's architecture: GitHub derives these from the HOST.
+        case "$l" in ARM|ARM64) host_arch="$l" ;; X64) host_arch="X64" ;; esac
+        host_skipped="${host_skipped:+$host_skipped,}$l"; continue
+      fi
+      # ⛔ THE TWO NAMED CARVE-OUTS (see the header). Dropping them is a REMOVAL, so each is
+      # PRINTED — a union that silently kept a false arch claim or a version pin is the defect this
+      # loop's own `removed=` line exists to expose.
+      if is_foreign_arch_label "$l"; then arch_dropped="${arch_dropped:+$arch_dropped,}$l"; continue; fi
+      # ⛔ THE VERSION-PIN CARVE-OUT READS THE BOX'S **RESOLUTION**, NOT THE FLAG'S SPELLING. #6897's
+      # `OVERRIDES:` marker suspends the version-pin invariant for as long as hosted deadlocks, it
+      # measures the departure as APPLIED (2026-10-29: 7 of 7 x64 runners carry `ubuntu-24.04`), and
+      # it records the revert as `CI_RUNNER_OS_LABEL=off` **plus** `--repair-labels`. A repair that
+      # dropped the pin whatever the flag said reached that revert with NO SWITCH INVOLVED: the next
+      # manual heal would have reverted an applied owner departure while the operator read a warning
+      # about a label their own box had been asked to claim. So the box's choice is READ here, and it
+      # is read AS THIS RUN RESOLVED IT: `resolve_labels` already ran in this mode (repair mode calls
+      # `need gh` first, so the read is available) and its `resolve_os_label` set `$OS_LABELS` to
+      # `,$OS_LABEL` ONLY where the claim was actually made — empty under `off`/unset **and** under an
+      # `auto` that DECLINED on this host (a 22.04 box, a container with no /etc/os-release, a
+      # non-Linux lane), which is the decline it printed out loud ~750 lines above.
+      # ⛔ RE-DERIVING THAT ANSWER FROM THE FLAG'S SPELLING was a THIRD answer that matched neither
+      # sibling writer. The pre-fix `case "${CI_RUNNER_OS_LABEL:-off}" in on|auto)` read the FLAG, so a
+      # declining `auto` printed "auto DECLINED … $OS_LABEL not claimed" and then KEPT the pin and
+      # re-PUT it — and because a repair only UNIONS, that claim the box had just declined became
+      # PERMANENT until an operator ran an explicit `off` repair. `--status`, in this same script,
+      # reads the RESOLUTION for the identical flag and reported the pool as NOT asked, and
+      # `runner_autoscale.py::_os_labels` agreed with `--status` — the instrument and the writer
+      # contradicting each other on one box. A flag spelling cannot answer "did this host claim it";
+      # only the resolution can, so the resolution is what this carve-out reads. (An unrecognised
+      # value never reaches here: the flag is validated ONCE before the mode dispatch, `die … must be
+      # off|on|auto`, so there is no third reading to defend against — the `*)` arm that used to sit
+      # here was unreachable by construction and is gone with the spelling it existed to guard.)
+      if is_version_pinned_hosted_label "$l"; then
+        if list_has "$OS_LABELS" "$OS_LABEL"; then
+          # ⛔ THE KEEP IS NARROWED TO THE ONE LABEL THIS BOX MAY CLAIM. `$OS_LABEL` is the only
+          # spelling `resolve_os_label` can ever emit, and a label is a claim about the IMAGE, not
+          # about architecture: keeping `ubuntu-24.04-arm` here would let an x86_64 runner serve
+          # an ARM64 job and produce a wrong artifact — the false PASS, not the queue delay, that
+          # this file's header forbids. It also diverges from the sibling writer of the same
+          # invariant, `tools/runner_autoscale.py::_preserve_labels`, which drops the WHOLE
+          # family on every arch ("it names an image, not an architecture") — and a keep and a
+          # drop on the same label is the divergence that function's own comment forbids. A
+          # repair UNIONS, so a kept pin is permanent until someone runs an explicit `off` repair:
+          # the narrowing has to happen HERE or not at all. Anything else in the family is
+          # reported on the `not kept=` / `removed=` lines, never silently absorbed.
+          if [ "$l" = "$OS_LABEL" ]; then
+            pinned_kept="${pinned_kept:+$pinned_kept,}$l"
+          else
+            pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
+            say "NOT KEPT: '$l' is a version-pinned hosted label outside this box's own label set ($OS_LABEL is the only one it can claim) — keeping it would make another image's claim on an x86_64 runner. Reported on the removed= line; nothing re-applies it here."
+            continue
+          fi
+        else
+          # ⛔ THE RESOLUTION CLAIMED NOTHING, SO THERE IS NOTHING FOR A UNION TO PRESERVE. The pin a
+          # runner already carries here is a claim this box has just DECLINED (`auto` on a host that
+          # is not the release) or was never granted (`off`/unset — the pre-departure invariant, and
+          # what `_preserve_labels` drops on re-registration). Keeping it is the false PASS the
+          # carve-out exists to stop, and a union makes it permanent. The reason is not restated
+          # here: `resolve_os_label` printed it, and the `removed=` line prints the resolution that
+          # decided it — one measurement, one message.
+          pinned_dropped="${pinned_dropped:+$pinned_dropped,}$l"
+          continue
+        fi
+      fi
+      list_has "$after" "$l" || after="${after:+$after,}$l"
+    done
+    # ⛔ THE KEEP-HALF IS ARCH-BLIND WITHOUT THIS GUARD, which re-creates #6897's own defect on the
+    # labels it was measured on. The union keeps `ubuntu-latest` ON PRINCIPLE, but on a runner whose
+    # read-only host label says ARM64 that keep hands an `ubuntu-latest` job to an arm64 box — the
+    # measured failure (job won by the ARM pool, died in "Set up job" on a codeload timeout, one
+    # shard per run turned into a FALSE RED per shard) that got the ARM pool stripped in the first
+    # place. The repair may be run from any host and against any install, so the runner's own
+    # `ARM64`/`ARM` label is the one witness a caller cannot talk it out of: this runner is refused
+    # (rc 3, nothing written) rather than PUT `self-hosted-x64` and `ubuntu-latest` onto an arm64
+    # registration. An absent arch label keeps the pre-existing path — the API always returns one.
+    case "$host_arch" in
+      ARM|ARM64) say "WARNING: $agent reports the read-only host label '$host_arch', so it is not an x86_64 runner: this repair would add $ARCH_LABEL to it and KEEP $FALLBACK_LABEL there, which is the #6897 false red (an arm64 box wins a $FALLBACK_LABEL job and dies in Set up job). Nothing was changed for this runner — relabel it from the x86_64 host that owns it, or deregister it."; rc=3; continue ;;
+    esac
+    for l in $(printf '%s' "$LABELS" | tr ',' ' '); do
+      list_has "$after" "$l" || after="${after:+$after,}$l"
+    done
+    # DERIVED, never asserted: what the PUT would REMOVE, computed from the two sets alone. A union
+    # removes nothing EXCEPT the two carved-out classes above, so a value here must be one of those
+    # and nothing else — printed BEFORE the PUT, which is the whole point (a removal must be visible
+    # in the output, not inferred from a job that never appears).
+    removed=""
+    for l in $(printf '%s' "$current" | tr ',' ' '); do
+      is_host_label "$l" && continue
+      list_has "$after" "$l" || removed="${removed:+$removed,}$l"
+    done
+    # A label outside GitHub's own charset would build a malformed JSON body; refuse rather than PUT
+    # one — and never skip it, because skipping a CURRENT label IS the removal this block forbids.
+    illegal=""
+    for l in $(printf '%s' "$after" | tr ',' ' '); do
+      case "$l" in *[!A-Za-z0-9._-]*) illegal="$l" ;; esac
+    done
+    if [ -n "$illegal" ]; then
+      say "WARNING: label '$illegal' on $agent is not a legal runner label (alphanumeric, '.', '_', '-') — refusing to build a request body from it. Nothing was changed for this runner."; rc=3; continue
+    fi
+    # ⚠️ KEPT DELIBERATELY, AND UNREACHABLE BY CONSTRUCTION at this head: the union can only be empty
+    # if the COMPUTED set is, and `resolve_labels` always emits at least `$ARCH_LABEL` — the modes are
+    # pinned by `test_the_computed_set_is_never_empty_which_is_what_makes_the_empty_union_guard_dead`.
+    # It stays because the array it refuses to send is not harmless: the vendor's own Set-custom-labels
+    # parameter note reads "you can pass an empty array to remove all custom labels", i.e. exactly the
+    # strip this block exists to stop, and the guard costs one line against a future edit to
+    # `resolve_labels`.
+    if [ -z "$after" ]; then
+      say "WARNING: the union of $agent's current labels and the computed set ($LABELS) is EMPTY — refusing to PUT an empty label set, which would strip the runner. Nothing was changed for this runner."; rc=3; continue
+    fi
+    say "labels for $agent (id $id):"
+    say "  before=[$current]"
+    say "  after =[$after]"
+    say "  host-owned, not sent=[$host_skipped] alien-arch, not kept=[$arch_dropped] version-pinned, not kept=[$pinned_dropped] version-pinned, kept=[$pinned_kept]"
+    # ⛔ THE SUMMARY PRINTS WHAT DECIDED THE CARVE-OUT — the RESOLUTION, not only the flag's spelling.
+    # Printing the flag alone made the log agree with the writer even where the writer was wrong: a
+    # declining `auto` printed `(CI_RUNNER_OS_LABEL=auto decides …)` beside a `kept=[ubuntu-24.04]`
+    # line, i.e. a reading the operator could not tell from the claiming arm. `resolved claim=none`
+    # is the same value `--status` reads for this flag.
+    pin_claim="${OS_LABELS:+$OS_LABEL}"
+    say "  removed=[$removed]  (CI_RUNNER_OS_LABEL=${CI_RUNNER_OS_LABEL:-off}, resolved claim=${pin_claim:-none} — the RESOLUTION decides the version-pin carve-out)"
+    body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$after" | sed 's/,/","/g')")"
+    if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; set +f; continue; fi
+    # ⛔ `relabelled` IS A CLAIM ABOUT THE SERVER'S STATE, NOT ABOUT THE PUT'S EXIT STATUS. A whole-set
+    # relabel on this pool has already printed `set_labels ok=16 fail=0` while the label it reported
+    # attaching was still absent (#6897) — an exit status says a request was accepted, never that it
+    # took effect, and the two differ exactly when the repair matters. The Set verb's own 200 carries
+    # the runner's RESULTING label set, so it is read back through `--jq` and every label this repair
+    # asked for must be in it; anything else is exit 3 with the returned set in the message, never a
+    # `relabelled` line over a state nobody looked at.
+    if ! relabelled_now="$(printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - --jq '[.labels[].name]|join(",")' 2>/dev/null)"; then
+      say "WARNING: relabel FAILED for $agent (id $id)"; rc=3; continue
+    fi
+    missing=""
+    for l in $(printf '%s' "$after" | tr ',' ' '); do
+      list_has "$relabelled_now" "$l" || missing="${missing:+$missing,}$l"
+    done
+    set +f
+    if [ -n "$missing" ]; then
+      say "WARNING: the PUT for $agent (id $id) was ACCEPTED but the label set GitHub returned does not carry $missing (returned=[$relabelled_now]) — the write did NOT take effect (#6897 measured ok=16 fail=0 for a label that was never attached). Nothing is claimed about this runner; re-read it with --status before trusting the queue."; rc=3; continue
+    fi
+    say "relabelled $agent → $after (read back from the PUT's own response)"
   done
   exit "$rc"
 fi

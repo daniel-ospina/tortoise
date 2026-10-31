@@ -53,7 +53,73 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # ── HOSTED-ONLY PIN (deliberate, measured 2026-10-27) ─────────────
+    # `ubuntu-latest` is served by BOTH GitHub-hosted runners AND this repo's
+    # self-hosted pool — the pool advertises it WHILE the fallback is engaged
+    # (`scripts/ci_runner_gate.sh`; docs/ops/ci-runner-x64.md:25), so that is a
+    # CONDITIONAL property, not a standing one: measured again on 2026-10-27 with
+    # the fallback disengaged, none of the nine runners carried it. Measured over
+    # these four workflows' own SCHEDULED runs on 2026-10-27 (115 runs, 00:00-12:00
+    # UTC, jobs classified by `runner_name`): 83 created a job - 72 served by a
+    # GitHub-hosted runner, 11 by this repo's self-hosted runners (10 of them
+    # `pi-runner-*`, 1 `cmux`) - and 32 never got a runner at all.
+    # So the pin is not "escape a queue that is always the pool"; it removes
+    # the arm that FAILS.
+    #
+    # The pool arm does not starve — it HANGS, and it also fails fast. Of those
+    # 11 self-hosted jobs, TWO hung in `actions/checkout` and were killed at the
+    # job's OWN `timeout-minutes`, with the measuring step SKIPPED, which reads
+    # as a finished run that measured nothing; TWO failed in 9s/36s with the
+    # payload step actually run; SEVEN completed normally (10-46s). So the pin
+    # does not say "the pool never works" — it says the pool cannot be relied on
+    # to MEASURE. Both cited runs are `ci-queue-health`'s, whose timeout is
+    # `10`; this block is shared by four workflows with different timeouts
+    # (`repair` is `15`), so it names no single job's number as its own:
+    #     run 40456347720 → pi-runner-vm-2: checkout 8m40s, then cancelled
+    #     run 40451686065 → pi-runner-vm-4: checkout 4m41s, then cancelled
+    # (same day: 9/9 runners busy, 78 runs queued, and `ci-queue-health`
+    # completed 1 of its last 8 scheduled runs — 6 cancelled, 1 pending.)
+    #
+    # ⛔ THE PIN IS NOT A COMPLETE FIX, and this comment must not read as one.
+    # Hosted is queued too: 18 jobs were waiting on `ubuntu-24.04` with a max
+    # wait of 56m, and one `ci-queue-health` job waited 65 minutes for a hosted
+    # runner and then ran 15 seconds. GitHub keeps only ONE pending run per
+    # concurrency group, so while a wait exceeds this workflow's cadence each
+    # tick still cancels the previous PENDING tick. The pin removes the arm that
+    # hangs and usually serves in minutes; the cadence/concurrency question stays
+    # open and is tracked separately.
+    #
+    # `ubuntu-24.04` is HOSTED-ONLY for THIS job by choice, but NOT — any more —
+    # because the pool cannot answer it. Since the 2026-10-29 mitigation (#6897
+    # suspended; docs/ops/ci-runner-x64.md, "the label contract") the installer
+    # CAN emit `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`
+    # (tools/install-ci-runner-x64.sh; the flag defaults to `off`, so nothing
+    # changes for a box that does not set it) and an ORPHANED re-registration
+    # derives the same fact (tools/runner_autoscale.py) — so the premise this
+    # comment was written on ("`ubuntu-24.04` is claimed by no self-hosted
+    # runner") is FALSE. ⛔ WHAT DOES **NOT** HOLD IT: `_preserve_labels` still
+    # DROPS a version pin on RE-registration and nothing in this tree
+    # re-attaches it on that path, so a re-registered runner loses the label
+    # until someone runs `--repair-labels` on a box whose OWN resolution
+    # claims it (`on`, or `auto` on a host whose `/etc/os-release` reports
+    # 24.04 — a DECLINING `auto` claims nothing and drops it with the rest of
+    # the family) or reinstalls. `--status`' `label-coverage` exit 5 is what makes
+    # that visible; re-measure rather than trusting this text:
+    # `gh api repos/<owner>/<repo>/actions/runners`. The installer never hands
+    # `config.sh` a version pin with the flag off — pinned at
+    # `tests/test_ci_runner_x64_install.py:230`.
+    # ⛔ THE COST, STATED: GitHub's label matching is cumulative and unscoped
+    # (github/docs, "Using self-hosted runners in a workflow"), so while the
+    # mitigation is engaged this observer is POOL-ELIGIBLE — and a guard whose
+    # job is to report on a full pool can sit in `actions/checkout` behind that
+    # very backlog, then die at its own `timeout-minutes` with the measuring step
+    # SKIPPED: quiet precisely during the hosted outage it exists to surface.
+    # `runs-on:` cannot scope that away, because the mitigation is label-wide and
+    # not leg-scoped. Keep the pin for what it still buys — on a healthy day this
+    # leg lands on hosted and spends no pool slot and no fleet quota — and if the
+    # mitigation becomes permanent, re-scope this leg onto a label only hosted
+    # answers. Public repo, so hosted minutes are free: this spends nothing.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # persist-credentials: false — this job only reads a file; the workflow

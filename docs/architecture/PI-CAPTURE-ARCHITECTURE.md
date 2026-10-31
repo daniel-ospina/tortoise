@@ -1,8 +1,8 @@
 ---
 title: "Pi capture architecture — the hybrid (in-process hook + store-sync backstop)"
-type: architecture
+type: engineering
 domain: platform
-doc_status: current
+doc_status: live
 created: 2026-10-23
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
@@ -157,7 +157,7 @@ and are not renumbered). Status against the tree at this commit:
 | 7 | Sweep-vs-hook concurrency guard, server-side extraction claim + lease TTL | **NOT built by this lane** — it is a server change (a claim keyed by `_session_capture_event_id` with a lease ≥ the ~819 s extraction deadline) and it is **the next task**, not a silent drop. Until it lands, a sweep+live-hook race can run extraction twice; the captures themselves converge (idempotent MERGE). Recorded in §9. |
 | 8 | Persisted **lane/provenance** marker, end to end | **landed before this lane** — `SessionRequest.capture_lane`, the set-only-when-present MERGE, `capture_spool.CAPTURE_LANES`, the TS mirror, and `test_capture_lane_3516.py`. The backstop **stamps `store_sync`**. |
 | 9 | **Cursor-past-EOF / file-replaced** handling | **built here** — `planFile`: `cursor_past_eof` → re-read from offset 0; `file_replaced` (dev/ino) and `header_changed` (header sha) likewise. Never a silent skip. |
-| 10 | Bounded sweep rate + spool cap | **built here for the sweep** — `MAX_FILES_PER_RUN = 50` **files shipped** per run (the remainder drains next run), `MAX_REQUESTS_PER_RUN = 200`. The cap deliberately bounds SHIPPED files, not EXAMINED ones (capping the examined prefix would starve the tail), so an up-to-date file is skipped from its `stat` identity plus its HEADER LINE: a sweep never reads a whole session file it is going to skip. The spool cap is the existing count/byte bound in `capture_spool.DEFAULT_BOUNDS` (no TTL — the owner ruled the spool is kept until the user deletes it). |
+| 10 | Bounded sweep rate + spool cap | **built here for the sweep** — `MAX_FILES_PER_RUN = 50` **files shipped** per run (the remainder drains next run), `MAX_REQUESTS_PER_RUN = 200`. The cap deliberately bounds SHIPPED files, not EXAMINED ones (capping the examined prefix would starve the tail), so an up-to-date file is skipped from its `stat` identity plus its HEADER LINE: a sweep never reads a whole session file it is going to skip. The spool cap is the existing count/byte bound in `capture_spool.DEFAULT_BOUNDS` (no TTL — the owner ruled the spool is kept until the user deletes it), and its eviction is **two-class then oldest-first**: an already-filed entry's bytes are on the wire (and the harness log still holds them), so it is reaped before any unfiled entry, which is the only copy of an undelivered conversation (#6388). A quarantined `*.turns.jsonl.orphan[N]` log is reaped ahead of both classes (a corrupt meta moved it out of every scan, so it is unreachable to every surface) and its record names that as `UNREACHABLE`, leaving `unknown` where the corrupt meta (the only copy of the filing stamp) took the answer with it. |
 | 11 | Backoff exhaustion retains; restarts do not multiply; permanent 4xx → stall + dead-letter, non-blocking | **built here** — retention keeps the cursor at the last good offset and persists `failures`; a permanent 4xx writes a dead-letter row (folded to one row per file, capped at 500), advances past it, and **counts the drop** so a later file still ships. `PERMANENT` is the set that will never succeed **for the same BYTES** (400/404/405/406/413/415/422). A credential refusal (401/403/407) is **RETAINED**, never crossed: it refuses the CALLER, not the bytes, so a rotated/expired key would otherwise permanently drop every pending session — the exact loss the backstop exists to prevent. The dead-letter count is also printed on the extension's `capture:` health line — and on the **Python** leg's, which is the same pinned string (a checker may run either) — since the one production caller spawns the worker with `stdio: "ignore"`. |
 | 12 | Clock source per lane | **landed before this lane** (`cli_observed` / `file_mtime` / `unknown`); **extended here** with `entry_timestamp` — the store-sync lane stamps the **log entry's own** `timestamp`, in unix seconds, under its own source name so the floor can tell the three clocks apart. Server vocabulary, the `capture_spool` mirror and the TS mirror move together; a test pins the TS mirror against the server's set. |
 | 13 | **ONE shared turn-window / branch contract** | **built here** as `activeBranch` + `cutAtCompaction` (leaf → root via `parentId`, cut at `compaction.firstKeptEntryId`, no positional ids ever). The Python backfill reader (`session_import.parsers.parse_pi`) is **NOT yet branch-aware** — it walks lines — so the contract has one consumer and one known non-conformant reader, recorded in §9 rather than claimed. |
@@ -354,6 +354,57 @@ recorded in §9 — it needs a decision about fail-loud vs warn on a machine who
 extension was installed by an older product version, which is a product-policy
 decision, not a mechanism.
 
+**#10241 (2026-10-29) — success is now VERIFIED, but the measured gap is not
+closed.** The byte check above was the *pre-write* comparison
+(`_is_regular_unchanged` answers "should I write?"), so an install could report
+`installed …` — and `tortoise install pi` could print
+`Pi capture extension installed.` — from its own write INTENT, over bytes it had
+never read back. `capture_install.assert_seam_target` now runs after every real
+`_install_pi` write (and on the no-op path), with `require_present=True` so a
+missing file after a claimed write is a FAILURE rather than "another check owns
+that": it RESOLVES the path Pi will load, sha256s it, compares that with the
+shipped artifact, and fails the install with a message naming **both** paths (plus
+the resolved target whenever resolving changes the path — a symlink, or a
+symlinked ancestor such as macOS `/tmp`) and **both** digests. The generation
+marker is read only to say which WAY the bytes differ, so an install from a newer
+CLI is not accused of running older logic and told to downgrade. It also names
+the REMEDY the installer accepts: for a seam symlinked outside the install home
+the unconditional "re-run `tortoise install pi`" would refuse (`_symlink_escape`),
+so the message hands out the unlink step first — computed from that same guard,
+never re-derived (#5351, #4680).
+
+**What that closes, stated exactly.** It closes "success claimed from write
+intent": the verdict is now a fact about the bytes on disk, so a write that never
+lands, a concurrent writer, and a future early return cannot be reported as an
+install. On the ordinary paths it is a *tautology, on purpose* — the no-op path
+already compared bytes in `_is_regular_unchanged`, and the write path lands
+exactly `payload` via `os.replace` or raises (an immutable target raises
+`PermissionError`, reported as `install failed … NOT fully installed`).
+
+**What it does NOT close is the divergence measured above, and this section must
+not be read as closing it.** The reference box's installed seam was generation 14
+(149,736 B) against a shipped generation 15 (152,752 B) because that seam was
+installed by an OLDER CLI and **no install ran on it since** — the very condition
+install-time verification cannot observe. Pre-PR, `tortoise install pi` on that
+box wrote generation 15 and printed `installed …`; post-PR it writes generation 15
+and prints the same. The user-visible outcome for the measured state is therefore
+UNCHANGED, and it stays open on **#10241** with the startup surface below.
+
+The assertion never raises and never blocks: a non-regular artifact (a FIFO,
+which `open` would block on) gets a sentence rather than a read — the same
+report-without-reading posture `detect_artifact_install` takes — and an
+unsearchable path or a symlink loop gets a sentence too. Presence and following
+are errno-discriminating stats, because the detector's own probe does not survive
+those two states: on an UNSEARCHABLE install directory it propagates
+`PermissionError` on Python 3.12 and (worse) folds `EACCES` into "absent" and
+reports a false `missing-artifact` on 3.14 — both inside this repo's
+`requires-python = ">=3.12"` — and for a symlink LOOP it reports
+`symlinked-artifact` / "is a broken symlink", naming a target that exists. That is
+**#10317** (filed, not widened into this PR). What is still open is
+only the STARTUP surface — reporting the same divergence at session start rather
+than at the next `tortoise install pi` — which keeps the fail-loud-vs-warn decision
+above; it stays on **#10241**, not on a closed issue.
+
 ---
 
 ## 8. GUARANTEED vs NOT GUARANTEED
@@ -426,7 +477,11 @@ the server's admission pool.
 
 These all stay on **#3515**, which this PR references (`Refs`, not `Closes`) for
 exactly this reason: they are the issue's own Indicators, and closing it while they
-are unbuilt would read as done.
+are unbuilt would read as done.  ⚠️ **#3515 has since been CLOSED** (2026-10-24,
+when #9788 landed), so this list is the historical ledger, not a live pointer — the
+current home of each remainder is named in its bullet where one exists.  **A
+remainder without a live home is not done; it is unowned**, and the startup bullet
+below is the one that matters here.
 
 - **Piece 7** — the server-side extraction claim + lease: the next task. Its test
   set is already named in the issue.
@@ -434,7 +489,13 @@ are unbuilt would read as done.
   reader) is not branch-aware. It is a **different invocation** (an explicit
   import), so it does not overwrite live turns; making it call the same contract is
   a follow-up.
-- **Startup resolution assert** on the user's machine — §7.
+- **Startup resolution assert** on the user's machine — §7. **Now held on
+  #10241**: its install-time assertion landed (`capture_install.assert_seam_target`),
+  which verifies a write THIS install performed and therefore cannot see a seam
+  installed by an older CLI — the state §7 measured — so it does not close this
+  bullet; and the startup half waits on the fail-loud-vs-warn decision §7/§9 record
+  as the owner's. Closing #10241 without it would re-orphan the criterion it was
+  filed for.
 - **Part (ii)'s falsifiers (a)/(b)/(c)** — §6.
 - **A monotone window across a `/compact`** — §4's recorded consequence. The
   deletion path is **narrowed, not closed**: the worker refuses a shrinking window

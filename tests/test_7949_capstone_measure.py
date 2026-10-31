@@ -64,6 +64,98 @@ def _sdk_line_naming(code: str) -> int:
 _META_FOLD_CITE = f"tortoise/sdk.py:{_sdk_line_naming('\"stats\": out.get(\"stats\")')}"
 
 
+_EXTRACTOR = "tortoise/extractor_v2.py"
+
+
+def _extractor_lineno(code: str) -> int:
+    """The ONE line of `extractor_v2.py` whose code starts with `code` — READ from the tree.
+
+    `_sdk_line_naming`'s reason applies verbatim to the extractor's line cites, and
+    the red it prevents is the one this file carried: `69f156db0` re-derived every
+    `extractor_v2.py` cite the bundle prints (`ef231735b` had inserted 4 lines above
+    the whole S0→S6 block, moving all of them by +4) but left the pins below typed
+    at the old numbers — so the two tests asserting them failed at the very head
+    whose claim was "the shard is green". A typed number can only be repaired by
+    another hand re-derivation; DERIVED here, the assertion keeps its teeth (a cause
+    or an `_IDLE_CITES` entry naming ANY OTHER line still reds) without carrying a
+    number that re-stales on the next insert above it.
+    """
+    hits = [n for n, line in enumerate(
+        (_REPO / _EXTRACTOR).read_text().splitlines(), 1)
+        if line.strip().startswith(code)]
+    assert len(hits) == 1, (
+        f"`{code}` starts {len(hits)} lines of extractor_v2.py {hits} — the pin names one")
+    return hits[0]
+
+
+def _extractor_block(start: int) -> tuple[int, int]:
+    """The first..last line of the `{`-block opened on line `start`, brace-counted.
+
+    A RANGE cite is the shape the bundle prints for an emitted block
+    (``result["vet"]``, the early-return dict), and its END moves with every key
+    added to the block. Counting braces derives both ends from the tree instead of
+    typing the span.
+    """
+    lines = (_REPO / _EXTRACTOR).read_text().splitlines()
+    depth = 0
+    for n in range(start, len(lines) + 1):
+        depth += lines[n - 1].count("{") - lines[n - 1].count("}")
+        if depth == 0:
+            return start, n
+    raise AssertionError(f"unbalanced `{{` from extractor_v2.py:{start}")
+
+
+def _extractor_cite(code: str) -> str:
+    """``:LINE`` for the one line carrying `code` (bare, the shape causes embed)."""
+    return f":{_extractor_lineno(code)}"
+
+
+def _extractor_range(code: str) -> str:
+    """``:START-END`` for the brace block opened on `code`'s line."""
+    start, end = _extractor_block(_extractor_lineno(code))
+    return f":{start}-{end}"
+
+
+def _extractor_items_gate(gate_code: str) -> str:
+    """``:LINE`` of the first `if items:` after the classify gate `gate_code`.
+
+    `if items:` is not uniquely searchable (the S2 pass and the union pass each
+    carry one), so the pin derives the SECOND gate from its enclosing gate rather
+    than from a bare string that would match either.
+    """
+    lines = (_REPO / _EXTRACTOR).read_text().splitlines()
+    for n in range(_extractor_lineno(gate_code) + 1, len(lines) + 1):
+        if lines[n - 1].strip() == "if items:":
+            return f":{n}"
+    raise AssertionError(f"no `if items:` after extractor_v2.py:{gate_code!r}")
+
+
+#: Every ``extractor_v2.py`` cite the flag-on/zero-activity causes print, DERIVED
+#: from the tree — one table per SURFACE, because the whole point of the rule below
+#: is that the two passes are different code. Every entry except `result` is a line
+#: `_IDLE_CITES` must name (so the bundle cannot drift from the tree without a red);
+#: `result` is the absent-surface cause's ``:START-END`` for the block it names.
+_EXTRACTOR_SITES: dict[str, dict[str, str]] = {
+    "vet": {
+        "flag": _extractor_cite("vet_enabled = (vet_arbiter is not None"),
+        "early": _extractor_cite('"vet": {"enabled": vet_enabled'),
+        "gate_s2": _extractor_cite("if vet_enabled and embed_list:"),
+        "gate_union": _extractor_cite("if vet_enabled and complete_list:"),
+        "result": _extractor_range('result["vet"] = {'),
+    },
+    "classify_later": {
+        "flag": _extractor_cite("classify_later = kind_classifier is not None"),
+        "init_fail": _extractor_cite("classify_later = False"),
+        "early": _extractor_range('"classify_later": {"enabled": classify_later,'),
+        "gate_s2": _extractor_cite("if classify_later and embed_list:"),
+        "items_s2": _extractor_items_gate("if classify_later and embed_list:"),
+        "gate_union": _extractor_cite("if classify_later and complete_list:"),
+        "items_union": _extractor_items_gate("if classify_later and complete_list:"),
+        "result": _extractor_range('result["classify_later"] = {'),
+    },
+}
+
+
 def _load():
     spec = _ilu.spec_from_file_location("capstone_measure_pure", str(PROBE))
     assert spec and spec.loader
@@ -678,8 +770,9 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
 
     `extract_session_v2` emits `result["vet"]` and `result["classify_later"]`
     UNCONDITIONALLY — on the FLAG-OFF arm and on the early-return path the block
-    is `{"enabled": False, "s2": {}, "union": {}}` (`:8509-8524`,
-    `:8873-8887`). An acceptance test of "a non-empty dict" therefore takes an OFF
+    is `{"enabled": False, "s2": {}, "union": {}}` (the two cites are the block
+    ranges `_EXTRACTOR_SITES[k]["early"/"result"]` read out of the tree, see
+    `_extractor_block`). An acceptance test of "a non-empty dict" therefore takes an OFF
     block as the witness for "the S2.2 VET pass RAN" and prints
     `step S2.2 WITNESSED … enabled=false, s2={}`. That is the hazard, not
     pedantry: the moment #9116 copies the sibling key at the meta fold — exactly
@@ -734,20 +827,23 @@ def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
 def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     """`enabled: true` with zero activity is a NON-witness, and not #9116.
 
-    `extractor_v2.py:8504` computes `vet_enabled` (the FLAG) BEFORE the
-    `if not edus:` early return at `:8508`, whose surface is literally
-    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8524`); the
-    VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
-    `:8592`, `if vet_enabled and complete_list:` `:8714`). So the flag-ON +
-    empty-list session emits `enabled: True` with empty counters and no pass ran —
-    and a FAILED vet pass leaves the same shape (`_run_vet_pass` returns `{}` on
-    its fail-open path, `:8390-8393`).
+    `extractor_v2.py` computes `vet_enabled` (the FLAG) BEFORE the
+    `if not edus:` early return, whose surface is literally
+    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}`; the VET passes
+    themselves are gated on the LIST (`if vet_enabled and embed_list:`,
+    `if vet_enabled and complete_list:`). So the flag-ON + empty-list session emits
+    `enabled: True` with empty counters and no pass ran — and a FAILED vet pass
+    leaves the same shape (`_run_vet_pass` returns `{}` on its fail-open path).
 
     The CLASSIFY pass is DIFFERENT CODE, so the cause is PER SURFACE:
-    `classify_later` is computed at `:8473`, its gates are
-    `if classify_later and embed_list:` (`:8604`) around `if items:` (`:8607`) and
-    `if classify_later and complete_list:` (`:8729`) around `if items:` (`:8739`),
-    and its fail-open `except` sits at `:8620` / `:8750`. A cause templated for the
+    `classify_later` is computed from the classifier / flag pair, its gates are
+    `if classify_later and embed_list:` around `if items:` and
+    `if classify_later and complete_list:` around `if items:`, and its fail-open
+    `except` sits below each. Every number the two causes print is DERIVED from
+    `extractor_v2.py` (`_EXTRACTOR_SITES`), never typed — they move with every
+    insert above them (`ef231735b` shifted ALL of them by +4 while the pins stayed
+    typed at the old numbers, reddening the very shard the re-derivation commit
+    claimed to green). A cause templated for the
     surface NAME while citing the VET lines told a reader of the classify block
     that the VET pass's gate idled it — false: an idle classify block comes from no
     embed list or no classify ITEMS, and `embed_list` is only its first gate
@@ -782,27 +878,42 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         assert "did NOT run" not in cause, cause
 
     # ── S2.2 cites the VET pass's own code … ──────────────────────────────
-    assert "tortoise/extractor_v2.py:8504" in vet_cause, vet_cause
-    assert ":8524" in vet_cause, vet_cause
-    assert "if vet_enabled and embed_list" in vet_cause, vet_cause
-    assert "_run_vet_pass" in vet_cause, vet_cause
-    # … and NOT the classify pass's flag or gates
-    for classify_cite in ("classify_later", "if classify_later", ":8473",
-                          ":8498", ":8520", ":8523", ":8604", ":8607",
-                          ":8729", ":8739", ":8620", ":8750"):
-        assert classify_cite not in vet_cause, (classify_cite, vet_cause)
+    for name, site in _EXTRACTOR_SITES["vet"].items():
+        if name == "result":       # emitted by the absent-surface cause, not this one
+            continue
+        assert site in vet_cause, (site, vet_cause)
+    # … and NOT one line of the classify pass's, nor its flag/gate TOKENS
+    for site in _EXTRACTOR_SITES["classify_later"].values():
+        # a range cite reds on its FIRST line too: the reader sent to `:8612`
+        # has landed on the classify early return even if `-8615` is not printed
+        for form in {site, site.split("-", 1)[0]}:
+            assert form not in vet_cause, (form, vet_cause)
+    for classify_token in ("classify_later", "if classify_later"):
+        assert classify_token not in vet_cause, (classify_token, vet_cause)
 
-    # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
-    assert "tortoise/extractor_v2.py:8473" in classify_cause, classify_cause
-    assert "if classify_later and embed_list" in classify_cause, classify_cause
-    assert ":8604" in classify_cause, classify_cause
-    assert ":8607" in classify_cause, classify_cause
-    assert "if classify_later and complete_list" in classify_cause, classify_cause
-    assert ":8729" in classify_cause, classify_cause
-    # … and NOT the VET pass's flag, pass function or gates
-    for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
-                     ":8504", ":8524", ":8592", ":8714", ":8390", ":8393"):
-        assert vet_cite not in classify_cause, (vet_cite, classify_cause)
+    # ── S2.3 cites the CLASSIFY pass's own code … ────────────────────────
+    for name, site in _EXTRACTOR_SITES["classify_later"].items():
+        if name == "result":
+            continue
+        assert site in classify_cause, (site, classify_cause)
+    # … and NOT the VET pass's flag, pass function or any of its lines
+    for site in _EXTRACTOR_SITES["vet"].values():
+        for form in {site, site.split("-", 1)[0]}:
+            assert form not in classify_cause, (form, classify_cause)
+    for vet_token in ("vet_enabled", "_run_vet_pass", "if vet_enabled"):
+        assert vet_token not in classify_cause, (vet_token, classify_cause)
+
+    # The constant the causes are built FROM must name those same lines: this is
+    # the seam the pre-fix red was on. `69f156db0` re-derived every cite the
+    # bundle prints and left these pins typed, so a `_IDLE_CITES` entry can now
+    # only move together with the tree — a re-derivation to a wrong line reds
+    # here instead of shipping.
+    for key, sites in _EXTRACTOR_SITES.items():
+        for name, site in sites.items():
+            if name == "result":       # emitted by the absent-surface cause, not the table
+                continue
+            assert site in measure._IDLE_CITES[key], (
+                key, name, site, measure._IDLE_CITES[key])
 
     # Different text, so neither cause can stand in for the other: a version
     # emitting the SAME sentence for both surfaces would satisfy every
@@ -855,8 +966,11 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
 
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
-    `result["vet"]` (:8883-8887) and `result["classify_later"]` (:8873-8879). The
-    drop is the meta fold at `tortoise/sdk.py:13217` — **re-derived from the tree at
+    `result["vet"]` and `result["classify_later"]`. Both cites are DERIVED from
+    the tree (`_EXTRACTOR_SITES[k]["result"]`), never typed — a range's END moves
+    with every key added to the emitted block, exactly as the start moves with
+    every insert above it. The
+    drop is the meta fold at `_META_FOLD_CITE` — **re-derived from the tree at
     this head, never from the other side of a merge.** Both this branch and `main`
     move `sdk.py` (`#9964` inserts 326 lines above the fold; `main`'s own commits
     insert above it too; #9202's own branch moved it by 4), so any typed number is
@@ -882,7 +996,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
     assert _META_FOLD_CITE in cause, cause
-    assert "tortoise/extractor_v2.py:8883-8887" in cause, cause
+    assert (f"{_EXTRACTOR}{_EXTRACTOR_SITES['vet']['result']}" in cause), cause
     assert "tortoise/sdk.py:12197" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _META_FOLD_CITE in unobserved["S2.3"], unobserved["S2.3"]
@@ -938,7 +1052,7 @@ def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
                      "other=15 (anchored 0)",
                      "total=326", "STRUCTURALLY INCAPABLE",
                      "create_operator", "never writes extractedFrom",
-                     "BY CONSTRUCTION", "tortoise/sdk.py:2372",
+                     "BY CONSTRUCTION", "tortoise/sdk.py:2399",
                      # the denominator is stated as the WRITER class, and the
                      # residual is inside it
                      "supposed-to-derive", "the class where a LOST derivation "
@@ -1148,13 +1262,14 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 #
 # ⚠️ Coverage is every cite that NAMES ITS FILE (`sdk.py`, `edges.py`,
 # `extractor_v2.py` — the three sources the bundle prints numbers for), in all
-# FIVE documents a reader is sent into: the README, both probes, the
+# SIX documents a reader is sent into: the README, both probes, the E-row audit
+# (`E1-E5-PROOFS.md`, the sixth and newest — `#10108`), the
 # `docs/00_index.md` row that is the entry point to this bundle, and the
 # extractor's shared design doc `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
 # architecture doc carries ~15 cites belonging to other epics, so another epic's
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
-# continuation (the docs write `` `extractor_v2.py:8504` and `:8524` ``) is NOT a
+# continuation (the docs write `` `extractor_v2.py:8596` and `:8616` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
 # `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
@@ -1166,6 +1281,12 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
 
 _BUNDLE_DOCS = (
     ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+    # #10108 review (P2): the E-row audit's own `file:line` cites (the gate's
+    # step list, the two extractor surfaces, the receipt fold) were read by no
+    # sweep at all — a document whose thesis is "a claim nothing re-checks can
+    # rot silently" cannot leave its own claims unwatched.
+    ("E1-E5-PROOFS.md",
+     _REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md"),
     ("probes/capstone_measure.py", PROBE),
     ("probes/capstone_run.py",
      _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
@@ -1212,8 +1333,8 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:13217`, ``tortoise/projection/edges.py:2432-2457``, `edges.py:475`,
-# ``tortoise/extractor_v2.py:8883-8887``
+# `tortoise/sdk.py:14377`, ``tortoise/projection/edges.py:2573-2598``, `edges.py:587`,
+# ``tortoise/extractor_v2.py:8975-8979``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
@@ -1226,10 +1347,10 @@ _BUNDLE_CITE = re.compile(
 # vanishing into the exclusion.
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
-        "sdk.py:12402", "sdk.py:12683", "sdk.py:2368", "edges.py:467",
+        "sdk.py:12401", "sdk.py:12682", "sdk.py:2367", "edges.py:467",
         "edges.py:494-503", "edges.py:2168-2192",
         "tortoise/extractor_v2.py:8278-8285", "tortoise/extractor_v2.py:8288-8292"),
-    r"SUPERSEDED and its file is gone": ("sdk.py:12197",),
+    r"SUPERSEDED and its file is gone": ("sdk.py:12196",),
 }
 
 # (label, source, phrases the DOCUMENT uses to name the line, what the line must
@@ -1324,7 +1445,7 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     """The rule whose naming phrase sits NEAREST this cite — distance, not order.
 
     A document names a line with the phrase right beside it (`` `vet_enabled` is
-    computed at `extractor_v2.py:8504` ``), so the closest phrase is the one that
+    computed at `extractor_v2.py:8596` ``), so the closest phrase is the one that
     names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
     names the CLASSIFY pass and then the VET flag on one line, and taking the first
     table match bound the VET cite to the classify phrase ~40 characters away (a
@@ -1444,10 +1565,12 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     """Every live `file.py:line` cite that names its file → the code it names there.
 
     Covers all three sources the bundle prints numbers for (`sdk.py`, `edges.py`,
-    `extractor_v2.py`) across `README.md`, both probes, the `docs/00_index.md` row
-    that is the bundle's entry point, and the `docs/architecture/
-    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 45 cites at
-    this head.
+    `extractor_v2.py`) across `README.md`, both probes, the E-row audit
+    (`E1-E5-PROOFS.md`), the `docs/00_index.md` rows that are the bundle's entry
+    point, and the `docs/architecture/
+    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 50 cites at
+    this head (`#10108` added the sixth document; the count is MEASURED, and it
+    moves with the documents, so re-read `checked` rather than trusting this line).
 
     The architecture doc was the LAST unread one, and it hid a false PASS: its D3
     cite (`run_s2(...)` passing `edus=edus`) was re-derived onto `:7804` — a
@@ -1480,7 +1603,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:13217` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:14377` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]

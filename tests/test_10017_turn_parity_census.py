@@ -380,6 +380,60 @@ def test_a_zero_turn_graph_is_not_evidence(monkeypatch):
     assert tpc.main(_argv("--expect-empty")) == 0
 
 
+def test_expect_empty_never_blesses_a_record_side_that_holds_nothing(
+        monkeypatch, capsys):
+    """The flag relaxes the GRAPH axis only, and it is the axis to get wrong.
+
+    `--expect-empty` exists so a DRAINED target can certify after the purge. It
+    is therefore the one flag a purge can be run under, and the one flag whose
+    scope decides whether the gate protects anything on that run. A graph that
+    still holds turn nodes while the record holds zero rows is the P0 shape —
+    deleting on that reading loses every turn — and it must stay REFUSED (2)
+    with the flag passed, not become a pass because the operator asserted an
+    empty side for the OTHER axis.
+
+    Measured on prod 2026-10-27 and the reason this pin exists: the record's
+    every table held 0 rows while `/health` reported `record.armed=true,
+    ok=true` (the counters reset on deploy, so they do not report volume), and
+    a tenant at its capture ceiling writes nothing at all. "The record is
+    armed" is not "the record holds the turns", so the purge run above is a
+    reachable state, not a hypothetical.
+    """
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1"),
+             "s1_t1": _graph_node("s1_t1", "s1")}
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {"nodes": nodes})
+    monkeypatch.setattr(tpc, "read_record_turns", lambda *a, **k: {
+        "rows_by_key": {}, "non_turn_shaped": 0})
+
+    assert tpc.main(_argv("--expect-empty")) == 2
+    out = capsys.readouterr()
+    # NOT `"CLEAN" not in out`: the output legitimately contains the word as a
+    # COUNT (`0 session(s) CLEAN`), so that assertion is a substring of both the
+    # passing and the inverted reading and pins nothing. The verdict line is the
+    # discriminating one, and the clean-session count is asserted explicitly.
+    assert "verdict    : REFUSED" in out.out
+    assert "0 session(s) CLEAN" in out.out
+    assert "REFUSED  session s1" in out.out
+    assert "would delete 0 turn node(s)" in out.out
+
+
+def test_expect_empty_does_not_suppress_a_PARTIALLY_copied_session(
+        monkeypatch):
+    """One row of two is the half-copied state `--expect-empty` must not hide.
+
+    A copy that stopped midway leaves the record holding SOME of a session's
+    turns — the state a purge gate is most likely to meet in practice, and the
+    one a coarse "the record has rows" check would pass.
+    """
+    nodes = {"s2_t0": _graph_node("s2_t0", "s2"),
+             "s2_t1": _graph_node("s2_t1", "s2")}
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {"nodes": nodes})
+    monkeypatch.setattr(tpc, "read_record_turns", lambda *a, **k: {
+        "rows_by_key": {"s2_t0": _record_row("s2_t0")},
+        "non_turn_shaped": 0})
+    assert tpc.main(_argv("--expect-empty")) == 2
+
+
 def test_an_ALL_unidentifiable_graph_is_not_reported_as_an_EMPTY_graph(
         monkeypatch, capsys):
     """The population is "episodic nodes", not "keyable episodic nodes".

@@ -44,7 +44,7 @@ derives a corpus-level `operator_audit.drop_warnings` that separates the two cla
 | class | markers (refusal TAILS, never a shared prefix) | what a count means |
 |---|---|---|
 | **operator drops** | `operator dropped:`, `operator with unknown op_type`, `non-dict operator entry`, `endpoint NOT minted`, `MITIGATES target edge not emitted` | the operator pass refused an edge the model emitted |
-| **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous (`, `matches no S3 prior or same-session point`, `non-dict retraction ref`, `empty retraction ref`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref` | the replace channel dropped a CORRECTS/supersession record |
+| **supersede refusals** | `matches no S3 prior`, `is the point itself`, `supersedes itself`, `is ambiguous (`, `matches no S3 prior or same-session point`, `non-dict retraction ref`, `empty retraction ref`, `does not resolve to an S3 search result`, `lifecycle=superseded with no supersedes ref`, `with no surviving point id` | the replace channel dropped a CORRECTS/supersession record |
 
 Measured on the fixed tree: **`operator_drops = 0` in every run that carries the field** (the `preleg` receipt predates
 it and records only the pre-narrowing refusal class). ⚠️ The column counts
@@ -69,7 +69,11 @@ a marker now, and the mutation arm pins the class.
 ⛔ **A ZERO IS EVIDENCE ABOUT THE OPERATOR PASS AND NOTHING ELSE.** Two seams are outside
 this instrument: the commit layer (`commit_ops.apply_payload_operators`) logs its skips
 through `_logger` with no warnings sink on the capture, and a session whose snapshot failed
-to read produces no warnings at all. The run note says so verbatim; the receipts committed
+to read produces no warnings at all. (A third seam this note used to carry — a point-level
+`supersedes` ref on a point that FOLDS — is **closed** by #9906: the ref is carried onto the
+surviving point and reaches the resolver, so a refusal there is counted like any other, and a
+carried ref whose fold resolved no graph id is NAMED (`with no surviving point id`) and
+counted too. Only those two remain invisible here.) The run note says so verbatim; the receipts committed
 here predate that wording (their note still reads "not the write path dropping one") — the
 counts are unchanged and the corrected note is what the shipped code emits.
 

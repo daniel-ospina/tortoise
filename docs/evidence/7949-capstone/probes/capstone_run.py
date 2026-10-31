@@ -16,17 +16,23 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:12389``, called at ``:11426``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8396``) calls
-   ``_edus_from_conversation`` (S0, ``:8507``), ``run_s1`` (S1, ``:8540``),
-   ``run_s2`` (S2.1, ``:8564``), ``_run_vet_pass`` (S2.2, ``:8593``),
+   (``sdk.py:13549``, called at ``:12586``) →
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
+   ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
+   ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
    ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
-   ``:8609``), ``search_graph`` (S3, ``:8625``), ``run_s4`` (the gap filler,
-   ``:8646``), and ``execute_embed`` (S5+S6, ``:8845``). The SYMBOL is
-   authoritative and the line is a convenience — the three FILE-NAMED cites
-   above are resolved against the tree by the bundle's pin (the eight bare step
-   cites are pinned only where the README's step table repeats the same
-   numbers, so tree drift shows up there), and no line here is claimed to be
+   ``:8700``), ``search_graph`` (S3, ``:8717``), ``run_s4`` (the gap filler,
+   ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``). The SYMBOL is
+   authoritative and the line is a convenience: the three FILE-NAMED cites
+   above are resolved against the tree by the bundle's pin, and these eight
+   bare step cites are re-read by that same pin file
+   (`tests/test_7949_capstone_verdict_check.py`,
+   `test_the_readmes_line_citations_resolve_to_the_symbols_they_name`). They
+   need that separate leg because a bare `:NNNN` carries no filename, so the
+   bundle's own sweep (`_BUNDLE_CITE`) cannot see them: `#10243` moved
+   `extractor_v2.py` by +88 and all eight went stale while every pin stayed
+   green, which this sentence used to deny by pointing at a README cross-pin
+   `#10211` had already invalidated. No line here is claimed to be
    self-detecting on its own. (No derivation head is named here on purpose: the
    stamps such a sentence used to name re-staled the moment `main` moved, and a
    claim that can only re-stale is not worth keeping.) So the capstone drives

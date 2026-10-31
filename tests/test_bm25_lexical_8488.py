@@ -10,7 +10,8 @@ What this file pins, and why each test exists:
 * the BOUND on the lexical leg's fusion weight (#7704 / #1657) and the
   mutation that reds it — dropping the clamp lets the lexical leg's also-ran
   overtake the dense leg's best hit, i.e. the read's actual answer;
-* the READ PATH: the arm is OFF by default, ON behind ``TORTOISE_BM25_LEXICAL``,
+* the READ PATH: the arm is ON by default (owner ruling 2026-10-28), and
+  ``TORTOISE_BM25_LEXICAL=0`` opts out,
   and an arm that finds nothing falls back to the shipped scorer instead of
   costing the read its lexical leg;
 * the dense-only miss — the acceptance test: on this fixture the DENSE leg
@@ -46,6 +47,7 @@ from tortoise.bm25 import (
     LEXICAL_WEIGHT_MAX,
     bm25_rank,
     bm25_scores,
+    bm25_tokens,
     resolve_lexical_weight,
 )
 from tortoise.embeddings import EmbeddingModel
@@ -60,10 +62,20 @@ from tortoise.search_engine import (
 )
 
 # ── the fixture corpus ────────────────────────────────────────────────────
-#: The rare exact token. `keep_numeric=False` (the shipped search-lane policy,
-#: #8933 untouched) shreds it to `err`, so the lexical signal here is the RARE
-#: WORD — the numeric half of the identifier is the owner's pending decision.
-RARE = "ERR-4032"
+#: The rare exact token.
+#:
+#: #8933 UPDATE (owner ruling, 2026-10-26): this fixture used to carry the
+#: IDENTIFIER `ERR-4032`, which the shipped search lane shredded to `err` — the
+#: numeric half was "the owner's pending decision" and the fixture knowingly
+#: depended on it. That decision has LANDED: the search lane now preserves an
+#: identifier (`err4032` + the adjacency phrase `"err 4032"`), so the shipped
+#: leg matches this record exactly and the rank-lift assertion below lost its
+#: headroom (`on.index == off.index`, measured). The rare token is therefore a
+#: plain OOV WORD — which is what this file is actually about: a token the dense
+#: leg cannot see (the lexicon has no direction for it) and the shipped scorer
+#: under-prices (no idf). Re-pinned by name rather than waived; the #8933
+#: subject has its own file (`tests/test_identifier_tokens_8933.py`).
+RARE = "zebra"
 
 #: Six documents about the query's TOPIC and holding none of its rare token.
 TOPIC_DOCS = [
@@ -218,11 +230,37 @@ class TestBM25Scorer:
         assert scores["three"] < 3 * scores["one"]
 
     def test_score_tie_breaks_by_id_not_by_dict_order(self):
-        """#3019: RRF is rank-based, so a tie must be a function of the data."""
+        """#3019 + #10121: a tie must be a function of the data, and the data
+        says NEWEST first.
+
+        #3019 closed the "function of dict order" half with ``(-score, id)``,
+        which — because ``id`` is a timestamp-minted ULID — was oldest-first.
+        #10121 made it newest-first: the newest match must not be the one a
+        ``limit`` truncates.
+        """
         docs = [("b", "alpha beta"), ("a", "alpha beta")]
-        assert [pid for pid, _ in bm25_rank("alpha", docs)] == ["a", "b"]
+        assert [pid for pid, _ in bm25_rank("alpha", docs)] == ["b", "a"]
         assert [pid for pid, _ in bm25_rank("alpha", list(reversed(docs)))] == [
-            "a", "b"]
+            "b", "a"]
+
+    def test_recency_outranks_the_id_on_a_tie(self):
+        """#10121: the tie follows the RECENCY key the caller supplies.
+
+        Two documents tie on score; the OLDER id holds the NEWER timestamp, so
+        recency must put it first even though the id key alone would not. This
+        is the arm's half of the shared rule — without it the arm ranks its
+        corpus newest-first and then throws the newest match away at
+        ``limit`` (measured: absent from ``limit=5`` on a 21-row tie).
+        """
+        docs = [("b", "alpha beta"), ("a", "alpha beta")]
+        ranked = [pid for pid, _ in bm25_rank(
+            "alpha", docs, recency={"a": "2026-10-01T00:00:00Z",
+                                    "b": "2026-01-01T00:00:00Z"})]
+        assert ranked == ["a", "b"], ranked
+        # An unlisted doc sorts as oldest, exactly as the shared clause does.
+        ranked = [pid for pid, _ in bm25_rank(
+            "alpha", docs, recency={"b": "2026-01-01T00:00:00Z"})]
+        assert ranked == ["b", "a"], ranked
 
     def test_no_shared_token_is_absent_rather_than_zero(self):
         """"unscorable" and "scored zero" must stay distinguishable."""
@@ -233,17 +271,32 @@ class TestBM25Scorer:
         assert bm25_scores("the of and", [("a", "the of and")]) == {}
 
     def test_keep_numeric_threads_the_caller_policy_never_decides_it(self):
-        """#8933 is the OWNER's reopen — this module only passes the choice on.
+        """The numeric-token policy is the CALLER's; this module only threads it.
 
-        With the shipped default the numeric segment of a punctuated identifier
-        is dropped by the shared tokenizer, so `ERR-4032` contributes `err`
-        only; with ``keep_numeric=True`` the ``4032`` segment participates. The
-        DEFAULT is untouched (asserted here rather than left implicit).
+        With the shipped default a BARE numeric token is dropped by the shared
+        tokenizer, so `40` in "spend 40 on lights" contributes nothing; with
+        ``keep_numeric=True`` it participates. The DEFAULT is untouched
+        (asserted here rather than left implicit).
+
+        #8933 UPDATE: the assertion used to ride `ERR-4032`, which was the wrong
+        vehicle once the identifier ruling landed — an identifier's digits are
+        preserved as the COMPOSITE alias (`err4032`), which is not a numeric
+        policy at all and is present on BOTH sides (asserted explicitly below).
+        The bare-numeric lever this test exists for is now measured on a bare
+        numeric token, where ``keep_numeric`` is the only variable.
         """
-        docs = [("d", f"failure {RARE}")]
-        with_numeric = bm25_scores(RARE, docs, keep_numeric=True)
-        without = bm25_scores(RARE, docs)
+        docs = [("d", "spend 40 on lights")]
+        with_numeric = bm25_scores("spend 40 on lights", docs, keep_numeric=True)
+        without = bm25_scores("spend 40 on lights", docs)
         assert with_numeric["d"] > without["d"] > 0
+        # The identifier alias is NOT gated by keep_numeric: the token list
+        # carries `err4032` under BOTH policies, because preserving an
+        # identifier is a different control from the numeric-token policy
+        # (#8933). keep_numeric only ADDS the bare `4032` on top.
+        assert "err4032" in bm25_tokens("failure ERR-4032")
+        assert "err4032" in bm25_tokens("failure ERR-4032", keep_numeric=True)
+        assert "4032" not in bm25_tokens("failure ERR-4032")
+        assert "4032" in bm25_tokens("failure ERR-4032", keep_numeric=True)
 
 
 # ── the bound (#7704 / #1657) ─────────────────────────────────────────────
@@ -324,8 +377,27 @@ class TestLexicalWeightBound:
 
 # ── the read path ─────────────────────────────────────────────────────────
 class TestReadPath:
-    def test_arm_is_off_by_default(self, monkeypatch, lexicon_embedder):
-        """No gate ⇒ the lexical rows are the SHIPPED scorer's, not BM25's.
+    def test_arm_is_on_by_default(self, monkeypatch, lexicon_embedder):
+        """OWNER RULING 2026-10-28: with NO env set, the arm RUNS.
+
+        Pins the default in the direction that matters — a regression back to
+        fail-safe-OFF would silently retire the arm and nothing else would
+        notice. Mutation: ``env_flag(BM25_ENV, False)`` → no
+        ``mechanism="bm25"`` entry, this reds.
+        """
+        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        sdk, _target = _e2e_sdk()
+        trace: list[dict] = []
+        hits = sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
+        assert hits, "guard: the read must return rows"
+        assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
+                   for e in trace), (
+            "with no TORTOISE_BM25_LEXICAL in the environment the arm must run "
+            f"(owner ruling 2026-10-28); trace={trace}")
+
+    def test_the_opt_out_restores_the_shipped_scorer(self, monkeypatch,
+                                                     lexicon_embedder):
+        """``TORTOISE_BM25_LEXICAL=0`` ⇒ the lexical rows are the SHIPPED scorer's.
 
         Not a tautology: the read runs, and each hit's ``scores["fts"]`` must
         match the shipped leg's score for that id — a value BM25 does NOT
@@ -334,7 +406,7 @@ class TestReadPath:
         """
         # Explicit, not ambient: this assertion is about the UNSET gate, so it
         # must not depend on the process env a sibling test happened to leave.
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         sdk, target = _e2e_sdk()
         graph = sdk._get_proj().g
         from tortoise.search_engine import run_fts_query
@@ -352,7 +424,8 @@ class TestReadPath:
         hits = sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
         assert all(e.get("mechanism") != LEXICAL_MECHANISM_BM25
                    for e in trace), (
-            "the BM25 arm must not run unless TORTOISE_BM25_LEXICAL is set")
+            "the BM25 arm must not run when TORTOISE_BM25_LEXICAL=0 opts "
+            "out")
         assert hits, "guard: the read must return rows to compare"
         assert all(h["id"] in shipped for h in hits), (
             "guard: every hit must be a row of the graph the shipped scores "
@@ -413,15 +486,48 @@ class TestReadPath:
         the dense leg's (``LEXICAL_WEIGHT_MAX``), so the arm RE-RANKS within the
         pool rather than vaulting past the dense leg's whole list — that is the
         recorded production balance (``{"vector": 1.5}``, k=60, #1657) and
-        moving it is a measurement decision (#8486), not a lane's. So this test
-        asserts a strict rank IMPROVEMENT, not rank 1.
+        moving it is a measurement decision (#8486), not a lane's. So BOTH
+        claims below are strict on this fixture — the fused POSITION and the
+        target's LEXICAL rank — and the re-measurement in the next paragraph is
+        why the fused one is strict again rather than "does not regress".
 
         Mutation: drop the ``raw_results["fts"] = _bm25_hits`` assignment (the
-        lexical arm disabled) → both reads rank the record identically and this
-        reds.
+        lexical arm disabled) → the lexical score assertions below go red.
+
+        #10121 (2026-10-27) RE-MEASURED this fixture at its own head, embedded
+        lane: gate-off fused rrf 0.0410/0.0403/0.0397/0.0391/0.0385 with the
+        target LAST (5/5); gate-on 0.0407/0.0401/0.0395/0.0394/0.0388 with the
+        target 3/5. So the lift is 5/5 → 3/5 — the same delta the pre-#10121
+        measurement recorded — and the claim below is STRICT (``<``) again.
+
+        Why an intermediate state of this PR had it relaxed to ``<=``, and why
+        that reading is superseded rather than dropped: #10121 flips the DENSE
+        leg's equal-distance tie (the four topic documents sit in one: vector
+        0.9496 ×4 vs the target's 0.4142, while the lexical leg is NOT tied —
+        topics 3.0 vs the target's 2.0). Flipping the dense order alone while
+        the lexical leg still ordered oldest-first handed the same row different
+        ranks on the two legs, so the best lexical rank stopped pairing with the
+        best dense rank and the fused spread compressed — a measured intermediate
+        state (gate-on 0.0400/0.0398/0.0397/0.0396/0.0395, target last in both),
+        not the shipped behaviour. The arm's own recency sort
+        (``bm25_rank(recency=...)``) lands in the SAME change and restores the
+        pairing; the numbers above are the post-pairing re-measurement, which is
+        why this assertion is strict and why no relaxation is left behind.
+
+        Honest scope, unchanged from the fixture note at the module top: the
+        embedder here is the lexicon stand-in, so this proves the MECHANISM. The
+        live numeric improvement is #8486's measurement (postponed by owner
+        ruling) and is NOT claimed here.
+
+        What stays STRICT is the arm's own mechanism: with the gate on the
+        target carries the strongest lexical score (1.3863 vs 0.5754 for every
+        topic doc) and therefore the best LEXICAL rank — asserted below, and it
+        is what the arm is for. The fused POSITION must clear strictly too
+        (measured 5/5 -> 3/5 at this head, asserted below): a ``<=`` there would
+        be satisfied by an arm that changes nothing.
         """
         sdk, target = _e2e_sdk()
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         from tortoise import retrieval_metering
         tally = retrieval_metering.arm(org_id=None)
         _before = tally.legs.get("fts", 0)
@@ -441,10 +547,31 @@ class TestReadPath:
                    for e in on_trace), (
             f"the lexical leg must be BM25-scored when the gate is on; "
             f"trace={on_trace}")
+        # STRICT (#10121 re-measurement): measured 5/5 -> 3/5 at this head. A
+        # ``<=`` here would be satisfied by an arm that changes nothing.
         assert on_ids.index(target) < off_ids.index(target), (
             "the BM25-scored lexical leg must rank the rare-token record "
-            f"better than the shipped scorer did; off={off_ids}, on={on_ids}")
-        # The lexical SCORE the fusion consumed, not just the order.
+            f"BETTER than the shipped scorer did, not merely not-worse; "
+            f"off={off_ids}, on={on_ids}")
+
+        def _lexical_rank(rows: list[dict]) -> int:
+            """Rank by lexical SCORE within the page: rows scoring strictly
+            higher than the target. Strictly-better rather than position, so a
+            tie among the peers cannot make the claim look tighter than it is."""
+            target_score = next(
+                r["scores"]["fts"] for r in rows if r["id"] == target)
+            return sum(1 for r in rows
+                       if r["id"] != target
+                       and r["scores"]["fts"] > target_score)
+
+        # THE STRICT CLAIM (#10121 review): the arm's mechanism is a lexical
+        # re-scoring, so the lexical rank is where it must show. Measured
+        # 4 -> 0 on this fixture.
+        assert _lexical_rank(on) < _lexical_rank(off), (
+            "the arm must strictly improve the target's LEXICAL rank; "
+            f"off={_lexical_rank(off)}, on={_lexical_rank(on)}")
+        # The lexical SCORE the fusion consumed, not just the order. This is the
+        # arm's mechanism and the assertion that must stay strict (#10121).
         on_target = next(h for h in on if h["id"] == target)
         assert on_target["scores"]["fts"] > max(
             h["scores"]["fts"] for h in on if h["id"] != target), (
@@ -478,7 +605,7 @@ class TestReadPath:
             sdk.create_point("statement", content)
 
         query = "the"
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off = sdk.tortoise_fts_query(query, limit=5)
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         on_trace: list[dict] = []
@@ -516,7 +643,7 @@ class TestReadPath:
             sdk.create_point("statement", content)
 
         query = "zebra xylophone"
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off = sdk.tortoise_fts_query(query, limit=5)
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         on_trace: list[dict] = []
@@ -625,7 +752,7 @@ class TestReadPath:
         again and this reds.
         """
         sdk, _target = _e2e_sdk()
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
 
         control_trace: list[dict] = []
         # ruff F841: the call's EFFECT is `control_trace`, asserted below — the
@@ -645,7 +772,7 @@ class TestReadPath:
 
         for lever in ({"search_keys_prf": True},
                       {"entity_key_expansion": True}):
-            monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+            monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
             off = [(h["id"], h["similarity"])
                    for h in sdk.tortoise_fts_query(QUERY, limit=10, **lever)]
             monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
@@ -712,7 +839,7 @@ class TestReadPath:
 
         # The same floor with the gate OFF is the reference read: a stood-down
         # arm changes nothing about it (not the ids, not the fused scores).
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off_floored = [(h["id"], h["similarity"])
                        for h in sdk.tortoise_fts_query(QUERY, limit=10)]
         assert floored and floored == off_floored, (
@@ -762,23 +889,25 @@ class TestReadPath:
             self, monkeypatch, lexicon_embedder):
         """A corpus WIDER than the cap declines — the whole-label rows survive.
 
-        The shipped leg answers over the WHOLE label (index-backed); the arm's
-        window is the first ``cap`` ids in id order — oldest-first on ULID ids,
-        so the newest documents are invisible to it. Replacing the shipped
-        rows with that window makes the read lexically weaker than the leg it
-        replaced, silently, and #8486 would baseline it as the arm's answer.
-        So the leg returns ``[]`` and records ``declined`` — NOT ``degraded``,
+        The shipped leg answers over the WHOLE label (index-backed); the arm
+        reads a ``cap``-row WINDOW of it. Replacing the shipped rows with that
+        window makes the read a subset dressed as a complete ranking, silently,
+        and #8486 would baseline it as the arm's answer. So the leg returns
+        ``[]`` and records ``declined`` — NOT ``degraded``,
         which would relabel this complete read as an impaired memory (see
         ``TestDeclineIsNotAReadDegradation``) — the same fail-safe an empty
         arm gets.
 
         The cap is driven through the REAL sdk wiring by wrapping
         ``run_bm25_query`` (the sdk imports it at call time), so the assertion
-        is about the composition, not about a helper called by the test. The
-        target is created LAST, so it holds the highest id and is outside a
-        one-row window. Control first: the same wiring with a cap the corpus
-        fits in DOES change the read — otherwise "unchanged" below could be
-        explained by the arm not being wired at all.
+        is about the composition, not about a helper called by the test. Since
+        #10121 the window holds the NEWEST ``cap`` rows, and the target is
+        created LAST — i.e. it is INSIDE a one-row window rather than outside
+        it (the pre-#10121 story read the other way round; the decline does not
+        depend on the target's position, only on the corpus exceeding the cap).
+        Control first: the same wiring with a cap the corpus fits in DOES change
+        the read — otherwise "unchanged" below could be explained by the arm not
+        being wired at all.
 
         Mutation: return ``ranked`` instead of ``[]`` when over the cap → the
         arm's windowed rows enter the read and ``on == off`` reds.
@@ -793,7 +922,7 @@ class TestReadPath:
             sdk.create_point("statement", content)
         target = sdk.create_point("statement", TARGET_DOC)["id"]
 
-        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off = [(h["id"], h["similarity"])
                for h in sdk.tortoise_fts_query(QUERY, limit=10)]
         assert off and off[0][0] != target, (
@@ -1492,3 +1621,4 @@ def _bm25_env_block(env: str) -> str:
     end = next((j for j in range(start + 1, len(lines))
                 if lines[j].startswith("# ──")), len(lines))
     return "\n".join(lines[start:end])
+

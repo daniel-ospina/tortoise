@@ -335,6 +335,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # shipped read's own fusion), so it is exempt from the docker redirect and
     # routed to the URI-unset carve-out job.
     "test_bm25_lexical_8488",
+    # #10122: the Point `name` advisory + the FTS-gap evidence — module-level
+    # ``pytest.mark.embedded_only`` (the lane the defect was measured on), so it
+    # is exempt from the docker redirect and routed to the URI-unset carve-out
+    # job. Mirrors the ``carve_out:`` row in ``config/ci-surfaces.yml``; a stem
+    # in only one of the two is the silent hole
+    # ``test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems``
+    # catches.
+    "test_10122_point_name_not_indexed",
     # #5140: the behavioural `ingestedAt` file constructs its own embedded
     # `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`), so the
     # construction IS the under-test input — a URI-set run would discard the
@@ -451,6 +459,24 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # registries are one set in two homes
     # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
     "test_mechanism_write_path_9963",
+    # #3590 round-5 review F3: the minted-identity acceptance pins. The `sdk`
+    # fixture builds `TortoiseSDK(<tmp_path>/t.db, event_log_path=…)` BY DB PATH
+    # and its tests drive `rebuild_all(...)` against that store, so a URI-set
+    # lane would discard the path, connect the construction to the server, and
+    # the `rebuild == live` property this file exists to prove would never be
+    # measured. ⛔ NO test count is stated here on purpose (#9876 review P3):
+    # the file is re-derived at every revision — this sentence quoted "four of
+    # its nine" while the file held 21 tests, the same drift the
+    # `config/ci-surfaces.yml` durations row for this file already guards
+    # against. `pytest --collect-only` is the authority; a comment is not. The
+    # file carries NO module-level `embedded_only`
+    # marker, so the load-bearing reason is the REDIRECT, not a skip (the #7852
+    # W1 shape). Mirror of the `carve_out:` entry in config/ci-surfaces.yml and
+    # of the declaration in
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact — the three
+    # are one set in three homes (`test_ci_selection.py::
+    # test_carve_out_mirrors_test_no_redirect_stems` pins the first two).
+    "test_3590_minted_identity_acceptance",
     # #6871: the operator's INPUT set (idx=0 source, idx>=1 targets), the source
     # edge being EP's factor source slot, and the canonical evidence read never
     # surfacing a point as its own supporter. The fixture builds
@@ -544,6 +570,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
     # tests/test_markers.py::test_no_redirect_stems_registry_exact.
     "test_cli_extraction",
+    # #10121: the recency-tie pins build per-test embedded `TortoiseSDK(<tmpfile>)`
+    # stores and read the tie ORDER back off them (the sweep, the id-less
+    # `:Object`/legacy-id regressions), so the module is `embedded_only` and a
+    # URI-set lane would either skip every case or redirect the construction to
+    # the shared server — the #4047/#4524 shape. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact.
+    "test_10121_recency_tie",
 )
 
 _HAS_FALKOR: bool | None = None

@@ -31,6 +31,15 @@ concurrency:
 jobs:
   drift-guard:
     runs-on: ubuntu-latest
+    # No cap before this line → GitHub's 360m default. The step is a full-history
+    # fetch plus one local tool, so a wedged fetch held a queued runner slot for
+    # hours. Not a branch-protection context (it is absent from .mergify.yml and
+    # from the live required set) but it is on the merge path — it refuses a
+    # merge that would revert main — and it is cheap to bound.
+    # Measured 2026-10-27 (40 newest runs, 2026-10-27T01:44Z..04:08Z, completed
+    # only): p50 0.33m, p95 0.37m, max 0.43m (n=22). 15m is the runner-stall
+    # floor. See docs/ops/ci-wall-clock.md.
+    timeout-minutes: 15
     steps:
       # fetch-depth 0: counting commits behind origin/main needs full history.
       # ref: the PR HEAD (#4174) — NOT the default merge ref, which contains

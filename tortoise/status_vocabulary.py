@@ -68,6 +68,47 @@ as ``degraded`` — the recorded term for an impaired memory — and keeps the
 leg-by-leg detail in its ``leg_trace``. That is a read-path-local extension,
 recorded here because this module is the vocabulary's ONE home: it adds no
 fifth term, renames none, and does not change the boundary's mapping.
+
+**One write-path dimension this vocabulary does not name.** ``record_writer``'s
+LIVE door reports an ARMED call that did not write as ``REFUSED`` (#8447), and
+its ``refusal`` token is one of six. NONE of the six is exactly a term here:
+
+* ``circuit_open`` is the only LITERAL fit — a connect to the record failed, so
+  the store is configured and was not reached, which is ``degraded`` exactly;
+* ``write_failed`` covers two causes: the record was unreachable
+  (``degraded`` literally), OR the record was reached and refused the
+  projection — an impairment, not an outage;
+* ``malformed_dsn`` is a SET-UP defect, refused before any reach is attempted:
+  closer to a policy/set-up gap than to an outage, but ``unconfigured`` is
+  defined as *no value is configured*, and here a value IS set and is wrong;
+* ``no_tenant`` is a deployment/caller gap — nothing about the store is wrong;
+* ``no_tenant_carried`` is the same gap one arm over: the caller DID supply a
+  tenant pair and it was unusable (empty, half, or not two non-empty strings),
+  so the seam refuses it rather than filing a row under a tenant nobody named.
+  It is a FAILURE — counted on the ``no_tenant`` COUNTER, which is why an
+  operator reading the metric set cannot see the split;
+* ``no_durable_journal`` is a healthy DECLINE (the M2 capture lane has no
+  journal by design), counted on ``record_non_journal_skips`` rather than
+  ``record_write_failures``, so nothing a replay could restore is missing.
+
+⛔ THE COUNT AND THIS LIST ARE INDEXED, NOT AUTHORITATIVE. The vocabulary is
+declared in ``record_writer`` — ``LIVE_WRITE_REFUSALS`` for the tokens the seam
+returns before any socket, plus ``write_failed`` for the attempt itself, and
+``RecordWrite.refusal``'s own docstring for the closed set a consumer branches
+on. This list said *five* while the door returned six (#10021 review P3): the
+new ``no_tenant_carried`` token was added at the producer and the module that
+calls itself the vocabulary's ONE home was not, so a consumer reading this map
+was told a set one value too small. A reader that needs the set MUST read
+``record_writer`` — and if the two ever disagree again, the code is the answer.
+
+So the write path carries all six as ``degraded`` — the NEAREST recorded term
+for "not available", and not a measured outage for five of them — and keeps the
+reason in ``RecordWrite.refusal``, which is authoritative: a consumer must read
+``refusal`` before calling a refusal an outage, a set-up gap, or an error.
+Recorded here for the same reason as the read-path dimension above — this
+module is the vocabulary's ONE home, and a mapping documented only at the call
+site is one that no reader of the published table will find. It adds no fifth
+term, renames none, and does not change the boundary's mapping.
 """
 
 from __future__ import annotations

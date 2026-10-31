@@ -96,6 +96,11 @@ from tortoise.config import _resolve_event_log_path
 from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
     EmbedMeteringMiddleware as _EmbedMeteringMiddleware,
 )
+from tortoise.entity_identity import (  # #3590: identity is a minted id, a name is a label
+    AmbiguousEntityName,  # #9876: the create's route-then-refuse, mapped to 422 here
+    refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
+    resolve_fold_name,  # #3590 fold-side name resolution
+)
 from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
@@ -2025,6 +2030,16 @@ async def _lifespan(app):
     _CONTROL_PLANE_PROBE.reset()
     _probe_sdk_reset()
 
+    # ── #3524 §9 step 1: the consent token's single-use register is SHARED state
+    # (control plane, migration 20261030000001), not this process's memory. Installed here
+    # rather than at import because the AS runs several Fly machines: a register that only
+    # one machine can see lets a replayed token mint a SECOND authorization code — the
+    # replay §2.2's `jti` exists to bound. Idempotent and side-effect-free when the arm is
+    # never used (no query is issued until a redemption).
+    from tortoise.consent_token import install_shared_consent_jti_store
+
+    install_shared_consent_jti_store()
+
     # ── #2850: arm liveness BEFORE anything that can block. The heartbeat
     # task, the dedicated /healthz listener and the stall watchdog are all
     # synchronous/cheap — they cannot delay uvicorn's bind, and they mean the
@@ -2824,10 +2839,13 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
     ``record_tenant`` (#9188) is the Postgres record's tenant for THAT graph,
     resolved by the enqueueing request from its own credential. The drain can
     only open a graph, not a tenant, so this is where the answer has to be
-    carried across the queue. ``None`` (a SESSION/JWT or OAuth ``oat_``
-    credential — post-#10025 an org-wide API KEY names the default graph, so it
-    is NOT this case) records nothing and the drain's writes are refused
-    `no_tenant` — a named refusal, not a guess.
+    carried across the queue. ``None`` means the request's credential named no
+    tenant — since #10046 that is no longer a credential class (an API key since
+    #10025, a SESSION/JWT credential and an OAuth ``oat_`` token since #10046 all
+    name the org's default graph), so it now means the default row could not be
+    NAMED (missing, tombstoned, another org's, unreadable). Nothing is recorded
+    and the drain's writes are refused `no_tenant` — a named refusal, not a
+    guess.
     """
     if not dirty_roots:
         return
@@ -6520,6 +6538,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _ORG_ADDITIVE_IMPORT_TIER,
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
+        default_graph_id_for_credential,
     )
     row = await _cp_offload(
         lambda: _orgs_row_fail_soft(
@@ -6601,6 +6620,40 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         # the flag for enforcement — only the UI renders from it.
         "dashboard_key_login": row.get("dashboard_key_login") is not False,
     }
+    # #10046: the RECORD tenant for a SESSION/JWT credential. This lane never
+    # goes through `resolve_api_key`, so nothing else on it puts the org's
+    # default-graph row id on the dict — and `record_tenant_for` (the one
+    # declaration both transports call) names an org-wide credential ONLY from
+    # `default_graph_id`. Without this stamp every armed write on this lane is
+    # refused `no_tenant` while the data lands in the default graph
+    # (`_data_sdk` opens `namespace=org_id`): a whole credential class invisible
+    # to the record, silently. Resolved through the SAME home the API-key lane
+    # uses — `default_graph_id_for_credential`, which is
+    # `default_graph_id_for` plus the on-miss mint — never a second notion of
+    # "which graph is this".
+    #
+    # Fail-soft and never gating the request (#5148's rule, and the resolver's
+    # own contract): a `None` here is a NAMED refusal counted `no_tenant`, not
+    # a guess, and it is the direction to prefer over failing a signed-in
+    # request. `best_effort=True` keeps an offload hiccup from turning a
+    # record-tenant lookup into a 503 on ~33 session endpoints.
+    #
+    # ⚠️ The offload RESULT is not a tenant id by construction: on a refused
+    # submission / missed wait bound, `best_effort=True` returns the
+    # `OFFLOAD_REFUSED` sentinel rather than `None` (see `_cp_offload`).
+    # `record_tenant_for` type-checks `str`, so the refusal direction is already
+    # fail-closed — but the sentinel must not sit in a field NAMED
+    # `default_graph_id`, so it is normalised here and a later consumer cannot
+    # inherit it.
+    _resolved_default_graph_id = await _cp_offload(
+        lambda: default_graph_id_for_credential(
+            cp, org_id, row.get("graph_name"),
+            context="session auth self-heal"),
+        op="default_graph_row", best_effort=True)
+    org["default_graph_id"] = (
+        _resolved_default_graph_id
+        if isinstance(_resolved_default_graph_id, str) and _resolved_default_graph_id
+        else None)
     # #1913: post-auth abuse evaluation — the session-JWT lane was the
     # abuse-blind hole (key lanes call _abuse_post_auth in get_current_org /
     # _get_current_org_supabase; session-driven REST calls never recorded an
@@ -6925,17 +6978,22 @@ def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
     tenancy resolver — and the dream drain it enqueues carries the same answer
     across the queue (``_DREAM_RECORD_TENANTS`` / ``_bind_dream_record_tenant``),
     because that drain opens its own SDK. Routes that write the org's DEFAULT
-    graph by construction — the onboarding/starter seed runners and the
-    background indexing jobs — build their own SDK
-    (``_make_sdk(namespace=org_id)``) and never see the request's credential,
-    so they are bound by :func:`_bind_default_graph_record_tenant` at their own
-    construction site (#10047), from the SAME ``public.graphs`` default row and
-    through the SAME ``record_tenant_for`` answer this function asks for.
-    Binding a runner to a graph-bound key's id would file its rows under a
-    graph it never wrote, so that is never what that helper does. What is still
-    unbound is the SESSION/JWT and OAuth ``oat_`` credential class, which
-    carries no ``default_graph_id`` on the dict this function reads — a
-    RESOLUTION gap at the credential (#10046), not a missing carrier here.
+    graph by construction (the onboarding/starter seed runners and the background
+    indexing jobs) ARE bound — by
+    :func:`_bind_default_graph_record_tenant`, at their own construction site
+    (#10047), from the SAME ``public.graphs`` default row and through the SAME
+    ``record_tenant_for`` answer this function asks for. Binding a runner to a
+    graph-bound key's id would file its rows under a graph it never wrote, so
+    that is never what that helper does. The SESSION/JWT and OAuth ``oat_``
+    credential classes name the default graph too, since #10046:
+    ``_session_user_org`` and
+    ``tortoise.oauth.resolve_oauth_access_token`` both stamp
+    ``default_graph_id`` from ``default_graph_id_for_credential``, so this
+    function's ``record_tenant_for`` call names it for them as well. What
+    remains unbound is a credential whose org has no nameable default row; there
+    the residue is a counted ``no_tenant``, never a misfiled row. (Both seed
+    surfaces reject a graph-bound credential outright, so that residue cannot
+    even be reached from them.)
 
     Fail-soft and DELIBERATELY so: a record-binding fault must not fail the
     request (#5148's rule — the record is a derived, replayable store, and this
@@ -7036,11 +7094,13 @@ def _bind_dream_record_tenant(sdk: TortoiseSDK, key: str) -> None:
     an armed hosted deployment refuses every dream-emitted record `no_tenant`
     for a graph whose credential named it.
 
-    Silent by design when the key carries no tenant: that is a SESSION/JWT or
-    OAuth ``oat_`` write — credentials that carry no ``default_graph_id``
-    (#10046) — so the tenant is not something this helper may guess. An
-    org-wide API KEY is NOT this case: since #10025 it names the default graph,
-    and the enqueue carried that tenant here.
+    Silent by design when the key carries no tenant: the request's credential
+    never named one (an unreadable control plane, or an org whose default row
+    does not exist — #10046's resolvers stamp ``default_graph_id`` for a
+    SESSION/JWT and an OAuth ``oat_`` credential too, so "no tenant" no longer
+    means "this credential class"), and that is not something this helper may
+    guess. An org-wide API KEY is NOT this case: since #10025 it names the
+    default graph, and the enqueue carried that tenant here.
     """
     tenant = _DREAM_RECORD_TENANTS.get(key)
     if tenant is None:
@@ -7085,16 +7145,20 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     auth seam holds no `with` to hang an ambient scope on.
 
     ⚠️ WHAT THE ORG-WIDE HALF ACTUALLY DOES, on the credential that reaches
-    here. An org-wide **API KEY** (``tt_``/``tk_``, ``graph_id`` None) DOES get
-    a tenant bound since #10025: ``resolve_api_key`` puts the org's active
+    here. An org-wide **API KEY** (``tt_``/``tk_``, ``graph_id`` None) gets a
+    tenant bound since #10025: ``resolve_api_key`` puts the org's active
     ``kind='default'`` row id on the credential as ``default_graph_id``, and
-    ``record_tenant_for`` names it — measured, not assumed. What stays unbound
-    is the shape that carries no such field: a SESSION/PAT credential
-    (``_session_user_org`` resolves `org_id` + tier only) and an OAuth ``oat_``
-    token (``tortoise.oauth.resolve_oauth_access_token`` never calls
-    ``resolve_api_key``). Those are #10046's scope (a RESOLUTION gap at the
-    credential, not a missing carrier in this module), and for them the write
-    is refused ``no_tenant`` rather than filed under a tenant nobody chose.
+    ``record_tenant_for`` names it — measured, not assumed. Since #10046 the
+    OTHER org-wide credential classes answer identically, through the same
+    field and the same resolver: ``_session_user_org`` (SESSION/JWT) and
+    ``tortoise.oauth.resolve_oauth_access_token`` (``oat_``) both stamp
+    ``default_graph_id`` from ``default_graph_id_for_credential``. The runners
+    that never see a request credential at all — the seed runners and the
+    background indexing jobs — are bound at their own construction site by
+    :func:`_bind_default_graph_record_tenant` (#10047), from the same default
+    row. What stays unbound is a credential whose org has no nameable default
+    row; there the write is refused ``no_tenant`` rather than filed under a
+    tenant nobody chose.
     """
     # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
@@ -7506,8 +7570,12 @@ def _check_org_limit(org: dict, resource: str, *,
     - Fail-closed is the secure default: when you can't verify, don't grant.
     - Customer harm is bounded: a DB outage that breaks count queries typically
       also breaks the actual write (same store), so we're failing fast.
-    - Alerting mitigates ops risk: every QuotaCheckError is logged at ERROR
-      level with org_id and resource, visible in production dashboards.
+    - Alerting mitigates ops risk: every data-fault QuotaCheckError — a
+      counting failure, a MISSING limit key, an UNREADABLE limit value — is
+      logged at ERROR level with org_id and resource, visible in production
+      dashboards. (`unknown quota resource` is an internal programming error —
+      a bad `resource` literal, never tenant data — and is deliberately not
+      logged here; #4051 review round 5.)
 
     #329: delegates to the shared fail-closed quota helper.
     #683: the limits dict is the authenticated org dict (resolved once by
@@ -7539,8 +7607,11 @@ def _check_org_limit(org: dict, resource: str, *,
             detail=quota_refusal_payload(e),
         )
     except QuotaCheckError as e:
-        # quota._count_resource already logged at ERROR level (#686);
-        # avoid double-logging — this site only records the HTTP context.
+        # `quota` already logged the refusal at ERROR level — `_count_resource`
+        # for a counting failure (#686), and the limit validation for an
+        # UNREADABLE limit (#4051, on BOTH the generic path and the `documents`
+        # derived branch) or a MISSING one (#4051 review round 5); avoid
+        # double-logging — this site only records the HTTP context.
         _logger.debug(
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
             org_id, resource, str(e),
@@ -10012,16 +10083,24 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
                             "read cannot be served from the record — absence "
                             "is NOT established"))
             # A credential that resolves no record tenant is a PERMANENT
-            # condition — `record_tenant_for` returns None for every session/JWT
-            # read and every non-Supabase deployment — so it gets its OWN reason.
-            # Counting it `record-unavailable` would make that counter, which
-            # exists to alert on outages, fire permanently on a condition the
-            # record never caused.
+            # condition — a retry re-runs the SAME resolution, whose self-heal
+            # mint has already missed, so it never becomes nameable on its own —
+            # so it gets its OWN reason. Since #10046 that is no longer a
+            # credential CLASS: an API key (#10025), a SESSION/JWT credential and
+            # an OAuth `oat_` token all name the org's `kind='default'` row
+            # through `supabase_control.default_graph_id_for_credential`, so
+            # `None` here means that row could not be NAMED (absent, tombstoned,
+            # another org's, unreadable), the tenant read was lost, or this is a
+            # non-Supabase deployment with no control plane — never "this
+            # credential carries no tenant by design". Counting it
+            # `record-unavailable` would make that counter, which exists to alert
+            # on outages, fire permanently on a condition the record never
+            # caused.
             # ⚠️ Count AFTER the cache answers — the same invariant as
             # `record_serve._fell_back`. A cache failure raises out of here, so a
             # request that was never answered contributes no increment (this arm
-            # is the most-travelled counting path in `prefer` mode, because
-            # `record_tenant_for` returns None for every session/JWT credential).
+            # is the most-travelled counting path in `prefer` mode: it is taken
+            # for every request whose org has no nameable default row).
             reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
             props_from_cache = await asyncio.to_thread(_cache_props)
             record_serve.note_fallback(reason)
@@ -11052,22 +11131,186 @@ def _org_is_anon(org_id: str) -> bool:
         return False
 
 
+#: Episode-feed depth the acknowledgement route resolves against (#10156).
+#: Larger than the dashboard's render limit on purpose: the owner may be
+#: acknowledging an episode that `limit=20` does not render, and "we did not
+#: look" must not be reported back as "no such episode".
+_ALERT_ACK_SCAN = 200
+
+
 @app.get("/v1/team/alerts")
 async def org_alerts(org_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """#308 (R7) — suspicious-activity alert history for the dashboard.
 
     Session-authed (NOT API-key authed) by design: it must stay reachable
     while the org is suspended so the owner can see what happened and find
-    the appeal path (scoping delta 12)."""
+    the appeal path (scoping delta 12).
+
+    #10156: each entry carries `register` ("alert" = something happened, or
+    "activity" = a detector measured a rate and changed nothing), `count` and
+    `first_at` (one row per sustained BOUT, not per detector window), `acked`,
+    and the opaque `episode` key the acknowledgement route takes. The panel
+    renders the two registers separately and can say "nothing was changed"
+    only because the register travels with the row.
+
+    ``scan_saturated`` says the scan was cut. It is NOT a per-row flag (that is
+    ``truncated``): it exists for the empty-feed case, where there is no row to
+    carry the caveat."""
     membership = await _membership_org(user["user_id"], org_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
+    saturated = False
+    unavailable = False
     try:
         from tortoise.supabase_control import get_abuse_store
-        alerts = get_abuse_store().recent_alerts(org_id, limit=20)
+        store = get_abuse_store()
+        alerts = store.recent_alerts(org_id, limit=20)
     except Exception:
-        alerts = []  # best-effort — an alert-history failure is not a 500
-    return {"org_id": org_id, "alerts": alerts}
+        # Best-effort — an alert-history failure is not a 500. But it is ALSO not
+        # "nothing happened": the panel unmounts on an empty feed, so a failed
+        # read would render as an all-clear on the one screen whose job is not to
+        # hide incidents (round-23 review finding). `unavailable` says "we could
+        # not look", which is a different fact from "we looked and found none".
+        alerts = []
+        unavailable = True
+    else:
+        # The saturation probe gets its OWN handler: it is a SECONDARY read, and
+        # while it shared the `try` above, a probe failure (a store that does not
+        # implement it, a transient error) discarded an already-successful alert
+        # read and unmounted a live `suspend` row (round-23 review finding).
+        # Fail-soft into "saturated", which is the conservative direction: the
+        # panel then says the window may be full rather than claiming it is not.
+        try:
+            saturated = bool(store.alert_scan_saturated(org_id))
+        except Exception:
+            saturated = True
+    # #10156 round-8 review finding: `truncated` rides on a row, so an EMPTY feed
+    # that is empty only because the scan was cut (the newest rows were all
+    # non-alert) would otherwise read as "nothing ever happened" — the exact
+    # false negative this change exists to remove. Reported as a separate flag so
+    # the panel can say "there may be more" without a row.
+    return {"org_id": org_id, "alerts": alerts, "scan_saturated": saturated,
+            "unavailable": unavailable}
+
+
+@app.post("/v1/team/alerts/ack")
+async def ack_org_alert(request: Request, user: dict = Depends(get_current_user)):  # noqa: B008
+    """#10156 — acknowledge ONE alert episode so it stops rendering as current.
+
+    Persisted as a durable row (``abuse_events`` / ``alert_ack``), never a
+    cookie: a dismissal that evaporates on the next device or the next deploy
+    is not a dismissal, and the customer would be told "acknowledged" by a
+    browser that had remembered it. The response is deliberately NOT optimistic
+    — a failure to store returns 503 rather than 200, because the row would
+    otherwise reappear on the next poll and teach the customer the control is
+    broken.
+
+    GATED BY ROLE, but deliberately NOT by ``_require_owner_admin``: that helper
+    also 403s a SUSPENDED org, and this surface must stay reachable while
+    suspended (the appeal flow reads it — #1853). Acknowledging changes no
+    enforcement state and disables nothing; it records that a human saw a row,
+    so owner/admin is the right gate and the suspension stamp is not.
+
+    The episode is RESOLVED against the org's current feed before it is written
+    (review findings, two of them):
+
+    * an arbitrary/stale ``episode`` string is refused instead of being written
+      as a row that nothing will ever match (the previous version accepted any
+      string from an owner and accumulated one row per attempt);
+    * the WINDOW written with the acknowledgement is the one from OUR feed, not
+      from the request: the client sends only the key it rendered, and a
+      client-supplied window would let a caller acknowledge an episode it was
+      never shown.
+
+    ``rendered_at`` is OPTIONAL and is only an ASSERTION, not input to the
+    window (#10156 round 9): it is the ``at`` the caller had on screen, and if
+    our feed has moved past it on the INCIDENT register we refuse with 409 so
+    the dashboard reloads — because the acknowledgement we would otherwise write
+    covers the newer row too, and a re-suspension inside the same episode gap
+    would then be dismissed by a click that never saw it.
+
+    A ``truncated`` episode IS acknowledgeable. An intermediate version refused
+    it with 409 on the reasoning that its key is anchored to the oldest row we
+    can see, so it moves as the window slides — which was true of the KEY. It is
+    not true of the ACKNOWLEDGEMENT: ``_episode_acknowledged`` matches on
+    identity plus window OVERLAP, so a record of the window we can see survives
+    the scan sliding past the episode's start. Refusing would have made the
+    oldest, longest-running episode permanently undismissable — a live security
+    row with no way to clear it (review finding P1).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    org_id = str(body.get("org_id") or "").strip()
+    episode = str(body.get("episode") or "").strip()
+    if not org_id or not episode:
+        raise HTTPException(status_code=422,
+                            detail="org_id and episode are required")
+    role = await _membership_role(user["user_id"], org_id)
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=403,
+                            detail="Requires owner or admin role in team")
+    from tortoise.supabase_control import get_abuse_store
+    try:
+        store = get_abuse_store()
+        # A LARGE limit: the caller's `episode` may be any episode in the feed,
+        # not just the newest 20 the dashboard renders.
+        current = store.recent_alerts(org_id, limit=_ALERT_ACK_SCAN,
+                                      include_identity=True)
+    except Exception as exc:
+        _raise_503_if_cp_outage(exc)
+        raise HTTPException(
+            status_code=503,
+            detail="alert episode could not be resolved") from exc
+    match = next((a for a in current if a.get("episode") == episode), None)
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no such alert episode on this Organization")
+    # ROUND 9 (review finding) — a dismissal must not cover an incident it was
+    # not shown. The window written with the ack is the episode's newest row AT
+    # WRITE TIME, and `_episode_acknowledged`'s incident gate only refuses rows
+    # NEWER than that — so anything that arrived between the render and the click
+    # is folded into the dismissal and can never re-open it. A re-suspension
+    # immediately after a suspension is exactly that case, and a suspension
+    # writes no follow-up row, so nothing else would ever surface it.
+    #
+    # The client therefore sends the `at` it RENDERED, and we use it only as an
+    # ASSERTION about what was on screen — never as the window (that stays
+    # server-derived, see above): if our feed has moved past it, the click is
+    # answering a row that is no longer current, so we refuse and the dashboard
+    # reloads. Applied to the INCIDENT register only: absorbing a newer
+    # observation is the deliberate choice for a rate (`_episode_acknowledged`),
+    # and refusing there would live-lock dismissal of an ongoing rate, where a
+    # new window can arrive every 5 minutes.
+    from tortoise import abuse as _abuse  # the timestamp + register vocabulary
+    rendered_at = str(body.get("rendered_at") or "").strip()
+    if rendered_at and match.get("register") == _abuse.REGISTER_ALERT:
+        newer = _abuse._parse_ts(match.get("at"))
+        seen = _abuse._parse_ts(rendered_at)
+        if newer is not None and seen is not None and newer > seen:
+            raise HTTPException(
+                status_code=409,
+                detail="this alert changed since it was shown — reload to "
+                       "see what is current")
+    # The WINDOW is taken from OUR feed, never from the request: the client
+    # sends only the key it rendered, and a client-supplied window would let a
+    # caller acknowledge an episode it was never shown (review finding).
+    # `truncated` episodes ARE acknowledgeable — the window we can see is enough,
+    # because `_episode_acknowledged` matches by OVERLAP rather than by the key,
+    # so the acknowledgement survives the scan sliding past the episode's start.
+    try:
+        store.record_alert_ack(org_id, episode, ack_of=match,
+                               by=user.get("user_id"))
+    except Exception as exc:
+        _raise_503_if_cp_outage(exc)
+        raise HTTPException(
+            status_code=503,
+            detail="alert acknowledgement could not be stored") from exc
+    return {"org_id": org_id, "episode": episode, "acknowledged": True}
 
 
 @app.get("/v1/internal/abuse/state")
@@ -12447,15 +12690,22 @@ def _acl_layer_declared_strict() -> bool:
 _ACL_ABSENCE_ANNOUNCED: set[str] = set()
 
 
-def _announce_acl_absence_once(status: str, graph_id: str, detail: str) -> None:
-    """Log why the per-graph ACL user is missing — once per process per kind.
+def _announce_acl_absence_once(status: str, reason: str, graph_id: str,
+                               detail: str) -> None:
+    """Log why the per-graph ACL user is missing — once per process per KIND.
+
+    Keyed by ``(status, reason)``, not by status alone (#10093): ``absent``
+    covers three different facts — no URI, bare redis, an unreachable server —
+    and a status-only key would print the first one that happened and silently
+    swallow the rest.
 
     ``absent_by_design`` / ``denied`` are WARNINGS (an operator must be able to
     see that this deployment has no database-level second wall); a plain
     ``absent`` (embedded store, bare redis, layer down) is INFO."""
-    if status in _ACL_ABSENCE_ANNOUNCED:
+    key = f"{status}:{reason or 'unknown'}"
+    if key in _ACL_ABSENCE_ANNOUNCED:
         return
-    _ACL_ABSENCE_ANNOUNCED.add(status)
+    _ACL_ABSENCE_ANNOUNCED.add(key)
     if status == "absent":
         _logger.info(
             "per-graph ACL layer absent (%s) — no ACL user for graph %s; "
@@ -12510,7 +12760,8 @@ def _acl_user_create_hook(graph_id: str, org_id: str, *,
         return
     if result.status is AclStatus.PROVISIONED:
         return
-    _announce_acl_absence_once(result.status.value, graph_id, result.detail)
+    _announce_acl_absence_once(result.status.value, result.reason, graph_id,
+                               result.detail)
 
 
 def _acl_user_drop_hook(graph_id: str) -> None:
@@ -14829,6 +15080,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             raise HTTPException(
                 status_code=500, detail=f"Quota check failed: {e}") from None
 
+    # ⚠️ #10133 — the SAME VACUOUS PROXY the commit lane lost in #4051: since
+    # #4010 every resolver supplies `max_sessions: None`, so this call can never
+    # 402 (it does not even count). It is NOT the org-limit gate for this lane;
+    # the binding one is the points ESTIMATE gate above, which is conditional on
+    # `(not session_existed or retry_failed_capture) and not store_only`. What
+    # this call still does is refuse (500) a limits dict with no `max_sessions`
+    # key at all — the #310 GAP-B presence check the MCP capture bridge relies on
+    # (`tests/test_capture_session.py::test_mcp_capture_missing_max_sessions_fails_closed`).
+    # Removing it needs that contract re-pointed at `max_points` AND a decision
+    # for the store-only lanes, so it is tracked separately rather than copied
+    # half-way here.
     _check_org_limit(org, "sessions")
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
@@ -14908,29 +15170,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # prior stored-turn count — not on which branch ran (see the meter below).
     prior_turn_count = 0
     if session_existed:
-        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
-        # meter. Before #3551 it sat AFTER the Session MERGE that had already
-        # committed; the MERGE now runs LATER, inside the pooled
-        # _write_session_and_turns submission below, so nothing is committed
-        # at this point yet. It stays best-effort regardless — a transient
-        # graph error here must never 500 a capture (the file's posture, and
-        # every sibling bookkeeping read in this function), and the Session
-        # node is guaranteed to pre-exist by `session_existed`. On failure 0
-        # makes the meter OVER-count (`len(windowed) > 0`), the documented
-        # conservative posture, never a blind spot. It also must not abort the
-        # keyless→keyed upgrade this PR exists to enable.
-        try:
-            _prior_turns = proj.g.query(
-                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                "WHERE t.is_episodic = true RETURN count(t)",
-                params={"sid": session_id}).result_set
-            prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
-        except Exception:
-            import logging
-            logging.getLogger("tortoise.api").warning(
-                "prior_turn_count read failed (non-fatal, metering over-counts)",
-                exc_info=True)
-            prior_turn_count = 0
+        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op meter,
+        # and it must never 500 a capture — see `_prior_stored_turn_count`.
+        prior_turn_count = _prior_stored_turn_count(proj, session_id)
 
     # #4194: embed the whole window BEFORE the loop — the stored text of each
     # turn, exactly as the loop writes it — in ONE local-model call, using the
@@ -16817,6 +17059,109 @@ def _narrative_carrier(story_arc, summary, *, session_id: str,
     }
 
 
+def _ambiguous_entity_refusal(exc) -> HTTPException:
+    """The ONE 422 body for a create-side ambiguity refusal (#9876 review).
+
+    ``entity_identity.AmbiguousEntityName`` already carries the machine-readable
+    coordinates (``label``, ``name``, ``candidate_ids``) precisely so a
+    boundary does not have to string-match the message — so this relabels the
+    exception into the repo's validation posture (422) and nothing else.
+
+    ⛔ THE 500'S ADVICE IS WRONG FOR IT AND MUST NOT RIDE ALONG. That detail
+    says "the commit is replay-safe (retry with the same client_commit_id)",
+    and this refusal is DETERMINISTIC: a same-payload retry re-raises it
+    identically (the same argument the two sibling clauses in the handler make
+    for themselves — `InvertedSupersedeWindow` and `UnapprovedKindNamespace`).
+    So the body must name the conflicting carriers and tell the client what to
+    CHANGE instead. A retryable-looking answer for a permanent refusal is the
+    one thing an idempotency contract must never send (AIP-193/AIP-194: a
+    non-transient state refusal is not a retryable failure — only UNAVAILABLE
+    is, and a 5xx whose advice never comes true turns one bad payload into an
+    infinite client loop).
+
+    ``candidate_ids`` keeps the resolver's own display form, so an ID-LESS live
+    carrier reads ``"<id-less>"`` — the evidence that made the read ambiguous,
+    never dropped (the #8018 class).
+    """
+    return HTTPException(
+        status_code=422,
+        detail={
+            "error_code": "AMBIGUOUS_ENTITY_NAME",
+            "code": "ambiguous_entity_name",
+            "message": (
+                f"{exc} — rename or retire one of the carriers before naming "
+                f"it in a commit; the create will not pick one for you"
+            ),
+            "label": exc.label,
+            "name": exc.name,
+            "candidate_ids": list(exc.candidate_ids),
+        },
+    )
+
+
+def _refuse_ambiguous_commit_entities(sdk, reconcile) -> None:
+    """Refuse a commit naming a doubly-held entity BEFORE the first write.
+
+    #9876 review (this head), the blocking half: ``_execute_commit_writes``
+    reaches ``sdk.create_entity`` at **step 6**, and that door calls
+    ``resolve_or_mint``, which REFUSES a name two or more LIVE entities hold
+    (route-then-refuse, R8). Steps 2/2b/3/3b/4/5 have already journaled and
+    written by then — events, the Document transcript, the session Source and
+    the Points — so the refusal landed as the retry-advising fail-closed 500 on
+    top of a half-written commit, and every later POST of the same payload
+    produced the same 500. That is the #2422/#7925 partial-mutation class this
+    PR closes on the SDK bundle door (`sdk._validate_bundle`'s bundle-wide
+    ambiguity loop), reached here through the production capture entry point.
+
+    MIRRORS THAT LOOP, with the parts this path needs:
+
+    * the item set is the one step 6 WRITES (``plan.reconcile.entities``), not
+      ``payload.entities`` — reconcile is what the write phase iterates;
+    * the LABEL is the same routing step 6 uses (``writable_kind`` then
+      ``is_subject_kind``), so the probe asks about the label the create lands
+      on — probing ``:Object`` for a subject-kind item would answer about a
+      different node set;
+    * the PREDICATE is not re-implemented: ``refuse_ambiguous_create`` is the
+      READ-ONLY twin of the door's own ``refuse_if_ambiguous``, over the same
+      ``live_name_holder_ids`` primitive — LIVE rows, id-less included, because
+      a filter on truthy ids is exactly what let a 2+ LIVE carrier miss pass a
+      guard (#8018);
+    * it RECORDS the non-folded entry before raising (R8), which the door would
+      have done — a probe that short-circuits the door must not lose the record.
+
+    ⛔ PLACEMENT IS THE GUARANTEE, and it is why this is called from the handler
+    region BEFORE ``CommitRecordStore.acquire``: a refusal here writes NOTHING
+    (no :CommitRecord either), so the graph is exactly as it was and a corrected
+    payload is a genuine FIRST attempt (a leftover `partial` record would make
+    the retry a re-adjudication without the first-adjudication hard-25 band —
+    the same reason the 429 gate discards the attempt it created). It also runs
+    AFTER the L1 replay return, so an idempotent re-POST of an already-written
+    commit still answers 200 `duplicate:true` and is never refused.
+
+    NOT a whole-commit guarantee against every writer: a name can become doubly
+    held between this probe and the write (a concurrent create), which is what
+    the handler's boundary clause (the 422 mapping) is the last resort for.
+    """
+    from tortoise.kind_fallbacks import writable_kind
+    from tortoise.subject_binding import is_subject_kind
+
+    if reconcile is None:  # an L1 replay plans no reconciliation
+        return
+    g = sdk._get_proj().g
+    probed: set[tuple[str, str]] = set()
+    for er in reconcile.entities:
+        kind = writable_kind(er.entity.kind)
+        label = "Subject" if is_subject_kind(kind or "") else "Object"
+        name = er.entity.name
+        if (label, name) in probed:
+            continue
+        probed.add((label, name))
+        try:
+            refuse_ambiguous_create(g, label, name)
+        except AmbiguousEntityName as exc:
+            raise _ambiguous_entity_refusal(exc) from exc
+
+
 def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
@@ -17055,6 +17400,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 
     # ── 3b. Extracted occurrences — Event NODES (issue #1013: never points
     # with pointKind event). Content-addressed ev_<sha> ids; MERGE-safe. ──
+    #: (eventId, Object name) pairs the events mention — wired in step 6a, after
+    #: step 6 has REGISTERED the entities (see the note at the append site).
+    _deferred_about_objects: list[tuple[str, str]] = []
     for ev in (payload.events or []):
         proj.g.query(
             "MERGE (e:Event {eventId:$eid}) "
@@ -17086,14 +17434,15 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 continue
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
-            # edge for NEW entities. MERGE creates the :Object on demand
-            # (consistent with step 6's MERGE-by-name semantics).
-            proj.g.query(
-                "MATCH (e:Event {eventId:$eid}) "
-                "MERGE (o:Object {name:$name}) "
-                "MERGE (e)-[:aboutObject]->(o)",
-                params={"eid": ev.id, "name": name},
-            )
+            # edge for NEW entities, so the write resolved-or-minted on demand.
+            # ⛔ #3590 removes the mint (a fold-time mint is not replay-
+            # deterministic, and an id may not be derived from a name — the
+            # projection is not the minter, D9), so the ORDER is now the whole
+            # fix: the reference is DEFERRED to step 6a, after step 6 has
+            # registered the entity with its real minted id. Resolving HERE
+            # found no holder for a name this payload introduces and dropped the
+            # edge for exactly the case P2-4 was filed about.
+            _deferred_about_objects.append((ev.id, name))
 
     # ── 4. Source bridge: the session Source (#4005 — the canonical
     # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
@@ -17448,7 +17797,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # ── 6. Entities — routed by KIND (#1370/#4934): declared §5 Subject kinds
     # become :Subject (with subjectKind) so the Subject layer is reachable and
     # the vocabulary does not leak into Object.objectKind; everything else stays
-    # an :Object MERGEd by name (#452) with objectKind + the S5 gate-result flag
+    # an :Object registered through ``create_entity``, which RESOLVES the name to
+    # its single live holder or mints an opaque id (#452 idempotent re-mention;
+    # #3590 moved the MERGE key from the name to that id) with objectKind + the
+    # S5 gate-result flag
     # (passes_frequency_gate written WITH flag, amendment §4.3 #12). aboutObject
     # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
     # gated binder is the only aboutSubject producer. ──
@@ -17481,6 +17833,38 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
+            )
+
+    # ── 6a. Event→aboutObject, AFTER the entities exist. The reference is
+    # RESOLVED, never minted (#3590 D9): a fold-time / wiring-time mint is not
+    # replay-deterministic and an id may not be derived from a name. That makes
+    # the ORDER load-bearing — step 3b journals/writes the events before step 6
+    # registers their targets, so resolving there found no holder for a name
+    # this very payload introduces and dropped the edge, which is exactly the
+    # #1272 P2-4 case the retired `MERGE (o:Object {name:$name})` existed to
+    # cover. A name that still resolves to nothing is left UNWIRED (and recorded
+    # by `resolve_fold_name`) rather than fabricated.
+    # ⛔ `mention=True` is the ATTRIBUTION classification (#9876 review). This is
+    # an about-edge NAME — one of the uses D1's `unfolded-mention` row enumerates
+    # verbatim (`identity-decision.md`: "an `EventRecorded`'s `subject` / `object`
+    # / `uses[]`, an `about_entities` status-fold target, **or an about-edge
+    # name** — resolved to no single live holder … **in its ATTRIBUTION use**").
+    # The edge is attribution: a miss drops ONE link and moves no entity's state.
+    # Without the flag this site records `unregistered-reference` /
+    # `ambiguous-entity-name` — NON-exempt — for a write where nothing was
+    # folded, while the replay pass resolves the SAME reference exemptly
+    # (`projection/entities.py:4896` status-fold target, `:5275`
+    # `EventRecorded.object`), i.e. one reference with two dispositions, the
+    # live/replay parity break R8 forbids.
+    for _eid, _name in _deferred_about_objects:
+        _resolved = resolve_fold_name(proj.g, "Object", _name,
+                                      context="session-commit aboutObject",
+                                      mention=True)
+        if _resolved:
+            proj.g.query(
+                "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
+                "MERGE (e)-[:aboutObject]->(o)",
+                params={"eid": _eid, "oid": _resolved},
             )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
@@ -17651,8 +18035,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     422 field reasons incl. commit_id_mismatch + calibration_mismatch;
     retry-once semantics documented) → [2] L1 replay via :CommitRecord
     (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
-    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract,
-    org points ceiling, per-org ingest budget (#4051: 429 + Retry-After)
+    [3] L2 reconciliation IN MEMORY → [4] org points ceiling (the org's OWN
+    limit — #4051 removed the vacuous sessions-cap stand-in), per-org ingest
+    budget (#4051: 429 + Retry-After)
     and budget adjudication on the reconciled net-new delta (soft 15 → WARN
     telemetry; >25 first-adjudication → held[], NOT written; >50 → 402) →
     [5] the four-node chain + entities + operators + supersede_point +
@@ -17827,6 +18212,19 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         state = _load_commit_graph_state(sdk, payload)
         plan = plan_commit(payload, state, record)
 
+        # [3c] #9876 review (this head) — the create-side AMBIGUITY refusal, as
+        # a PRE-WRITE probe. `_execute_commit_writes` reaches
+        # `sdk.create_entity` at step 6, and that door refuses a name 2+ LIVE
+        # entities hold; steps 2/2b/3/3b/4/5 have written by then, so the
+        # refusal used to land as the retry-advising 500 on top of a
+        # half-written commit (and re-landed identically on every later POST).
+        # Asking the SAME question here — before `store.acquire`, so not even a
+        # :CommitRecord is left behind — makes it a clean 422 that writes
+        # nothing, and keeps a corrected payload a genuine FIRST attempt.
+        # Position is also why it sits AFTER the L1 replay return above: an
+        # idempotent re-POST must still answer `duplicate:true`, never a refusal.
+        _refuse_ambiguous_commit_entities(sdk, plan.reconcile)
+
         # :CommitRecord MERGE = the atomic concurrency serialization point (W-3
         # [2], DE2E-7 neg a): the loser of the MERGE sees the winner's record →
         # duplicate (if fully_written) or completes the remainder (held|partial).
@@ -17846,27 +18244,65 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         if plan.duplicate:
             return _commit_response(payload, duplicate=True, warnings=warnings)
 
-        # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
-        # unlimited for every tier, so every resolver supplies an explicit None
-        # and this call cannot 402; it remains the fail-closed presence check
-        # (#310 GAP-B) that a limits dict built without the key does not slip
-        # past. Replays already returned above: quota never gates a duplicate
+        # [4a] The ORG-LIMIT gate — the org's OWN limit, read from its own
+        # source. Replays already returned above: quota never gates a duplicate
         # (zero writes).
-        _check_org_limit(org, "sessions")
-        # #4051 — the org points gate (the second half of step [4a]). The sessions
-        # gate above is VACUOUS since #4010 (sessions unlimited for every tier).
+        #
+        # ⛔ #4051 — `_check_org_limit(org, "sessions")` STOOD HERE AND IS
+        # REMOVED, not relocated. Since #4010 sessions are unlimited for every
+        # tier, so every resolver supplies `max_sessions: None` and that call
+        # could never 402: it was a session CAP standing in for the org limit,
+        # i.e. a guard that cannot see what it guards — and it read as "this
+        # lane has an org-limit gate" while enforcing nothing.
+        # What it still DID was refuse (HTTP 500) when the resolved limits dict
+        # carried no `max_sessions` key at all (the #310 GAP-B presence
+        # contract). That contract is NOT dropped: it rides on the limit that
+        # actually binds, `max_points`, which the gate below reads and
+        # VALIDATES (`quota.enforce_org_limit`): a limit that is missing OR that
+        # cannot be read as a number is a `QuotaCheckError` naming the field,
+        # never a pass. A limit whose absence cannot change any decision (an
+        # unlimited one) is not worth a refusal.
+        # ⚠️ What that means for THIS lane, stated so the two are not conflated:
+        # the gate validates the dict it is GIVEN, and this lane's dependency
+        # (`get_current_org_gated`) coerces `max_points` with `int(mp)` before
+        # the handler ever runs — so a corrupt STORED value fails earlier, in
+        # auth, as an unnamed 500 (`"Auth error"` on the Supabase lane). That is
+        # the resolver's gap, tracked as #10136; it is NOT closed by this gate.
+        # WHICH lanes hand the gate a raw value — and which do their own
+        # `int(...)` and so stay unnamed — is stated ONCE, in
+        # `quota.enforce_org_limit`'s SCOPE note. Do not restate the inventory
+        # here: copies of it drifted apart repeatedly inside this very change
+        # (this one claimed create_graph / invite reached the gate, which they
+        # never do — create_graph calls its own `int(max_graphs)` and
+        # invite_to_org reads no limit at all — while `quota`'s copy denied it
+        # for key-mint, the one lane that really does arrive raw).
+        #
+        # #4051 — the org points gate. It enforces the org's OWN `max_points`:
+        # the value this handler's sole dependency (`get_current_org_gated`)
+        # resolved from the org's row + pricing.json, read by
+        # `enforce_org_limit`. No MCP bridge reaches this handler (the only MCP
+        # session tool proxies the capture impl), so that resolver is the one
+        # producer.
+        # ⚠️ `.get(limit_key)` is why a dict built WITHOUT the key is refused as
+        # a `QuotaCheckError` naming the field instead of raising `KeyError` —
+        # but it does NOT make the missing-key branch a live path on THIS lane:
+        # the resolver above always emits the key (`hosted_api.py:6234`,
+        # `supabase_control.py:1158-1159`). Here that branch is reached only
+        # through the test seam
+        # (`tests/test_commit_endpoint.py::test_missing_max_points_refuses_and_mints_nothing`).
+        # Do not read it as a production branch on this lane.
         #
         # ⛔ SCOPE — stated precisely, because overstating a gate is worse than the
         # gap it leaves: this polices the COUNTED CATEGORY (value Points, plus the
         # :Object/:Subject nodes entities mint), because `_count_resource("points")`
         # counts exactly `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic =
         # false)) OR n:Object OR n:Subject OR (n:Event AND (n.is_episodic IS NULL OR
-        # n.is_episodic = false))` (tortoise/quota.py:734-736).
+        # n.is_episodic = false))` (tortoise/quota.py:1024-1030).
         # ⛔ IT GATES THE PRE-STATE, NOT THE PAYLOAD: it refuses when the org's count
         # is ALREADY at/over `max_points`. It therefore does NOT bound the count this
         # lane's own commit can leave behind — the lane writes in bulk and carries
         # no payload estimate, so a commit from just under the cap can finish past
-        # it. (The capture lane's `count + est > max_points` at :10888 IS
+        # it. (The capture lane's `count + est > max_points` at :14755 IS
         # estimate-aware; this is the pre-write form every OTHER write endpoint
         # uses — /v1/points, /v1/objects, /v1/subjects — which is the parity #4051
         # asked for, NOT a new bound.)
@@ -17883,8 +18319,8 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         #
         # What it buys: parity with every other write endpoint's points gate
         # (/v1/points, /v1/objects, /v1/subjects, the demo seed) in place of the
-        # now-vacuous sessions-only gate. Same pre-write site as the sessions gate
-        # (after every replay return above) so an idempotent re-POST is never gated
+        # removed sessions-cap stand-in. Same pre-write site as the old sessions
+        # call (after every replay return above) so an idempotent re-POST is never gated
         # — a replay writes no nodes and must never 402 (#1727's lesson); the
         # budget 402 below is unchanged. Same shipped machinery + structured
         # `quota_refusal_payload` as the /v1/points-class gates (#4614), off the
@@ -17918,7 +18354,7 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # wants more speaks to us (#5425's posture — rate limit, not refusal of
         # the customer's data).
         #
-        # WHY HERE — the SAME site as the sessions/points gates above, i.e. after
+        # WHY HERE — the SAME site as the points gate above, i.e. after
         # every replay return and BEFORE the budget adjudication. Before the
         # adjudication is load-bearing, not cosmetic: the `held` outcome WRITES
         # (it MERGEs the :Session node with its `value_nodes_held` counter, and
@@ -18076,6 +18512,18 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
                     "predecessor_validFrom": exc.predecessor_valid_from,
                 },
             )
+        except AmbiguousEntityName as exc:
+            # #9876 review (this head): the boundary of last resort for the
+            # create-side route-then-refuse. `[3c]` refuses the same shape
+            # BEFORE the first write, so reaching this clause means the name
+            # became doubly held between that probe and the write (a concurrent
+            # create) — or a create this commit emits from a leg the probe does
+            # not enumerate (the supersession/synthesis writers). Same
+            # determinism as the two clauses above: a same-payload retry
+            # re-raises identically, so the retry-advising 500 below is
+            # actively wrong for it, and the client must be told WHICH carriers
+            # conflict so it can rename or retire one.
+            raise _ambiguous_entity_refusal(exc)  # noqa: B904
         except UnapprovedKindNamespace as exc:
             # #5475: the SDK/entity funnel now refuses a kind naming a pack this
             # graph has not approved, and this door reaches that funnel
@@ -18375,18 +18823,160 @@ def _actor_display_map(actor_ids: list[str], org_id: str) -> dict:
     return {uid: email_of[uid] for uid in actor_ids if uid in email_of}
 
 
-def _record_holds_turns() -> bool:
-    """#10000: does the RECORD hold captured turns (rather than the graph)?
+def _record_unavailable() -> HTTPException:
+    """#8447: fail-CLOSED 503 when the RECORD did not answer and nothing could be
+    served in its place.
 
-    The same capability question the capture writer asks, asked from the read
-    side: turns reach the record only through the per-turn `PointAdded` records,
-    which require a configured journal, and the record must be ARMED
-    (`TORTOISE_RECORD_DSN`). When either is absent the graph is what holds them
-    and every read stays exactly as it was before #10000.
+    On an armed **journaling** deployment the turns are RECORD rows (the
+    turn-record carrier's ``public.point`` rows — ``TurnsRecorded``, #10017;
+    before that change, the per-turn `PointAdded` records of #10000/#10011) and
+    the graph keeps only the
+    Session's counters — so when the record read FAILS, the fail-soft fallback
+    below answers zero turn nodes, which is byte-identical to a session that has
+    no turns. Serving that as ``200 {"turn_points": []}`` is the shape #8447
+    forbids — a refusal rendered as a legitimate empty answer, with the only
+    signal in a WARNING the caller never reads.
+
+    ⚠️ "JOURNALING" is load-bearing, and this route now asks it: the read door's
+    predicate is `record_writer.record_holds_turns(journal_configured=…)`
+    (`_record_tenant_for_read`), which is the WRITE side's own question with both
+    conjuncts — a configured journal AND the arming DSN — because a per-turn
+    `PointAdded` record is gated on the journal. That shared predicate is
+    #10021's fix; this route used to ask the DSN alone. Without
+    `TORTOISE_EVENT_LOG_BASE_DIR` the
+    write door declines `no_durable_journal` and the GRAPH keeps the turns, so
+    "the graph keeps only the counters" is a property of armed+journaling, not
+    of arming alone. This refusal's own behaviour is unaffected there: the guard
+    at the bottom of the read measures the fallback against the Session's own
+    ``turn_count``, and on that config the graph holds all of them, so a
+    complete copy is still served 200.
+
+    The arm that fails soft to the graph KEEPS failing soft, and #1591 is not
+    repealed: a graph copy that is COMPLETE against the Session's own
+    ``turn_count`` is still served byte-identically, because it protects a
+    transcript that is really there. A copy that is only a stale PREFIX of that
+    transcript — or a stale SUPERSET of it — is NOT protected; serving it would be
+    the same silent truncation in a less obvious shape. `sess[2]` is the count this
+    endpoint already publishes, and it is what makes the copy checkable at all.
+    This body is for the cases that arm cannot cover: the Session carries no
+    ``turn_count`` to check the copy against, or the copy disagrees with the count
+    it would report alongside.
+
+    Same envelope as :func:`_graph_unavailable` on this route (``503`` +
+    ``error_code``) rather than a new one, because on this route that body is
+    already the shape for "the data plane could not answer": it is body-only
+    today — **no client maps it yet** (that function's own docstring says so),
+    and the agents/SDKs that consume this lane treat any 5xx as retryable. The
+    ENVELOPE is borrowed from there; its TRANSIENCE argument is NOT.
+
+    ⛔ The two doors fail in different units. ``_graph_unavailable``'s unit is an
+    offloaded SDK construction that may never have run ("a submission that never
+    ran did NO work"); the unit here is a synchronous record connect plus SQL
+    read on a worker thread, which DID run and did fail. What makes a retry safe
+    here is only that this is a ``GET`` — a SAFE method (RFC 9110 §9.2.1) — so a
+    retry can never re-apply work, whatever the cause was.
+
+    ⚠️ And the cause is NOT always transient. The ``except Exception`` above
+    cannot tell an outage from a PERMANENT record failure — an RLS denial, a
+    missing migration, a query defect — so those surface to the caller as this
+    same retryable body. That is a known limit of the arm, stated rather than
+    papered over; the distinction IS recoverable from the log, where the
+    fail-soft arm records the exception class and its traceback
+    (``exc_info=True``).
+
+    ⚠️ Deliberately NOT a response field. A new key on the session-detail
+    projection (`SESSION_DETAIL_FIELDS`) would widen a public wire surface, which
+    is an owner approval and not a lane decision; an explicit error is the
+    narrowest visible shape available (#8447: "an explicit error, or a reply
+    field that says so").
     """
-    from tortoise.record_writer import record_dsn as _dsn
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "record_unavailable",
+            "message": "The record could not answer for this session, and no "
+                       "complete copy could be served in its place — retry; if "
+                       "it persists the record needs an operator.",
+        },
+    )
 
-    return _dsn() is not None
+
+def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
+    """The tenant this READ must scope, or ``None`` ⇒ the graph holds the turns.
+
+    ⛔ THE READ MUST RESOLVE THE TENANT THE WAY THE WRITE DOES (#10000 review
+    P1). The previous version hand-built ``(org["org_id"], org["graph_id"])`` —
+    the credential's pair — while the capture writer resolves through
+    `record_writer.record_tenant()` (``_live_write_verdict``: *"the scope's, else
+    the env pair"*). On a self-host registry deployment armed with the
+    single-tenant env pair those are DIFFERENT values: `record_tenant_for`
+    refuses a registry `g_<hex>` graph id (the record's tables FK into
+    `public.graphs`), so the write files the turns under the env pair while a
+    read scoped to the credential sees nothing — `answered=False`, the graph
+    fallback, and the graph holds no turn node because the record took them. An
+    empty transcript for a captured session, from the store the ruling chose.
+
+    So: `_resolve_record_tenant` first (the control-plane pair, the ONE
+    declaration this module already owns — it dovetails with what
+    `_bind_record_tenant` puts on the SDK), then `record_tenant()` for the
+    single-tenant / scoped lane the writer falls through to. `None` when neither
+    names one: the same credential's capture is then refused ``no_tenant`` and
+    keeps its turns in the graph, so reading the graph is the CORRECT answer
+    rather than a degradation.
+
+    The predicate half is `record_writer.record_holds_turns`, the ONE declaration
+    of "can the record hold a live write right now", asked with THIS tenant. No
+    journal ⇒ the per-turn records are never emitted ⇒ the record is not where
+    the turns are, armed DSN or not.
+
+    ⛔ THE JOURNAL PATH IS RESOLVED THE WAY THE WRITE RESOLVES IT (#10000 review
+    P1) — from `_data_sdk`'s OWN branch, never from the dict's
+    `graph_namespace`. The previous version read `org["graph_namespace"]`, which
+    only the KEY lanes stamp (`_get_current_org_supabase`); the SESSION-JWT org
+    dict (`_session_user_org`) carries neither `graph_id` nor `graph_namespace`,
+    so that read was `None` → `record_holds_turns(journal_configured=False)` →
+    `None` → the record was never consulted on the one lane
+    `get_session_detail`'s own docstring says it exists for (#2002/W6, the
+    Settings Captured-sessions transcript DE2E-11), and the endpoint served
+    `turns: []` for a session whose transcript the SAME request's capture had
+    put in the record — silently, since the graph holds no turn node either.
+    `_data_sdk` opens `_make_sdk(graph_name=_data_graph_name(org))` for a
+    graph-bound key and `_make_sdk(namespace=org_id)` otherwise, and `_make_sdk`
+    derives its journal from exactly those two arguments — so this mirrors the
+    branch, and the read cannot resolve a journal the writer did not write to.
+    """
+    from tortoise.config import _resolve_event_log_path
+    from tortoise.record_writer import record_holds_turns, record_tenant
+
+    tenant = _resolve_record_tenant(org)
+    if tenant is None:
+        tenant = record_tenant()
+    if tenant is None:
+        return None
+    if org.get("graph_id"):
+        # The graph-bound branch: an explicit graph name, no namespace (the
+        # derivation uses the name verbatim, and `namespace="registry"` would
+        # divert it) — the SAME pair `_data_sdk` hands `_make_sdk`.
+        journal_path = _resolve_event_log_path(
+            namespace=None, graph_name=_data_graph_name(org))
+    else:
+        # Org-wide key AND session auth: `_data_sdk` opens `namespace=org_id`,
+        # whose journal key the SDK derives from that namespace alone.
+        journal_path = _resolve_event_log_path(
+            namespace=org.get("org_id"), graph_name=None)
+    # ⛔ THE WRITE BREAKER IS NOT ASKED HERE (#10000 review P1). `circuit_open`
+    # says a connect failed within the last 60 s — a bound on the COST of the
+    # write path (one timeout per journal record), and no evidence about where a
+    # transcript that is already stored lives. Inheriting it made a serving read
+    # decide "the record holds nothing" without asking, so an armed deployment
+    # whose record holds the turns served `turns: []` for 60 s with no log line
+    # and no counter. This door ASKS instead: one request pays at most one
+    # bounded connect, and a record that then fails is reported by the fail-soft
+    # arm below (WARNING + the graph copy), never pre-judged as absence.
+    if not record_holds_turns(journal_configured=journal_path is not None,
+                              tenant=tenant, consult_breaker=False):
+        return None
+    return tenant
 
 
 def _open_record():
@@ -18460,7 +19050,13 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             "s.capture_ok, s.capture_extractor, "
             # #3516: the capture-provenance triplet, APPENDED AFTER #3520's pair
             # (sess[9..11]) — #3520 holds sess[7]/sess[8].
-            "s.client_captured_at, s.client_captured_at_source, s.capture_lane",
+            "s.client_captured_at, s.client_captured_at_source, "
+            # #10000 review P2: APPENDED (sess[12]), and NOT served — the turn
+            # read's id-space TAIL witness. `turn_count` is a WINDOW length, so
+            # a refused HIGHEST turn is invisible to it; `turn_max_index` is the
+            # mark the capture MERGE writes and the fold restores, read here so
+            # `record_read.session_turns` can see a missing tail.
+            "s.capture_lane, s.turn_max_index",
             params={"sid": session_id},
         ).result_set)
     if not sess_rows:
@@ -18491,44 +19087,92 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     extracted_count = ext_rows[0][0] if ext_rows else 0
 
     # #10000: WHICH STORE holds the turns is the same CAPABILITY question the
-    # capture writer asks. With the record armed, the turns are RECORD rows (the
-    # per-turn `PointAdded` records) and the graph holds none, so this read must
-    # come from the record; unarmed, it reads the graph exactly as before, which
-    # makes the pre-arming deployment byte-identical.
+    # capture writer asks (`_record_tenant_for_read`, the ONE resolution). With
+    # the record holding them,
+    # the turn-record carrier's `public.point` rows (#10017) — and no
+    # turn NODE, so this read must come from the record;
+    # otherwise it reads the graph exactly as before, which is what keeps both
+    # the pre-arming deployment AND the refused-write lane byte-identical.
+    #
+    # ⛔ AN EMPTY RECORD ANSWER IS NOT AN EMPTY TRANSCRIPT (review P0-3). The
+    # record's `()` is what an unscoped connection, the wrong tenant, a
+    # pre-arming capture and a genuinely empty session all look like, so
+    # `record_read.session_turns` also reports whether the record SPOKE — and
+    # when it did not, this read goes to the graph and says so at WARNING. A
+    # migration that silently empties transcripts is worse than one that reddens.
     turns = []
-    _record_turns = None
-    if _record_holds_turns():
+    _record_answer = None
+    _record_read_failed = False
+    # ONE resolution for the capability question AND the scope the read installs:
+    # the read must file under the SAME tenant the capture writer used, or it
+    # answers from a tenant nothing was written to (`_record_tenant_for_read`).
+    _read_tenant = _record_tenant_for_read(org)
+    # The id-space high-water mark (sess[12], the `:Session` read above), cast
+    # the way the rest of this module reads a nullable integer column: an
+    # absent/non-int value is ``None`` ("this session predates the mark"), which
+    # makes the tail check abstain rather than invent a bound.
+    _turn_max_index = sess[12] if isinstance(sess[12], int) else None
+    if _read_tenant is not None:
         try:
             def _read_record_turns():
                 conn = _open_record()
                 try:
-                    return list(_record_read._turns(
-                        conn, org["org_id"], org["graph_id"], session_id))
+                    return _record_read.session_turns(
+                        conn, org_id=_read_tenant[0], graph_id=_read_tenant[1],
+                        session_id=session_id,
+                        # The TAIL witness, from the `:Session` read above
+                        # (sess[12]): without it a partially-refused append
+                        # window answers COMPLETE and the refused highest turn
+                        # is readable through no door (#10000 review P2).
+                        turn_max_index=_turn_max_index)
                 finally:
                     conn.close()
 
-            _record_turns = await asyncio.to_thread(_read_record_turns)
+            _record_answer = await asyncio.to_thread(_read_record_turns)
         except Exception:
             # Fail SOFT to the graph: a record that cannot answer must not blank a
             # transcript the cache still holds. This fallback is the transitional
             # half of #10000 and disappears with the graph-side purge step.
-            _record_turns = None
+            _record_answer = None
+            _record_read_failed = True
             _logger.warning(
-                "session %s turns read from the record failed — serving the graph "
-                "copy for this request", session_id, exc_info=True)
-    if _record_turns is not None:
-        for _t in _record_turns:
-            turns.append({
-                "id": _t.turn_id,
-                # The record stores the framed text and the speaker separately, so
-                # the SAME inverse gives the same role/body this endpoint served
-                # from the graph (#4675 parity).
-                "role": (_t.speaker
-                         or _capture_turn_role_text(_t.content)[0]),
-                "content": _t.body,
-                "created_at": _t.created_at,
-            })
+                "session %s turns read from the record failed — falling back to "
+                "the graph copy for this request", session_id, exc_info=True)
+    if _record_answer is not None and _record_answer.answered:
+        # ONE record→payload map, shared with `TortoiseSDK.get_session_detail`
+        # (#3557 parity, #4675: the record stores the framed text and the speaker
+        # separately, so the writer's own inverse gives the same role/body this
+        # endpoint served from the graph).
+        turns.extend(_record_read.turn_payloads(_record_answer.turns))
     else:
+        if _record_answer is not None:
+            # The record was REACHABLE and did not answer for the WHOLE
+            # transcript. Either it holds none of these turns (the session says
+            # it has one — `s.turn_count` above — while the record holds none) or
+            # it holds only part of them (a per-turn write refused mid-capture,
+            # or an append whose earlier turns predate arming). Both are
+            # divergences between the two stores — never a reason to serve an
+            # empty or truncated transcript, and never silent.
+            #
+            # ⛔ EXCEPT WHEN THE RECORD NEVER SPOKE (#10021 review P2).
+            # `NO_ACCOUNT` is the ordinary migrate-phase state — a session
+            # captured BEFORE arming has no narrative row and no turn rows — so
+            # warning here would fill the one line that means "the two stores
+            # disagree" with the largest healthy population on a transitional
+            # deployment, and stop it ever shrivelling. The union merge and the
+            # served transcript are IDENTICAL either way; only the level moves.
+            if _record_answer.kind == _record_read.TurnAnswer.NO_ACCOUNT:
+                _logger.debug(
+                    "session %s: the record holds no account of this session "
+                    "(%s) — serving the graph copy, which is the pre-arming "
+                    "state and not a divergence",
+                    session_id, _record_answer.reason)
+            else:
+                _logger.warning(
+                    "session %s: the record did not answer for its whole "
+                    "transcript (%s) — merging the graph copy for the turns it "
+                    "does not hold",
+                    session_id, _record_answer.reason)
         # Turn points (events) — ordered by turn index embedded in the id
         turn_rows = await asyncio.to_thread(
             lambda: proj.g.query(
@@ -18536,6 +19180,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
                 "RETURN t.id, t.content, t.createdAt ORDER BY t.id",
                 params={"sid": session_id},
             ).result_set)
+        graph_turns: list[dict] = []
         for tr in turn_rows:
             tid = tr[0]
             content = tr[1] or ""
@@ -18545,12 +19190,106 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             # have ONE definition — a client comparing a stored turn against a
             # served detail depends on the two agreeing (#4675).
             role, body = _capture_turn_role_text(content)
-            turns.append({
+            graph_turns.append({
                 "id": tid,
                 "role": role,
                 "content": body,
                 "created_at": created_at,
             })
+        # ⛔ A SHORT record answer is not an answer (#10000 review P0). The
+        # writer's store decision is per TURN while this read's is per SESSION, so
+        # a mid-capture refusal leaves part of one transcript in each store;
+        # serving the record alone (what any non-empty row set used to license)
+        # dropped the turns the writer's fallback had just rescued. The UNION is
+        # served, from the same definition the SDK twin uses.
+        turns.extend(
+            _record_read.merge_turn_payloads(
+                _record_answer, graph_turns,
+                # The residue filter (#10021 review P3): `_shortfall` reports
+                # rows above the live id-space end as NOT this session's
+                # transcript, and this is the call that would otherwise serve
+                # them anyway — the record's and the graph's alike.
+                turn_max_index=_turn_max_index)
+            if _record_answer is not None else graph_turns)
+
+    # ⛔ #8447: THE FAIL-SOFT ARM MUST NOT ANSWER WHAT IT COULD NOT READ. On an
+    # armed JOURNALING deployment the record was the store holding these turns and
+    # it did not answer, so the graph fallback may stand in for it only when it
+    # AGREES with the Session's own `turn_count` (`sess[2]`, written on every
+    # capture — `sdk.py`'s `merge_sets`), which is the count this endpoint
+    # publishes as `turns` below.
+    #
+    # ⛔ AND NEITHER MUST THE SUCCESS ARM (#10021 review P2). This guard used to
+    # run only when the read RAISED, so a record that ANSWERED and held short of
+    # its own count was served as `{"turns": 4, "turn_points": [2 rows]}` — the
+    # two numbers taken from two stores with nothing reconciling them, i.e. the
+    # same truncated-result shape one arm over. The rule now lives in ONE place
+    # (`record_read.served_turn_count`) and is applied to BOTH arms; what it
+    # refuses is a transcript that cannot be the one the stores describe, and
+    # what it publishes otherwise is the length of the transcript actually
+    # served (`len(turns)`), never a window length that the list contradicts.
+    #
+    # `served < expected`, plus `served > expected` ONLY when the record did not
+    # answer (#10021 review P2, both halves): a transcript shorter than the
+    # larger claim is provably incomplete, while a transcript LONGER than every
+    # claim is the APPEND — its older turns sit in the record, its `turn_count`
+    # is the last WINDOW — and refusing it refused a whole, healthy transcript on
+    # both doors. The superset direction survives exactly on the graph-only
+    # fallback (`answer is None`), where a longer copy has no record to explain
+    # it and is the stale-turn-sweep shape instead. `record_read.served_turn_count`
+    # states the rule and the measurement; this comment names only the arm.
+    #
+    # `turn_count` is NOT collapsed to 0 when absent (`or 0`): KNOWN ZERO (a
+    # capture that stored no turns) makes an empty copy the COMPLETE answer, while
+    # ABSENT — no capture ever wrote a count: the commit path's `MERGE (s:Session)`
+    # at `hosted_api.py:16928`, the held path at `:18036` — cannot be told from a
+    # legacy capture whose count went missing.
+    #
+    # ⛔ AN ABSENT COUNT IS REFUSED WHATEVER THE COPY'S SIZE, not only when the
+    # copy is empty. The bound is what makes a copy verifiable: absent means no
+    # `turn_count` was ever written, so NEITHER a prefix NOR a superset can be
+    # ruled out — and a non-empty copy served on that evidence is exactly the
+    # `#8447` shape ("never a silently truncated result indistinguishable from a
+    # complete one"), which the count arm above closes only where a count exists.
+    # Serving the non-empty sub-case was the hole: it made "absent is
+    # fail-closed" true only for the empty copy, and no test read it.
+    #
+    # ⚠️ NAMED LIMITS. Equality here proves only that the COUNTS agree — the same
+    # arithmetic `tools/backfill_graph_turns.py:522-528` refuses to attribute a
+    # CAUSE to ("a MEASUREMENT … a correct state that looks identical to a loss"),
+    # so this guard reads a disagreement as "not proven complete", never as "the
+    # copy is stale":
+    #   * a same-length pre-arming copy is served and is indistinguishable from a
+    #     post-arming re-capture on this route — count agreement is necessary,
+    #     not sufficient;
+    #   * `turn_count` is a WINDOW LENGTH (`sdk.py:2888-2895`), so the count check
+    #     assumes the offset-0 single-capture shape that is the only one wired
+    #     today. An append leaves `offset + turn_count` rows against a window
+    #     length of `count`, i.e. `served > expected` on a WHOLE transcript, and
+    #     that is now SERVED with the length it actually serves (#10021 review
+    #     P2 — before, `served != expected` refused it; the pins build the
+    #     writer's real shape, window count and all). Revisit when an append
+    #     caller is wired (`tools/backfill_graph_turns.py:503-520` already treats
+    #     that shape as correct);
+    #   * over-block: a record outage on a session with no turns — including any
+    #     session created without a capture — turns a truthful
+    #     `200 {"turn_points": []}` into a 503. It needs the read to fail, and the
+    #     message is worded not to claim the record held the transcript. #10021's
+    #     shared predicate narrows it to armed+journaling sessions only, which is
+    #     the same deployment the write door files the turns on. The ABSENT-count
+    #     refusal widens this deliberately: a legacy session whose `turn_count`
+    #     went missing but whose graph still holds its turns is also refused on a
+    #     record outage, though the graph copy may in fact be complete. That is
+    #     the fail-closed direction on evidence that cannot distinguish it from a
+    #     partial copy (`tools/backfill_graph_turns.py:522-528` calls the same
+    #     comparison a MEASUREMENT, never a cause).
+    _expected_turns = sess[2]
+    served_turns, _turns_refusal = _record_read.served_turn_count(
+        answer=_record_answer, served=len(turns),
+        declared=_expected_turns, read_failed=_record_read_failed)
+    if _turns_refusal:
+        _logger.warning("session %s: %s", session_id, _turns_refusal)
+        raise _record_unavailable()
 
     # Extracted points (#822: same non-turn filter as the count — M2 LLM
     # Points are untyped, reported as "statement" like the capture response).
@@ -18595,7 +19334,13 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "id": sess[0],
         "created_at": sess[1],
         # #5498: `turns` is the COUNT; the turn LIST is `turn_points` below.
-        "turns": sess[2],
+        # #10021 review P2: the count is the length of the transcript this body
+        # actually serves (`record_read.served_turn_count` decided it above), so
+        # the two halves of the body cannot contradict each other. It equals the
+        # session's `turn_count` in every healthy shape and differs only where
+        # the two stores disagree — where the old value was a window length
+        # published above a longer or shorter list.
+        "turns": served_turns,
         # #2600: actor + harness on the detail dict (raw actor_user_id +
         # resolved display; null for legacy sessions).
         "actor_user_id": actor_user_id,
@@ -36295,6 +37040,78 @@ def _index_state_updates(cursors: dict, totals: dict) -> dict:
     return updates
 
 
+def _prior_stored_turn_count(proj, session_id: str) -> int:
+    """How many turns this session ALREADY holds — for the write-op meter.
+
+    Best-effort: this feeds ONLY the write-op meter. It sits before the Session
+    MERGE (which runs later, inside the pooled `_write_session_and_turns`
+    submission), so nothing of this request is committed yet. A transient graph
+    error must never 500 a capture, and the documented conservative posture for
+    an unreadable count is ``0`` — which makes the meter OVER-count
+    (`len(windowed) > 0`), never a blind spot.
+
+    ⛔ THE COUNT COMES FROM THE SESSION'S OWN TURN ACCOUNT, NOT A NODE WALK
+    (#10000 review P1). Once the record holds the turns, the capture writes NO
+    turn node at all (`sdk._write_capture_turns` takes the record branch), so
+    the old `CONTAINS -> Point {is_episodic}` count read 0 for every session
+    captured since arming — and `len(windowed) > prior_turn_count` is then TRUE
+    for every idempotent re-POST, metering a write op for a replay that wrote
+    nothing. That is the #1827/#3892 phantom write-op on the billing/abuse leg,
+    silent. Two facts give the stored total, one per store, and `max` of the two
+    is the total whichever store holds them:
+
+    * `s.turn_max_index` — the session's LIVE id-space end this change makes
+      authoritative (the live MERGE writes it — lowering it on a shorter
+      re-capture — and `_fold_session_recorded` restores it), so it is the record
+      lane's turn total. It is an INDEX, hence ``+ 1``. An idempotent re-POST is
+      not metered (the mark equals this window's own end), which is the
+      #1827/#3892 case; the only replay it still charges is a re-POST of turns a
+      shorter re-capture already swept, i.e. a write of turns the session no
+      longer holds — a real write, not a phantom charge.
+    * the live node count — the same fact for the graph lane (an unarmed
+      deployment, or a capture whose record write was refused).
+
+    `s.turn_count` keeps a session captured before the mark existed readable.
+
+    ⛔ THE TWO ARMS ARE CONVERTED SEPARATELY (#10021 review P2). They are not
+    even the same KIND of number: `turn_max_index` is a 0-based INDEX (hence
+    ``+ 1``), `turn_count` is a COUNT. A single `coalesce(mark, count)` followed
+    by one ``+ 1`` — what this function used to do — therefore read a legacy
+    session (mark absent, `turn_count = N`) as ``N + 1`` stored turns, so a
+    capture that added exactly ONE turn (`len(windowed) = N + 1`) satisfied
+    `len(windowed) > prior_turn_count` NOWHERE and a real write went UNMETERED —
+    the #3892 blind spot this meter exists to close, in the direction the
+    docstring promises never to have. `turn_count` is a WINDOW length too, so it
+    is only ever a FLOOR; the mark, when present, is the session's live end and
+    is exact.
+    """
+    try:
+        prior = proj.g.query(
+            "MATCH (s:Session {id:$sid}) "
+            "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) "
+            "WHERE t.is_episodic = true "
+            "RETURN s.turn_max_index, s.turn_count, count(t)",
+            params={"sid": session_id}).result_set
+        if not prior:
+            return 0
+        mark, count, nodes = prior[0]
+        total = int(nodes or 0)
+        if isinstance(mark, int):
+            # The session's live id-space end: an INDEX, so ``+ 1`` is its count.
+            total = max(total, mark + 1)
+        elif isinstance(count, int):
+            # No mark yet (the pre-#10000 population): the window length is a
+            # floor on the total, never a value to add to.
+            total = max(total, count)
+        return total
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").warning(
+            "prior_turn_count read failed (non-fatal, metering over-counts)",
+            exc_info=True)
+        return 0
+
+
 def _relink_sessions_after_index(org_id: str) -> None:
     """#1727 Slice 2 (Task 12, T1-P15): re-run the entity-linking pass for
     the org's captured sessions after an index completes.
@@ -36302,6 +37119,20 @@ def _relink_sessions_after_index(org_id: str) -> None:
     Sessions captured BEFORE their entities materialized carried honest
     no-match links; once the index lands (entities minted), the pass resolves
     them. Best-effort: a failure is logged, never fatal to the job status.
+
+    ⚠️ DOCUMENTED RESIDUAL — a SILENT NO-OP on an armed deployment (#10000
+    review P2). It finds its work by walking `CONTAINS -> Point {pointKind:
+    'event'}`, which is the TURN NODE collection; once the record holds the turns
+    the capture writes no turn node (`sdk._write_capture_turns` takes the record
+    branch), so this query returns nothing and the post-index re-link pass never
+    runs for the sessions it exists to re-link — `entity_links_attempted` /
+    `entity_links_created` are never written for them. Recorded rather than fixed
+    because the fix is not local: the session list and each session's turn TEXTS
+    both have to come from the record (a per-session tenant-scoped
+    `session_turns` read), which is the same re-pointing work #10000 owns for the
+    graph-side purge step and its measurement. It is the `session_reinjection`
+    class of residual, and it must land before the turn nodes are purged or the
+    sessions captured under the old store lose their re-link pass.
     """
     try:
         from .session_link import link_session_entities
@@ -37769,6 +38600,7 @@ def _reconcile_acl_users_sync() -> dict:
             results[org_id] = {"status": "error", "error": str(e)}
             continue
         ok = absent_by_design = denied = absent = defaults = 0
+        absent_reasons: dict[str, int] = {}
         errors: list[str] = []
         for row in graphs:
             if row.get("_invalid"):
@@ -37802,11 +38634,18 @@ def _reconcile_acl_users_sync() -> dict:
             elif r.status is AclStatus.DENIED:
                 denied += 1
             else:
+                # #10093: `absent` is a TOTAL, and a total alone cannot tell
+                # "this deployment has no server" from "bare redis" from "the
+                # server vanished mid-op" — three different operator actions.
+                # The kinds ride beside it and sum to it by construction.
                 absent += 1
+                kind = r.reason or "unknown"
+                absent_reasons[kind] = absent_reasons.get(kind, 0) + 1
         results[org_id] = {"status": "reconciled", "provisioned": ok,
                             "absent_by_design": absent_by_design,
                             "denied": denied,
                             "absent": absent,
+                            "absent_reasons": absent_reasons,
                             "default_skipped": defaults,
                             "errors": errors}
     return {"status": "reconciled", "organizations": len(results), "results": results}
@@ -37814,20 +38653,33 @@ def _reconcile_acl_users_sync() -> dict:
 
 @app.post("/v1/internal/backups/acl-reconcile")
 async def backups_acl_reconcile(request: Request):
-    """Post-restore ACL rebuild/verification (#2313 folded delta): every
-    ACTIVE graph of every org must have its per-graph ACL user.
+    """Post-restore ACL rebuild/verification (#2313 folded delta): on a
+    deployment that provisions the per-graph ACL layer, every ACTIVE graph of
+    every org must have its per-graph ACL user.
+
+    ⛔ On a deployment that DECLARES the layer off (#8617 — the hosted lane,
+    ``TORTOISE_ACL_LAYER=off``) there is nothing to rebuild and this endpoint
+    does not rebuild it: every graph answers ``absent_by_design`` before any
+    server contact, and the honest report IS that absence. Per-graph ACL users
+    are NOT recreated there — isolation on that lane rests on the app-layer
+    ownership check plus the ``org_{tid}_{gid}`` namespace. Read the report,
+    never the HTTP 200: a green reconcile on that lane means "recorded", not
+    "rebuilt".
 
     A full-platform restore (disaster recovery into a fresh FalkorDB server)
     restores graph DATA from R2 — ACL server users do NOT live in the graph
     namespace and are lost with the old server. ``create_acl_user`` is the
-    idempotent rebuild primitive (full-reset upsert; registry/selfhost mode
+    idempotent rebuild primitive (full-reset upsert, where the layer is
+    provisionable; registry/selfhost mode
     reuses the stored credential, hosted create-once verifies without
     password churn). This reconcile replays it per ACTIVE graph — the DR
     runbook's post-restore step. Idempotent + fail-soft: ACL-layer absence
     is REPORTED, never a 500 — and since #8617 the report says which absence
     it is (`absent_by_design` — this lane declares the layer off, e.g.
     FalkorDB Cloud; `denied` — a reachable server refused the credential;
-    `absent` — no server URI / bare redis / layer down; `provisioned` — the
+    `absent` — no server URI / bare redis / layer down, with `absent_reasons`
+    naming WHICH (#10093: those three imply three different operator actions,
+    and a total alone hides an outage behind a boundary); `provisioned` — the
     user exists), instead of the single pre-#8617 `acl_absent_skipped`
     number that conflated all three. Runs off the
     event loop via ``asyncio.to_thread`` (#2371).
@@ -40947,6 +41799,42 @@ async def oauth_consent(request: Request):
     """Consent confirmation (P2): verifies the browser session JWT via the
     shared JWKS path, resolves the org (RFC 8707, D4), mints a single-use
     PKCE-bound authorization code, returns {code, state} for the redirect.
+
+    #3524 §9 step 2 — IDENTITY HAS TWO ACCEPTED SOURCES, and the bearer is
+    unchanged. A `consent_token` in the JSON body (spec
+    `docs/engineering/auth/consent-identity-bridge.md` §2.1) is a signed,
+    bound, single-use assertion minted on the session origin; when it is
+    present it is the ONLY identity input, and the code is minted with the
+    token's bound params (§9 step 2). When it is absent this function runs
+    exactly as it did before the bridge existed — same order, same errors,
+    same mid-flight state — because it is the path every existing caller takes
+    and this change must not alter it. (Which sources are LIVE is an operator
+    fact, not a property of this function: it depends on the deployed secret,
+    so it is recorded where it is measured, not asserted here.)
+    The arm is unavailable (typed 503, never a 500 and never a silent
+    fall-through) when `CONSENT_TOKEN_SECRET` is unset (§2.3).
+
+    WIRE CONTRACT for §9 steps 3/4 (the spec pins the token's CONTENT, not its
+    transport): the body carries `consent_token`, and the authorize params are
+    presented alongside it in the body exactly as the bearer path presents them.
+    Two sets, deliberately kept apart:
+      * REQUIRED in the request: `client_id`, `redirect_uri`,
+        `response_type=code`, `code_challenge`, `code_challenge_method=S256`,
+        `state`. `validate_authorize_params` refuses anything but
+        `response_type=code`, so a step-3/4 call that omits it is a 400 however
+        valid its token is.
+      * BOUND by the token (§2.1, `BIND_FIELDS`): `client_id`, `redirect_uri`,
+        `code_challenge`, `state` — exactly these four must match the token's
+        `bind`; `response_type` and `code_challenge_method` are checked by the
+        authorize path but are NOT part of the bind set.
+    §2.2 requires every bound param to be PRESENTED at redemption — the token
+    proves the flow, it does not replace the request. The response shape is
+    identical on both arms.
+
+    ⛔ Do NOT read the token on the consent page here or anywhere else yet:
+    a page that half-reads a token and half-reads the old cookie is the
+    "strictly worse than not starting" state §9 records for #3559. The page
+    rewrite is §9 step 4.
     """
     from tortoise.oauth import (
         OAuthError,
@@ -40983,14 +41871,19 @@ async def oauth_consent(request: Request):
                 code_challenge_method=body.get("code_challenge_method") or "S256",
                 scope=body.get("scope") or None),
             op="oauth_consent_params")
-        # #3443: the destination is rebuilt here too — the consent round trip
-        # is where the CODE is minted, so the target it returns is the one the
-        # page navigates to deliver it, computed on the same validated request
-        # (the page's `redirect_target` stays the source for the deny path,
-        # which never reaches this endpoint). Resolved BEFORE the mint: a code
-        # nobody can be sent to must not be issued. `None` is unreachable while
-        # the matcher and this helper agree (same predicate, same list); the
-        # guard is the fail-closed direction if that ever stops being true.
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
+        return _oauth_unconverted_failure(exc, where="oauth/consent params")
+    try:
+        # #3443 — the destination the browser is sent to, rebuilt from the
+        # registered URI (never the raw request string), and resolved BEFORE the
+        # identity check and the mint: "a code nobody can be sent to must not be
+        # issued", and an anonymous request must get the SAME 400 rather than a
+        # 401 that tells it whether a session would have been accepted.
+        # `tests/test_oauth_mcp.py::test_the_consent_handler_never_mints_for_an_
+        # undeliverable_target` pins that order — do NOT move this below the
+        # identity block. The token arm re-derives it from the BOUND value below.
         redirect_target = canonical_redirect_target(client, body.get("redirect_uri"))
         if redirect_target is None:
             raise OAuthError(400, "invalid_request",
@@ -40999,16 +41892,106 @@ async def oauth_consent(request: Request):
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/consent params")
-    # The browser session JWT — same JWKS/ES256+RS256 verification the session
-    # endpoints use (D2: reuse session_auth verify; no new auth stack).
-    user = await verify_session_jwt(request)
+    # ── identity: the bearer (unchanged) or a consent token (§9 step 2) ──────
+    # `mint` is the identity + the values the code is bound to. `bind`
+    # (`client_id`, `redirect_uri`, `code_challenge`, `state`) is what a consent
+    # token must match (§2.2); the bearer path takes the same four from the
+    # request, exactly as it did before #3524.
+    consent_token = body.get("consent_token")
+    if consent_token is None:
+        # The bearer path, byte-for-byte as it was before #3524: same identity
+        # source, same order, same mint arguments. §9 step 2 is ADDITIVE.
+        user = await verify_session_jwt(request)
+        mint = {
+            "client_id": client["id"],
+            "user_id": user["user_id"],
+            "redirect_uri": body["redirect_uri"],
+            "code_challenge": body["code_challenge"],
+            "state": body.get("state"),
+        }
+    else:
+        # §2.1/§2.2/§9 step 2 — verify, then mint with the BOUND params.
+        from tortoise.consent_token import (
+            _consent_refusal,
+            consume_consent_jti,
+            verify_consent_token,
+        )
+        from tortoise.oauth import parse_resource
+        try:
+            assertion = verify_consent_token(consent_token, presented={
+                "client_id": body.get("client_id") or "",
+                "redirect_uri": body.get("redirect_uri") or None,
+                "code_challenge": body.get("code_challenge") or None,
+                "state": body.get("state"),
+            })
+            # §2.2/§2.3 — the nonce is spent HERE, and the position is the
+            # contract: every refusal that CAN be evaluated first has been (the
+            # request params, the token, the binding, and — below — the pure
+            # resource check), so a request that could never mint does not burn
+            # the token; and it is spent BEFORE the insert, so one consent can
+            # never yield two codes.
+            #
+            # ⚠️ THE RESIDUAL, stated because the comment above used to hide it:
+            # `issue_auth_code` is a callee and CAN still refuse AFTER this line —
+            # `_resolve_org`'s 403 (no active team / not a member), a suspended
+            # org, or a control-plane transport error surfacing as 503. Those
+            # consume the token, and the retry of it answers 401 "already been
+            # redeemed". That is deliberate and fail-closed (the alternative —
+            # spending after the insert — admits two codes for one consent in a
+            # race), and it costs a RE-MINT, not a re-login: the 120 s TTL was
+            # about to expire and step 4's page mints again on load. Only the
+            # pure, caller-fault resource 400 is pre-evaluated, below.
+            #
+            # The destination the page must NAVIGATE to is re-derived from the
+            # token's BOUND `redirect_uri`, not from the presented one the
+            # #3443 guard above used: §2.2 compares the bind through
+            # `_redirect_uri_matches`, whose RFC 8252 §7.3 loopback relaxation
+            # lets the port differ, while `/oauth/token` compares `redirect_uri`
+            # EXACTLY. Pairing the response's `redirect_uri` (the bound value)
+            # with a `redirect_target` rebuilt from the PRESENTED value would
+            # hand the page two destinations, one of which cannot redeem the
+            # code. `None` here means the bind names a URI this client cannot be
+            # delivered to — an assertion fault, so it is a 401 and is
+            # evaluated before the spend (a refusal must not burn the token).
+            bound_target = canonical_redirect_target(client, assertion["bind"]["redirect_uri"])
+            if bound_target is None:
+                raise _consent_refusal(
+                    "consent token is bound to a redirect_uri this client cannot be sent to")
+            resource = body.get("resource") or None
+            if resource:
+                # `_resolve_org` parses the RFC 8707 resource and refuses a
+                # malformed one with 400 invalid_resource. That check is PURE, so
+                # evaluate it before the spend — a caller typo must not consume
+                # the consent.
+                parse_resource(_oauth_base(request), resource)
+            await consume_consent_jti(assertion["jti"], assertion["exp"])
+        except OAuthError as exc:
+            return _oauth_error_response(exc)
+        except Exception as exc:        # last-resort: never a bare 500 detail (#3026)
+            return _oauth_unconverted_failure(exc, where="oauth/consent token")
+        redirect_target = bound_target
+        bound = assertion["bind"]
+        mint = {
+            # The CLIENT is the resolved row — the same authority the bearer
+            # path uses and what /oauth/token compares against. §2.2's
+            # `bind.client_id` equality was checked above, so this row IS the
+            # client the token named; taking the token's raw string instead
+            # would bypass the resolved (revocation-filtered) row.
+            "client_id": client["id"],
+            # §2.2: `sub` is the only thing the token may establish.
+            "user_id": assertion["sub"],
+            # §9 step 2: "issue_auth_code with the *bound* params".
+            "redirect_uri": bound["redirect_uri"],
+            "code_challenge": bound["code_challenge"],
+            "state": bound["state"],
+        }
     try:
         code, _org_id = issue_auth_code(
-            cp, client_id=client["id"], user_id=user["user_id"],
+            cp, client_id=mint["client_id"], user_id=mint["user_id"],
             base=_oauth_base(request),
-            redirect_uri=body["redirect_uri"],
-            code_challenge=body["code_challenge"],
-            state=body.get("state"),
+            redirect_uri=mint["redirect_uri"],
+            code_challenge=mint["code_challenge"],
+            state=mint["state"],
             scope=body.get("scope") or client.get("scope") or "mcp",
             resource=body.get("resource") or None,
         )
@@ -41016,14 +41999,17 @@ async def oauth_consent(request: Request):
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/consent mint")
-    return {"code": code, "state": body.get("state"),
-            "redirect_uri": body["redirect_uri"],
+    return {"code": code, "state": mint["state"],
+            "redirect_uri": mint["redirect_uri"],
             # #3443: the destination the browser must be sent to, rebuilt from
             # the registered URI — ADDITIVE, so an existing consumer reading
-            # `redirect_uri` (the presented value, still what the code is bound
-            # to) is unaffected. The page prefers this one and falls back to the
-            # page-scoped `redirect_target` for the deny path / mixed-version
-            # deploys; both are server-rebuilt values, never the request string.
+            # `redirect_uri` is unaffected. Both fields now describe the SAME
+            # URI (the one the code is bound to) on BOTH arms; see the
+            # `canonical_redirect_target` call above for why the token arm must
+            # not derive this from the presented value. The page prefers this
+            # one and falls back to the page-scoped `redirect_target` for the
+            # deny path / mixed-version deploys; both are server-rebuilt values,
+            # never the request string.
             "redirect_target": redirect_target}
 
 

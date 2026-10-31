@@ -924,6 +924,729 @@ def test_pi_install_fails_loudly_when_a_legacy_disable_would_destroy_state(home)
     assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "keep.ts").exists()
 
 
+def test_pi_install_asserts_the_resolved_target_instead_of_trusting_the_write(
+        home, monkeypatch):
+    """#10241: an install may not report success over bytes it has NOT read
+    back. The Pi seam is a hand-copied file, so the installed copy is a
+    SNAPSHOT — and a snapshot can still be the previous generation after a
+    write that silently did not land (an immutable/overlay destination, an
+    external writer, or any future early return).
+
+    The assertion is driven by a REAL stale copy on disk plus a write that
+    does not land — the exact shape of the measured divergence (installed
+    generation 14 vs shipped 15 on the reference box), and it must name BOTH
+    paths and BOTH digests, because "some file differs" is not actionable.
+
+    Mutation: drop the post-write `assert_seam_target` call in `_install_pi` —
+    the installer returns `ok`/`changed`/`installed …` over the stale
+    generation, which is the silent divergence the issue names."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    stale = (b"// tortoise-hook-version: 14\n"
+             b"// the previous generation\nexport default {};\n")
+    dst.write_bytes(stale)
+    monkeypatch.setattr(capture_install, "_atomic_bytes",
+                        lambda dst, data, mode: None)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        f"the install claimed success over unverified bytes: {res.actions}")
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    assert str(dst) in res.error, res.error
+    assert str(shipped) in res.error, res.error
+    assert hashlib.sha256(stale).hexdigest() in res.error, res.error
+    assert hashlib.sha256(_PI).hexdigest() in res.error, res.error
+    assert dst.read_bytes() == stale, "the fixture's stale copy was overwritten"
+    # The writes that DID land are still reported on the failure result, so a
+    # caller cannot hide completed state behind a failure (#10241 review).
+    assert any("backed up" in a for a in res.actions), res.actions
+
+
+def test_pi_install_fails_when_the_write_leaves_no_file_at_all(home, monkeypatch):
+    """#10241 review: the ABSENT shape, which the read-side verdict deliberately
+    does not own. After a real write, a missing loaded path is THIS install's
+    failure — before this test's fix the installer returned
+    `ok=True/changed=True/installed …` over a path that does not exist, which is
+    the same "success claimed from write intent" class the issue exists to
+    close.
+
+    Mutation: drop `require_present=True` from `_install_pi`'s call (the assert
+    then answers "" for absence and the install passes)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    # A writer that does not create the file — an external reaper racing the
+    # install, or an overlay/immutable destination whose rename does not land.
+    monkeypatch.setattr(capture_install, "_atomic_bytes",
+                        lambda dst, data, mode: None)
+
+    res = install_capture("pi", home=home)
+
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    assert not dst.exists()
+    assert not res.ok, f"the install claimed success over a missing file: {res.actions}"
+    assert str(dst) in res.error, res.error
+
+
+def test_pi_install_reports_the_seam_assertion_instead_of_claiming_success(
+        home, monkeypatch):
+    """The WIRING, which had no test: every assertion in
+    `test_pi_install_passes_the_resolved_target_assertion` still holds with the
+    `assert_seam_target` call DELETED from `_install_pi` (its direct calls
+    re-derive the verdict), so a divergence could stop reaching the result
+    without a single RED.  Injects a verdict and pins that `_install_pi`
+    surfaces it as the install's FAILURE, with `require_present=True`.
+
+    Mutation: drop the `if not dry_run: divergence = assert_seam_target(...)`
+    block from `_install_pi` (the injected verdict never reaches the result —
+    RED)."""
+    verdict = ("the file pi LOADS is not the file this repo SHIPS: injected "
+               "divergence")
+    seen: list[tuple[str, bool]] = []
+
+    def _fake(harness, *, home=None, require_present=False):
+        seen.append((harness, require_present))
+        return verdict
+
+    monkeypatch.setattr(capture_install, "assert_seam_target", _fake)
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, (
+        "the install claimed success over the assertion's divergence: "
+        f"{res.actions}")
+    assert res.error == verdict, res.error
+    # The installer just wrote the path, so it asks the ABSENT-aware question.
+    assert seen == [("pi", True)], seen
+
+
+def test_pi_install_passes_the_resolved_target_assertion(home):
+    """The passing direction: an install that DID land is asserted clean, so
+    the new check cannot be satisfied by refusing everything.
+
+    Mutation: return a divergence unconditionally from `assert_seam_target`
+    (every install fails) — or compare the shipped file against itself
+    (every stale install passes); this pins that a real install is VERIFIED,
+    not merely assumed.  It does NOT pin the WIRING (its own direct calls to
+    the assertion re-derive the verdict, so deleting the call from `_install_pi`
+    leaves this green) — `test_pi_install_reports_the_seam_assertion_instead_
+    of_claiming_success` is that test."""
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    assert res.changed
+    dst = home / ".pi" / "agent" / "extensions" / capture_install.PI_EXTENSION_NAME
+    assert dst.read_bytes() == _PI
+    assert capture_install.assert_seam_target("pi", home=home) == ""
+    # The no-op re-run asserts the same thing: "already current" is a claim
+    # about the file on disk, not about this run's intent.
+    again = install_capture("pi", home=home)
+    assert again.ok, again.error
+    assert capture_install.assert_seam_target("pi", home=home) == ""
+
+
+def test_seam_target_assertion_names_both_paths_for_a_stale_install(home):
+    """A stale install — no fault injection, just the state the reference box
+    was measured in — fails the assertion with a message naming the installed
+    path AND the shipped path, with both digests.
+
+    Mutation: report the installed path only, or compare generations instead
+    of bytes (a prose-only seam edit moves the bytes without moving the
+    generation the reader trusts, so a marker-only check passes it)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    stale = (b"// tortoise-hook-version: 15\n"
+             b"// hand-edited, same marker\nexport default {};\n")
+    dst.write_bytes(stale)
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    assert msg, "a stale/hand-edited installed seam passed the assertion"
+    assert str(dst) in msg, msg
+    assert str(shipped) in msg, msg
+    assert hashlib.sha256(stale).hexdigest() in msg, msg
+    assert hashlib.sha256(_PI).hexdigest() in msg, msg
+    assert "older or locally edited" in msg, msg
+
+
+def test_seam_target_assertion_calls_a_newer_install_newer_not_stale(home):
+    """#10241 review: bytes-always must not collapse `ahead-artifact` into
+    "older logic". An install from a NEWER CLI is still not the file this repo
+    ships (both paths, both digests) — but accusing it of older logic invites a
+    DOWNGRADE of a healthy seam, which is a wrong outcome for the read-side
+    callers this function is exported for.
+
+    #10241 review (cycle 5): the fixture's generation is DERIVED from the
+    shipped seam, never a literal. `16` is only "newer" while the shipped
+    generation is 15, and the seam's own header mandates a bump on ANY
+    behavioural edit — so on the bump to 16 `found == expected`, the NEWER
+    branch stops firing, and both assertions below go RED for a reason that
+    has nothing to do with the mutation this test guards (and it stays RED for
+    every later generation). The sibling fifty lines down derives its
+    generation the same way; the pre-existing ahead-artifact test uses an
+    unreachable 9999.
+
+    Mutation: always emit the "older or locally edited" sentence."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    # The generation the shipped seam declares, +1: "a much newer CLI" with no
+    # constant to drift.
+    expected = hook_install.read_hook_version(
+        hook_install.ARTIFACT_CONTRACTS["pi"].source)
+    newer_gen = (expected + 1) if expected else 9999
+    newer = (f"// tortoise-hook-version: {newer_gen}\n"
+             "// from a newer CLI\n").encode()
+    (ext_dir / capture_install.PI_EXTENSION_NAME).write_bytes(newer)
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    assert msg, "a newer installed seam was reported as clean"
+    assert "NEWER" in msg, msg
+    assert "older or locally edited" not in msg, msg
+
+
+def test_seam_target_assertion_never_reads_a_non_regular_file(home):
+    """#10241 review: `open()` on a FIFO BLOCKS, so a checker without a
+    regular-file guard hangs the caller instead of answering — while the
+    sibling detector (`hook_install.detect_artifact_install`) deliberately
+    reports a non-regular artifact WITHOUT reading it. This pins that parity
+    (and `_sha256_file`'s `is_file` gate) with a real FIFO, under a timeout so
+    a regression FAILS rather than hanging the suite.
+
+    Mutation: drop the `resolved.is_file()` sentence (the FIFO then falls to
+    `_sha256_file`, whose own gate answers None, so the message says
+    "unreadable" instead of naming a non-regular file — RED), and the
+    `_sha256_file` gate is pinned by the DIRECT call at the end, which hangs
+    without it (the alarm turns that hang into a RED failure)."""
+    from tests._signal_hygiene import harness_safe_sigalrm
+
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    fifo = ext_dir / capture_install.PI_EXTENSION_NAME
+    os.mkfifo(fifo)
+
+    def _alarm(signum, frame):  # pragma: no cover - only fires on regression
+        raise AssertionError("assert_seam_target HUNG on a FIFO")
+
+    # #7655: the alarm goes through `harness_safe_sigalrm`, never a bare
+    # `signal.alarm` — pytest-timeout owns `ITIMER_REAL` for this item, and a
+    # bare disarm would leave a later hang in the test uncaught.
+    with harness_safe_sigalrm(10, _alarm):
+        msg = capture_install.assert_seam_target("pi", home=home)
+        # The reader's own regular-file gate, reached DIRECTLY: it is the
+        # TOCTOU backstop the resolve-time guard cannot cover, so it gets its
+        # own assertion instead of riding on the sentence above.
+        assert capture_install._sha256_file(fifo) is None
+
+    assert msg, "a FIFO at the loaded path was reported as clean"
+    assert str(fifo) in msg, msg
+    assert "not a regular file" in msg, msg
+
+
+def test_seam_target_assertion_reports_an_unstattable_resolved_target(
+        home, monkeypatch):
+    """#10241 review (cycle 5): the round-3 finding returned as UNVERIFIED —
+    "does `Path.is_file()` re-raise EACCES on this repo's floor?"  It does:
+    measured on 3.12.13, a leaf symlink whose target sits under a mode-000
+    directory gives `exists() -> PermissionError`, `resolve() -> <a path>` (it
+    swallowed the error) and `resolved.is_file() -> PermissionError`.  So the
+    stat between the two errno-discriminating ones must carry its own
+    `except`, or a `doctor` / startup caller gets a traceback out of a
+    function whose docstring promises "a sentence instead of a traceback".
+
+    FAULT-INJECTED, stated as such: the window is a TOCTOU race — the
+    `os.stat(loaded)` a few lines earlier already followed this exact path — so
+    the real state cannot be produced deterministically.  The injection raises
+    from `Path.is_file` for the resolved seam only, which is precisely what
+    3.12 does under an unsearchable parent.
+
+    Mutation: move `resolved.is_file()` back OUTSIDE the `try` (the injected
+    `PermissionError` escapes the function — RED with a traceback, not with a
+    missing sentence)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.write_bytes(b"// tortoise-hook-version: 14\n// stale\n")
+    guarded = dst.resolve()
+
+    real_is_file = Path.is_file
+
+    def _is_file(self, *args, **kwargs):
+        if Path(self) == guarded:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", _is_file)
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    assert msg, "a seam whose target cannot be stat'ed was reported as clean"
+    assert "cannot be inspected" in msg, msg
+    assert "PermissionError" in msg, msg
+    assert str(guarded) in msg, msg
+
+
+def test_seam_target_assertion_names_the_resolved_target_of_a_symlink(home):
+    """A `verified-target` install is graded on the bytes Pi LOADS, so the
+    message must name the RESOLVED target as well as the loaded path — a user
+    reading only the loaded path would edit the wrong file.
+
+    Mutation: drop the `via` segment from the sentence (the path the bytes were
+    actually read from disappears — the assertion below reds).  Hashing
+    `loaded` instead of `resolved` does NOT red this test (``open`` follows the
+    link, so the digest is identical); the load-bearing part is the reported
+    resolution, which is what the assertion pins.
+
+    The remedy here is the PLAIN one, and that is load-bearing too: this link
+    resolves INSIDE the install home, a state `_install_pi` accepts (the atomic
+    write replaces the link), so demanding an unlink would be the needless
+    manual step `is_manual_fix` records as the cheaper error.  The out-of-home
+    direction is pinned by the sibling test below."""
+    real_home = home.resolve()
+    ext_dir = real_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    old_copy = real_home / "old-checkout" / capture_install.PI_EXTENSION_NAME
+    old_copy.parent.mkdir(parents=True)
+    old_copy.write_bytes(b"// tortoise-hook-version: 14\n// stale\n")
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(old_copy)
+
+    msg = capture_install.assert_seam_target("pi", home=real_home)
+
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    assert msg, "a symlinked install pointing at a stale copy passed"
+    assert str(dst) in msg, msg
+    assert f"which resolves to {old_copy}" in msg, msg
+    assert str(shipped) in msg, msg
+    # The plain remedy, because the installer really does accept this state...
+    assert install_capture("pi", home=real_home, dry_run=True).ok, (
+        "the plain-remedy premise is false: this link is one the installer "
+        "refuses, so the message must name the unlink step")
+    # ...and the message says so, rather than sending the user to an unlink
+    # they do not need.
+    assert "Re-run `tortoise install pi` to replace it." in msg, msg
+    assert "unlink" not in msg, msg
+
+
+def test_seam_target_assertion_names_the_unlink_step_for_an_out_of_home_symlink(
+        home, tmp_path):
+    """#10241 review: for a seam symlinked to a checkout OUTSIDE `$HOME` — the
+    ordinary "I symlinked the installed extension to the copy in my repo"
+    shape — the installer REFUSES (`_symlink_escape`, pinned as a refusal twice
+    in this suite), so the older/edited divergence message's only remedy
+    ("Re-run `tortoise install pi` to replace it") is a dead end and the step
+    that unblocks it (unlink) is missing.  The message must name the user's
+    step first, from the installer's OWN guard rather than a re-derived one.
+
+    Mutation: emit the unconditional "Re-run `tortoise install pi` to replace
+    it." remedy (the pre-fix sentence — RED on the `unlink` assertion), or
+    condition the remedy on `via` instead of the installer's guard (a
+    symlinked ANCESTOR sets `via` while the installer accepts, which REDs the
+    in-home sibling above and does not satisfy this one's premise)."""
+    real_home = home.resolve()
+    ext_dir = real_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    # A checkout outside `$HOME`; `tmp_path` is outside `tmp_path/home`, and a
+    # resolved parent keeps `str(resolved)` equal to the path written here.
+    outside_dir = tmp_path.resolve() / "my-repo"
+    outside_dir.mkdir()
+    outside = outside_dir / capture_install.PI_EXTENSION_NAME
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    expected = hook_install.read_hook_version(shipped)
+    older = (expected - 1) if expected else 14
+    outside.write_bytes(
+        f"// tortoise-hook-version: {older}\n// tortoise session\n".encode())
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(outside)
+
+    # The fixture MUST be a state the installer refuses, or the finding (and
+    # this test) rests on a false premise.
+    refused = install_capture("pi", home=real_home, dry_run=True)
+    assert not refused.ok and "install home" in (refused.error or ""), (
+        "the fixture must be a state the installer REFUSES: "
+        f"{refused.error!r}")
+
+    msg = capture_install.assert_seam_target("pi", home=real_home)
+
+    assert msg, "a symlinked install pointing outside $HOME passed"
+    assert "older or locally edited" in msg, msg
+    assert str(dst) in msg, msg
+    assert f"which resolves to {outside}" in msg, msg
+    assert str(shipped) in msg, msg
+    # The user's step FIRST, quoting the installer's own refusal...
+    assert "unlink the symlink first" in msg, msg
+    assert msg.index("unlink the symlink first") < msg.index(
+        "tortoise install pi"), msg
+    # ...and the unconditional remedy — the pre-fix sentence — is gone.
+    assert "Re-run `tortoise install pi` to replace it." not in msg, msg
+
+
+def test_seam_target_assertion_names_the_unlink_step_for_a_newer_out_of_home_link(
+        home, tmp_path):
+    """The NEWER-branch sibling of the test above: it claims
+    "`tortoise install pi` would replace it with N", which is FALSE for a
+    symlinked seam the installer refuses — it cannot reach the file at all.
+    Same guard, same one-line consequence.
+
+    Mutation: emit the unconditional "would replace it with {expected}" clause
+    for the NEWER branch (the pre-fix sentence — RED).
+    """
+    real_home = home.resolve()
+    ext_dir = real_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    outside_dir = tmp_path.resolve() / "my-repo"
+    outside_dir.mkdir()
+    outside = outside_dir / capture_install.PI_EXTENSION_NAME
+    shipped = hook_install.ARTIFACT_CONTRACTS["pi"].source
+    expected = hook_install.read_hook_version(shipped)
+    newer = (expected + 1) if expected else 16
+    outside.write_bytes(
+        f"// tortoise-hook-version: {newer}\n// tortoise session\n".encode())
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(outside)
+    assert not install_capture("pi", home=real_home, dry_run=True).ok
+
+    msg = capture_install.assert_seam_target("pi", home=real_home)
+
+    assert msg, "a NEWER symlinked install outside $HOME passed"
+    assert "NEWER" in msg, msg
+    assert "older or locally edited" not in msg, msg
+    assert "unlink the symlink first" in msg, msg
+    # `expected`, not `newer`: the code interpolates the SHIPPED generation, so
+    # an assertion for any other number passes whatever the code does (#10241
+    # review cycle 6).  For THIS fixture the sentence is unreachable anyway —
+    # the link escapes, so the `refused` arm is taken — which is why the
+    # reachable arm has its own test below; this one guards against the
+    # pre-fix unconditional clause coming back.
+    assert f"would replace it with {expected}." not in msg, msg
+
+
+def test_seam_target_assertion_offers_the_replace_step_for_a_newer_in_home_seam(
+        home):
+    """The NEWER branch's OTHER arm: a seam the installer CAN reach.
+
+    #10241 review cycle 6: `… would replace it with {expected}.`
+    (``capture_install.py``, the non-``refused`` arm of the NEWER branch) was
+    graded by NO test — the out-of-home fixture above cannot reach it (its
+    link escapes, so the refusal arm always wins) and the in-home NEWER test
+    asserts only the generation wording.  Flip the branch to always emit the
+    refusal arm, or drop the `expected` interpolation, and the suite stayed
+    green — the false PASS this file's header forbids.
+
+    Mutation: take the `refused` arm unconditionally (RED on the
+    `would replace it with` assertion) or interpolate anything but `expected`
+    (RED on the same line).
+    """
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    expected = hook_install.read_hook_version(
+        hook_install.ARTIFACT_CONTRACTS["pi"].source)
+    newer_gen = (expected + 1) if expected else 9999
+    (ext_dir / capture_install.PI_EXTENSION_NAME).write_bytes(
+        f"// tortoise-hook-version: {newer_gen}\n"
+        "// tortoise session capture from a newer CLI\n".encode())
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    assert msg, "a newer installed seam was reported as clean"
+    assert "NEWER" in msg, msg
+    # The installer ACCEPTS this path, so the remedy is the plain re-run — and
+    # it must name the generation the user would be moved back to.
+    assert "cannot reach it as things stand" not in msg, msg
+    assert f"would replace it with {expected}." in msg, msg
+
+
+def test_seam_target_assertion_read_side_default_does_not_fail_on_absence(home):
+    """#10241 review: the parameter's WHOLE point is the split — absence is the
+    installer's failure and the read-side caller's non-finding. The installer's
+    direction is pinned elsewhere; this pins the DEFAULT, which had no test, so
+    flipping it shipped green.
+
+    Mutation: make `require_present` default to `True` (a read-side caller — the
+    startup surface §7 leaves open — then hard-fails on "not installed")."""
+    # No seam at all in this home.
+    assert capture_install.assert_seam_target("pi", home=home) == ""
+    assert capture_install.assert_seam_target(
+        "pi", home=home, require_present=True) != ""
+
+
+def test_seam_target_assertion_calls_a_broken_symlink_broken(home):
+    """#10241 review: a DANGLING link is not "not a regular file" — it is a
+    broken pointer, which the detector reports as `symlinked-artifact` with
+    "remove or re-point it". Saying "not a regular file" hides the only fact
+    the user needs (the load path is a dead link).
+
+    Mutation: drop the `except FileNotFoundError` arm around the follow-stat (the
+    state then falls through to the generic "cannot be resolved" sentence, so
+    nothing names the dead link — RED)."""
+    real_home = home.resolve()
+    ext_dir = real_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    gone = real_home / "deleted-checkout" / capture_install.PI_EXTENSION_NAME
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(gone)  # target never created
+
+    msg = capture_install.assert_seam_target("pi", home=real_home)
+
+    assert msg, "a broken symlink at the loaded path passed"
+    assert "broken symlink" in msg, msg
+    assert str(dst) in msg, msg
+    assert str(gone) in msg, msg
+
+
+def test_seam_target_assertion_never_claims_a_verdict_it_cannot_hash(home):
+    """#10241 review: an UNREADABLE seam produced "sha256 unreadable, differs
+    from …" — a "differs" verdict from a digest that was never computed — and
+    the wrong remedy ("re-run install") where the detector says `not-readable`
+    / "chmod it". A claim the code cannot support is the exact class this PR
+    exists to remove.
+
+    Mutation: delete the `loaded_digest is None` branch (the sentence then
+    asserts "differs" and accuses the user of editing the file)."""
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file permissions, so the read would succeed")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.write_bytes(_PI)
+    os.chmod(dst, 0o000)
+    try:
+        msg = capture_install.assert_seam_target("pi", home=home)
+    finally:
+        os.chmod(dst, 0o644)
+
+    assert msg, "an unreadable seam passed the assertion"
+    assert "not readable" in msg, msg
+    assert str(dst) in msg, msg
+    assert "differs from" not in msg, msg
+    assert "older or locally edited" not in msg, msg
+
+
+def test_seam_target_assertion_reports_an_unsearchable_install_dir(home):
+    """#10241 review: `exists()`/`is_symlink()` SWALLOW EACCES into `False`, so a
+    mode-000 install directory made the assert answer `""` (clean) — and, under
+    the installer's `require_present=True`, claim "the copy did not land" over a
+    copy that landed. Presence and following are errno-discriminating stats now.
+
+    Mutation: make the `except OSError` handler answer `""` instead of a
+    sentence (an unloadable seam then reads as CLEAN, and `require_present=True`
+    claims the copy did not land) — the pathlib probe this replaced raised
+    EACCES on 3.12 but SWALLOWS it on 3.14, which is why the branch is now an
+    explicit errno stat rather than a `try` around pathlib."""
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores directory permissions, so nothing is blocked")
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / capture_install.PI_EXTENSION_NAME).write_bytes(_PI)
+    os.chmod(ext_dir, 0o000)
+    try:
+        msg = capture_install.assert_seam_target("pi", home=home)
+        msg_required = capture_install.assert_seam_target(
+            "pi", home=home, require_present=True)
+    finally:
+        os.chmod(ext_dir, 0o755)
+
+    assert msg, "an unsearchable install dir was reported clean"
+    assert "cannot be inspected" in msg, msg
+    assert str(ext_dir / capture_install.PI_EXTENSION_NAME) in msg, msg
+    # ...and it must NOT claim the write did not land: it landed.
+    assert msg_required, msg_required
+    assert "was not written" not in msg_required, msg_required
+
+
+def test_seam_target_assertion_calls_a_symlink_loop_a_loop(home):
+    """#10241 review: `Path.resolve()` is non-strict and realpath BREAKS a cycle
+    rather than raising, so a loop fell into the broken-symlink branch and the
+    message named a path that exists ("→ …/tortoise-capture.ts, which does not
+    exist" for a self-loop). A cycle is its own state (`ELOOP`).
+
+    Mutation: drop the `errno.ELOOP` arm (the loop then falls to the generic
+    "cannot be resolved" sentence, so nothing names the cycle — `assert "symlink
+    LOOP" in msg` fails)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.symlink_to(dst)  # a self-loop
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    assert msg, "a symlink loop at the loaded path passed"
+    assert "symlink LOOP" in msg, msg
+    assert "broken symlink" not in msg, msg
+    assert str(dst) in msg, msg
+
+
+def test_seam_target_assertion_sends_a_foreign_file_to_move_aside(home):
+    """#10241 review: for a file that is NOT ours, "re-run `tortoise install pi`
+    to replace it" is a dead end — the installer REFUSES that state
+    (`_foreign_install_refusal`), and the user is told they edited a Tortoise
+    seam they never wrote. The detector's remedy (`move it aside, then re-run`)
+    is the one that works.
+
+    Mutation: drop the `_looks_like_our_script` gate (ours and foreign share the
+    "older or locally edited / re-run install" sentence)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.write_text("// someone else's extension\nexport default 1\n")
+
+    msg = capture_install.assert_seam_target("pi", home=home)
+
+    assert msg, "a foreign file at the loaded path passed the assertion"
+    assert "not a Tortoise seam" in msg, msg
+    assert "Move it aside" in msg, msg
+    # ...and the installer really does refuse it, so the two agree.
+    assert not install_capture("pi", home=home).ok
+
+
+def test_pi_install_write_failure_reports_the_actions_that_already_landed(home):
+    """#10241 review: the partial-write path — the one MOST likely to have
+    changed the machine — reported no actions at all, because the write-time
+    `OSError` escaped `_install_pi` into `install_capture`'s catch-all, which
+    returns a fresh result (`actions=()`). By then the legacy extension may be
+    renamed aside and the user's own seam backed up.
+
+    Mutation: remove the `try/except OSError` around the mutation block (the
+    actions vanish and this test reds)."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    legacy = ext_dir / "tortoise-capture"
+    legacy.mkdir(parents=True)
+    (legacy / "index.ts").write_text("// legacy producer\n")
+    stale = _PI + b"\n// locally edited - still ours (tortoise session)\n"
+    dst = ext_dir / capture_install.PI_EXTENSION_NAME
+    dst.write_bytes(stale)
+
+    real_atomic = capture_install._atomic_bytes
+
+    def _fails_on_the_seam_write(target, data, mode):
+        if target.name == capture_install.PI_EXTENSION_NAME:
+            raise OSError(28, "No space left on device")
+        return real_atomic(target, data, mode)
+
+    capture_install._atomic_bytes = _fails_on_the_seam_write
+    try:
+        res = install_capture("pi", home=home)
+    finally:
+        capture_install._atomic_bytes = real_atomic
+
+    assert not res.ok, res.actions
+    assert any("disabled legacy capture extension" in a for a in res.actions), (
+        res.actions)
+    assert any("backed up" in a for a in res.actions), res.actions
+    assert "NOT fully installed" in res.error, res.error
+    # The state those actions describe really is on disk.
+    assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "index.ts").exists()
+    assert (ext_dir / (capture_install.PI_EXTENSION_NAME + ".bak")).exists()
+
+
+def test_pi_install_write_failure_that_landed_nothing_says_so(home, monkeypatch):
+    """#10241 review: the ZERO-action write failure is the COMMON shape, not an
+    edge — a virgin home (no legacy ``tortoise-capture/``, no ``dst``) whose
+    target is full or immutable reaches the seam write as this run's FIRST
+    mutation, so ``actions == ()``. The message nevertheless read "… is NOT
+    fully installed, and the 0 action(s) above DID land": a sentence about
+    nothing, in the one report whose whole job is never to claim more than it
+    can support. It must say plainly that nothing was written.
+
+    Mutation: interpolate ``len(actions)`` unconditionally again (the
+    "nothing was written" arm disappears, so both prose assertions red)."""
+    # A VIRGIN home: nothing to back up and no legacy extension to disable, so
+    # the seam write is this install's first — and failing — mutation.
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    assert not ext_dir.exists(), "the fixture must start virgin"
+
+    real_atomic = capture_install._atomic_bytes
+
+    def _fails_on_the_seam_write(target, data, mode):
+        if target.name == capture_install.PI_EXTENSION_NAME:
+            raise OSError(28, "No space left on device")
+        return real_atomic(target, data, mode)
+
+    monkeypatch.setattr(capture_install, "_atomic_bytes",
+                        _fails_on_the_seam_write)
+    res = install_capture("pi", home=home)
+
+    assert not res.ok
+    assert res.actions == (), res.actions
+    assert "No space left on device" in res.error, res.error
+    assert "nothing was written" in res.error, res.error
+    assert "0 action(s)" not in res.error, res.error
+    assert "NOT fully installed" not in res.error, res.error
+    # ...and it really is virgin: the failure landed no state at all.
+    assert not (ext_dir / capture_install.PI_EXTENSION_NAME).exists()
+    assert not list(ext_dir.glob("*.tortoise-tmp"))
+
+
+def test_pi_install_failure_still_reports_the_writes_that_landed(home, capsys):
+    """#10241 review: a FAILED install may still have written state — the
+    backup of the user's own seam, the legacy directory renamed aside. The CLI
+    must print those action lines beside the failure, or the user is told
+    "FAILED" while their machine was modified and cannot find the backup.
+
+    Mutation: move the `for action in result.actions` loop back below the
+    `if not result.ok` short-circuit in `__main__._install_capture_seam` (only
+    the FAILED line prints)."""
+    from types import SimpleNamespace
+
+    from tortoise import __main__ as cli
+    from tortoise.capture_install import InstallResult
+
+    def _stub(*_args, **_kwargs):
+        return InstallResult(
+            "pi", changed=True,
+            actions=("backed up /x/tortoise-capture.ts → /x/tortoise-capture.ts.bak",),
+            error="the file pi LOADS is not the file this repo SHIPS: …")
+
+    args = SimpleNamespace(harness="pi", dir=str(home), dry_run=False)
+    rc = cli._install_capture_seam(args, _stub)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "backed up" in captured.out, captured.out
+    assert "Capture install FAILED for pi" in captured.err, captured.err
+
+
+def test_hooks_upgrade_failure_still_reports_the_writes_that_landed(home, capsys,
+                                                                   monkeypatch):
+    """`InstallResult` states ONE contract for BOTH CLI renderers (#10241): a
+    FAILED repair may already have written state (a `.bak` of the user's own
+    seam, a legacy extension renamed aside), so its actions are printed beside
+    the failure. Only the `tortoise install` half was pinned, so a future edit
+    could drop the `hooks upgrade` half and ship green — which is the very
+    class this rule exists to close (two renderers shipped the same defect).
+
+    Mutation: delete the `for action in result.actions` loop above
+    `if not result.ok` in `__main__._upgrade_artifact_seam` (only the error
+    line prints, so `"backed up" in captured.out` reds)."""
+    from types import SimpleNamespace
+
+    from tortoise import __main__ as cli
+    from tortoise import capture_install as ci
+    from tortoise.capture_install import InstallResult
+
+    def _stub(*_args, **_kwargs):
+        return InstallResult(
+            "pi", changed=True,
+            actions=("backed up /x/tortoise-capture.ts → /x/tortoise-capture.ts.bak",),
+            error="the file pi LOADS is not the file this repo SHIPS: …")
+
+    # `_upgrade_artifact_seam` imports the installer INSIDE the call, so patching
+    # the module attribute is what the call site resolves — no CLI fixture needed.
+    monkeypatch.setattr(ci, "install_capture", _stub)
+    rc = cli._upgrade_artifact_seam(
+        SimpleNamespace(harness="pi", dry_run=False), home, home)
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "backed up" in captured.out, captured.out
+    assert "not the file this repo SHIPS" in captured.err, captured.err
+    # The success sentence must not appear on the failure path.
+    assert "upgraded." not in captured.out, captured.out
+
+
 # ── codex: the artifact + the $CODEX_HOME registration (#3818) ──────────
 
 
@@ -3431,8 +4154,13 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # only) must read as stale to receive the injection half.  The drift detector
 # also flags the missing script/entry on its own, so the bump is what carries
 # the change to an install whose bytes are frozen at generation 3.
-_EXPECTED_INSTALL_CONTRACT = {"claude": 11, "codex": 3, "cursor": 4,
-                             "pi": 14}
+# #4848 and main's #6388/#10216 bumps are INDEPENDENT and both apply: `pi`
+# moved 14→15 on main (the capture spool's rank-by-class cap) while claude,
+# codex and cursor moved here (the `tortoise-interp-guard` block).  Taking
+# either side alone would pin `pi` to a generation main has already passed and
+# leave the shell seams accepting an interpreter they cannot run.
+_EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
+                             "pi": 15}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -3471,7 +4199,14 @@ def test_shipped_install_contract_generations(harness):
     The codex seam took the same slot split and its marker was already at 3 on
     main (#5919), so NO number moved for it: a stale codex install is caught by
     the installed-copy byte comparison (`modified-script`), not by a generation
-    bump.  Cursor also started at 3, then moved 3→4 under #2122 (the
+    bump.  #4848 changed the BEHAVIOUR of every shell seam that resolves an
+    interpreter (the byte-identical `tortoise-interp-guard` block: a candidate
+    that holds `tortoise/` but cannot be RUN is now refused instead of run under
+    an unversioned `python3`, which on a stock macOS host is 3.9 and cannot
+    import the package), so claude 11→12, codex 3→4 and cursor 4→5.  The bump is
+    again what carries the guard to an already-installed host, whose hook bytes
+    are frozen at install time — without it that host keeps accepting an
+    unusable checkout and keeps reporting the capture as merely quiet.  Cursor also started at 3, then moved 3→4 under #2122 (the
     sessionStart injection half — see the table comment above).  `pi` moved 1→2 on
     main under #4897, which this branch predates, so 2 is main's number and not
     a #5838 bump; #5109 then moved `pi` 2→3 (the read-side store-mode warning
@@ -3528,12 +4263,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 14`` from
+    Mutation: delete ``// tortoise-hook-version: 15`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 14
+    assert hook_install.read_hook_version(_PI_SRC) == 15
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -3549,7 +4284,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    14, "a7b50246ec3edfe989c06c95024c829b1e9674b4140b069deec32d588cd4d3e6")
+    15, "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3631,6 +4366,26 @@ _GENERATION_DIGESTS = {
     # defect. The reason sanitiser also moved to the single write site, so
     # `spool.error` (a raw exception message) can no longer bypass it.
     14: "a7b50246ec3edfe989c06c95024c829b1e9674b4140b069deec32d588cd4d3e6",
+    # Generation 15: the capture spool's count/byte ceiling ranks entries in TWO
+    # CLASSES before age — an already-filed entry (its bytes are on the wire, and
+    # the harness's own session log still holds them) is the safe loss and is
+    # reaped FIRST, while a never-filed entry is the only copy of a conversation
+    # that never reached the graph (#6388).  Generation 14 ranked by age alone,
+    # so on a box whose backlog is older than its successes the cap reaped the
+    # very backlog it exists to deliver.  The discard line also names the class of
+    # loss now (`UNDELIVERED (never filed)` vs `filed`); it is the only surface a
+    # cap eviction has.  Behaviour moved, so the generation moves with it.
+    # Generation 15's digest was re-cut before it shipped: the review of #10216
+    # found the quarantined-log path still unlabelled, so the same unmerged
+    # generation gained the `UNREACHABLE` record (and the prose that names its
+    # precedence), then lost the `never filed` clause that record first carried
+    # — the corrupt meta, the only copy of the filing stamp, is removed at
+    # quarantine, so that clause asserted something the code cannot know.  No
+    # installed copy can carry generation
+    # 15 — it has never been on `main` — so this is the one rewrite the rule
+    # below permits, and it is recorded here rather than left to look like a
+    # refresh-to-green.
+    15: "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f",
 }
 
 

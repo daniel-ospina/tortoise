@@ -10,8 +10,8 @@ carve_out_run: bool}.
 python-ci legs (2026-09-02-ci-audit F1/F2 — a docs-only PR paid ~59 runner-
 min slow + 23.5 min carve-out). select() now emits the diff-gate contract on
 every return path: slow_run (test-slow runs), slow_selected (the slow files
-test-slow should run — surface-matched on tier-2 PRs, the whole committed
-leg set = slow_files - carve_out on full selections), carve_out_run (the
+test-slow should run — surface-matched on tier-2 PRs, the whole GATING leg set
+= slow_gating_files() on full selections), carve_out_run (the
 carve-out job runs — full selections or a matched surface owns carve-out
 files). The workflow's changes job echoes these; docs/website-only PRs
 (surfaces == []) skip both legs, trunk (push) + nightly (schedule) +
@@ -313,6 +313,19 @@ SHARED_MODULES = (
     # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`)
     # cannot see it and this registration has to be made by hand.
     "tests/_change_feed_isolation.py",
+    # #3590 round-5 review F4: the minted-identity id RESOLVER
+    # (`tests/_node_ids.py`) replaced the retired `entity_name_id` derivation in
+    # the tests that need "the id of this name", and it is imported ACROSS
+    # surfaces — `test_sdk_group3.py` (sdk), `test_capture_session.py` /
+    # `test_ingest_event_endpoint.py` / `test_event_provenance.py` /
+    # `test_status_folds_2729.py` (core), `test_7936_stable_stub_ids.py`
+    # (core + sdk), and roughly a dozen more. Same class as `_live_utils.py`
+    # above: it is NOT a `test_*.py` file, so the manifest never classifies it —
+    # without this entry a helper-only change selected `core` only, and a break
+    # it induced in a sdk/api test would never run on the PR that made it (the
+    # #1349/#3332/#3910 under-selection class). Note `--integrity` cannot see
+    # this gap: it rglobs `test_*.py` only.
+    "tests/_node_ids.py",
     # this PR (#1436 / #5084 remainder): the in-process live-skip gate
     # (`tests/_live_gate.py`) is imported at conftest MODULE level and is applied
     # from `pytest_runtest_setup` — i.e. it runs before EVERY test on EVERY
@@ -805,6 +818,35 @@ SOURCE_PATTERNS = {
                    # test_the_monospace_guard_is_selected_on_every_root_it_scans.
                    "apps/graph-viz/src/",
                    "tortoise/oauth.py",
+                   # #10254 review (P2): the ELEMENT-level guard
+                   # (`tests/test_website_static.py::
+                   # TestARenderedCodeElementGetsAMonoFace`) declares `apps/` in its
+                   # `ROOTS`, and `apps/graph-viz/index.html` is the one subject in
+                   # that root the guard can DECIDE on that NO leg ran. Two files
+                   # under `apps/graph-viz/` carry their own `<style>` block at this
+                   # head — this one and `src/components/ontology/HierarchyChart.tsx:645`
+                   # — and the second already selects this surface through the
+                   # `apps/graph-viz/src/` row above, so it needs no entry of its own
+                   # (#10254 review: the earlier wording called this page "the only
+                   # subject the guard can DECIDE on", which the measurement
+                   # contradicts). It renders no `<code>`/
+                   # `<pre>` today, which is precisely why it needs naming: the
+                   # moment someone re-copies a Courier-rendering snippet into that
+                   # page, the guard would flag it and no leg would run it.
+                   # MEASURED before this entry: `select(['apps/graph-viz/index.html'])
+                   # -> surfaces=[], full=False`, `test_website_static.py` ABSENT (a
+                   # graph-viz-page-only diff filters to `changed == []` — `apps/` is
+                   # in NON_PYTHON_PREFIXES and matched no row — and takes the
+                   # docs-only tier-1 early return). Of the 21 decidable subjects the
+                   # guard scans at this head, this was the ONLY unwired one; the
+                   # other 20 already select this surface. Concrete path, not the
+                   # `apps/graph-viz/` directory: the same reasoning as the
+                   # `package.json` entry above — a wholesale claim would pull the
+                   # whole `core` set onto every source edit in that app.
+                   # Pinned by tests/test_website_static.py::
+                   # TestARenderedCodeElementGetsAMonoFace::
+                   # test_every_page_it_can_decide_on_selects_this_guard.
+                   "apps/graph-viz/index.html",
                    # The guard's other declared emitter (`MODULES`). It carries no
                    # mono declaration today, so nothing forces its wiring — which
                    # is exactly why it is named here: the guard's subject list
@@ -1015,6 +1057,25 @@ SOURCE_PATTERNS = {
             # token-flow fix must change. Paired with CORE_ALSO so the
             # core-registered half is not dropped by the named-surface match.
             "tortoise/oauth.py",
+            # #3524 review (P1): the consent identity bridge's VERIFIER,
+            # `tortoise/consent_token.py`. Its guard
+            # (`tests/test_oauth_consent_bridge.py`) is registered `api` +
+            # `onboarding` (config/ci-surfaces.yml) and NOT `core`, and a
+            # named-surface match REPLACES the `core` fallback — so without this
+            # entry a diff that touches the verifier and nothing else selected
+            # `core`, where that guard does not exist. MEASURED before this
+            # entry: `--changed-files tortoise/consent_token.py --event
+            # pull_request` -> surfaces ['core'], 682 test files,
+            # test_oauth_consent_bridge.py ABSENT (with the test file also in the
+            # diff: surfaces ['api', 'core'], guard present). A one-line fix or a
+            # revert of the signature/`alg`/`bind`/`jti` logic — the security
+            # half of the bridge — therefore red nowhere, and would have merged
+            # green, caught only by a later PR that happened to touch
+            # `hosted_api.py`. Same silent-drop class as the #2938/#3154/#4367
+            # entries above. No CORE_ALSO entry: the module has no
+            # core-registered guard. Pinned by tests/test_ci_selection.py::
+            # test_a_consent_token_only_diff_runs_the_bridge_guard.
+            "tortoise/consent_token.py",
             # #3496: the consent page pins its browser auth client to a CDN
             # specifier whose version must equal the VENDORED bundle the
             # behavioural harness executes (test_oauth_consent_pkce.py, api).
@@ -1064,6 +1125,24 @@ SOURCE_PATTERNS = {
             # repo's deliberate docs-PR policy; the required `docs` job runs
             # `tools/sdk_surface.py --check` on every PR instead (#4454).
             "tools/sdk_surface.py",
+            # #10044 review F1: `tools/sdk_surface_declaration.py` is the APPROVED-surface
+            # gate (the owner's 40 in `tortoise/__all__.py` vs the owner's document, and
+            # vs the live `TortoiseSDK`). Its proofs are the 17 in
+            # `test_sdk_surface_declaration.py` — registered in `api` AND `core` but
+            # unreachable, because `tools/` is in NON_PYTHON_PREFIXES: a gate-only diff
+            # selected NO surface (`surfaces: []`, `full: false`) and the required job
+            # then executed the PR's own edited gate with zero of its tests having run.
+            # What that file pins is the GATE's contract (`check(contract_only=True)` reds a
+            # doctored or padded declaration) — enough on its own: a neutered `check()`
+            # cannot pass them. The WIRING proof (that the required lint still CALLS the
+            # gate) lives in `tests/test_surface_manifest.py`, which is `core`-registered and
+            # selected by the `tools/surface_manifest.py` diff that could break it — so this
+            # entry does not carry it, and saying it did was wrong (round-6 F3).
+            # Same silent-drop class (#1349/#3332/#3616) as the generators above, and the
+            # one bypass the residual-bypass paragraph in `tools/surface_manifest.py`
+            # does not cover. `test_sdk_surface_declaration.py` is already in `api`, so
+            # this entry is what makes the registration bite.
+            "tools/sdk_surface_declaration.py",
             # #5373: `tools/registry_integrity.py` is the fail-closed validator
             # paired with `merge=union` on the two config registries, and
             # `test_registry_integrity.py` (dual-registered in `api` AND `core`)
@@ -1220,6 +1299,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tool's own guard) is selected. Pinned by
              # tests/test_ci_selection.py::test_queue_resweep_tool_change_selects_core_not_tier1.
              "tools/queue_resweep.py",
+             # #6388: `tools/seal_session_events.py` is the session-events seal
+             # policy, guarded by tests/test_session_events_seal.py, which is
+             # `core`-registered — but `tools/` is swallowed by
+             # NON_PYTHON_PREFIXES before the `core` fallback runs, so a
+             # tool-only diff took the docs-only early return and ran NO guard
+             # (the #1349/#3332/#3616 silent-drop class, and the same false
+             # "the core fallback covers it" claim #3261 removed). Pinned by
+             # tests/test_ci_selection.py::test_seal_session_events_tool_change_selects_core_not_tier1.
+             "tools/seal_session_events.py",
              # #6138 review P1: the queue-conflict census owns
              # tests/test_queue_conflict_census.py, which is `core`-registered,
              # but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -1332,6 +1420,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_inbound_relay_sweep_tool_change_selects_core_not_tier1.
              "tools/inbound_relay_sweep.py",
+             # #10220: tools/worktree_report.py owns tests/test_worktree_report.py
+             # (registered `core`), and the same silent drop bit it: `tools/` is
+             # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches
+             # the tool, so a TOOL-ONLY change selected NO surface, took the
+             # docs-only early return and landed on tier-1 smoke, where that file
+             # is not registered. The very PR that can weaken the report's
+             # anti-fabrication rules (re-hash the log, re-derive the counts, drop a
+             # rule) would then be the one that never ran the cases pinning them.
+             # MEASURED before this entry: `select(["tools/worktree_report.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, n=64,
+             # test_worktree_report.py ABSENT; after -> surfaces=['core'], present.
+             # ⚠️ n is a SNAPSHOT taken at the head that measured it — re-measure, do
+             # not trust the count. Same #1349/#3332/#3616 class as the entries above.
+             # Pinned by
+             # tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1.
+             "tools/worktree_report.py",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -1621,14 +1725,27 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change
              # and ……::test_the_semantic_id_key_migration_selects_every_reader_of_the_contract.
              "supabase/migrations/20261027000001_record_semantic_id_key.sql",
-             # #10017 R2 — the cache-tier migration is a FORWARD RE-DECLARATION
-             # of `chk_point_props_no_derived`, which replaces the constraint at
-             # the SQL level while the parser UNIONS. So this is the one file
-             # that can silently SHRINK `point`'s refusal set with the parser
-             # still reporting every name refused. A migration-only diff must
-             # run `test_record_projection.py` / `test_cache_projection.py` /
-             # `test_10017_cache_tier.py`, and a `core` registration alone
-             # cannot do it (#1349/#3332/#3616).
+             # #10017 R2: the FORWARD migration that ADDS `public.point.cache_tier`
+             # (the `graph`/`record_only` tier the cache projection skips
+             # `record_only` rows by), RE-DECLARES `chk_point_props_no_derived`
+             # with the full refused set, and adds the partial
+             # `idx_point_graph_tier`. Same shape as its neighbours above: it
+             # sorts outside the `2026101200000` prefix while `supabase/` is a
+             # NON_PYTHON_PREFIX, so a diff touching only this file selected NO
+             # surface. Measured on the pre-fix head: `_sel([<this path>])` ->
+             # `surfaces: []`, `full: false`, and BOTH readers
+             # (`test_record_projection.py`, `test_record_schema_placement.py`)
+             # absent from `test_files` — so the column set, the placement table
+             # and the props refusal this file re-declares could all drift with
+             # no guard running on the edit. The #1349/#3332/#3616 silent-drop
+             # class. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             # ⚠️ It is ALSO the one file that can silently SHRINK `point`'s
+             # refusal set (the SQL DROP+ADD REPLACES while
+             # `refused_props_names()` UNIONS), so this entry must run
+             # `test_record_projection.py` / `test_cache_projection.py` /
+             # `test_10017_cache_tier.py`, not merely a `core` registration
+             # (#1349/#3332/#3616).
              "supabase/migrations/20261029000001_record_point_cache_tier.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
@@ -2098,6 +2215,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # whole matrix for a DB-free instrument. Pinned by
              # tests/test_ci_selection.py::test_backfill_graph_turns_tool_change_selects_core_not_tier1.
              "tools/backfill_graph_turns.py",
+             # #10017 review P1 (the THIRD time this class was measured on this
+             # chain): tools/backfill_copy_turns.py is the COPY phase — the write
+             # whose turns the parity gate then certifies before an IRREVERSIBLE
+             # delete — and it owns tests/test_10017_backfill_copy.py, registered
+             # `core`. Same mechanism as its two siblings above: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry matching no SOURCE_PATTERNS row, so a
+             # tool-only diff came back with `changed == []`, took the docs-only
+             # early return and selected NO surface. Measured before this entry:
+             # `--changed-files tools/backfill_copy_turns.py` -> surfaces=[],
+             # full=False, test_10017_backfill_copy.py ABSENT (tier-1 smoke only).
+             # That diff also loses the file's own repo guard — the #5128
+             # interpreter guard in tests/test_entry_point_python_guard.py, which
+             # DID red this tool at 4cdad4be7 — so the one diff that can break the
+             # copy ran nothing that pins it.
+             # `CORE_ALSO` (not `TOOL_CARVEOUTS`) for the same reason as the
+             # census: the suite is hermetic (a fake graph + a fake journal, no
+             # DB), so `core` is the surface that can actually run it. Pinned by
+             # tests/test_ci_selection.py::
+             # test_backfill_copy_turns_tool_change_selects_core_not_tier1.
+             "tools/backfill_copy_turns.py",
              # #9085 review P1: `tests/test_runner_ports_6673.py` (registered
              # `core`) carries the two #8124 guards that pin the ENGINE, and both
              # read a file the selector did not keep:
@@ -2204,7 +2341,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # on the very change that can break them (#6138-review-P1 class).
              # Kept here so `_selection_relevant` claims it in `_keep_changed`
              # and the core fallback stays alive.
-             "integrations/cli-extraction/extract_turns.py")
+             "integrations/cli-extraction/extract_turns.py",
+             # #5086 review P1-2: the substrate map's drift guard
+             # (`tests/test_substrate_map.py`, registered `core` + `tier1`) has TWO
+             # arms a filter can swallow, and this entry closes the tool half.
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry and nothing in
+             # SOURCE_PATTERNS matches the tool, so a `tools/substrate_map_check.py`
+             # -only diff came back `changed == []`, took the docs-only early
+             # return and fell to tier-1 smoke — the tool's own test would not run
+             # on the PR editing the tool. MEASURED before this entry
+             # (`select()` in-process): `select(["tools/substrate_map_check.py"])`
+             # → surfaces=[], full=False, and the pin ABSENT from test_files.
+             # After: surfaces=['core'], pin present. The DOC half
+             # (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`) is deliberately NOT
+             # claimed here: a docs-only diff must stay on the tier-1 path, which is
+             # why the file is dual-registered there — see the `tier1` row's comment
+             # and config/ci-surfaces.yml's `core`-home row.
+             # Pinned by tests/test_ci_selection.py::
+             # test_substrate_map_guard_runs_on_the_diffs_it_guards.
+             "tools/substrate_map_check.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -2661,12 +2816,13 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
 # 23m31 carve-out); select() now emits slow_run / slow_selected /
 # carve_out_run on every return path so the workflow can diff-gate them.
 def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
-    """Surface -> slow files that run in test-slow (slow minus carve-out).
+    """Surface -> slow files that run in test-slow (the GATING slow pool).
 
     The slow carve-out files (test_reaper et al.) run in the dedicated
     URI-unset carve-out job (epic #1647 E2E-4), never the docker slow legs
-    — the test-slow committed leg set is exactly slow_files - carve_out
-    (pinned by the workflow's drift-guard step, #1471).
+    — the test-slow leg set is exactly `slow_gating_files()`: slow_files minus
+    carve_out minus the non-gating lane (#10194) (pinned by the workflow's
+    drift-guard step, #1471).
 
     First-match semantics (#2159 review P2-2): classify_test_file returns
     the FIRST surface whose patterns match (dict order api, battery, core,
@@ -2674,10 +2830,8 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     under two surfaces therefore owns to the first — a tier-2 PR touching
     ONLY the second surface will not run it (full runs stay the backstop).
     test_diff_gate_keys_emitted_on_every_return_path pins every
-    slow_selected subset to slow_files - carve_out; the tier-2 intersection
+    slow_selected subset to slow_gating_files(); the tier-2 intersection
     tests pin the per-surface splits."""
-    slow = set(manifest.get("slow_files", []))
-    carve = set(manifest.get("carve_out", []))
     # #6884: the test-slow legs are URI-empty on a tier-2 PR too (python-ci.yml
     # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
     # and they build their collect-only input from `slow_selected`. A
@@ -2690,9 +2844,17 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     # tests/test_uri_requiring_selection.py). No file is in both lanes today;
     # the guard test pins that, and handles a future relocation rather than
     # forbidding it.
+    # #10194: the POOL is `slow_gating_files()` — the single definition that also
+    # drops the non-gating lane — so a lane file can never ride the tier-2 slow
+    # leg even when the surface the PR touched is the one that owns it. The
+    # `slow`/`carve` bindings that used to be here are GONE rather than chained
+    # (three expressions of the same pool is the drift this consolidates), which
+    # is why the two local assignments above them were deleted, not re-pointed:
+    # a leftover `slow` would be an unused binding that ruff rejects (F841) and
+    # a second, silently-wrong definition for the next reader to reuse.
     uri_requiring = uri_requiring_files(manifest)
     by_surface: dict[str, set[str]] = {}
-    for f in sorted(slow - carve - uri_requiring):
+    for f in sorted(slow_gating_files(manifest) - uri_requiring):
         by_surface.setdefault(classify_test_file(f, manifest), set()).add(f)
     return by_surface
 
@@ -2705,19 +2867,27 @@ def carve_out_by_surface(manifest: dict) -> dict[str, set[str]]:
     return by_surface
 
 
-def _full_selection(manifest: dict, slow: set[str]) -> dict:
+def _full_selection(manifest: dict) -> dict:
     """push/schedule/shared-module/unknown-path selection (tier 3).
 
     The trunk + nightly backstop: full matrix AND both diff-gated legs run
     (test-slow + test-carve-out) — main can never lose slow/carve-out
     coverage to a PR-shape gate."""
-    carve = set(manifest.get("carve_out", []))
+    # #10194: the full selection's slow leg is `slow_gating_files()` — the ONE
+    # definition of the gating slow pool (slow - carve-out - non-gating lane) —
+    # so "evals paused" is true on the push/trunk path too, not only on a PR.
+    # There is deliberately NO pool parameter: the caller's `slow` set is the
+    # pre-exclusion declaration, and threading it in here is how this function
+    # would grow a second, quietly-different pool (#10206 review).
+    gating_slow = slow_gating_files(manifest)
     return {"surfaces": list(manifest["surfaces"]), "full": True,
-            "test_files": "ALL", "slow_files": sorted(slow),
+            "test_files": "ALL", "slow_files": sorted(gating_slow),
             # #2147/#2148: full selection always runs both legs; slow_selected
-            # carries the whole committed leg set (slow - carve-out).
+            # carries the whole GATING leg set — `slow_gating_files()` (slow minus
+            # carve-out minus the non-gating lane), which is the same pool the
+            # `slow_files` key above emits.
             "slow_run": True, "carve_out_run": True,
-            "slow_selected": sorted(slow - carve)}
+            "slow_selected": sorted(gating_slow)}
 
 
 def select(changed_files: list[str], event: str, manifest: dict,
@@ -2763,6 +2933,16 @@ def select(changed_files: list[str], event: str, manifest: dict,
         # construction, whatever a previous call recorded.
         explain.clear()
     slow = set(manifest.get("slow_files", []))
+    # #10194: `slow_gating` is what every return path EMITS as `slow_files`, and
+    # it is the same pool the legs are built from (`slow_gating_files()`: slow
+    # minus carve-out minus the non-gating lane). Before #10194 the two were
+    # equal, so emitting the raw config list was harmless; now they differ, and
+    # emitting the raw list would hand the `changes` job a candidate pool whose
+    # lane members the legs then refuse — a matrix that disagrees with the
+    # selection, which is the #1266 drift class. `slow` is kept separately for
+    # the two places that mean "is this file DECLARED slow" (the tier-1
+    # subtraction and the full-vs-partial decision).
+    slow_gating = slow_gating_files(manifest)
     # #1371: slow files run ONLY in the test-slow job — never in the fast
     # gate's tier-1/tier-2 selections (they are already covered there).
     # Every return path carries slow_files so the workflow's changes job can
@@ -2770,7 +2950,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # #2147/#2148: every return path ALSO carries slow_run / slow_selected /
     # carve_out_run (the test-slow + test-carve-out diff-gate contract).
     if event in ("push", "schedule"):
-        return _full_selection(manifest, slow)
+        return _full_selection(manifest)
 
     tier1 = set(manifest.get("tier1", [])) - slow
     # Filter out non-python-relevant paths — but a path that a SOURCE_PATTERNS
@@ -2839,8 +3019,9 @@ def select(changed_files: list[str], event: str, manifest: dict,
         # docs-only vector could not fail: with tier1 ∩ uri_requiring == []
         # the output is byte-identical with and without the subtraction).
         return {"surfaces": [], "full": False,
-                "test_files": sorted(set(tier1) - uri_requiring_files(manifest)),
-                "slow_files": sorted(slow),
+                "test_files": sorted(set(tier1) - uri_requiring_files(manifest)
+                                     - on_demand_files(manifest)),
+                "slow_files": sorted(slow_gating),
                 "slow_run": False, "carve_out_run": False,
                 "slow_selected": []}
 
@@ -2924,7 +3105,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
                          if c.startswith(SHARED_MODULES)
                          or _is_linter_policy_path(c)}
                 explain["unknown_all_blast"] = set(unknown) <= blast
-        return _full_selection(manifest, slow)
+        return _full_selection(manifest)
 
     # No separate `SHARED_MODULES` / linter-policy returns here: both causes were
     # appended to `reasons` above, so the `if reasons:` return already answered
@@ -2977,6 +3158,13 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # Tier-2 ONLY: the `full` path returned above and keeps these files, because
     # a full leg HAS the URI.
     files -= uri_requiring_files(manifest)
+    # #10194: and the NON-GATING LANE, on the tier-2 path too. The five eval
+    # files in `slow_files` and the 37 in the fast pool are all still REGISTERED
+    # in a surface, so without this subtraction a PR that touches the `eval`
+    # surface re-selects all of them and they gate again — the exclusion would
+    # hold on `push` and silently fail on every PR, which is the direction that
+    # reads green. (`slow_selected` is covered by `slow_gating_files()`.)
+    files -= on_demand_files(manifest)
     # #2147/#2148 tier-2: test-slow runs the slow files owned by the matched
     # surfaces (slow_selected — carve-out files excluded: they run in the
     # carve-out job when it triggers, never the docker slow legs); test-carve-
@@ -2992,7 +3180,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
         if s in carve_by_surface:
             carve_out_run = True
     return {"surfaces": surfaces, "full": False, "test_files": sorted(files),
-            "slow_files": sorted(slow),
+            "slow_files": sorted(slow_gating),
             "slow_run": bool(slow_selected), "carve_out_run": carve_out_run,
             "slow_selected": sorted(slow_selected)}
 
@@ -3182,6 +3370,47 @@ def carve_out_files(manifest: dict) -> set[str]:
     return set(manifest.get("carve_out", []))
 
 
+# #10194: the SUBTREE form of an `on_demand:` entry — `dir/**`. The lane was
+# built for one FILE at a time, and a subtree of 42 eval files registered that
+# way is 42 lines a lane has to keep re-adding (a new eval test file would
+# silently re-enter the gate, which is the failure the owner decision exists to
+# stop). An entry ending in `/**` means "every test file under this directory",
+# expanded against DISK by `on_demand_subtree_files()`.
+ON_DEMAND_SUBTREE_SUFFIX = "/**"
+
+
+def on_demand_subtree_prefixes(manifest: dict) -> tuple[str, ...]:
+    """The lane's SUBTREE entries (`dir/**`), as `dir/` prefixes, in order."""
+    prefixes = []
+    for entry in manifest.get("on_demand") or []:
+        if isinstance(entry, str) and entry.endswith(ON_DEMAND_SUBTREE_SUFFIX):
+            prefixes.append(entry[:-len(ON_DEMAND_SUBTREE_SUFFIX)] + "/")
+    return tuple(prefixes)
+
+
+def on_demand_subtree_files(manifest: dict) -> set[str]:
+    """Every `test_*.py` under a subtree lane entry, tests/-relative (#10194).
+
+    Disk-derived on purpose: the lane's meaning is "this SUBTREE does not gate",
+    so a file added to `tests/eval/` tomorrow is off the gate without a config
+    edit — the opposite of the literal form, where the new file silently
+    re-enters the gating shards until someone notices. The expansion happens
+    inside `on_demand_files()`, so every consumer (the leg producers, the
+    coverage guards, the runners) sees ONE set.
+
+    A prefix with no directory yields nothing rather than raising: the dead-entry
+    report in `leg_coverage_issues()` is what NAMES it.
+    """
+    found: set[str] = set()
+    for prefix in on_demand_subtree_prefixes(manifest):
+        base = TESTS_DIR / prefix
+        if not base.is_dir():
+            continue
+        found.update(str(p.relative_to(TESTS_DIR))
+                     for p in sorted(base.rglob("test_*.py")))
+    return found
+
+
 def on_demand_files(manifest: dict) -> set[str]:
     """Files excluded from every PRE-MERGE leg — a lane with two runners.
 
@@ -3201,7 +3430,64 @@ def on_demand_files(manifest: dict) -> set[str]:
     # `or []` is the fix; a test pins the None form specifically, because the
     # obvious `on_demand=[]` spelling in a test is a Python list and never
     # reproduces the state a human actually types into the YAML.
-    return set(manifest.get("on_demand") or [])
+    #
+    # #10194: a `dir/**` entry is expanded to the test files UNDER it, so the
+    # accessor keeps answering the question every consumer asks — "is this FILE
+    # in the lane?" — and no caller needs a second, pattern-aware membership
+    # test. A caller that compared raw entries would silently see `eval/**` as a
+    # filename that matches nothing.
+    entries = manifest.get("on_demand") or []
+    literals = {e for e in entries
+                if not (isinstance(e, str)
+                        and e.endswith(ON_DEMAND_SUBTREE_SUFFIX))}
+    return literals | on_demand_subtree_files(manifest)
+
+
+def on_demand_literal_runner_files(manifest: dict) -> set[str]:
+    """Lane files the EMBEDDED-shape runner owns (`evals-on-demand.yml`).
+
+    #10194 moved the two eval subtrees to their own docker-shaped runner
+    (`.github/workflows/eval-suite-manual.yml`), so the lane now has two runners
+    with different environments. What is left for the embedded one is the lane's
+    LITERAL entries — and a literal that merely happens to live INSIDE a subtree
+    stays here, because its own `on_demand` entry is what keeps this runner its
+    runner.
+
+    ⛔ Subtracting the subtree wholesale (`on_demand_files() -
+    on_demand_subtree_files()`) silently dropped `eval/retrieval/
+    test_integration.py` — the file `evals-on-demand.yml` was created for
+    (#4711) — and left the lane resolving to `test_perf_lane_volunteer_context.py`
+    alone, a file `perf-lane.yml` already runs. The workflow, the config comment
+    and `docs/ci/affected-test-selection.md` all still said the #4711 file ran
+    here, so nothing reddened: the resolver is in a `run:` heredoc, where no test
+    can see it. That is why the expression lives HERE, where it can be pinned
+    (#10206 review).
+    """
+    literals = {e for e in (manifest.get("on_demand") or [])
+                if isinstance(e, str)
+                and not e.endswith(ON_DEMAND_SUBTREE_SUFFIX)}
+    return (on_demand_files(manifest)
+            - on_demand_subtree_files(manifest)) | literals
+
+
+def slow_gating_files(manifest: dict) -> set[str]:
+    """The slow files a GATING leg may run: `slow_files - carve_out - lane`.
+
+    #10194: this is the ONE definition of the slow pool's gating membership.
+    Before it, three producers each computed it themselves — `push_legs()`
+    (`slow - carve_out`), `slow_leg_by_surface()` (`slow - carve - uri`), and
+    `_full_selection()` (`slow - carve`) — so a new exclusion had to be added in
+    three places or it was half-adopted (the failure `on_demand_files()`'s own
+    docstring names). They all read this now.
+
+    Subtracting the non-gating lane here is what lets the lane OVERLAP
+    `slow_files`: the config keeps the declaration (the file still needs a
+    `durations` weight and a classification), and the LEG drops it — exactly the
+    way slow carve-out files are handled.
+    """
+    return (set(manifest.get("slow_files") or [])
+            - carve_out_files(manifest)
+            - on_demand_files(manifest))
 
 
 def uri_requiring_files(manifest: dict) -> set[str]:
@@ -3389,11 +3675,12 @@ def slow_leg_files(manifest: dict) -> list[str]:
     filtered per leg. Sorted for determinism: the LPT pack's tie-break reads
     the input order.
     """
-    slow = {f[:-3] if f.endswith(".py") else f
-            for f in manifest.get("slow_files", [])}
-    carve = {f[:-3] if f.endswith(".py") else f
-             for f in carve_out_files(manifest)}
-    return sorted(slow - carve)
+    # #10194: read through `slow_gating_files()`, the single definition of the
+    # gating slow pool, so the in-workflow drift guard that compares the expanded
+    # legs against THIS function cannot disagree with the producer that built
+    # them. (Bare names: the workflow's matrix format.)
+    return sorted(f[:-3] if f.endswith(".py") else f
+                  for f in slow_gating_files(manifest))
 
 
 def slow_shard_entries(manifest: dict) -> list[dict]:
@@ -3667,7 +3954,10 @@ def push_legs(manifest: dict) -> dict:
     (#6145) — the per-leg budget is a property of the SHARD, not a workflow
     literal.
     """
-    slow = set(manifest.get("slow_files", []))
+    # #10194: `slow` is the GATING pool — `slow_gating_files()` already removed
+    # carve-out and the non-gating lane, so the subtraction below is idempotent
+    # and kept only because the emitted `slow` key's shape is pinned.
+    slow = slow_gating_files(manifest)
     carve_out = carve_out_files(manifest)
     on_demand = on_demand_files(manifest)
     fast = fast_pool(manifest)
@@ -3770,7 +4060,173 @@ def build_shard_entries(files: list[str], durations: dict,
     return entries
 
 
-def fast_matrix_include(shards: list[dict]) -> dict:
+def non_gating_report(manifest: dict) -> str:
+    """#10194: the OBSERVABILITY line for the gating run.
+
+    A membership change is invisible in a CI log unless the log says what left:
+    "the evals are not running" and "the evals are excluded on purpose" look
+    identical from a green run. This prints, on every run, which lane entries are
+    non-gating, how many files each one resolves to, and the shard → file-count
+    map the run is about to expand — so a reader can SEE that the 42 files are
+    absent from all 9 shards rather than infer it from a total.
+    """
+    lane = on_demand_files(manifest)
+    prefixes = on_demand_subtree_prefixes(manifest)
+    lines = [f"non-gating lane: {len(lane)} file(s) excluded from every gating leg"]
+    literals = sorted(e for e in manifest.get("on_demand") or []
+                      if not (isinstance(e, str)
+                              and e.endswith(ON_DEMAND_SUBTREE_SUFFIX)))
+    # Attribute every file to exactly ONE entry, so the itemization RECONCILES
+    # with the total. A literal that also sits inside a subtree (`eval/
+    # retrieval/test_integration.py` inside `eval/**`) was listed twice and the
+    # lines summed to 44 against a 43-file total — in the one feature whose
+    # whole purpose is an auditable count (#10206 review).
+    accounted = 0
+    for entry in literals:
+        inside = next((p for p in prefixes if entry.startswith(p)), None)
+        if inside:
+            lines.append(f"  {entry} -> covered by {inside}** below")
+        else:
+            lines.append(f"  {entry} -> 1 file")
+            accounted += 1
+    for prefix in prefixes:
+        n = sum(1 for f in lane if f.startswith(prefix))
+        lines.append(f"  {prefix}** -> {n} file(s)")
+        accounted += n
+    if accounted != len(lane):
+        lines.append(f"  ⚠️ itemization does not reconcile: {accounted} of "
+                     f"{len(lane)} file(s) attributed — an `on_demand` entry "
+                     f"resolved to files no line above claims")
+    legs = push_legs(manifest)
+    lines.append(f"gating fast shards: {len(legs['shards'])} "
+                 f"(file counts below EXCLUDE the lane above)")
+    for shard in legs["shards"]:
+        lines.append(f"  test ({shard['name']}): {len(shard['files'])} files, "
+                     f"est {shard['est_seconds']:.0f}s, "
+                     f"watchdog {shard['watchdog_minutes']:.0f}m")
+    lines.append(f"gating slow legs: {len(legs['slow_shards'])} "
+                 f"({len(legs['slow'])} file(s))")
+    lines.append(f"gating carve-out legs: {len(legs['carve_shards'])} "
+                 f"({len(legs['carve_out'])} file(s))")
+    total = sum(len(s["files"]) for s in legs["shards"])
+    lines.append(f"gating fast-pool total: {total} file(s); "
+                 f"non-gating total: {len(lane)} file(s)")
+    return "\n".join(lines)
+
+
+# #6897 (owner ruling 2026-10-27: use the compute capacity wherever it is,
+# prioritise THROUGHPUT over runner class): the two runner classes the fast
+# matrix can split across, as the LABEL ARRAYS `runs-on` wants. Emitted as a
+# JSON ARRAY STRING because a matrix value is always a string, and `runs-on`
+# needs an array — the workflow `fromJSON`s it back (`python-ci.yml`, `test:`).
+#
+# x64 CELLS ONLY for the pool half, never the ARM64 VMs: measured per-test cost
+# on the SAME nodeids splits by class — arm64 legs are 4.46x hosted, x64 cells
+# cheaper than that (654 common testcases, run 40238275534 vs hosted
+# 40249711042; the figures live in the `test` job's "WHICH RUNNER CLASS CARRIES
+# THIS LEG" header). Routing a fast shard onto ARM64 would buy queue time and
+# pay it back in test time — and naming `self-hosted-x64` EXPLICITLY, rather
+# than inheriting a generic label, is what makes that guarantee hold.
+#
+# ⛔ THE SPLIT IS **OFF BY DEFAULT**, AND THAT IS A RECORDED DECISION, NOT A
+# PREFERENCE. `docs/ops/ci-runner-x64.md` -> "Contradiction test" and
+# `scripts/ci_runner_gate.sh:1-30` record the local pool as **fallback-only**:
+# jobs landing on local hardware compete with the agent fleet and the Tortoise
+# graph (a local pytest run crashed FalkorDB, 178 restarts, 2026-10-12). An
+# earlier cut of this lane made the pool a PRIMARY class for 4 of 9 gated shards
+# BY DEFAULT, which is an adoption over that decision — not a lane's to take.
+# #6897's "use the capacity wherever it is" is therefore served by making the
+# split AVAILABLE (an explicit opt-in), never by making it the default; the
+# route to change the default is to reopen `fallback-only` in its own home
+# (#6897) with the measurement below attached.
+#
+# THE MEASUREMENT THAT KEEPS IT OFF (PR #10186 review, 2026-10-30, and this
+# branch's own head): on run 40981781885 (main, plain `ubuntu-latest`) the pool
+# won 5 of 9 legs by the fallback race and **5 of 5 died at their watchdog**
+# while 4 of 4 hosted legs passed in 10-12 m of a 20 m budget — x64 cells
+# measured ~2.7x hosted at job level, not the 1.16x an older run suggested. On
+# head 5a2ae6aa1 (run 40986603502) 3 of 4 pool legs failed, and two of those
+# were not budget kills at all: `redis.exceptions.ConnectionError: Error 111
+# ... localhost:6379` — the pool host was not serving the FalkorDB every docker
+# -lane shard needs. A class that cannot complete the work is not capacity, so
+# the default stays exactly where main is.
+#
+# ⛔ The hosted half is `ubuntu-latest` — MAIN'S CURRENT LABEL, and deliberately
+# NOT described here as "GitHub-hosted". On this repo that label is not
+# hosted-only: `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the
+# self-hosted pool as a FALLBACK, and #6897 measured it attached WHILE
+# GitHub-hosted was healthy (the gate logged `set_labels ok=16 fail=0`, a false
+# PASS), so a `ubuntu-latest` job can land on the ARM64 class — that is the
+# mechanism behind the 39.6m `test-slow (a)` kill on run 39309984832. It reads as
+# hosted today (probe 40548658598: no runner carries the label, and the
+# `ubuntu-latest` probe job queued 3m50s and was then CANCELLED without ever
+# being assigned a runner — it never landed on the pool), which is why "today"
+# is a measurement, not a guarantee. `ubuntu-24.04` is the hosted-ONLY label
+# (`test-slow`, `workflow-lint`, finding-provenance pin it for that reason);
+# moving this half to it is a SEPARATE decision, not taken here, because it would
+# also drop the outage fallback and break comparability with the canary streak's
+# history.
+SHARD_RUNNER_HOSTED = ["ubuntu-latest"]
+SHARD_RUNNER_X64 = ["self-hosted", "self-hosted-x64"]
+
+# THE OPERATOR LEVER, and the mode is resolved in ONE place (Python, not a
+# workflow expression) so it is testable. Anything that is not the explicit
+# opt-in resolves to hosted-only: an unset variable, a typo, an emptied value,
+# or a fork where `vars` are unavailable all land on MAIN'S behaviour instead of
+# routing a required check onto a contended class. Fail-safe, never fail-open —
+# an operator should never discover the split because a leg died.
+SHARD_ROUTING_ENV = "CI_SHARD_ROUTING"
+SHARD_ROUTING_HOSTED_ONLY = "hosted-only"
+SHARD_ROUTING_POOL_SPLIT = "pool-split"
+
+
+def resolve_shard_routing(value: str | None) -> str:
+    """#6897: map a `CI_SHARD_ROUTING` value to a routing mode.
+
+    `pool-split` is the ONLY value that enables the split (exact match, case and
+    surrounding space ignored — a hand-typed Settings value should not need to
+    be byte-exact). Everything else, INCLUDING the documented `hosted-only`, is
+    hosted-only: that value is the explicit safe setting, and being the default
+    must not make it illegal.
+    """
+    if (value or "").strip().lower() == SHARD_ROUTING_POOL_SPLIT:
+        return SHARD_ROUTING_POOL_SPLIT
+    return SHARD_ROUTING_HOSTED_ONLY
+
+
+def fast_shard_runner(index: int, count: int) -> list[str]:
+    """#6897: which runner class carries shard `index` of `count` IN POOL-SPLIT MODE.
+
+    ⛔ This is the OPT-IN rule only: under the default (`hosted-only`)
+    `fast_matrix_include()` never calls it, and every row keeps
+    `SHARD_RUNNER_HOSTED` — main's label, main's behaviour.
+
+    Two rules, in this order:
+
+    1. The LAST shard is ALWAYS the HOSTED LABEL — it is the `canary_producer`,
+       whose artifacts feed the canary streak, and that streak is compared
+       across runs. Keeping the producer on the same label it has always used
+       keeps the comparison a comparison of TESTS. (That label's resolving class
+       is main's ambiguity, carried over unchanged — see the constants above; it
+       is not a promise this function can make.)
+    2. Everything else ALTERNATES by position (even -> the hosted label, odd ->
+       the x64 pool) so the work splits across BOTH runner classes and the
+       matrix actually adds throughput instead of queueing every leg on one.
+
+    At `count == 2` rule 2 has no row to give (index 0 is even, index 1 is the
+    pinned last one), so the split degrades to all-hosted-label — main's
+    pre-#6897 behaviour, never a half-applied one. Any S >= 3 uses both classes.
+
+    Positional, never content-based: the same property #6135 uses for the
+    labels, so the routing does not have to be re-derived when the pack moves a
+    file between shards.
+    """
+    if index == count - 1:
+        return list(SHARD_RUNNER_HOSTED)
+    return list(SHARD_RUNNER_HOSTED if index % 2 == 0 else SHARD_RUNNER_X64)
+
+
+def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
     """#6135: the GitHub Actions matrix the `test` job expands.
 
     Emitted COMPLETE (the workflow does no shell composition), because the
@@ -3778,7 +4234,17 @@ def fast_matrix_include(shards: list[dict]) -> dict:
     marks the ONE shard whose artifacts feed the canary streak: the last shard,
     chosen positionally so the marker never has to name a half (`half == 'b'`
     stopped existing the moment S rose — the exact coupling #6135 removes).
+
+    #6897: `runner` carries the label array (as a JSON string) for `runs-on` —
+    the workflow's ONLY consumer of it, so the routing is decided HERE and not
+    in a shell expression. `routing` is the mode: `pool-split` opts into the
+    positional split via `fast_shard_runner()`, anything else (the default,
+    including `routing=None`, which reads `CI_SHARD_ROUTING` from the
+    environment) gives EVERY row `SHARD_RUNNER_HOSTED` — main's label, main's
+    behaviour. See the block above the constants for why the default is off.
     """
+    mode = resolve_shard_routing(
+        os.environ.get(SHARD_ROUTING_ENV) if routing is None else routing)
     include = []
     for i, s in enumerate(shards):
         # #6145: carry the headroom alongside the budget so the margin a leg was
@@ -3795,6 +4261,9 @@ def fast_matrix_include(shards: list[dict]) -> dict:
             "watchdog_minutes": s["watchdog_minutes"],
             "watchdog_headroom": round(float(headroom), 2),
             "canary_producer": i == len(shards) - 1,
+            "runner": json.dumps(
+                fast_shard_runner(i, len(shards))
+                if mode == SHARD_ROUTING_POOL_SPLIT else SHARD_RUNNER_HOSTED),
         })
     return {"include": include}
 
@@ -3836,7 +4305,8 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
         issues.append(f"slow shard pack runs a file twice: {dupes}")
     if set(covered) != slow_leg:
         issues.append(
-            f"slow shards do not cover slow_files - carve_out exactly: "
+            f"slow shards do not cover slow_gating_files() "
+            f"(slow_files - carve_out - the non-gating lane, #10194) exactly: "
             f"missing={sorted(slow_leg - set(covered))} "
             f"extra={sorted(set(covered) - slow_leg)}")
     if carve_out & ENV_BROKEN_FILES:
@@ -3850,8 +4320,17 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
     # the lane is not a portability regression.
     if "on_demand" in manifest and not on_demand:
         issues.append("on_demand lane is present but EMPTY — it excludes nothing")
-    if on_demand & slow:
-        issues.append(f"on-demand/slow overlap (still on the merge path): {sorted(on_demand & slow)}")
+    # #10194: the lane may now legitimately OVERLAP the config's `slow_files`
+    # (five eval files are declared slow AND in the lane), the same way slow
+    # carve-out files do — `slow_files` keeps the declaration and the LEG drops
+    # the file. So the invariant is about the LEG: a lane file that reaches a
+    # gating slow leg is still on the merge path, and `slow_gating_files()` is
+    # the single place that subtracts it. Reading this as a config-set overlap
+    # would red a correct manifest and invite deleting the lane entry.
+    gating_slow = set(slow_gating_files(manifest))
+    if on_demand & gating_slow:
+        issues.append("on-demand file leaked into a gating slow leg: "
+                      f"{sorted(on_demand & gating_slow)}")
     # REACHABLE but DORMANT with the current config: `fast_pool()` filters the
     # lane out, and `push_extra` is EMPTY today, so this branch does not fire on
     # the real manifest. It fires when a `push_extra` entry names a lane file —
@@ -3888,6 +4367,17 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
     for f in sorted(on_demand):
         if not (TESTS_DIR / f).exists():
             issues.append(f"on-demand {f} has no tests/{f} (dead entry)")
+    # #10194: a SUBTREE entry gets the same dead-entry treatment, in the form
+    # that can actually be wrong for it — the directory is gone, or it is there
+    # and holds no test file, in which case the exclusion reads as a saving while
+    # excluding nothing (the same false assurance the literal case guards).
+    for prefix in on_demand_subtree_prefixes(manifest):
+        if not (TESTS_DIR / prefix).is_dir():
+            issues.append(f"on-demand subtree {prefix}** has no tests/{prefix} "
+                          "directory (dead entry)")
+        elif not any(f.startswith(prefix) for f in on_demand):
+            issues.append(f"on-demand subtree {prefix}** holds no test files "
+                          "(dead entry — it excludes nothing)")
     for f in manifest.get("push_extra", []):
         if f in classified:
             issues.append(f"push_extra {f} is a classified top-level file (move it into a surface)")
@@ -4120,14 +4610,22 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
         tier-2 path does not subtract ENV_BROKEN_FILES, so a PR touching a
         kept file can still place a member of the set in a tier-2 fast shard.
         That is a separate question and is NOT changed here.
-      * `fast_pool()` also omits `on_demand`, which this function does not
-        subtract. That is LATENT rather than live only because no on_demand
-        file is currently a member of any surface, and the universe this check
-        walks is the surfaces — so such a file cannot reach it today. Add one
-        to a surface and it becomes this same false positive.
+      * `fast_pool()` also omits `on_demand`. That WAS unsubtracted here, and
+        LATENT rather than live only while no on_demand file was a member of any
+        surface; #10194 made the lane hold 42 surface-registered files, so it is
+        subtracted above (see the #10194 note).
 
     The durable rule: this subtraction must stay in sync with `fast_pool`'s own
     filter, since the two are complements of the same pool.
+
+    #10194: `on_demand` is now subtracted HERE too. The paragraph above called
+    that case LATENT "only because no on_demand file is currently a member of
+    any surface" — and #10194 ends exactly that premise: the 42 eval files stay
+    registered in their surfaces (that registration is what classifies them) and
+    are excluded from the gate by the LANE, so without this subtraction
+    `--integrity` prints a permanent 36-file "coverage hole" that is not one.
+    The stale-warning cost the paragraph describes is the reason it is fixed with
+    the change rather than after a confused reader reports it.
 
     The cost of leaving it in was not cosmetic: `--integrity` printed
     `1 manifest fast files are in NO shard (full-matrix coverage hole, #1266)`
@@ -4145,6 +4643,7 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
     fast -= slow
     fast -= carve_out
     fast -= ENV_BROKEN_FILES
+    fast -= on_demand_files(manifest)
     halfset = {f for fs in halves.values() for f in fs}
     return sorted(f for f in fast if f[:-3] not in halfset)
 
@@ -5363,10 +5862,21 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
     ap.add_argument("--emit-push-matrix", action="store_true",
                     help="#1472/#6135: print the derived push fast_matrix + shards "
-                         "(and the derived slow_matrix, #9539)")
+                         "(and the derived slow_matrix, #9539). #6897: the fast "
+                         f"rows' `runner` follows ${SHARD_ROUTING_ENV} — "
+                         f"`{SHARD_ROUTING_POOL_SPLIT}` splits across the x64 "
+                         "pool, anything else (the default) is hosted-only")
     ap.add_argument("--split", action="store_true",
                     help="#1473/#6135: LPT-pack the stdin JSON test-file list "
                          "into the configured number of shards")
+    ap.add_argument("--non-gating-report", action="store_true",
+                    help="#10194: print the non-gating lane and the gating "
+                         "shard → file-count map (observability, exit 0)")
+    ap.add_argument("--non-gating-subtree-files", action="store_true",
+                    help="#10194: print the SUBTREE entries' files as "
+                         "pytest-pathable `tests/…` entries, one per line — the "
+                         "resolver the manual eval workflow feeds straight to "
+                         "pytest")
     args = ap.parse_args()
 
     manifest = load_manifest()
@@ -5449,6 +5959,33 @@ def main() -> int:
             print("   review: config/ci-surfaces.yml — move a file to another surface if the default is wrong.")
         else:
             print("✅ manifest already covers all test files")
+        return 0
+
+    if args.non_gating_report:
+        print(non_gating_report(manifest))
+        return 0
+
+    if args.non_gating_subtree_files:
+        # #10194: the SUBTREE entries only — the literal entries have their own
+        # runners (evals-on-demand / perf-lane) and their own environments, so a
+        # workflow that ran the whole lane would run files it does not own, in a
+        # shape it was not built for (the embedded redislite lane vs the docker
+        # one). Printed empty rather than failing here: the caller fails closed
+        # on an empty list, which is the state that must never read as a green
+        # "ran nothing" (same rule as evals-on-demand's step).
+        #
+        # ⛔ The output is `tests/<relative>`, NOT `on_demand_subtree_files()`'s
+        # raw tests/-relative form. The caller feeds these straight to pytest
+        # from the repo root, where a bare `eval/ask/test_ask_corpus.py` does not
+        # exist — pytest exits 4 with "file or directory not found" and the lane
+        # runs ZERO files while its own guard reports green. Verified live: the
+        # first cut of this verb printed the bare form and every dispatch of
+        # `eval-suite-manual.yml` would have reddened on path validation.
+        # `run_affected.sh` prints the same pytest-pathable shape for the same
+        # reason; the accessor stays tests/-relative because every other
+        # consumer (the leg producers, the guards) indexes the manifest that way.
+        for f in sorted(on_demand_subtree_files(manifest)):
+            print(f if f.startswith("tests/") else f"tests/{f}")
         return 0
 
     if args.emit_push_matrix:

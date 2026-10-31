@@ -145,6 +145,123 @@ class TestEnforceTeamLimit:
         with pytest.raises(QuotaCheckError):
             enforce_org_limit({"org_id": "t", "max_points": 10}, "widgets")
 
+    def test_missing_limit_key_fails_closed(self, caplog):
+        """#310 GAP-B: a MISSING limit key is fail-closed; present-None is not.
+
+        THE HOLE THIS CLOSES (measured by the #9567 capstone): the suite had no
+        test of the missing-key branch, so mutating its
+        ``raise QuotaCheckError(...)`` to ``return`` left this file GREEN — a
+        fail-OPEN regression of the exact guard the branch exists to be. The
+        two-line pair below is what makes that mutation red: same dict, one key
+        REMOVED (refused) versus PRESENT-and-None (unlimited, allowed).
+
+        Nothing is counted: the branch fires before the count, so no sdk.
+        """
+        import logging
+        with pytest.raises(QuotaCheckError, match="missing max_points"):
+            enforce_org_limit({"org_id": "team1"}, "points")
+        enforce_org_limit({"org_id": "team1", "max_points": None}, "points")
+        # ALERTING (#4051 review round 5): this refusal is a DATA FAULT that
+        # refuses every write, and it raised silently — `_check_org_limit`
+        # documents that a refusal is logged with org_id and resource, and then
+        # demoted the whole class to DEBUG, so the fault was ops-invisible. The
+        # pin names the FIELD, not the shared prefix, so a mutant that logs a
+        # different key stays green only if it really logs this one. Mutation
+        # REDs it: drop the `_logger.error` at the missing-key raise site.
+        errors = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.ERROR]
+        assert any("quota limit missing (fail-closed)" in m
+                   and "resource=points" in m and "max_points" in m
+                   for m in errors), errors
+
+    def test_unreadable_limit_fails_closed(self, caplog):
+        """#4051: a limit that cannot be READ is refused, never "unlimited".
+
+        The limit is read from the org's OWN source (here `max_points`), so a
+        corrupt value must not degrade into no limit at all. WHICH lanes arrive
+        raw, and which die earlier, is stated ONCE — in `quota.enforce_org_limit`'s
+        SCOPE note — and deliberately NOT restated here: this docstring used to
+        carry a second copy, and it contradicted both that note and itself (it
+        named a lane as never reaching this gate and then, one clause later, as
+        the lane that reaches it raw). A copy is how the two drifted apart.
+
+        Mutation REDs this: drop the validation and let the non-numeric value
+        reach the comparison — pre-change it raised a bare `TypeError`, refused
+        by accident, naming nothing, and escaping the documented
+        `QuotaCheckError` contract every caller handles.
+        """
+        with pytest.raises(QuotaCheckError) as exc_info:
+            enforce_org_limit({"org_id": "t", "max_points": "unreadable"},
+                             "points")
+        assert "max_points" in str(exc_info.value), (
+            f"the refusal must name the unreadable surface: {exc_info.value}")
+        assert "unreadable" in str(exc_info.value)
+        # A float-FORMATTED string is the SAME refusal, not a silent truncation:
+        # `int("1000.0")` raises ValueError, so it never reaches the
+        # comparison. Pinned because the docstring states the three shapes
+        # explicitly, and a later "helpful" widening to `int(float(x))` would
+        # honour it instead — turning a stored "1000.0" from a named refusal
+        # into a cap of 1000 (review round 6 on #4051).
+        with pytest.raises(QuotaCheckError) as dotted_exc:
+            enforce_org_limit({"org_id": "t", "max_points": "1000.0"},
+                               "points")
+        assert "max_points" in str(dotted_exc.value), dotted_exc.value
+        # A NON-FINITE value is the same class: `int(float('inf'))` raises
+        # OverflowError, which must become this refusal rather than an unmapped
+        # 500 that names nothing (review round 1 on #4051). Mutation REDs it:
+        # narrow the except clause back to (TypeError, ValueError).
+        with pytest.raises(QuotaCheckError) as inf_exc:
+            enforce_org_limit({"org_id": "t", "max_points": float("inf")},
+                              "points")
+        assert "max_points" in str(inf_exc.value)
+        # The field named must be the field READ — not a hardcoded
+        # `max_points` (review round 2 on #4051: with only `points` cases, a
+        # mutant that hardcodes the key stayed GREEN, so a corrupt `max_users`
+        # would be reported as `max_points`). Mutation REDs this: replace
+        # `{limit_key}` with the literal `max_points` in the raise above.
+        with pytest.raises(QuotaCheckError) as users_exc:
+            enforce_org_limit({"org_id": "t", "max_users": "unreadable"},
+                              "users")
+        users_msg = str(users_exc.value)
+        assert "max_users" in users_msg, users_msg
+        assert "max_points" not in users_msg, users_msg
+        # The `documents` branch DERIVES its cap from the same field, so it must
+        # refuse a non-finite value the same way (it used to escape as a bare
+        # `OverflowError` — the parity the code comment now claims).
+        with pytest.raises(QuotaCheckError):
+            enforce_org_limit({"org_id": "t", "max_points": float("inf")},
+                              "documents")
+        # ALERTING is part of the fail-closed contract (#686): this refusal is
+        # raised BEFORE the count, so it cannot rely on `_count_resource`'s
+        # ERROR log — and the pre-change crash did reach `logger.exception` +
+        # Sentry, so a silent refusal here would downgrade a money-gate data
+        # fault to an ops-invisible 500 (review round 4 on #4051).
+        # ⛔ PIN THE FIELD, NOT THE SHARED PREFIX: this list also contains the
+        # `documents` branch's log from the call above, so a prefix-only match
+        # is satisfied by the WRONG raise site — verified by mutation, deleting
+        # the GENERIC `_logger.error` left a prefix-only assertion GREEN (review
+        # round 3 on #4051). Naming `resource=points` makes each site pin its
+        # own record. Mutation REDs it: drop the `_logger.error` at the generic
+        # raise site.
+        import logging
+        errors = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.ERROR]
+        assert any("quota limit unreadable (fail-closed)" in m
+                   and "resource=points" in m for m in errors), errors
+        # The `documents` branch is a SEPARATE raise site and logs separately —
+        # pin it on its own, by clearing first. Without this, the generic-path
+        # log above satisfies any later assertion and a silent documents
+        # branch would stay green (review round 3 on #4051: `_check_org_limit`
+        # documents the documents surface as logged, and it was not).
+        caplog.clear()
+        with pytest.raises(QuotaCheckError):
+            enforce_org_limit({"org_id": "t", "max_points": float("inf")},
+                              "documents")
+        docs_errors = [r.getMessage() for r in caplog.records
+                       if r.levelno >= logging.ERROR]
+        assert any("quota limit unreadable (fail-closed)" in m
+                   and "documents" in m for m in docs_errors), docs_errors
+
 
 # ── #683: users + graphs enforcement ──────────────────────────────────────
 

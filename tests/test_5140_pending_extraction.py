@@ -587,46 +587,21 @@ def test_upgrade_all_not_a_document_bucket_is_stable_across_runs(monkeypatch):
 #
 # Review round 3 measured both of these and refused to accept a green suite as
 # proof of coverage. They are boundaries of the FIX, not of the bug: reaching
-# them is a migration (#5140 finding 8) and a product decision respectively.
-# Pinning them here means the next lane that changes either has to change a
-# test whose docstring says why, instead of discovering the gap from a corpus
-# that silently never got upgraded.
-
-@_live_db
-def test_sweep_cannot_reach_unmigrated_document_labelled_nodes():
-    """The historical backlog lives on ``:Document {id}`` — a label BOTH readers
-    exclude, because D10 shipped no relabel and ``migrate_kinds`` only SETs kind
-    properties (it cannot relocate a node between labels).
-
-    So a pre-D10 capture with ``doc_status='captured'`` on its ``:Document`` node
-    is NOT selected — not by the default sweep, not with ``--include-unstamped``.
-    Closing that is the relabel migration #5140 finding 8 asks for; this test
-    exists so nobody reads the ``doc_status`` arm as having covered it.
-    """
-    from tortoise.ingest import _discover_pending_documents
-
-    if not _require_live_falkor():
-        return
-    uri = _live_uri(f"test_5140_legacylab_{os.urandom(4).hex()}")
-    _reset(uri)
-    proj = FalkorProjection.from_uri(uri)
-    try:
-        # The EXACT pre-D10 shape: `:Document`, keyed `id`, marker present.
-        proj.g.query(
-            "CREATE (d:Document {id:'doc/pre-d10.md', title:'Pre D10', "
-            "documentKind:'research', doc_status:'captured', "
-            "needs_extraction:false, sourcePath:'/corpus/pre-d10.md'})"
-        )
-        assert _discover_pending_documents(proj) == [], (
-            "an un-migrated :Document node is not reachable by the sweep — if "
-            "this now selects one, the relabel migration (#5140 finding 8) "
-            "landed and this boundary test should be updated")
-        assert _discover_pending_documents(proj, include_unstamped=True) == [], (
-            "--include-unstamped must not reach :Document-labelled nodes either")
-    finally:
-        proj.close()
-
-
+# them is a product decision. Pinning them here means the next lane that
+# changes either has to change a test whose docstring says why, instead of
+# discovering the gap from a corpus that silently never got upgraded.
+#
+# ⛔ The FIRST boundary (the un-relabelled `:Document` population) is no longer
+# pinned here: it is CLOSED for the foldable part by
+# `migrate_kinds.relabel_legacy_documents` (#5140 finding 8), and the before/
+# after pair lives in
+# `tests/test_5140_d10_relabel_migration.py::
+# test_relabel_makes_the_pre_d10_backlog_discoverable` — where a change to it
+# moves the test of the finding that owns the behaviour, not a boundary note
+# two files away. What remains unreached is narrower and stays a product
+# decision: a document `_event_plain_merge` minted without a clock (the relabel
+# refuses it as `undated` rather than invent one) and the REBUILT-graph shape
+# below.
 @_live_db
 def test_include_unstamped_does_not_reach_a_replayed_legacy_false(monkeypatch):
     """A REPLAYED pre-D10 record folds a boilerplate ``needs_extraction=false``

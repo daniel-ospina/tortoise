@@ -113,18 +113,44 @@ class AclStatus(StrEnum):
 
 
 class FalkorProbe(StrEnum):
-    """Tri-state ``MODULE LIST``/capability probe (#8617).
+    """Four-state ``MODULE LIST``/capability probe (#8617).
 
-    ``ABSENT`` — the layer is not there (bare redis without the graph module,
-    or the server is unreachable). ``DENIED`` — the server ANSWERED and
-    refused the probe: the credential lacks ``+MODULE|LIST``, which is a fact
-    about the CREDENTIAL, not about the server. Conflating the two was the
-    silent-degradation class #8617 paid for.
+    ``ABSENT`` — the server ANSWERED and has no graph module (bare redis):
+    nothing to protect, a boundary. ``UNREACHABLE`` — the probe could not
+    complete (down, timeout, connection reset): a TRANSIENT FAULT. Reporting it
+    as "absent" *without a distinguishing reason* would certify an outage as a
+    deployment fact — which is why this state exists (the caller still carries
+    it as ``ABSENT`` + ``layer_down``). ``DENIED`` — the
+    server ANSWERED and refused the probe: the credential lacks
+    ``+MODULE|LIST``, which is a fact about the CREDENTIAL, not about the
+    server. Conflating these was the silent-degradation class #8617 paid for.
     """
 
     PRESENT = "present"
     ABSENT = "absent"
+    UNREACHABLE = "unreachable"
     DENIED = "denied"
+
+
+# The absence REASONS (#10093). Each implies a DIFFERENT operator action: a
+# boundary (`declared_off`, `no_graph_module`), a deployment fact (`no_uri`), a
+# credential fault (`probe_denied`, `setuser_denied`) or an INCIDENT
+# (`layer_down`, `probe_unreadable`). One number cannot say which.
+#
+# There are SEVEN, and they do not all land in the same counter. The reconcile
+# report's ``absent_reasons`` histogram decomposes the ``absent`` STATUS, so
+# ``no_uri`` / ``no_graph_module`` / ``layer_down`` reach it — and so do
+# ``probe_unreadable`` and the ``unknown`` fallback, which exist precisely so a
+# probe state with no mapping is a VISIBLE fault rather than a boundary.
+# ``declared_off`` is counted in ``absent_by_design``; ``probe_denied`` and
+# ``setuser_denied`` in ``denied``.
+REASON_DECLARED_OFF = "declared_off"
+REASON_NO_URI = "no_uri"
+REASON_NO_GRAPH_MODULE = "no_graph_module"
+REASON_PROBE_DENIED = "probe_denied"
+REASON_LAYER_DOWN = "layer_down"
+REASON_SETUSER_DENIED = "setuser_denied"
+REASON_PROBE_UNREADABLE = "probe_unreadable"
 
 
 @dataclass(frozen=True)
@@ -138,6 +164,7 @@ class AclProvisionResult:
     password: str | None = None
     graph: str | None = None
     detail: str = ""
+    reason: str = ""
 
     @property
     def provisioned(self) -> bool:
@@ -237,8 +264,9 @@ def _admin_client():
     failure". A failure inside :func:`_falkordb_present` no longer vanishes:
     since #8617 a permission refusal there logs the refusal (it is the
     ``denied`` state, a fact about the credential), while an unreachable
-    server still answers ``absent`` silently — the connection-failure text
-    below is the arm that speaks for an outage. The HEDGE arm is the one this
+    server answers ``unreachable`` and LOGS the outage — carried as ``absent``
+    with ``reason=layer_down``, so an outage can never be mistaken for the
+    ``no_graph_module`` boundary. The HEDGE arm is the one this
     channel gets, deliberately:
     every verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
     ``SETUSER``/``DELUSER``/``SAVE``), so ``_command_mutating`` has no statement
@@ -285,14 +313,16 @@ def _admin_client():
 
 
 def _falkordb_present(client) -> FalkorProbe:
-    """Tri-state capability probe (#8617): ``present`` / ``absent`` /
-    ``denied``.
+    """Four-state capability probe (#8617, #10093): ``present`` / ``absent`` /
+    ``unreachable`` / ``denied``.
 
     Bare redis (no falkordb module) has ACL but no graph commands — the
-    per-graph layer is meaningless there (``absent``, fail-soft). A server that
-    ANSWERED with a permission refusal is a different fact (``denied``): the
-    credential cannot even look, which is the FalkorDB Cloud shape. Only a
-    ``present`` probe lets the caller attempt the SETUSER."""
+    per-graph layer is meaningless there (``absent``: nothing to protect). A
+    server that could not be REACHED is ``unreachable`` — a transient fault
+    about the SERVER, never a boundary. A server that ANSWERED with a
+    permission refusal is ``denied``: a fact about the CREDENTIAL, and the
+    FalkorDB Cloud shape. Only a ``present`` probe lets the caller attempt the
+    SETUSER."""
     try:
         rows = client.execute_command("MODULE", "LIST") or []
     except Exception as e:
@@ -301,7 +331,11 @@ def _falkordb_present(client) -> FalkorProbe:
                 "MODULE LIST refused by the server (%s) — the ACL credential "
                 "lacks +MODULE|LIST (#8617): %s", type(e).__name__, e)
             return FalkorProbe.DENIED
-        return FalkorProbe.ABSENT  # down/unreachable — fail-soft, never a SPOF
+        # down/timeout/reset — fail-soft, never a SPOF, but NOT "absent": an
+        # outage must not be reported as a deployment boundary (#10093).
+        logger.warning("MODULE LIST could not complete (%s) — the server is "
+                       "unreachable: %s", type(e).__name__, e)
+        return FalkorProbe.UNREACHABLE
     tokens: list = []
     for row in rows:
         if not isinstance(row, (list, tuple)):
@@ -496,7 +530,7 @@ def create_acl_user(graph_id: str, org_id: str) -> AclProvisionResult:
     if not layer_provisionable():
         return AclProvisionResult(
             status=AclStatus.ABSENT_BY_DESIGN, username=username,
-            graph=graph_name,
+            graph=graph_name, reason=REASON_DECLARED_OFF,
             detail=(f"{ACL_LAYER_ENV}={layer_mode()} — the per-graph ACL "
                     "layer is declared unavailable in this deployment "
                     "(#8617: FalkorDB Cloud grants no credential +ACL)"))
@@ -504,16 +538,31 @@ def create_acl_user(graph_id: str, org_id: str) -> AclProvisionResult:
     if client is None:
         return AclProvisionResult(
             status=AclStatus.ABSENT, username=username, graph=graph_name,
+            reason=REASON_NO_URI,
             detail="no server URI (embedded store) — no ACL layer to write")
     probe = _falkordb_present(client)
     if probe is not FalkorProbe.PRESENT:
+        if probe is FalkorProbe.DENIED:
+            status, reason = AclStatus.DENIED, REASON_PROBE_DENIED
+        elif probe is FalkorProbe.UNREACHABLE:
+            status, reason = AclStatus.ABSENT, REASON_LAYER_DOWN
+        elif probe is FalkorProbe.ABSENT:
+            status, reason = AclStatus.ABSENT, REASON_NO_GRAPH_MODULE
+        else:  # a probe state added later with no mapping — pinned by a test
+            # NEVER fall through to "bare redis, nothing to protect": a state we
+            # cannot classify is an UNREADABLE probe, not a boundary. This arm
+            # exists so the next enum member cannot silently become the boundary
+            # this whole change is about (#10093 review).
+            status, reason = AclStatus.ABSENT, REASON_PROBE_UNREADABLE
+        detail = {
+            FalkorProbe.DENIED: "MODULE LIST refused — the credential cannot "
+                                "read the server's capability",
+            FalkorProbe.UNREACHABLE: "the server could not be reached mid-op",
+            FalkorProbe.ABSENT: "server has no graph module (bare redis)",
+        }.get(probe, "the probe returned an unrecognised state")
         return AclProvisionResult(
-            status=(AclStatus.DENIED if probe is FalkorProbe.DENIED
-                    else AclStatus.ABSENT),
-            username=username, graph=graph_name,
-            detail=("MODULE LIST refused — the credential cannot read the "
-                    "server's capability" if probe is FalkorProbe.DENIED
-                    else "server has no graph module (bare redis) or is down"))
+            status=status, username=username, graph=graph_name, reason=reason,
+            detail=detail)
     _ensure_default_user_secured(client)
     from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
@@ -549,10 +598,12 @@ def _setuser_result(client, username: str, graph_name: str, password: str,
         ok = _setuser(client, username, graph_name, password)
     except AclLayerDenied as e:
         return AclProvisionResult(status=AclStatus.DENIED, username=username,
-                                  graph=graph_name, detail=str(e))
+                                  graph=graph_name,
+                                  reason=REASON_SETUSER_DENIED, detail=str(e))
     if not ok:
         return AclProvisionResult(
             status=AclStatus.ABSENT, username=username, graph=graph_name,
+            reason=REASON_LAYER_DOWN,
             detail="connection failure mid-op — the ACL layer went away")
     if store is not None:
         store()

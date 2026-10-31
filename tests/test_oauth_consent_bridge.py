@@ -25,18 +25,58 @@ These are STATIC guards on purpose. They assert where behaviour lives, not that 
 page's behaviour is EXECUTED by `tests/test_oauth_consent_pkce.py` (node:vm against the vendored
 supabase bundle), and the BFF's by the Pages gates. A guard that cannot fail is not a guard, so
 each one asserts it found its subject.
+
+⛔ ONE SECTION IS NOT STATIC — `§2 / §9 step 2, EXECUTED` at the end of this file. The sections
+above pin WHERE the contract is written; that one pins THAT IT IS ENFORCED, because §9 orders the
+AS half (`POST /oauth/consent` accepting a signed, bound, single-use token) to land before any
+page change, and a verifier nobody exercises is the "specified, not implemented" state #3524 was
+reopened for. It drives the real `hosted_api` app over the OAuth suite's `FakeControlPlane`: one
+refused request per guarantee in §2.2 (`aud`, `iss`, `exp`, `bind`, `jti`), plus the two arms
+proven independent of each other — the bearer path must stay live (§9: step 2 is additive), and
+the token arm must never need it.
 """
 
 from __future__ import annotations
 
 import ast
+import base64
+import hashlib
+import hmac
 import html
+import json
+import os
 import re
+import secrets
+import tempfile
+import time
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+from fastapi import HTTPException
+
+# The OAuth suite's own harness — the SEEDING helpers and the app, reused rather than re-derived:
+# a second control plane seeded differently from the suite the endpoint ships with is a second
+# thing that can be wrong. The fixtures themselves are local because a pytest fixture's
+# dependencies resolve in the module that DECLARES the test, not the one that declares the fixture.
+from tests._http_fixtures import patched_tortoise_sdk
+from tests._verdict import verdict_client
+from tests.fake_control_plane import FakeControlPlane
+from tests.test_oauth_mcp import (
+    _U1,
+    REDIRECT,
+    TEAM_FREE,
+    TEAM_TEAM,
+    TEST_BASE,
+    _enable_supabase,
+    _exchange,
+    _member,
+    _pkce,
+    _register_client,
+)
+from tortoise.consent_token import mint_consent_token
+from tortoise.hosted_api import app
 
 REPO = Path(__file__).resolve().parent.parent
 OAUTH = REPO / "tortoise" / "oauth.py"
@@ -1443,3 +1483,1388 @@ def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
         "the spec no longer names the behavioural guard for the four properties — the contract "
         "would be anchor-only again, which is the state #3524 task 3 exists to end"
     )
+
+
+def _section_23_jti_store(spec: str) -> str:
+    """§2.3's `jti`-store paragraph, located by its own subject, and asserted found.
+
+    Bounded by the next bold-led paragraph (`**Signing key.**`) rather than by line numbers, so a
+    reflow of the section cannot silently turn this guard into a no-op on an empty string.
+    """
+    start = spec.find("**The `jti` store.**")
+    assert start != -1, (
+        "§2.3 no longer opens a 'The `jti` store.' paragraph — this guard has lost its subject, "
+        "which is not the same thing as the defect it exists to catch"
+    )
+    end = spec.find("**Signing key.**", start)
+    assert end > start, (
+        "§2.3's `jti`-store paragraph is no longer followed by '**Signing key.**' — the section "
+        "has been restructured and this guard's bounds need re-deriving, not deleting"
+    )
+    return spec[start:end]
+
+
+def test_the_spec_records_the_jti_mechanism_as_DECIDED_not_open() -> None:
+    """§2.3 must record the mechanism that SHIPPED, because §9 points a reader at it.
+
+    The defect this pins (raised on this PR, and real at `e618904d3` before this fix): §2.3 kept
+    its PRE-decision form — "Options, in order of preference … **(a) is preferred** … This is the
+    one open *mechanism* choice in this spec, and it is deliberately recorded rather than
+    assumed" — while `ControlPlaneJtiStore` shipped option **(b)**, the migration that backs it
+    says so, and §9 step 1's row tells the reader "the mechanism choice is §2.3".
+
+    The cost is not cosmetic: (a)'s argument is architectural, so a lane reading §2.3 as written
+    builds option (a) — a SECOND single-use store for the same guarantee, with its own secret
+    surface — and nothing in the record says the choice was taken. The fix is a RELAY, not a
+    reversal: the (a)-vs-(b) comparison stays, and the historical "open" wording is allowed to
+    survive as a QUOTED history (that is the lineage the next reader needs to understand why the
+    paragraph changed). What must be true is that the section states the adopted option, names the
+    artifact that ships it, gives the reason, and no longer ASSERTS the choice is open.
+    """
+    section = _section_23_jti_store(SPEC.read_text())
+    flat = " ".join(section.split())
+
+    # The relay's concrete subject: the option that shipped, and the artifact that ships it.
+    assert "**(b) is DECIDED" in flat, (
+        "§2.3 does not record (b) as the DECIDED mechanism — §9 step 1 points a reader here for "
+        "the choice, so leaving it unstated is the stale-flag shape this guard exists for"
+    )
+    for artifact in ("ControlPlaneJtiStore", "20261030000001_oauth_consent_tickets.sql"):
+        assert artifact in flat, (
+            f"§2.3's decided record does not name {artifact!r}, so it claims a decision without "
+            "naming anything that carries it"
+        )
+    # The artifact the section names must EXIST — a decided record citing a missing migration is
+    # the same fiction as an anchor pointing at a deleted line.
+    assert (REPO / "supabase/migrations/20261030000001_oauth_consent_tickets.sql").is_file(), (
+        "§2.3 cites migration 20261030000001_oauth_consent_tickets.sql, which is not in the tree"
+    )
+    # …and the reason, because "decided" without a WHY is the state that gets re-litigated.
+    assert "Why (b) and not (a)" in flat, (
+        "§2.3 records the decision without its reason — the comparison has to stay readable, or "
+        "the next lane re-opens a choice that was taken for a stated reason"
+    )
+    # …and the departure is MARKED, so a lane holding the earlier preference (or a vendor page
+    # arguing for (a)) meets the ruling where the adoption would happen instead of "tidying it up".
+    assert "**OVERRIDES:**" in flat, (
+        "§2.3 reverses a recorded preference without the OVERRIDES marker AGENTS.md requires — an "
+        "unmarked departure reads as an accident of history, not as a ruling"
+    )
+
+    # The pre-decision FRAMING must be gone: a preference ORDER is what made (a) look buildable.
+    assert "in order of preference" not in flat, (
+        "§2.3 still orders the two mechanisms by preference, which reads as 'not yet decided' "
+    )
+    # The open-claim SENTENCE must be gone. It is matched with its own opening, because the
+    # historical quotation of the phrase is deliberately kept (see the docstring) — deleting the
+    # lineage is not what this guard asks for.
+    assert "This is the one open" not in flat, (
+        "§2.3 still ASSERTS that the mechanism choice is open, while the code ships option (b)"
+    )
+
+
+def _section_still_open(spec: str) -> str:
+    """The doc's `## Still open` list, located by its own heading, and asserted found.
+
+    This is the ONE list a lane scopes against first, which is why a stale entry there costs more
+    than the same stale entry anywhere else: it is read as the work inventory. Bounded by the next
+    `## ` heading (or EOF) rather than by line numbers, so a reflow cannot turn the guard below
+    into a no-op on an empty string.
+    """
+    start = spec.find("## Still open")
+    assert start != -1, (
+        "the spec no longer has a '## Still open' section — this guard has lost its subject, which "
+        "is not the same thing as the defect it exists to catch"
+    )
+    end = spec.find("\n## ", start + 1)
+    return spec[start:] if end == -1 else spec[start:end]
+
+
+def test_the_still_open_list_does_not_reopen_the_DECIDED_jti_mechanism() -> None:
+    """`## Still open` must not list the `jti` mechanism as unchosen after §2.3 decided it.
+
+    The defect this pins (raised on this PR at `3f1d32ec0`): §2.3 records **(b) is DECIDED, and
+    shipped** and §9 step 1's row is DELIVERED, while `## Still open` still carried
+
+        - **The `jti` store mechanism** (§2.3) — preferred shape recorded; not chosen by an owner.
+
+    On `origin/main` that bullet was TRUE (§2.3 there presents the choice as open) — this PR's own
+    edits are what made it false, and the relay landed in §2.3/§9 and missed the one list a
+    scoping lane reads first. The cost is the same one that motivated the §2.3 relay: a lane that
+    trusts the open-items list re-opens a shipped mechanism choice and builds a SECOND single-use
+    store for the same guarantee.
+
+    Deleting the whole section is NOT an acceptable way to satisfy this: the section's other
+    entries are real open items (`#8218`, `#3529`), so the found-assert and the positive arm below
+    keep the guard anchored to a section that still says something.
+
+    Measured non-vacuity: with the bullet re-inserted verbatim and nothing else changed, this test
+    FAILS on the open-claim arm; it passes only once the bullet is gone.
+    """
+    section = _section_still_open(SPEC.read_text())
+    flat = " ".join(section.split())
+
+    # The section must still be a live inventory — otherwise "no jti claim here" is satisfied by
+    # emptying it, and the guard would pass on a doc that lost its open-items list entirely.
+    assert "#8218" in flat, (
+        "`## Still open` no longer names #8218 (attested client identity) — if the section was "
+        "emptied to satisfy this guard, the open items were lost rather than relayed"
+    )
+
+    # The bullet's own subject, and its own open-claim wording. Both are matched so a re-worded
+    # restatement (`the jti mechanism is still open` / `not chosen by an owner`) cannot slip past.
+    assert "`jti` store mechanism" not in flat, (
+        "`## Still open` still lists the `jti` store mechanism — §2.3 records (b) as DECIDED and "
+        "`ControlPlaneJtiStore` ships it, so a lane scoping from this list builds the second "
+        "single-use store the §2.3 relay exists to prevent"
+    )
+    assert "not chosen by an owner" not in flat, (
+        "`## Still open` still ASSERTS that a mechanism choice is unchosen — the only mechanism "
+        "choice in this spec (§2.3) is decided and shipped"
+    )
+
+    # …and the cross-check that makes the pair a contradiction guard rather than two independent
+    # string checks: the section §2.3 lives in must still read as DECIDED.
+    assert "**(b) is DECIDED" in " ".join(_section_23_jti_store(SPEC.read_text()).split()), (
+        "§2.3 no longer reads as DECIDED, so the relay has moved back — this guard's premise is "
+        "gone, not satisfied"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# §2 / §9 step 2 — the token arm on `POST /oauth/consent`, EXECUTED
+#
+# §9 orders this step to land BEFORE any page change, on the argument that it is additive: the
+# bearer path stays live while the AS learns to accept an assertion from the session origin. The
+# tests below hold that argument to its two halves — every guarantee in §2.2 has a request that
+# is REFUSED without it, and the two arms must be provably independent of each other.
+#
+# The token's wire format is built HERE, by hand, for the negative cases: a fixture that used the
+# module's own signer to produce a bad token would pass while the signer was broken, and the
+# contract in §2.1 is small enough to state independently.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: Long enough to be a key: the arm refuses a secret shorter than 32 UTF-8 BYTES (a guessable HMAC
+#: key is the same forgery oracle as a reused one), so a fixture secret must clear that floor.
+_TEST_SECRET = "consent-token-secret-for-tests-0123456789"
+#: §2.1 — the session origin, "the minting authority". A token from anywhere else is the `iss`
+#: failure §2.2 names, so the look-alike below is a real shape, not a placeholder.
+_ISSUER = "https://app.premiselabs.co"
+_LOOKALIKE_ISSUER = "https://app.premiselabs.co.evil.example"
+#: A second LEGITIMATE origin — what a preview deployment sets `CONSENT_TOKEN_ISSUER` to (§2.1).
+_STAGING_ISSUER = "https://staging.app.premiselabs.co"
+#: A second redirect registered for the SAME client, so a request using it passes
+#: `validate_authorize_params` and reaches the BIND check rather than being refused earlier for
+#: the wrong reason (a test that reds for the wrong reason proves nothing). A different PATH, not
+#: a different loopback port — the port is relaxed by `_redirect_uri_matches` (§2.2), so a port
+#: variant would match the binding instead of testing it.
+_ALT_REDIRECT = "http://127.0.0.1:8765/cb2"
+
+
+def _seg(obj: dict) -> str:
+    raw = json.dumps(obj, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _signed(payload: dict, *, secret: str = _TEST_SECRET, alg: str = "HS256",
+            typ: str = "JWT", kid: str = "consent-1") -> str:
+    """A compact-JWS token built to §2.1 by hand — including the shapes a mint must never emit."""
+    signing_input = f"{_seg({'alg': alg, 'typ': typ, 'kid': kid})}.{_seg(payload)}"
+    if alg == "none":          # RFC 7519 §6: the "unsecured" JWT's signature segment is empty
+        return signing_input + "."
+    mac = hmac.new(secret.encode(), signing_input.encode(), hashlib.sha256).digest()
+    return signing_input + "." + base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
+
+
+def _claim_set(base_bind: dict, **overrides) -> dict:
+    """A currently-valid claim set per §2.1, mutable per test.
+
+    The bind parameter is named `base_bind` so a test can REPLACE `bind` through `overrides`
+    (the malformed-bind cases) as well as populate it.
+    """
+    now = time.time()
+    payload = {
+        "iss": _ISSUER,
+        "aud": "tortoise-consent",      # §2.2: NOT a Supabase audience
+        "iat": now,
+        "exp": now + 120,               # §2.2: CONSENT_TOKEN_TTL_S
+        "jti": secrets.token_hex(32),
+        "sub": _U1,
+        "email": "u@example.com",
+        "bind": base_bind,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _bind(client_id: str, challenge: str, *, redirect_uri: str = REDIRECT,
+          state: str | None = "st-123") -> dict:
+    return {"client_id": client_id, "redirect_uri": redirect_uri,
+            "code_challenge": challenge, "state": state}
+
+
+def _consent_payload(tc, bind: dict) -> dict:
+    """The body a page sends: the flow's params, exactly as the authorize URL carried them."""
+    return {
+        "client_id": bind["client_id"],
+        "redirect_uri": bind["redirect_uri"],
+        "response_type": "code",
+        "code_challenge": bind["code_challenge"],
+        "code_challenge_method": "S256",
+        "state": bind["state"],
+        "scope": "mcp",
+    }
+
+
+def _post_token(tc, token: str, bind: dict, *, headers: dict | None = None,
+                **overrides):
+    payload = _consent_payload(tc, bind) | {"consent_token": token}
+    payload.update(overrides)
+    return tc.post("/oauth/consent", json=payload, headers=headers or {})
+
+
+def _post_bearer(tc, bind: dict, **overrides):
+    payload = _consent_payload(tc, bind)
+    payload.update(overrides)
+    return tc.post("/oauth/consent", json=payload,
+                   headers={"Authorization": "Bearer fake-session-jwt"})
+
+
+@pytest.fixture
+def bridge_client(monkeypatch):
+    """The real `hosted_api` app over the OAuth suite's in-memory control plane.
+
+    The accessors below are the SAME ones `tests/test_oauth_mcp.py` uses (one seeding path, two
+    suites), but the fixture lives here: a fixture's dependencies are resolved in the module that
+    declares the requesting test, so importing `api_client` by name needs its whole chain imported
+    too — and an imported name reused as a fixture parameter is a redefinition (ruff F811).
+    """
+    cp = FakeControlPlane({
+        "organizations": [dict(TEAM_FREE), dict(TEAM_TEAM)],
+        "org_memberships": [_member(_U1, "team-free-001")],
+        "api_keys": [],
+    })
+    _enable_supabase(monkeypatch, cp)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "oauth.db")
+        with patched_tortoise_sdk(db_path), verdict_client(app) as tc:
+            yield tc, cp
+
+
+@pytest.fixture(autouse=True)
+def _consent_token_env(monkeypatch):
+    """Start every test in this module from §9 step 1's PROVISIONED state, with an EMPTY store.
+
+    The replay register is process-global (§2.3: single-use needs shared state), so a test that
+    left a `jti` in it would make the NEXT test's "first use" a replay — a false red that depends
+    on collection order.
+    """
+    from tortoise import consent_token
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.delenv("CONSENT_TOKEN_ISSUER", raising=False)
+    consent_token.reset_consent_jti_store()
+    yield
+    consent_token.reset_consent_jti_store()
+
+
+@pytest.fixture
+def mint_spy(monkeypatch) -> list[dict]:
+    """Record every `issue_auth_code` call — the ONLY place the bound params are observable.
+
+    They are not observable in the response: the binding REQUIRES the token's values to match the
+    request's, so every honest request passes the same values either way. The precedence is real
+    only in the one case they legitimately differ (the RFC 8252 loopback relaxation), and this
+    spy is what makes that case readable without weakening the contract for all the others.
+    """
+    import tortoise.oauth as oauth_module
+
+    calls: list[dict] = []
+    real = oauth_module.issue_auth_code
+
+    def _spy(cp, **kwargs):
+        calls.append(dict(kwargs))
+        return real(cp, **kwargs)
+
+    monkeypatch.setattr(oauth_module, "issue_auth_code", _spy)
+    return calls
+
+
+@pytest.fixture
+def bearer_ok(monkeypatch):
+    """The pre-bridge identity source, available to the bearer path."""
+    async def _ok(request):
+        return {"user_id": _U1, "email": "u@example.com"}
+
+    monkeypatch.setattr("tortoise.hosted_api.verify_session_jwt", _ok)
+
+
+@pytest.fixture
+def bearer_refuses(monkeypatch):
+    """Make the BEARER path unverifiable, so only a consent token can establish identity.
+
+    This is the production shape the bridge exists for: a cold browser whose session cookie is
+    `__Host-session` on `app.*` — host-only and HttpOnly, so `api.*` never receives it.
+    """
+    async def _refuse(request):
+        raise HTTPException(status_code=401, detail="Missing session token")
+
+    monkeypatch.setattr("tortoise.hosted_api.verify_session_jwt", _refuse)
+
+
+def test_startup_installs_the_SHARED_register(bridge_client, mint_spy, bearer_refuses) -> None:
+    """§9 step 1's OTHER half: the wiring, not the class.
+
+    `ControlPlaneJtiStore` being correct proves nothing about the deployment if the startup hook
+    never installs it — `consent_jti_store()` falls back to `ProcessLocalJtiStore` SILENTLY, so
+    every machine answers "first use" for a nonce another machine already spent and one consent
+    yields N authorization codes. The cross-machine test installs the store itself, so it proves
+    the class and not the wiring; this test boots the real app and drives a redemption through it.
+
+    MEASURED, two-sided: passes here, and FAILS at the `isinstance` below with "the AS started
+    with a PER-PROCESS register — cross-machine replay is unbounded" if the
+    `install_shared_consent_jti_store()` call is deleted from `_lifespan` (`tortoise/hosted_api.py`).
+    The RPC assertion further down is a SECOND, independent arm and is NOT the one that fires for
+    that mutation — it fires if the store is installed but the redemption never reaches the
+    control plane (e.g. a store that short-circuits locally). Note that deleting the call leaves
+    every other consent test green, which is exactly why this pin has to exist.
+    """
+    from tortoise.consent_token import ControlPlaneJtiStore, consent_jti_store
+
+    tc, cp = bridge_client                      # entering the client runs the real `_lifespan`
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    assert isinstance(consent_jti_store(), ControlPlaneJtiStore), (
+        "the AS started with a PER-PROCESS register — cross-machine replay is unbounded, and no "
+        "other consent test notices because they install the store themselves")
+
+    assert _post_token(tc, mint_consent_token(user_id=_U1, email="u@example.com", bind=bind),
+                       bind).status_code == 200
+    assert any(fn == "consume_oauth_consent_ticket" for fn, _ in cp.rpc_calls), (
+        "the redemption never reached the control plane — per-process again")
+
+
+def test_the_startup_hook_still_calls_the_installer() -> None:
+    """The AST seam, alongside the behavioural pin above (`tests/test_8098_webhook_retry_sweep.py`
+    is the precedent): the wiring must be a real statement in `_lifespan`, not a comment, and the
+    behavioural test cannot tell a call from an equivalent side effect that a refactor removed.
+    """
+    from pathlib import Path
+
+    import tortoise.hosted_api as ha
+
+    tree = ast.parse(Path(ha.__file__).resolve().read_text(), filename="hosted_api.py")
+    lifespan = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_lifespan")
+    calls = [
+        node for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and ((isinstance(node.func, ast.Name) and node.func.id == "install_shared_consent_jti_store")
+             or (isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "install_shared_consent_jti_store"))
+    ]
+    assert len(calls) == 1, (
+        "expected exactly one `install_shared_consent_jti_store()` call in `_lifespan` — zero "
+        "silently restores per-process single-use across Fly machines (replay), and two is ambiguous")
+
+
+def test_a_bound_token_mints_the_code_with_the_tokens_identity_and_bound_params(
+        bridge_client, mint_spy, bearer_refuses) -> None:
+    """§9 step 2, the whole deliverable: verify, then `issue_auth_code` with the BOUND params.
+
+    Proven three ways, because a single one can be satisfied by accident:
+      * the bearer path is unverifiable (`bearer_refuses`), so the identity CANNOT have come from
+        it — the code is bound to the token's `sub` (§2.2: `sub` is "the ONLY thing the token is
+        allowed to establish");
+      * the call `issue_auth_code` received carries the token's `bind` values, not the request's;
+      * the code is redeemed end-to-end with the PKCE verifier, so the values minted are the ones
+        `/oauth/token` compares against.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    verifier, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["state"] == bind["state"]
+    assert body["redirect_uri"] == bind["redirect_uri"]
+
+    assert len(mint_spy) == 1, "one consent must mint exactly one code"
+    minted = mint_spy[0]
+    assert minted["user_id"] == _U1, "the identity must come from the TOKEN's sub"
+    assert minted["redirect_uri"] == bind["redirect_uri"]
+    assert minted["code_challenge"] == bind["code_challenge"]
+    assert minted["state"] == bind["state"]
+
+    tok = _exchange(tc, client_id=client_id, code=body["code"], verifier=verifier)
+    assert tok.status_code == 200, tok.text
+    assert tok.json()["token_type"] == "Bearer"
+
+
+def test_the_token_arm_does_not_require_a_bearer(bridge_client, bearer_refuses) -> None:
+    """No `Authorization` header exists on the bridge's path — that is the point of the token.
+
+    §1: `api.*` can never see `__Host-session`, so a verifier that still demanded a bearer would
+    have implemented nothing. The fixture makes every bearer verification a 401, so a 200 here is
+    only reachable through the token arm.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    r = _post_token(tc, token, bind, headers={"Authorization": "Bearer stale-and-unverifiable"})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("field", ("client_id", "redirect_uri",
+                                   "code_challenge", "state"))
+def test_a_token_bound_to_another_flow_is_refused(bridge_client, mint_spy, bearer_refuses,
+                                                  field: str) -> None:
+    """§2.2 — each `bind` field is what stops a token minted in flow X being used for flow Y.
+
+    Every mutation below is a request that is INDIVIDUALLY VALID (the client is registered, the
+    redirect is registered for it, the challenge is a legal S256 challenge), so the refusal can
+    only come from the binding — which is the property §2.4 says is the only half that bounds
+    cross-flow substitution.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc, redirect_uris=[REDIRECT, _ALT_REDIRECT])["client_id"]
+    other_client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    _, other_challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    requested = {
+        "client_id": other_client_id if field == "client_id" else bind["client_id"],
+        "redirect_uri": _ALT_REDIRECT if field == "redirect_uri" else bind["redirect_uri"],
+        "code_challenge": other_challenge if field == "code_challenge" else challenge,
+        "state": "st-attacker" if field == "state" else bind["state"],
+    }
+    r = _post_token(tc, token, bind, **requested)
+    assert r.status_code == 401, r.text
+    assert f"bind.{field}" in r.json()["error_description"], r.text
+    assert mint_spy == [], "a refused binding must never reach the mint"
+
+
+def test_a_token_bound_to_a_state_the_request_drops_is_refused(bridge_client, mint_spy,
+                                                               bearer_refuses) -> None:
+    """`state` is optional on the wire, so "absent" is a value the binding has to compare.
+
+    A `None == absent` shortcut on the verifier's side would let a token minted for a stateful
+    flow be redeemed by a request that presents no state — the cross-flow substitution §2.2 names
+    for `bind.state`, arriving through the one field that can legitimately be null.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge, state="st-123")
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    payload = _consent_payload(tc, bind) | {"consent_token": token}
+    payload.pop("state")
+    r = tc.post("/oauth/consent", json=payload)
+    assert r.status_code == 401, r.text
+    assert "bind.state" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+@pytest.mark.parametrize("overrides,needle", [
+    # §2.2 `exp` — the TTL is what bounds exposure; expiry is the whole of that half.
+    ({"iat": time.time() - 900, "exp": time.time() - 600}, "expired"),
+    # §2.2 `iss` — a look-alike origin must not be accepted as the session origin.
+    ({"iss": _LOOKALIKE_ISSUER}, "iss"),
+    # §2.2 `aud` — a Supabase session token (or any other JWT on a shared key) must never be
+    # readable as a consent assertion. `authenticated` is literally that audience.
+    ({"aud": "authenticated"}, "aud"),
+    # …including in its list form: PyJWT's `strict_aud` exists because this spelling bypasses a
+    # naive equality check.
+    ({"aud": ["tortoise-consent"]}, "aud"),
+    # §2.2 — `exp = iat + CONSENT_TOKEN_TTL_S`. A token that outlives the TTL is a mint bug (or
+    # a rogue minter), and accepting it would silently turn a 120 s window into an arbitrary one.
+    ({"iat": time.time(), "exp": time.time() + 86_400}, "ttl"),
+    # §2.2 — the TTL test above bounds the SPAN (`exp - iat`), not the expiry, so a future-dated
+    # `iat` passes it: `iat = now + 10_000, exp = iat + 120` is live for ~10 119 s. The future-`iat`
+    # refusal is the only thing bounding that, and deleting it left this file GREEN (measured,
+    # review round 2), so it needs its own row.
+    ({"iat": time.time() + 10_000, "exp": time.time() + 10_120}, "future"),
+    # §2.2 `jti` — single-use is unimplementable without it, so its absence must refuse.
+    ({"jti": ""}, "jti"),
+    # §2.2 `sub` — the identity. Without it the AS has no input at all.
+    ({"sub": ""}, "sub"),
+    # §2.2 `jti` — its `_MAX_JTI_CHARS` cap is the register's only bound on key size, and deleting
+    # it left the suite GREEN (measured, fresh review round 5).
+    ({"jti": "x" * 300}, "jti"),
+    # §2.1 `email` — optional, but if present it must be a string; the check had no test.
+    ({"email": 12345}, "email"),
+    # §2.2 `exp` — a JSON integer literal too large to be a float. `json.loads` yields a Python int
+    # with no float involved, and both `math.isfinite` and `float()` then raise `OverflowError`,
+    # which answered a bare 500 (measured, convergence review). Not a privilege path (only a
+    # signature holder gets here), but this module's every-refusal-is-typed claim has to be true.
+    ({"exp": 10**400}, "exp"),
+])
+def test_a_claim_that_breaks_the_contract_is_refused(bridge_client, mint_spy, bearer_refuses,
+                                                     overrides: dict, needle: str) -> None:
+    """One refusal per guarantee in §2.2 — the table that would otherwise be prose."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = _signed(_claim_set(bind, **overrides))
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 401, r.text
+    assert needle in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+@pytest.mark.parametrize("overrides", [
+    ({"bind": {"client_id": "c", "redirect_uri": REDIRECT, "code_challenge": "x"}}),
+    ({"bind": "not-an-object"}),
+])
+def test_a_malformed_bind_is_refused(bridge_client, mint_spy, bearer_refuses,
+                                     overrides: dict) -> None:
+    """`bind` is the security-relevant field, so its SHAPE is part of the contract (§2.1)."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = _signed(_claim_set(bind, **overrides))
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 401, r.text
+    assert "bind" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_a_non_string_bind_state_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
+    """§2.1 — `bind.state` is a string or null, and this guard is LOAD-BEARING.
+
+    `_bind_mismatch` cannot catch this case: a `state` of `7` in the token and `7` in the request
+    compare EQUAL, so the mismatch branch passes and the value reaches `issue_auth_code` and is
+    echoed to the page. Deleting the type check left the suite green and minted a code (measured,
+    fresh review round 5) — so it gets its own test, presenting the same non-string value on both
+    sides, which is the only shape where the type guard is the sole refuser.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    confused = bind | {"state": 7}
+    token = _signed(_claim_set(bind, bind=confused))
+
+    r = _post_token(tc, token, confused)
+    assert r.status_code == 401, r.text
+    assert "bind.state" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_a_bind_carrying_a_key_the_contract_does_not_name_is_refused(
+        bridge_client, mint_spy, bearer_refuses) -> None:
+    """`bind` is EXACTLY §2.1's four params — an unknown key is refused, not ignored.
+
+    The four bound fields here all MATCH the request, so the mismatch branch cannot fire and the
+    exact-set rule is the only thing that can refuse. That is why this is its own test: the earlier
+    version reused a bind whose `client_id`/`code_challenge` were `"c"`/`"x"`, which the mismatch
+    branch refused first, so deleting the shape check left it GREEN (measured, review round 1).
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    smuggled = bind | {"org_id": "another-team"}
+    token = _signed(_claim_set(bind, bind=smuggled))
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 401, r.text
+    assert "unexpected" in r.json()["error_description"], (
+        "the refusal must come from the exact-set rule (which names the unexpected key), not from "
+        f"the bind mismatch: {r.text}")
+    assert mint_spy == []
+
+
+def test_a_header_that_does_not_say_typ_jwt_is_refused(bridge_client, mint_spy,
+                                                     bearer_refuses) -> None:
+    """§2.1 — `typ` is why a Supabase session JWT can never read as a consent assertion."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    for typ in ("", "at+jwt", "JWT "):
+        r = _post_token(tc, _signed(_claim_set(bind), typ=typ), bind)
+        assert r.status_code == 401, f"typ={typ!r}: {r.text}"
+        assert "typ" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_the_register_refuses_rather_than_evicting_when_it_is_full(bridge_client, mint_spy,
+                                                                  bearer_refuses) -> None:
+    """§2.3 — a full register answers 503; it never evicts, because evicting re-enables replay.
+
+    Driven through the documented step-1 seam with `max_entries=1`: the SECOND distinct token must
+    be refused, and the refusal must not mint. The first still mints, so the refusal is the
+    capacity policy and not the arm being off.
+    """
+    from tortoise.consent_token import (
+        ProcessLocalJtiStore,
+        configure_consent_jti_store,
+        reset_consent_jti_store,
+    )
+
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    configure_consent_jti_store(ProcessLocalJtiStore(max_entries=1))
+    try:
+        first = _post_token(tc, mint_consent_token(user_id=_U1, email="u@example.com", bind=bind),
+                            bind)
+        assert first.status_code == 200, first.text
+        minted = len(mint_spy)
+
+        _, other_challenge = _pkce()
+        other_bind = _bind(client_id, other_challenge)
+        second = _post_token(
+            tc, mint_consent_token(user_id=_U1, email="u@example.com", bind=other_bind),
+            other_bind)
+        assert second.status_code == 503, second.text
+        assert second.json()["error"] == "temporarily_unavailable", second.text
+        assert "full" in second.json()["error_description"], second.text
+        assert len(mint_spy) == minted, "a full register must not mint"
+    finally:
+        reset_consent_jti_store()
+
+
+def test_a_store_that_cannot_answer_is_a_typed_503_and_never_a_500(bridge_client, mint_spy,
+                                                               bearer_refuses) -> None:
+    """§2.3 + #3026 — step 1's store may fail in its OWN way (D1/HTTP, not `JtiStoreUnavailable`).
+
+    Two shapes, both of which reached a 500 `server_error` in review round 2: a store whose
+    `consume` is not `async` (its body runs, records the jti, and only then fails at the `await`),
+    and a store that raises outside the documented exception — the handler's #3026 net converts
+    `RuntimeError` to a retryable 503 but anything else to an internal error. Neither may surface
+    as one.
+    """
+    from tortoise.consent_token import configure_consent_jti_store, reset_consent_jti_store
+
+    class _SyncStore:
+        def consume(self, jti, expires_at):
+            return True
+
+    with pytest.raises(TypeError, match="async"):
+        configure_consent_jti_store(_SyncStore())
+
+    class _StoreBlewUp(Exception):
+        """Deliberately NOT a `RuntimeError`: the handler's #3026 net maps `RuntimeError` to a
+        retryable 503 and everything ELSE to a 500 `server_error`, and a store failure is never a
+        bug-in-this-request. A driver error (httpx, a D1 client) is exactly this shape."""
+
+    class _BrokenStore:
+        async def consume(self, jti, expires_at):
+            raise _StoreBlewUp("D1: 500 from the ticket table")
+
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    configure_consent_jti_store(_BrokenStore())
+    try:
+        r = _post_token(tc, token, bind)
+        assert r.status_code == 503, r.text
+        assert r.json()["error"] == "temporarily_unavailable", r.text
+        assert mint_spy == [], "a store that cannot answer must not mint"
+        # ⛔ #3026's no-detail rule: the store is an arbitrary object (§2.3), so its message can
+        # carry an upstream URL, a query string or a schema detail, and this 503 is triggerable by
+        # one unauthenticated POST. The detail belongs in the log, not the body.
+        assert "ticket table" not in r.text, r.text
+        assert "_StoreBlewUp" not in r.text, r.text
+    finally:
+        reset_consent_jti_store()
+
+
+def test_an_oversized_token_is_refused_before_anything_is_parsed(bridge_client, mint_spy,
+                                                                 bearer_refuses) -> None:
+    """Resource exhaustion: the length cap is the only attacker-facing bound on this input."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    r = _post_token(tc, "A" * 8193, bind)
+    assert r.status_code == 401, r.text
+    assert "too large" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_the_issuer_is_the_configurable_session_origin_and_not_a_literal(bridge_client,
+                                                                        mint_spy,
+                                                                        bearer_refuses,
+                                                                        monkeypatch) -> None:
+    """§2.1 — `iss` must equal the configured session origin, so a preview deployment can verify
+    its own mint. Without this, changing the anchor is invisible to the suite (measured round 2:
+    deleting the env override entirely left the file green)."""
+    from tortoise.consent_token import DEFAULT_CONSENT_TOKEN_ISSUER
+
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", _STAGING_ISSUER)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    # minted by the origin this deployment now trusts → accepted
+    ok = _post_token(tc, _signed(_claim_set(bind, iss=_STAGING_ISSUER)), bind)
+    assert ok.status_code == 200, ok.text
+
+    # the DEFAULT origin is a different origin → refused, and the refusal names `iss`
+    wrong = _post_token(tc, _signed(_claim_set(bind, iss=DEFAULT_CONSENT_TOKEN_ISSUER)), bind)
+    assert wrong.status_code == 401, wrong.text
+    assert "iss" in wrong.json()["error_description"], wrong.text
+
+
+def test_a_secret_that_reuses_a_service_key_is_not_a_provisioned_arm(monkeypatch) -> None:
+    """§2.3 — the secret must be DEDICATED. A reused key is treated as unprovisioned.
+
+    Without this, `CONSENT_TOKEN_SECRET=<anon key>` makes the verifier a forgery oracle for anyone
+    who has loaded the consent page (the page embeds that key in its HTML) — and `sub` is the only
+    identity input on the token arm, so that is every account. Unit-level on purpose: the arm's
+    unavailability already has an end-to-end test, and the operator signal here is the REASON the
+    503 carries, which is what distinguishes "unset" from "set to something you must not reuse".
+    """
+    from tortoise.consent_token import consent_token_secret, consent_token_secret_problem
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    assert consent_token_secret() == _TEST_SECRET
+    assert consent_token_secret_problem() is None
+
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", _TEST_SECRET)
+    assert consent_token_secret() is None, "a reused key must not be accepted as the HMAC key"
+    problem = consent_token_secret_problem()
+    assert problem and "DEDICATED" in problem and "SUPABASE_SERVICE_ROLE_KEY" in problem, problem
+
+    # ⛔ …and the ANON key, which is the WORSE half (§2.3): it is public by construction, because the
+    # consent page embeds it — `hosted_api.py` reads `SUPABASE_ANON_KEY` into the page's
+    # `__SUPABASE_ANON_KEY__` placeholder, so it IS in this process's environment. An earlier
+    # version of this guard claimed it was not, and so left exactly this case unguarded (measured,
+    # review round 3).
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", _TEST_SECRET)
+    assert consent_token_secret() is None, "the PUBLIC anon key must never sign assertions"
+    problem = consent_token_secret_problem()
+    assert problem and "SUPABASE_ANON_KEY" in problem, problem
+
+
+def test_a_guessably_short_secret_is_not_a_provisioned_arm(monkeypatch) -> None:
+    """§2.3 — a key short enough to guess is the same forgery oracle as a reused one.
+
+    Measured before this guard: with `CONSENT_TOKEN_SECRET=a`, a token HMAC'd with `"a"` was
+    ACCEPTED and minted an authorization code. The floor is a length check, not an entropy
+    measurement — it catches the copy-paste-a-word class, which is the realistic mistake.
+    """
+    from tortoise.consent_token import consent_token_secret, consent_token_secret_problem
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", "a")
+    assert consent_token_secret() is None
+    problem = consent_token_secret_problem()
+    assert problem and "shorter" in problem, problem
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    assert consent_token_secret() == _TEST_SECRET
+    assert consent_token_secret_problem() is None
+
+    # The floor is measured in UTF-8 BYTES, so a multi-byte key with FEWER than 32 characters and
+    # 32+ bytes must stay ACCEPTED — the only direction the byte measure loosens, and a revert to
+    # `len(secret)` re-introduces a false refusal. This is 20 characters and 40 bytes.
+    multibyte = "\u00e9" * 20
+    assert len(multibyte) < 32 and len(multibyte.encode()) >= 32
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", multibyte)
+    assert consent_token_secret_problem() is None, (
+        "a 40-byte key was refused for being 20 characters — the floor is a byte measure")
+
+
+def test_a_padded_secret_is_not_a_provisioned_arm(monkeypatch) -> None:
+    """§2.3 — a padded value is UNPROVISIONED, because the minter does not strip it either.
+
+    Measured before this guard: `CONSENT_TOKEN_SECRET="  <40 k>\\n"` was accepted AND silently
+    normalised — `consent_token_secret()` returned the stripped value — while step 3's minter (the
+    BFF, TypeScript) reads `process.env.CONSENT_TOKEN_SECRET` verbatim. The two sides then HMAC
+    DIFFERENT keys: every redemption answers `401 invalid_token: signature does not verify`, i.e.
+    the whole step-4 flow is dead and the diagnosis blames the token instead of the key. Padding is
+    the normal result of `fly secrets set … < file` and of a pasted secret, so this is the
+    realistic operator mistake; refusing it names the fix at the first request instead of never.
+    """
+    from tortoise.consent_token import consent_token_secret, consent_token_secret_problem
+
+    for padded in (" " + _TEST_SECRET, _TEST_SECRET + "\n", "\t" + _TEST_SECRET + " "):
+        monkeypatch.setenv("CONSENT_TOKEN_SECRET", padded)
+        assert consent_token_secret() is None, (
+            f"a padded key {padded[:3]!r}… was accepted as the HMAC key — the operator's value "
+            "must never be silently normalised, because the minter does not normalise it")
+        problem = consent_token_secret_problem()
+        assert problem and "whitespace" in problem, problem
+
+    # …and the unpadded value is still exactly what is returned, byte-for-byte.
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    assert consent_token_secret() == _TEST_SECRET
+    assert consent_token_secret_problem() is None
+
+
+def test_a_padded_secret_turns_the_arm_off_end_to_end(bridge_client, mint_spy, bearer_ok,
+                                                      monkeypatch) -> None:
+    """The padded-secret refusal is a typed 503, not a 401 that blames the token."""
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", " " + _TEST_SECRET)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = _signed(_claim_set(bind), secret=_TEST_SECRET)
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 503, r.text
+    assert r.json()["error"] == "temporarily_unavailable", r.text
+    assert "whitespace" in r.json()["error_description"], r.text
+    assert mint_spy == [], "an unprovisioned arm must not mint"
+
+    # …and the arm being off must not take the bearer path with it.
+    ok = _post_bearer(tc, bind)
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_secret_that_is_not_utf8_encodable_is_not_a_provisioned_arm(monkeypatch) -> None:
+    """The `UnicodeEncodeError` arm exists so a lone surrogate is a 503, never a 500.
+
+    A surrogate in the ENV value (not in the token) reaches `len(secret.encode("utf-8"))`. Without
+    this arm the exception escapes `consent_token_secret_problem()` → `verify_consent_token` → the
+    handler's token-arm catch-all, which maps only `RuntimeError` to 503 and everything else to
+    `500 server_error` — on the endpoint whose contract is "never a 500 on unauthenticated input".
+    Deleting the `try/except` the suite would otherwise stay green (measured, review round 4).
+    """
+    from tortoise.consent_token import consent_token_secret, consent_token_secret_problem
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", "\udcff" * 32)
+    assert consent_token_secret() is None
+    problem = consent_token_secret_problem()
+    assert problem and "encodable" in problem, problem
+
+
+def test_a_surrogate_secret_turns_the_arm_off_end_to_end(bridge_client, mint_spy, bearer_ok,
+                                                         monkeypatch) -> None:
+    """End to end: the surrogate-secret arm answers a typed 503, never a 500."""
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", "\udcff" * 32)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    # The secret check precedes the parse, so no valid signature is needed to reach it.
+    r = _post_token(tc, "a.b.c", bind)
+    assert r.status_code == 503, r.text
+    assert r.json()["error"] == "temporarily_unavailable", r.text
+    assert "encodable" in r.json()["error_description"], r.text
+    assert mint_spy == [], "an unprovisioned arm must not mint"
+
+
+def test_a_short_secret_turns_the_arm_off_end_to_end(bridge_client, mint_spy, bearer_ok,
+                                                    monkeypatch) -> None:
+    """§2.3 — a guessable key is a forged-`sub` oracle, so it is UNPROVISIONED, end to end.
+
+    Tokens are SIGNED, not encrypted: one legitimate token (any account holder can get one) is a
+    complete known-plaintext HMAC pair, so a low-entropy key is brute-forceable OFFLINE and the
+    attacker then mints `{"sub": <any user_id>}` — `sub` is the only identity input on this arm,
+    so that is account takeover. The unit test next door covers the predicate; this covers what a
+    caller actually sees: a typed 503, no mint, and the bearer path still working.
+    """
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", "x")
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = _signed(_claim_set(bind), secret="x")
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 503, r.text
+    assert r.json()["error"] == "temporarily_unavailable", r.text
+    assert "bytes" in r.json()["error_description"], r.text
+    assert mint_spy == [], "a guessable key must not mint"
+
+    # …and the arm being off must not take the bearer path with it.
+    ok = _post_bearer(tc, bind)
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_token_without_a_kid_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
+    """§2.1 puts `kid` in the header for rotation (§2.3); a mint without one is refused."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    r = _post_token(tc, _signed(_claim_set(bind), kid=""), bind)
+    assert r.status_code == 401, r.text
+    assert "kid" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+@pytest.mark.parametrize("overrides", [
+    # NaN: every ordering comparison is False for it, so without an explicit finiteness check
+    # `iat = exp = NaN` never expires, never trips the TTL bound, AND is never pruned out of the
+    # register (its stored expiry never arrives) — an immortal token, which is the one thing the
+    # TTL exists to stop, plus a permanently occupied register slot.
+    ({"iat": float("nan"), "exp": float("nan")}),
+    ({"iat": float("inf"), "exp": float("inf")}),
+])
+def test_a_non_finite_timestamp_is_refused(bridge_client, mint_spy, bearer_refuses,
+                                           overrides: dict) -> None:
+    """§2.2's TTL bound is only a bound if the numbers are real numbers."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = _signed(_claim_set(bind, **overrides))
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 401, r.text
+    assert mint_spy == []
+
+
+def test_a_token_that_is_not_base64url_is_refused_and_never_500s(
+        bridge_client, mint_spy, bearer_refuses) -> None:
+    """A LONE SURROGATE must be a typed refusal, not a 500 (#3026's class).
+
+    `json.loads` accepts a `\\ud800` JSON escape, and encoding that string raises
+    `UnicodeEncodeError`. Measured before the fix (review round 1): a `500 server_error` **plus** a
+    captured Sentry event per request, from an unauthenticated caller — an error-tracker flood on a
+    public endpoint, and a contradiction of this module's "never a 500" contract.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    # The case that reaches the SIGNATURE's own `.encode()`: a VALID header (alg/typ/kid are all
+    # checked before the signature) plus a payload segment carrying the surrogate. Without a
+    # charset check on every segment, that encode raises and the refusal becomes a 503 — typed, but
+    # the wrong answer to a malformed token, and one captured event per unauthenticated request.
+    header, payload_b64, signature = _signed(_claim_set(bind)).split(".")
+    malformed_payload = f"{header}.{payload_b64}\ud800.{signature}"
+
+    for token in ("\ud800", "a.\ud800.c", malformed_payload):
+        # Sent as a JSON ESCAPE in raw bytes: httpx refuses to encode a lone surrogate itself (which
+        # is why the first version of this test could not reach the server at all), while the AS's
+        # `json.loads` decodes the escape into exactly the str that used to 500.
+        payload = _consent_payload(tc, bind) | {"consent_token": token}
+        r = tc.post("/oauth/consent", content=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"})
+        assert r.status_code == 401, f"{token!r} must be a typed refusal: {r.status_code} {r.text}"
+        assert r.json()["error"] == "invalid_token", r.text
+    assert mint_spy == []
+
+
+@pytest.mark.parametrize("build,why", [
+    (lambda claims: _signed(claims, secret="not-the-configured-secret"), "wrong signing key"),
+    # RFC 7519 §6 — the unsecured JWT. A verifier that read `alg` from the header instead of
+    # requiring HS256 would accept a token anyone can write.
+    (lambda claims: _signed(claims, alg="none"), "alg: none"),
+    # Algorithm confusion: a header claiming an asymmetric alg while the signature is an HMAC.
+    (lambda claims: _signed(claims, alg="RS256"), "alg confusion"),
+    (lambda claims: _signed(claims, alg="HS512"), "alg substitution"),
+    (lambda claims: ".".join(_signed(claims).split(".")[:2]), "two segments"),
+    # The OTHER side of the same guard: the structure rule is `len == 3`, not `len >= 3`.
+    # A trailing segment must be REFUSED, not ignored — a verifier that ignores it
+    # disagrees with every other consumer about what the token IS, which is the
+    # differential a smuggling class starts from. Measured: with the guard weakened to
+    # `< 3` the whole file stayed green (`107 passed`) and `h.p.s.junk` verified, because
+    # `parts[3:]` is never looked at.
+    (lambda claims: _signed(claims) + ".junk", "four segments"),
+])
+def test_a_forged_token_is_refused(bridge_client, mint_spy, bearer_refuses, build, why: str) -> None:
+    """§2.1 — HMAC-SHA256 and nothing else; the signature is checked before any claim is read."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = build(_claim_set(bind))
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 401, f"{why}: {r.text}"
+    # ⛔ The status alone does not prove this test's subject: with the whole token arm reverted,
+    # all five cases still answered 401 — from the BEARER path (`bearer_refuses`), which never
+    # looked at the token. Measured in review round 2. `invalid_token` is the arm's own code.
+    assert r.json()["error"] == "invalid_token", f"{why}: {r.text}"
+    assert mint_spy == []
+
+
+def test_a_tampered_payload_is_refused(bridge_client, mint_spy, bearer_refuses) -> None:
+    """The signature must cover the payload — flipping a claim must not survive verification."""
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    header, _payload, signature = _signed(_claim_set(bind)).split(".")
+    forged = _seg(_claim_set(bind, user_id="smuggled") | {"sub": "someone-else"})
+    token = f"{header}.{forged}.{signature}"
+
+    r = _post_token(tc, token, bind)
+    assert r.status_code == 401, r.text
+    assert "signature" in r.json()["error_description"], r.text
+    assert mint_spy == []
+
+
+def test_a_replayed_jti_is_refused_and_only_one_code_is_ever_minted(bridge_client, mint_spy,
+                                                                   bearer_refuses) -> None:
+    """§2.2/§2.3 — `jti` is single-use, and a TTL is NOT a substitute for it.
+
+    Without the register one consent yields N authorization codes. The second request here is
+    otherwise IDENTICAL to the first (same binding, same flow), so the only thing that can refuse
+    it is the spent `jti` — and the mint count is what proves no second code was issued.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    first = _post_token(tc, token, bind)
+    assert first.status_code == 200, first.text
+    second = _post_token(tc, token, bind)
+    assert second.status_code == 401, second.text
+    assert "already" in second.json()["error_description"], second.text
+    assert len(mint_spy) == 1, "a replay must not mint a second authorization code"
+
+
+def test_a_request_refused_before_the_token_is_checked_does_not_spend_the_jti(
+        bridge_client, mint_spy, bearer_refuses) -> None:
+    """ORDER — the `jti` is spent at the mint, never at parse time (§2.3).
+
+    Burning the nonce on a request that could never mint would be a denial-of-service on the real
+    flow: anyone who can make the victim's browser send one malformed consent POST (an
+    unregistered `redirect_uri` is enough) would invalidate the token the page is about to use.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    refused = _post_token(tc, token, bind, redirect_uri="https://not-registered.example/cb")
+    assert refused.status_code == 400, refused.text
+    assert mint_spy == []
+
+    # ⛔ And the case the params-stage refusal CANNOT reach: a refusal of the ASSERTION itself.
+    # A verifier that spent the nonce while refusing (burn-at-verify) is invisible to the check
+    # above — `validate_authorize_params` never lets it run — and it is the same denial of service,
+    # from a request anyone can send: one bind-mismatch attempt would invalidate the token the page
+    # is about to use. Measured: the burn-at-verify mutant passed this test before this block.
+    _, other_challenge = _pkce()
+    mismatched = _post_token(tc, token, bind, code_challenge=other_challenge)
+    assert mismatched.status_code == 401, mismatched.text
+    assert mint_spy == []
+
+    # …and the third refusal that CAN be evaluated before the spend, but only if someone does:
+    # `_resolve_org` (inside the mint) parses the RFC 8707 `resource` and refuses a malformed one.
+    # That check is pure, so it runs first — a caller typo must not consume the consent.
+    bad_resource = _post_token(tc, token, bind, resource=f"{TEST_BASE}/nope")
+    assert bad_resource.status_code == 400, bad_resource.text
+    assert mint_spy == []
+
+    accepted = _post_token(tc, token, bind)
+    assert accepted.status_code == 200, (
+        "a refused assertion or resource must leave the token usable — the jti was spent too "
+        f"early: {accepted.text}")
+
+
+def test_a_mint_failure_after_the_spend_consumes_the_token_fail_closed(
+        bridge_client, monkeypatch, bearer_refuses) -> None:
+    """THE DOCUMENTED RESIDUAL, pinned so it cannot drift into an unstated claim.
+
+    The `jti` is recorded before the code is inserted (so one consent can never yield two codes),
+    and `issue_auth_code` can then still refuse — no active team, a suspended org, a transient
+    control-plane failure. Those consume the nonce. The honest consequences, both asserted here:
+    the first attempt reports the REAL cause, and the retry reports "already redeemed" — a
+    RE-MINT, never a re-login. If a later change makes the nonce recoverable, this test reds and
+    the docstring / spec §9 paragraph must be updated with it.
+    """
+    import tortoise.oauth as oauth_module
+    from tortoise.oauth import OAuthTemporarilyUnavailable
+
+    def _boom(cp, **kwargs):
+        raise OAuthTemporarilyUnavailable(
+            "Temporary control-plane failure — retry.")
+
+    monkeypatch.setattr(oauth_module, "issue_auth_code", _boom)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    first = _post_token(tc, token, bind)
+    assert first.status_code == 503, first.text
+    assert first.json()["error"] == "temporarily_unavailable", first.text
+
+    second = _post_token(tc, token, bind)
+    assert second.status_code == 401, second.text
+    assert "already" in second.json()["error_description"], second.text
+
+
+def test_an_unset_secret_leaves_the_bearer_path_working_and_the_token_arm_unavailable(
+        bridge_client, monkeypatch, mint_spy, bearer_ok) -> None:
+    """§9 step 2's additivity, measured: no secret → the arm is UNAVAILABLE, the bearer is intact.
+
+    This is the partially-provisioned state §8's checklist warns about (the BFF minting, the AS
+    without the secret). The token arm must fail CLOSED and TYPED — a 503 the page can act on,
+    never a 500 and never a silent fall-through to the bearer, which would answer "missing session
+    token" for a request that never had one.
+    """
+    monkeypatch.delenv("CONSENT_TOKEN_SECRET", raising=False)
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+    # minted while the secret existed — the token is well-formed and simply cannot be checked here
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind,
+                               secret=_TEST_SECRET)
+
+    unavailable = _post_token(tc, token, bind)
+    assert unavailable.status_code == 503, unavailable.text
+    assert unavailable.json()["error"] == "temporarily_unavailable", unavailable.text
+    assert mint_spy == [], "an unavailable arm must not mint"
+
+    worked = _post_bearer(tc, bind)
+    assert worked.status_code == 200, worked.text
+    assert mint_spy[0]["user_id"] == _U1
+
+
+def test_the_bearer_path_never_consults_the_token_arm(bridge_client, monkeypatch,
+                                                      mint_spy, bearer_ok) -> None:
+    """§9 step 2 is ADDITIVE — the bearer request must not reach the token machinery at all.
+
+    Proven by making the token functions explode: a bearer request that so much as calls them
+    fails here. Seeded with the secret PRESENT, so "the arm is configured" is not what keeps this
+    green.
+    """
+    from tortoise import consent_token
+    from tortoise.consent_token import (
+        ProcessLocalJtiStore,
+        configure_consent_jti_store,
+        reset_consent_jti_store,
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("the bearer path consulted the consent-token arm")
+
+    monkeypatch.setattr(consent_token, "verify_consent_token", _boom)
+
+    # ⛔ …and a SECOND, hoist-proof probe. Patching a module attribute above only works because the
+    # handler imports these names inside the function: hoisting that import to module scope (a
+    # behaviourally identical, lint-preferable refactor) would silently make it observe nothing —
+    # measured in review round 2, where a real regression stayed GREEN after the hoist. The store
+    # is resolved from the module global at CALL time, so a store that records use survives any
+    # import style. Assert on the observation, not on a side effect of the import.
+    consulted: list[str] = []
+
+    class _RecordingStore(ProcessLocalJtiStore):
+        async def consume(self, jti: str, expires_at: float) -> bool:
+            consulted.append(jti)
+            return await super().consume(jti, expires_at)
+
+    configure_consent_jti_store(_RecordingStore())
+    try:
+        tc, _ = bridge_client
+        client_id = _register_client(tc)["client_id"]
+        verifier, challenge = _pkce()
+        bind = _bind(client_id, challenge)
+
+        r = _post_bearer(tc, bind)
+        assert r.status_code == 200, r.text
+    finally:
+        reset_consent_jti_store()
+    assert consulted == [], "the bearer path reached the jti register — §9 step 2 is additive"
+
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    verifier, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    r = _post_bearer(tc, bind)
+    assert r.status_code == 200, r.text
+    tok = _exchange(tc, client_id=client_id, code=r.json()["code"], verifier=verifier)
+    assert tok.status_code == 200, tok.text
+
+
+@pytest.mark.parametrize("value", ["", "   ", False, 0, [], {}])
+def test_a_present_but_falsy_token_never_falls_back_to_the_bearer(
+        bridge_client, mint_spy, bearer_ok, value) -> None:
+    """§9 step 2 — a PRESENT token arm is the only identity input, even when its value is junk.
+
+    `consent_token = body.get("consent_token")` then `if consent_token is None:` is the only branch
+    that decides which identity source authenticates the request. `bearer_ok` seeds a session that
+    WOULD mint (verified below with `_post_bearer`), so a fall-through is observable as a 200
+    rather than as an accident of an unverifiable bearer — and the idiomatic rewrite
+    `if not consent_token:` turns every row here into exactly that fall-through: a request that
+    asserts an identity gets the SESSION's code, which is the mixed-version shape §9's #3559
+    window says must never happen. Asserted on the arm's own error code, because the bearer path
+    also 401s.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)
+
+    # The control: the seeded session DOES mint when no token arm is present at all.
+    control = _post_bearer(tc, bind)
+    assert control.status_code == 200, control.text
+    assert len(mint_spy) == 1, "the bearer path must mint, or the fall-through is unobservable"
+    mint_spy.clear()
+
+    r = _post_token(tc, value, bind)
+    assert r.status_code == 401, r.text
+    assert r.json().get("error") == "invalid_token", (
+        f"a present-but-falsy consent_token ({value!r}) was not refused BY THE TOKEN ARM: "
+        f"{r.text}")
+    assert mint_spy == [], (
+        f"a request carrying consent_token={value!r} minted a code from the BEARER — the token "
+        "arm silently fell through to the session identity")
+
+
+def test_the_bound_redirect_uri_wins_over_a_relaxed_loopback_variant(bridge_client, mint_spy,
+                                                                    bearer_refuses) -> None:
+    """§2.2 + §9 step 2 — the two rules meet only in this case, so it is pinned.
+
+    `bind.redirect_uri` is compared with the AS's own normalisation, and for loopback that
+    normalisation IGNORES the port (RFC 8252 §7.3). When the request names a different port for
+    the same destination, the comparison passes — and §9 step 2 still says the mint takes the
+    **bound** value, so the code is bound to the URI the token approved rather than to whatever
+    was presented last. That direction is fail-closed: `/oauth/token` compares `redirect_uri`
+    exactly, so a divergent presentation can never redeem the code, and no code is ever issued
+    pointing at a destination the token did not name.
+    """
+    tc, _ = bridge_client
+    client_id = _register_client(tc)["client_id"]
+    _, challenge = _pkce()
+    bind = _bind(client_id, challenge)                     # …:8765/callback
+    token = mint_consent_token(user_id=_U1, email="u@example.com", bind=bind)
+
+    r = _post_token(tc, token, bind, redirect_uri="http://127.0.0.1:9999/callback")
+    assert r.status_code == 200, r.text
+    assert mint_spy[0]["redirect_uri"] == bind["redirect_uri"], (
+        "the mint must carry the token's bound redirect_uri (§9 step 2), not the presented one")
+    assert r.json()["redirect_uri"] == bind["redirect_uri"]
+    # ⛔ And `redirect_target` — the field the page actually NAVIGATES the browser to — must name
+    # the same URI. It is rebuilt from the registered URI, and an earlier version rebuilt it from
+    # the PRESENTED value: the response then told the page two different destinations, and the code
+    # (bound to the token's URI, compared EXACTLY by /oauth/token) would have been unredeemable
+    # after the user approved. Both fields now derive from the bound value.
+    assert r.json()["redirect_target"] == bind["redirect_uri"], (
+        "the browser would have been sent to a destination the code is not bound to: "
+        f"redirect_target={r.json()['redirect_target']!r} vs {bind['redirect_uri']!r}")
+
+
+def test_the_register_outlives_the_tokens_last_valid_instant() -> None:
+    """§2.2 — the replay window must be CLOSED at the token's last valid instant, not half-open.
+
+    The verifier refuses an expired token only when `exp + LEEWAY < now`, so at EXACT equality the
+    token still verifies. The register therefore has to keep the `jti` at that instant; dropping it
+    on `<=` opens a (one-microsecond) replay hole and makes the class's own comment false. Driven
+    directly on the store, because no HTTP request can land on an exact expiry instant.
+    """
+    import asyncio
+
+    from tortoise.consent_token import CONSENT_TOKEN_LEEWAY_S, ProcessLocalJtiStore
+
+    frozen = 1_000_000.0
+    store = ProcessLocalJtiStore(clock=lambda: frozen)
+    # The store keys the entry on `exp + LEEWAY`, so this expiry puts the entry's own expiry at
+    # EXACTLY `now` — the instant the verifier still accepts the token (`exp + LEEWAY < now` is
+    # false) and the instant a `<=` prune would have already forgotten it.
+    expires_at = frozen - CONSENT_TOKEN_LEEWAY_S
+    assert asyncio.run(store.consume("boundary-jti", expires_at)) is True
+    assert asyncio.run(store.consume("boundary-jti", expires_at)) is False, (
+        "the jti was pruned at the very instant the token is still valid, so it could be replayed")
+
+
+def test_no_module_in_the_package_mints_a_consent_token() -> None:
+    """§2.3 / §9 step 3 — the mint belongs on the SESSION origin (a BFF route), never here.
+
+    `mint_consent_token` exists as the reference inverse so the wire format has two checkable
+    sides. Shipping it from a Python route would let the service that VERIFIES the assertion also
+    MINT it, which is exactly the split §2.3 exists to preserve (the mint must run where the
+    session cookie is). That rule was prose in a docstring — and a docstring cannot fail — so it is
+    executed here. An AST scan, not a grep: a comment or a log line naming the function is not a
+    false positive, and an alias or attribute call is not a false negative.
+
+    Its LIMIT, stated because a guard that overstates its reach is worse than none: it sees STATIC
+    references — `from ... import`, `import ... as`, `module.attr`, a bare name — and not a name
+    assembled at runtime (`getattr(mod, "mint_" + "consent_token")` escapes it, measured in review).
+    That is the right scope for the purpose: catching an innocent route addition. A deliberate
+    obfuscation is a code-review matter, not a scan's.
+    """
+    import ast
+
+    offenders: list[str] = []
+    for path in sorted((REPO / "tortoise").rglob("*.py")):
+        # By PATH, not basename: a module that merely SHARES the name must not be exempt.
+        if path == REPO / "tortoise" / "consent_token.py":
+            continue                      # the reference implementation itself
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            hit = (
+                (isinstance(node, ast.ImportFrom)
+                 and any(a.name == "mint_consent_token" for a in node.names))
+                or (isinstance(node, ast.Import)
+                    and any("mint_consent_token" in a.name for a in node.names))
+                or (isinstance(node, ast.Attribute) and node.attr == "mint_consent_token")
+                or (isinstance(node, ast.Name) and node.id == "mint_consent_token")
+            )
+            if hit:
+                offenders.append(f"{path.relative_to(REPO)}:{node.lineno}")
+
+    assert offenders == [], (
+        "a consent token may only be minted on the session origin (§2.3/§9 step 3) — this package "
+        f"must not mint one: {offenders}")
+
+
+def test_the_contract_in_the_code_is_the_contract_in_the_spec() -> None:
+    """The verifier and the spec must state the SAME contract, or "the spec is the authority"
+    is unenforceable: a value changed in one place would leave the other describing a different
+    token.
+
+    Also pins that each guarantee's source section is cited IN THE MODULE (the brief's own
+    requirement: the next reader checks the code against the contract, not against prose), so a
+    rewrite cannot quietly drop the mapping.
+    """
+    from tortoise import consent_token as ct
+
+    spec = SPEC.read_text()
+    assert ct.BIND_FIELDS == ("client_id", "redirect_uri", "code_challenge", "state"), \
+        "the bind set must be exactly the four params §2.1 names — in the spec's order"
+    assert ct.CONSENT_TOKEN_AUDIENCE == "tortoise-consent"
+    assert ct.CONSENT_TOKEN_TTL_S == 120
+    assert ct.CONSENT_TOKEN_LEEWAY_S == 30
+
+    # …and both halves of each fact still appear in the spec.
+    for clause in ('"client_id", "redirect_uri", "code_challenge", "state"',
+                   '"aud": "tortoise-consent"',
+                   "CONSENT_TOKEN_TTL_S",
+                   "120 s",
+                   "30 s leeway",
+                   "CONSENT_TOKEN_SECRET",
+                   "must equal the configured session origin"):
+        assert clause in spec, f"§2 no longer states {clause!r}"
+
+    source = (REPO / "tortoise" / "consent_token.py").read_text()
+    for section in ("§2.1", "§2.2", "§2.3", "§9"):
+        assert section in source, (
+            f"tortoise/consent_token.py no longer cites {section} — the guarantee it implements "
+            "is then checkable only against the code's own prose")
