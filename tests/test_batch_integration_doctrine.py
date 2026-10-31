@@ -1181,14 +1181,28 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
     # `echo`'s 0, not a halt. Without that split, `[ "…" ] || [ "…" ] || { echo "must
     # exit 1"; }` passed — the canonical trap `_QUOTED`'s docstring names, and the exact
     # "refusal that only echoes" class this module's ledger claims to kill.
+    # The halt must be REACHABLE from the subject's failure, and the text does not carry
+    # reachability: `{ (exit 1); }` exits a CHILD (these fences have no `set -e`), and
+    # `{ :; } || { …; exit 1; }` leaves the real halt as dead code — both were measured
+    # GREEN, and both leave the fence running past RC=137 into the STALE
+    # /tmp/batch-junit.xml (pytest truncates it only in pytest_sessionfinish), so a killed
+    # run could still certify BATCH-GREEN for a tree no run has seen. Pin the TAIL: the
+    # halt is the LAST thing on the line, and a `{…}` body may hold only echo/printf
+    # segments before its final non-zero `exit`.
     _STATUS_RC = re.compile(
-        r'^\[\s*"\$RC"\s+-eq\s+0\s*\]\s*\|\|\s*\[\s*"\$RC"\s+-eq\s+1\s*\]\s*\|\|\s*\{'
+        r'^\[\s*"\$RC"\s+-eq\s+0\s*\]\s*\|\|\s*\[\s*"\$RC"\s+-eq\s+1\s*\]\s*\|\|'
     )
-    _STATUS_HALT = re.compile(r"\{[^}]*exit\s+[1-9][^}]*\}\s*$")
+    _STATUS_TAIL = re.compile(
+        r"^\s*(?:\{\s*(?:(?:echo|printf)\s+[^;{}()]*;\s*)*"
+        r"exit\s+[1-9]\d*\s*;?\s*\}|exit\s+[1-9]\d*)\s*$"
+    )
     bad_status = [
         c
         for c in status_checks
-        if not (_STATUS_RC.match(_code(c)) and _STATUS_HALT.search(_unquoted(_code(c))))
+        if not (
+            (head := _STATUS_RC.match(_code(c)))
+            and _STATUS_TAIL.match(_unquoted(_code(c))[head.end() :])
+        )
     ]
     assert not bad_status, (
         "the status predicate must accept EXACTLY 0 and 1 — any additional accepted code "
