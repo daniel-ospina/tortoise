@@ -7550,20 +7550,43 @@ class TestCompactReferenceClosure:
         assert "dev:issue" not in hit, list(hit)
 
     def test_every_declared_endpoint_of_a_selected_pack_is_closed(self):
-        """The general guard over the REAL catalog: for every namespace that
-        declares a cross-pack endpoint, a story that selects it gets every one
-        of its `.` endpoints in the list. A new pack (or a new relation) needs
-        no engine edit — only the endpoint must be a kind the brief carries."""
+        """The general guard over the REAL catalog: for every KIND that declares
+        a namespaced relation partner, a story that selects it gets every one of
+        its partners in the list. A new pack (or a new relation) needs no engine
+        edit — only the partner must be a kind the brief carries.
+
+        Keyed by kind (#9733) and NOT by declaring namespace: `pack_refs` has no
+        namespace rows to iterate, and the old namespace-shaped loop also read
+        `_PACK_TRIGGERS[f"{ns}:"][0]` directly — a `KeyError` for any
+        ref-declaring namespace with no trigger row, a catalog state the engine
+        explicitly supports and injects whole (extractor_v2.py `_PACK_TRIGGERS`
+        read, ``triggers is None``). That guard would then have gone red for a
+        non-defect on the next such pack, and the cheapest way to green it is to
+        add an engine trigger row — exactly the per-pack engine edit this branch
+        documents as a deliberate decision. A kind in a trigger-less namespace is
+        selected whole, so it is exercised by asserting the partner arrives, not
+        by synthesising a story for it.
+        """
         m = v2.build_master_list()
         assert m["pack_refs"], "fixture: the catalog must declare endpoints"
-        for ns, refs in m["pack_refs"].items():
-            trigger = v2._PACK_TRIGGERS[f"{ns}:"][0]
-            story = f"the {trigger} was reviewed last week"
+        empty = v2._select_pack_kinds(
+            "zzz no trigger word at all zzz", m["pack_kinds"])
+        assert set(empty) == set(m["pack_kinds"]), "fixture: expected fallback"
+        for kind, partners in m["pack_refs"].items():
+            triggers = v2._PACK_TRIGGERS.get(f"{kind.split(':')[0]}:")
+            if triggers is None:
+                # trigger-less namespace: injected whole, closure is moot
+                continue
+            story = f"the {triggers[0]} was reviewed last week"
             hit = v2._select_pack_kinds(story, m["pack_kinds"], m["pack_refs"])
-            assert [k for k in hit if k.startswith(f"{ns}:")], (ns, story, hit)
-            for ref in refs:
-                if ref in m["pack_kinds"]:
-                    assert ref in hit, (ns, ref, story)
+            if kind not in hit:
+                # not every kind of a selected namespace carries its namespace's
+                # trigger word; the closure is about selected kinds, so a kind
+                # the story did not reach makes no claim here.
+                continue
+            for partner in partners:
+                if partner in m["pack_kinds"]:
+                    assert partner in hit, (kind, partner, story)
 
     def test_a_reference_from_an_unselected_pack_is_not_added(self):
         """Closure follows the SELECTION, not the catalog: a pack the story did
@@ -7581,10 +7604,104 @@ class TestCompactReferenceClosure:
         has no such kind to add, and must not raise (the same direction as
         every other branch in the selector)."""
         pack_kinds = {"portfolio:mandate": "m", "dev:issue": "i"}
-        refs = {"portfolio": ["venture:investment"], "ghost": ["gone:kind"]}
+        refs = {"portfolio:mandate": ["venture:investment"],
+                "dev:issue": ["gone:kind", 7, None]}
         hit = v2._select_pack_kinds(
             "the investment mandate", pack_kinds, refs)
         assert hit == {"portfolio:mandate": "m"}, hit
+
+    def test_the_closure_iterates_to_a_fixpoint(self):
+        """A kind the closure ADDS brings the partners of its own declarations.
+
+        This is the P1 a fresh-context reviewer left open on the first cut of
+        this fix, which keyed `pack_refs` by declaring NAMESPACE and kept only
+        foreign refs ("a same-namespace partner is already selected with it").
+        That premise is false the moment a namespace is selected PARTIALLY —
+        which is exactly what co-selecting one foreign kind produces. Measured
+        on the real catalog at that head: a `dev` story gained
+        `product-strategy:feature` and nothing else of `product-strategy`, so
+        five of that namespace's own declared edges became half-offered and the
+        metric the fix exists for went 2 → 6 (WORSE for `dev`).
+        """
+        m = v2.build_master_list()
+        hit = v2._select_pack_kinds(
+            "deploy the hotfix and fix the CI test failure",
+            m["pack_kinds"], m["pack_refs"])
+        # the foreign kind the first hop adds…
+        assert "product-strategy:feature" in hit
+        # …and, transitively, every partner of ITS declared edges.
+        for partner in m["pack_refs"]["product-strategy:feature"]:
+            assert partner in hit, (partner, sorted(hit))
+        # narrowing is still not the all-packs fallback
+        assert set(hit) != set(m["pack_kinds"])
+
+    def test_no_relation_is_left_half_offered(self):
+        """The METRIC the whole fix exists for, over the real catalog.
+
+        A relation is half-offered when exactly one of its two namespaced
+        endpoints is in the narrowed list — the "closed vocabulary its own
+        declarations cannot be spelled in" state, which is the defect #9733
+        names. Two-sided: the trigger words ALONE leave relations half-offered
+        (so the assertion is not vacuous), and the closure leaves NONE — for
+        every shipped namespace that is story-selected.
+
+        Reads the pairings off the BRIEF (`pack_refs`), not off a second YAML
+        parse, so it cannot drift from what the selector actually consumes.
+        """
+        m = v2.build_master_list()
+        pack_kinds, refs = m["pack_kinds"], m["pack_refs"]
+        # every declared pairing, both directions, restricted to kinds offered
+        # by the brief (a brief-gated graph simply has fewer)
+        pairs = set()
+        for kind, partners in refs.items():
+            if kind not in pack_kinds:
+                continue
+            for partner in partners:
+                if partner in pack_kinds:
+                    pairs.add((kind, partner))
+        assert pairs, "fixture: the catalog must declare namespaced pairings"
+
+        def half_offered(sel):
+            return sum(1 for a, b in pairs if (a in sel) != (b in sel))
+
+        # `must_discriminate` is False where the namespace's pairings are ALL
+        # intra-namespace (`marketing`: campaign→content→channel, all
+        # `marketing:*`): a namespace that selects on its own trigger words
+        # selects its every kind, so no relation can be half-offered and the
+        # pre-fix side is trivially zero. That is a property of the catalog, not
+        # a hole — the discriminating namespaces are the ones with a FOREIGN
+        # pairing, and there the pre-fix list must be visibly broken.
+        stories = {
+            "deploy the hotfix and fix the CI test failure": ("dev", True),
+            "the board reviewed the investment mandate last week":
+                ("portfolio", True),
+            "our product feature addresses a customer segment":
+                ("product-strategy", True),
+            "the campaign ran on a new channel for the audience":
+                ("marketing", False),
+        }
+        regressed = {}
+        for story, (ns, must_discriminate) in stories.items():
+            pre = v2._select_pack_kinds(story, pack_kinds)
+            if must_discriminate:
+                assert half_offered(pre) > 0, (
+                    f"{ns}: the trigger words alone leave NO half-offered "
+                    f"relation — this story stopped discriminating, so the "
+                    f"assertion below is vacuous for it")
+            else:
+                assert half_offered(pre) == 0, (
+                    f"{ns} was recorded as intra-namespace-only; it now has a "
+                    f"foreign pairing and must discriminate: "
+                    f"{sorted((a, b) for a, b in pairs if (a in pre) != (b in pre))}")
+            post = v2._select_pack_kinds(story, pack_kinds, refs)
+            if half_offered(post):
+                regressed[ns] = sorted(
+                    (a, b) for a, b in pairs if (a in post) != (b in post))
+            # …and it is still the NARROWING, not the all-packs fallback.
+            assert set(post) != set(pack_kinds), (ns, "all-packs fallback")
+        assert not regressed, (
+            "the closure left a declared relation unspellable: "
+            f"{regressed}")
 
     def test_nothing_matched_still_returns_everything(self):
         """The all-packs fallback returns before the closure runs — it is
@@ -7604,8 +7721,8 @@ class TestCompactReferenceClosure:
         `product-strategy: [dev]` and `portfolio: [venture]` all declare one,
         and `dev` ↔ `product-strategy` is a CYCLE. Transitive namespace
         closure would therefore collapse the narrowing compact mode exists for:
-        every `dev:` story would pull dev+product-strategy+pm, and a
-        `marketing:` story would pull 35 of the 47 shipped kinds.
+        every `dev:` story would pull dev+product-strategy+pm (29), and a
+        `marketing:` story would pull 33 of the 47 shipped kinds.
 
         Pinned so a later "generalise it" change is visible rather than silent:
         these kinds are referenced by NO selected pack's endpoint, so their

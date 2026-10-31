@@ -660,9 +660,11 @@ class TestClashRules:
         pack_kinds, refs = master["pack_kinds"], master["pack_refs"]
         # The declaration the fix honours, read from the manifest rather than
         # from memory: `venture` is the pack's declared dependency, and the
-        # referenced endpoint lives in that namespace.
+        # referenced endpoint lives in that namespace. `pack_refs` is keyed by
+        # KIND (#9733), so the row is read off the declaring kind itself.
         assert list(pack.depends_on) == ["venture"]
-        assert refs[NS] == ["venture:investment"], refs.get(NS)
+        assert refs["portfolio:valuationMark"] == ["venture:investment"], (
+            refs.get("portfolio:valuationMark"))
 
         for mention in _PACK_TRIGGERS[f"{NS}:"]:
             story = f"the board reviewed the {mention} last week"
@@ -753,9 +755,15 @@ def _strip_portfolio(table: dict) -> dict:
             n: g for n, g in gran.items() if n != NS}
     refs = out.get("pack_refs")
     if isinstance(refs, dict):
+        # #9733: `pack_refs` is keyed by KIND (`portfolio:valuationMark`), not by
+        # namespace, so this pack's contribution is both its own kinds as KEYS
+        # (each of which names partners) and its kinds as PARTNERS inside
+        # another pack's row. Treating either half as untouched would leave one
+        # of this pack's entries in place and make "nothing else moved" read as
+        # false for the wrong reason.
         out["pack_refs"] = {
-            n: [r for r in row if not str(r).startswith(f"{NS}:")]
-            for n, row in refs.items() if n != NS}
+            k: [r for r in row if not str(r).startswith(f"{NS}:")]
+            for k, row in refs.items() if not k.startswith(f"{NS}:")}
         out["pack_refs"] = {n: row for n, row in out["pack_refs"].items() if row}
     return out
 

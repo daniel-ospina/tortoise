@@ -39,8 +39,8 @@ from tortoise.commit_schema import EVENT_KINDS as _GATE_EVENT_KINDS
 RESERVED_BRIEF_KEYS = frozenset({"memory_granularity", "pack_hints", "pack_refs"})
 
 
-def _relation_endpoint_refs(raw: object, ns: str) -> list[str]:
-    """The FOREIGN kind names a manifest's declared relations point at (#9733).
+def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
+    """``{kind: [every kind its own declared relations pair it with]}`` (#9733).
 
     Compact-mode story selection (``extractor_v2._select_pack_kinds``) narrows
     the PACK KINDS list to the namespaces whose trigger words matched the story,
@@ -51,36 +51,61 @@ def _relation_endpoint_refs(raw: object, ns: str) -> list[str]:
     and no ``portfolio:`` trigger word is also a ``venture:`` trigger — so a
     portfolio story lost the very position kind the mark values.
 
+    ⛔ **Keyed by KIND and UNDIRECTED, including same-namespace partners.** The
+    first cut of this fix keyed by declaring NAMESPACE and kept only foreign
+    refs, on the premise "a same-namespace partner is already selected with it".
+    That premise is false the moment a namespace can be selected PARTIALLY —
+    which is exactly what co-selecting one foreign kind produces: a `dev` story
+    gained `product-strategy:feature` but no other `product-strategy` kind, so
+    five of that namespace's own declared edges became half-offered (measured:
+    2 → 6, i.e. the fix made the metric it exists for WORSE for `dev`). A
+    relation is emittable only when BOTH endpoints are offered, so the closure
+    is over the pairing itself: whichever endpoint is selected pulls the other.
+
     Collected from the two declaration sites that name a KIND on both sides of a
     typed edge: ``ontology.relations[].fromKind/toKind`` and
     ``extraction.relationTemplates[].fromKind/toKind``. Kind-to-kind prose
     (``nearMisses``, descriptions) is deliberately NOT collected: prose mentions
     a kind, an endpoint IS one — only the latter needs vocabulary to be
-    emittable.
+    emittable. The legacy ``from``/``to`` relation spelling is likewise not
+    read: it carries ENTITY TYPES (``Object``/``Subject``), never a namespaced
+    kind (``pack_registry`` dataclass comment).
 
-    Only namespaced refs into a DIFFERENT pack are returned. A bare name
-    resolves against the declaring pack itself (its kinds are already selected
-    with it), and a ``core:`` ref names the always-rendered core vocabulary.
+    Bare names and ``core:`` refs are dropped: a bare name resolves against the
+    declaring pack's own namespace and a ``core:`` kind is always rendered.
     First-seen order, de-duplicated; shape is NOT trusted — this reads raw YAML,
     so a malformed section degrades to nothing rather than raising (the manifest
     validator reports it).
     """
     if not isinstance(raw, dict):
-        return []
-    out: list[str] = []
-    seen: set[str] = set()
+        return {}
+    out: dict[str, list[str]] = {}
 
-    def _add(ref: object) -> None:
-        if not isinstance(ref, str):
+    def _add(kind: str, partner: object) -> None:
+        if not isinstance(partner, str):
             return
-        ref = ref.strip()
-        if ":" not in ref:
-            return  # bare ⇒ this pack's own namespace (or a core bare kind)
-        target_ns = ref.split(":", 1)[0]
-        if not target_ns or target_ns in (ns, "core") or ref in seen:
+        partner = partner.strip()
+        if ":" not in partner:
+            return  # bare ⇒ the declaring namespace, or a core bare kind
+        target_ns = partner.split(":", 1)[0]
+        if not target_ns or target_ns == "core":
+            return  # core is rendered on every path, always spellable
+        row = out.setdefault(kind, [])
+        if partner not in row:
+            row.append(partner)
+
+    def _pair(a: object, b: object) -> None:
+        # both sides, so the map is undirected: either endpoint catches the other
+        if not isinstance(a, str) or ":" not in a:
             return
-        seen.add(ref)
-        out.append(ref)
+        a = a.strip()
+        if not a or a.split(":", 1)[0] in ("", "core"):
+            return
+        _add(a, b)
+        if isinstance(b, str) and ":" in b:
+            b = b.strip()
+            if b and b.split(":", 1)[0] not in ("", "core"):
+                _add(b, a)
 
     onto = raw.get("ontology")
     onto = onto if isinstance(onto, dict) else {}
@@ -88,16 +113,14 @@ def _relation_endpoint_refs(raw: object, ns: str) -> list[str]:
     for rel in (relations if isinstance(relations, list) else []):
         if not isinstance(rel, dict):
             continue
-        _add(rel.get("fromKind"))
-        _add(rel.get("toKind"))
+        _pair(rel.get("fromKind"), rel.get("toKind"))
     ext = raw.get("extraction")
     templates = (ext.get("relationTemplates")
                  if isinstance(ext, dict) else None)
     for tpl in (templates if isinstance(templates, list) else []):
         if not isinstance(tpl, dict):
             continue
-        _add(tpl.get("fromKind"))
-        _add(tpl.get("toKind"))
+        _pair(tpl.get("fromKind"), tpl.get("toKind"))
     return out
 
 
@@ -289,7 +312,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     pack_hints: dict = {}
     #: #9733: the SAME gate and the SAME loop — a relation endpoint is
     #: pack-authored domain data like the kinds it belongs with, so an
-    #: uninstalled pack's references must not reach the prompt either.
+    #: uninstalled pack's references must not reach the prompt either. Keyed by
+    #: KIND (not by declaring namespace) and merged across packs, because the
+    #: closure that consumes it walks kinds: see ``_relation_endpoint_refs``.
     pack_refs: dict = {}
     for ns, path in ns_files.items():
         if _gate is not None and ns not in _gate:
@@ -301,9 +326,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
         hints = _extraction_hints(raw.get("extraction"))
         if hints:
             pack_hints[ns] = hints
-        refs = _relation_endpoint_refs(raw, ns)
-        if refs:
-            pack_refs[ns] = refs
+        for kind, partners in _relation_endpoint_refs(raw).items():
+            row = pack_refs.setdefault(kind, [])
+            row.extend(p for p in partners if p not in row)
 
     # #2031: per-tenant custom packs (hosted) — the SAME compile loop over
     # the tenant's :PackManifest YAMLs (graph-native, not filesystem).
@@ -364,9 +389,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                 hints = _extraction_hints(raw.get("extraction"))
                 if hints:
                     pack_hints[ns] = hints
-                refs = _relation_endpoint_refs(raw, ns)
-                if refs:
-                    pack_refs[ns] = refs
+                for kind, partners in _relation_endpoint_refs(raw).items():
+                    row = pack_refs.setdefault(kind, [])
+                    row.extend(p for p in partners if p not in row)
             except Exception:  # noqa: BLE001, RUF100 — never let one node
                 continue  # take down the whole tenant's vocabulary
 
@@ -402,12 +427,13 @@ def compile_value_brief(packs_dir: Path | str | None = None,
             # the SINGLE documented pack→extractor seam stays single. RESERVED —
             # ``_object_kind_vocab`` skips it, so it never reads as an objectKind.
             "pack_hints": pack_hints,
-            # #9733: ``{declaring namespace: [foreign `ns:kind` an own relation
-            # endpoint names]}``, so compact-mode story selection can co-select
-            # exactly the kinds a SELECTED pack's declarations reference.
-            # RESERVED for the same reason — it names the vocabulary, it is not
-            # in it. Absent-equivalent (``{}``) for a catalog where no pack
-            # declares a cross-pack relation endpoint.
+            # #9733: ``{kind: [every kind its own declared relations pair it
+            # with]}`` — the SAME shape the closure walks, so compact-mode
+            # story selection can co-select exactly the kinds a SELECTED
+            # pack's declarations reference, to a fixpoint.
+            # RESERVED for the same reason ``pack_hints`` is — it names the
+            # vocabulary, it is not in it. Absent-equivalent (``{}``) for a
+            # catalog where no pack declares a cross-pack relation endpoint.
             "pack_refs": pack_refs}
 
 

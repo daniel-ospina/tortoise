@@ -979,13 +979,17 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict,
     valuation mark exists to value.
 
     ``pack_refs`` is the brief's reserved ``pack_refs`` section
-    (``{declaring ns: [foreign `ns:kind` an own relation endpoint names]}``,
-    built by ``value_extractor._relation_endpoint_refs``). A referenced kind is
-    added IFF the story already selected its declaring pack AND the kind is in
-    ``pack_kinds`` — a graph-gated brief that does not install the dependency
-    simply has nothing to add (fail-open, the same direction as every other
-    branch here). The all-packs fallback returns before this runs: it is
-    already the whole vocabulary.
+    (``{kind: [every kind its own declared relations pair it with]}``, built by
+    ``value_extractor._relation_endpoint_refs``). A partner is added IFF the
+    story already selected a kind that declares the pairing AND the partner is
+    in ``pack_kinds``, and the closure is iterated to a FIXPOINT over the kinds
+    it just added — a foreign kind arrives with the kinds its OWN declarations
+    point at, or the list offers a kind and forbids every kind its declared
+    edges name (the defect this fix exists to remove, one namespace deeper). A
+    graph-gated brief that does not install the dependency simply has nothing to
+    add (fail-open, the same direction as every other branch here). The
+    all-packs fallback returns before this runs: it is already the whole
+    vocabulary.
 
     ⚠️ Why the CLOSURE OVER REFERENCES and not over the manifest's
     `depends_on` list, which is how #9733 was filed. Measured at this head, the
@@ -995,12 +999,16 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict,
     of them form a CYCLE (`dev` ↔ `product-strategy`), so transitively
     co-selecting whole dependency NAMESPACES collapses the narrowing this
     function exists for — a `marketing:` story would pull
-    marketing+product-strategy+dev+pm (35 of the 47 shipped kinds), and every
-    `dev:` story would pull dev+product-strategy+pm. The kinds a selected pack
-    actually references are the ones whose absence makes a declared relation
-    unemittable, and they are named by the declarations themselves — so the
-    closure is taken over THOSE, which costs one line for a dev or
-    product-strategy selection and one for portfolio (`venture:investment`).
+    marketing+product-strategy+dev+pm (33 of the 47 shipped kinds), and every
+    `dev:` story would pull dev+product-strategy+pm (29). The kinds a selected
+    pack actually references are the ones whose absence makes a declared
+    relation unemittable, and they are named by the declarations themselves — so
+    the closure is taken over THOSE. Measured over the real catalog, the
+    fixpoint leaves every story narrow (7-20 of 47 kinds) and leaves ZERO
+    half-offered relations — a relation is half-offered when exactly one of its
+    two namespaced endpoints is in the list, i.e. exactly the unspellable state
+    this fix exists to remove; ``TestCompactReferenceClosure
+    ::test_no_relation_is_left_half_offered`` pins the metric.
     """
     if not story:
         return dict(pack_kinds)
@@ -1023,12 +1031,20 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict,
             selected[k] = v
     if not selected:
         return dict(pack_kinds)  # nothing matched → all (safe)
-    # #9733: reference closure over the SELECTED packs' declared endpoints.
+    # #9733: reference closure over the SELECTED kinds' declared pairings,
+    # iterated to a fixpoint — a kind added by the closure brings the kinds ITS
+    # declarations name, or the list offers a kind and forbids the partners of
+    # its own declared edges (the same defect, one namespace deeper: before the
+    # fixpoint, a `dev` story gained `product-strategy:feature` and none of that
+    # namespace's edgemates, taking half-offered relations 2 → 6).
     refs = pack_refs if isinstance(pack_refs, dict) else {}
-    for ns in sorted({k.split(":")[0] for k in selected}):
-        for ref in refs.get(ns) or ():
-            if ref in pack_kinds and ref not in selected:
-                selected[ref] = pack_kinds[ref]
+    if refs:
+        worklist = list(selected)
+        while worklist:
+            for partner in refs.get(worklist.pop()) or ():
+                if partner in pack_kinds and partner not in selected:
+                    selected[partner] = pack_kinds[partner]
+                    worklist.append(partner)
     return selected
 
 
@@ -8562,10 +8578,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     runs UNCONDITIONALLY on every arm (the A/B holds it constant) and may
     deterministically rewire about_entities on the flag-off path — its
     result key reflects that run (``items_checked`` >= 1 whenever
-    about_entities exist on any arm); (b) compact mode keeps its
-    pre-existing story-threaded pack selection (``_select_pack_kinds``,
-    identical in main) — the byte-identity guarantee is pinned to the
-    default verbose render; (c) two ADDITIVE result keys (``chain_enforcer``
+    about_entities exist on any arm); (b) compact mode's story-threaded
+    pack selection (``_select_pack_kinds``) is deliberately NOT main-identical
+    since #9733: it co-selects the kinds a selected pack's own declared
+    relations pair with, to a fixpoint, so a compact render of a story that
+    selects a ref-declaring pack differs from main by those kinds. The
+    byte-identity guarantee stated above is pinned to the DEFAULT VERBOSE
+    render, which is unchanged; (c) two ADDITIVE result keys (``chain_enforcer``
     / ``classify_later``) are always present — only ``classify_later`` is
     an empty block when the flag is off.
     When set (or the env toggle is on), the stage order becomes
