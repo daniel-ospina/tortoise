@@ -158,10 +158,13 @@ def keyword_lane(monkeypatch):
     The ``<line>`` is printed by pytest at emission and is deliberately NOT
     pinned here: ``origin/main`` merges move ``tortoise/sdk.py`` (the previous
     numeric citations in this docstring went 610 lines stale on one merge,
-    which is a claim that can only re-stale). The three seams this docstring
-    cites are therefore named by SOURCE SNIPPET in ``_SDK_ANCHORS`` below, and
-    ``test_the_sdk_anchors_this_docstring_cites_still_resolve`` proves each one
-    still exists — a rename reds it, a re-ordering does not.
+    which is a claim that can only re-stale). The seams this docstring rests
+    on are therefore named by SOURCE SNIPPET in ``_SDK_ANCHORS`` below —
+    ``stand_down_flag`` and ``embedded_gate`` quoted by name above,
+    ``stand_down_warning`` quoted verbatim in the reproduction block, and
+    ``arm_gate_flag`` as the read the stand-down keys on — and
+    ``test_the_sdk_anchors_this_docstring_cites_still_resolve`` proves each of
+    those four still exists — a rename reds it, a re-ordering does not.
 
     A4 itself is provably inert without aliases (``_search_keys_prf_expansion``
     returns ``None`` — "nothing to expand" — and the caller keeps the ORIGINAL

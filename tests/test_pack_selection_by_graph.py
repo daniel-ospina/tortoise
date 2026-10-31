@@ -455,6 +455,12 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     `hosted_api._registry_anchor()` — the exact helper `_org_node` uses. That is
     what this guard asserts, and it is the only thing this guard asserts.
 
+    WHICH SEEDERS ARE COVERED (#10424 review P2): the two that write a Team and
+    then hand it to the app — `_seed_org` and `_seed_create_team`, each calling
+    this guard before its own `sdk.close()`. `_seed_member` writes no Team and
+    is incidentally covered by ordering (it only ever runs after `_seed_org`,
+    whose guard has already pinned the anchor), so it takes neither line.
+
     ⛔ THE TEARDOWN'S OWN ARTIFACTS ARE NOT THE DISCRIMINATOR, and an earlier
     revision of this docstring was wrong to name them (#10424 review P3,
     measured against `redislite/client.py`). It said the rows were lost because
@@ -609,8 +615,11 @@ def test_a_seeded_team_survives_the_seeder_that_wrote_it(monkeypatch):
     records, and this test pins what a reader can actually verify: the seeded
     Team is still visible through the app's OWN anchor after `gc.collect()`.
     The guard's read is what pins that second client; the close keeps the
-    release off the unguarded teardown path. Both halves stay load-bearing and
-    each alone keeps this green (measured at this head).
+    release off the unguarded teardown path. THIS test pins the GUARD, not the
+    `close()` half: the guard's anchor read is what makes the rows readable
+    here, and `close()`'s contribution is that the release does not tear down a
+    store the anchor is still on. It is the pre-fix shape (neither half) that
+    reds — see FAIL-ON below.
 
     FAIL-ON (MEASURED on `main`'s tree at `7a6301142`): with the seeder's SDK
     dropped rather than closed (#10424's pre-fix shape), the app's read lands on
@@ -639,12 +648,15 @@ def test_a_seeded_team_survives_the_seeder_that_wrote_it(monkeypatch):
         db_path = os.path.join(tmpdir, "sel-hold.db")
         with patched_tortoise_sdk(db_path):
             _seed_org(db_path, "t-sel-hold")
-            gc.collect()  # the seeder handles are out of scope by now
+            gc.collect()  # nothing else in this process may hold a handle
             assert _registry_team_rows(db_path, "t-sel-hold"), (
-                "the seeded team is GONE: the seeder's embedded server was "
-                "torn down when its last client went away, so `_org_node` "
-                "would answer 404 'Unknown organization' for a team this "
-                "test just wrote (#10424)"
+                "the seeded team is GONE: `_seed_org` released its handle and "
+                "that release ORPHANED the daemon (ephemeral socket dir "
+                "reclaimed while the server was still ALIVE), so the next "
+                "construction cannot join it and starts a second, EMPTY "
+                "server — `_org_node` would answer 404 'Unknown organization' "
+                "for a team this test just wrote. No teardown ran and no row "
+                "was deleted (#10424)"
             )
 
 
@@ -1324,6 +1336,17 @@ def _seed_create_team(db_path: str, org_id: str, *, tier: str = "solo",
         "MERGE (m:Membership {user_id:$u, org_id:$t}) "
         "SET m.status='active', m.role=$r",
         params={"u": user_id, "t": org_id, "r": role})
+    # #10424 review P2 — the SAME two lines `_seed_org` takes, in the same
+    # order and for the same reason. This is the file's THIRD Team-writer and
+    # without them it keeps the pre-fix shape verbatim (handle dropped at
+    # return), one function away from the guard that names the failure, so the
+    # invariant reads as file-wide while covering one of three seeders. The
+    # guard runs BEFORE the close so its read through the app's own anchor pins
+    # the store's second client; the close then takes the co-tenant path
+    # instead of tearing down the server `create_client`'s `TestClient(app)`
+    # is reading.
+    _assert_seed_visible(db_path, org_id)
+    sdk.close()
 
 
 def _act_as(tc, user_id: str, org_id: str) -> None:
