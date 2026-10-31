@@ -1175,11 +1175,21 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
     # fixed path /tmp/batch-junit.xml, which pytest truncates only in pytest_sessionfinish
     # and which the fence never clears: a killed run leaves the PREVIOUS report intact, so
     # Phase 4 would diff stale failure ids. The predicate must have exactly this shape.
+    # The HEAD is matched on the RAW line (quoting `"$RC"` in `_unquoted` would blank the
+    # very subject being compared, and was measured to red the honest document); the HALT
+    # is matched on the QUOTE-BLANKED line, because a message that only SAYS `exit 1` is
+    # `echo`'s 0, not a halt. Without that split, `[ "…" ] || [ "…" ] || { echo "must
+    # exit 1"; }` passed — the canonical trap `_QUOTED`'s docstring names, and the exact
+    # "refusal that only echoes" class this module's ledger claims to kill.
     _STATUS_RC = re.compile(
-        r'^\[\s*"\$RC"\s+-eq\s+0\s*\]\s*\|\|\s*\[\s*"\$RC"\s+-eq\s+1\s*\]'
-        r'\s*\|\|\s*\{[^}]*exit\s+[1-9][^}]*\}$'
+        r'^\[\s*"\$RC"\s+-eq\s+0\s*\]\s*\|\|\s*\[\s*"\$RC"\s+-eq\s+1\s*\]\s*\|\|\s*\{'
     )
-    bad_status = [c for c in status_checks if not _STATUS_RC.fullmatch(_code(c))]
+    _STATUS_HALT = re.compile(r"\{[^}]*exit\s+[1-9][^}]*\}\s*$")
+    bad_status = [
+        c
+        for c in status_checks
+        if not (_STATUS_RC.match(_code(c)) and _STATUS_HALT.search(_unquoted(_code(c))))
+    ]
     assert not bad_status, (
         "the status predicate must accept EXACTLY 0 and 1 — any additional accepted code "
         "(137=SIGKILL/OOM, 2=interrupted) certifies a KILLED run as COMPLETED: "
