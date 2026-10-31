@@ -106,6 +106,7 @@ from tortoise import search_engine
 from tortoise.coverage_loop import (  # C3-1 (#2519, #2567): product loop rules
     DEFAULT_LOOP_GUARD_WINDOW as _LOOP_WINDOW,
 )
+from tortoise.coverage_loop import _calendar_date, facet_window_bounds
 from tortoise.embeddings import EmbeddingModel
 from tortoise.retrieval import (
     DEFAULT_CONTEXT_ITEM_CAP,
@@ -708,12 +709,37 @@ def _apply_time_window(annotated: list[dict], constraint: TimeConstraint,
                        *, question_date: str | None) -> list[dict]:
     """R5 (D5): hard time-window filter on the annotated hits' session_date.
 
-    * interval — keep hits whose ``session_date ∈ [start, end]`` (inclusive;
-      ISO dates compare lexicographically).
+    * interval — keep hits whose ``session_date ∈ [start, end]`` (inclusive).
     * recency — keep hits whose ``session_date ∈ [qdate − N_days, qdate]``
-      (N from ``constraint.start``; missing/unparseable qdate → the filter
-      cannot compute bounds → returns [] so the caller's defensive fallback
-      (``tr_window_fallback``) keeps the unfiltered pool).
+      (N from ``constraint.start``; a missing/unparseable ``question_date`` →
+      the filter cannot compute bounds → returns [] so the caller's defensive
+      fallback (``tr_window_fallback``) keeps the unfiltered pool).
+
+    ⚠️ The recency branch has a SECOND degradation path, and it is a
+    behaviour CHANGE for a hand-built constraint: a BLANK `N`
+    (`constraint.start` ``None``/empty) used to be coerced to 0 by
+    ``int(constraint.start or 0)``, i.e. the one-day window ``[qdate, qdate]``,
+    which kept the question-day hit and dropped every earlier one. It now
+    reaches :func:`facet_window_bounds`, whose recorded rule is that a missing
+    day count is UNRESOLVABLE and therefore NO BOUND (coercing it to 0 built
+    the NARROWEST possible window) → this seam returns [] → the caller keeps
+    the unfiltered pool, exactly like every other unresolvable input. The
+    PRODUCT path cannot reach it (``detect_time_constraint``'s recency regex
+    always captures a digit run, so it always emits a count); only a caller that hand-builds a
+    ``TimeConstraint("recency", start=None)`` sees the difference, and its
+    direction is the shared rule: no day count never means "one day".
+
+    BOTH sides resolve through the ONE calendar-date resolver the product
+    loop already uses: the window comes from
+    :func:`tortoise.coverage_loop.facet_window_bounds`, and each hit's
+    ``session_date`` from :func:`tortoise.coverage_loop._calendar_date`. That
+    is what makes the producer's real ``2023/04/10 (Mon) 17:50`` shape
+    (#3011/#8710) compare correctly against ISO bounds. Comparing RAW strings
+    is what made this seam INERT on the frozen dataset: an ISO bound against
+    a slash-shaped date fails the upper-bound comparison (``"/"`` 0x2F >
+    ``"-"`` 0x2D at index 4) and a ``strptime("%Y-%m-%d")`` on the question
+    date raises, so every TR question silently fell back (#9182) and any TR
+    delta attributed to the window was measuring the fallback.
 
     Undated hits (no session_date) never satisfy a window — the filter
     returns only in-window DATED hits. The caller falls back when this
@@ -721,28 +747,25 @@ def _apply_time_window(annotated: list[dict], constraint: TimeConstraint,
     """
     if not annotated:
         return []
-    if constraint.kind == "interval":
-        start, end = constraint.start, constraint.end
-        if not start or not end:
-            return []
-        return [h for h in annotated
-                if h.get("session_date") and start <= h["session_date"] <= end]
+    if constraint.kind not in ("interval", "recency"):
+        return list(annotated)  # ordering/None → no filter, no reorder
+    anchor = None
     if constraint.kind == "recency":
-        try:
-            n_days = int(constraint.start or 0)
-            qdate = (datetime.strptime(str(question_date or "")[:10],
-                                       "%Y-%m-%d").date()
-                     if question_date else None)
-        except (TypeError, ValueError):
+        # Recency needs a clock. An absent question date keeps the pre-#9182
+        # contract exactly: cannot compute bounds → [] → caller falls back.
+        # (An unparseable one is handled by the resolver: it returns None —
+        # and so does a BLANK day count, see this function's docstring.)
+        if not question_date:
             return []
-        if qdate is None:
-            return []  # recency math needs the question date — fall back
-        from datetime import timedelta
-        lo = (qdate - timedelta(days=n_days)).isoformat()
-        hi = qdate.isoformat()
-        return [h for h in annotated
-                if h.get("session_date") and lo <= h["session_date"] <= hi]
-    return list(annotated)  # ordering/None → no filter
+        anchor = question_date
+    window = facet_window_bounds(constraint.kind, constraint.start,
+                                 constraint.end, None, anchor=anchor)
+    if window is None:
+        return []
+    lo, hi = window
+    return [h for h in annotated
+            if (session_date := _calendar_date(h.get("session_date")))
+            is not None and lo <= session_date <= hi]
 
 
 def _speaker_for_turns(proj, turn_ids: list[str]) -> dict[str, str]:
