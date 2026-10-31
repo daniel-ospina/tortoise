@@ -307,15 +307,17 @@ because a branch records where it is LATER while the invariant is about what was
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
 revision rather than asserted — **37 checks**, **0 red**, and the head the round-35 review was taken
-at (``9f8e12192``) is **4 of 37**: the three findings of that review that red a CHECK there — the
+at (``9f8e12192``) is **5 of 37**: the three findings of that review that red a CHECK there — the
 ``-m track_b`` half's missing SKIP axis, the two unhalted ``git fetch origin main`` lines the pin and
 the landing gate ride on (one check, enumerated over fences) — plus the ``batch_size`` value restated
-in prose, plus (this round) the residual-window check, which now requires the tested tree to be
-carried BY VALUE. The tree assertion's unpinned SUBJECT is GREEN on that document by
+in prose, plus (round 36) the residual-window check, which now requires the tested tree to be
+carried BY VALUE, plus the ``$BATCH`` "needs no carrier" claim, which the ledger-name check now
+refuses. The tree assertion's unpinned SUBJECT is GREEN on that document by
 construction (it asserts a non-``main`` ref), which is exactly why it is pinned by a MUTANT rather
 than by the revision axis: pasting ``main`` in as the compared ref measured 0 of 37 red. The
-P1+P2 repair head, ``c6d4c8278``, is **1 of 37** (this round's residual-window requirement: its
-detector diffs a remote batch branch); the ``c7a772628`` / ``657a544a4`` head is
+P1+P2 repair head, ``c6d4c8278``, is **2 of 37** — the residual-window requirement (its detector
+diffs a remote batch branch) AND that same ``needs no carrier`` refusal, both of which are round-36
+findings about THAT document; the ``c7a772628`` / ``657a544a4`` head is
 **8 of 37** (the checks that did not exist yet — the residual-window check, the ``a66387f9f``
 round's CI-population, exported-ledger-name and fenced post-revert re-run checks, the pin-reading
 fetch check, the tightened argv on ``test_every_full_suite_command_is_one_of_the_two_deliberate_halves``,
@@ -501,6 +503,20 @@ the ``c7a772628`` round's 13 ("make the diff compare two constant files", "point
 by value (``$LANDED_TREE`` vs ``$TESTED_TREE``), so they are re-measured in that shape above
 (constants; and the read-from-the-live-branch mutant, which is the same fail-open the ref comparison
 had).
+
+**The round-36 ledger above was re-measured INDEPENDENTLY at the merged head, and its matrix was stale
+by exactly one check.** A second lane implemented the same four findings and chose ``tested-tree`` by
+VALUE independently (the merge kept that implementation and dropped the duplicate); its guards were
+then re-run against a DIFFERENT mutant set — 12 measured, **12 killed**, each on exactly one check:
+delete Phase 3's half-2 skip block and Phase 1's half-2 recording (both red the ``track_b`` check),
+flip the half-1 comparison to ``-ge`` and delete its whole block (both red the half-1 skip check),
+degrade the ``$RC`` predicate to ``-ge 0`` and delete the count comparison (both red the gate-status
+check, per fence), delete the tested-tree capture from EITHER fence, read it from the LIVE branch,
+compare two constants, and un-halt the detector's fetch (all red the residual-window check), and
+restore the ``needs no carrier`` claim (red the ledger-name check). The same re-run found the header's
+matrix understated ``9f8e12192`` (4 → **5**) and ``c6d4c8278`` (1 → **2**) by exactly the
+``needs no carrier`` refusal this round added and did not fold in — the very class the round-35 review
+nailed: a count recorded when a check landed, and never re-derived after the next one.
 
 **The `7fb722a9a` review's P2 is recorded as MEASURED FALSE, not "fixed".** It reported that
 ``ci-introduced-failure`` and ``DEFERRABLE_LEGS`` "do not exist" and that the leg-table pointer is out
