@@ -34,7 +34,8 @@ pre-#10240 shipped scorer produced. So WHICH prior the bound starves is the
 LEXICALLY WEAKEST row (``_PRIOR_TEXT``), not the oldest: before #10240 every row
 tied and the shared recency-then-id tie (``search_engine.recency_tie_clause``)
 decided it, so the starved row was the OLDEST (#10121; and #3019's ``id ASC``
-before it) — against a relevance ranking that tie does not fire. Both bounds
+before it) — against a relevance ranking that tie does not decide the STARVED
+row, only the order WITHIN each band of equally-scored echoes. Both bounds
 below are measured against a prior that the echo wall OUTRANKS, so the fixture's
 prior must be the WEAKEST lexical match, which is what ``_PRIOR_TEXT`` constructs
 and documents. The assertions themselves are unchanged: what the arm re-ordered
@@ -170,14 +171,17 @@ def _seed_echo_wall(s, session_id: str, prior_id: str) -> None:
     real prior. The echoes contain the query tokens; the prior does too, so it
     is a genuine candidate of the fused pool.
 
-    The rows are NOT tied against the shipped scorer: the sparse leg is the BM25
-    arm (#10240, ON by default), so the fused order is a RELEVANCE order and the
-    prior is deliberately the weakest match (``_PRIOR_TEXT``) — that is what puts
-    it below the echo wall, and it is why seed ORDER no longer decides anything
-    under the DEFAULT arm. Before #10240 every row scored alike and the order
-    came from the recency-then-id tie (#10121), so this fixture placed the prior
-    by seeding it between the two bands. The ``_HOT``/``_COLD`` banding is KEPT
-    because that is still what places the prior when the arm is opted out
+    The *PRIOR* is not tied against the shipped scorer — the echoes still tie
+    with EACH OTHER, and that tie orders each band and decides which echoes the
+    pool cuts; what it no longer decides is the prior's position. The sparse leg
+    is the BM25 arm (#10240, ON by default), so the fused order is a RELEVANCE
+    order and the prior is deliberately the weakest match (``_PRIOR_TEXT``) —
+    that is what puts it below the echo wall, and it is why seed ORDER no longer
+    decides the prior's position under the DEFAULT arm. Before #10240 every row
+    scored alike and the order came from the recency-then-id tie (#10121), so
+    this fixture placed the prior by seeding it between the two bands. The
+    ``_HOT``/``_COLD`` banding is KEPT because that is still what places the
+    prior when the arm is opted out
     (``TORTOISE_BM25_LEXICAL=0``): there the rows tie again, and the ``_COLD``
     band written after the prior holds the newer stamps that fill the over-fetch
     window ahead of it. The fixture therefore holds under BOTH arm states."""
@@ -354,15 +358,19 @@ def _seed_echo_wall_production(sdk, session_id: str, prior_id: str,
     prior, and — unlike ``_seed_echo_wall`` — no ``pool_size`` is passed by the
     caller under test, so the fused pool is the product default.
 
-    The rows are not tied against the shipped scorer: the sparse leg is the BM25
+    The *PRIOR* is not tied with the echo rows — the echoes still tie with EACH
+    OTHER (measured: all 130 share one score, ``0.017974725``), so that tie
+    orders each band and decides which echoes the pool cuts; what it no longer
+    decides is the starved row. The sparse leg is the BM25
     arm (#10240, ON by default), so who fills the pool is decided by RELEVANCE —
     length normalisation (``b=0.75``) is what prices the prior's padding and so
     favours the short echo over the long prior (``k1``'s saturation caps what a
     repetition can earn but is not what decides this ordering; see
     ``_weak_prior``). #10121's
     recency-then-id tie decided this when every row scored alike; against a
-    relevance ranking the tie never fires, so the prior that starves is the
-    LEXICALLY WEAKEST row, which ``_PRIOR_TEXT`` constructs. That is the
+    relevance ranking the tie never decides WHICH row is starved, so the prior
+    that starves is the LEXICALLY WEAKEST row, which ``_PRIOR_TEXT`` constructs.
+    That is the
     production shape the residual is about: a prior captured earlier in the
     session, then the session keeps talking in text that matches the query more
     densely. Seeding the prior FIRST is kept so the fixture also holds when the
