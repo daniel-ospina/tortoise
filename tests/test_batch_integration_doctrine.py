@@ -116,6 +116,18 @@ or facts that were false against the tree they describe:
   not trust a count of these members written here"), and the leg check pins member NAMES, not the
   ordinal, so nothing could red. The sentence now points at the measurement
   (``grep -c '^    needs: changes$' .github/workflows/python-ci.yml``) and states no number.
+* **the reviewed-head fetch was refused on a rewritten PR head, silently, and the stale ref is what
+  got merged.** The assembly fence's ``git fetch origin pull/<N>/head:refs/tmp/pr-<N>`` writes a
+  **local** ref, and ``git switch -C`` above exists precisely because a REBUILD is the intended case —
+  so the ref is REUSED, and when the PR head has been rewritten since the last run (amend / rebase /
+  force-push: the ordinary answer to a review) the update is a **non-fast-forward** that git refuses
+  without ``--force`` / a ``+`` refspec (measured in a scratch repo: ``! [rejected]
+  refs/pull/1/head -> refs/tmp/pr-1 (non-fast-forward)``, rc=1, ref left at the PREVIOUS head). The
+  fetch was also the one line of the fence with no halt, so the fence continued and the merge landed
+  yesterday's head under a comment reading "exactly the reviewed head" — a clean ``--no-ff`` merge
+  with a correct-looking ``batch: merge PR #<N>`` subject, Phase 2's own eligibility invariant
+  (``headRefOid`` == the reviewed head) broken one phase before Landing can see it. The fetch now
+  carries ``--force`` **and** a halt, and both are pinned.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
@@ -134,9 +146,11 @@ ASSERTION (``TORTOISE_DB_URI`` or an explicit carve-out, HALTING) in every fence
 — a SELECTION in Phase 0's fence is a different shell's environment, so it cannot substitute for one.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **25 checks** at this head, **0 red**: **2 of 25** at
-``62c79b0b8`` (the lane assertion and the hand-written ordinal — the two findings of the round this
-head answers), **3 of 25** at
+revision rather than asserted — **25 checks** at this head, **0 red**, and **1 of 25** at
+``7fb722a9a`` (this round's P1 — the reviewed-head fetch; the override and the halt added for it red
+``test_the_batch_fence_rebuild_is_re_runnable`` and nothing else), **2 of 25** at
+``62c79b0b8`` (the lane assertion and the hand-written ordinal — the two findings of the round before
+that one), **3 of 25** at
 ``a6a71c1e5`` (the per-batch ledger, added there), **4 of 25**
 at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **6 of 25** at
 ``a12792afe`` (those plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
@@ -226,6 +240,24 @@ LAST suite fence, move that assertion AFTER the suite line (all three red
 ``test_the_lane_is_asserted_in_every_fence_that_runs_the_suite`` — the halting, the every-fence and
 the before-the-run halves of it), and restore the pre-fix ``the nine jobs that declare
 `needs: changes``` ordinal (red ``test_no_hand_counted_ordinal_for_the_needs_changes_jobs``).
+**6 more measured with the reviewed-head fetch (`7fb722a9a`'s P1), 6 killed**, each red on
+``test_the_batch_fence_rebuild_is_re_runnable`` and on nothing else: drop ``--force``, drop the halt,
+``|| true`` for the halt, ``--force-with-lease`` (a different option), a ``| cat`` before the halt (a
+pipeline's status is its last command's, so the fetch's failure never reaches it), and a
+``&& git switch -`` suffix after it. Both HONEST alternative spellings are GREEN, measured — ``-f`` and
+``origin +pull/<N>/head:…`` — so the check accepts the documented remedy rather than only the spelling
+it was written against (the "the guard refuses its own remedy" shape this file has fixed three times).
+
+**The `7fb722a9a` review's P2 is recorded as MEASURED FALSE, not "fixed".** It reported that
+``ci-introduced-failure`` and ``DEFERRABLE_LEGS`` "do not exist" and that the leg-table pointer is out
+of range, measured against a ``python-ci.yml`` of **3791** lines. At this head that file is **4622**
+lines and every clause of the doctrine holds: the job is declared at
+``.github/workflows/python-ci.yml:4292`` (``if: always()``, ``actions: read``, ``GH_TOKEN``, and
+"Reading the run's jobs and their step logs is the whole requirement"), it is in ``python-ci-gate``'s
+``needs:`` (:4411) and in the gate's own ``LEGS_FILE`` table (:4496), ``DEFERRABLE_LEGS`` is declared
+at :4435 (and ``changes`` is not in it), and the table this module points at begins at :4483
+(``cat > "$LEGS_FILE" <<'LEGS'``). Deleting those needles would have made the partition claim false —
+the defect the list was added to fix. A stale checkout, not a defect in the document.
 **The surviving CLASS — and it is the reason #10434 exists.** Earlier rounds named a
 single survivor; rounds 30-34 measured ~90 further mutants and the honest claim is
 weaker than "one survivor": the guard decides SHELL CONTROL FLOW by pattern-matching
@@ -835,6 +867,11 @@ def _re_runnable(code: str) -> bool:
 #: runs `echo`, never pins, and (before this) was selected as the subject.
 _PIN_CREATE_FIRST = re.compile(r"^(?:command\s+|builtin\s+|exec\s+)?git\s+(?:switch|checkout)\b")
 
+#: The `--force` FLAG as its own token (``-f`` is the same option, and refusing it would make
+#: the honest fix inexpressible in the short spelling). ``--force-with-lease`` is a different
+#: option and must not be mistaken for it (``--force-x`` is not ``--force``).
+_FORCE_FLAG = re.compile(r"(?<!\S)(?:--force|-f)(?![-\w])")
+
 
 def _pin_subject(segment: str) -> bool:
     """Is this segment the pin create itself?"""
@@ -849,6 +886,52 @@ def _allows_pin_segment(segment: str) -> bool:
 def _allows_dirty_test(segment: str) -> bool:
     """A segment that may join the dirty-tree test: the test itself."""
     return bool(_DIRTY_TEST.match(segment))
+
+
+#: The reviewed-head fetch of the assembly fence (`git fetch … pull/<N>/head:refs/tmp/pr-<N>`).
+#: ⛔ The ref it writes is LOCAL and it is REUSED by every later run, so a PR head that was
+#: REWRITTEN since the last one — amend, rebase, force-push, the ordinary answer to a review —
+#: makes that update a NON-fast-forward, which git REFUSES without `--force` / a leading `+`:
+#: measured in a scratch repo with the exact command shape, `! [rejected] refs/pull/1/head ->
+#: refs/tmp/pr-1 (non-fast-forward)`, rc=1, and the ref left at the PREVIOUS head. The fetch was
+#: also the one line of the fence that carried no halt, so the fence continued and the merge
+#: landed yesterday's head under a comment reading "exactly the reviewed head" — a clean
+#: `--no-ff` merge with a correct-looking `batch: merge PR #<N>` subject, Phase 2's own
+#: eligibility invariant (`headRefOid` == the reviewed head) broken one phase before Landing can
+#: see it, and Phase 3 certifying a tree built from heads nobody reviewed.
+_PR_HEAD_FETCH = re.compile(r"\bgit\s+fetch\b[^|&;]*\bpull/")
+
+
+#: The whole COMMAND of the reviewed-head fetch: ONE command (no separator before the halt),
+#: a refspec naming a pull head, then a HALT at the end of the line.
+_REVIEWED_HEAD_FETCH = re.compile(
+    r"git\s+fetch\s+(?P<flags>[^|&;]*?)\s*(?P<refspec>\S*pull/\S*)"
+    r"\s*\|\|\s*(?:\{[^}]*\}|exit\s+[1-9]\d*)\s*"
+)
+
+
+def _reviewed_head_fetch(code: str) -> bool:
+    """Is this the reviewed-head fetch, ONE command, FORCED and HALTING on refusal?
+
+    Three properties, and the last two are the ones a spelling check cannot see:
+    ``--force`` (or a ``+``-prefixed refspec) is the documented override for a
+    non-rewindable local ref, and the halt is what stops a REFUSED fetch instead of
+    merging the stale ref it left behind. Both were missing at ``7fb722a9a`` while the
+    line's own comment claimed "exactly the reviewed head".
+    """
+    code = _code(code)
+    shape = _REVIEWED_HEAD_FETCH.fullmatch(_unquoted(code))
+    if shape is None:
+        return False
+    forced = _FORCE_FLAG.search(shape.group("flags")) is not None or shape.group(
+        "refspec"
+    ).startswith("+")
+    return forced and _halts(code, subject=_is_pr_head_fetch_segment)
+
+
+def _is_pr_head_fetch_segment(segment: str) -> bool:
+    """Is this segment the reviewed-head fetch itself (the halt's subject)?"""
+    return bool(_PR_HEAD_FETCH.search(segment))
 
 
 def _ends_at_halt(code: str, allow=_allows_pin_segment, subject=_pin_subject) -> bool:
@@ -2107,6 +2190,11 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     ``--no-ff`` merge then lands a foreign PR head into whatever branch the
     operator is standing on. ``-C``/``-B``/``--detach`` reset to the pin, which
     is the intent of a rebuild.
+
+    The ``7fb722a9a`` P1 (the same rebuild class, one line down): the reviewed-head
+    fetch REUSES ``refs/tmp/pr-<N>``, so a rewritten PR head makes the update a
+    non-fast-forward that git refuses without ``--force``/``+``, and the fence merged
+    the stale ref because that line carried no halt.
     """
     fences = _fences()
     batch = [
@@ -2134,6 +2222,26 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
         f"leaves the following --no-ff merge on the wrong branch: {flat}"
     )
 
+    # P1 (the ``7fb722a9a`` review): the reviewed-head fetch is REUSED across rebuilds, so a
+    # head that was rewritten since the last run makes the update to `refs/tmp/pr-<N>` a
+    # non-fast-forward, which git REFUSES — silently, because the fetch is one command with no
+    # separator and its `|| exit 1` was absent. The fence then merged the PREVIOUS head under a
+    # comment reading "exactly the reviewed head". Both halves are pinned: the OVERRIDE and the
+    # halt, on the refspec that names a PR head.
+    fetches = [c for fence in batch for c in fence if _is_pr_head_fetch_segment(_code(c))]
+    assert fetches, (
+        "the batch fence no longer fetches a reviewed PR head (`git fetch … pull/<N>/head:…`) "
+        "— re-point this guard"
+    )
+    for command in fetches:
+        assert _reviewed_head_fetch(command), (
+            "the reviewed-head fetch must be ONE command, FORCE the update (`--force` or a "
+            "`+pull/<N>/head:` refspec — git refuses a non-fast-forward update to the reused "
+            "local ref) and HALT on refusal: without the halt a refused fetch leaves the ref "
+            "at the PREVIOUS head and the merge below lands it silently. got: "
+            f"{command}"
+        )
+
     # EVERY line of the assembly fence must be ONE command (or end at a halt): a
     # suffix on the merge line — `git merge … refs/tmp/pr-<N> && git switch main` —
     # puts the second and every later merge on the operator's local `main`, so the
@@ -2145,8 +2253,10 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
             # NOT `or _halts(code)`: that is a PRESENCE predicate, so a mover
             # followed by a legitimate `|| exit 1` would be exempt — the mover has
             # already run by the time the halt fires, which is the round-26 P1 one
-            # `|| exit 1` away from its own fix.
-            if _ends_at_halt(code):
+            # `|| exit 1` away from its own fix. The reviewed-head fetch is the one
+            # exemption, and it is not a presence predicate: `_reviewed_head_fetch`
+            # pins the whole shape (one command, forced, halted).
+            if _ends_at_halt(code) or _reviewed_head_fetch(code):
                 continue
             assert not re.search(r"[;&|]", _unquoted(code)), (
                 "every line of the batch-assembly fence must be one command: a "

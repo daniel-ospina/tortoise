@@ -357,7 +357,18 @@ git switch -C integration/batch-1 "$PINNED" || exit 1
 # `-C` = create OR reset. A rebuild from a new pin is the intended case, and a plain `-b` fails on
 # an existing branch — after which the `--no-ff` merge below would merge a foreign PR head into
 # whatever branch the operator happens to be standing on.
-git fetch origin pull/<N>/head:refs/tmp/pr-<N>          # exactly the reviewed head
+git fetch --force origin pull/<N>/head:refs/tmp/pr-<N> || { echo "the fetch of PR #<N> was refused — do NOT merge a stale ref"; exit 1; }   # exactly the reviewed head
+# ⛔ `--force` (or a leading `+` on the refspec) is load-bearing on a REBUILD, not a
+# convenience. The ref written above is LOCAL and it is REUSED by the next run, so when a
+# PR head has been rewritten since then — amend, rebase, force-push, the ordinary answer
+# to a review — the update is a NON-fast-forward and git REFUSES it (measured: `!
+# [rejected] refs/pull/1/head -> refs/tmp/pr-1 (non-fast-forward)`, rc=1, and the ref
+# left at the PREVIOUS head). The fetch is the one line in this fence that had no halt,
+# so the fence continued and the merge below landed yesterday's head under a comment
+# reading "exactly the reviewed head": a clean `--no-ff` merge with a correct-looking
+# `batch: merge PR #<N>` subject, Phase 2's own eligibility invariant (`headRefOid` ==
+# the reviewed head) broken, and Phase 3 certifying a tree built from heads nobody
+# reviewed. The halt is what stops a REFUSED fetch instead of merging a stale ref.
 git merge --no-ff --no-edit -m "batch: merge PR #<N> (<sha>)" refs/tmp/pr-<N>
 git log --oneline -1                                    # after EVERY merge
 ```
