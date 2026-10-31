@@ -15,6 +15,14 @@ properties. Each has a test here that FAILS when the property is broken:
    checked and it was clean" are different facts, and folding the first into the second is
    how a report becomes a licence for a wrong decision.
    `test_a_missing_artifact_is_unknown_not_never` fails if UNKNOWN is folded into NEVER.
+4. **A file excluded from the pre-merge lane BY DECISION is neither of those** — #10194
+   (owner decision A) took `tests/eval/**` out of the gating shards, so those `slow_files`
+   rows do not run on a PR head at all. Reading them as UNKNOWN presents a decision as a
+   measurement hole; reading them as NEVER presents it as a clean bill.
+   `test_a_file_taken_off_the_gating_lane_is_named_as_a_decision_not_a_gap` fails if the
+   non-gating lane is folded into either bucket, and the 74-row test fails if the 74 are
+   not fully partitioned by the lanes `ci_selection` derives (a hardcoded split rotted once
+   already — that is what the merge with #10194 broke).
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `check-runs/<sha>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -396,18 +404,69 @@ def test_a_red_with_no_failing_testcase_is_unknown_not_attributed(tmp_path):
 # --- the 74 rows, and the carve-out half of them --------------------------
 
 
-def test_the_table_covers_all_74_slow_files_including_the_carve_out_nine(tmp_path):
+def test_the_74_rows_are_fully_partitioned_by_the_lanes_ci_selection_derives(tmp_path):
+    """Every `slow_files` entry belongs to EXACTLY one pre-merge lane — derived, not assumed.
+
+    ⛔ This is the assertion that rotted in the first cut: the split was hardcoded as
+    "74 = 65 `test-slow` + 9 carve-out", and #10194's owner decision then took 5 eval files
+    out of the gating shards, so the constant described a partition that no longer existed.
+    Reading the lanes out of `ci_selection` makes a re-cut a non-event, and an entry that
+    falls out of every lane is caught here instead of being silently reported as UNKNOWN.
+    """
     root = _world(tmp_path, runs=[])
     report = _report(root)
     assert len(report["files"]) == 74
     assert len(catch.manifest_index(MANIFEST)) == 74
-    # 9 of the 74 are carve-out members: they run in `test-carve-out`, never in a
-    # `test-slow` leg, so a report that only read `test-slow` would lose them.
-    leg_files = {f for legs in LEGS[catch.JOB_SLOW].values() for f in legs}
-    carve_only = {f for f in SLOW_INDEX if f not in leg_files}
-    assert len(carve_only) == 9
-    assert _row(report, "test_hosted_backup.py")["status"] == catch.UNKNOWN  # no run measured it
-    assert report["coverage"]["status_" + catch.UNKNOWN] == 74
+
+    lanes = catch.slow_lane(MANIFEST)
+    slow_legs = {f for legs in LEGS[catch.JOB_SLOW].values() for f in legs}
+    carve_legs = {f for legs in LEGS[catch.JOB_CARVE].values() for f in legs}
+    non_gating = {catch.to_observed(f) for f in ci_selection.on_demand_files(MANIFEST)}
+
+    assert len(lanes) == 74
+    assert report["coverage"]["lane_" + catch.LANE_ORPHAN] == 0, (
+        "a slow file is in no gating leg and not on the declared non-gating lane"
+    )
+    assert report["coverage"]["lane_" + catch.LANE_GATING] == len(slow_legs)
+    assert report["coverage"]["lane_" + catch.LANE_NON_GATING] == len(
+        set(lanes) & non_gating - carve_legs
+    )
+    # The carve-out half is still read (it is the half a `test-slow`-only report loses).
+    assert _row(report, "test_hosted_backup.py")["lane"] == catch.LANE_CARVE
+    # With no runs at all nothing was measured: the gating legs are UNKNOWN (a gap) while
+    # the non-gating lane is NOT-PREMERGE (a decision) — the two are never the same cell.
+    assert _row(report, "test_billing.py")["status"] == catch.UNKNOWN
+    assert report["coverage"]["status_" + catch.UNKNOWN] == len(slow_legs) + len(
+        carve_legs & set(lanes)
+    )
+
+
+def test_a_file_taken_off_the_gating_lane_is_named_as_a_decision_not_a_gap(tmp_path):
+    """The non-gating lane reads as a DECISION, never as an unmeasured hole or a clean bill.
+
+    #10194 (owner decision A) removed `tests/eval/**` from the merge-gating shards. A row
+    for one of those files must say so: UNKNOWN would present the decision as a measurement
+    gap, NEVER would present it as "we ran it on every PR and it caught nothing".
+    """
+    root = _world(tmp_path, runs=[])
+    report = _report(root)
+    non_gating = [row for row in report["files"] if row["lane"] == catch.LANE_NON_GATING]
+    assert non_gating, "#10194's non-gating lane must show up in the partition"
+    assert all(catch.to_observed(row["file"]) not in {
+        f for legs in LEGS.values() for files in legs.values() for f in files
+    } for row in non_gating)
+
+    row = non_gating[0]
+    # ⛔ Both buckets are the wrong answer; only NOT-PREMERGE carries the reason.
+    assert row["status"] == catch.NOT_PREMERGE
+    assert row["status"] != catch.UNKNOWN
+    assert row["status"] != catch.NEVER
+    assert row["unknown"] == [], "an exclusion has no UNKNOWN reason — it has a decision"
+    assert "#10194" in row["note"] and "NON-GATING" in row["note"]
+    # And the table renders the reason instead of the blank a "-" cell would show.
+    table = catch.render_table(report, only="nonpremerge")
+    assert "#10194" in table
+    assert f"{len(non_gating)}" in catch.render_summary(report)
 
 
 def test_the_bare_carve_out_job_is_shard_a_and_attributes_the_nine(tmp_path):
@@ -451,7 +510,8 @@ def test_coverage_counts_reconcile_and_never_extrapolate(tmp_path):
     )
     report = _report(root)
     coverage = report["coverage"]
-    total = sum(coverage[f"status_{key}"] for key in (catch.CATCH_PR, catch.CATCH_PUSH_ONLY, catch.NEVER, catch.UNKNOWN))
+    statuses = (catch.CATCH_PR, catch.CATCH_PUSH_ONLY, catch.NEVER, catch.UNKNOWN, catch.NOT_PREMERGE)
+    total = sum(coverage[f"status_{key}"] for key in statuses)
     assert total == 74
     # The leg's files carry the artifact reason; every other row is UNKNOWN for the OTHER
     # reason (nothing measured it) — the two are never collapsed into one number.
@@ -460,15 +520,23 @@ def test_coverage_counts_reconcile_and_never_extrapolate(tmp_path):
     ]
     assert len(attributed_unknown) == len(LEGS[family][leg])
     assert "UNKNOWN (not extrapolated)" in catch.render_summary(report)
+    assert "not run pre-merge (non-gating lane)" in catch.render_summary(report)
 
 
 def test_a_sha_whose_check_surface_is_unreadable_is_not_a_clean_sha(tmp_path):
     """A read failure is not "no reds": it makes the legs that could have run UNKNOWN."""
     root = _world(tmp_path, runs=[_run(RUN_PR, SHA, "pull_request", pr=11)])
     report = _report(root)
+    measured_lane = report["coverage"]["slow_files"] - report["coverage"][
+        "lane_" + catch.LANE_NON_GATING
+    ]
     # ⛔ NEVER would be the fail-open reading of a failed READ.
-    assert report["coverage"]["status_" + catch.UNKNOWN] == 74
+    assert report["coverage"]["status_" + catch.UNKNOWN] == measured_lane
     assert report["coverage"]["status_" + catch.NEVER] == 0
+    # The non-gating lane is unaffected by a PR-head read failure: it is not run there.
+    assert report["coverage"]["status_" + catch.NOT_PREMERGE] == report["coverage"][
+        "lane_" + catch.LANE_NON_GATING
+    ]
     assert any("unreadable" in note for note in report["window"]["api_notes"])
 
 

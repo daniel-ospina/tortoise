@@ -34,15 +34,24 @@ Three facts decide it, and each is a defect in a naive reading:
    ``UNKNOWN``, it names its reason, and it is scoped to the leg whose artifact is missing
    — never folded into "never", and never extrapolated over.
 
-WHAT "THE 74" ACTUALLY SPLIT INTO (measured, not assumed)
----------------------------------------------------------
-74 = 65 in the `test-slow` legs + 9 that are ALSO `carve_out` members and therefore run in
-`test-carve-out` (`ci_selection.slow_leg_files` packs 65; the 9 left over are
-`test_embedded_concurrency`, `test_flip_gate`, `test_hosted_backup`, `test_migrate_db`,
-`test_pipeline_2792`, `test_projection_embedded_socket_timeout`,
-`test_projection_lifecycle`, `test_reaper`, `test_rebuild_config_preservation`). Reading
-only `test-slow` would have silently dropped those 9 — they are read from the carve-out
-job instead, so the table has 74 rows and not 65.
+WHAT "THE 74" ACTUALLY SPLIT INTO (DERIVED, never hardcoded)
+-------------------------------------------------------------
+`slow_files` is a UNION of three disjoint lanes, and the tool reads the split out of
+`ci_selection` on every run — a re-cut of the lanes must not leave this table describing a
+partition that no longer exists (#10194 already re-cut it once, under this PR):
+
+* **`test-slow` legs** — `slow_gating_files()`: `slow_files` minus the carve-out minus the
+  non-gating lane, LPT-packed by `slow_shard_entries()`.
+* **the carve-out job** — `slow_files` that are ALSO `carve_out` members. They run in
+  `test-carve-out`, never in a `test-slow` leg, and are read from the carve-out job instead
+  so they are not silently dropped.
+* **the non-gating lane** — `slow_files` minus both of the above, i.e. members of
+  `on_demand_files()`. #10194 (owner decision A) took `tests/eval/**` out of the gating
+  shards; those files do NOT run on a PR head at all. That is a RECORDED DECISION, not a
+  hole in the window, so such a row reads `NOT-PREMERGE` and names the lane — reporting it
+  as `UNKNOWN` would present a decision as a measurement gap, and reporting it as `NEVER`
+  would present it as a clean bill of health. (Where the answer must not be invented, the
+  report still says `UNKNOWN`; that rule is unchanged.)
 
 THE WINDOW, NAMED
 -----------------
@@ -122,11 +131,29 @@ JOB_NAME_RE = re.compile(r"^(?P<base>test-slow|test-carve-out)(?:\s*\((?P<leg>[a
 CARVE_BARE_LEG = "a"
 
 #: Per-file outcome vocabulary. `UNKNOWN` is a first-class answer: an unattributable red is
-#: exactly the case where "never caught anything" would be a fabrication.
+#: exactly the case where "never caught anything" would be a fabrication. `NOT_PREMERGE` is
+#: the fourth kind of answer — the file is excluded from the pre-merge lane BY DECISION (it
+#: runs in the non-gating lane), so the question "has it caught anything on a PR head?" is
+#: not answered by a measurement at all. The distinction is the same one pytest draws
+#: between a FAILURE, a PASS and a DESELECTED/SKIPPED test: a deliberate non-run is counted
+#: as its own outcome, never folded into either of the other two.
 CATCH_PR = "CATCH-PR"
 CATCH_PUSH_ONLY = "CATCH-PUSH-ONLY"
 NEVER = "NEVER"
 UNKNOWN = "UNKNOWN"
+NOT_PREMERGE = "NOT-PREMERGE"
+
+#: Which lane a `slow_files` entry runs in. Derived from `ci_selection` per run.
+LANE_GATING = "gating"
+LANE_CARVE = "carve-out"
+LANE_NON_GATING = "non-gating"
+#: In `slow_files`, in no leg, and not declared non-gating: the manifest and the lanes
+#: disagree. Fail closed — such a row is UNKNOWN (a gap), never NEVER (a clean bill).
+LANE_ORPHAN = "orphan"
+
+#: The recorded decision that put the non-gating lane's files where they are. Cited on the
+#: row so a reader is pointed at the decision rather than at a phantom measurement hole.
+NON_GATING_DECISION = "#10194 (owner decision A): excluded from the merge-gating shards"
 
 #: Retention is the coverage bound, so it is read from the repo rather than assumed. This is
 #: the fallback ONLY when the endpoint cannot be read; the value used is always reported.
@@ -225,6 +252,31 @@ def leg_partitions(manifest: Mapping[str, Any]) -> dict[str, dict[str, set[str]]
         for entry in ci_selection.carve_shard_entries(dict(manifest))
     }
     return {JOB_SLOW: slow_legs, JOB_CARVE: carve_legs}
+
+
+def slow_lane(manifest: Mapping[str, Any]) -> dict[str, str]:
+    """``{observed path: LANE_*}`` for every slow file — the split, DERIVED every run.
+
+    ⛔ Never hardcode it: the lanes are re-cut by decisions outside this tool (#10194 took
+    the eval suites out of the gating shards), and a constant here would report a stale
+    partition as a measurement result. A file in no leg and not on the declared non-gating
+    lane is `LANE_ORPHAN` — a manifest/lane disagreement, which fails closed to UNKNOWN.
+    """
+    partitions = leg_partitions(manifest)
+    in_slow_leg = {path for files in partitions[JOB_SLOW].values() for path in files}
+    in_carve_leg = {path for files in partitions[JOB_CARVE].values() for path in files}
+    non_gating = {to_observed(str(f)) for f in ci_selection.on_demand_files(dict(manifest))}
+    out: dict[str, str] = {}
+    for observed in manifest_index(manifest):
+        if observed in in_slow_leg:
+            out[observed] = LANE_GATING
+        elif observed in in_carve_leg:
+            out[observed] = LANE_CARVE
+        elif observed in non_gating:
+            out[observed] = LANE_NON_GATING
+        else:
+            out[observed] = LANE_ORPHAN
+    return out
 
 
 # --- JUnit attribution ------------------------------------------------------
@@ -543,6 +595,8 @@ class FileHistory:
 
     file: str
     path: str = ""
+    #: The lane this file runs in pre-merge (`LANE_*`), derived from `ci_selection`.
+    lane: str = LANE_GATING
     pr_catches: list[Citation] = field(default_factory=list)
     push_catches: list[Citation] = field(default_factory=list)
     flake_cleared: list[Citation] = field(default_factory=list)
@@ -552,6 +606,7 @@ class FileHistory:
 
     @property
     def status(self) -> str:
+        # Evidence wins over the lane: a red recorded before a re-cut still counts.
         if self.pr_catches:
             return CATCH_PR
         if self.push_catches:
@@ -560,6 +615,9 @@ class FileHistory:
             return UNKNOWN
         if self.pr_leg_runs or self.push_leg_runs:
             return NEVER
+        if self.lane == LANE_NON_GATING:
+            # Excluded by decision, not unmeasured — see NON_GATING_DECISION.
+            return NOT_PREMERGE
         # No red, and no leg ever measured it: the window says nothing about this file.
         return UNKNOWN
 
@@ -583,7 +641,9 @@ class FileHistory:
         return {
             "file": self.file,
             "path": self.path or self.file,
+            "lane": self.lane,
             "status": self.status,
+            "note": self._note(),
             "pr_head_catches": [c.to_dict() for c in self.pr_catches],
             "push_main_catches": [c.to_dict() for c in self.push_catches],
             "flake_cleared": [c.to_dict() for c in self.flake_cleared],
@@ -591,6 +651,20 @@ class FileHistory:
             "pr_leg_runs": self.pr_leg_runs,
             "push_leg_runs": self.push_leg_runs,
         }
+
+    def _note(self) -> str | None:
+        """Why a row's status is what it is, when no citation or UNKNOWN reason says it."""
+        if self.status == NOT_PREMERGE:
+            return (
+                f"runs in the NON-GATING lane, not on a PR head — {NON_GATING_DECISION}; "
+                f"this row's question is answered by that decision, not by a measurement"
+            )
+        if self.status == UNKNOWN and self.lane == LANE_ORPHAN:
+            return (
+                "in `slow_files` but in NO gating leg and NOT on the declared non-gating "
+                "lane — the manifest and the lanes disagree (a drift, not a measurement)"
+            )
+        return None
 
 
 # --- clients ----------------------------------------------------------------
@@ -943,8 +1017,10 @@ def build_history(
 
     index = manifest_index(manifest)
     partitions = leg_partitions(manifest)
+    lanes = slow_lane(manifest)
     histories = {
-        observed: FileHistory(file=entry, path=observed) for observed, entry in index.items()
+        observed: FileHistory(file=entry, path=observed, lane=lanes.get(observed, LANE_GATING))
+        for observed, entry in index.items()
     }
     leg_files: dict[str, set[str]] = {}
     for family, legs in partitions.items():
@@ -1162,9 +1238,12 @@ def build_history(
                         history.flake_cleared.append(citation)
 
     files = [histories[key].to_dict() for key in sorted(histories, key=lambda p: index[p])]
-    counts = {CATCH_PR: 0, CATCH_PUSH_ONLY: 0, NEVER: 0, UNKNOWN: 0}
+    counts = {CATCH_PR: 0, CATCH_PUSH_ONLY: 0, NEVER: 0, UNKNOWN: 0, NOT_PREMERGE: 0}
     for row in files:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
+    lane_counts = {lane: 0 for lane in (LANE_GATING, LANE_CARVE, LANE_NON_GATING, LANE_ORPHAN)}
+    for row in files:
+        lane_counts[row["lane"]] = lane_counts.get(row["lane"], 0) + 1
 
     oldest = min((r.created_at for r in refs if r.created_at), default=None)
     newest = max((r.created_at for r in refs if r.created_at), default=None)
@@ -1195,6 +1274,7 @@ def build_history(
             "red_jobs_attributed": attributed_jobs,
             "red_jobs_unattributable": unattributable_jobs,
             **{f"status_{key}": value for key, value in counts.items()},
+            **{f"lane_{key}": value for key, value in lane_counts.items()},
         },
         "files": files,
     }
@@ -1277,7 +1357,18 @@ def render_summary(report: Mapping[str, Any]) -> str:
         f"{coverage['status_' + CATCH_PR]} caught on a PR head · "
         f"{coverage['status_' + CATCH_PUSH_ONLY]} only on main · "
         f"{coverage['status_' + NEVER]} never caught anything · "
+        f"{coverage['status_' + NOT_PREMERGE]} not run pre-merge (non-gating lane) · "
         f"{coverage['status_' + UNKNOWN]} UNKNOWN (not extrapolated)",
+        "lanes (derived from ci_selection): "
+        + " · ".join(
+            f"{name}={coverage['lane_' + name]}"
+            for name in (LANE_GATING, LANE_CARVE, LANE_NON_GATING)
+        )
+        + (
+            f" · ORPHAN={coverage['lane_' + LANE_ORPHAN]}"
+            if coverage.get("lane_" + LANE_ORPHAN)
+            else ""
+        ),
     ]
     for note in window.get("api_notes") or []:
         lines.append(f"note: {note}")
@@ -1285,21 +1376,30 @@ def render_summary(report: Mapping[str, Any]) -> str:
 
 
 def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
-    """The 74-row table. ``only`` filters to one status (``pr``/``push``/``never``/``unknown``)."""
-    alias = {"pr": CATCH_PR, "push": CATCH_PUSH_ONLY, "never": NEVER, "unknown": UNKNOWN}
+    """The 74-row table. ``only`` filters to one status (``pr``/``push``/``never``/``unknown``/``nonpremerge``)."""
+    alias = {
+        "pr": CATCH_PR,
+        "push": CATCH_PUSH_ONLY,
+        "never": NEVER,
+        "unknown": UNKNOWN,
+        "nonpremerge": NOT_PREMERGE,
+    }
     wanted = alias.get(only, only)
     rows = [
-        "| file | status | PR legs run | main legs run | PR-head catches | main catches | UNKNOWN |",
-        "|---|---|---|---|---|---|---|",
+        "| file | status | lane | PR legs run | main legs run | PR-head catches | main catches | UNKNOWN |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for row in report["files"]:
         if wanted and row["status"] != wanted:
             continue
         prs = "; ".join(c.label() for c in row["pr_head_catches"]) or "-"
         pushes = "; ".join(c.label() for c in row["push_main_catches"]) or "-"
-        unknown = "; ".join(u.label() for u in row["unknown"]) or "-"
+        # A by-decision exclusion has no UNKNOWN reason and no citation — without the note
+        # the cell would read "-", which is exactly the blank that hides the decision.
+        unknown = "; ".join(u.label() for u in row["unknown"]) or row.get("note") or "-"
         rows.append(
-            f"| `{row['file']}` | {row['status']} | {row['pr_leg_runs']} | {row['push_leg_runs']} "
+            f"| `{row['file']}` | {row['status']} | {row.get('lane', '-')} "
+            f"| {row['pr_leg_runs']} | {row['push_leg_runs']} "
             f"| {prs} | {pushes} | {unknown} |"
         )
     return "\n".join(rows)
@@ -1334,7 +1434,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--only",
         default=None,
-        choices=("pr", "push", "never", "unknown", CATCH_PR, CATCH_PUSH_ONLY, NEVER, UNKNOWN),
+        choices=(
+            "pr",
+            "push",
+            "never",
+            "unknown",
+            "nonpremerge",
+            CATCH_PR,
+            CATCH_PUSH_ONLY,
+            NEVER,
+            UNKNOWN,
+            NOT_PREMERGE,
+        ),
         help="filter the printed table",
     )
     parser.add_argument("--json", action="store_true", help="print the full report to stdout")
