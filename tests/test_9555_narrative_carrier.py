@@ -105,8 +105,12 @@ def test_the_carrier_names_its_session_and_carries_the_narrative():
 
     `sessionId` is one of the two spellings the projection accepts (the commit's
     own; the capture's is `session_id`), and `story_arc` is §9.1's narrative
-    under the graph's own name for it — the SAME key the raw Cypher writes one
-    statement earlier, so the record and the cache state one fact.
+    under the RECORD's own name for it — the column `public.session_narrative`
+    reads and the shape-keyed projection consumes. ⛔ It is NOT any more "the
+    SAME key the raw Cypher writes one statement earlier": #10000 deleted that
+    Cypher (`tests/…::test_the_commit_path_emits_the_carrier_and_writes_no_
+    narrative_onto_a_node`), so the record is the only place this fact is
+    stated at all.
     """
     carrier = _carrier()
     assert carrier is not None
@@ -172,6 +176,133 @@ def test_the_commit_path_emits_the_carrier_and_writes_no_narrative_onto_a_node()
         "exactly the #9555 (b) gap returning: the record keeps the COUNTS and "
         "loses the TEXT, and with the node write gone (#10000) the narrative "
         "would then be stored NOWHERE")
+
+
+def test_the_commit_path_READS_the_record_outcome_it_cannot_assume():
+    """#10389 review ISSUE 2 — the only writer's outcome is read, not assumed.
+
+    With the node writes deleted the carrier IS the narrative's only write, and
+    `sdk._emit_event` is best-effort by contract: no journal configured returns
+    BEFORE the record leg (`sdk.py:9889-9894`), and a raising append returns
+    `False` and skips it (`sdk.py:10027`). Either lane leaves the prose in NO
+    store while the commit answers 200 — the state this pin refuses.
+
+    (1) FAILS on the pre-fix phase, on both counts: no `record_sink=` at the
+        carrier emit (so the outcome is unobservable) and no call to the
+        reporter that turns it into a log line + a receipt advisory.
+    (2) STRUCTURAL on purpose: calling `_execute_commit_writes` needs a live
+        projection, and the behaviour of the reporter itself is pinned
+        separately below — the two halves cannot cover for each other.
+    """
+    tree = ast.parse((REPO_ROOT / "tortoise" / "hosted_api.py").read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "_execute_commit_writes"),
+              None)
+    assert fn is not None, "the commit write phase is gone — re-measure #9555"
+    carrier_emits = [
+        call for call in ast.walk(fn)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "_emit_event"
+        and call.args
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "NARRATIVE_RECORD_TYPE"]
+    assert carrier_emits, "the commit path no longer emits the narrative carrier"
+    sinks = [kw.value for call in carrier_emits for kw in call.keywords
+             if kw.arg == "record_sink"]
+    assert sinks, (
+        "the carrier emit passes no `record_sink` — the commit door cannot tell "
+        "whether the narrative's ONLY writer landed, so a record that declines "
+        "it (no journal, a raising append, a non-durable journal) answers 200 "
+        "with the narrative in no store at all (#10389 ISSUE 2)")
+    reporters = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Name)
+                 and c.func.id == "_report_narrative_home"]
+    assert reporters, (
+        "the commit door collects the record's outcome and never reports it — "
+        "reading `record_sink` and doing nothing with it is the same silent "
+        "200 it was adopted to end (#10389 ISSUE 2)")
+
+
+def _record_write(outcome_name: str, *, statements: int = 1, refusal=None):
+    from tortoise.record_writer import RecordWrite, RecordWriteOutcome
+    return RecordWrite(outcome=RecordWriteOutcome[outcome_name],
+                       statements=statements, refusal=refusal)
+
+
+def test_a_narrative_outside_its_record_home_is_NAMED_not_assumed(caplog):
+    """#10389 review ISSUE 2 — the three destinations, decided not guessed.
+
+    The terms are the contract (`narrative_not_recorded` rides the receipt for
+    the two that are not `record`):
+
+    * APPLIED **and** `statements >= 1` — the fold executed something for THIS
+      record. `applied` alone is not enough, which is why the empty-fold case
+      below is asserted: an armed seam that folds nothing would otherwise read
+      as "the record holds the narrative".
+    * APPLIED with ZERO statements — the record did not take it. Not `record`.
+    * journal appended, record declined — `journal`: replay heals it from that
+      same line, so this is a warning, not a loss.
+    * `no_durable_journal` + a "journalled" return — `nowhere`: a scratch buffer
+      is not a journal and nothing about it survives the process. This is the
+      one case where the seam's own vocabulary overrides the emit return.
+    * nothing journalled and no record outcome (no journal configured, or the
+      append raised) — `nowhere`, at ERROR.
+
+    (1) FAILS pre-fix: `_report_narrative_home` does not exist, so every call
+        here is an AttributeError — the door had no such decision at all.
+    (2) REACHABLE: the outcome objects are the REAL `RecordWrite`/`
+        RecordWriteOutcome` the live seam returns, not a stand-in shape.
+    """
+    report = hosted_api._report_narrative_home
+
+    assert report(session_id=SESSION,
+                  outcome=_record_write("APPLIED", statements=2),
+                  journalled=True) == "record"
+    assert report(session_id=SESSION,
+                  outcome=_record_write("APPLIED", statements=0),
+                  journalled=True) != "record", (
+        "an APPLIED write that executed ZERO statements was read as 'the "
+        "record holds the narrative' — the seam was armed and folded nothing")
+
+    caplog.clear()
+    assert report(session_id=SESSION,
+                  outcome=_record_write("REFUSED", refusal="circuit_open"),
+                  journalled=True) == "journal"
+    assert any(r.levelname == "WARNING" and "narrative" in r.getMessage()
+               for r in caplog.records), (
+        "a record that declined the narrative while the journal held it was "
+        "not reported at all — the caller learns nothing until the verb answers "
+        "nothing for a narrative that exists")
+
+    caplog.clear()
+    assert report(session_id=SESSION,
+                  outcome=_record_write("REFUSED", refusal="no_durable_journal"),
+                  journalled=True) == "nowhere", (
+        "a NON-DURABLE journal was read as holding the narrative — nothing in "
+        "it survives the process, so replay cannot heal the record from it")
+    assert any(r.levelname == "ERROR" and SESSION in r.getMessage()
+               for r in caplog.records)
+
+    caplog.clear()
+    assert report(session_id=SESSION, outcome=None, journalled=None) == "nowhere"
+    assert any(r.levelname == "ERROR" and "NO store" in r.getMessage()
+               for r in caplog.records), (
+        "the narrative reached no store and the door said nothing — a silent "
+        "200 is the exact state #10389 ISSUE 2 reds")
+
+
+def test_the_receipt_says_the_narrative_is_not_in_its_record_home():
+    """The advisory a caller reads: additive, non-blocking, and it names a home."""
+    for home in ("journal", "nowhere"):
+        adv = hosted_api._narrative_home_advisory(home, SESSION)
+        assert adv["code"] == hosted_api.NARRATIVE_NOT_RECORDED
+        assert adv["session_id"] == SESSION
+        assert adv["advisory"] is True
+        assert "severity" not in adv, (
+            "a `severity: block` here would reject a commit whose graph writes "
+            "already landed — the advisory channel is warn-first (#405/#7819)")
+        assert adv["message"], "an advisory with no message tells the caller nothing"
 
 
 # ── §2 the record effect, through the shape-keyed projection ────────────────
