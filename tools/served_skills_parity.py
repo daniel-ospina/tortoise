@@ -174,9 +174,14 @@ def _err(msg: str) -> None:
           file=sys.stderr)
 
 
-def _note(msg: str) -> None:
-    """A non-fatal observation. stderr only — never stdout (the --json contract)."""
-    print(f"::notice::{msg}" if os.environ.get("GITHUB_ACTIONS") else msg,
+def _note(msg: str, level: str = "notice") -> None:
+    """A non-fatal observation. stderr only — never stdout (the --json contract).
+
+    `level` is the GitHub Actions annotation class (`notice` or `warning`) and is
+    inert outside CI; it is here so a step that FAILED but must not abort the run
+    surfaces as a warning rather than as an informational line (#10423).
+    """
+    print(f"::{level}::{msg}" if os.environ.get("GITHUB_ACTIONS") else msg,
           file=sys.stderr)
 
 
@@ -786,17 +791,42 @@ def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
     already written the served copies and the pin — that would leave a half-done
     sync behind a non-zero exit. The staleness is still caught by the gate
     (`build_skill_archives.py --check`, and the 9660 test).
+
+    ⛔ BOTH the import AND the write are inside that best-effort guard, and that
+    is not cosmetic (#10423 review, P2): an earlier revision resolved the builder
+    while FILTERING (`_ARCHIVE_SKILL_NAMES()`) and called
+    `write_stale_archives()` outside any `try`, so the two guards below were
+    unreachable and an `ENOSPC`/`EACCES` on `website/skills/` propagated out of
+    `--sync` AFTER the served copies and the pin were written — exactly the
+    half-derived state this docstring claims the design prevents. A swallow is
+    only acceptable because it is LOUD: a skip or a failure prints a warning, so
+    an operator following the documented remedy never commits a stale archive
+    behind a silent exit 0.
     """
-    wanted = [n for n in names if n in _ARCHIVE_SKILL_NAMES()]
+    try:
+        builder = _archive_builder()
+    except Exception:  # an unloadable builder is unavailable, not fatal
+        builder = None
+    if builder is None:
+        _note("the derived `website/skills/*.skill` archives were NOT re-cut: "
+              "`tools/build_skill_archives.py` could not be loaded. Run "
+              "`uv run python tools/build_skill_archives.py` and commit the "
+              "archives together with the mirror and the pin, or the tree is "
+              "red on `test_9660_skill_archive_holds_exactly_its_own_skill`.",
+              level="warning")
+        return ()
+    wanted = [n for n in names if n in tuple(getattr(builder, "SKILL_NAMES", ()))]
     if not wanted:
         return ()
     try:
-        builder = _archive_builder()
-    except Exception:  # a missing builder must not fail the sync
+        return tuple(builder.write_stale_archives(root, wanted))
+    except Exception as exc:  # noqa: BLE001 — see the best-effort note above
+        _note(f"re-cutting the derived `website/skills/*.skill` archives FAILED "
+              f"({type(exc).__name__}: {exc}). The served copies and the pin were "
+              f"already written, so this tree is HALF-derived: run "
+              f"`uv run python tools/build_skill_archives.py` and commit the "
+              f"archives with them.", level="warning")
         return ()
-    if builder is None:
-        return ()
-    return tuple(builder.write_stale_archives(root, wanted))
 
 
 _ARCHIVE_BUILDER: list[object] = []
@@ -821,14 +851,6 @@ def _archive_builder():
             module = None
     _ARCHIVE_BUILDER.append(module)
     return module
-
-
-def _ARCHIVE_SKILL_NAMES() -> tuple[str, ...]:
-    """The skills the builder ships an archive for (its own `SKILL_NAMES`)."""
-    builder = _archive_builder()
-    if builder is None:
-        return ()
-    return tuple(getattr(builder, "SKILL_NAMES", ()))
 
 
 def sync(root: Path, manifest_path: Path, commit: str | None = None,

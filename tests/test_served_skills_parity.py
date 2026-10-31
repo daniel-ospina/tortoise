@@ -798,6 +798,74 @@ def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
             f"--dry-run rewrote the served copy of {name}")
 
 
+def test_4643_a_failing_archive_write_does_not_abort_a_half_done_sync(
+        monkeypatch, tmp_path, capsys):
+    """`--sync` is best-effort on the archives — and the guard must be REACHABLE.
+
+    ⛔ NON-VACUITY (review finding, P2). The docstring promises that a checkout
+    that cannot re-cut the archives "must not make `--sync` fail AFTER it has
+    already written the served copies and the pin", and an earlier revision did
+    not implement it: `_rebuilt_archives` resolved the builder while FILTERING
+    (`_ARCHIVE_SKILL_NAMES()`, outside the `try`) and called
+    `write_stale_archives()` outside any guard, so `ENOSPC`/`EACCES` propagated
+    straight out of `sync()` after the pin was written. Delete the guard and this
+    test errors with the injected `OSError`.
+
+    The swallow is only acceptable because it is LOUD: the warning has to reach
+    stderr, or an operator following the documented remedy commits a stale
+    archive behind a silent exit 0.
+    """
+    pin, _manifest, root = _sync_fixture(
+        tmp_path, monkeypatch, "a" * 40,
+        {e["upstream_path"]: b"# fresh upstream\n"
+         for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+
+    names = ("how-to-use-tortoise", "tortoise-decide", "tortoise-file-finding")
+
+    class _FailingWriter:
+        SKILL_NAMES = names
+
+        @staticmethod
+        def write_stale_archives(root, wanted):
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sp, "_archive_builder", lambda: _FailingWriter)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert result.changed, "fixture: upstream must differ from the served copies"
+    assert result.archives == ()
+    assert sp.load_manifest(pin)["upstream"]["commit"] == "a" * 40, (
+        "the pin is written BEFORE the archives, so a failed re-cut must not undo "
+        "or roll back a completed sync")
+    err = capsys.readouterr().err
+    assert "FAILED" in err and "build_skill_archives.py" in err, (
+        f"a skipped archive re-cut must say so on stderr: {err!r}")
+
+
+def test_4643_an_unavailable_archive_builder_warns_instead_of_silently_skipping(
+        monkeypatch, tmp_path, capsys):
+    """A builder that cannot be loaded skips the step AND says so (#10423 review).
+
+    ⛔ NON-VACUITY: pre-fix the filter resolved the builder first, so `None`
+    produced an empty `wanted` and an early `return ()` with no diagnostic at
+    all — the operator saw `re-derived N served skill(s)`, exit 0, and a stale
+    archive. Deleting the warning reds this test.
+    """
+    pin, _manifest, root = _sync_fixture(
+        tmp_path, monkeypatch, "b" * 40,
+        {e["upstream_path"]: b"# fresh upstream\n"
+         for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+    monkeypatch.setattr(sp, "_archive_builder", lambda: None)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert result.archives == ()
+    err = capsys.readouterr().err
+    assert "NOT re-cut" in err and "build_skill_archives.py" in err, (
+        f"an unavailable builder must not skip the archives silently: {err!r}")
+
+
 def test_4643_sync_to_a_non_head_commit_is_not_a_pin_its_own_check_rejects(
         monkeypatch, tmp_path):
     """`--sync --commit <sha>` must not be a capability whose only product is a
