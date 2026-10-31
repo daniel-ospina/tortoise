@@ -672,7 +672,7 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             numerator=None, denominator=None,
             corpus_sha256=e2["corpus_sha256"],
             artifact_corpus_sha256=e2["corpus_sha256"], sibling="E1",
-            blocked_by="#9775", note=e2["note"]),
+            blocked_by="#10360", note=e2["note"]),
         row("E3", verdict=e3["verdict"], evidence=out_path, sha=head,
             numerator=e3["numerator"], denominator=e3["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#9736", note=e3["note"]),
@@ -2132,8 +2132,8 @@ def main(argv: list[str] | None = None) -> int:
                  f"control (values {e1['state_values']} before and after, "
                  f"real_facts {e1['real_facts']}) is consistent with E2a but does "
                  f"not compute it. Same corpus caveat as E1: "
-                 f"{e1['corpus_sha256']} is not {corpus_sha}, and #9775 records "
-                 f"that the state-value carve-out is absent on one render path"),
+                 f"{e1['corpus_sha256']} is not {corpus_sha}, and #10360 records "
+                 f"that nothing enforces retention (the render half closed, #9775)"),
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────
