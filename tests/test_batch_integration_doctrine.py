@@ -173,10 +173,13 @@ def _is_refusal(fence: list[str], i: int) -> bool:
     pinned: the command must BE the test, not a message about it.
     """
     code = _code(fence[i])
-    if code.startswith(("echo ", "printf ", ":", "true")):
-        return False  # a message about the refusal is not the refusal
+    # `!`, `true`, `:`, `echo` — each one makes the command something other than
+    # the refusal. `!` matters most: `! [ -z "$(…)" ] || exit 1` SUCCEEDS on a
+    # dirty tree and refuses a clean one, i.e. it certifies the inversion.
+    if code.startswith(("!", "echo ", "printf ", ":", "true")):
+        return False
     if "git status --porcelain" in code:
-        if not re.match(r"^(?:!\s*)?(?:\[\s*-n?z\s|test\s+-n?z\s)", code):
+        if not re.match(r"^(?:\[\s*-z\s|test\s+-z\s)", code):
             return False
     return _halts(_block(fence, i))
 
@@ -622,13 +625,50 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     # 1: the landing fence has no `set -e`, so an unhalted `[ … ]` is discarded
     # and the operator merges onto a moved `main` — the document's headline
     # failure, certified green by its own guard.
-    refusals = [
+    guardish = [
         i
         for i, c in enumerate(landing[0])
-        if _code(c).startswith(("[", "test ", "!"))
+        if _code(c).lstrip()[:1] in ("[", "!") or _code(c).lstrip().startswith("test ")
+    ]
+    # POLARITY: `!` inverts the enforcement (`! [ … = "$PINNED" ] || exit 1`
+    # refuses an UNMOVED main and lands a MOVED one), `true || …` makes it
+    # unreachable, and `:`/`echo` print instead of enforcing. The previous list
+    # silently SKIPPED a `!`-prefixed guard rather than refusing it.
+    neutered = [
+        landing[0][i]
+        for i in guardish
+        if _code(landing[0][i]).lstrip().startswith(("!", "true", ":", "echo ", "printf "))
+    ]
+    # ...and the same for the equality assertion wherever it sits: `guardish`
+    # above only sees lines that START like a guard, so `true || [ … = "$PINNED"
+    # ] || { … exit 1; }` slipped past as "not a guard" while making the check
+    # unreachable.
+    unreachable = [
+        landing[0][i]
+        for i, c in enumerate(landing[0])
+        if _PINNED_MAIN_ASSERTION.search(_code(c))
+        and _code(c).lstrip().startswith(("!", "true", ":", "echo ", "printf "))
+    ]
+    assert not neutered and not unreachable, (
+        "a landing guard must not be negated or neutralised: each of these makes "
+        "the tested-tree==landed-tree check pass when it should stop: "
+        f"{neutered + unreachable}"
+    )
+    refusals = [
+        i for i in guardish if _code(landing[0][i]).lstrip().startswith(("[", "test "))
     ]
     assert refusals, (
         "the landing fence carries no guarded command at all — re-point this guard"
+    )
+    # ...and the pin guard's polarity: `[ -n "$PINNED" ]` refuses an EMPTY pin.
+    # `[ -z "$PINNED" ]` refuses every non-empty one, so landing becomes
+    # impossible — the same class as the `--jq -r` defect that made the check
+    # unpassable.
+    assert any(
+        re.match(r'\[\s*-n\s+"\$PINNED"\s*\]', _code(c)) for c in landing[0]
+    ), (
+        'the landing fence must guard the pin with `[ -n "$PINNED" ]`: a `-z` '
+        "guard refuses every real sha, so the landing step can never pass"
     )
     unhalted = [landing[0][i] for i in refusals if not _halts(_block(landing[0], i))]
     assert not unhalted, (
