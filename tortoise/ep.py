@@ -2251,22 +2251,28 @@ class TortoiseEP:
                 else None
             )
             _target_classes = {c for c in _input_classes[1:] if c is not None}
-            # ⛔ ``op_idx_known`` gates the guard exactly as the sibling
-            # source-slot guard above is gated: on a legacy/migrated operator
-            # whose input edges carry NO idx, every row coalesces to position 0
-            # and the tie breaks lexicographically — so ``input_ids[0]`` is not
-            # provably the source, and judging a class against the wrong slot
-            # can block the CORROBORATION leg while leaving the override leg
-            # flowing, i.e. invert the very rule this guard encodes (#943
-            # review, same hazard; #2351 review P2).
-            if op_idx_known.get(op_id, True):
-                effective = claim_class.factor_direction_over_claims(
-                    direction,
-                    _source_classes,
-                    _target_classes,
-                )
-            else:
-                effective = direction
+            # ⛔ NOT gated on ``op_idx_known`` (#10364). The sibling
+            # source-slot guard above IS gated, and correctly so: its verdict
+            # ("the idx-0 SOURCE was stripped") is only meaningful if idx 0 is
+            # provably the source, so with idx-less edges it must stand down
+            # (#943 review). This guard asks a different question — which leg
+            # of THIS factor pushes a derived claim's belief into an asserted
+            # one — and that question is POSITIONAL: ``_update_factor`` sends
+            # ``fwd`` from ``input_ids[0]`` into the rest and ``bwd`` the other
+            # way, and the class sets below are read at those same positions.
+            # A mis-identified DECLARED source therefore cannot invert this
+            # verdict: whichever slot the derived endpoint occupies, the leg
+            # that would carry its belief INTO the asserted one is the leg
+            # blocked. Standing down instead propagated an idx-less
+            # ``derived -> asserted`` factor with its direction UNCHANGED while
+            # the identical wiring carrying ``idx`` was dropped and reported —
+            # the same wiring surviving or not depending only on whether the
+            # edges carry ``idx`` (#10364, measured both ways).
+            effective = claim_class.factor_direction_over_claims(
+                direction,
+                _source_classes,
+                _target_classes,
+            )
             if effective is None:
                 logger.warning(
                     "Operator %s: DERIVED source over ASSERTED target — "
