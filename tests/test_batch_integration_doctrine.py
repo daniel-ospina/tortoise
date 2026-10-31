@@ -131,12 +131,16 @@ separator between the last subject segment and the ``||`` is ``&&``, no separato
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
 blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **The ledger, by
 provenance**: 109 mutants accumulated through ``c50628450``, 8 added in round 27 (its
-own ledger), and **14 measured here, 14 killed** — drop ``--first-parent`` from the
+own ledger), and **15 measured here, 15 killed** — drop ``--first-parent`` from the
 bisect start, revert an independently-typed ``<merge sha>``, a merge-ness assert that
 only PRINTS instead of halting, delete the ``wait``/``RC`` capture, widen the status
 predicate to accept a signal kill (``-ne 0``), replace the count comparison with
 ``true`` and flip it so it cannot fail, delete the verdict row's "did not COMPLETE"
-clause, delete ``changes`` from the leg bullet, and the four round-27 re-measurements
+clause, delete ``changes`` from the leg bullet, a mover on the merge line that HALTS
+only on failure (``… refs/tmp/pr-<N> && git switch main || exit 1`` — it dies only
+because the assembly fence no longer exempts a line merely for carrying ``|| exit 1``:
+a PRESENCE predicate, which the mover has already got past by the time the halt could
+fire), and the four round-27 re-measurements
 (poll / merge / after-merge-log / revert each with an appended mover) — plus the
 guard-internal pair: restoring the quote-blind ``_code`` lets a ``&& git switch main``
 suffix on the merge line pass GREEN, which is exactly what the quote-aware cut kills.
