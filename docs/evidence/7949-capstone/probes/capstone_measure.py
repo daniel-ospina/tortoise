@@ -57,7 +57,7 @@ longer reports them as unobservable-by-construction.** Pre-seam, ``capture_sessi
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:9052-9058`` and
-``result["vet"]`` at ``:8975-8979``) while the meta fold dropped them with
+``result["vet"]``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
 ``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14725``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
@@ -884,7 +884,7 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:8612-8616, :8965-8979) — so an acceptance test of "a non-empty dict"
+    {}}`` — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
@@ -903,7 +903,7 @@ def _pass_ran(block: dict) -> bool | None:
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at ``:8565``, its own early-return
+    is different code (``classify_later``, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one

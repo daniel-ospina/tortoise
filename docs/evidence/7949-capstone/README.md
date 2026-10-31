@@ -148,7 +148,7 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:8965-8971` here, not in the log. (The SYMBOL is what makes
+the `result["classify_later"]` block here, not in the log. (The SYMBOL is what makes
 this line checkable: a bare number in this paragraph is read by no pin — the paragraph is
 `_BUNDLE_HISTORICAL`, deliberately — so a reader re-deriving it must land on the block the sentence
 names, not on the number alone.) That is deliberate: a scored log is a measurement record and the bundle's rule is
@@ -249,12 +249,12 @@ non-empty S2 stats) fails CLOSED.
 first tightened rule accepted `enabled: true` on its own, reading it as "the extractor's OWN
 statement that the gate was open". It is not that: `enabled` is the FLAG, computed BEFORE the pass
 is reached. `vet_enabled` is computed at `extractor_v2.py:8683`, i.e. BEFORE the
-`if not edus:` early return (`:8600`), which emits literally
-`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:8616`), and
-each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8684`), `if vet_enabled and
-complete_list:` (`:8806`). So a session with the flag ON and an empty list emits `enabled: True`
-with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
-`{}` on its fail-open path, `:8478-8481`). Because `_witness_block` returns the first positive
+`if not edus:` early return, which emits literally
+`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}`, and
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` and
+`if vet_enabled and complete_list:`. So a session with the flag ON and an empty list emits `enabled:
+True` with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass`
+returns `{}` on its fail-open path). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
@@ -264,10 +264,10 @@ to look.
 ⛔ **And that cause cites each surface's OWN code — the CLASSIFY pass is not the VET pass.** It was
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
 the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
-classify pass has its own flag (`classify_later`, `:8565`), its own early-return block
-(`:8612-8615`), its own gates — `if classify_later and embed_list:` (`:8696`) around `if items:`
-(`:8699`), and `if classify_later and complete_list:` (`:8821`) around `if items:` (`:8831`) — and its
-own fail-open `except` (`:8712` / `:8842`), so an idle classify block comes from no embed list **or
+classify pass has its own flag (`classify_later`), its own early-return block,
+its own gates — `if classify_later and embed_list:` around `if items:` and
+`if classify_later and complete_list:` around `if items:` — and its own fail-open `except`, so an
+idle classify block comes from no embed list **or
 no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface
 (`_IDLE_CITES`), and a surface added without its own entry fails loudly rather than borrowing
 another pass's code. Pinned by `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` and by
@@ -281,7 +281,8 @@ proves the flag; a classify or vet block can legitimately carry `enabled: True, 
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
-unconditionally at `:8965`/`:8975` and now reaches the receipt through the seam at the meta fold
+unconditionally as `result["classify_later"]` / `result["vet"]` and now reaches the receipt through
+the seam at the meta fold
 `sdk.py:14725` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
@@ -496,8 +497,8 @@ made V5 pass on a step nobody observed; its derivation figure was also circular 
 defined by the link it measures). `6020cbd5f` (the stamped run THIS one replaces) fixed that rule but
 left two prose defects this round repairs: its flag-on/no-activity cause was templated for the surface
 NAME while every citation in it was the VET pass's, so the S2.3 line sent a reader to code the
-classify pass never runs (`classify_later` at `:8565`, its `if classify_later and …` / `if items:`
-gates at `:8696`/`:8699`/`:8821`/`:8831`), and its absent-surface cause asserted "so the pass RAN"
+classify pass never runs (`classify_later`, its `if classify_later and …` / `if items:` gates), and
+its absent-surface cause asserted "so the pass RAN"
 from the forced-and-read-back flag alone — the very equation `_pass_ran` rejects — so an unobserved
 step read as a pass that ran and was merely hidden. Keeping any of them alongside the corrected run
 would leave two artifacts claiming to be THE measurement. **Superseding is how a row moves: re-run the probe, DELETE
@@ -644,6 +645,18 @@ plus a short quote for the `sdk.py` cites — so a number that stops resolving i
 without drift it is symbol-only on purpose. (`tests/test_7949_capstone_measure.py` pins the cite
 each cause string and the composition line carry, so one cannot be dropped silently; the
 number's resolution is checked against the tree when it is re-derived.)
+
+⚠️ **What the sweep can and cannot read — the boundary is a rule of this bundle.**
+`_BUNDLE_CITE` matches a cite that NAMES its file (`extractor_v2.py:<line>`,
+`sdk.py:<line>`); a bare `` `:NNNN` `` continuation names no file, so no rule can look it
+up and nothing re-checks it.
+That is exactly how twenty of them went stale on this branch: the extraction feature inserted 87
+lines above S0-S6, the re-derivation stopped at the cites carrying a prefix, and a bare number
+that had silently moved still READ as a citation. So a bare `:NNNN` is not used here at all:
+where the number is the claim it is written with its file, and where it is merely a convenience
+the SYMBOL is printed alone. `test_a_bare_call_site_cite_resolves_where_the_bundle_says_it_does`
+pins the one bare form this bundle keeps — the S0-S6 call sites, where the row pairs the symbol
+with its line — and reds when a number beside a symbol stops carrying the call that symbol names.
 
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|

@@ -1844,6 +1844,104 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
 
 
+# The S0-S6 call sites are the ONE place this bundle prints a BARE number on
+# purpose: the row pairs the symbol with its line, and `_BUNDLE_CITE` cannot read a
+# bare `:NNNN` at all — it carries no file, so no rule can resolve it. That is
+# exactly how twenty of them went stale on #9733: the extraction feature inserted
+# 87 lines above S0-S6, the re-derivation stopped at the cites carrying a
+# `file.py:` prefix, and every bare number beside a symbol silently moved onto a
+# comment. Nothing reddened, in a bundle whose thesis is that a claim nothing
+# re-checks can rot silently.
+#
+# So the bare form gets its own pin: the SYMBOL is matched in the document, and the
+# number written beside it is resolved against the extractor, which must carry the
+# call that symbol names. `README.md`'s "The eight steps" table and
+# `capstone_run.py`'s entry-point chain are the documents that carry it.
+_BARE_CALL_SITES = (
+    ("_edus_from_conversation", "_edus_from_conversation("),
+    ("run_s1", "run_s1("),
+    ("run_s2", "run_s2("),
+    ("_run_vet_pass", "_run_vet_pass("),
+    ("kind_classifier.classify_items", "kind_classifier.classify_items("),
+    ("_apply_classify_kinds", "_apply_classify_kinds("),
+    ("search_graph", "search_graph("),
+    ("run_s4", "run_s4("),
+    ("execute_embed", "execute_embed("),
+)
+
+# a bare cite — one or two backticks, a colon, a number (never a `file.py:` prefix)
+_BARE_CITE = re.compile(r"`{1,2}:(\d{3,5})(?:-(\d{3,5}))?`{1,2}")
+
+
+def _bare_call_cites(docs):
+    """(document, line, symbol, call-text, number) for every bare CALL-SITE cite.
+
+    A bare cite counts as a call-site cite when its own row names one of the
+    table's symbols just before it; anything else (an `sdk.py` continuation, the
+    frozen log's stamps) is another file's number and not this pin's.
+    """
+    found = []
+    for doc_name, doc_path in docs:
+        lines = doc_path.read_text(encoding="utf-8").splitlines()
+        for line_no, line in enumerate(lines, 1):
+            for match in _BARE_CITE.finditer(line):
+                # The pair may wrap: ``execute_embed`` closes one line and its
+                # ``:9024`` opens the next, so the lookback crosses the break.
+                window = (lines[line_no - 2][-40:] if line_no > 1 else "")
+                window = (window + line[:match.start()])[-80:]
+                best = None
+                for symbol, call in _BARE_CALL_SITES:
+                    at = window.rfind(symbol)
+                    if at >= 0 and (best is None or at > best[0]):
+                        best = (at, symbol, call)
+                if best is not None:
+                    found.append((doc_name, line_no, best[1], best[2],
+                                  match.group(1)))
+    return found
+
+
+def test_a_bare_call_site_cite_resolves_where_the_bundle_says_it_does():
+    """A bare `:NNNN` beside a symbol → the extractor call that symbol names.
+
+    `test_the_bundles_cites_resolve_where_the_bundle_says_they_do` sweeps only
+    cites that NAME their file (`extractor_v2.py:9052-9058`); `_BUNDLE_CITE`
+    cannot resolve a bare `:NNNN`, so the S0-S6 table and the `capstone_run.py`
+    chain were verified by nothing at all. #9733's +87-line insertion above S0-S6
+    moved every one of them and left the bundle printing numbers that land on
+    docstrings and comments — the exact rot the bundle exists to forbid.
+
+    Non-vacuity (measured): moving `run_s1`'s cite from its current line to that
+    line `-9` reds this with `run_s1` reading a neighbouring comment instead of
+    `run_s1(`, and it stays green over the correct table. The count is a MEASURED
+    property of the two documents — re-read it, do not trust it.
+    """
+    lines = (_REPO / "tortoise/extractor_v2.py").read_text(
+        encoding="utf-8").splitlines()
+    docs = (("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+            ("probes/capstone_run.py",
+             _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"))
+    found = _bare_call_cites(docs)
+    assert found, "no bare call-site cite was found — this pin is reading nothing"
+    covered = {symbol for _, _, symbol, _, _ in found}
+    assert covered == {symbol for symbol, _ in _BARE_CALL_SITES}, (
+        "a symbol in `_BARE_CALL_SITES` has no bare cite left in the documents, so "
+        "nothing pins it — re-read the table before deleting the entry: "
+        f"missing={sorted({s for s, _ in _BARE_CALL_SITES} - covered)}")
+    failures = []
+    for doc_name, line_no, symbol, call, number in found:
+        cited = lines[int(number) - 1]
+        if call not in cited:
+            failures.append(
+                f"{doc_name}:{line_no} writes `{symbol}` beside `:{number}`, but "
+                f"extractor_v2.py:{number} reads {cited.strip()!r}, which does not "
+                f"carry {call!r} — re-derive the number from the tree")
+    assert not failures, "\n  ".join(
+        ["a bare call-site cite does not resolve:"] + failures)
+    assert len(found) >= 16, (
+        f"only {len(found)} bare call-site cites were read — the table or the "
+        "chain lost cites, and a bare number nothing reads is the rot this pins")
+
+
 def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     """A cite on ANOTHER epic's index row is not this bundle's to verify.
 
