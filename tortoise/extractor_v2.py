@@ -1422,7 +1422,7 @@ def run_s1(model, transcript: str, *,
     system = (S1_TMPL
               .replace("{memory_granularity}", _granularity_text(master))
               .replace("{date_anchor}", _date_anchor(session_date)))
-    user_msg = "CONVERSATION:\n" + transcript
+    user_msg = "CONVERSATION:\n" + transcript  # ⛔ UNFRAMED BY DESIGN — #10301 (OPEN): S1_TMPL system clause + re-measured S1 request sizes; do NOT wrap in _render_untrusted_block here
     base = _stage_cap(_S1_MAX_TOKENS)
     response = _complete(model, system, user_msg,
                          max_tokens=base, stats=stats)
