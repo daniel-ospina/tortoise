@@ -75,8 +75,10 @@ WHAT IS BEING PINNED
   10b. **The version-pin carve-out is the `off` state of `CI_RUNNER_OS_LABEL`, not an unconditional
      drop** — #6897's `OVERRIDES:` marker records the revert as `CI_RUNNER_OS_LABEL=off` PLUS
      `--repair-labels`, so a repair that dropped the pin whatever the flag said performed that revert
-     with no switch involved. `on|auto` KEEPS the pin (and prints `version-pinned, kept=[…]`),
-     `off`/unset drops it, an unrecognised value is read as `off`. The keep-half is also ARCH-AWARE:
+     with no switch involved. The carve-out reads THIS RUN'S RESOLUTION, never the flag's spelling:
+     `on` keeps the pin (and prints `version-pinned, kept=[…]`), `auto` keeps it ONLY on a host whose
+     `/etc/os-release` reports 24.04, and `off`/unset **or a DECLINING `auto`** drops it; an
+     unrecognised value is REFUSED (exit 1, before any mode runs). The keep-half is also ARCH-AWARE:
      a runner whose read-only host label says `ARM64`/`ARM` is refused, because keeping
      `ubuntu-latest` there is the measured #6897 false red rather than a queue delay.
   10c. **A label set is PARSED literally, and `relabelled` is a claim about the server.** An unquoted
@@ -118,6 +120,46 @@ if not INSTALLER.exists():  # pragma: no cover - a broken checkout must not read
 # Every headroom leg EXCEPT the one under test, satisfied. The guards run forks → disk → cpu, so
 # without this the disk bound can refuse first and the cpu assertion fails on a message that never
 # mentions cpu (that is what a GitHub-hosted ubuntu-latest does: ~14G free on `/`, where /opt is).
+# ⛔ EVERY `runs-on` FORM THE SHIPPED EXTRACTOR READS, or the counter-guard over the runbook's
+# accepted-cost inventory is blind to one form again each round. TWO kinds of spelling matter:
+#
+#   • the KEY. Keys are NODES, not spellings — plain, single- and double-quoted all resolve to the
+#     key `runs-on` (measured with PyYAML for every form below; spec 1.2.2 makes two spellings that
+#     resolve equal a DUPLICATE key, which is the same statement). The same rule governs the
+#     `labels:` key INSIDE a mapping, which is where the single-spelling bug survived a round
+#     longer: the extractor's `keyis()` accepts `labels`, `'labels'`, `"labels"` and a space before
+#     the colon, so `{group: x, "labels": [ubuntu-24.04]}` is verdict-able at rc 5 while a guard
+#     matching only `\blabels:` kept the inventory green — one spelling over from the `"runs-on":`
+#     half that was already fixed.
+#   • the VALUE. The extractor reads FIVE forms, so a pin in any of them makes its file
+#     pool-eligible: scalar, explicit key (`? runs-on` / `: value`), block sequence, block MAPPING
+#     (`group:` / `labels:` keys on deeper-indented lines), and a flow `{group: …, labels: […]}`.
+#     A count that sees only the plain scalar silently omits that file from the inventory.
+_QUOTED_RUNS_ON = r'(?:"runs-on"|\'runs-on\'|runs-on)'
+# The `labels:` key, spelled any way the extractor's `keyis(k, "labels")` accepts — including the
+# space-before-colon form (`labels :`), which is valid YAML and which `keyis` reads.
+_LABELS_KEY = r'(?:["\']?labels["\']?[ \t]*:[ \t]*)'
+# The pin itself, and NOT its `-arm` sibling: `ubuntu-24.04-arm` is an ARM64 hosted label the
+# autoscaler keeps dropping, so counting it would inflate the inventory with a leg the mitigation
+# does not serve (measured: the old flow-mapping arm's `\bubuntu-24\.04\b` matched it).
+_PIN_2404 = r'["\']?ubuntu-24\.04["\']?(?![-\w.])'
+RUNS_ON_UBUNTU_2404_RE = (
+    r'^    (?:'
+    # scalar value, and the explicit-key form (a two-line construct: `? runs-on` then `: value`)
+    + _QUOTED_RUNS_ON + r'[ \t]*:[ \t]+' + _PIN_2404 + r'[ \t]*$'
+    + r'|\?[ \t]*' + _QUOTED_RUNS_ON + r'[ \t]*\r?\n[ \t]*:[ \t]+' + _PIN_2404 + r'[ \t]*$'
+    # block sequence: the runs-on key, then one or more `- label` items (stops at the next key)
+    + r'|' + _QUOTED_RUNS_ON + r'[ \t]*:\r?\n(?:[ \t]+-[^\n]*\r?\n)*?[ \t]+-[ \t]*' + _PIN_2404 + r'[ \t]*$'
+    # block MAPPING: `runs-on:` then a `group:`/`labels:` key on a deeper-indented line. The repeat
+    # may cross sibling lines but never another `runs-on`, so one job cannot absorb the next one's.
+    + r'|' + _QUOTED_RUNS_ON + r'[ \t]*:\r?\n(?:[ \t]+(?!' + _QUOTED_RUNS_ON + r')[^\n]*\r?\n)*?'
+    + r'[ \t]+' + _LABELS_KEY + r'[^\n]*' + _PIN_2404
+    # flow mapping: `{group: …, labels: [ubuntu-24.04]}` (the group: prefix is consumed)
+    + r'|' + _QUOTED_RUNS_ON + r'[ \t]*:[ \t]*\{[^\n}]*' + _LABELS_KEY + r'\[[^\]]*' + _PIN_2404
+    + r'[^\n}]*\}[ \t]*$'
+    + r')'
+)
+
 _NEUTRAL_HEADROOM = {
     "CI_RUNNER_FORKS_PER_RUNNER": "0",
     "CI_RUNNER_FORK_CAP": "1000000",
@@ -125,6 +167,11 @@ _NEUTRAL_HEADROOM = {
     "CI_RUNNER_DISK_RESERVE_GB": "0",
     "CI_RUNNER_MEM_PER_RUNNER_GB": "0",
     "CI_RUNNER_MEM_RESERVE_GB": "0",
+    # ⛔ THIS FILE CALLS ITSELF HERMETIC AND WAS NOT. It starts from `dict(os.environ)`, and this PR
+    # adds a variable that CHANGES THE INSTALLER'S ANSWER — so a box (or CI job) with
+    # `CI_RUNNER_OS_LABEL=on|auto` exported reded the label tests for a reason unrelated to the code
+    # under test. The default arm is pinned here; each arm then sets what it means.
+    "CI_RUNNER_OS_LABEL": "off",
 }
 
 
@@ -148,9 +195,11 @@ def _env(base: Path, **extra: str) -> dict[str, str]:
 def _run(
     *args: str, env: dict[str, str] | None = None, cwd: Path | None = None
 ) -> subprocess.CompletedProcess:
-    """Run the installer. `cwd` matters for exactly one arm: an unquoted label split would expand a
-    `*` against the shell's working directory, so that test runs the installer FROM the directory
-    holding the decoy files it would otherwise swallow."""
+    """Run the installer. `cwd` matters for two arms: an unquoted label split would expand a `*`
+    against the shell's working directory, so that test runs the installer FROM the directory
+    holding the decoy files it would otherwise swallow — and `--status`' label-coverage read is a
+    read OF THE CWD (it parses `.github/workflows`), so a case that exercises it must say where it
+    stands."""
     return subprocess.run(
         [BASH, str(INSTALLER), *args],
         capture_output=True,
@@ -245,7 +294,10 @@ def _stub_gh(
       * `select(.name==` → the repair's `id<TAB>label,label,…` detail line (`labels`, or
         `detail_by_name` for a per-runner answer — a batch arm needs one runner's read to differ
         from another's);
-      * anything else → the ARM64 pool's fallback count (`stdout`, the existing argument).
+      * anything else → the pooled reads: the ARM64 fallback count (`stdout`, the existing
+        argument) and the label-coverage rows, whose fixture spelling is `name<TAB>labels` for an
+        ONLINE runner or `name<TAB>status<TAB>labels` to express an OFFLINE one (`coverage` below
+        fills the status in, so a fixture can only say what the installer's own projection says).
     A `-X PUT` also records the request BODY it was fed on stdin, so a test can assert the exact
     label set a repair would write — not a message about it — and answers it the way the REAL Set
     verb does: with the runner's resulting label set, which is what the repair reads back before it
@@ -258,6 +310,16 @@ def _stub_gh(
     bin_dir.mkdir(parents=True, exist_ok=True)
     log = tmp_path / "gh-calls.log"
     gh = bin_dir / "gh"
+    # ⛔ THE COVERAGE READ CARRIES A THIRD FIELD — `.status` — BECAUSE AN OFFLINE RUNNER IS NOT
+    # COVERAGE. A fixture written as `name<TAB>labels` therefore means "a runner that IS online"
+    # (the state every pre-existing arm was written for), while a three-field row
+    # (`name<TAB>status<TAB>labels`) is how an arm expresses an OFFLINE carrier. Normalising here
+    # keeps ONE spelling in the fixtures and still answers the installer's real projection, so a
+    # fixture cannot express a row the installer could not read.
+    coverage = "\n".join(
+        line.replace("\t", "\tonline\t", 1) if line.count("\t") == 1 else line
+        for line in stdout.split("\n")
+    )
     detail = f"7\t{labels}"
     if detail_by_name:
         per_name = "".join(
@@ -297,7 +359,7 @@ def _stub_gh(
         "case \"$*\" in\n"
         f"  *'busy='*) printf '%s\\n' {shlex.quote(rows)} ;;\n"
         f"{detail_arm}"
-        f"  *) printf '%s\\n' {shlex.quote(stdout)} ;;\n"
+        f"  *) printf '%s\\n' {shlex.quote(coverage)} ;;\n"
         "esac\n"
         f"exit {rc}\n"
     )
@@ -441,11 +503,13 @@ def test_a_version_pinned_hosted_label_is_dropped_never_made_permanent(tmp_path:
     """⛔ THE UNION'S NAMED CARVE-OUT (a): `ubuntu-<version>` is DROPPED, not carried forward.
 
     A literal union makes every out-of-band version pin PERMANENT, and that reverses a recorded
-    decision (not just a style choice): `docs/ops/ci-runner-x64.md:67` — "these runners
-    deliberately **do not** claim any `ubuntu-<version>` label" — and `docs/ops/ci-runner-x64.md:76-77`,
-    an out-of-band
-    attachment "cannot survive a re-registration or `tools/install-ci-runner-x64.sh
-    --repair-labels`". `tools/runner_autoscale.py::_preserve_labels` already drops the family
+    decision (not just a style choice): `docs/ops/ci-runner-x64.md:92-96` —
+    "`_preserve_labels` DROPS the whole class on re-registration … so an attachment survives a
+    repair that re-applies it (`--repair-labels` keeps only the box's own label, and only where
+    **this run's resolution** claims it — `on`, or `auto` on a host whose `/etc/os-release` reports
+    24.04; a DECLINING `auto` drops it with the rest of the family) and does NOT
+    survive a re-registration". `tools/runner_autoscale.py::_preserve_labels` already drops the
+    family
     (`VERSION_PINNED_HOSTED_LABEL`), so a union that kept it would leave the two writers with
     OPPOSITE policies for the same label set, both green.
 
@@ -484,9 +548,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:226-228`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:590-592`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:346-347`). Keeping
+    (`docs/ops/ci-runner-x64.md:746-747`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -561,28 +625,110 @@ def test_the_version_pin_carve_out_obeys_the_boxes_own_choice(tmp_path: Path):
     box was asked to claim. So the flag is read, under the same name and values the install-side
     contract uses (#10275), and the four arms below are the whole truth table:
 
-      * `on`     → the pin is KEPT and printed as `version-pinned, kept=[…]`, `removed=[]`;
-      * `auto`   → same (the box may claim one);
+      * `on`     → the pin THIS BOX CAN CLAIM (`ubuntu-24.04`) is KEPT and printed as
+                   `version-pinned, kept=[…]`; the rest of the family — `ubuntu-24.04-arm`, an
+                   ARM64 image — stays DROPPED and is printed on `not kept=` / `removed=`;
+      * `auto` on a host whose `/etc/os-release` reports 24.04 → same (the box claims one);
+      * `auto` on any OTHER host (22.04, non-Linux) → DROPPED. The DECLINE is the answer: the
+                   repair reads the RESOLUTION (`$OS_LABELS`), not the flag's spelling;
       * unset    → dropped (the pre-departure invariant `_preserve_labels` also enforces);
-      * `yes`    → read as `off` — the invariant-consistent side, never a silent keep — and says so.
+      * `yes`    → REFUSED before any mode runs (exit 1). The flag is validated ONCE, before the
+                   dispatch, so an unrecognised value cannot reach this carve-out at all — the
+                   pre-#10275 code read it as `off`, which made a typo look like a working revert.
+
+    ⛔ THE DECLINING-`auto` ARMS ARE THE POINT OF THIS TEST AT THIS HEAD (#10275). The carve-out
+    used to read `case "${CI_RUNNER_OS_LABEL:-off}" in on|auto)`, i.e. the FLAG SPELLING, so a box
+    that had just printed `os-label: auto DECLINED — … ubuntu-24.04 not claimed` went on to KEEP the
+    pin and re-PUT it — and a repair only UNIONS, so that claim the box had itself declined became
+    PERMANENT until an operator ran an explicit `off` repair. `--status`, in the same script,
+    already read the resolution for the identical flag and reported the pool as NOT asked. The
+    `auto` arms therefore set BOTH seams (`CI_RUNNER_OS_NAME` / `CI_RUNNER_OS_RELEASE`): without
+    them the arm only ever exercised whatever host the suite happens to run on, which is insensitive
+    to the one property `auto` is defined by and cannot tell "reads the resolution" from "ignores
+    the resolution".
+
+    ⛔ THE KEEP IS NARROWED TO `$OS_LABEL`, NOT THE WHOLE CLASS. `resolve_os_label` can only ever
+    emit `ubuntu-24.04`, and a label names an IMAGE: keeping `ubuntu-24.04-arm` on an x86_64 runner
+    is the false-architecture claim this file's header forbids, and it diverges from the sibling
+    writer `runner_autoscale.py::_preserve_labels` (which drops the whole family on every arch). A
+    repair UNIONS, so a kept pin is permanent — the narrowing has to happen in the repair or not at
+    all.
 
     Non-vacuity: with the flag ignored (an unconditional drop, the shape review rejected) the `on`
     arm reds on the PUT set and on the `kept=` line; with the flag inverted (an unconditional keep)
-    the unset arm reds on `ubuntu-24.04` appearing in the PUT.
+    the unset arm reds on `ubuntu-24.04` appearing in the PUT; with the keep widened back to the
+    whole family the `on` arm reds on `ubuntu-24.04-arm` appearing in the PUT and on the `kept=`
+    line; and with the pre-fix FLAG-SPELLING read (`case "${CI_RUNNER_OS_LABEL:-off}" in on|auto)`)
+    the declining-`auto` arms red on the PUT set, on `kept=[]`, on `not kept=` and on `removed=` —
+    measured against the pre-fix code at `b5ff9b24a`.
     """
-    # `on` / `auto`: the box has opted in, so the pin it was asked to claim survives
-    for value in ("on", "auto"):
+    rel24 = tmp_path / "os-release-24"
+    rel24.write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+    rel22 = tmp_path / "os-release-22"
+    rel22.write_text('NAME="Ubuntu"\nVERSION_ID="22.04"\n')
+
+    # `on`, and `auto` on a host that REPORTS the pinned release: the box has opted in, so the pin
+    # it can actually claim survives — and ONLY it
+    for value, seams in (
+        ("on", {}),
+        ("auto", {"CI_RUNNER_OS_NAME": "Linux", "CI_RUNNER_OS_RELEASE": str(rel24)}),
+    ):
         stub, env = _repair_runner(tmp_path / f"opt-{value}", pool="1", labels=POOL_LABELS)
         env["CI_RUNNER_OS_LABEL"] = value
+        env.update(seams)
         r = _run("--repair-labels", "--count", "1", env=env)
         assert r.returncode == 0, r.stderr
         put = _put_body(stub)
-        assert {"ubuntu-24.04", "ubuntu-24.04-arm"} <= set(put), (
-            f"CI_RUNNER_OS_LABEL={value} is the box's recorded state — a repair must not strip the "
-            f"pin it opted into: {put}"
+        assert "ubuntu-24.04" in put, (
+            f"CI_RUNNER_OS_LABEL={value} is the box's recorded state, and this host CLAIMS the pin "
+            f"— a repair must not strip it: {put}"
         )
-        assert "version-pinned, kept=[ubuntu-24.04,ubuntu-24.04-arm]" in r.stderr, r.stderr
-        assert "removed=[]" in r.stderr, f"nothing is removed when the box opted in: {r.stderr}"
+        assert "ubuntu-24.04-arm" not in put, (
+            f"keeping `ubuntu-24.04-arm` PUTs an ARM64 image claim onto an x86_64 runner — the "
+            f"false-architecture claim the whole file forbids: {put}"
+        )
+        assert "version-pinned, kept=[ubuntu-24.04]" in r.stderr, r.stderr
+        assert "version-pinned, not kept=[ubuntu-24.04-arm]" in r.stderr, r.stderr
+        assert "removed=[ubuntu-24.04-arm]" in r.stderr, (
+            f"dropping the arm64 spelling is a REMOVAL and must be printed as one: {r.stderr}"
+        )
+        assert "NOT KEPT: 'ubuntu-24.04-arm'" in r.stderr, (
+            f"the reason must be printed, not left to be inferred from `not kept=`: {r.stderr}"
+        )
+        # …and the log says WHICH reading decided it, so it cannot disagree with `--status`
+        assert "resolved claim=ubuntu-24.04" in r.stderr, r.stderr
+
+    # ⛔ A DECLINING `auto` IS THE SAME ANSWER AS `off`: the resolution claimed nothing, so nothing is
+    # kept — even though the runner already carries the pin, and even though the FLAG spelling is
+    # still `auto`. Keeping it here is what makes a declined claim permanent.
+    for case, seams in (
+        ("rel-22.04", {"CI_RUNNER_OS_NAME": "Linux", "CI_RUNNER_OS_RELEASE": str(rel22)}),
+        ("not-linux", {"CI_RUNNER_OS_NAME": "Darwin"}),
+    ):
+        stub, env = _repair_runner(tmp_path / f"declined-{case}", pool="1", labels=POOL_LABELS)
+        env["CI_RUNNER_OS_LABEL"] = "auto"
+        env.update(seams)
+        r = _run("--repair-labels", "--count", "1", env=env)
+        assert r.returncode == 0, r.stderr
+        assert "DECLINED" in r.stderr, (
+            f"the premise of this arm is that `auto` DECLINED on this host: {r.stderr}"
+        )
+        put = _put_body(stub)
+        assert not {"ubuntu-24.04", "ubuntu-24.04-arm"} & set(put), (
+            f"`auto` declined on this host, so the box claimed nothing — a repair that keeps (and "
+            f"re-PUTs) the pin makes a claim the box itself declined PERMANENT, and it is the false "
+            f"PASS the carve-out exists to stop: {put}"
+        )
+        assert "version-pinned, kept=[]" in r.stderr, r.stderr
+        assert "version-pinned, not kept=[ubuntu-24.04,ubuntu-24.04-arm]" in r.stderr, r.stderr
+        assert "removed=[ubuntu-24.04,ubuntu-24.04-arm]" in r.stderr, (
+            f"the drop is a REMOVAL and must be printed as one: {r.stderr}"
+        )
+        assert "resolved claim=none" in r.stderr, (
+            f"the `removed=` line must print the resolution that decided the carve-out — printing "
+            f"the flag alone is how the log agreed with the writer even where it was wrong: "
+            f"{r.stderr}"
+        )
 
     # unset (and an explicit `off`): the pre-departure invariant — the pin is dropped and printed
     for value in ("", "off"):
@@ -593,14 +739,20 @@ def test_the_version_pin_carve_out_obeys_the_boxes_own_choice(tmp_path: Path):
         put = _put_body(stub)
         assert not {"ubuntu-24.04", "ubuntu-24.04-arm"} & set(put), put
         assert "version-pinned, kept=[]" in r.stderr, r.stderr
+        assert "resolved claim=none" in r.stderr, r.stderr
 
-    # an unrecognised value is READ AS off, and says so — never a silent keep
+    # an unrecognised value NEVER REACHES the carve-out: the flag is validated once, before every
+    # mode, so this is a usage error with nothing read and nothing PUT.
     stub, env = _repair_runner(tmp_path / "bogus", pool="1", labels=POOL_LABELS)
     env["CI_RUNNER_OS_LABEL"] = "yes"
     r = _run("--repair-labels", "--count", "1", env=env)
-    assert r.returncode == 0, r.stderr
-    assert "is not on|auto|off — read as off" in r.stderr, r.stderr
-    assert not {"ubuntu-24.04", "ubuntu-24.04-arm"} & set(_put_body(stub))
+    assert r.returncode == 1, (r.returncode, r.stderr)
+    assert "must be off|on|auto" in r.stderr, r.stderr
+    log = stub / "gh-calls.log"
+    assert not log.exists() or not re.search(r"PUT ", log.read_text()), (
+        f"a refused value must change nothing, but gh was asked to relabel: "
+        f"{log.read_text() if log.exists() else '<no gh call at all>'}"
+    )
 
 
 def test_the_repair_refuses_an_arm64_runner_instead_of_keeping_ubuntu_latest_on_it(tmp_path: Path):
@@ -874,140 +1026,1292 @@ def test_repair_refuses_fallback_off_because_a_union_cannot_detach(tmp_path: Pat
     assert "ubuntu-latest" in _put_body(stub), _put_body(stub)
 
 
-# ── 3c. `--status` answers "who answers this runs-on: label" ─────────────────────────────────
-def test_status_counts_answering_runners_per_runs_on_label(tmp_path: Path):
-    """The stalled gate produced NO check to look at, so the queue has to be READ, not inferred.
+# ── 3b. the OS-release label: the deadlock escape, opt-in and honest about declining ────────
+def test_the_os_label_is_opt_in_and_no_fallback_arm_can_drop_it(tmp_path: Path):
+    """`CI_RUNNER_OS_LABEL=on` adds `ubuntu-24.04` on EVERY `--fallback` arm; the default adds none.
 
-    `--status` counts, per `runs-on:` label the workflows actually use, how many ONLINE self-hosted
-    runners answer it — and says so loudly when the answer is zero, because that is the state in
-    which a job sits `pending` with zero materialised jobs while every PR waits.
+    The default arm is the #6897 decision (`test_labels_are_this_archs_own_and_follow_the_fallback`
+    pins it as the shipped behaviour). What is pinned HERE is the other half nobody executed: the
+    opt-in, and the invariant that makes it an OS FACT rather than a fallback state — `--fallback
+    off` must not be able to drop it, because a runner that drops it leaves `workflow-lint` and
+    `test-slow (a–e)` unschedulable and `python-ci-gate` is never dispatched (every PR BLOCKED).
 
-    ⛔ HERMETIC: the installer is COPIED one directory down and the `runs-on:` surface it reads is
-    written under that copy — the same shape as the two coverage arms below. Reading this repo's
-    real `.github/workflows` made an INSTALLER test depend on the checkout: the day an unrelated
-    workflow retargets its last `ubuntu-24.04` pin (a plausible change for a runner-capacity PR,
-    which is exactly this area) the arm reds with a label-coverage message that has nothing to do
-    with the installer — and it is the host/checkout coupling this module's contract forbids.
+    Mutation: append `$OS_LABELS` inside the `off` arm only -> the third case lacks it -> RED.
+    Mutation: return early from `resolve_labels` after the `--fallback` case -> RED.
     """
-    tools = tmp_path / "tools"
-    tools.mkdir()
-    copied = tools / "install-ci-runner-x64.sh"
-    copied.write_text(Path(INSTALLER).read_text())
-    wf = tmp_path / ".github" / "workflows"
-    wf.mkdir(parents=True)
-    (wf / "ci.yml").write_text(
-        "jobs:\n"
-        "  gate:\n    runs-on: ubuntu-latest\n"
-        "  slow:\n    runs-on: ubuntu-24.04\n"
+    on = _run("--print-labels", "--fallback", "on", env=_env(tmp_path, CI_RUNNER_OS_LABEL="on"))
+    assert on.returncode == 0, on.stderr
+    assert on.stdout.strip() == "self-hosted-x64,ubuntu-latest,ubuntu-24.04", on.stdout
+
+    # ⛔ THE ONE INVARIANT THE FEATURE RESTS ON: the OS fact rides every arm.
+    off = _run("--print-labels", "--fallback", "off", env=_env(tmp_path, CI_RUNNER_OS_LABEL="on"))
+    assert off.returncode == 0, off.stderr
+    assert off.stdout.strip() == "self-hosted-x64,ubuntu-24.04", (
+        f"`--fallback off` must not drop the OS fact: {off.stdout}"
     )
 
-    def _status(stub: Path) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [BASH, str(copied), "--status", "--count", "1"],
-            capture_output=True,
-            text=True,
-            env=_env(
-                tmp_path,
-                PATH=f"{stub}:{os.environ['PATH']}",
-                CI_RUNNER_UNIT_DIR=str(tmp_path / "units"),
-            ),
+    # The default is `off`: the shipped behaviour still keeps the #6897 pin.
+    default = _run("--print-labels", "--fallback", "off", env=_env(tmp_path))
+    assert "ubuntu-24.04" not in default.stdout, default.stdout
+
+    # ⛔ AND THE DEFAULT IS THE ONE WITH THE VARIABLE ABSENT — not merely the one where it says
+    # `off`. `_env` now sets `CI_RUNNER_OS_LABEL=off` explicitly (the suite is hermetic), so without
+    # this case the suite could only prove that `off` behaves, and a flip of the DEFAULT would pass
+    # every assertion here. This is the #6897 pin itself: a fresh box must claim nothing.
+    unset = _env(tmp_path)
+    unset.pop("CI_RUNNER_OS_LABEL", None)
+    for args in (("--print-labels", "--fallback", "off"), ("--print-labels", "--fallback", "on")):
+        r = _run(*args, env=unset)
+        assert r.returncode == 0, r.stderr
+        assert "ubuntu-24.04" not in r.stdout, (
+            f"the DEFAULT flipped: a box with no CI_RUNNER_OS_LABEL exported claimed the "
+            f"version-pinned label ({args}): {r.stdout}"
         )
 
-    carrying = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest"
-    r = _status(_stub_gh(tmp_path / "carrying", "0", rows=carrying))
-    assert r.returncode == 0, r.stderr
-    assert re.search(r"^\s+ubuntu-latest → 1 online, 0 offline$", r.stderr, re.M), r.stderr
-    assert re.search(r"^\s+ubuntu-24\.04 → 0 online, 0 offline$", r.stderr, re.M), r.stderr
-    assert "NO RUNNER ANSWERS 'ubuntu-24.04'" in r.stderr, r.stderr
-    assert "NO RUNNER ANSWERS 'ubuntu-latest'" not in r.stderr, r.stderr
 
-    # …and with nothing carrying the gate's label, it is named — the measured stall, made visible
-    stripped = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64"
-    r2 = _status(_stub_gh(tmp_path / "stripped", "0", rows=stripped))
-    assert r2.returncode == 0, r2.stderr
-    assert "NO RUNNER ANSWERS 'ubuntu-latest'" in r2.stderr, r2.stderr
-    # ⛔ LABEL-SCOPED, not byte-for-byte: the summary line names EVERY uncovered label, so an
-    # unrelated workflow edit must not be able to red this arm. Assert that the labels THIS arm is
-    # about are named, and nothing about the rest.
-    summary = re.search(r"NO online self-hosted answer for: (.*)$", r2.stderr, re.M)
-    assert summary, r2.stderr
-    named = set(summary.group(1).split())
-    assert {"ubuntu-latest", "ubuntu-24.04"} <= named, (
-        f"the summary must name each uncovered label; got {named}: {r2.stderr}"
+def test_auto_claims_the_os_label_only_when_the_host_reports_that_release(tmp_path: Path):
+    """`auto` derives the label from the HOST, and SAYS SO when it declines.
+
+    `auto` used to decline in total silence: a 22.04 box, a container with no `/etc/os-release`, or
+    a macOS lane got a label set without `ubuntu-24.04` and no signal — indistinguishable from
+    "opted out", on the one property (the host's release) that decides whether the escape applies.
+    The recommended spelling must not be the quiet one. Both reads are seams (`CI_RUNNER_OS_NAME`,
+    `CI_RUNNER_OS_RELEASE`) for the same reason `CI_RUNNER_ARCH` is: the box that reads this code is
+    not the box being guarded.
+
+    Mutation: return 0 silently in the declined arms -> the DECLINED assertions red -> RED.
+    Mutation: drop the `VERSION_ID` comparison -> the 22.04 case claims the label -> RED.
+    """
+    rel24 = tmp_path / "os-release-24"
+    rel24.write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+    rel22 = tmp_path / "os-release-22"
+    rel22.write_text('NAME="Ubuntu"\nVERSION_ID="22.04"\n')
+
+    derived = _run(
+        "--print-labels",
+        env=_env(
+            tmp_path,
+            CI_RUNNER_OS_LABEL="auto",
+            CI_RUNNER_OS_NAME="Linux",
+            CI_RUNNER_OS_RELEASE=str(rel24),
+        ),
+    )
+    assert derived.returncode == 0, derived.stderr
+    assert derived.stdout.strip() == "self-hosted-x64,ubuntu-24.04", (
+        f"auto on a 24.04 box must claim the OS fact: {derived.stdout}"
+    )
+    assert "DECLINED" not in derived.stderr, derived.stderr
+
+    wrong_release = _run(
+        "--print-labels",
+        env=_env(
+            tmp_path,
+            CI_RUNNER_OS_LABEL="auto",
+            CI_RUNNER_OS_NAME="Linux",
+            CI_RUNNER_OS_RELEASE=str(rel22),
+        ),
+    )
+    assert wrong_release.returncode == 0, wrong_release.stderr
+    assert wrong_release.stdout.strip() == "self-hosted-x64", wrong_release.stdout
+    assert "DECLINED" in wrong_release.stderr and "$OS_LABEL" not in wrong_release.stderr, (
+        "a declining `auto` must say why, not return 0 in silence: " f"{wrong_release.stderr}"
+    )
+    assert "22.04" in wrong_release.stderr, wrong_release.stderr
+
+    not_linux = _run(
+        "--print-labels",
+        env=_env(tmp_path, CI_RUNNER_OS_LABEL="auto", CI_RUNNER_OS_NAME="Darwin"),
+    )
+    assert not_linux.returncode == 0, not_linux.stderr
+    assert not_linux.stdout.strip() == "self-hosted-x64", not_linux.stdout
+    assert "DECLINED" in not_linux.stderr and "not Linux" in not_linux.stderr, not_linux.stderr
+
+
+def test_an_unrecognised_os_label_value_is_refused_in_every_mode(tmp_path: Path):
+    """A typo is a USAGE error (exit 1) in every mode — including `--status`, where it is looked for.
+
+    The refusal used to live inside `resolve_os_label`, which only install / repair / --print-labels
+    reach. `--status` never calls it, so `CI_RUNNER_OS_LABEL=true --status` exited 0 with no
+    complaint — and `--status` is exactly the mode an operator runs AFTER setting the flag to
+    VERIFY the escape is applied. A fail-open in the one place the answer is read. The check is now
+    hoisted beside `--count`, so all four modes refuse before doing anything.
+
+    Mutation: move the `case` back inside `resolve_os_label` -> `--status` exits 0/3, not 1 -> RED.
+    """
+    for args in (
+        ("--print-labels",),
+        ("--status",),
+        ("--uninstall",),
+        ("--repair-labels",),
+        ("--count", "1", "--dry-run"),
+    ):
+        r = _run(*args, env=_env(tmp_path, CI_RUNNER_OS_LABEL="true"))
+        assert r.returncode == 1, f"{args} must refuse a typo as a usage error: {r.returncode} {r.stderr}"
+        assert "CI_RUNNER_OS_LABEL must be off|on|auto" in r.stderr, (args, r.stderr)
+
+
+def test_the_log_names_the_label_set_that_is_actually_registered(tmp_path: Path):
+    """The `fallback:` line must print the FINAL set — the one `config.sh` gets, OS label included.
+
+    `$OS_LABELS` is appended at the END of `resolve_labels`, and the two `say` lines printed
+    `$LABELS` before that — so one run logged `labels=self-hosted-x64,ubuntu-latest` and registered
+    `…,ubuntu-24.04` four lines later, and the runbook quotes the log line as recorded output. An
+    operator reading the log for the mitigation saw it absent and concluded the flag had not applied.
+
+    Mutation: revert either `say` to `$LABELS` alone -> the assertion reds -> RED.
+    """
+    engaged = _stub_gh(tmp_path / "engaged", "1")
+    (tmp_path / ".runner").write_text('{"agentName": "pi-runner-x64-1"}\n')
+    env = _env(
+        tmp_path,
+        PATH=f"{engaged}:{os.environ['PATH']}",
+        CI_RUNNER_ARCH="x86_64",
+        CI_RUNNER_OS_LABEL="on",
+    )
+    r = _run("--repair-labels", "--count", "1", "--dry-run", env=env)
+    assert r.returncode == 0, r.stderr
+    logged = re.search(r"labels=(\S+)", r.stderr)
+    assert logged, r.stderr
+    assert "ubuntu-24.04" in logged.group(1), (
+        f"the logged label set is not the one that would be registered: {r.stderr}"
     )
 
-    # ⛔ THE COUNT IS AN EXACT LABEL MATCH, and this row is why: `ubuntu-latest-extra` is a
-    # DIFFERENT label, so a substring/prefix comparison would report `ubuntu-latest → 1` and declare
-    # the required gate covered by a runner that cannot answer it — a false green on the one surface
-    # whose whole job is to be accountable for silence.
-    lookalike = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest-extra"
-    r3 = _status(_stub_gh(tmp_path / "lookalike", "0", rows=lookalike))
-    assert r3.returncode == 0, r3.stderr
-    assert re.search(r"^\s+ubuntu-latest → 0 online, 0 offline$", r3.stderr, re.M), r3.stderr
-    assert "NO RUNNER ANSWERS 'ubuntu-latest'" in r3.stderr, r3.stderr
+
+# ── 3c. label-coverage: the instrument that must not lie in either direction ────────────────
+def _repo_with_workflows(tmp_path: Path, body: str, suffix: str = ".yml") -> Path:
+    repo = tmp_path / "repo"
+    wf = repo / ".github" / "workflows"
+    wf.mkdir(parents=True, exist_ok=True)
+    (wf / f"w{suffix}").write_text(body)
+    return repo
 
 
-def test_label_coverage_makes_no_claim_when_it_cannot_read_the_workflows(tmp_path: Path):
-    """⚠️ AN UNREAD SURFACE MUST NOT READ AS COVERED.
+def test_label_coverage_distinguishes_did_not_look_from_looked_and_found(tmp_path: Path):
+    """Exit 4 for an EMPTY READ, 0 when the read happened, 5 when a label has NO answer.
 
-    The coverage block derives its label list from `.github/workflows` in the checkout the SCRIPT
-    lives in. Run from a tree without them (a copied installer, a packaged deploy) it must say it
-    read nothing — a "every label has an answer" over an empty surface is the same false-clean this
-    block exists to remove, one level down. It must also still exit 0: this is a report, not a gate.
+    Two separate predicates, neither implied by the other: the directory may be missing (no read at
+    all), or it may exist and yield zero labels (a `uses:`-only workflow). Exit 0 used to cover BOTH
+    "every label covered" and "a required label has no runner", so `--status && …` could not tell
+    the state that blocks every PR from the one that does not — a verdict, and it is bad, is exit 5.
+
+    Mutation: drop either exit-4 arm -> the corresponding case exits 0 -> RED.
+    Mutation: return 0 on `uncovered` -> the 5 case reds -> RED.
     """
-    tools = tmp_path / "tools"
-    tools.mkdir()
-    copied = tools / "install-ci-runner-x64.sh"
-    copied.write_text(Path(INSTALLER).read_text())
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
 
-    carrying = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest"
-    stub = _stub_gh(tmp_path / "pool", "0", rows=carrying)
-    r = subprocess.run(
-        [BASH, str(copied), "--status", "--count", "1"],
-        capture_output=True,
-        text=True,
-        env=_env(tmp_path, PATH=f"{stub}:{os.environ['PATH']}", CI_RUNNER_UNIT_DIR=str(tmp_path / "units")),
+    no_dir = tmp_path / "no-dir"
+    no_dir.mkdir()
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=no_dir)
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "read NOTHING" in r.stderr, r.stderr
+
+    # `.yaml` is as real as `.yml` (GitHub accepts both): a `uses:`-only caller yields zero labels.
+    uses_only = _repo_with_workflows(
+        tmp_path, "jobs:\n  call:\n    uses: org/repo/.github/workflows/x.yml@main\n", suffix=".yaml"
     )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=uses_only)
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "found NO runs-on label" in r.stderr, r.stderr
+
+    # A covered label: the read happened, the pool answers it. Exit 0.
+    covered = _repo_with_workflows(
+        tmp_path,
+        "jobs:\n"
+        "  a:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        # ⛔ A COMMENT IS NOT A `runs-on:` LINE. Counted, this printed a false ⛔ UNCOVERED for a
+        # label no workflow asks for (and this tree's own comments name real labels).
+        "  # legacy: runs-on: windows-2022\n"
+        "  b:\n    runs-on: ubuntu-latest  # note: runs-on: macos-14\n    steps: []\n",
+        suffix=".yaml",
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=covered)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-latest = 1 of 1" in r.stderr, r.stderr
+    assert "windows-2022" not in r.stderr and "macos-14" not in r.stderr, (
+        f"comment prose was counted as a required label: {r.stderr}"
+    )
+
+    # The incident state: a REQUIRED label the pool IS ASKED to serve and nobody answers. A verdict,
+    # and it is bad -> 5. ⛔ `CI_RUNNER_OS_LABEL=on` IS PART OF THE FIXTURE: `--status` reads the
+    # operator's intent (the same `resolve_os_label` the install path uses) before it verdicts a bare
+    # pin, because with the flag at its shipped default `off` a zero-answer `ubuntu-24.04` cannot be
+    # NAMED — it is the pin OR erosion to zero, and one shell cannot tell them apart. See the
+    # flag-off control below.
+    uncovered = _repo_with_workflows(tmp_path / "u", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n")
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=uncovered,
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "0 of 1 online self-hosted runner(s)" in r.stderr, r.stderr
+    # ⛔ THE REMEDY MUST NAME ITS PRECONDITION: `--repair-labels` PUTs a WHOLE set, so the bare
+    # command (variable unset ⇒ `off`) removes the mitigation while the operator means to fix it.
+    assert "CI_RUNNER_OS_LABEL=on" in r.stderr and "REMOVES the mitigation" in r.stderr, r.stderr
+    # ⛔ AND THE REMEDY MUST NOT PRESCRIBE A SIDE OF AN OPEN DECISION. Reaching exit 5 means the pool
+    # is ALREADY asked to serve the label, so the command repeats the operator's own spelling and
+    # never re-derives `on` (which would silently widen an `auto` install).
+    assert "This pool IS asked to serve them" in r.stderr, r.stderr
+
+    # ⛔ THE MIRROR — AND THE FALSE CLEAR THIS FIX REMOVES. With `CI_RUNNER_OS_LABEL` at its shipped
+    # default (`off`, and `_env` pins that), a pool that answers NO `ubuntu-24.04` used to be
+    # reported as **"that is the #6897 pin applied correctly, NOT the incident state"**, exit 0 —
+    # and the runbook tells the operator to verify with the BARE `--status`, where the variable is
+    # unset. But `n == 0` cannot distinguish "never asked" (the pin, nothing to do) from "asked and
+    # gone" (erosion to zero — the incident, and the exact event the `⚠️ PARTIAL` arm exists to see
+    # coming one fill at a time). Naming the harmless reading was a fail-open in the BLOCKING
+    # direction: the default invocation cleared precisely the erosion this block exists to surface.
+    # The honest output is the measurement plus the ambiguity, and never an assertion of one side.
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=uncovered)
+    assert r.returncode == 0, (
+        f"the pinned configuration (#6897, flag off) is not the incident state: {r.stderr}"
+    )
+    assert "0 of 1 online self-hosted runner(s)" in r.stderr, r.stderr
+    assert "#6897 pin applied correctly" in r.stderr, r.stderr
+    assert "⛔ UNCOVERED" not in r.stderr, r.stderr
+    # Mutation (the pre-fix code): print only the harmless reading -> RED, both below.
+    assert "never asked" in r.stderr and "asked and gone" in r.stderr, (
+        f"a zero answer under an unset flag must name BOTH readings, not assert the pin: {r.stderr}"
+    )
+    assert "NOT the incident state" not in r.stderr, (
+        f"a shell's flag cannot rule out erosion to zero — that assertion is the fail-open: {r.stderr}"
+    )
+    # The verdict is still ONE read away, and the report says so without claiming it applied anything.
+    assert "CI_RUNNER_OS_LABEL=on" in r.stderr and "read-only" in r.stderr, r.stderr
+
+    # ⛔ AND THE INVOCATION THE RUNBOOK ACTUALLY DOCUMENTS IS THE ONE WITH THE VARIABLE ABSENT, not
+    # the one where it says `off`. `_env` pins `off` explicitly (the suite is hermetic), so without
+    # this case the suite proves only that `off` behaves — and `off`/absent is exactly the pair the
+    # shipped default lives in. Same assertion: the ambiguity, never the pin asserted as the state.
+    bare = _env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}")
+    bare.pop("CI_RUNNER_OS_LABEL", None)
+    r = _run("--status", env=bare, cwd=uncovered)
     assert r.returncode == 0, r.stderr
-    assert "SKIPPED (this makes NO claim about any label)" in r.stderr, r.stderr
-    assert "every one has an online self-hosted answer" not in r.stderr, r.stderr
+    assert "never asked" in r.stderr and "NOT the incident state" not in r.stderr, (
+        f"the bare `--status` the runbook tells an operator to verify with must not name the pin "
+        f"as the state: {r.stderr}"
+    )
+
+    # ⛔ AN EMPTY POOL IS NOT ONE RUNNER. `awk` counts RECORDS, and an empty pool feeds it exactly
+    # one empty record, so the denominator was `total=1` and an empty pool reported
+    # `0 of 1 online self-hosted runner(s)` — a fabricated runner, in the block whose doctrine is "an empty
+    # read is not a coverage verdict". The count the script already had (`grep -c .` → 0) is now the
+    # denominator it prints. Mutation: stop passing `pool_total` to the awk -> `0 of 1` -> RED.
+    empty_pool = _stub_gh(tmp_path / "empty", "")
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{empty_pool}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=_repo_with_workflows(tmp_path / "e", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"),
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "0 of 0 online self-hosted runner(s)" in r.stderr, (
+        f"an empty pool must report 0 runners, not a fabricated one: {r.stderr}"
+    )
+    # CONTROL — the same empty pool with the flag OFF is a report, so the 5 above is caused by the
+    # intent read and not by the empty pool (the two arms are independent predicates).
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{empty_pool}:{os.environ['PATH']}"),
+        cwd=_repo_with_workflows(tmp_path / "e2", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"),
+    )
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "0 of 0 online self-hosted runner(s)" in r.stderr, r.stderr
 
 
-def test_label_coverage_reads_yaml_workflows_too(tmp_path: Path):
-    """⛔ A `.yaml` WORKFLOW MUST NOT READ AS COVERED.
+def test_label_coverage_refuses_a_workflow_it_cannot_read(tmp_path: Path):
+    r"""⛔ A WORKFLOW THE READ COULD NOT OPEN IS `exit 4`, NEVER A SILENTLY DROPPED FILE.
 
-    GitHub accepts both `.yml` and `.yaml`, and the reader globbed only `*.yml` — so a `.yaml`
-    workflow's `runs-on:` was dropped while the block still printed "every one has an online
-    self-hosted answer". The repo has 0 `.yaml` workflows today, which is exactly why nothing caught
-    it: the block's own contract (`docs/ops/ci-runner-x64.md:235-237`) is that an unread label must
-    never read as healthy.
+    The extraction was a raw glob with `2>/dev/null`, which discarded grep's per-file read error: a
+    workflow that could not be OPENED contributed NOTHING, the surviving files still produced a row
+    set, no `!` was emitted, and the block printed a clean verdict and exited 0 over the one file it
+    had failed to read. Measured: an unreadable workflow naming `ubuntu-24.04` beside a readable
+    `ubuntu-latest` → `ubuntu-24.04` appeared NOWHERE in the report and `--status` exited 0; the same
+    tree with the mode restored → rc 5. That is the incident state this block exists to surface,
+    cleared through the one path its three exit-4 arms cannot see: they all inspect what the read
+    PRODUCED, never whether every file was read at all.
 
-    Non-vacuity: with the glob reverted to `*.yml` the `macos-14` row never appears and the summary
-    claims full coverage off a surface it did not read.
+    ⛔ GREP'S rc ALONE CANNOT DECIDE IT, which is why the checkpoint is the enumeration: with only
+    `*.yml` present the literal `.yaml` glob makes grep exit 2 for a reason that is NOT a read
+    failure (measured `grep-rc=2`), so a blanket `|| exit 4` would red the ordinary tree. The
+    predicate is "every ENUMERATED file could be opened" — the `[ -f ]`-per-path enumerator the
+    pre-rewrite script had and this one replaced with a glob.
+
+    Mutation: restore the glob + `2>/dev/null` → this exits 0 over a file it never read → RED.
     """
-    tools = tmp_path / "tools"
-    tools.mkdir()
-    copied = tools / "install-ci-runner-x64.sh"
-    copied.write_text(Path(INSTALLER).read_text())
-    wf = tmp_path / ".github" / "workflows"
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    env = _env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on")
+
+    # A `.yml` entry that is NOT a regular file cannot be opened by any user, root included — so this
+    # arm states the same predicate as the permission case below without depending on the test uid.
+    repo = tmp_path / "repo"
+    wf = repo / ".github" / "workflows"
     wf.mkdir(parents=True)
-    (wf / "legacy.yaml").write_text("jobs:\n  m:\n    runs-on: macos-14\n")
-    (wf / "plain.yml").write_text("jobs:\n  p:\n    runs-on: ubuntu-latest\n")
+    (wf / "aa-not-a-file.yml").mkdir()
+    (wf / "zz-readable.yml").write_text("jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n")
+    r = _run("--status", env=env, cwd=repo)
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "cannot READ" in r.stderr and "aa-not-a-file.yml" in r.stderr, r.stderr
 
-    carrying = "pi-runner-x64-1\tonline\tbusy=false\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest"
-    stub = _stub_gh(tmp_path / "pool", "0", rows=carrying)
-    r = subprocess.run(
-        [BASH, str(copied), "--status", "--count", "1"],
-        capture_output=True,
-        text=True,
-        env=_env(tmp_path, PATH=f"{stub}:{os.environ['PATH']}", CI_RUNNER_UNIT_DIR=str(tmp_path / "units")),
+    # The shape the review measured: a readable file silently ABSORBS the one it could not open.
+    # Skipped under root, where a mode bit is not a fence — never asserted vacuously.
+    if os.geteuid() != 0:
+        repo2 = tmp_path / "repo2"
+        wf2 = repo2 / ".github" / "workflows"
+        wf2.mkdir(parents=True)
+        (wf2 / "aa-unreadable.yml").write_text("jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n")
+        (wf2 / "zz-readable.yml").write_text("jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n")
+        (wf2 / "aa-unreadable.yml").chmod(0o000)
+        try:
+            r = _run("--status", env=env, cwd=repo2)
+        finally:
+            (wf2 / "aa-unreadable.yml").chmod(0o644)
+        assert r.returncode == 4, (r.returncode, r.stderr)
+        assert "cannot READ" in r.stderr, r.stderr
+        # CONTROL: the same tree, readable, measures BOTH labels — so the 4 above is caused by the
+        # unreadable file and not by the fixture.
+        r = _run("--status", env=env, cwd=repo2)
+        assert r.returncode in (0, 5), (r.returncode, r.stderr)
+        assert "ubuntu-24.04" in r.stderr and "ubuntu-latest" in r.stderr, r.stderr
+
+
+def test_label_coverage_refuses_a_runs_on_in_flow_position(tmp_path: Path):
+    r"""⛔ A `runs-on` IN FLOW POSITION IS REFUSED, NOT CLEARED — `a: {runs-on: …}` is valid YAML.
+
+    The opener only ever saw a line that STARTS with `runs-on:`, so a job written as a flow mapping
+    opened no block, `keyseen` never incremented, the END rule had nothing to report, and the block
+    CLEARED. Measured on a fixture whose other workflow named `ubuntu-latest`: the `ubuntu-24.04`
+    leg was absent from the report entirely and the read exited 0. GitHub parses the JOB MAPPING, not
+    the formatting, so the leg is real and this instrument is the only thing that would notice it.
+
+    This pass does not carry flow-position keys, so counting them is what turns "invisible" into
+    "refused" — the same content-not-prefix rule the quoted-key and explicit-key spellings were
+    added for: a form the pass cannot read is refused rather than allowed to clear the rest.
+
+    Mutation: revert `keylike()` to the line-start spellings only → rc 0 with no `ubuntu-24.04` row
+    → RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    repo = tmp_path / "repo"
+    wf = repo / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "a.yml").write_text(
+        "jobs:\n"
+        "  a: {runs-on: ubuntu-24.04, steps: [{run: echo hi}]}\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
     )
-    assert r.returncode == 0, r.stderr
-    assert re.search(r"^\s+macos-14 → 0 online, 0 offline$", r.stderr, re.M), (
-        f"a `.yaml` workflow's `runs-on:` must be READ, not silently dropped: {r.stderr}"
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=repo,
     )
-    assert "NO RUNNER ANSWERS 'macos-14'" in r.stderr, r.stderr
-    assert "every one has an online self-hosted answer" not in r.stderr, r.stderr
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "could not read 1 runs-on: block(s)" in r.stderr, r.stderr
+
+
+def test_label_coverage_matches_labels_case_insensitively(tmp_path: Path):
+    r"""⛔ A LABEL IS CASE-INSENSITIVE — GitHub matches runner labels that way.
+
+    The carrier match (`a[i]==want`), the class regexes and the shell-side identity compare all keyed
+    on the EXACT spelling, so a workflow naming `Ubuntu-24.04` beside a pool whose runners carry
+    `ubuntu-24.04` printed `Ubuntu-24.04 = 0 of 7`, fell to the `*)` class arm ("Not a label this
+    pool serves … a report, not a block") and exited 0 — the incident state, cleared, on a spelling
+    Actions treats as identical. This file already relies on the case-insensitivity elsewhere (the
+    repair block records that `Self-Hosted-Arm64` / `SELF-HOSTED-ARM64` ARE the arm64 marker,
+    `_preserve_labels` tests with `grep -qiE`, and `tools/runner_autoscale.py` uses
+    `re.IGNORECASE`), which made this read the only case-SENSITIVE member of the family.
+
+    The fold lives in `emit()` — the one choke point every documented `runs-on` form goes through —
+    so the label set, the carrier match, the class arms and `lab_asked` all see one spelling.
+
+    Mutation: drop `v = tolower(v)` from `emit()` → the mixed-case arms RED (0 of 1 / rc 0 instead
+    of covered / rc 5).
+    """
+    # A pool that answers the lowercase spelling only: `ubuntu-24.04` on ONE online x64 runner.
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-24.04")
+
+    # (a) The mixed-case REQUIRED label is MEASURED, not reported as somebody else's label.
+    covered = _repo_with_workflows(
+        tmp_path / "c",
+        "jobs:\n  a:\n    runs-on: Ubuntu-24.04\n    steps: []\n  b:\n    runs-on: UBUNTU-LATEST\n    steps: []\n",
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=covered,
+    )
+    assert "ubuntu-24.04 = 1 of 1" in r.stderr, r.stderr
+    assert "ubuntu-latest = 0 of 1" in r.stderr, r.stderr
+    assert "Not a label this pool serves" not in r.stderr, r.stderr
+    assert r.returncode == 0, (r.returncode, r.stderr)
+
+    # (b) And the fold does not CLEAR the incident state: the same mixed-case pin against a pool with
+    # NO carrier is still the verdict it is in lowercase. Without the fold `lab_asked` was 0 (the
+    # identity compare failed on case), so this arm exited 0 — a false clear in the blocking
+    # direction, on the one spelling Actions normalises away.
+    empty = _stub_gh(tmp_path / "empty", "r1\tself-hosted-x64,ubuntu-latest")
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{empty}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=_repo_with_workflows(
+            tmp_path / "e", "jobs:\n  a:\n    runs-on: Ubuntu-24.04\n    steps: []\n"
+        ),
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "0 of 1 online self-hosted runner(s)" in r.stderr, r.stderr
+
+
+def test_label_coverage_counts_only_online_carriers(tmp_path: Path):
+    """⛔ A CARRIER THAT IS OFFLINE IS NOT AN ANSWER — `online` is a GATE, not a decoration.
+
+    GitHub's own runner-status definition: `Offline` means "the runner is not connected to GitHub",
+    so it cannot be handed a job. The coverage read used to project `(name, labels)` only, so the
+    exact incident this block exists to surface was reported GREEN: 7 carriers of `ubuntu-24.04`,
+    every one offline, printed `ubuntu-24.04 = 7 of 7 runner(s)`, no `⚠️ PARTIAL`, and exit 0 even
+    under `CI_RUNNER_OS_LABEL=on` — i.e. "`python-ci-gate` never dispatched, every PR blocked"
+    reported as covered. It also inflated the denominator, so the PARTIAL arm added in this PR
+    (the only read that sees erosion before the last carrier goes) could not fire for a
+    partially-offline pool.
+
+    Runners go offline routinely — `runner_autoscale.py::converge` re-registers DEAD/ORPHANED ones —
+    so this is a state, not an edge case.
+
+    Mutation: drop `.status` from the coverage projection (the pre-fix read) -> the first arm below
+    prints `7 of 7` and exits 0 -> RED. Count offline carriers in `n` (or in `denom`) -> the first
+    and second arms RED.
+    """
+    repo = _repo_with_workflows(
+        tmp_path / "cov", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+
+    # ── the incident: every carrier exists, none of them is connected ────────────────────────
+    offline_pool = _stub_gh(
+        tmp_path / "gh-offline",
+        "\n".join(
+            f"o{i}\toffline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04"
+            for i in range(1, 8)
+        ),
+    )
+    r = _run(
+        "--status",
+        env=_env(
+            tmp_path, PATH=f"{offline_pool}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"
+        ),
+        cwd=repo,
+    )
+    assert r.returncode == 5, (
+        f"a label whose every carrier is OFFLINE has no answer, so the verdict is `bad`: "
+        f"{(r.returncode, r.stderr)}"
+    )
+    assert "7 of 7" not in r.stderr, (
+        f"seven offline runners are not seven answers — this is the false green: {r.stderr}"
+    )
+    assert "0 of 0 online self-hosted runner(s) answer it" in r.stderr, r.stderr
+    assert "7 runner(s) in the pool are not `online`, 7 of them carrying ubuntu-24.04" in r.stderr, (
+        f"the offline carriers must be printed as CONTEXT, so the measurement is readable: {r.stderr}"
+    )
+    assert "⛔ UNCOVERED" in r.stderr, r.stderr
+
+    # ── the erosion shape: one online runner that CANNOT answer, one offline one that can ────
+    # Pre-fix this printed `ubuntu-24.04 = 1 of 2 runner(s) — ⚠️ PARTIAL` and exited 0: the only
+    # carrier was disconnected, and the label had no answer at all.
+    mixed = _stub_gh(
+        tmp_path / "gh-mixed",
+        "on1\tonline\tself-hosted-x64\noff1\toffline\tself-hosted-x64,ubuntu-24.04",
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{mixed}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=repo,
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "ubuntu-24.04 = 0 of 1 online self-hosted runner(s) answer it" in r.stderr, (
+        f"the denominator counts the runners that COULD answer — the online one, not the offline "
+        f"carrier: {r.stderr}"
+    )
+    assert "1 runner(s) in the pool are not `online`, 1 of them carrying ubuntu-24.04" in r.stderr, (
+        r.stderr
+    )
+
+    # ── CONTROL: the fix is not "everything is red" ─────────────────────────────────────────
+    # One ONLINE carrier is coverage, and an offline runner that does NOT carry the label must not
+    # inflate the denominator either (`1 of 1`, never `1 of 2`).
+    live = _stub_gh(
+        tmp_path / "gh-live",
+        "on1\tonline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04\n"
+        "on2\toffline\tself-hosted-x64",
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{live}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=repo,
+    )
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-24.04 = 1 of 1 online runner(s)" in r.stderr, (
+        f"an online carrier is coverage, and an offline non-carrier is not a candidate: {r.stderr}"
+    )
+    assert "1 runner(s) in the pool are not `online`, 0 of them carrying ubuntu-24.04" in r.stderr, (
+        r.stderr
+    )
+
+
+def test_label_coverage_never_widens_a_class_numerator_to_foreign_arch_carriers(tmp_path: Path):
+    """⛔ AN EMPTY SUB-POOL IS THE INCIDENT — WIDENING THE NUMERATOR TO THE WHOLE POOL HIDES IT.
+
+    The class denominator (`nx64` for a bare `ubuntu-<version>`, `narm` for an `-arm` spelling) can
+    legitimately be 0, and the read used to widen BOTH halves in that case
+    (`if (denom == 0) { denom = pool_online; num = n }`). `n` counts EVERY online carrier, so the
+    widening put foreign-arch carriers back into the numerator the class exists to exclude — and
+    the verdict got BETTER as more of them were added, which is the fail-open direction:
+
+      0 online x64 + 5 online arm64 wrongly carrying `ubuntu-24.04`
+        -> `ubuntu-24.04 = 5 of 5 online runner(s)` and exit 0   (full coverage, stated)
+        -> `0 of 0 ... answer it` + `⛔ UNCOVERED` + exit 5        (the incident, after the fix)
+
+    The same shape hid a false architecture claim for the `-arm` class (0 online arm64, 2 online x64
+    wrongly carrying `ubuntu-24.04-arm` read `2 of 2`, now `0 of 0`).
+
+    Mutation: restore the widening, or use `n` as the numerator for a class -> the first arm below
+    prints `5 of 5` and exits 0 -> RED; the second prints `2 of 2` -> RED.
+    """
+    repo = _repo_with_workflows(
+        tmp_path / "cov-foreign", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+
+    # ── the bare class: every online carrier is FOREIGN-arch, the one real x64 carrier is offline ──
+    foreign = _stub_gh(
+        tmp_path / "gh-foreign",
+        "\n".join(
+            [
+                f"a{i}\tonline\tself-hosted,Linux,ARM64,self-hosted-arm64,ubuntu-24.04"
+                for i in range(1, 6)
+            ]
+            + ["x1\toffline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04"]
+        ),
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{foreign}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=repo,
+    )
+    assert r.returncode == 5, (
+        f"0 online x64 runners is NO answer for a bare x64 pin however many arm64 runners wrongly "
+        f"carry it — a verdict, not a green: {(r.returncode, r.stderr)}"
+    )
+    assert "5 of 5" not in r.stderr, (
+        f"five foreign-arch carriers are not five answers; counting them makes the read WORSE as "
+        f"unusable runners are added: {r.stderr}"
+    )
+    assert "0 of 0 online self-hosted runner(s) answer it" in r.stderr, (
+        f"the denominator counts the runners that COULD answer (the online x64 pool, here empty), "
+        f"and the numerator must be counted in that same population: {r.stderr}"
+    )
+    assert "⛔ UNCOVERED" in r.stderr, r.stderr
+    assert "1 runner(s) in the pool are not `online`, 1 of them carrying ubuntu-24.04" in r.stderr, (
+        f"the offline x64 carrier is still printed as CONTEXT, so the measurement stays readable: "
+        f"{r.stderr}"
+    )
+
+    # ── the `-arm` class: 0 online arm64, 2 online x64 wrongly carrying the ARM spelling ─────────
+    arm_repo = _repo_with_workflows(
+        tmp_path / "cov-foreign-arm", "jobs:\n  a:\n    runs-on: ubuntu-24.04-arm\n    steps: []\n"
+    )
+    wrong_arch = _stub_gh(
+        tmp_path / "gh-wrong-arch",
+        "\n".join(
+            f"x{i}\tonline\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04-arm"
+            for i in range(1, 3)
+        ),
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{wrong_arch}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=arm_repo,
+    )
+    assert "2 of 2" not in r.stderr, (
+        f"an x64 runner carrying an `-arm` spelling is a false architecture claim, never coverage: "
+        f"{r.stderr}"
+    )
+    assert "0 of 0 online self-hosted runner(s) answer it" in r.stderr, r.stderr
+    assert r.returncode == 0, (
+        f"an `-arm` spelling is not this pool's class on an x64 box, so it is a REPORT, not a "
+        f"block: {(r.returncode, r.stderr)}"
+    )
+
+
+def test_label_coverage_reports_partial_coverage_rather_than_green(tmp_path: Path):
+    """`0 < n < pool_total` is the erosion state: a label half the pool cannot answer is WARNED.
+
+    The scheduled autoscaler ADDS runners, and its FILL leg registers them through
+    `install-ci-runner-x64.sh` — which attaches `ubuntu-24.04` only under `CI_RUNNER_OS_LABEL`. A
+    pool that drifts to `ubuntu-24.04 = 3` still printed a clean "covered" line, so the label could
+    reach zero answers one fill at a time with this instrument green at every step and the return of
+    the ALL-PR-BLOCKED state landing with no red in between.
+
+    Mutation: `elif [ "$n" -lt "$pool_total" ]` -> `elif false` -> "PARTIAL" absent -> RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest\nr2\tself-hosted-x64")
+    repo = _repo_with_workflows(tmp_path, "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: []\n")
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=repo)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-latest = 1 of 2 online runner(s)" in r.stderr, r.stderr
+    assert "PARTIAL" in r.stderr, (
+        f"a label only half the pool answers must not read as plain coverage: {r.stderr}"
+    )
+    # ⛔ AND THE REMEDY IS CLASS-CORRECT, because one message for all classes prescribed a fix that
+    # cannot apply. `ubuntu-latest` is the GATE's label: `scripts/ci_runner_gate.sh` attaches and
+    # detaches it, and this installer never registers it — so telling an operator to "re-apply with
+    # CI_RUNNER_OS_LABEL=on --repair-labels" during a fallback transition sends them to a command
+    # that does not change this label at all. Only the bare `ubuntu-<version>` pin is re-applied by
+    # this script, so only that class may carry the instruction.
+    assert "nothing to re-apply here" in r.stderr, (
+        f"a gate-owned label must not be given this script's re-apply instruction: {r.stderr}"
+    )
+    assert "CI_RUNNER_OS_LABEL=on --repair-labels" not in r.stderr, (
+        f"the repair instruction cannot apply to a label the gate owns: {r.stderr}"
+    )
+
+    # CONTROL — the bare pin, half-covered, is the class where the instruction IS correct (a fill or
+    # re-registration that omitted it is exactly what erodes coverage).
+    half = _stub_gh(tmp_path / "gh-half", "x1\tself-hosted-x64,ubuntu-24.04\nx2\tself-hosted-x64")
+    pin = _repo_with_workflows(
+        tmp_path / "pin", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{half}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=pin,
+    )
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-24.04 = 1 of 2 online runner(s)" in r.stderr, r.stderr
+    assert "CI_RUNNER_OS_LABEL=on --repair-labels" in r.stderr, (
+        f"a half-covered bare pin IS this script's to re-apply: {r.stderr}"
+    )
+
+    # ⛔ AND THE SAME ARM WITH THE FLAG OFF MUST NOT INVERT THE REMEDY — the fix for finding 1's (b),
+    # and the destructive half. This branch is reached only when `0 < n < denom`, i.e. it has just
+    # MEASURED runners carrying the label. A runner's labels are explicitly assigned (GitHub REST:
+    # `Add custom labels` / `Set custom labels` / `Remove all custom labels`; registration labels
+    # come from `config.sh --labels`), so a carrier is proof the pool WAS asked — "this pool is not
+    # asked to serve it" was asserted on a line reporting carriers, and the remedy it printed
+    # (`--repair-labels` with the variable UNSET) PUTs a WHOLE set: following it removes the label
+    # from the LAST carriers and lands the pool at `0 of 12`, which the zero arm then reports as
+    # intentional. Both readings must be stated and the destructive command refused.
+    r = _run("--status", env=_env(tmp_path, PATH=f"{half}:{os.environ['PATH']}"), cwd=pin)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "CI_RUNNER_OS_LABEL=on --repair-labels" not in r.stderr, (
+        f"the remedy must not re-apply a departure the operator has switched off: {r.stderr}"
+    )
+    # ⛔ BOTH READINGS MUST BE STATED, and this assertion used to name a string the script never
+    # emits (`"leftover from a previous state"` — `grep` finds it nowhere), so it could not fail and
+    # the "Mutation ... both RED" note above rested on the two assertions below it alone. Pin the
+    # text the code ACTUALLY prints, positively: the both-readings sentence is the fix, a
+    # single-reading revert drops one half of it, and the pin reds.
+    assert "leftover from an earlier" in r.stderr, (
+        f"the flag-off PARTIAL arm must name the leftover reading it fits: {r.stderr}"
+    )
+    assert "erosion while the pool is still asked" in r.stderr, (
+        f"and the OTHER reading it fits — a single-reading message is the destructive half: {r.stderr}"
+    )
+    assert "proof the pool WAS asked" in r.stderr, (
+        f"a carrier must outvote a shell variable, and the line must say so: {r.stderr}"
+    )
+    assert "Do NOT settle it by accident" in r.stderr, (
+        f"the destructive instruction must be refused out loud, not printed as the fix: {r.stderr}"
+    )
+
+    # ⛔ AND THE NUMERATOR IS COUNTED IN THE SAME POPULATION AS THE DENOMINATOR — the arm that
+    # reads EROSION was defeated by its own arithmetic. The denominator was fixed to the sub-pool
+    # (the ARM64 runners must never claim the bare `ubuntu-<version>`), but the numerator still
+    # counted EVERY carrier in the pool — including the arm64 runners whose answer the denominator
+    # deliberately does not count. Measured pre-fix on this exact fixture: `ubuntu-24.04 = 8 of 7
+    # runner(s)` with NO `⚠️ PARTIAL` and exit 0, because `n < denom` is false once `denom - n_real`
+    # foreign carriers exist. So the one read that sees the x64 sub-pool eroding before its last
+    # carrier goes printed a clean row — a ratio that cannot be true, reported as coverage — and the
+    # scheduled autoscaler could walk that sub-pool to zero with this instrument green at every
+    # step. The arm64 carrier is not "coverage" on the instrument's own terms either: per the
+    # published label→arch mapping a bare `ubuntu-<version>` IS the x64 image, so an arm64 runner
+    # answering it is the false architecture claim `_preserve_labels` now drops on re-registration.
+    # Mutation: count `hit` for the whole pool (use `n` as the numerator) -> `8 of 7`, no PARTIAL,
+    # and the two assertions below are RED.
+    foreign = _stub_gh(
+        tmp_path / "gh-foreign",
+        "b1\tself-hosted-x64,ubuntu-24.04\n"
+        "b2\tself-hosted-x64,ubuntu-24.04\n"
+        "b3\tself-hosted-x64,ubuntu-24.04\n"
+        "b4\tself-hosted-x64\n"
+        "b5\tself-hosted-x64\n"
+        "b6\tself-hosted-x64\n"
+        "b7\tself-hosted-x64\n"
+        "a1\tself-hosted-arm64,ubuntu-24.04\n"
+        "a2\tself-hosted-arm64,ubuntu-24.04\n"
+        "a3\tself-hosted-arm64,ubuntu-24.04\n"
+        "a4\tself-hosted-arm64,ubuntu-24.04\n"
+        "a5\tself-hosted-arm64,ubuntu-24.04",
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{foreign}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=pin,
+    )
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "ubuntu-24.04 = 3 of 7 online runner(s)" in r.stderr, (
+        "a foreign-arch carrier must not be counted as an answer for the x64 sub-pool "
+        f"(pre-fix this printed `8 of 7`): {r.stderr}"
+    )
+    assert "PARTIAL" in r.stderr, (
+        f"4 of the 7 runners that must answer the bare pin cannot, so a clean row is a fail-open: {r.stderr}"
+    )
+    assert "8 of 7" not in r.stderr, (
+        f"a ratio above 1 means the numerator and denominator came from different populations: {r.stderr}"
+    )
+
+    # ⛔ AND THE MIRROR: `ubuntu-latest` with NO carrier is the HEALTHY state, not a block. The gate
+    # detaches that label from the pool whenever GitHub-hosted is healthy, so a zero-answer
+    # `ubuntu-latest` verdict would make `--status` — and any `--status && …` guard — permanently red
+    # in normal operation: the false red this instrument must never produce. The denominator is the
+    # runners that COULD answer (x64 pool for a bare version label), so a two-arch pool is not read
+    # as erosion either.
+    healthy = _stub_gh(tmp_path / "gh2", "x1\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-24.04")
+    repo2 = _repo_with_workflows(
+        tmp_path / "h", "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: []\n"
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{healthy}:{os.environ['PATH']}"), cwd=repo2)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "report, not a block" in r.stderr, r.stderr
+
+
+def test_label_coverage_does_not_verdict_a_custom_label_that_starts_ubuntu_digits(tmp_path: Path):
+    """A CUSTOM label is not the bare-version class — in the verdict OR the denominator.
+
+    The block held TWO definitions of "a bare `ubuntu-<version>` pin" eight lines apart: the
+    denominator matched `^ubuntu-[0-9][0-9.]*$` (so `ubuntu-2204-tools` was an ordinary custom
+    label counted against the whole pool) while the verdict arm used the `case` glob
+    `ubuntu-[0-9]*`, which matches anything after the digits. A zero-carrier custom label therefore
+    exited `5` and was told *"python-ci-gate is never dispatched and every PR stays BLOCKED"* — a
+    false red, and a false all-PRs-blocked claim, from the one instrument whose own comment says it
+    must never produce one. `tools/runner_autoscale.py:284-287` states the boundary the verdict arm
+    was missing ("a custom label that merely starts `ubuntu-<digits>` … is NOT in the class"), so
+    the two files disagreed about it.
+
+    Mutation: `case "$label" in ubuntu-[0-9]*)` -> this case exits 5 and names the gate -> RED.
+    Control: the bare pin in the same shape still exits 5, so the fix is not "never verdict".
+    """
+    pool = _stub_gh(tmp_path / "gh", "x1\tself-hosted,Linux,X64,self-hosted-x64,ubuntu-latest")
+    custom = _repo_with_workflows(
+        tmp_path / "custom", "jobs:\n  a:\n    runs-on: ubuntu-2204-tools\n    steps: []\n"
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}"), cwd=custom)
+    assert r.returncode == 0, (
+        f"a custom label with no carrier is a report, not the incident state: {r.stderr}"
+    )
+    # The denominator is the WHOLE pool for a custom label (not the x64 sub-pool), so the two
+    # arms of the block agreeing is visible in the printed line.
+    assert "ubuntu-2204-tools = 0 of 1 online self-hosted runner(s)" in r.stderr, r.stderr
+    assert "every PR stays BLOCKED" not in r.stderr, (
+        f"a custom label must not be told it blocks every PR: {r.stderr}"
+    )
+    assert "⛔ UNCOVERED" not in r.stderr, r.stderr
+
+    # CONTROL — the class the verdict exists for. Same pool, same shape, bare pin at zero — with the
+    # pool ASKED to serve it (`CI_RUNNER_OS_LABEL=on`); with the flag off the same fixture is a
+    # report, because a zero answer cannot be told apart from the pin applied correctly.
+    bare = _repo_with_workflows(
+        tmp_path / "bare", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=bare,
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "every PR BLOCKED" in r.stderr, r.stderr
+
+
+# ── 3a-bis. the intent is PER LABEL, not per block ─────────────────────────────────────────
+def test_label_coverage_verdicts_only_the_label_this_script_can_register(tmp_path: Path):
+    """A bare pin the installer CANNOT emit must never be verdicted, whatever the flag says.
+
+    `resolve_os_label` can only ever set `$OS_LABEL` (`ubuntu-24.04`), but the awk's `bare` class is
+    ANY `^ubuntu-[0-9][0-9.]*$`. One intent flag was therefore applied to the whole class: with
+    `CI_RUNNER_OS_LABEL=on`, a workflow pinning `ubuntu-22.04` at zero took the verdict arm, exited
+    `5`, and printed the remedy `CI_RUNNER_OS_LABEL=on --repair-labels` — a command that CANNOT
+    apply `ubuntu-22.04`, because the installer only ever emits `$OS_LABEL`. That is a permanent red
+    with an unactionable remedy: the false-red class this block refuses to create, and the mirror of
+    `tools/runner_autoscale.py:284-287` ("a custom label that merely starts `ubuntu-<digits>` … is
+    NOT in the class") in the other direction.
+
+    Mutation: `if [ "$shell_asks_os_label" = 1 ]` without the `$label = $OS_LABEL` conjunct -> this
+    case exits 5 -> RED.
+    Control: the SAME pool and flag with `ubuntu-24.04` still exits 5, so the fix is not "the flag
+    stopped working".
+    """
+    pool = _stub_gh(tmp_path / "gh", "x1\tself-hosted-x64,ubuntu-24.04")
+    empty = _stub_gh(tmp_path / "gh-empty", "x1\tself-hosted-x64,ubuntu-latest")
+    other = _repo_with_workflows(
+        tmp_path / "other", "jobs:\n  a:\n    runs-on: ubuntu-22.04\n    steps: []\n"
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{pool}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=other,
+    )
+    assert r.returncode == 0, (
+        f"a bare pin this script cannot register is a report, never a permanent red with a remedy "
+        f"that cannot apply: {r.returncode} {r.stderr}"
+    )
+    assert "ubuntu-22.04 = 0 of 1 online self-hosted runner(s)" in r.stderr, r.stderr
+    assert "nothing here re-applies ubuntu-22.04" in r.stderr, r.stderr
+    assert "every PR BLOCKED" not in r.stderr, (
+        f"a label this pool cannot be asked to serve must not be told it blocks every PR: {r.stderr}"
+    )
+    assert "--repair-labels" not in r.stderr, (
+        f"the unactionable remedy must not be printed either: {r.stderr}"
+    )
+
+    # CONTROL — the label the flag actually governs, same flag, a pool with no carrier for it.
+    ours = _repo_with_workflows(
+        tmp_path / "ours", "jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{empty}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=ours,
+    )
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "every PR BLOCKED" in r.stderr, r.stderr
+
+
+# ── 3b. every DOCUMENTED `runs-on` form must be read, or refused ────────────────────────────
+def test_label_coverage_reads_every_documented_runs_on_form(tmp_path: Path):
+    """A required label in ANY documented `runs-on` spelling must be counted — or refused, never cleared.
+
+    GitHub documents `runs-on` as a single string, an **array of strings**, a variable, and a
+    `key: value` pair using the `group` or `labels` keys. The extractor this replaces required the
+    value on the SAME line and unquoted DOUBLE quotes only, so three of those four forms were
+    cleared to `exit 0` on the incident state itself:
+
+    * `runs-on: ['ubuntu-24.04']` kept its single quotes, matched no class arm, fell to the `*)`
+      report arm ("not a label this pool serves") and left `uncovered=0`;
+    * a BLOCK sequence and a `group:`/`labels:` mapping yielded NOTHING at all, so the label was
+      never counted and the read looked covered.
+
+    Each fixture carries a second, COVERED label on purpose: that makes the read PARTIAL, which is
+    the shape neither exit-4 arm could see (the read was not empty, so `labels_seen` never hit 0).
+
+    Mutation (measured against the pre-fix script): restore the three-grep pipeline -> the four
+    spellings below exit 0 instead of 5 -> RED.
+    """
+    # The pool answers `ubuntu-latest` and nothing else: the required pin has NO self-hosted answer.
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    forms = {
+        "block sequence": (
+            "jobs:\n  a:\n    runs-on:\n      - self-hosted-x64\n      - ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "single-quoted flow sequence": (
+            "jobs:\n  a:\n    runs-on: ['ubuntu-24.04']\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "labels: mapping, block list": (
+            "jobs:\n  a:\n    runs-on:\n      group: pool\n      labels:\n        - ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "labels: mapping, inline flow": (
+            "jobs:\n  a:\n    runs-on: {group: pool, labels: [ubuntu-24.04]}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+    }
+    for i, (name, body) in enumerate(forms.items()):
+        repo = _repo_with_workflows(tmp_path / f"form{i}", body)
+        r = _run(
+            "--status",
+            env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+            cwd=repo,
+        )
+        assert r.returncode == 5, (
+            f"{name}: a required label written this way has NO self-hosted answer, so this is the "
+            f"incident state and must exit 5, not {r.returncode}: {r.stderr}"
+        )
+        assert "ubuntu-24.04 = 0 of 1 online self-hosted runner(s)" in r.stderr, f"{name}: {r.stderr}"
+        assert "every PR BLOCKED" in r.stderr, f"{name}: {r.stderr}"
+
+    # ⛔ AND A SPELLING NOBODY PARSED IS `exit 4`, NOT `0`. A matrix expression has no static label
+    # set to verdict, so the honest answer is "no verdict" — the fail-closed direction every other
+    # arm of this block already chose. The covered `ubuntu-latest` here is what makes this a PARTIAL
+    # read: without the backstop it would sail through as coverage.
+    expr = _repo_with_workflows(
+        tmp_path / "expr",
+        "jobs:\n  a:\n    runs-on: ${{ matrix.os }}\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=expr)
+    assert r.returncode == 4, (
+        f"a `runs-on` whose labels are not a static label set must refuse, not clear: {r.stderr}"
+    )
+    assert "STATIC label set" in r.stderr, r.stderr
+
+    # CONTROL — `group:` alone names a runner GROUP, not a label: it must be consumed, never counted
+    # (counting `pool` would print a false UNCOVERED for a "label" no runner is supposed to carry).
+    grp = _repo_with_workflows(
+        tmp_path / "grp",
+        "jobs:\n  a:\n    runs-on:\n      group: pool\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=grp)
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "pool" not in r.stderr, f"a runner GROUP was counted as a label: {r.stderr}"
+
+
+# ── 3b-ii. ONE UNREADABLE MEMBER REFUSES THE BLOCK ────────────────────────────────────────
+def test_label_coverage_refuses_a_block_with_any_unreadable_member(tmp_path: Path):
+    r"""A parseable sibling must NOT absorb an unparsed member — the block has no static label set.
+
+    The extractor dropped an unreadable member silently (`if (v ~ /^\$/) return`, no marker) and the
+    only marker that reached the `exit 4` arm was printed when the block yielded NOTHING. So a
+    `runs-on:` cleared as long as ANY part of it parsed:
+
+    * `group: pool` + `labels: ${{ … }}` — no label emitted, and the `group:` suppressed the marker
+      (`got == 0 && !pgroup`), so the block vanished entirely;
+    * `runs-on: [self-hosted, "${{ matrix.arch }}"]` — `self-hosted` emitted, the expression member
+      dropped, so the block read as covered.
+
+    Both are DOCUMENTED shapes (GitHub's own example of the combined form is `group: ubuntu-runners`
+    / `labels: ubuntu-24.04-16core`, and a matrix-ified workflow's first move is to put the OS into
+    the label list), so this is not an exotic spelling: it is the ordinary way a required leg gets
+    routed, and the instrument meant to prove coverage reported `covered` and exited 0 — clearing
+    the incident state this whole block exists to surface.
+
+    Mutation: `if (v ~ /^\$/) return` -> no `bad++` -> every fixture below exits 0/5, never 4 -> RED.
+    Mutation: `finish()` back to `got == 0 && !pgroup` -> the `group:`/`labels:` fixture clears -> RED.
+    Mutation: the refusal back to a PREFIX test (`/^\$/`) -> the four CONTENT fixtures below (an
+    expression INSIDE a label, a YAML alias, a space-bearing scalar) are emitted as literal labels,
+    no `!` is printed, and `--status` exits 0 with fabricated `= 0 of N … a report` rows -> RED.
+    Mutation: drop `|| v ~ /^[>|]/` -> the two BLOCK-SCALAR fixtures below print the INDICATOR as a
+    label (`⛔ >- = 0 of 1 … a report, not a block`) and exit 0 over the incident state -> RED.
+    Control: a `group:` with genuinely NO `labels:` key stays a report — there is no label to check,
+    which is a real read (pinned by the case above).
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    unreadable = {
+        "group + expression labels": (
+            "jobs:\n  a:\n    runs-on:\n      group: pool\n"
+            "      labels: ${{ fromJSON(vars.labels) }}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "expression member in a list": (
+            "jobs:\n  a:\n    runs-on: [self-hosted, \"${{ matrix.arch }}\"]\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "group + block-list of expressions": (
+            "jobs:\n  a:\n    runs-on:\n      group: pool\n      labels:\n"
+            "        - ${{ matrix.os }}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "inline mapping with an expression": (
+            "jobs:\n  a:\n    runs-on: {group: pool, labels: \"${{ matrix.os }}\"}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # ⛔ THE EXPRESSION **INSIDE** THE LABEL, NOT AS THE WHOLE VALUE. A prefix test (`/^\$/`)
+        # emitted these as literal label names — so the block HAD a static label set, no `!` was
+        # printed, and the one instrument meant to surface the all-PR-BLOCKED state exited 0. This
+        # is the ordinary way a required leg gets parameterised (GitHub documents expressions in
+        # `labels:`), and actionlint declines to verdict a value containing `${{` ANYWHERE
+        # (`ast.go` `ContainsExpression` = `strings.Index(s, "${{")`, not a prefix test).
+        "expression inside a scalar label": (
+            "jobs:\n  a:\n    runs-on: ubuntu-24.04-${{ matrix.arch }}\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "expression inside a list member": (
+            "jobs:\n  a:\n    runs-on: [self-hosted-x64, \"ubuntu-24.04-${{ matrix.arch }}\"]\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # A YAML ALIAS is a reference to a sequence elsewhere, not a label: every token here used to
+        # be emitted as a label named `*pool`.
+        "yaml alias": (
+            "x-pool: &pool [self-hosted-x64, ubuntu-24.04]\n"
+            "jobs:\n  a:\n    runs-on: *pool\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # ⛔ WHITESPACE INSIDE A TOKEN is refused because `coverage_labels` is consumed by an
+        # UNQUOTED `for label in $coverage_labels`, which word-splits — so one unreadable token
+        # printed several FABRICATED labels (one row per fragment, exit 0).
+        "space-bearing scalar": (
+            "jobs:\n  a:\n    runs-on: self-hosted-x64 ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        # ⛔ A BLOCK-SCALAR INDICATOR IS THE SCALAR HEADER, NOT A LABEL, AND IT PASSED THE PREDICATE.
+        # `${{`, whitespace and `^[*&]` miss `>` / `|`, so the INDICATOR was printed as a label name
+        # (`⛔ >- = 0 of 1 … a report, not a block`), the scalar VALUE on the next line was consumed
+        # as an unreadable continuation, and the block cleared at exit 0 — over exactly the incident
+        # state, with a `--status && …` guard told coverage was fine. These are ordinary YAML for a
+        # single string (the folded/literal spelling of the same `ubuntu-24.04` the case above
+        # refuses at exit 5), which is why the refusal cannot be a same-line-scalar assumption.
+        "folded block scalar": (
+            "jobs:\n  a:\n    runs-on: >-\n      ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+        "literal block scalar": (
+            "jobs:\n  a:\n    runs-on: |\n      ubuntu-24.04\n"
+            "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        ),
+    }
+    for i, (name, body) in enumerate(unreadable.items()):
+        repo = _repo_with_workflows(tmp_path / f"bad{i}", body)
+        r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=repo)
+        assert r.returncode == 4, (
+            f"{name}: a block with an unreadable member has NO static label set, so it must refuse "
+            f"with 4 — not clear it at {r.returncode}: {r.stderr}"
+        )
+        assert "STATIC label set" in r.stderr, f"{name}: {r.stderr}"
+
+    # ⛔ AND A PARTIAL READ REFUSES **BEFORE** IT VERDICTS ANYTHING. The three exit-4 arms used to
+    # sit AFTER the per-label loop and after the block-level `⛔ UNCOVERED` message, so a repo with
+    # ONE unreadable `runs-on:` block AND a zero-answer `ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on`
+    # printed the full UNCOVERED verdict plus its `--repair-labels` remedy and THEN exited 4: the
+    # exit code disowning the verdict it had just printed (the EXIT header and the runbook define `4`
+    # as "NO verdict" — `docs/ops/ci-runner-x64.md`, Exit codes), and the printed remedy unable to
+    # fix the actual cause, since relabelling runners cannot parse an unreadable block. That is the
+    # "a red whose printed remedy cannot work is a false red" rule this block applies to
+    # `ubuntu-22.04` and to the gate-owned `ubuntu-latest`. The `b:` job below is a COVERED sibling
+    # that gives the loop a verdict to print; `c:` is the zero-answer bare pin (stub pool carries
+    # `self-hosted-x64,ubuntu-latest`, never `ubuntu-24.04`) that made the verdict fire.
+    #
+    # Mutation: move the three exit-4 arms back below the loop -> `UNCOVERED` reappears in stderr at
+    # rc 4 -> RED.
+    partial = (
+        "jobs:\n  a:\n    runs-on: ${{ matrix.os }}\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n"
+        "  c:\n    runs-on: ubuntu-24.04\n    steps: []\n"
+    )
+    repo = _repo_with_workflows(tmp_path / "partial-and-unreadable", partial)
+    r = _run(
+        "--status",
+        env=_env(
+            tmp_path,
+            PATH=f"{bindir}:{os.environ['PATH']}",
+            CI_RUNNER_OS_LABEL="on",
+        ),
+        cwd=repo,
+    )
+    assert r.returncode == 4, (
+        "an unreadable block means NO verdict — the pool's coverage of the readable labels is not "
+        f"a verdict either, so this must be 4, not {r.returncode}: {r.stderr}"
+    )
+    assert "STATIC label set" in r.stderr, r.stderr
+    assert "UNCOVERED" not in r.stderr, (
+        "the block printed the ⛔ UNCOVERED verdict and its `--repair-labels` remedy and THEN "
+        "refused with 4 — the exit code disowns the verdict just printed, and the printed remedy "
+        "cannot fix an unreadable block. The no-verdict arms must run BEFORE the per-label loop: "
+        f"{r.stderr}"
+    )
+    assert "ubuntu-24.04 = 0 of" not in r.stderr, (
+        f"a partial read must not verdict any label, but a per-label verdict line was printed: {r.stderr}"
+    )
+
+    # ⛔ AND THE FABRICATION ITSELF MUST BE GONE, not merely out-voted. The content fixtures above
+    # prove the refusal; this proves WHY it matters — the exit-4 arm is what stands between an
+    # unreadable token and the unquoted `for label in $coverage_labels`, which word-splits. Measured
+    # on the pre-fix program, one `[self-hosted-x64, "ubuntu-24.04-${{ matrix.arch }}"]` printed
+    # THREE fabricated rows (`ubuntu-24.04-${{`, `matrix.arch`, `}}`) as "custom labels, a report,
+    # not a block" and exited 0 — with `CI_RUNNER_OS_LABEL=on`, since no fragment matches the pin.
+    fabricated = _repo_with_workflows(
+        tmp_path / "fabricated",
+        "jobs:\n  a:\n    runs-on: [self-hosted-x64, \"ubuntu-24.04-${{ matrix.arch }}\"]\n"
+        "  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+        cwd=fabricated,
+    )
+    assert r.returncode == 4, (
+        "a `runs-on` whose label set is not static has NO verdict — the pool's coverage of the "
+        f"labels it could read is not a verdict either, so this must be 4, not {r.returncode}: {r.stderr}"
+    )
+    combined = r.stdout + r.stderr
+    assert "${{" not in combined, (
+        f"an expression reached the output as if it were a label name: {combined}"
+    )
+    assert not re.search(r"= \d+ of \d+", combined), (
+        "a per-label `= N of M` row was printed for a block with no static label set — that is the "
+        f"fabrication the unquoted `for label in $coverage_labels` produces: {combined}"
+    )
+
+
+def test_label_coverage_reads_the_runs_on_key_in_every_yaml_spelling(tmp_path: Path):
+    """A QUOTED `runs-on` KEY is the same key, so it must be MEASURED — and the form still unread is refused.
+
+    The extractor opened a block on ONE spelling of the key (`^runs-on[ \\t]*:`), so a key written as
+    a quoted scalar opened no block: `finish()` never ran, NO `!` was printed, `runs_on_unreadable`
+    stayed 0, and the two "no verdict" arms could not fire (a readable sibling label always exists)
+    — so a workflow whose only `ubuntu-24.04` pin was `'runs-on': ubuntu-24.04` reported that label
+    NOWHERE, printed the other labels as covered, and exited 0. That is the all-PR-BLOCKED incident
+    reported as covered, in the direction this block forbids, and it is the spelling a
+    machine-formatted / `yq`-style workflow produces. YAML gives a plain, a single-quoted, a
+    double-quoted and an explicit key the SAME mapping key (measured with PyYAML: all four resolve
+    to `runs-on`, value included), so GitHub routes the job identically and the instrument may not
+    see them differently. The explicit-key form is instead COUNTED against the blocks opened, so a
+    spelling this pass still cannot carry refuses at 4 rather than clearing everything.
+
+    Mutation: restore `if (line ~ /^runs-on[ \\t]*:/)` -> both quoted cases exit 0 and print no
+    `ubuntu-24.04` row -> RED. Mutation: drop the `keyseen`/`opened` count -> the explicit-key case
+    exits 0 -> RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    quoted = {
+        "single-quoted key": "jobs:\n  a:\n    'runs-on': ubuntu-24.04\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+        "double-quoted key": 'jobs:\n  a:\n    "runs-on": ubuntu-24.04\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n',
+    }
+    for i, (name, body) in enumerate(quoted.items()):
+        repo = _repo_with_workflows(tmp_path / f"quoted{i}", body)
+        r = _run(
+            "--status",
+            env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+            cwd=repo,
+        )
+        combined = r.stdout + r.stderr
+        assert r.returncode == 5, (
+            f"{name}: a quoted key IS the `runs-on` key, so the pin it carries must be measured — "
+            f"a zero answer the pool is asked to serve is 5, not {r.returncode}: {combined}"
+        )
+        assert "ubuntu-24.04 = 0 of 1" in combined, (
+            f"{name}: the quoted key was never measured, so the pin is reported NOWHERE — that is "
+            f"the incident state cleared at exit 0: {combined}"
+        )
+        assert set(re.findall(r"^\s+(?:⛔ )?(\S+) = \d+ of \d+", combined, re.MULTILINE)) == {
+            "ubuntu-latest",
+            "ubuntu-24.04",
+        }, f"{name}: a label row was printed for something that is not a label: {combined}"
+        # CONTROL — quoting must not tilt the verdict either way: the same fixture under the
+        # shipped default reports both readings (asked-and-gone vs never asked) and exits 0.
+        r = _run("--status", env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"), cwd=repo)
+        assert r.returncode == 0, (
+            f"{name}: the flag-off reading of the pin is a report, so 0 — not {r.returncode}: {r.stderr}"
+        )
+        assert "ubuntu-24.04 = 0 of 1" in r.stderr and "asked and gone" in r.stderr, (
+            f"{name}: the quoted key must reach the same measurement as the plain one: {r.stderr}"
+        )
+
+    # ⛔ THE FORM THE PASS STILL CANNOT CARRY IS REFUSED, NOT CLEARED. `? runs-on` / `: value` is
+    # valid YAML for the same mapping (measured), so it is a required leg the tool cannot see — and
+    # the count of key-shaped lines against the blocks opened turns it into the honest 4 instead of
+    # a 0 that measured every OTHER label and called the set covered.
+    explicit = _repo_with_workflows(
+        tmp_path / "explicit",
+        "jobs:\n  a:\n    ? runs-on\n    : ubuntu-24.04\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    for flag in ("on", "off"):
+        r = _run(
+            "--status",
+            env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL=flag),
+            cwd=explicit,
+        )
+        combined = r.stdout + r.stderr
+        assert r.returncode == 4, (
+            f"an explicit-key `runs-on` opens no block, so the read is PARTIAL and has no verdict — "
+            f"that is 4 under CI_RUNNER_OS_LABEL={flag}, not {r.returncode}: {combined}"
+        )
+        assert "STATIC label set" in combined, f"flag={flag}: {combined}"
+        assert not re.search(r"= \d+ of \d+", combined), (
+            f"flag={flag}: a partial read must not verdict any label: {combined}"
+        )
+
+
+def test_label_coverage_reads_a_quoted_labels_key_and_refuses_an_unclosed_collection(tmp_path: Path):
+    r"""Three shapes were CLEARED at exit 0 while a required pin went unmeasured — all fail-open.
+
+    They are one class: the block's own contract says "a form this pass cannot read is refused",
+    and each of these read as a form it COULD read.
+
+    1. **A quoted `labels:` key.** `mapping()` and the two block arms matched `/^labels[ \t]*:/`,
+       the SPELLING, not the key node. YAML gives a plain, a single-quoted and a double-quoted key
+       the same mapping key — the argument this file already makes for `runs-on` — so
+       `runs-on: {group: pool, "labels": [ubuntu-24.04]}` emitted NO label, `plabels` stayed 0, and
+       the `group:` beside it suppressed the one refusal marker (`finish()` prints `!` only on
+       `bad > 0 || (got == 0 && (!pgroup || plabels))`). Measured: rc 0 with no `ubuntu-24.04` row
+       at all. The block form `'labels': ubuntu-24.04` under a `group:` behaves identically.
+    2. **An unterminated flow collection.** `flowlist()` does `sub(/\]$/, "", s)`, a silent no-op
+       when the `]` is not on the line, and the caller `finish()`es the block on the same line — so
+       a multi-line flow sequence (valid YAML; what a formatted workflow produces) was read as its
+       opening line: `runs-on: [self-hosted,` / `ubuntu-24.04]` emitted `self-hosted`, dropped the
+       pin, and exited 0. Same for a multi-line flow MAPPING.
+    3. **CRLF.** `trim()` stripped `[ \t]` only, so `ubuntu-24.04\r` survived into the emitted
+       label, matched no class arm, and fell to the `*)` "a report, not a block" default — the
+       whole read silently became "not a label this pool serves", exit 0.
+
+    Mutation: restore `/^labels[ \t]*:/` -> the two quoted-key cases exit 0 -> RED.
+    Mutation: drop the two `bad++` arms in `value()` -> the unclosed cases exit 0 -> RED.
+    Mutation: drop `sub(/\r+$/, "", s)` from `trim()` -> the CRLF case exits 0 -> RED.
+    """
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+
+    def status(repo: Path) -> subprocess.CompletedProcess:
+        return _run(
+            "--status",
+            env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}", CI_RUNNER_OS_LABEL="on"),
+            cwd=repo,
+        )
+
+    # 1. a QUOTED `labels:` key is the same key — measured, exactly like the plain spelling.
+    measured = {
+        "flow mapping, double-quoted key": 'jobs:\n  a:\n    runs-on: {group: pool, "labels": [ubuntu-24.04]}\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n',
+        "block mapping, single-quoted key": "jobs:\n  a:\n    runs-on:\n      group: pool\n      'labels': ubuntu-24.04\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    }
+    for i, (name, body) in enumerate(measured.items()):
+        r = status(_repo_with_workflows(tmp_path / f"ql{i}", body))
+        combined = r.stdout + r.stderr
+        assert r.returncode == 5, (
+            f"{name}: a quoted `labels:` key carries a required pin this pool is asked to serve, "
+            f"so a zero answer is 5 — not {r.returncode}: {combined}"
+        )
+        assert "ubuntu-24.04 = 0 of 1" in combined, (
+            f"{name}: the pin was never measured — the `group:` beside the quoted key suppressed "
+            f"the refusal as well, which is the incident state cleared at exit 0: {combined}"
+        )
+
+    # 2. an UNCLOSED collection has no static label set, so it is 4 (no verdict) — never 0.
+    unclosed = {
+        "multi-line flow sequence": "jobs:\n  a:\n    runs-on: [self-hosted,\n      ubuntu-24.04]\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+        "multi-line flow mapping": "jobs:\n  a:\n    runs-on: {group: pool,\n      labels: [ubuntu-24.04]}\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    }
+    for i, (name, body) in enumerate(unclosed.items()):
+        r = status(_repo_with_workflows(tmp_path / f"un{i}", body))
+        combined = r.stdout + r.stderr
+        assert r.returncode == 4, (
+            f"{name}: the members past the line break cannot be read, so the read is PARTIAL and "
+            f"has no verdict — that is 4, not {r.returncode}: {combined}"
+        )
+        assert "STATIC label set" in combined, f"{name}: {combined}"
+        assert not re.search(r"= \d+ of \d+", combined), (
+            f"{name}: a partial read must not verdict any label: {combined}"
+        )
+        # CONTROL — the identical array on ONE line is a static label set, and it verdicts.
+        one_line = body.replace("[self-hosted,\n      ubuntu-24.04]", "[self-hosted, ubuntu-24.04]").replace(
+            "{group: pool,\n      labels: [ubuntu-24.04]}", "{group: pool, labels: [ubuntu-24.04]}"
+        )
+        assert one_line != body, f"{name}: the control fixture did not change — fix the substitution"
+        ctl = status(_repo_with_workflows(tmp_path / f"un{i}-ctl", one_line))
+        assert ctl.returncode == 5, (
+            f"{name} (control, one line): a readable static set verdicts at 5 — not {ctl.returncode}: "
+            f"{ctl.stdout}{ctl.stderr}"
+        )
+
+    # 3. CRLF must not fabricate a label: `ubuntu-24.04\r` is not a class arm and is not a name.
+    crlf = _repo_with_workflows(
+        tmp_path / "crlf",
+        "jobs:\r\n  a:\r\n    runs-on: ubuntu-24.04\r\n  b:\r\n    runs-on: ubuntu-latest\r\n    steps: []\r\n",
+    )
+    r = status(crlf)
+    combined = r.stdout + r.stderr
+    assert r.returncode == 5, (
+        f"a CRLF workflow names the same labels as an LF one, so the pin's zero answer is 5 — not "
+        f"{r.returncode}: {combined}"
+    )
+    assert "ubuntu-24.04 = 0 of 1" in combined, (
+        "the `\\r` was kept in the label, so every row fell to the "
+        f"\"not a label this pool serves\" default: {combined}"
+    )
+    assert "\r" not in combined, f"a carriage return survived into the report: {combined!r}"
 
 
 # ── 4. dry run = plan only ──────────────────────────────────────────────────────────────────
@@ -1485,6 +2789,11 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
         "disk": r"DISK NEXT",
         "cpu/memory": r"CPU LAST",
         "fallback_engaged": r"^fallback_engaged\(\)",
+        # ⛔ THE ANCHOR THIS CHANGE ADDS. Without an entry it was checked only by the in-range arm,
+        # so the next edit above it moved `resolve_os_label` and the map kept pointing at an
+        # unrelated line — exactly the drift this dict's own comment records for `repair` /
+        # `print-labels`, and why it demands EVERY anchor be found by name.
+        "resolve_os_label": r"^resolve_os_label\(\)",
         "resolve_labels": r"^resolve_labels\(\)",
         "verify": r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',
         "token": r"registration-token",
@@ -1502,6 +2811,27 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
         "repair": r'^if \[ "\$MODE" = repair \]',
         "print-labels": r'^if \[ "\$MODE" = labels \]',
     }
+    # ⛔ THE SYSTEMD REF IS NOT IN THE DICT ABOVE BECAUSE THE MAP DOES NOT WRITE IT AS
+    # `label` `:NNN` — it writes `systemd install/start at `:NNN``, so the label-to-ref regex the
+    # dict is matched with cannot be anchored on it. That is exactly why it drifted unchecked: the
+    # sentence cited `:1062-1064` (the download block) while the systemd install/start lives at
+    # `:1085-1088`, and `main` had it right at `:510-512` before this change — a regression that only
+    # the in-range arm could see. Pinned here by the phrase the sentence uses.
+    systemd = re.search(r"systemd\s+install/start at `:(\d+)(?:-(\d+))?`", map_text)
+    assert systemd is not None, (
+        f"the runbook map no longer cites the systemd install/start line — re-anchor this pin: {map_text!r}"
+    )
+    s_start = int(systemd.group(1))
+    s_stop = int(systemd.group(2) or s_start)
+    s_block = installer[s_start - 1 : s_stop]
+    assert any(re.search(r"svc\.sh install", line) for line in s_block), (
+        "the runbook cites the systemd install/start at "
+        f":{s_start}-{s_stop}, which carries no `svc.sh install` — the systemd block is at "
+        f"{[i + 1 for i, line in enumerate(installer) if 'svc.sh install' in line]}"
+    )
+    assert any(re.search(r"svc\.sh start", line) for line in s_block), (
+        f"the same sentence names a START, and :{s_start}-{s_stop} carries no `svc.sh start`"
+    )
     # ⛔ EVERY anchor must be found by name: a label the map stopped naming is how this pin would
     # silently degrade to checking nothing (the runbook writes some labels bare — `(forks :262` —
     # and some in backticks — `` `fallback_engaged` :160``, so both forms are matched).
@@ -1524,6 +2854,71 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
         "the runbook's installer line map no longer lands on what it names "
         "(re-derive the numbers from the installer): "
         + "; ".join(f"{k}: doc says :{n}, the anchor is at {actual}" for k, (n, actual) in wrong.items())
+    )
+
+    # ⛔ AND THE **SIBLING** BULLETS, WHICH THE MAP PIN ABOVE CANNOT SEE. Three refs sat OUTSIDE the
+    # map bullet, so they were only range-checked (`1 <= n <= EOF`) — and an offset-shifted number
+    # always passes a range check. All three had been shifted by a constant that matched main's
+    # numbers plus a line delta, and one of them landed on the INSTALL disk guard
+    # (`die "disk headroom: …"`) while its sentence named the uninstall block: a fixer sent there
+    # edits the capacity guard on the destructive path, which is worse than no ref at all. They are
+    # pinned by SENTENCE here so that class reds instead of sailing through.
+    whole = "\n".join(lines)
+
+    m = re.search(r"`--uninstall` deletes only what it can PROVE[^(]*\(`:(\d+)-(\d+)`", whole)
+    assert m is not None, (
+        "the runbook no longer cites the `--uninstall` span — re-anchor this pin rather than "
+        "deleting it (an unpinned span is how it drifted onto the install disk guard)"
+    )
+    lo, hi = int(m.group(1)), int(m.group(2))
+    span = "\n".join(installer[lo - 1 : hi])
+    assert "# ── uninstall ──" in span, (
+        f"the runbook's --uninstall span :{lo}-{hi} does not begin inside the uninstall section "
+        f"(it starts at {installer[lo - 1]!r})"
+    )
+    assert 'if [ "$MODE" = uninstall ]' in span, (
+        f"the runbook's --uninstall span :{lo}-{hi} does not contain the uninstall mode block"
+    )
+    assert installer[hi - 1].strip() == "fi", (
+        f"the runbook's --uninstall span ends at :{hi} = {installer[hi - 1]!r}, not at the block's fi"
+    )
+
+    # The arch refusal, cited twice by NUMBER outside the map: `(:NNN, the MODE = install block)` and
+    # `the refusal itself dies at :NNN`. Both were off by the same constant, one of them landing on a
+    # comment line. One is a block start, the other is a `die` — checking them by shape, not range.
+    m = re.search(r"`:(\d+)`, the `MODE = install`", whole)
+    assert m is not None, "the runbook no longer cites the `MODE = install` block — re-anchor this pin"
+    n = int(m.group(1))
+    assert re.search(r'^if \[ "\$MODE" = install \]', installer[n - 1]), (
+        f"the runbook cites :{n} as the `MODE = install` block, but that line is {installer[n - 1]!r}"
+    )
+
+    m = re.search(r"the refusal itself dies at `:(\d+)`", whole)
+    assert m is not None, "the runbook no longer cites where the arch refusal dies — re-anchor this pin"
+    n = int(m.group(1))
+    assert "would register a DIFFERENT arch label" in installer[n - 1], (
+        f"the runbook says the arch refusal dies at :{n}, but that line is {installer[n - 1]!r}"
+    )
+
+    # ⛔ THE FIFTH SIBLING SENTENCE, AND THE ONE THAT HAD DRIFTED RED-FREE AT THIS HEAD. The map
+    # above re-derivation moved the runbook's `--uninstall` proof ref off `is_runner_install` and
+    # onto `:268` — a `# shellcheck disable=SC1091` pragma inside `resolve_os_label()` — while the
+    # function itself was 54 lines earlier (on `main` the sentence cited `:173`, and `:173` WAS the
+    # function, so the re-derivation is what moved it). An operator sent to `:268` to check the "is
+    # this provably a runner install?" proof lands in the OS-label resolver instead, which is
+    # precisely the class the doc itself calls worse than no ref at all. Pinned by SENTENCE, not by
+    # the `anchors` dict, because that dict's regex requires the ref to follow the label
+    # immediately and this sentence spells it `` `is_runner_install` at `:NNN` ``.
+    m = re.search(r"`is_runner_install` at `:(\d+)`", whole)
+    assert m is not None, (
+        "the runbook no longer cites `is_runner_install` by line — re-anchor this pin rather than "
+        "deleting it (an unpinned ref is how it drifted into the OS-label resolver)"
+    )
+    n = int(m.group(1))
+    assert re.search(r"^is_runner_install\(\)", installer[n - 1]), (
+        f"the runbook cites :{n} as the `is_runner_install` proof, but that line is "
+        f"{installer[n - 1]!r} (the definition is at "
+        f"{[i + 1 for i, line in enumerate(installer) if re.search(r'^is_runner_install\\(\\)', line)]})"
     )
 
 
@@ -1576,34 +2971,41 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
 
     # cited number -> a regex the line at that number must match, i.e. what the sentence names
     anchors: dict[int, str] = {
-        89: r"^# EXIT — the one distinction",  # "Exit codes (`:84-100`)"
-        185: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # "--count is validated ONCE"
-        218: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        222: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        226: r"^fallback_engaged\(\) \{",
-        237: r"^resolve_labels\(\) \{",
-        266: r"label algebra: the UNION",  # "the union's label algebra at"
-        290: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        308: r"label coverage: which",  # "the label-coverage block"
-        328: r"^workflow_files\(\) \{",  # "read from BOTH `.yml` and `*.yaml`"
-        365: r"^label_coverage\(\) \{",
-        410: r"── status ──",  # "the `--status` block that calls it"
-        445: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        470: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        574: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        606: r'MODE" = labels',  # "`--print-labels`"
-        633: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        638: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        641: r"FORK HEADROOM FIRST",  # "forks"
-        661: r"DISK NEXT",  # "disk"
-        668: r"CPU LAST",  # "cpu/memory"
-        686: r'MODE" = uninstall',  # "`uninstall`" / "`--uninstall` deletes only what it can PROVE"
-        811: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        822: r"SHA256_LINUX_X64",  # "sha256 pin" / "verify"
-        825: r"registration-token",  # "token"
-        830: r"set -- --unattended",  # "one argv"
-        832: r'\./config\.sh "\$@"',  # "`config.sh`"
-        842: r"svc\.sh install",  # "systemd install/start"
+        111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
+        237: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
+        270: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        274: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        278: r"^fallback_engaged\(\) \{",
+        301: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
+        306: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
+        338: r"^resolve_labels\(\) \{",
+        377: r"label algebra: the UNION",  # "the union's label algebra at"
+        401: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        429: r"── status ──",  # the `--status` block
+        452: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        792: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        800: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        809: r"found NO runs-on label to check",  # zero labels -> exit 4
+        375: r"^\}$",  # "whose body ends at its `}` on"
+        1027: r"exit 5",  # the uncovered verdict
+        1049: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        1074: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1221: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1253: r'MODE" = labels',  # "`--print-labels`"
+        1280: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1285: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1288: r"FORK HEADROOM FIRST",  # "forks"
+        1308: r"DISK NEXT",  # "disk"
+        1315: r"CPU LAST",  # "cpu/memory"
+        1332: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1333: r'MODE" = uninstall',  # "`uninstall`"
+        1458: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1461: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1469: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1472: r"registration-token",  # "token"
+        1477: r"^    set -- --unattended",  # "one argv"
+        1479: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1489: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -1711,7 +3113,7 @@ def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_nam
 
     # `MEMORY.md` cites the REPAIR's range (the whole-set relabel that drops a version pin).
     memory = (REPO_ROOT / "MEMORY.md").read_text()
-    repair = re.search(r"whole-set relabel \(`:(\d+)-\d+`\)", memory)
+    repair = re.search(r"the repair \(`(?:tools/)?install-ci-runner-x64\.sh:(\d+)-\d+`\)", memory)
     assert repair, "MEMORY.md no longer cites the repair's line range — re-anchor this pin"
     land("MEMORY.md", int(repair.group(1)), r'^if \[ "\$MODE" = repair \]')
 
@@ -1740,7 +3142,13 @@ def test_the_installers_own_self_citations_land_on_the_line_they_name():
     # (a fragment of the citing comment paragraph, a regex the CITED line must match)
     known: list[tuple[str, str]] = [
         ("the false PASS this file forbids", r"ARCH LABELS ARE NOT INTERCHANGEABLE"),
-        ("`set -o pipefail` is on", r"^set -uo pipefail$"),
+        # ⛔ THE `set -o pipefail` SELF-CITATION WENT WITH THE HELPER IT DESCRIBED. It pinned the
+        # `*.yml`/`*.yaml` glob reader's `pipefail` hazard; that reader was replaced by the
+        # label-coverage extractor, which does not depend on a matched glob at all — a read that
+        # finds nothing is `exit 4` rather than a silent empty set. Re-anchor this pin to that
+        # reader if the globbing path ever comes back.
+        # the writer section names `resolve_os_label` and cites its own line for it (#10275)
+        ("THE FLAG HAS TWO SIDES IN THIS TREE", r"^resolve_os_label\(\) \{"),
     ]
 
     # contiguous `#` runs (blank lines and code end a paragraph, which is what keeps a phrase from
@@ -1794,6 +3202,106 @@ def test_the_installers_own_self_citations_land_on_the_line_they_name():
         "a self-citation this pin lists is gone from the installer — a pin over refs that were "
         f"re-worded or removed is pinning nothing: {[known[k][0] for k in silent]}"
     )
+
+
+# ── 8c-ii. the call graph the prose DESCRIBES must be the one the script RUNS ───────────────
+def test_the_os_label_resolvers_documented_call_graph_matches_its_real_call_sites():
+    """⛔ A SCRIPT WHOSE DESIGN ARGUMENT IS ITS COMMENTS MAY NOT SHIP A FALSE CALL-GRAPH CLAIM.
+
+    Two surfaces in the installer (the §*THE FLAG HAS TWO SIDES* reach list and the
+    "validated ONCE" rationale above the `case`) stated that `resolve_os_label` is "reached only
+    from `resolve_labels`" and that "`--status` never calls it". Both are FALSE at this head and
+    always were: `--status` calls the resolver DIRECTLY for its intent read (`:511`, inside the
+    `$MODE = status` block), which is why `resolve_os_label` prints its `os-label: auto DECLINED …`
+    line in `--status` at all. The same claim sat in the runbook's WRITERS sentence.
+
+    WHY IT MATTERED ENOUGH TO PIN: that sentence is the file's ONLY explanation of why the
+    `CI_RUNNER_OS_LABEL` value is validated before the mode dispatch instead of inside the
+    resolver — a reader who believes `--status` never reaches the resolver draws the wrong
+    conclusion about the check's placement AND about the resolver's missing `*)` arm. This PR is
+    what introduced both the direct call and the prose, so the premise was inverted inside the
+    change that shipped it.
+
+    NOT A TEXT SCRAPE (agent-infra#1426). The claim is checked against the MEASURED call graph:
+    the call sites are read from non-comment lines, the enclosing region of each is derived from
+    the file's own mode dispatch, and the resolver's arm set is read from its body. The prose is
+    then required to AGREE with whatever was measured — in BOTH directions, so the pin still bites
+    if the direct call is ever removed and the paragraphs keep asserting it.
+
+    Non-vacuity (measured against the pre-fix file): the banned-phrase arm reds on the old
+    `:296-297` ("reached only from") and the agreement arm reds on the old §*TWO SIDES* paragraph
+    and the old runbook WRITERS paragraph (both reach lists omit `--status`), while the direct
+    `--status` call site already exists in the code they describe.
+    """
+    src = INSTALLER.read_text().splitlines()
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    # non-comment lines only: a `resolve_os_label` inside a `#` explanation is not a call site
+    code = [(i, ln) for i, ln in enumerate(src, 1) if not ln.lstrip().startswith("#")]
+
+    def first(pattern: str) -> int:
+        for i, ln in code:
+            if re.match(pattern, ln):
+                return i
+        raise AssertionError(f"the installer no longer has a line matching {pattern!r}")
+
+    resolver_def = first(r"^resolve_os_label\(\)\s*\{")
+    labels_def = first(r"^resolve_labels\(\)\s*\{")
+    status_open = first(r'^if \[ "\$MODE" = status \]; then$')
+    status_close = next(
+        i for i, ln in code if i > status_open and ln == "fi"
+    )
+
+    calls = [i for i, ln in code if re.match(r"^\s*resolve_os_label\s*$", ln)]
+    assert calls, "`resolve_os_label` is defined but never called — this pin would be vacuous"
+    in_labels = [i for i in calls if labels_def < i < status_open]
+    in_status = [i for i in calls if status_open < i < status_close]
+    assert in_labels, (
+        "`resolve_labels` no longer calls `resolve_os_label` — the install/repair/--print-labels "
+        "reach the comments describe is gone, so re-derive this pin instead of deleting it"
+    )
+    direct = bool(in_status)
+
+    # ── the other half of the corrected rationale: the resolver has no `*)` arm to complain with,
+    # which is WHY the unknown-value refusal has to live above the mode dispatch.
+    resolver_body = [ln for i, ln in code if resolver_def < i < labels_def]
+    assert not [ln for ln in resolver_body if re.match(r"^\s*\*\)", ln)], (
+        "`resolve_os_label` now carries a `*)` arm — the 'validated ONCE, before the dispatch' "
+        "rationale in the installer was written for a resolver that cannot refuse an unknown "
+        "value on its own; re-derive the comment and this pin"
+    )
+
+    # ── (1) the false statement itself, on every comment line in the installer
+    banned = (r"reached only from `resolve_labels`", r"`--status` never calls it")
+    for i, ln in enumerate(src, 1):
+        for pat in banned:
+            assert not re.search(pat, ln), (
+                f"install-ci-runner-x64.sh:{i} claims {pat!r}, but the measured call sites are "
+                f"{calls} with {in_status} inside the `$MODE = status` block ({status_open}-{status_close})"
+                " — a false call-graph claim, in the one file whose design argument IS its comments"
+            )
+
+    # ── (2) the reach SENTENCE must AGREE with the measured graph, both ways. Scoped to the
+    # sentence that names the reach (`reached from `resolve_labels``) plus the two lines it may
+    # wrap onto, so a `--status` elsewhere in the header cannot satisfy it by accident.
+    def reach_sentence(lines: list[str], artifact: str) -> str:
+        hits = [j for j, ln in enumerate(lines) if "reached from `resolve_labels`" in ln]
+        assert len(hits) == 1, (
+            f"{artifact} should carry exactly ONE sentence stating `resolve_os_label`'s reach — "
+            f"found {len(hits)}; re-derive this pin rather than deleting it"
+        )
+        return "\n".join(lines[hits[0] : hits[0] + 3])
+
+    for artifact, lines in (
+        ("tools/install-ci-runner-x64.sh", src),
+        ("docs/ops/ci-runner-x64.md", runbook.splitlines()),
+    ):
+        text = reach_sentence(lines, artifact)
+        assert ("`--status`" in text) is direct, (
+            f"{artifact}'s reach sentence for `resolve_os_label` "
+            f"{'OMITS' if direct else 'still CLAIMS'} `--status`, but the script's measured call "
+            f"sites are {calls} — inside the `$MODE = status` block ({status_open}-{status_close}) "
+            f"the calls are {in_status}. The prose and the code must agree in both directions."
+        )
 
 
 # ── 8d. the label assertion FIVE OTHER FILES send a reader to ───────────────────────────────
@@ -1885,14 +3393,16 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
 
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
-        67: r"deliberately \*\*do not\*\* claim any `ubuntu-<version>` label",
-        76: r"an out-of-band attachment cannot survive",
-        226: r"A foreign arch marker",
-        235: r'answers "who answers this `runs-on:` label"',
-        346: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        92: r"DROPS the whole class on re-registration",
+        590: r"A foreign arch marker",
+        746: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        448: r"test_the_changes_job_carries_no_job_scope_env",
+        866: r"test_the_changes_job_carries_no_job_scope_env",
+        # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
+        # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
+        25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
+        26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -1940,7 +3450,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:448` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:866` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -1998,8 +3508,10 @@ _TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_aut
 # citing comment names. Keyed by the runbook line the citation must point at at THIS head.
 _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
-    25: r"`ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted only\*\*",
-    67: r"deliberately \*\*do not\*\* claim any `ubuntu-<version>` label",
+    25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
+    26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
+    87: r"still does \*\*not\*\* claim any",
+    92: r"DROPS the whole class on re-registration",
 }
 
 
@@ -2070,7 +3582,631 @@ def test_every_tools_citation_into_the_runbook_lands_on_what_it_names():
     )
 
 
+# ── 8h-bis. the version-pin DROP's own prose cannot DENY the mitigation it cites ────────────
+_VERSION_PIN_CITATION_RE = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
+
+#: The flag the INSTALL side spells the mitigation with. A comment about the version-pin DROP that
+#: never names it is describing the pre-2026-10-29 world, where dropping a pin was pure restoration.
+_MITIGATION_FLAG = "CI_RUNNER_OS_LABEL"
+
+#: Absolutes that were TRUE on `main` and are FALSE since the mitigation: `:26` of the runbook says
+#: the pool claims `ubuntu-24.04` too, so a comment citing the table to prove the opposite now
+#: refutes itself — the exact class this PR corrected on nine other surfaces.
+_PRE_MITIGATION_ABSOLUTES = ("never one of these", "no workflow is starved by that")
+
+#: The runbook's label-contract table — the two rows a comment about what the pool CLAIMS must land
+#: on. A citation of `:13` (whose pool this is) is not a claim about the pin and is not in scope.
+_VERSION_PIN_LABEL_ROWS = frozenset({25, 26})
+
+
+def _version_pin_comment_sites() -> dict[str, str]:
+    """The two comment blocks that describe the version-pin DROP, found by their own anchors.
+
+    Located by CONTENT, never by line: the tool file has been re-derived numerically four times,
+    and a pin keyed on a number reports the move instead of the defect.
+    """
+    lines = (REPO_ROOT / "tools" / "runner_autoscale.py").read_text().splitlines()
+
+    head = next((i for i, ln in enumerate(lines) if "`ubuntu-24.04`-shaped labels" in ln), None)
+    assert head is not None, (
+        "`VERSION_PINNED_HOSTED_LABEL`'s comment lost its `ubuntu-24.04`-shaped opener — re-anchor "
+        "this pin rather than deleting it"
+    )
+    const = next(
+        (i for i in range(head, len(lines)) if lines[i].startswith("VERSION_PINNED_HOSTED_LABEL")),
+        None,
+    )
+    assert const is not None, "`VERSION_PINNED_HOSTED_LABEL` itself is gone — re-anchor this pin"
+
+    fn = next((i for i, ln in enumerate(lines) if ln.startswith("def _preserve_labels(")), None)
+    assert fn is not None, "`_preserve_labels` is gone — re-anchor this pin"
+    start = next(
+        (i for i in range(fn, len(lines)) if "⛔ A VERSION-PINNED HOSTED LABEL" in lines[i]), None
+    )
+    assert start is not None, "`_preserve_labels` lost its version-pin paragraph — re-anchor this pin"
+    stop = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("⛔")), len(lines)
+    )
+    return {
+        "label-constant": "\n".join(lines[head:const]),
+        "preserve-labels": "\n".join(lines[start:stop]),
+    }
+
+
+def _mitigation_denials(text: str, runbook: list[str]) -> list[str]:
+    """Everything a DROP comment says that the 2026-10-29 mitigation made untrue.
+
+    Three arms, each of which the pre-fix prose fails: it must NAME the flag (or it states the
+    pre-mitigation default as if it still held), it must not repeat a pre-fix absolute, and every
+    runbook citation in it must land on a row that records the mitigation — a comment sent to a row
+    that contradicts it is worse than no citation, because the reader believes the fix is recorded.
+    """
+    problems: list[str] = []
+    if _MITIGATION_FLAG not in text:
+        problems.append(f"does not name `{_MITIGATION_FLAG}`, so it describes the pool as it was before 2026-10-29")
+    mentioned = [a for a in _PRE_MITIGATION_ABSOLUTES if a in text]
+    if mentioned:
+        problems.append(f"still asserts the pre-mitigation absolute(s) {mentioned}")
+    for m in _VERSION_PIN_CITATION_RE.finditer(text):
+        lo = int(m.group(1))
+        hi = int(m.group(2) or lo)
+        if not (_VERSION_PIN_LABEL_ROWS & set(range(lo, hi + 1))):
+            continue  # not a citation of the label-contract rows: no claim about the pin is made
+        assert 1 <= lo <= hi <= len(runbook), f"cites :{lo}-{hi}, past EOF ({len(runbook)} lines)"
+        span = "\n".join(runbook[lo - 1:hi])
+        if "mitigation" not in span:
+            problems.append(
+                f"cites :{lo}-{hi}, which records no mitigation: {span.strip()!r}"
+            )
+    return problems
+
+
+def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
+    """⛔ THE DROP'S RATIONALE WAS TRUE ON `main` AND SELF-REFUTING AT THIS HEAD (#10275 review).
+
+    Two comment sites said the pool *never* carries a version-pinned label and cited
+    `docs/ops/ci-runner-x64.md:25-26` as the warrant — while `docs/ops/ci-runner-x64.md:26`, the row
+    this very PR rewrote, says the pool claims `ubuntu-24.04` as the temporary #6897 mitigation. The
+    PR had corrected that absolute on nine other surfaces (six workflow comments,
+    `test_runner_tool_contract.py`, the runbook, `MEMORY.md`), so these two were the residue of a
+    re-derivation that moved the numbers (1417 -> 272 / 1523) without re-pointing the claim.
+
+    The `:1527-1529` half was the load-bearing one: *"no workflow is starved by that"* is FALSE under
+    the mitigation — a job naming the label wants the hosted IMAGE, and during a hosted outage it
+    cannot get one, which is the deadlock `CI_RUNNER_OS_LABEL` exists for. A maintainer reading the
+    drop's rationale saw "harmless" thirty lines above the sentence naming it as a residual.
+
+    Mutation: restore either pre-fix sentence -> the checker reports the pre-fix absolute and the
+    missing flag; re-point a corrected sentence at a row that records no mitigation -> the citation
+    arm reds alone. Both directions are executable below, so no arm of this pin rests on my word for
+    it. Control: the real sites pass all three arms, so this is not a pin that "never" matches.
+    """
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+    sites = _version_pin_comment_sites()
+    assert set(sites) == {"label-constant", "preserve-labels"}, sorted(sites)
+    bad = {name: _mitigation_denials(text, runbook) for name, text in sites.items()}
+    assert not any(bad.values()), (
+        "a version-pin comment still states the pre-mitigation absolute the runbook row it cites "
+        "has refuted — scope it to the DEFAULT and name the suspension: "
+        + "; ".join(f"{name}: {', '.join(v)}" for name, v in bad.items() if v)
+    )
+
+    # Non-vacuity, executable: the SAME checker must reject this PR's pre-fix prose (head
+    # `ef26ae634`), sentence for sentence, or it is pinning nothing.
+    pre_fix = {
+        "label-constant": (
+            "#: claims only `ubuntu-latest` and never one of these "
+            "(`docs/ops/ci-runner-x64.md:25-26`), because a job that pins a version asks for the "
+            "GitHub-hosted image specifically."
+        ),
+        "preserve-labels": (
+            "dropped rather than preserved. The recorded invariant is that the pool claims "
+            "`ubuntu-latest` and never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:25-26`). "
+            "Dropping it restores the invariant; no workflow is starved by that, because a job "
+            "naming the label wants the GitHub-hosted image."
+        ),
+    }
+    for name, text in pre_fix.items():
+        assert _mitigation_denials(text, runbook), (
+            f"{name}: the checker no longer sees the pre-fix defect it exists for — it would pass "
+            "the very prose this test was written against."
+        )
+
+    # …and the CITATION arm, alone: a sentence that is otherwise blameless (names the flag, states
+    # the DEFAULT, repeats no absolute) but sends the reader to `:25` — the `ubuntu-latest` row,
+    # which records no mitigation — instead of the `ubuntu-24.04` row that does. Without this the
+    # third arm could be dead code.
+    #
+    # ⛔ The ref is ASSEMBLED from two literals on purpose. The 8e pin above asserts that every
+    # `docs/ops/ci-runner-x64.md:<line>` written in this file is a REAL citation, and this one is a
+    # negative control, not a citation: pointing a reader at `:25` in prose would be a lie the
+    # file's own pin cannot express.
+    _MISDIRECTED_REF = "docs/ops/ci-runner-x64.md" + ":25"
+    misdirected = (
+        "The pool's DEFAULT is `ubuntu-latest`, never an `ubuntu-<version>` "
+        f"({_MISDIRECTED_REF}); `CI_RUNNER_OS_LABEL=on|auto` suspends that for one label."
+    )
+    unreached = _mitigation_denials(misdirected, runbook)
+    assert any("records no mitigation" in p for p in unreached), (
+        "the citation arm no longer fires on a blameless sentence sent to a row that records no "
+        f"mitigation: {unreached}"
+    )
+
+
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
+def test_the_runbooks_cross_file_refs_land_on_what_they_name():
+    """Refs OUTSIDE the installer map were only range-checked, so they drifted silently.
+
+    The runbook cites `.github/workflows/*.yml`, `scripts/ci_runner_gate.sh` and `config.sh` by line
+    number, and the installer map pin above can only see refs INSIDE its own bullet. Measured at
+    this head: `mirror-images.yml:92` cited the arm64 comment while the file had moved it to `:104`
+    (this PR adds 12 net lines above it), and `python-ci.yml:1556` / `:1544-1546` were ALREADY stale
+    on `main` (the cited comment sits at `:1761`). Each still passed the only check they had — `1 <=
+    n <= EOF` — which an offset-shifted number always passes.
+
+    Mutation: revert any of the four refs to its pre-fix number -> RED with the line it actually
+    hit. A ref that lands two files away is worse than none: a fixer sent there edits workflow
+    routing or a shell script the sentence never named.
+    """
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+
+    def at(rel: str, n: int) -> str:
+        lines = (REPO_ROOT / rel).read_text().splitlines()
+        assert 1 <= n <= len(lines), f"{rel} has {len(lines)} lines, the runbook cites :{n}"
+        return lines[n - 1]
+
+    # Who the pool's arm64-ness is (and why nothing depends on it).
+    m = re.search(r"`mirror-images\.yml:(\d+)` records", runbook)
+    assert m is not None, (
+        "the runbook no longer cites `mirror-images.yml:<line>` for the arm64 measurement — "
+        "re-anchor this pin rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert "orbctl run -m pi-runner uname -m" in at(".github/workflows/mirror-images.yml", n), (
+        f"the runbook cites mirror-images.yml:{n} for the arm64 comment, but that line is "
+        f"{at('.github/workflows/mirror-images.yml', n)!r}"
+    )
+
+    # The prohibition, and the reason for it.
+    m = re.search(r"`\.github/workflows/python-ci\.yml:(\d+)`\s*\n?\s*is \"Do NOT change it back", runbook)
+    assert m is not None, (
+        "the runbook no longer cites `python-ci.yml:<line>` as the \"Do NOT change it back\" "
+        "prohibition — re-anchor this pin"
+    )
+    n = int(m.group(1))
+    assert "never to `self-hosted`" in at(".github/workflows/python-ci.yml", n), (
+        f"the runbook cites python-ci.yml:{n} as the prohibition, but that line is "
+        f"{at('.github/workflows/python-ci.yml', n)!r}"
+    )
+
+    m = re.search(r"recorded at `:(\d+)-(\d+)` \u2014 a `self-hosted` pin removes", runbook)
+    assert m is not None, (
+        "the runbook no longer cites the python-ci.yml span that records WHY a `self-hosted` pin is "
+        "forbidden — re-anchor this pin"
+    )
+    lo, hi = int(m.group(1)), int(m.group(2))
+    span = "\n".join((REPO_ROOT / ".github/workflows/python-ci.yml").read_text().splitlines()[lo - 1 : hi])
+    assert "not answered" in span and "WAIT for a hosted runner" in span, (
+        f"the runbook's python-ci.yml span :{lo}-{hi} does not record the reason it names "
+        f"(pending-not-answered instead of a false red): {span!r}"
+    )
+
+    # The provisioner invocation — a ref into a file THIS PR edits, and one the first pass missed.
+    # `tools/runner_autoscale.py` gained ~96 lines above it, so the number that was correct on
+    # `main` (`:965`, the installer invocation) landed on a systemd unit-name f-string here and
+    # still passed the only check it had (`1 <= n <= EOF`). Pinned by SENTENCE, like the three
+    # above, so a sibling-bullet ref drifts red instead of passing a range check.
+    m = re.search(r"`tools/runner_autoscale\.py:(\d+)` invokes the installer", runbook)
+    assert m is not None, (
+        "the runbook no longer cites `tools/runner_autoscale.py:<line>` for the installer "
+        "invocation — re-anchor this pin rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert '"--count", str(target_count), "--fallback", "auto"' in at(
+        "tools/runner_autoscale.py", n
+    ), (
+        f"the runbook cites tools/runner_autoscale.py:{n} as the installer invocation, but that "
+        f"line is {at('tools/runner_autoscale.py', n)!r}"
+    )
+
+
+# ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────
+def test_the_inventory_pattern_carries_every_documented_runs_on_form():
+    r"""The counter-guard over the inventory must see every form that can make a file pool-eligible.
+
+    This is the arm that reds when `RUNS_ON_UBUNTU_2404_RE` is narrowed back — it exists because the
+    shipped pattern was `["\']?runs-on[\']?`: it OPENED on both quotes and CLOSED on one, so a pin
+    added as `"runs-on": ubuntu-24.04` (a spelling YAML resolves to the SAME key, measured with
+    PyYAML) left `total` at 9 and
+    `test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible` green — the exact
+    stale-inventory failure `finding-provenance.yml` produced for a whole review round, one spelling
+    over. The same one-instance-over reasoning applies to the VALUE forms: a `runs-on` block
+    sequence or a `{group: …, labels: […]}` mapping is equally servable by the mitigation, and a
+    count that sees only the plain scalar omits that file from the accepted-cost list just as
+    silently.
+
+    The `labels:` KEY inside a mapping is the same rule one level in, and it outlived the `runs-on:`
+    half by a round: the extractor's `keyis()` reads `"labels":` / `'labels':` / `labels :`, so a
+    pin written `{group: x, "labels": [ubuntu-24.04]}` was verdict-able at rc 5 while a guard
+    matching only `\blabels:` counted nothing and left the inventory green. The block-MAPPING value
+    form (`runs-on:` then `group:` / `labels:` on deeper-indented lines) was the same shape: read by
+    the extractor, invisible to the count. Both are positive arms below.
+
+    Mutation: restore the pre-fix pattern (`^    ["\']?runs-on[\']?[ \t]*:[ \t]*ubuntu-24\.04$`) ->
+    the double-quoted and explicit-key arms RED, and the block/mapping arms RED too. Narrow the
+    `labels:` key back to `\blabels:` -> the quoted-key and spaced-colon arms RED. Restore
+    `\bubuntu-24\.04\b` in the flow-mapping arm -> the arm64-in-a-mapping arm RED.
+    """
+    positive = {
+        "plain scalar": "    runs-on: ubuntu-24.04\n",
+        "single-quoted key": "    'runs-on': ubuntu-24.04\n",
+        "double-quoted key": '    "runs-on": ubuntu-24.04\n',
+        "explicit key": "    ? runs-on\n    : ubuntu-24.04\n",
+        "block sequence": "    runs-on:\n      - self-hosted-x64\n      - ubuntu-24.04\n",
+        "labels mapping": "    runs-on: {group: pi-runner, labels: [self-hosted-x64, ubuntu-24.04]}\n",
+        # The same mapping with the `labels:` KEY spelled the other two ways `keyis()` reads. A
+        # mapping is what a formatted workflow produces, and the runtime verdicts all three — so a
+        # guard that sees only the plain spelling under-counts the very files the mitigation serves.
+        "double-quoted labels key": '    runs-on: {group: pi-runner, "labels": [self-hosted-x64, ubuntu-24.04]}\n',
+        "single-quoted labels key": "    runs-on: {group: pi-runner, 'labels': [ubuntu-24.04]}\n",
+        "spaced labels colon": "    runs-on: {group: pi-runner, labels : [ubuntu-24.04]}\n",
+        # The FIFTH value form: a block mapping under `runs-on:`. The extractor reads it (its
+        # `keyis(line, "labels")` arm), so the file is pool-eligible and the inventory must see it.
+        "block mapping": "    runs-on:\n      group: pi-runner\n      labels: [self-hosted-x64, ubuntu-24.04]\n",
+        "block mapping, quoted labels key": '    runs-on:\n      group: pi-runner\n      "labels": [ubuntu-24.04]\n',
+        "block mapping, scalar value": "    runs-on:\n      group: pi-runner\n      labels: ubuntu-24.04\n",
+    }
+    for name, text in positive.items():
+        assert re.search(RUNS_ON_UBUNTU_2404_RE, text, re.MULTILINE), (
+            f"the inventory's counter-guard cannot see the {name} form, so a pin added that way makes "
+            f"its file pool-eligible while the runbook's accepted-cost list stays silent about it — "
+            f"widen RUNS_ON_UBUNTU_2404_RE, do not relax this arm: {text!r}"
+        )
+
+    # The boundaries that must NOT count, or the guard would red the count on legitimate spellings.
+    negative = {
+        "the arm64 hosted spelling": "    runs-on: ubuntu-24.04-arm\n",
+        "a different version pin": "    runs-on: ubuntu-latest\n",
+        "an expression, not a static set": "    runs-on: ${{ matrix.os }}\n",
+        "a step-level key (indent 8)": "        runs-on: ubuntu-24.04\n",
+        "a mapping without the label": "    runs-on: {group: pi-runner, labels: [self-hosted-x64]}\n",
+        "a block without the label": "    runs-on:\n      - self-hosted-x64\n      - ubuntu-latest\n",
+        # The `-arm` sibling INSIDE a mapping. `\b` alone matched it (measured), which is the
+        # wrong direction of error for an inventory: it invents a leg the mitigation does not serve
+        # and the runbook then has to explain a job it never named.
+        "the arm64 pin inside a flow mapping": "    runs-on: {group: pi-runner, labels: [ubuntu-24.04-arm]}\n",
+        "the arm64 pin inside a block mapping": "    runs-on:\n      group: pi-runner\n      labels: [ubuntu-24.04-arm]\n",
+        "a block mapping without the label": "    runs-on:\n      group: pi-runner\n      labels: [self-hosted-x64]\n",
+        "an expression in a block mapping": "    runs-on:\n      group: pi-runner\n      labels: ${{ matrix.labels }}\n",
+    }
+    for name, text in negative.items():
+        assert not re.search(RUNS_ON_UBUNTU_2404_RE, text, re.MULTILINE), (
+            f"the counter-guard counts {name}, which is not a `ubuntu-24.04` job pin — the inventory "
+            f"number would then be wrong in the direction nobody re-checks: {text!r}"
+        )
+
+    # ⛔ AND ONE JOB MUST NOT ABSORB THE NEXT ONE'S PIN. The block-mapping arm scans forward to the
+    # `labels:` key, so a `runs-on:` block that never names the pin could walk into the FOLLOWING
+    # job's block and count it twice — the count is `len(re.findall(...))`, so a double count is a
+    # wrong number in the inventory, not a red. Exactly one job here is pinned.
+    two_jobs = (
+        "    runs-on:\n"
+        "      group: pi-runner\n"
+        "      labels: [self-hosted-x64]\n"
+        "    steps: []\n"
+        "  second:\n"
+        "    runs-on:\n"
+        "      group: pi-runner\n"
+        "      labels: [ubuntu-24.04]\n"
+    )
+    assert len(re.findall(RUNS_ON_UBUNTU_2404_RE, two_jobs, re.MULTILINE)) == 1, (
+        "the block-mapping arm counted a nested `runs-on` block more than once (or followed it into "
+        "the next job) — the inventory total would then be inflated: "
+        f"{re.findall(RUNS_ON_UBUNTU_2404_RE, two_jobs, re.MULTILINE)!r}"
+    )
+    pinned_then_next = (
+        "    runs-on:\n"
+        "      group: pi-runner\n"
+        "      labels: [ubuntu-24.04]\n"
+        "  second:\n"
+        "    runs-on: ubuntu-latest\n"
+        "  third:\n"
+        "    runs-on: {group: pi-runner, labels: [ubuntu-latest]}\n"
+    )
+    assert len(re.findall(RUNS_ON_UBUNTU_2404_RE, pinned_then_next, re.MULTILINE)) == 1, (
+        "the arms double-count a file whose unpinned siblings follow a pinned block mapping: "
+        f"{re.findall(RUNS_ON_UBUNTU_2404_RE, pinned_then_next, re.MULTILINE)!r}"
+    )
+
+
+def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
+    """A `runs-on: ubuntu-24.04` job whose file was never told about the mitigation stays invisible.
+
+    Three sites still asserted the premise this change inverts, because the inventory was written
+    from memory rather than read off the tree: `python-ci.yml` (`test-slow`, the leg #6897 was
+    filed about — *"`ubuntu-24.04` is claimed by NO self-hosted runner"*), the `workflow-lint`
+    STEP comment (*"pinned to a HOSTED label … so it has its own egress IP"*, 22 lines under the
+    header that says the opposite), and `finding-provenance.yml` (*"a version-pinned label no
+    self-hosted runner claims removes the ambiguity"*) — and `finding-provenance` was not named in
+    the runbook's accepted-cost list at all, so its two jobs became pool-eligible with nobody
+    having recorded the cost.
+
+    So this pins the INVENTORY against the TREE, two ways: every workflow that carries a
+    job-level `runs-on: ubuntu-24.04` must be named in the runbook's accepted-cost list, the stated
+    job count must be the measured one, and each such file must itself name the mitigation (a file
+    whose pin the mitigation makes servable and that never mentions it is the shape that stayed
+    false for a whole round of review).
+
+    Mutation: drop the `finding-provenance` bullet -> RED on both arms (the file is pinned twice
+    but named nowhere, and its own comment still asserts the reverse).
+    """
+    wf_dir = REPO_ROOT / ".github" / "workflows"
+    # ⛔ THE PATTERN CARRIES EVERY DOCUMENTED FORM OF THE KEY — see `RUNS_ON_UBUNTU_2404_RE`. The
+    # single-quoted spelling alone was not enough: it closes on one quote, so a pin added as
+    # `"runs-on": ubuntu-24.04` left the count at 9 and this suite green, which is the same
+    # blind spot one spelling over from the one the extractor had just been fixed for.
+    pinned = {
+        path.name: len(
+            re.findall(
+                RUNS_ON_UBUNTU_2404_RE,
+                path.read_text(),
+                re.MULTILINE,
+            )
+        )
+        for path in sorted([*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")])
+    }
+    pinned = {name: n for name, n in pinned.items() if n}
+    total = sum(pinned.values())
+    assert total == 9, (
+        "the `runs-on: ubuntu-24.04` job count moved — re-derive the runbook's accepted-cost list "
+        f"and this pin together, do not assume {total} is right: {pinned}"
+    )
+
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+    start = runbook.index("⛔ **The mitigation is label-WIDE")
+    section = runbook[start : runbook.index("These are **accepted costs", start)]
+
+    words = {6: "six", 8: "eight", 9: "nine"}
+    assert f"all **{words[total]}**" in section, (
+        "the runbook no longer states the measured number of legs the mitigation makes servable, or "
+        f"states a different one than the tree has ({total}): {section[:400]!r}"
+    )
+
+    for name, n in pinned.items():
+        assert name in section, (
+            f"{name} pins {n} job(s) to `ubuntu-24.04`, so the mitigation makes {'them' if n > 1 else 'it'} "
+            "pool-eligible — but the runbook's accepted-cost list does not name the file, so its cost is "
+            "unrecorded. Add a bullet (or re-derive the count) rather than widening this assertion."
+        )
+        assert "CI_RUNNER_OS_LABEL" in (wf_dir / name).read_text(), (
+            f"{name} pins a job to `ubuntu-24.04` and never mentions `CI_RUNNER_OS_LABEL`: its in-file "
+            "comment still reads as if the pool cannot answer that label, which is the premise this "
+            "mitigation makes FALSE (measured: 7 of 12 runners carry it)"
+        )
+
+
+# A GitHub Actions expression opener, spelled without braces-in-f-string hazards.
+_EXPR = "$" + "{{"
+
+
+def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_path: Path):
+    r"""The `ubuntu-latest` row is a MEASUREMENT, and the page must not sell a read it cannot get.
+
+    Both halves of this pin were false at `f83a7d1c1`, and nothing redded: the branch's own merge
+    brought in `#10186`, which replaced one literal `runs-on: ubuntu-latest` with
+    `runs-on: ${{ fromJSON(matrix.runner) }}` in `python-ci.yml`. Two consequences, neither
+    re-derived against the tree the merge produced:
+
+      1. the inventory is **76** `ubuntu-latest` jobs, not the 77 the page states (a number this PR
+         added itself);
+      2. that one non-static block makes `--status`' `label-coverage` read refuse with `exit 4`
+         BEFORE it verdicts any label — so the page's *Verify it* section told the operator to
+         confirm the mitigation with a read that prints the header, the refusal, and ZERO
+         `<label> = <n> of <m>` rows, while the PR body's transcript showed `rc 0` with two rows.
+
+    The refusal is CORRECT (a partial read is not a coverage verdict, pinned by 3b-ii); what was
+    wrong is a page and a verification transcript that assume this tree has no expression block.
+    So this pin holds both directions: the numbers must be the measured ones, and the refusal
+    paragraph must be present exactly while the tree still HAS a job the extractor cannot read.
+
+    Non-vacuity (measured at `f83a7d1c1`): with the pre-fix doc restored the count arms RED on
+    `77 != 76` and the *Verify it* arms RED on a section that never names `python-ci.yml:716`,
+    `exit 4`, or the `STATIC label set` refusal; deleting the `fromJSON` block (or making it static)
+    reds the last arm, which is the signal to delete the paragraph in the same change.
+    """
+    # Local import: a module-level one shifts this file's line numbers, and five other files cite
+    # `tests/test_ci_runner_x64_install.py:230` by number (pinned by
+    # `test_the_label_assertion_other_files_cite_lands_on_it`).
+    import yaml
+
+    wf_dir = REPO_ROOT / ".github" / "workflows"
+    counts = {"ubuntu-latest": 0, "ubuntu-24.04": 0}
+    unreadable: list[tuple[str, str, object]] = []
+
+    for path in sorted([*wf_dir.glob("*.yml"), *wf_dir.glob("*.yaml")]):
+        workflow = yaml.safe_load(path.read_text()) or {}
+        for job, body in (workflow.get("jobs") or {}).items():
+            if not isinstance(body, dict) or "runs-on" not in body:
+                continue
+            value = body["runs-on"]
+            labels = value.get("labels") if isinstance(value, dict) else value
+            if labels is None:  # a `group:` with no `labels:` names no static label — skipped, as
+                continue  # the extractor's `group:`-only arm does (it is a report, not a refusal)
+            labels = [labels] if isinstance(labels, str) else labels
+            if any(_EXPR in str(m) for m in labels):
+                unreadable.append((path.name, job, value))
+                continue
+            for label in labels:
+                if label in counts:
+                    counts[label] += 1
+
+    assert counts["ubuntu-24.04"] == 9, (
+        "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
+        f"{counts}"
+    )
+    assert counts["ubuntu-latest"] == 76, (
+        "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
+        "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
+        f"not assume {counts['ubuntu-latest']} is right: {counts}"
+    )
+
+    runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
+
+    row = re.search(r"^\| `ubuntu-latest` \| (\d+) \|", runbook, re.MULTILINE)
+    assert row is not None, (
+        "the runbook no longer carries an `ubuntu-latest` count row — re-anchor this pin rather "
+        "than deleting it"
+    )
+    assert int(row.group(1)) == counts["ubuntu-latest"], (
+        f"the runbook's `ubuntu-latest` row says {row.group(1)}, the tree has "
+        f"{counts['ubuntu-latest']} jobs whose `runs-on:` names that single label"
+    )
+
+    stated = re.search(r"count each job's `runs-on`\): \*\*(\d+) / (\d+)\*\*", runbook)
+    assert stated is not None, (
+        "the runbook no longer states its re-measured `N / M` total — re-anchor this pin rather "
+        "than deleting it"
+    )
+    assert (int(stated.group(1)), int(stated.group(2))) == (
+        counts["ubuntu-latest"],
+        counts["ubuntu-24.04"],
+    ), (
+        f"the runbook states {stated.group(1)} / {stated.group(2)}, the tree measures "
+        f"{counts['ubuntu-latest']} / {counts['ubuntu-24.04']}"
+    )
+
+    # ⛔ AND THE REFUSAL PARAGRAPH IS TRUE ONLY WHILE THE TREE HAS A BLOCK IT CANNOT READ. The
+    # extractor's own arm (3b-ii) is what makes it correct; this is the RUNBOOK side, which is
+    # where an operator learns that the ``<label> = <n> of <m>`` transcript does not exist here.
+    assert unreadable, (
+        "no workflow names a non-static `runs-on:` any more, so this tree's `--status` DOES report "
+        "coverage rows — the runbook's 'on THIS tree that read refuses' paragraph is now false and "
+        "must be deleted in the same change as this assertion: "
+        f"{(REPO_ROOT / 'docs' / 'ops' / 'ci-runner-x64.md')}"
+    )
+    start = runbook.index("**Verify it \u2014 do not assume it.**")
+    section = runbook[start : runbook.index("The EXIT is decided per CLASS", start)]
+    for rel, job, value in unreadable:
+        needle = f"{rel}:{_line_of(REPO_ROOT / '.github' / 'workflows' / rel, f'runs-on: {value}')}"
+        assert needle in section, (
+            f"`{rel}::{job}` names `runs-on: {value}`, so `--status` refuses on THIS tree — but the "
+            f"runbook's *Verify it* section never cites `{needle}`. A page that tells the operator "
+            "to verify with a read that returns no verdict, and does not say so, sends them to a "
+            "transcript that cannot exist here."
+        )
+    assert "`exit 4`" in section and "STATIC label set" in section, (
+        "the *Verify it* section no longer states that this tree's coverage read REFUSES with exit "
+        f"4 (and why) — an operator reads it as a broken instrument: {section[-600:]!r}"
+    )
+
+    # ── behaviour, not prose: the read the page tells you to run, on the tree it ships in.
+    bindir = _stub_gh(tmp_path / "gh", "r1\tself-hosted-x64,ubuntu-latest")
+    r = _run(
+        "--status",
+        env=_env(tmp_path, PATH=f"{bindir}:{os.environ['PATH']}"),
+        cwd=REPO_ROOT,
+    )
+    assert r.returncode == 4, (
+        "`--status` on THIS tree must refuse (4) rather than report coverage over the blocks it "
+        f"could not read — the runbook says so; got {r.returncode}: {r.stderr}"
+    )
+    assert "STATIC label set" in r.stderr, r.stderr
+    assert "online runner(s)" not in r.stderr, (
+        "a partial read printed per-label answer rows — the no-verdict arms must run BEFORE the "
+        f"loop, or a refusal is outvoted by the labels that did parse: {r.stderr}"
+    )
+
+
+def _line_of(path: Path, needle: str) -> int:
+    for i, line in enumerate(path.read_text().splitlines(), start=1):
+        if needle in line:
+            return i
+    raise AssertionError(f"{path} no longer contains {needle!r} — re-anchor this pin")
+
+
+
+# ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
+def test_memory_ci_runners_exit_contract_is_intent_gated():
+    """`MEMORY.md` is the shortcut file an agent reads MID-CODE, so its exit contract must match.
+
+    This PR edits the `[ci-runners]` line, and it stated the OLD contract: *"`0` exits 5, a partial
+    pool prints ⚠️ PARTIAL"*. At this head a zero-answer bare pin exits `5` only when the invoking
+    shell sets `CI_RUNNER_OS_LABEL=on|auto`; under the shipped default it reports both readings and
+    exits `0`. A reader keying on that line took a bare `--status` returning `0` as "no zero-answer
+    label" — the fail-open direction, in the one file that is read without the runbook open. The
+    doc's exit list was updated for the intent read; this line was not.
+
+    Mutation: restore the unqualified phrasing -> RED. The assertion is the QUALIFIER's presence,
+    not the whole sentence, so the line can be rewritten without re-pinning prose.
+    """
+    text = (REPO_ROOT / "MEMORY.md").read_text()
+    m = re.search(r"^\[ci-runners\]:.*$", text, re.MULTILINE)
+    assert m is not None, "MEMORY.md lost its `[ci-runners]` line — re-anchor this pin"
+    line = m.group(0)
+    assert "exits 5" in line, (
+        "the `[ci-runners]` line no longer states the exit contract at all — re-anchor this pin "
+        "rather than deleting it"
+    )
+    assert "exits 5 ONLY when" in line and "reports BOTH readings" in line, (
+        "MEMORY.md's `[ci-runners]` line states the exit-5 contract WITHOUT the intent gate — a "
+        f"bare `--status` exiting 0 then reads as 'no zero-answer label': {line!r}"
+    )
+
+
+def test_memory_facts_this_pr_does_not_measure_are_not_offset_shifted():
+    """⛔ MEMORY.md IS GRADED HERE TOO — AND A `git diff -U0` DELTA WAS APPLIED TO ITS PROSE.
+
+    A "re-derive every ref" pass over this PR applied one constant (`+55`, a line-offset delta)
+    to THREE numbers in `MEMORY.md` that this change never measured: `[docs]`'s worked example
+    moved one of its three spellings (`:39205` → `:39260`, the other two left), and
+    `[silent-loss]`'s measured box fact moved both loopback ports (`:6379`/`:16379` →
+    `:6434`/`:16434`). Neither line has anything to do with the CI-runner label contract, and
+    `MEMORY.md` is read by lanes that never diff it against `main` — so the drift is silent.
+
+    Both pins are INVARIANTS, not fresh magic numbers, so a legitimate future edit still passes:
+
+    * the `[docs]` spellings (`:<n>`, `L <n>`, `line <n>`) are one worked example of the SAME
+      anchor, so they must carry ONE number — a shift of any one of them reds the sentence;
+    * the `[silent-loss]` ports are a MEASURED box fact that `tortoise/event_store.py`
+      (`_store_identity`) names for the same two stores, so the two files must agree.
+
+    Mutation: restore either `+55` value (`:39260`, `:6434`/`:16434`) → RED. Measured: pre-fix the
+    three spellings report `('39260', '39205', '39205')` and neither shifted port appears in
+    `event_store.py`'s docstring.
+    """
+    text = (REPO_ROOT / "MEMORY.md").read_text()
+
+    docs_line = re.search(r"^\[docs\]:.*$", text, re.MULTILINE)
+    assert docs_line is not None, "MEMORY.md lost its `[docs]` line — re-anchor this pin"
+    example = re.search(r"plus `:(\d+)`/`L (\d+)`/`line (\d+)`", docs_line.group(0))
+    assert example is not None, (
+        "MEMORY.md's `[docs]` entry no longer carries its worked example of the three spellings "
+        "(`:N`, `L N`, `line N`) — re-anchor this pin rather than deleting it"
+    )
+    spellings = example.groups()
+    assert len(set(spellings)) == 1, (
+        "the `[docs]` entry's three spellings are one worked example of the SAME anchor, so they "
+        f"must carry one number — a line-offset pass moved one of them: {spellings!r}"
+    )
+
+    silent = re.search(r"^\[silent-loss\]:.*$", text, re.MULTILINE)
+    assert silent is not None, "MEMORY.md lost its `[silent-loss]` line — re-anchor this pin"
+    pair = re.search(r"two loopback servers `:(\d+)`/`:(\d+)`", silent.group(0))
+    assert pair is not None, (
+        "MEMORY.md's `[silent-loss]` entry no longer states the two-loopback-servers measurement "
+        "— re-anchor this pin rather than deleting it"
+    )
+    store_identity = (REPO_ROOT / "tortoise" / "event_store.py").read_text()
+    for port in pair.groups():
+        assert f"localhost:{port}" in store_identity, (
+            f"`[silent-loss]` cites loopback port :{port}, but `tortoise/event_store.py` "
+            "(`_store_identity`, the seam the sentence is about) names no such store — the entry's "
+            "measured pair must match the source it explains, and a constant shift breaks it "
+            "without touching a single word"
+        )
+
+
+# ── 8. a missing installer is a FAIL, not a silent skip ───────────────────────────────────────
 def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path):
     """Copied one directory down, the module's own `REPO_ROOT` has no installer → it must go RED.
 
@@ -2087,7 +4223,16 @@ def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path
         # `--noconftest`: the throwaway tree gets no conftest at all (this repo's `tests/conftest.py`
         # forbids collecting under a shared temp dir, and a stray ancestor conftest is not the
         # subject here). The copied module imports nothing but the stdlib and pytest.
-        [sys.executable, "-m", "pytest", str(copied), "-q", "-p", "no:cacheprovider", "--noconftest"],
+        # `-x`: the proof is that the MODULE goes red, so the first failure is the whole answer —
+        # without it the nested run re-proves it once per arm and outlives its own timeout.
+        # ⛔ `--rootdir` IS NOT COSMETIC: without it the nested pytest resolves the ini/rootdir
+        # upward out of the throwaway tree and inherits this repo's configuration, whose test paths
+        # it then walks — measured here as a silent 300 s hang with no output, i.e. the
+        # non-vacuity proof timing out instead of proving anything.
+        [
+            sys.executable, "-m", "pytest", str(copied), "-x", "-q",
+            "-p", "no:cacheprovider", "--noconftest", f"--rootdir={copy_root}",
+        ],
         capture_output=True, text=True,
         cwd=str(copy_root),
     )
@@ -2097,18 +4242,23 @@ def test_a_missing_installer_fails_collection_instead_of_skipping(tmp_path: Path
 
 
 # ── 8f. the `CI_RUNNER_OS_LABEL` writers: one reader, ZERO writers, said plainly ────────────
-def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
-    """⛔ THREE ARTIFACTS ASSERTED A WRITER THAT DOES NOT EXIST — AND THE FLEET IS THE COST.
+def test_the_os_label_flag_describes_its_writers_without_asserting_the_live_box():
+    """⛔ A WRITER THAT DOES NOT EXIST WAS ASSERTED, AND SO WAS A BOX NO CHECKOUT CAN READ.
 
-    `CI_RUNNER_OS_LABEL` guards the version-pin carve-out: `on|auto` KEEPS `ubuntu-24.04`,
-    `off`/unset DROPS it. Three places described the live pool as `on|auto` — the runbook's
-    "the live pool's own state", its section preamble's "BOTH writers read it", and the installer
-    header's "cannot revert an APPLIED owner departure with no switch involved". Measured at the
-    head this pin was written: `git grep -n CI_RUNNER_OS_LABEL` finds ONE reader (this installer's
-    repair `case`) and ZERO writers — the install-side emitter is open PR #10275 — so an unset flag
-    resolves to `off` and a plain `--repair-labels` on the live pool (7 of 7 x64 runners carrying
-    `ubuntu-24.04` on 2026-10-29) performs #6897's recorded revert. An operator who read the old
-    sentences would run it believing the pin was protected.
+    `CI_RUNNER_OS_LABEL` guards the version-pin carve-out: THIS RUN'S RESOLUTION keeps
+    `ubuntu-24.04` — `on`, or `auto` on a 24.04 host — and `off`/unset **or a declining `auto`**
+    drops it. The flag arrived with the repair (its READER), and two mistakes were made
+    around it in opposite directions. First, three places asserted a WRITER that did not exist yet
+    ("BOTH writers read it", "the live pool's own state", "cannot revert an APPLIED owner departure
+    with no switch involved") — so an operator read a pin as protected that a plain
+    `--repair-labels` reverts. Then, once the install-side writer existed (#10275), the correction
+    ("ONE reader … nothing WRITES it") became the stale half: the writer is now `resolve_os_label`
+    in this tree, the autoscaler mirrors it in `_os_labels`, and the schedule renders it into the
+    timer.
+
+    Both halves are pinned, because both failures read as diligence. A claim about the LIVE BOX's
+    own environment FAILS (no checkout can read a unit's `Environment`), and the WRITERS this tree
+    actually has must be named — so deleting the paragraph instead of restating it reds too.
 
     Two-way over the two artifacts a lane or an operator reads (the runbook and the installer
     header): a claim that a second writer exists FAILS, and the corrective disclosure must be
@@ -2172,6 +4322,24 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
             "runner-autoscale.service` is the measurement, so the page may only say what the TREE "
             "exports"
         ),
+        "nothing in this tree exports it yet": (
+            "the schedule writer renders the value into the timer, so `off` on a hand-run command is "
+            "the ABSENCE of that writer's environment, not the absence of a writer"
+        ),
+        "the computed set never carries an `ubuntu-<version>`": (
+            "`resolve_labels` appends `$OS_LABELS` on every arm after its `case`, so under "
+            "`on|auto` the computed set DOES carry `ubuntu-24.04` and the repair ADDS it — the "
+            "sentence denies the one path that re-applies the #6897 mitigation"
+        ),
+        "Both belong to #10275": (
+            "that framing made the page defer its own subject to a PR that IS this branch; the "
+            "`_preserve_labels` drop is a NAMED residual here, and the re-attach path is "
+            "`--repair-labels`"
+        ),
+        "an empty answer is the expected one today, since nothing in this tree writes the flag": (
+            "the schedule writes it and `systemctl show -p Environment` is the read, so an empty "
+            "answer is the `off` row rather than the expected state"
+        ),
         "every row below that says": (
             "which row is LIVE is per-box state, so the page may only say which row an unexported "
             "repair takes — the fleet is read back through `gh api …/actions/runners` (I took this "
@@ -2189,18 +4357,40 @@ def test_the_os_label_flag_is_described_as_one_reader_and_no_writer():
     required = {
         "tools/install-ci-runner-x64.sh": (
             installer,
-            ("and nothing WRITES it", "Export `CI_RUNNER_OS_LABEL=on` to KEEP one"),
+            (
+                "THE FLAG HAS TWO SIDES IN THIS TREE",
+                "resolve_os_label",
+                "Export `CI_RUNNER_OS_LABEL=on` to KEEP one",
+            ),
         ),
         "docs/ops/ci-runner-x64.md": (
             runbook,
             (
-                "and nothing WRITES it",
-                "has ONE reader in this tree (this repair) and NO writer",
-                "nothing in this tree exports it",
+                "Both sides now live in this tree",
+                "resolve_os_label",
                 "not a fact this page holds",
+                # the writer the page must name, and the read that replaces guessing
+                "the only WRITER is the SCHEDULE",
+                "systemctl show -p Environment runner-autoscale.service",
+                # the UNION half: `on|auto` ADDS the pin, it is not only a preservation
+                "ADDS it to a runner that lacks it",
+                # the residual is named, not deferred to a PR
+                "NAMED residual",
             ),
         ),
     }
+    # ⛔ THE RUNBOOK'S "ADDS it" IS BACKED BY THE INSTALLER'S OWN APPEND POINT, not by prose: the
+    # OS label rides on EVERY `resolve_labels` arm, after its `case`, which is what makes the union
+    # carry it under `on|auto`. Without this pair the runbook could keep the sentence while the code
+    # stopped honouring it.
+    assert 'LABELS="$LABELS$OS_LABELS"' in installer, (
+        "`resolve_labels` no longer has its single unconditional append point "
+        "(`LABELS=\"$LABELS$OS_LABELS\"`) — then the runbook's \"the repair ADDS it\" is false and "
+        "the #6897 mitigation has no re-apply path outside a fresh install"
+    )
+    for arm in ("LABELS=\"$ARCH_LABEL,$FALLBACK_LABEL\"", "LABELS=\"$ARCH_LABEL\""):
+        assert arm in installer, f"`resolve_labels` lost the arm {arm!r} the append point completes"
+
     for artifact, (text, fragments) in required.items():
         for fragment in fragments:
             assert fragment in text, (
@@ -2220,7 +4410,7 @@ def test_the_carveout_lead_in_names_the_writer_roles_instead_of_trailing_off():
         flag yet: **ONE writer here:**
 
     The clause stops at a colon with nothing after it, and the numbered list that follows is NOT
-    its continuation (it starts with `1. **\`ubuntu-<version>\`**`), so a reader of the carve-out
+    its continuation (it starts with `1. **`ubuntu-<version>`**`), so a reader of the carve-out
     contract is left with a dangling referent exactly where the two writers are being promised to
     agree. The installer header carries the complete sentence
     (`tools/install-ci-runner-x64.sh:58`), so this is leftover text from the `c725ab7f5` rewrite,
@@ -2232,8 +4422,9 @@ def test_the_carveout_lead_in_names_the_writer_roles_instead_of_trailing_off():
          numbered list does not carry;
       2. it still states the ROLE (`reads`/`reading` NO flag) — the fact an operator needs, and
          the one a "fix" that simply deletes the dangling clause would silently drop;
-      3. it NAMES the missing writer (`#10275`) — the dangling clause promised a writer and named
-         none, which is how it survived a pin that only checked the flag's reader count.
+      3. it NAMES the writer that can put the class back (`resolve_os_label` / `_preserve_labels`)
+         — the dangling clause promised a writer and named none, which is how it survived a pin
+         that only checked the flag's reader count.
 
     Non-vacuity (measured at 9dc9d727f, each mutation restored afterwards): with the pre-fix lead-in
     restored the truncation check reds on its own; deleting `#10275` reds on its own; deleting the
@@ -2256,7 +4447,211 @@ def test_the_carveout_lead_in_names_the_writer_roles_instead_of_trailing_off():
         "the carve-out lead-in no longer states that `_preserve_labels` reads NO flag — that role "
         f"statement is the operator-visible fact the clause carried: {lead_in[-160:]!r}"
     )
-    assert "#10275" in lead_in, (
-        "the carve-out lead-in no longer NAMES the missing writer (#10275) — a clause that promises "
-        f"a writer and names none is what dangled in the first place: {lead_in[-160:]!r}"
+    assert re.search(r"resolve_os_label|_preserve_labels", lead_in), (
+        "the carve-out lead-in no longer NAMES the writer that can put the class back — a clause "
+        "that promises a writer and names none is what dangled in the first place: "
+        f"{lead_in[-160:]!r}"
+    )
+
+
+# ── 9. a sibling test's runbook CITE is a reader instruction too ───────────────────────────────
+def test_the_autoscale_tests_runbook_refs_land_on_what_they_name():
+    """A sibling test's runbook cite is a reader instruction like any other, and nothing read it.
+
+    `tests/test_runner_autoscale.py` argues why `ubuntu-24.04-arm` stays dropped and cites a line
+    span for the sentence it leans on ("the ARM64 VMs register their own markers"). The number was
+    right on `main`; this PR's own measurement paragraph was inserted ABOVE it, so `:33-34` came to
+    name the `ubuntu-latest = 0 of 12` paragraph instead. No test read the cite at all — the same
+    only-range-checked class `test_the_runbooks_cross_file_refs_land_on_what_they_name` exists for,
+    one direction over (a test citing the runbook, not the runbook citing a workflow).
+
+    Mutation: restore `:33-34` in that docstring -> RED (the span says `ubuntu-latest = 0 of 12`,
+    not the ARM64 sentence).
+    """
+    sibling = (REPO_ROOT / "tests" / "test_runner_autoscale.py").read_text()
+    # the span may be written `(`:NN-MM`)` or `(`:NN-MM`, `docs/ops/…`)` — both name the same lines,
+    # so the citation is matched on the SPAN and not on how the sentence closes its parenthesis.
+    m = re.search(r"the ARM64 VMs register their own markers \(`:([0-9]+)-([0-9]+)`", sibling)
+    assert m is not None, (
+        "`tests/test_runner_autoscale.py` no longer cites a runbook span for the ARM64-marker "
+        "sentence — re-anchor this pin rather than deleting it"
+    )
+    lo, hi = int(m.group(1)), int(m.group(2))
+    lines = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+    assert 1 <= lo <= hi <= len(lines), f"cite :{lo}-{hi} is outside the runbook's {len(lines)} lines"
+    span = "\n".join(lines[lo - 1 : hi])
+    assert "ARM64 VMs register" in span, (
+        f"`tests/test_runner_autoscale.py` cites docs/ops/ci-runner-x64.md:{lo}-{hi} for the "
+        f"arm64-marker sentence, but that span is {span!r} — re-derive the ref, do not offset it"
+    )
+
+
+# ── 12. the narrowed keep is described as narrowed, everywhere it is described ────────────────
+def test_no_surface_claims_the_repair_keeps_the_whole_version_pinned_class():
+    """⛔ A KEEP THAT IS NARROWED IN CODE AND WIDE IN PROSE IS THE FALSE-ARCHITECTURE CLAIM BACK.
+
+    `--repair-labels` keeps ONLY `$OS_LABEL` (`if [ "$l" = "$OS_LABEL" ]`, and every other member of
+    the family is printed `NOT KEPT:`) — deliberately, because keeping `ubuntu-24.04-arm` is how an
+    x86_64 runner serves an ARM64 job and produces a wrong artifact. The instruction read by the
+    next maintainer is the COMMENT and the RUNBOOK, not the `case` arm, so a sentence saying the
+    repair "keeps the class" licenses exactly the state the narrowing exists to forbid.
+
+    This is not hypothetical: the claim was removed from two workflow comments, then from
+    `runner_autoscale.py::_preserve_labels`, and each time it survived in a SIBLING sentence that
+    no test read (the re-registration branch of `tools/runner_autoscale.py` here, and the runbook
+    sentence that contradicted its own "TWO NAMED CARVE-OUTS" section ON THE SAME PAGE). So the pin
+    is
+    mechanical and covers every surface that describes the repair, not the one line a review named.
+
+    Mutation: restore any of the three `keeps the class` sentences -> RED on the file it is in.
+    """
+    surfaces = [
+        REPO_ROOT / "tools" / "runner_autoscale.py",
+        REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md",
+        REPO_ROOT / "MEMORY.md",
+        REPO_ROOT / "tests" / "test_runner_autoscale.py",
+        REPO_ROOT / "tests" / "test_reporting_workflow_concurrency.py",
+    ]
+    wide = re.compile(r"keep[s]?\s+the\s+(whole\s+)?class", re.IGNORECASE)
+    offenders: list[str] = []
+    for path in surfaces:
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if wide.search(line):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
+        # a claim can also be WRAPPED across two prose lines, which the per-line scan above cannot
+        # see — normalise before concluding the surface is clean (#10275: the surviving sentence in
+        # the runbook was a wrap of the one the review had already removed elsewhere).
+        joined = re.sub(r"\s+", " ", path.read_text())
+        if wide.search(joined) and not wide.search(path.read_text()):
+            offenders.append(f"{path.relative_to(REPO_ROOT)}: (wrapped) {wide.search(joined).group(0)!r}")
+    assert not offenders, (
+        "the repair keeps `$OS_LABEL` and DROPS the rest of the version-pinned family "
+        "(`NOT KEPT:`), so no surface may say it keeps the class — a narrowed keep described as "
+        "wide is the false-architecture claim the narrowing removed: " + "; ".join(offenders)
+    )
+
+    # ...and the narrowed truth is actually STATED where a maintainer looks, not merely un-denied.
+    # (whitespace-normalised: both files wrap this sentence across two lines.)
+    narrowed = re.compile(r"dropping the rest of the family|drops? the rest of the family", re.IGNORECASE)
+    autoscale = re.sub(r"\s+", " ", (REPO_ROOT / "tools" / "runner_autoscale.py").read_text())
+    assert narrowed.search(autoscale), (
+        "`_preserve_labels`'s residual must name the narrowing (`$OS_LABEL` kept, the rest dropped) "
+        "— an unstated narrowing reads as the wide keep this pin forbids"
+    )
+    runbook = re.sub(r"\s+", " ", (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text())
+    assert narrowed.search(runbook), (
+        "the runbook must name the narrowing too — it is the page an operator reads before running "
+        "`--repair-labels`"
+    )
+
+
+# ── 8j. the relays a SIBLING test file makes into the runbook and the tree ──────────────────
+_CITING_TEST_FILE = "tests/test_ci_selection.py"
+
+
+def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
+    """⛔ EVERY PIN ABOVE READS THIS FILE; A SIBLING'S RELAYS WERE UNSCANNED, AND ONE DRIFTED.
+
+    `tests/test_ci_selection.py` tells a maintainer that `docs/ops/ci-runner-x64.md` and the
+    capstone pin's re-cut history both advertise
+    `test_the_changes_job_carries_no_job_scope_env` — the reference-surface relay for #10186
+    FINDING 1. While re-deriving this PR's own refs, that runbook citation was moved to `:474` by
+    a constant: at this head `:474` is a BLANK LINE inside a fenced block (473 closes the fence,
+    475 opens "If a runner is gone …") and the sentence naming the test is the file's only
+    occurrence of it, at `:862`. Nothing redded, because every pin above scans THIS file's
+    citations and `tests/test_ci_selection.py` is in none of their surfaces — so the one file
+    whose relay drifted was the one file no pin read.
+
+    A blank-line target is worse than a stale one, because the reader concludes the assertion is
+    gone. All three citations in the sibling file are pinned here, two-way: a citation this pin
+    does not know FAILS (add it rather than leaving it unchecked), a known site that stopped
+    citing FAILS (the pin must not silently shrink), and each citation must land on the line that
+    says the thing its own paragraph claims.
+
+    Non-vacuity (measured): with the pre-fix citation (runbook `:474`, named that way in this
+    docstring rather than as a `path:line` ref, so 8e's scan does not read it as a claim) the
+    landing check reds on ``cites …:474, but that line is ''``; re-pointed at `:862` it
+    is GREEN; re-pointed at `:448` (where the sentence lives on `origin/main`, i.e. a plausible
+    offset re-derivation) it reds again — which is what makes this a landing check and not a
+    range check.
+
+    ⛔ AND THE SURFACE IS DISCOVERED, NOT NAMED, BECAUSE NAMING IT IS WHAT LET THE DRIFT THROUGH.
+    The pin as first written hard-coded ONE sibling file, so it reproduced the defect it exists to
+    remove at the next level up: `tests/test_reporting_workflow_concurrency.py` relays the same
+    runbook by number (`:25-26`, the two inventory rows it contrasts) and sat outside every pin for
+    the same reason `tests/test_ci_selection.py` did — a scan surface that names its files is
+    incomplete the moment a file is added, and the file it misses is unread in BOTH directions. So
+    every OTHER `tests/**/*.py` is now scanned for runbook citations and folded into the same
+    two-way anchor set: a runbook citation in a sibling this pin does not know FAILS, and an anchor
+    nothing cites FAILS. Only the runbook is discovered — a sibling's citations into the *tree* are
+    that file's own business, and requiring anchors for them would widen this pin into an unrelated
+    ref audit. A `:N-M` range is anchored on its first line.
+
+    Non-vacuity for the discovered half (measured): re-pointing `tests/test_reporting_workflow_
+    concurrency.py`'s citation at a line that does not carry the inventory row reds with `cites
+    docs/ops/ci-runner-x64.md:<n>, but that line is …`; with this pin absent the same edit is
+    silent, because no other surface reads that file.
+    """
+    # (target file, cited line) -> a regex the CITED LINE ITSELF must match
+    anchors: dict[tuple[str, int], str] = {
+        # the /docs guard's import of the schema types the citing paragraph names
+        ("tests/test_website_docs_consistency.py", 56):
+            r"from tortoise\.commit_schema import Point, point_content_id",
+        # the reference-surface relay that drifted: the runbook sentence naming the test
+        ("docs/ops/ci-runner-x64.md", 866): r"test_the_changes_job_carries_no_job_scope_env",
+        # the capstone pin's re-cut history, which names it too
+        ("tests/test_capstone_preregistration_9075.py", 1590):
+            r"test_the_changes_job_carries_no_job_scope_env",
+        # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
+        # moving alias the observers must NOT pin to, which the version pin below it replaces
+        ("docs/ops/ci-runner-x64.md", 25): r"^\| `ubuntu-latest` \|",
+    }
+
+    ref = re.compile(r"((?:tests/[A-Za-z0-9_/]+\.py)|(?:docs/ops/ci-runner-x64\.md)):(\d+)")
+    runbook_ref = re.compile(r"(docs/ops/ci-runner-x64\.md):(\d+)")
+    # cited[target, line] -> every place that cites it, as ``file:line``, so a failure names the
+    # file the reader should open — the discovered half does not live in _CITING_TEST_FILE.
+    cited: dict[tuple[str, int], list[str]] = {}
+
+    def _collect(path: Path, pattern: re.Pattern[str]) -> None:
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            for m in pattern.finditer(line):
+                cited.setdefault((m.group(1), int(m.group(2))), []).append(f"{rel}:{n}")
+
+    _collect(REPO_ROOT / _CITING_TEST_FILE, ref)
+    this_file = (REPO_ROOT / "tests" / "test_ci_runner_x64_install.py").resolve()
+    for sibling in sorted((REPO_ROOT / "tests").rglob("*.py")):
+        if sibling.resolve() != this_file:
+            _collect(sibling, runbook_ref)
+    assert cited, (
+        "no surface cites the runbook or the tree any more — re-anchor this pin rather than "
+        "deleting it; a pin over an empty reference set checks nothing"
+    )
+
+    unknown = sorted(set(cited) - anchors.keys())
+    assert not unknown, (
+        "a citation this pin does not know — re-derive it against the tree at this head and add it "
+        f"to `anchors`: {unknown}"
+    )
+    stale = sorted(anchors.keys() - set(cited))
+    assert not stale, (
+        "this pin still lists citations nothing makes — a pin over refs that were re-worded or "
+        f"removed is pinning nothing: {stale}"
+    )
+
+    wrong: list[str] = []
+    for (target, n), places in sorted(cited.items()):
+        path = REPO_ROOT / target
+        assert path.is_file(), f"{places} cites a missing file: {target}"
+        lines = path.read_text().splitlines()
+        assert 1 <= n <= len(lines), f"{target}:{n} is past EOF ({len(lines)} lines)"
+        if not re.search(anchors[(target, n)], lines[n - 1]):
+            wrong.append(
+                f"{places} cites {target}:{n}, but that line is "
+                f"{lines[n - 1].strip()!r}"
+            )
+    assert not wrong, (
+        "a citation names a line that does not say it — re-derive the number at this head: "
+        + "; ".join(wrong)
     )

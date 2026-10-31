@@ -696,11 +696,29 @@ unpaired aggregates). Protocol for the follow-up:
 The 3-point micro-test that SELECTS the granularity knob before the pilot:
 
 ```bash
-# offline smoke (deterministic ingest implied by --mock):
+# offline smoke (deterministic ingest implied by --mock).
+# --skip-preflight WAIVES the dense leg exactly as for `run.py` above (#4718):
+# the sweep now runs the same pre-flight, so without it a host with no embedder
+# stops before the dataset load. Drop the flag to REQUIRE the real leg.
+#
+# The waiver is not itself the label — what ran is, and which label you get
+# depends on the MODE, not only on the host:
+#   * this `--mock` smoke is a DETERMINISTIC (view-only) run: `_select_winner`
+#     returns None by definition (D2 — the selection metric is knob-insensitive
+#     there), so it prints "Deterministic mode ... no winner", never SELECTED,
+#     and exits 0 on ANY host — no embedder or an embedder present alike.
+#   * a v2 sweep (the command below) is the only one that can SELECT. On a host
+#     with no embedder its waiver records `vector_strategy="unavailable"`,
+#     `embedding_coverage=0.0` and prints NOT MEASURED. Taken on a host where
+#     the embedder DOES load, the same waiver is a no-op: the cells record
+#     `enabled`, it is a real measurement, and it prints SELECTED.
+#   * third case, distinct from both: a cell that loads the embedder but embeds
+#     0 of N points (the write itself degraded) reads NOT MEASURED however the
+#     run was invoked — the dense leg did not actually run.
 python -m tools.longmem_eval.sweep_granularity --data tests/fixtures/longmemeval_mini.json \
-    --limit 5 --mock
+    --limit 5 --mock --skip-preflight
 
-# real v2 sweep (needs provider keys / --extractor-model):
+# real v2 sweep (needs the embedder + provider keys / --extractor-model):
 python -m tools.longmem_eval.sweep_granularity --split s --limit 20
 ```
 
