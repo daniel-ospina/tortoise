@@ -51,6 +51,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -582,3 +583,168 @@ def test_the_helper_carries_no_process_name_kill() -> None:
         "the preview helper signals processes by name again; it must only ever signal "
         "the pid it recorded and that pid's descendants (#10283):\n" + "\n".join(offenders)
     )
+
+
+# ── #10305: the CONSUMER's readiness budget ───────────────────────────────────
+# The arms above pin `preview-server.sh`'s `ready` verb. #10305 is the other end
+# of the same contract: the specs' own preflight (`tests/e2e/preview_preflight.py`)
+# re-probes both origins before any spec drives them, and it used to sample ONCE.
+# Measured (run 41141786500 job 124361929728): auth `ready` at 23:21:53.99, the
+# dashboard preview booted beside it at 23:21:56.09, and the single preflight
+# probe at 23:21:59.36 caught a 500 — the job reddened with "local preview
+# server(s) unreachable" over a server that had served 200 four seconds earlier,
+# while run 41140572622 (head `b3bbf2f1c`, byte-identical `website/`, `tests/e2e/`
+# and `.github/`) ran the same suite GREEN. A budget is the fix; these arms pin
+# that it is a BUDGET (retries, then still refuses) and not a blanket pass.
+
+
+class _FakeResponse:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+
+class _StatusScript:
+    """An `opener` that answers a scripted sequence of statuses, per URL.
+
+    A status >= 400 is raised the way `urllib` raises it (`HTTPError`), because
+    that is what the real probe sees for the measured failure — a 500 from
+    wrangler is an exception, not a response object.
+    """
+
+    def __init__(self, script: dict[str, list[int]], default: int = 200) -> None:
+        self.script = {url: list(codes) for url, codes in script.items()}
+        self.default = default
+        self.calls: list[str] = []
+
+    def open(self, url: str, timeout: float | None = None):
+        self.calls.append(url)
+        codes = self.script.get(url) or []
+        status = codes.pop(0) if codes else self.default
+        if status >= 400:
+            raise urllib.error.HTTPError(url, status, "Internal Server Error", {}, None)
+        return _FakeResponse(status)
+
+
+class _Clock:
+    """A monotonic stand-in that advances only when the poll sleeps."""
+
+    def __init__(self, step: float) -> None:
+        self.now = 0.0
+        self.step = step
+        self.sleeps = 0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps += 1
+        self.now += max(self.step, seconds)
+
+
+def _preflight(**kwargs):
+    from tests.e2e.preview_preflight import preflight_local_servers
+    return preflight_local_servers(**kwargs)
+
+
+def test_preflight_polls_through_a_transient_5xx() -> None:
+    """A single 500 must not declare the previews unreachable (#10305).
+
+    The measured failure is exactly this: one 500 from a preview that had
+    answered 200 seconds earlier. On the pre-fix gate (one sample, then
+    `pytest.exit`) this test cannot even reach its assertion — the call raises,
+    which is the non-vacuity proof for this arm.
+    """
+    auth = "http://127.0.0.1:8836/"
+    app = "http://127.0.0.1:8791/"
+    opener = _StatusScript({auth: [500, 500]})
+    clock = _Clock(step=0.5)
+
+    _preflight(targets=(("auth", auth), ("dashboard", app)), budget=20.0,
+               interval=0.5, opener=opener, sleep=clock.sleep,
+               monotonic=clock.monotonic)
+
+    assert opener.calls == [auth, app, auth, auth], (
+        "round 1 probes BOTH origins, then only the one still failing is "
+        f"re-probed: {opener.calls}"
+    )
+    assert clock.sleeps == 2, (
+        "two transient 500s must cost two polls, not a refusal: "
+        f"sleeps={clock.sleeps}"
+    )
+
+
+def test_preflight_still_refuses_once_the_budget_is_spent() -> None:
+    """A server that never serves still reds — the budget is not a blanket pass.
+
+    The positive-control mirror of the arm above: without it, a gate that
+    retried forever would satisfy `test_preflight_polls_through_a_transient_5xx`.
+    """
+    auth = "http://127.0.0.1:8836/"
+    opener = _StatusScript({auth: [500] * 500})
+    clock = _Clock(step=0.5)
+
+    with pytest.raises(pytest.exit.Exception) as excinfo:
+        _preflight(targets=(("auth", auth),), budget=3.0, interval=0.5,
+                   opener=opener, sleep=clock.sleep, monotonic=clock.monotonic)
+
+    message = str(excinfo.value)
+    assert "500" in message, message
+    assert "auth http://127.0.0.1:8836/" in message, message
+    assert "Polled for 3s" in message, (
+        "the refusal must say it was a BUDGET that ran out, so the next reader "
+        f"does not re-diagnose it as a one-shot miss: {message}"
+    )
+    assert len(opener.calls) > 1, (
+        "a refusal after ONE sample is the pre-fix behaviour this fixes: "
+        f"calls={len(opener.calls)}"
+    )
+
+
+def test_a_serving_preview_costs_exactly_one_probe_and_no_sleep() -> None:
+    """The happy path stays fail-FAST — the budget must not slow a green job.
+
+    Positive control for the two arms above: a gate that always waited the full
+    budget would pass them both and add 20 s to every CI run.
+    """
+    auth = "http://127.0.0.1:8836/"
+    app = "http://127.0.0.1:8791/"
+    opener = _StatusScript({})
+    clock = _Clock(step=0.5)
+
+    _preflight(targets=(("auth", auth), ("dashboard", app)), budget=20.0,
+               interval=0.5, opener=opener, sleep=clock.sleep,
+               monotonic=clock.monotonic)
+
+    assert opener.calls == [auth, app], opener.calls
+    assert clock.sleeps == 0, f"a serving preview must not be waited on: {clock.sleeps}"
+
+
+def test_preflight_refuses_a_non_loopback_origin_without_burning_the_budget() -> None:
+    """A refusal polling cannot fix must not be retried (#2731 review P2).
+
+    The loopback rule is request-INDEPENDENT: re-probing `10.0.0.5` twenty times
+    cannot make it local, so it refuses on the first evaluation and the opener is
+    never called. Without this arm a poll could paper over a misconfigured origin
+    (the guard would still fire, but only after the budget — and the message
+    would imply the far end answered something).
+    """
+    opener = _StatusScript({})
+    clock = _Clock(step=0.5)
+
+    with pytest.raises(pytest.exit.Exception) as excinfo:
+        _preflight(targets=(("auth", "http://10.0.0.5:8788/"),), budget=20.0,
+                   interval=0.5, opener=opener, sleep=clock.sleep,
+                   monotonic=clock.monotonic)
+
+    message = str(excinfo.value)
+    assert "non-loopback host" in message, message
+    assert opener.calls == [], (
+        f"a non-local origin must not be probed at all: {opener.calls}"
+    )
+    assert clock.sleeps == 0, clock.sleeps

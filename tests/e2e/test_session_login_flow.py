@@ -32,7 +32,6 @@ Flows (the user's #1511 acceptance):
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import json
 import os
 import re
@@ -45,6 +44,8 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page, expect
+
+from tests.e2e.preview_preflight import preflight_local_servers
 
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
@@ -255,31 +256,6 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
 # spec originates a prod-app-origin request).
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """#2731 (review P2): never follow a redirect in the preflight — a local
-    preview that 3xx-bounces off-box must not pass a redirect-following check."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def _is_local_preview_host(host: str) -> bool:
-    """True only for ``localhost`` or a **loopback** IP literal.
-
-    Loopback-only on purpose (#2731 review P2): a guard whose job is to reject
-    non-local origins must not accept a DNS name like ``10.evil.com`` (prefix
-    match), a LAN host (``10.0.0.5``, ``192.168.1.1``), or the cloud-metadata
-    address (``169.254.169.254``). ``urlparse().hostname`` strips the brackets
-    off IPv6 literals, so ``::1`` arrives unbracketed here.
-    """
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def _preflight_local_servers() -> None:
     """Fail fast — ONE clear error — when the local preview servers are not
     serving (#2731). Without this, a missing :8788/:8790 preview makes the
@@ -287,50 +263,15 @@ def _preflight_local_servers() -> None:
     an app-behavior failure. Called from a module-scoped autouse fixture in
     every migrated dashboard/auth spec (and the #2731 flow module).
 
-    ``pytest.exit`` (not ``pytest.fail``) is deliberate: a module-scoped autouse
-    fixture that fails is re-raised once per collected test, so ``fail`` would
-    print the same error 16 times. ``exit`` aborts the session with a single
-    message (#2731 review P2)."""
-    failures: list[str] = []
-    opener = urllib.request.build_opener(_NoRedirect)
-    for label, url in (("auth", AUTH_ORIGIN + "/"), ("dashboard", DASHBOARD_URL)):
-        try:
-            parsed = urllib.parse.urlparse(url)
-            host = parsed.hostname or ""
-        except ValueError:
-            # Malformed authority (e.g. an unbalanced IPv6 bracket) — this must
-            # not escape as a per-test ValueError; it is a preflight failure.
-            failures.append(f"{label} {url} -> unparseable URL")
-            continue
-        if parsed.scheme not in ("http", "https"):
-            failures.append(
-                f"{label} {url} -> unsupported scheme {parsed.scheme!r} "
-                "(only http/https previews are probed)")
-            continue
-        if not _is_local_preview_host(host):
-            failures.append(
-                f"{label} {url} -> non-loopback host {host!r} — refusing to "
-                "drive a non-local origin")
-            continue
-        try:
-            with opener.open(url, timeout=10) as resp:
-                if resp.status != 200:
-                    failures.append(f"{label} {url} -> HTTP {resp.status}")
-        except Exception as exc:  # any error means the preview is not serving
-            failures.append(f"{label} {url} -> {type(exc).__name__}: {exc}")
-    if failures:
-        pytest.exit(
-            "dashboard e2e: local preview server(s) unreachable — this suite "
-            "drives the LOCAL wrangler previews, never production (#2731). "
-            "Start BOTH before running (dist/ is a build artifact since "
-            "#3775 — build it first or :8790 serves a missing/stale bundle):\n"
-            "  cd website/apps/dashboard && npm ci && npm run build\n"
-            "  cd website/apps/dashboard && npx wrangler@4 pages dev dist --port 8790\n"
-            "  cd website && npx wrangler@4 pages dev . --port 8788\n"
-            "Unreachable:\n"
-            + "\n".join(f"  - {f}" for f in failures),
-            returncode=1,
-        )
+    #10305: the gate itself (the loopback-only rule, the 200 requirement and the
+    POLLED readiness budget) lives in ``tests/e2e/preview_preflight.py`` so it can
+    be exercised without this module's ``RUN_DASHBOARD_E2E`` opt-in and without a
+    browser. A single sample was measured reddening a job four minutes after the
+    same suite ran green on the same tree, because a preview that had answered 200
+    five seconds earlier returned 500 once while it warmed up.
+    """
+    preflight_local_servers((("auth", AUTH_ORIGIN + "/"),
+                             ("dashboard", DASHBOARD_URL)))
 
 
 def _seed_local_session_cookie(page: Page, user_id: str,
