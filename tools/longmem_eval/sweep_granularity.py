@@ -126,7 +126,20 @@ def _points_census(outcomes: list[dict]) -> dict:
     impossible receipt would be certified as a dense MEASUREMENT — the exact
     class this receipt exists to close (#10355 review P2). A record that fails
     either half of the rule is excluded as a record; it is never half-counted.
-    The sum of ``points_embedded`` is ``0`` whenever
+
+    Exclusion ALONE does not close that class, and the first version of this
+    rule said it did (#10355 review P3). Dropping an impossible record leaves
+    the cell's coverage ``None`` — or, beside an honest record, a coverage
+    computed over a SMALLER population — and ``None`` is exactly what the
+    zero-coverage arm cannot see, so a cell whose only census record was
+    impossible still came back MEASURED. Two things close it, and the count in
+    the returned dict is the second: an impossible pair is COUNTED in
+    ``points_refused``, and :func:`_dense_leg_verified` refuses a cell whose
+    ``points_refused`` is non-zero. Counting it is also what keeps this
+    function auditable for the mixed case (``[(1, 1), (3, 7)]`` sums to a
+    ONE-point population): the refused record is visible in ``points_refused``
+    instead of vanishing from the population the ratio was computed over. The
+    sum of ``points_embedded`` is ``0`` whenever
     the cell's outcomes carry no census at all — so pairing it with ``points_total: None`` published
     ``{points_total: None, points_embedded: 0}``, where a consumer summing
     ``points_embedded`` across cells reads "0 embedded" for a population it
@@ -137,23 +150,29 @@ def _points_census(outcomes: list[dict]) -> dict:
     halves, and a cell that embedded none of N reports ``(N, 0)`` — a real
     zero, which ``_dense_leg_verified`` reads as not-measured.
 
-    One honest wrinkle (#4821 review P3). The ``None/None`` shape covers four
-    states, and this function cannot tell them apart: (a) a cell whose outcomes
-    all report ``points_total == 0`` — a KNOWN zero; (b) a cell whose records
-    carry no census at all; (c) a cell that knows its total but not how many of
-    its points were embedded — excluded as a pair, so the half it does know is
-    not published as a whole; and (d) a record whose pair is impossible
-    (``points_embedded > points_total``, a bool, a negative) — refused rather
-    than summed. Safe here for the same reason in every case: a cell with no
-    points can neither reach the context cap nor produce evidence recall, so it
-    is never a winner; (c) still has its ``vector_strategy`` witness; and (d)
-    is unreachable from a real report — ``retrieve.py`` derives both halves
+    One honest wrinkle (#4821 review P3). ``None/None`` beside a ZERO
+    ``points_refused`` covers three UNKNOWN states this function cannot tell
+    apart: (a) a cell whose outcomes all report ``points_total == 0`` — a KNOWN
+    zero; (b) a cell whose records carry no census at all; and (c) a cell that
+    knows its total but not how many of its points were embedded — excluded as
+    a pair, so the half it does know is not published as a whole. Safe in every
+    one of them: a cell with no points can neither reach the context cap nor
+    produce evidence recall, so it is never a winner, and (c) still has its
+    ``vector_strategy`` witness. Recorded rather than implied: the coverage arm
+    treats all three as un-refuted instead of inventing a zero, which is the
+    documented rule for an unknown population (see ``_dense_leg_verified``) and
+    is what stops this function publishing a ratio nobody measured.
+
+    The fourth state is NOT one of those and is NOT left un-refuted — a record
+    that supplies a value for BOTH halves and lies about it (a value that is
+    not a valid int, like ``True``, or ``points_embedded > points_total`` or a
+    negative). It is counted in ``points_refused`` and the predicate refuses
+    the cell, because the surviving ratio was computed over a population the
+    record was silently removed from.
+    It is unreachable from a real report — ``retrieve.py`` derives both halves
     from ONE Cypher row (``count(p), count(p.embedding)``), so
-    ``0 <= points_embedded <= points_total`` holds by construction. Recorded
-    rather than implied: the coverage arm treats all four as un-refuted instead
-    of inventing a zero, which is the documented rule for an unknown population
-    (see ``_dense_leg_verified``) and is what stops this function publishing a
-    ratio nobody measured."""
+    ``0 <= points_embedded <= points_total`` holds by construction — which is
+    why this is a contract for the NEXT producer rather than a live path."""
     # ONE pair per outcome: an outcome that knows its total but not how many
     # of its points were embedded is excluded from BOTH halves, never counted
     # on one side only — that is what "one pair, never two independent sums"
@@ -162,16 +181,34 @@ def _points_census(outcomes: list[dict]) -> dict:
     # (ints, not bools, 0 <= embedded <= total): a per-record lie rolls up to
     # a coverage outside [0, 1] that the zero-coverage arm cannot see, i.e. an
     # impossible receipt certified as a MEASUREMENT (#10355 review P2).
+    #
+    # Two different exclusions, deliberately not conflated: a record that does
+    # NOT supply both halves (absent or ``None``) is UNKNOWN — it says nothing
+    # about the ratio, so it refutes nothing — while a record that supplies a
+    # value which is not a valid int (a bool, a float) or a ratio outside
+    # ``0 <= embedded <= total`` is a LIE about the ratio: counted, and refused
+    # by the predicate that certifies the leg.
     pairs = [(o.get("points_total"), o.get("points_embedded")) for o in outcomes]
-    known = [(t, e) for t, e in pairs
-             if isinstance(t, int) and not isinstance(t, bool)
-             and isinstance(e, int) and not isinstance(e, bool)
-             and 0 <= e <= t]
+    known: list[tuple[int, int]] = []
+    refused = 0
+    for t, e in pairs:
+        if t is None or e is None:
+            continue
+        if not (isinstance(t, int) and not isinstance(t, bool)
+                and isinstance(e, int) and not isinstance(e, bool)):
+            refused += 1
+            continue
+        if 0 <= e <= t:
+            known.append((t, e))
+        else:
+            refused += 1
     known_total = sum(t for t, _ in known)
     known_embedded = sum(e for _, e in known)
     if not known_total:
-        return {"points_total": None, "points_embedded": None}
-    return {"points_total": known_total, "points_embedded": known_embedded}
+        return {"points_total": None, "points_embedded": None,
+                "points_refused": refused}
+    return {"points_total": known_total, "points_embedded": known_embedded,
+            "points_refused": refused}
 
 
 def _dense_leg_verified(results: list[dict]) -> bool:
@@ -212,6 +249,16 @@ def _dense_leg_verified(results: list[dict]) -> bool:
     resume) is not refuted by this arm; the ``vector_strategy`` arm still
     governs it.
 
+    AND a cell that REFUSED a census record (``points_refused`` non-zero) is
+    not a measurement either (#10355 review P3). Refused means the record
+    supplied BOTH halves and the ratio was impossible, so the coverage that
+    survived was computed over a population that record was removed from —
+    an exclusion that can only INFLATE the ratio, and whose absence the
+    zero-coverage arm cannot see. That is a different state from the unknown
+    cell above (which refutes nothing) and is what makes the census's
+    POSSIBILITY rule close the class it names rather than only the publishing
+    half of it.
+
     KNOWN RESIDUAL (recorded, not implied — #4821 review P3). This predicate
     reads the WRITE-time witness only. A cell with full write coverage whose
     QUERY-side encode degrades (the vector leg skipped, an FTS-only pool)
@@ -225,6 +272,8 @@ def _dense_leg_verified(results: list[dict]) -> bool:
         return False
     for r in results:
         if r.get("vector_strategy") != "enabled":
+            return False
+        if r.get("points_refused"):
             return False
         total = r.get("points_total")
         if r.get("embedding_coverage") == 0.0 and isinstance(total, int) \
