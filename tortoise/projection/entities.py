@@ -1667,7 +1667,7 @@ class _EntityHandlers:
         # `None` and `e.project` still lands, so the entry is ONE key and not a
         # blanket refusal of the passthrough (#228). ⚠️ That narrows `#228` on
         # this fold deliberately; the departure is marked ON `#228` with an
-        # `OVERRIDES:` line (`#issuecomment-6541136211`).
+        # `OVERRIDES:` line (`#issuecomment-6544613785`).
         # ⛔ ONTOLOGY §4.4 declares `story_arc` on `:Source` only, so on
         # `:Event` it was an UNDECLARED property riding the open passthrough —
         # the same #3998/D30 shape this change closes for the document fold.

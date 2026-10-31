@@ -1834,8 +1834,11 @@ a FalkorDB, one commit with a 167-char narrative: `sum(size(n.story_arc))` = **3
 removal (`:Source` 167 + `:Event` 167), **0 bytes** after it, with `public.session_narrative` holding
 the same 167 chars. `summary`/`title` deliberately stay on the node (§4.4 metadata, not the prose).
 
-**The four re-entry routes, and where each one stood.** The key stays DECLARED in `_SOURCE_NODE_PROPS`
-so legacy nodes read back, and the declaration is what makes a route possible at all:
+**The re-entry routes, and where each one stood.** The key stays DECLARED in `_SOURCE_NODE_PROPS`
+so legacy nodes read back, and the declaration is what makes a route possible at all. The list is per
+ROUTE over the three labels the commit path could reach, and the first cut of this entry counted four
+because it was Source-shaped — the `:Event` anchor the same SET wrote was under the same declaration
+and under no deny set, which #10389's fifth review round measured (`#10428`):
 
 - The journal `SourceCreated` fold was **recorded** as the open fold door and it never was one —
   `_upsert_source` passes `allow_keys=_SOURCE_EXTRA_PROPS`, a closed set excluding `story_arc`, so
@@ -1864,6 +1867,26 @@ so legacy nodes read back, and the declaration is what makes a route possible at
   **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
   restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
   table, plus that test's premise), which is why it is filed rather than absorbed.
+- **The `:Event` fold — door 1's counterpart one label over, denied here (`#10428`).** `_upsert_event`
+  persists extras with `skip = _META_KEYS | _EVENT_HANDLED`, and `story_arc` was in neither while
+  `docs/ONTOLOGY.md` declares it on `:Source` only — an UNDECLARED key on the open passthrough, the
+  `#3998`/D30 shape, and DURABLE because the fold that writes it live is the fold a `rebuild_all`
+  replays. `story_arc` joins `_EVENT_HANDLED`. MEASURED through the SDK door behind
+  `tortoise_create_event`, one call, before: `e.story_arc` = `NARRATIVE-EVENT-DOOR-PROSE`; after:
+  `None`, with `e.project` = `kept-228` still landing — one key, not a blanket refusal (`#228`, marked
+  there with an `OVERRIDES:` line).
+- **The `:Event` tenant route — a SECOND door the fold entry cannot reach (`#10428`).**
+  `_update_entity` writes caller props with a live `SET n += $props` and consults no label skip-set, so
+  `update_entity(<agentSession eventId>, story_arc=…)` was ACCEPTED, journalled into an
+  `EntityMutated` record and restored by a rebuild. `_EVENT_SERVER_MANAGED_PROPS` (new, the write-filter
+  counterpart of `_SOURCE_SERVER_MANAGED_PROPS`) refuses it, resolved with the same predicate the write
+  uses.
+- **The `:Point` passthrough — the route no deny set covers, filed as `#10429`.** `create_point` writes
+  caller props in its CREATE map, `_upsert_point_props` is its replay fold, and `_update_entity`'s
+  Point branch writes them live; MEASURED, `create_point("statement", …, story_arc=…)` leaves the
+  PROSE on the node and the same payload through the fold re-materialises it. Narrowing it is
+  `#2795`/D2's open-set passthrough decision and needs its own `OVERRIDES:` marker, so §9.1(b) names it
+  as an open route instead of counting it denied.
 
 **And the replay half of that route reclaims what a legacy journal carried.** Residual (a) said only that
 nodes already carrying the prose keep it, which is true of the copies this change stops writing and NOT
