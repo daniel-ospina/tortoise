@@ -133,8 +133,14 @@ def _re_runnable(code: str) -> bool:
     if sub is None:
         return False
     if sub.group(1) == "switch":
-        return ("switch -C" in code) or ("--force-create" in code) or ("--detach" in code)
-    return ("-B " in code) or ("--detach" in code)
+        creates = ("switch -C" in code) or ("--force-create" in code)
+    else:
+        creates = "-B " in code
+    detaches = "--detach" in code
+    # git refuses a create flag WITH --detach — "fatal: '--detach' cannot be used
+    # with '-b/-B/--orphan'" — so that pair is a command that does not run, and
+    # union-ing the flags (the previous form) blessed it.
+    return (creates or detaches) and not (creates and detaches)
 
 
 #: The test target a marker-scoped run names (``tests/test_ingest_safety.py``).
