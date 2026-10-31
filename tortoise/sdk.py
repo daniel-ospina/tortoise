@@ -32,7 +32,6 @@ import contextvars
 import hashlib
 import json as _json
 import logging
-import math
 import os
 import re
 import stat
@@ -17735,58 +17734,57 @@ class TortoiseSDK:
                     continue
                 # The rebuilt layout: ``old`` becomes ``new`` AT ITS SLOT, so what
                 # is judged below is the wiring the graph holds AFTER the write.
-                _slots: list[tuple[float | None, str]] = []
-                for _sidx, _sinp in _srows:
-                    _slot_no: float | None
-                    if isinstance(_sidx, (int, float)):
-                        # NB: ``bool`` is an ``int`` here and coerces harmlessly
-                        # (``True``→1), which is also how the engine compares it.
-                        _slot_no = float(_sidx)
-                    elif isinstance(_sidx, str):
-                        # A NUMERIC STRING names a position (``r.idx='1'``, the
-                        # shape a hand/foreign writer leaves in a schemaless
-                        # graph): coerce it and JUDGE — ``ep.py`` orders the same
-                        # row and reads the factor all the same. A value that
-                        # names no finite number ('nan'/'inf') orders nothing, so
-                        # it falls through to UNORDERABLE rather than poisoning
-                        # ``min``.
-                        try:
-                            _slot_no = float(_sidx.strip())
-                        except ValueError:
-                            _slot_no = None
-                        else:
-                            if not math.isfinite(_slot_no):
-                                _slot_no = None
-                    else:
-                        _slot_no = None  # cannot be ordered at all
-                    _slots.append((_slot_no, new_id if _sinp == old_id else _sinp))
-                _unorderable = any(_slot_no is None for _slot_no, _ in _slots)
-                if _unorderable:
-                    # UNORDERABLE, not unjudgeable: no position is provably the
-                    # SOURCE, so EVERY input is a candidate source and the wiring
-                    # is refused if ANY candidate would override. Fail CLOSED,
-                    # because the load side keeps judging this factor — the
-                    # fallback belongs to the load side's strictness, never to a
-                    # silent exemption.
-                    _candidate_sources = [i for _, i in _slots]
-                else:
-                    # The load side's own rule (``ORDER BY coalesce(r.idx, 0),
-                    # c.id``): the source is the input at the LOWEST slot idx, and
-                    # a slot idx carried by TWO inputs is tie-broken there by the
-                    # claim ID. The door therefore takes the SAME single candidate
-                    # rather than judging every tied one — judging them all would
-                    # refuse a shape the load side keeps, which is the divergence
-                    # `claim_class` warns against (#10195 review P3).
-                    _low = min(_slot_no for _slot_no, _ in _slots)
-                    _candidate_sources = sorted(
-                        {i for _slot_no, i in _slots if _slot_no == _low})[:1]
+                _slots: list[tuple[object, str]] = [
+                    (_sidx, new_id if _sinp == old_id else _sinp)
+                    for _sidx, _sinp in _srows]
                 _slot_ids = [i for _, i in _slots]
-                # The slots are judged AS WRITTEN — every input — which is how
-                # ``create_operator`` reads a caller's request. EP's load side
-                # the first SURVIVING one as the source, but that is a reading of
-                # a factor after the fact, not the wiring the caller asked to
-                # write: a draft input can be promoted later, and the factor is
-                # then exactly the one this door refuses.
+                # ⛔ ORDERABILITY IS NOT A NUMERIC PROPERTY, and this was MEASURED
+                # on the engine rather than assumed (#10195 review round 2).
+                # ``ep.py`` reads the factor with
+                # ``ORDER BY coalesce(r.idx, 0), c.id``, and on FalkorDB that
+                # ordering GROUPS BY TYPE before comparing values: a STRING slot
+                # sorts AHEAD of a numeric one (``'1'`` before ``0``), and a
+                # BOOLEAN sorts neither as 0 nor as 1. A total numeric order over a
+                # MIXED layout therefore names a DIFFERENT source than the loader:
+                # measured fail-open in one direction (source DERIVED at ``'1'``,
+                # predecessor at ``0`` — the door passed the supersede and the load
+                # side immediately reported ``derived_over_asserted``) and
+                # over-refusal in the mirror. So the layout is orderable ONLY when
+                # EVERY slot idx is a real ``int`` (``bool`` excluded — it is an
+                # ``int`` SUBCLASS in Python yet a separate type to the engine); any
+                # other type mix takes the candidate arm below, which is
+                # engine-agnostic and fail-CLOSED. Modelling the engine's type-group
+                # order instead would be a second copy of engine-defined behaviour,
+                # wrong the day that engine changes.
+                _uniform_int = all(
+                    isinstance(_sidx, int) and not isinstance(_sidx, bool)
+                    for _sidx, _ in _srows)
+                _unorderable = not _uniform_int
+                if _uniform_int:
+                    # The load side's own rule: the source is the input at the
+                    # LOWEST slot idx, and a slot idx carried by TWO inputs is
+                    # tie-broken there by the claim ID (``c.id``). The door takes
+                    # the SAME single candidate rather than judging every tied one —
+                    # judging them all would refuse a shape the load side keeps,
+                    # the divergence `claim_class` warns against (#10195 review P3).
+                    _low = min(_sidx for _sidx, _ in _srows)
+                    _candidate_sources = [min(
+                        {i for _sidx, i in _slots if _sidx == _low}, key=str)]
+                else:
+                    # UNORDERABLE, not unjudgeable: no position is provably the
+                    # SOURCE, so EVERY input is a candidate source and the wiring is
+                    # refused if ANY candidate would override. Fail CLOSED, because
+                    # the load side keeps judging this factor — the fallback belongs
+                    # to the load side's strictness, never to a silent exemption.
+                    _candidate_sources = [i for _, i in _slots]
+                # The slots are judged AS WRITTEN — every input, in the row's id
+                # order (position is decided above, never by this list) — which is
+                # how ``create_operator`` reads a caller's request. EP's load side
+                # additionally strips draft/terminal inputs and takes the first
+                # SURVIVING one as the source, but that is a reading of a factor
+                # after the fact, not the wiring the caller asked to write: a draft
+                # input can be promoted later, and the factor is then exactly the one
+                # this door refuses.
                 # ⛔ ``classes_for_ids`` is ``:Point``-anchored: an id ABSENT
                 # from it is not a claim at all (:Subject/:Object/:Event —
                 # #7902), and its absence must not read as the ASSERTED

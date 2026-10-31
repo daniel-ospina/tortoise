@@ -389,9 +389,9 @@ def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
 
 
 @pytest.mark.parametrize("int_slot, str_idx", [(1, "1"), (0, "0")])
-def test_supersede_repoint_coerces_a_numeric_string_slot_idx(
+def test_supersede_repoint_lets_a_same_class_supersede_through_a_string_idx(
         lane, int_slot, str_idx):
-    """A NUMERIC-STRING slot ``idx`` is a position, not a crash and not a skip.
+    """A slot ``idx`` stored as a STRING is neither a crash nor a refusal.
 
     The graph is schemaless, so any hand/foreign writer can leave ``r.idx='1'``
     beside an int ``idx`` on the same operator. Two failure modes sit on that
@@ -399,19 +399,19 @@ def test_supersede_repoint_coerces_a_numeric_string_slot_idx(
 
     * sorting raw keys raises ``TypeError`` and aborts a supersede the class
       guard is not even about (the pre-fix crash);
-    * SKIPPING the factor would be worse — EP's load side keeps it
-      (``op_idx_known`` is cleared for a NULL ``idx`` only, and ``ep.py`` orders
-      ``coalesce(r.idx, 0)``), so a skip is a fail-open exemption for the door.
+    * SKIPPING the factor would be a fail-open exemption — EP's load side keeps
+      it (``op_idx_known`` is cleared for a NULL ``idx`` only).
 
-    So the string is COERCED and the layout judged. Here both endpoints are
-    computed, so the guard has nothing to say and the supersede must go through
-    and carry the predecessor's slot — idx VALUE and type preserved, as 2a
-    reads ``idx`` opaquely.
+    So a mixed-type layout takes the candidate arm: no position is provably the
+    source, every input is a candidate, and here both endpoints are computed, so
+    no assignment overrides and the supersede must go through and carry the
+    predecessor's slot — idx VALUE and type preserved, as 2a reads ``idx``
+    opaquely.
 
     ⚠️ This is an ANTI-OVER-REFUSAL pin, not a discriminator: it passes on the
-    pre-fix stand-down too (a skip also lets the supersede through), so it
-    cannot witness the fail-open. `…refuses_a_raw_written_slot_idx` is the case
-    that does.
+    pre-fix stand-down too (a skip also lets the supersede through), so it cannot
+    witness the fail-open. `…refuses_a_raw_written_slot_idx` and
+    `…refuses_when_a_string_idx_outranks_the_source` are the cases that do.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -450,18 +450,18 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     the whole guard: the supersede minted ``derived --IMPL--> asserted`` with no
     verdict, no warning and no record.
 
-    Three unprovable-looking shapes are pinned: a numeric string naming a
-    position (coerced and judged exactly), a string that only LOOKS numeric
-    (`'+-1'` — the shape that crashed the first cut of this coercion, because
-    `str.lstrip('+-').isdigit()` accepts it but `int()` refuses it), and a value
-    that cannot be ordered at all (judged over EVERY candidate source and
-    refused if any blocks — fail-closed, never a silent exemption).
+    Three unprovable-looking shapes are pinned: a string that looks like a slot
+    number (`'1'`), a string that only LOOKS numeric (`'+-1'` — the shape that
+    crashed the first cut of the coercion, because `str.lstrip('+-').isdigit()`
+    accepts it but `int()` refuses it), and one that names no number at all
+    (`'slot-one'`). Each takes the same candidate arm — MEASURED: the engine's
+    `ORDER BY coalesce(r.idx, 0), c.id` groups a STRING slot AHEAD of a numeric
+    one, so no numeric coercion can reproduce the slot order and none is
+    attempted — and each must still REFUSE this wiring.
 
     ⚠️ No `float` parametrization: MEASURED, FalkorDB returns `1` (an `int`) for
     a property written as `1.0`, so a float-idx case would take the int path and
     "pass" on the pre-fix code too — a non-discriminating case is not coverage.
-    The door still coerces `float` defensively (a driver that returned one would
-    otherwise be pushed onto the unorderable arm).
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -482,6 +482,42 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     assert _props(lane, old).get("status") == "live"
     assert _props(lane, new).get("status") == "live"
     assert _operator_rows(lane, old) == [[op["id"], "IMPL", raw_idx]]
+    assert _operator_rows(lane, new) == []
+
+
+def test_supersede_repoint_refuses_when_a_string_idx_outranks_the_source(lane):
+    """The mirror a numeric coercion cannot see — measured on the engine.
+
+    ``ORDER BY coalesce(r.idx, 0), c.id`` groups by TYPE before it compares
+    values on FalkorDB, so a STRING slot sorts AHEAD of a numeric one. Here the
+    DERIVED claim sits at ``idx='1'`` and the predecessor at int ``0``: the
+    loader reads the STRING as the source, so the rebuilt factor is
+    ``derived --IMPL--> asserted`` — while a door that coerced ``'1'``→1 would
+    read the predecessor's slot as the source, see nothing to refuse, and mint
+    exactly the wiring #10195 is filed for (measured: the load side then reports
+    ``derived_over_asserted`` for the operator the supersede created).
+
+    So a mixed-type layout is NOT ordered: every input is a candidate source and
+    any overriding assignment refuses.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    # Predecessor at the int slot 0, the other input at 1 — then make the SECOND
+    # slot a string, i.e. the type mix a hand/foreign writer leaves behind.
+    op = lane.create_operator("IMPL", old, [src], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->(n:Point {id:$tgt}) "
+        "SET r.idx = '1'",
+        params={"op": op["id"], "tgt": src})
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
     assert _operator_rows(lane, new) == []
 
 
