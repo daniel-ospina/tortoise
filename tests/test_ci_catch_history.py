@@ -617,14 +617,25 @@ def test_the_markdown_table_renders_its_citations_and_its_unknowns(tmp_path):
 
 
 def test_the_cli_writes_the_markdown_table_from_an_offline_fixture(tmp_path, capsys):
-    """The documented invocation (`--offline-dir --md-out`) runs end to end."""
+    """The documented invocation (`--offline-dir --md-out`) runs end to end — and the file it
+    writes is the REPORT, not a bare table: the table, its window and its method together.
+
+    ⛔ Acceptance #1 of #10131 is "a committed report with the 74-row table, its window, its
+    UNKNOWNs and its method". A `--md-out` that emitted only rows would leave a reader unable
+    to tell what the rows cover or how to re-derive them.
+    """
     root = _world(tmp_path, runs=[])
     out = tmp_path / "catch.md"
     assert catch.main(["--offline-dir", str(root), "--md-out", str(out)]) == 0
     rendered = out.read_text(encoding="utf-8")
-    assert rendered.startswith("| file | status | lane |")
-    assert rendered.count("\n") >= 74  # header + separator + one row per slow file
+    assert "| file | status | lane |" in rendered
+    assert rendered.count("\n") >= 74  # one row per slow file, plus the header and method
     assert "NOT-PREMERGE" in rendered  # the non-gating lane is named in the table
+    # The window and the method travel WITH the table.
+    assert "## Method" in rendered
+    assert "Window in one line:" in rendered
+    assert "newest **ATTEMPT** decides" in rendered
+    assert "regenerate it, do not edit it" in rendered
 
 
 # --- 5. a leg RUNNING is not a FILE running --------------------------------
