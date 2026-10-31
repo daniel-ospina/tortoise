@@ -381,39 +381,45 @@ def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
     assert _operator_rows(lane, old) == []
 
 
-def test_supersede_repoint_leaves_a_non_int_idx_alone(lane):
-    """A slot ``idx`` stored as a STRING stands down too — it must not crash.
+@pytest.mark.parametrize("int_slot, str_idx", [(1, "1"), (0, "0")])
+def test_supersede_repoint_stands_down_on_a_non_int_slot_idx(
+        lane, int_slot, str_idx):
+    """A slot ``idx`` stored as a STRING is an UNPROVABLE layout, not a crash.
 
-    ``idx`` is a graph-supplied property on a schemaless store, so nothing
-    constrains it to an int: ``record_projection.py`` forwards
-    ``payload.get("idx", 0)`` uncoerced, so a record carrying ``"idx": "1"``
-    lands a string slot in a live graph. The guard rebuilds its slots by
-    SORTING ``idx``, and Python ordering is total only within one type —
-    ``sorted({0: ..., "1": ...})`` raises
-    ``TypeError: '<' not supported between instances of 'int' and 'str'``
-    BEFORE any mutation.
+    The graph is schemaless, so any hand/foreign writer can leave
+    ``r.idx='1'`` beside an int ``idx`` on the same operator. The door sorts
+    the slot keys, and ``sorted({0: …, '1': …})`` raises ``TypeError`` — so
+    pre-fix this ENTIRELY LEGAL derived→derived supersede (nothing to do with
+    the class boundary) aborted with a traceback before any mutation, where
+    the base body simply moved the edge. Same doctrine as the ``idx is None``
+    case above: a layout that cannot prove which slot is the SOURCE is not
+    judged.
 
-    So a legal derived→derived supersede was turned into a traceback by a door
-    whose own contract is "an UNPROVABLE layout is not judged". A non-int
-    ``idx`` is that same class of layout (it names no position any more than a
-    missing one does), so the door stands down exactly as it does for the
-    idx-less shape — and the supersede proceeds, which is what base did.
+    Both mixed shapes are pinned — the string in the target slot (the
+    predecessor's own, which is the edge the re-point carries) and in the
+    source slot.
     """
     old = lane.create_point("statement", "computed v1",
-                            claim_class="derived")["id"]
-    new = lane.create_point("statement", "computed v2",
                             claim_class="derived")["id"]
     src = lane.create_point("statement", "computed source",
                             claim_class="derived")["id"]
     op = lane.create_operator("IMPL", src, [old], direction="->")
+    # Re-stamp ONE slot's idx as a string — no door writes this shape, which is
+    # exactly why it is the raw one a foreign writer leaves behind.
     lane._get_proj().g.query(
-        "MATCH (op:Point {id:$op})-[r:IMPL|NAND]->(n:Point {id:$old}) "
-        "SET r.idx='1'",
-        params={"op": op["id"], "old": old})
+        "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = $from "
+        "SET r.idx = $to",
+        params={"op": op["id"], "from": int_slot, "to": str_idx})
 
-    # Pre-fix this raised ``TypeError`` out of ``sorted(_rebuilt)``.
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    # Same class on both sides: the guard has nothing to say, so the supersede
+    # must go through and carry the predecessor's slot — idx VALUE and type
+    # preserved, as 2a reads ``idx`` opaquely.
+    moved_idx = str_idx if int_slot == 1 else 1
     assert lane.supersede_point(old, new)["edges_transferred"] == 1
-    assert _operator_rows(lane, new) == [[op["id"], "IMPL", "1"]]
+    assert _operator_rows(lane, new) == [[op["id"], "IMPL", moved_idx]]
     assert _operator_rows(lane, old) == []
 
 
