@@ -44,8 +44,10 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO
   session origin (§2.3). The function here is the reference INVERSE of the verifier — it exists so
   the AS has a checkable counterpart to the contract and so tests can mint exactly what §2.1
   specifies. Shipping it as a route would put identity assertion on the wrong origin.
-* **No page change.** Reading a token on the page is §9 step 4; a page that half-reads a token and
-  half-reads the old cookie is the "strictly worse than not starting" state §9 records for #3559.
+* **No page logic here.** The page that reads a token is §9 step 4, and it is **DELIVERED** — it
+  lives in `tortoise/oauth.py` (`_CONSENT_HTML`) and the routes above, not in this module. It reads
+  only the token (no cookie, no inline client, no bearer), which is why the #3559 "strictly worse
+  than not starting" half-read hazard has no second source left to half-read.
 
 The `jti` register IS shared (§2.3, DELIVERED)
 ---------------------------------------------
@@ -77,8 +79,12 @@ OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on
     guessable key is the same forgery
     oracle as a reused one — the floor is a length heuristic, not a strength guarantee, so pick a
     generated value). Must NOT be the service-role key (key reuse across purposes) or the anon key
-    (§2.3: the consent page embeds the anon key in HTML). Unset ⇒ the arm is unavailable and the
-    bearer path is unaffected.
+    (§2.3: the anon key is public by construct — Supabase's low-privilege key is DESIGNED to be
+    shipped to a browser, and only Row Level Security bounds what it may reach — and it is in
+    this process's environment, so a collision is OBSERVABLE here. It is not this deployment's
+    bundle: #4054 removed the UMD script and #4178 keeps `VITE_SUPABASE_ANON_KEY`
+    non-load-bearing, so do NOT read "designed to be shipped" as "this app ships it").
+    Unset ⇒ the arm is unavailable and the bearer path is unaffected.
   * ``CONSENT_TOKEN_ISSUER`` — optional, defaults to ``https://app.premiselabs.co`` (the session
     origin). A token whose `iss` differs is refused, so this must match the minting origin.
   * the shared `jti` store — installed from `hosted_api._lifespan` (above). If nothing is
@@ -154,13 +160,16 @@ _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # ── configuration (§2.3 / §8) ───────────────────────────────────────────────
 
 #: Keys that must never ALSO be the consent HMAC key — §2.3: "It must **not** be the service-role
-#: key (key reuse across purposes) and must **not** be the anon key (the consent page embeds it in
-#: HTML, so it is public)". BOTH halves are checked here: the hosted API reads `SUPABASE_ANON_KEY`
-#: into the consent page's `__SUPABASE_ANON_KEY__` placeholder, so it is in this process's
-#: environment too — an earlier version of this tuple claimed otherwise and would have left the
-#: WORSE half unguarded (that key is public by construction: everyone who opens `/oauth/authorize`
-#: receives it). §8's human checklist still carries the cross-deployment case, where the Pages
-#: project's env differs from the API's.
+#: key (key reuse across purposes) and must **not** be the anon key (it is public by construct, so
+#: anyone can hold it)". BOTH halves are checked here: `SUPABASE_ANON_KEY` is in this process's
+#: environment, so a collision is observable — an earlier version of this tuple claimed otherwise
+#: and would have left the
+#: WORSE half unguarded (that key is public by construction — Supabase designs it for browser
+#: exposure and only Row Level Security bounds it — which never made it a SECRET, and #3524 §9
+#: step 4 deleted the only page that ever embedded it, so this app does not ship it at all:
+#: #4054 removed the dashboard's UMD script, #4178 keeps `VITE_SUPABASE_ANON_KEY`
+#: non-load-bearing). §8's human checklist still carries the cross-deployment case, where the
+#: Pages project's env differs from the API's.
 _REUSED_KEY_ENVS = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_ANON_KEY")
 
 #: The shortest secret this arm will use. A FLOOR, not an entropy measurement: it catches the
@@ -184,8 +193,10 @@ def consent_token_secret_problem() -> str | None:
     A REUSED key is treated as *not provisioned* rather than as a working arm. §2.3 makes a
     dedicated secret a ``must``, and the failure it guards is silent and total: a
     ``CONSENT_TOKEN_SECRET`` copied from the anon key turns this verifier into a forgery oracle —
-    that key is public by construction (the consent page embeds it), so anyone who loaded the page
-    could assert any ``sub`` with any ``bind``, and ``sub`` is the only identity input on the token
+    that key is public by construction (Supabase designs it to be shipped to a browser and bounds
+    it only by Row Level Security, so anyone who has it can hold it — no page of THIS app needs to
+    publish it, and per #4054/#4178 none does), so anyone holding it could assert any ``sub`` with
+    any ``bind``, and ``sub`` is the only identity input on the token
     arm. A reused service-role key is the same class from the other direction: one leak of the
     wider credential silently becomes an assertion signing key. Refusing here costs one
     typed 503 and one restart with the right value; accepting it costs every account.
