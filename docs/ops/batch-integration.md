@@ -192,7 +192,9 @@ Two corrections to the quantifier, because both decide whether the batch is a ga
 
 - **`-m track_b` is NOT deselected upstream.** `python-ci.yml`'s `test-track-b` job runs
   `tests/test_ingest_safety.py -m track_b` as its own **MUST-PASS** member — it is a `needs:` of the
-  required `python-ci-gate`, and its own measured job max is 1.15 m. CI runs the deterministic suite
+  required `python-ci-gate`, and its own measured job max is ~1.2 m (`docs/ops/ci-wall-clock.md`,
+  captured 2026-10-26, records 1.18 m; the job's own 2026-09-30 cap comment says 1.15 m). CI runs the
+  deterministic suite
   in two marker **halves**; a batch that runs only the `not track_b` half leaves a gate member
   unrun, and a `track_b` regression introduced by the composition reaches `main` unseen — the exact
   class the invariant forbids. So Phase 3 runs **both** halves.
@@ -211,7 +213,10 @@ as "`python-ci-gate` passed":
   the GitHub API to separate a failure **introduced by this change** from `main`'s own pre-existing
   red. It is the rail's automated version of Phase 1 above, so no local run stands in for it — and
   `changes`, the diff selector itself: it is not in `DEFERRABLE_LEGS`, so a failure there reds the
-  required check by name, and it is the one leg whose failure makes every other leg SKIP, i.e. exactly
+  required check by name, and it is the only leg whose failure makes every **test** leg skip — the nine
+  jobs that declare `needs: changes`. `manifest-integrity`, `workflow-lint` and `surface-guard` declare
+  no `needs:` at all (#2656 made them peers of the matrix) and `ci-introduced-failure` runs
+  `if: always()`, so those four do not skip. It is still exactly
   the selection a batch's pytest run cannot exercise. Do not trust a count of these members written
   here — the authority is the leg table in `.github/workflows/python-ci.yml`
   (`python-ci-gate`'s `LEGS_FILE`), and it grows.
@@ -277,18 +282,25 @@ Same lane, same commands, same env as the baseline — **both** halves of the de
 
 # Half 1 — the deterministic suite. Detached and POLLED, never one blocking call: a wedged
 # foreground run takes the whole lane down with it and leaves no log.
-uv run pytest tests/ -q --junitxml=/tmp/batch-junit.xml -m 'not track_b and not live and not integration' > /tmp/batch.log 2>&1 &
-echo $! > /tmp/batch.pid
-kill -0 "$(cat /tmp/batch.pid)" 2>/dev/null && echo RUNNING || echo 'DONE — read /tmp/batch.log'   # repeat until DONE
+# ⛔ The STATUS is written by the run's OWN shell, never recovered with `wait`. `wait` only reaps THIS
+# shell's children, and the poll below happens in a LATER shell — the only way to satisfy the line
+# above (`never one blocking call`). Measured (bash 5.2): `bash: wait: pid N is not a child of this
+# shell`, rc=127 — so `wait` declared a COMPLETED, green run UNPROVEN and printed the wrong diagnosis.
+# The subshell writes `$?` to a file, so no step here is shell-local.
+rm -f /tmp/batch.rc /tmp/batch-junit.xml   # a stale status/report from an earlier run must not decide this one
+( uv run pytest tests/ -q --junitxml=/tmp/batch-junit.xml -m 'not track_b and not live and not integration' > /tmp/batch.log 2>&1; echo $? > /tmp/batch.rc ) &
+[ -f /tmp/batch.rc ] && echo 'DONE — read /tmp/batch.rc' || echo RUNNING   # repeat until DONE
 
-# ⛔ DONE is not PASSED. `kill -0` fails exactly as fast for a run the kernel OOM-killed as for one
-# that finished — measured on #10399, five `python` processes were killed in 23 minutes — and a killed
-# run prints no summary, hence carries no failure ids, so Phase 4 would diff it straight to
-# BATCH-GREEN. Wait for the job, keep its status, and require a COMPLETED report:
-wait "$(cat /tmp/batch.pid)"; RC=$?
+# ⛔ DONE is not PASSED. A pid that goes away fails exactly as fast for a run the kernel OOM-killed as
+# for one that finished — measured on #10399, five `python` processes were killed in 23 minutes — and a
+# killed run prints no summary, hence carries no failure ids, so Phase 4 would diff it straight to
+# BATCH-GREEN. The status the run itself wrote is the only thing that separates them; require a
+# COMPLETED report:
+[ -f /tmp/batch.rc ] || { echo "no /tmp/batch.rc — the gate run was never launched in this shell: launch it above, then poll"; exit 1; }
+RC="$(cat /tmp/batch.rc)"
 [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || { echo "the gate run did not COMPLETE (rc=$RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
 BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/batch-junit.xml | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
-[ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the gate run reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — a short run is the signature of a KILLED run: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+[ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the gate run reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — SHORTER than the baseline: investigate (a killed run, or a diff that legitimately removes or moves tests) — and never call it green: UNPROVEN-FULL-SUITE(<lane>)"; exit 1; }
 
 # Half 2 — the track_b leg CI runs as its own MUST-PASS, gate-member job (`-m track_b`).
 uv run pytest tests/test_ingest_safety.py -q -m track_b
@@ -315,19 +327,33 @@ uv run pytest <the failing file(s)> -q
 
 ```bash
 git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1 || exit 1'
-BAD="$(git rev-parse HEAD)"            # the first bad commit — capture it BEFORE the reset moves HEAD back
+BAD="$(git rev-parse refs/bisect/bad)" # ⛔ NOT `HEAD` — see below: `bisect run` leaves HEAD on the LAST
+                                       # PROBE it tested. `refs/bisect/bad` is the ref git's own manual
+                                       # names as the result, and it survives until `git bisect reset`,
+                                       # which is exactly why this capture sits here.
                                        # (walking the merges by hand instead? set BAD to that merge's sha)
 # ⛔ `--first-parent` on the `start` above is what makes this sha a MERGE: by default `git bisect`
 # walks EVERY commit in origin/main..integration/batch-1, so the "exact commit" it reports can be a
 # commit INSIDE a PR (reproduced in a scratch repo against this doctrine's own --no-ff shape: the
 # blame stopped at `PR1 commit 2`, not at `batch: merge PR #1`).
-git bisect reset integration/batch-1   # ⛔ REQUIRED: `bisect run` leaves HEAD DETACHED at the first bad commit
+git bisect reset integration/batch-1   # ⛔ REQUIRED: `bisect run` leaves HEAD DETACHED at the last probe
+                                       # it tested, which is usually NOT the culprit
 git switch integration/batch-1 || exit 1   # the cheaper route leaves it detached too — HALT, or the revert commits detached
 git log --oneline -1                   # must name integration/batch-1's tip, never a bisect probe
 ```
 
+  **`HEAD` is not the answer — `refs/bisect/bad` is.** `git bisect run` leaves `HEAD` detached at the
+  **last probe it tested**, which measured (3/5/7/8/13-merge `--no-ff` batches, 40 cases) diverges from
+  the first bad commit in **27 of 40** — and every divergence is the merge **immediately before** the
+  culprit, a `batch: merge PR #<N>` commit. So the merge-ness assert below passes on the WRONG sha, and
+  `git revert -m 1` drops an innocent PR while the culprit stays in the tree. Git's own manual names the
+  ref: *"the command will print out a description of the first bad commit. The reference
+  `refs/bisect/bad` will be left pointing at that commit"* (<https://git-scm.com/docs/git-bisect>), and
+  `git bisect reset` removes it — which is why the capture above precedes the reset and reads the ref,
+  never `HEAD`.
+
   **Without the return, two silent failures follow.** `git bisect` checks out its probes and `git bisect
-  run` ends detached at the first bad commit, so: (1) the revert below commits onto a **detached HEAD**
+  run` ends detached at the last probe it tested, so: (1) the revert below commits onto a **detached HEAD**
   and never lands on `integration/batch-1`, which therefore still contains the PR the doctrine says to
   drop; and (2) the "one more full suite run" measures the first-bad commit's tree — missing every PR
   merged after the culprit — and *that* result becomes the verdict row. The verdict would then describe

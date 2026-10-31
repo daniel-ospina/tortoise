@@ -20,10 +20,13 @@ or facts that were false against the tree they describe:
   out**, so the "baseline on ``origin/main`` ALONE" ran in whatever tree the
   operator stood in — and that ledger is what every later verdict is diffed
   against;
-* **``git bisect run`` leaves HEAD detached at the first bad commit** and the
-  doctrine never returned to the batch branch, so the documented "drop the
-  culprit" committed the revert onto a detached HEAD (the batch kept the
-  culprit) and the final verdict measured a tree nobody lands;
+* **``git bisect run`` leaves HEAD detached at the LAST PROBE it tested, not at the first bad
+  commit** — the ref git's own manual names as the result is ``refs/bisect/bad`` — and the doctrine
+  read the blame from ``HEAD``, so it named the merge *immediately before* the culprit (measured: 27
+  of 40 swept shapes). The merge-ness assert passed on that sha, so ``git revert -m 1`` dropped an
+  innocent PR while the culprit stayed in the tree. The doctrine also never returned to the batch
+  branch, so the documented "drop the culprit" committed the revert onto a detached HEAD (the batch
+  kept the culprit) and the final verdict measured a tree nobody lands;
 * **``-m track_b`` was silently dropped from the gate** although CI's
   ``test-track-b`` job is a MUST-PASS ``needs:`` of the required
   ``python-ci-gate`` — so a batch could be green with a gate member unrun;
@@ -144,7 +147,17 @@ fire), and the four round-27 re-measurements
 (poll / merge / after-merge-log / revert each with an appended mover) — plus the
 guard-internal pair: restoring the quote-blind ``_code`` lets a ``&& git switch main``
 suffix on the merge line pass GREEN, which is exactly what the quote-aware cut kills.
-The one named survivor is unchanged from earlier rounds:
+**The surviving CLASS — and it is the reason #10434 exists.** Earlier rounds named a
+single survivor; rounds 30-34 measured ~90 further mutants and the honest claim is
+weaker than "one survivor": the guard decides SHELL CONTROL FLOW by pattern-matching
+text, so any ONE-LINE edit that changes a subject's INPUTS rather than its wording
+leaves a textually perfect halt bash-dead. Measured witness: inserting
+``BASELINE_TOTAL=0`` between the fence's own ``[ "$BASELINE_TOTAL" -gt 0 ]`` guard and
+the count halt makes the count halt dead (``bash`` prints CONTINUED) with the guard
+**0 of 18 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
+``unset``, deleting the ``-gt 0`` line). No accumulation of spellings closes it; the
+closure is to EXECUTE the fences under a stubbed PATH and assert the fence STOPS,
+which is #10434. One instance of that class is still named explicitly below:
 ``git switch --detach -C <branch> "$PINNED"``, which git refuses outright (rc=128) and
 whose ``|| exit 1`` halts — a predicate-tightness miss, not a broken invariant — and
 the honest document is 0 of 18 red.
@@ -158,6 +171,18 @@ outside quoted spans). One survivor remains and is named rather than hidden:
 whose `|| exit 1` halts — a predicate-tightness miss, not a broken invariant. A
 separator appended to the poll line, the merge line, the after-merge log line or the
 revert line is the same class one fence over: every one of them must BE one command.
+
+**The review at ``aa1cd92d4`` added two COMMAND defects and their guards, each measured red on the
+pre-fix text.** (1) The blame sha was read from ``HEAD`` after ``git bisect run``, which leaves HEAD on
+the LAST PROBE it tested — the ref that holds the answer is ``refs/bisect/bad``, reproduced here in a
+scratch repo against this doctrine's own ``--no-ff`` shape (5 merges, culprit PR #4, ``HEAD`` =
+``batch: merge PR #3``, and both are merges, so the merge-ness assert passed on the wrong one).
+(2) The gate's status was taken with ``wait`` in a later shell — the poll's own requirement — where the
+pid is not a child: measured ``bash: wait: pid N is not a child of this shell``, rc=127, so a
+COMPLETED green run was declared ``UNPROVEN-FULL-SUITE``. The run's own shell now persists ``$?``.
+Measured by mutating the honest document back to each pre-fix form: the ``HEAD`` capture reds 2 checks
+and the ``wait`` form reds 1; a stale un-cleared status file, and a poll reading a file no one writes,
+red 1 each; the honest document is 18 of 18 green.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
 session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
@@ -208,8 +233,11 @@ _COUNT_SUBJECT = re.compile(
 )
 #: The merge-ness assert's own subject — the ASSERTION only; `_MERGE_ASSERT` is the
 #: whole line and ends in `||`, so it cannot be the pre-halt segment.
+#: Same tolerance as `_MERGE_ASSERT` (`"?\$\{?BAD\}?"?`): a selector wider than its
+#: own subject refuses honest `${BAD}`/`$BAD` lines and blames the halt.
 _MERGE_SUBJECT = re.compile(
-    r'\[\s+-n\s+"\$\(\s*git\s+rev-list\s+--no-walk\s+--merges\s+"\$BAD"\s*\)"\s*\]'
+    r'\[\s+-n\s+"\$\(\s*git\s+rev-list\s+--no-walk\s+--merges\s+'
+    r'"?\$\{?BAD\}?"?\s*\)"\s*\]'
 )
 #: The landing pin guard's own subject: `$PINNED` is non-empty.
 _LANDING_PIN_GUARD = re.compile(r'\[\s+-n\s+"\$PINNED"\s*\]')
@@ -235,7 +263,15 @@ _SUITE_FILE_TARGETS = {"tests/test_ingest_safety.py"}
 #: quantifies over ("every fence that runs the full suite", "every fence that runs
 #: both halves") is derived from THIS: keying them on the target instead let one
 #: repointed token remove a fence from the population that must refuse a dirty tree.
-_SUITE_CMD = re.compile(r"^uv\s+run\s+pytest\b(?!\s+<)")  # not the <placeholder> bisect leg
+_SUITE_CMD = re.compile(r"^(?:\(\s*)?uv\s+run\s+pytest\b(?!\s+<)")  # not the <placeholder> bisect leg
+
+#: The status wrapper that makes a DETACHED run's exit status survive the shell boundary. `wait`
+#: cannot: the poll happens in a LATER shell, where the pid is not a child (measured, bash 5.2:
+#: `bash: wait: pid N is not a child of this shell`, rc=127) — a completed, green run then read as
+#: UNPROVEN with a kill diagnosis printed. The run's OWN shell writes `$?` to a file instead.
+_STATUS_WRAPPER = re.compile(
+    r"^\(\s*(?P<suite>uv\s+run\s+pytest\b.*?)\s*;\s*echo\s+\$\?\s*>\s*(?P<rc>/tmp/[\w.-]+)\s*\)\s*&$"
+)
 
 #: The two deliberate halves, as term MULTISETS. Order-free (a reordered `-m`
 #: passes) but exact — `… and not slow` still *contains* the three exclusion terms
@@ -246,6 +282,11 @@ _HALF2_TERMS = ("track_b",)
 
 def _suite_argv_ok(cmd: str) -> bool:
     """Is this suite command `uv run pytest <target> [-q] [-m FILTER] [--junitxml=…]`?"""
+    wrapped = _STATUS_WRAPPER.match(cmd.strip())
+    if wrapped is not None:
+        # The detached form: the argv check must see through the status writer, or the gate command
+        # reads as "unpinned argv" and the population silently loses its one real run.
+        cmd = wrapped.group("suite")
     try:
         tokens = shlex.split(cmd)
     except ValueError:
@@ -305,11 +346,12 @@ def _suite_argv_ok(cmd: str) -> bool:
     return target in _SUITE_DIR_TARGETS
 
 
-#: The only honest shape of the gate's poll line. Without this, `true && echo DONE`
-#: reports a half-written log as a finished run.
-_POLL = re.compile(
-    r'kill\s+-0\s+"\$\(cat\s+/tmp/[\w.-]+\)"\s+2>/dev/null\s+&&\s+echo\s+RUNNING'
-    r"\s+\|\|\s+echo\s+(?:'[^']*'|\"[^\"]*\")\s*"
+#: The only honest shape of the gate's poll line: it must read the STATUS FILE the run's own shell
+#: wrote. A `kill -0` probe answers "is the pid gone", which is the same answer for a finished run and
+#: for an OOM-killed one; `true && echo DONE` answers nothing at all.
+_RC_POLL = re.compile(
+    r"^\[\s*-f\s+/tmp/[\w.-]+\s*\]\s*&&\s*echo\s+(?:'[^']*'|\"[^\"]*\")\s*"
+    r"\|\|\s*echo\s+(?:'[^']*'|\"[^\"]*\"|\S+)$"
 )
 
 #: The dirty-tree subject: the command whose failure must reach the halt.
@@ -393,10 +435,15 @@ def _code(line: str) -> str:
     return stripped
 
 
-#: A variable bound to a READ-ONLY git query — `BAD="$(git rev-parse HEAD)"`, the blame sha the
-#: revert must be bound to. It is ONE command and it cannot move HEAD, so the phase-4 window may
-#: carry it without loosening "benign lines must BE one command".
-_READ_ONLY_CAPTURE = re.compile(r'^[A-Za-z_]\w*="\$\(\s*git\s+rev-parse\s+HEAD\s*\)"$')
+#: A variable bound to the REF that holds the bisect result — `BAD="$(git rev-parse refs/bisect/bad)"`.
+#: ⛔ NOT `git rev-parse HEAD`: `git bisect run` leaves HEAD on the LAST PROBE it tested (measured over
+#: 3/5/7/8/13-merge `--no-ff` batches, 40 cases: HEAD diverged from the culprit in 27, always to the
+#: merge immediately BEFORE it), and it is `refs/bisect/bad` that git's manual names as the result.
+#: `git bisect reset` deletes the ref, so the capture must precede it. It is ONE command and it cannot
+#: move HEAD, so the phase-4 window may carry it without loosening "benign lines must BE one command".
+_READ_ONLY_CAPTURE = re.compile(
+    r'^[A-Za-z_]\w*="\$\(\s*git\s+rev-parse\s+refs/bisect/bad\s*\)"$'
+)
 
 #: The merge-ness assertion on the blame sha. `git revert -m 1` on a NON-merge IGNORES the
 #: mainline and exits 0, so a bisect result that is a commit inside a PR silently reverts ONE
@@ -475,9 +522,20 @@ def _halts(code: str, subject: object | None = None) -> bool:
     # Slice the RAW text: `_unquoted` blanks the quoted subjects (`"$BATCH_TOTAL"`,
     # `"$PINNED"`) that the site predicates must still see. `_unquoted` preserves
     # length, so the halt's index in the blanked text is the same index here.
-    head_text = raw[: match.start(0)].rstrip()
-    segments = [seg.strip() for seg in re.split(r"(;|&&|\|\||\||&)", head_text)[0::2]]
-    segments = [seg for seg in segments if seg]
+    # Split the BLANKED head and slice `raw` by the resulting indices: a quoted
+    # `|`, `;` or `&&` inside a segment is not a separator, and splitting the raw text
+    # turned the last segment into a fragment — which made the subject path NARROWER
+    # than the no-subject fallback on an honest halting line (measured).
+    blank_head = code[: match.start(0)].rstrip()
+    raw_head = raw[: match.start(0)].rstrip()
+    bounds = [m.start() for m in re.finditer(r";|&&|\|\||\||&", blank_head)]
+    pieces: list[str] = []
+    start = 0
+    for stop in bounds:
+        pieces.append(raw_head[start:stop])
+        start = stop + (2 if blank_head[stop : stop + 2] in ("&&", "||") else 1)
+    pieces.append(raw_head[start:])
+    segments = [seg.strip() for seg in pieces if seg.strip()]
     if not segments:
         return True
     if subject is not None:
@@ -775,33 +833,49 @@ def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
         f"as --co/--lf/-k/--ignore/--deselect runs nothing and still exits 0: "
         f"{unpinned_argv}"
     )
-    polls = [cmd for cmd in _fenced_commands() if "kill -0" in cmd]
-    assert polls, "the doctrine no longer documents a polled run — re-point this guard"
-    bad_polls = [cmd for cmd in polls if not _POLL.fullmatch(_code(cmd))]
-    assert not bad_polls, (
-        "the poll line must BE `kill -0 \"$(cat /tmp/<run>.pid)\" 2>/dev/null && echo "
-        f"RUNNING || echo ...`; anything else reads a half-written log as done: {bad_polls}"
+    # A detached run's status cannot come from `wait`, and the poll cannot come from a pid probe.
+    # `wait` only reaps THIS shell's children and the poll runs in a LATER shell (measured, bash 5.2:
+    # `bash: wait: pid N is not a child of this shell`, rc=127), while a pid going away says nothing
+    # about COMPLETION — it fails just as fast for an OOM kill. The run's own shell must persist `$?`,
+    # and the poll must read that file.
+    launches = [cmd for cmd in _fenced_commands() if _STATUS_WRAPPER.match(_code(cmd))]
+    assert launches, (
+        "no detached suite run persists its exit status: launch it as "
+        "`( uv run pytest …; echo $? > /tmp/<run>.rc ) &` — `wait` cannot return a pid that is not "
+        "this shell's child (rc=127), so a status taken that way declares a completed run unproven"
     )
-    # ...and the pid it reads must be the pid the SAME fence wrote: editing
-    # `echo $! > /tmp/gate.pid` alone leaves `kill -0` failing on an absent file,
-    # and the fence then prints DONE over a half-written log.
+    polls = [cmd for cmd in _fenced_commands() if _RC_POLL.match(_code(cmd))]
+    assert polls, (
+        "the doctrine no longer POLLS the run's status file — re-point this guard (`[ -f "
+        "/tmp/<run>.rc ] && echo 'DONE …' || echo RUNNING`)"
+    )
+    # ...and the file the poll reads must be the one the SAME fence wrote AND cleared. A leftover
+    # status file from an earlier run makes the poll report DONE instantly and hands the verdict the
+    # PREVIOUS run's status.
     for fence in _fences():
-        written = {
-            match.group(1)
-            for cmd in fence
-            if (match := re.search(r"echo\s+\$!\s*>\s*(\S+)", _code(cmd)))
-        }
-        read = {
-            match.group(1)
-            for cmd in fence
-            for match in re.finditer(r'kill\s+-0\s+"\$\(cat\s+(\S+)\)"', _code(cmd))
-        }
-        if not read:
+        codes = [_code(cmd) for cmd in fence]
+        written = {m.group("rc") for c in codes if (m := _STATUS_WRAPPER.match(c))}
+        if not written:
             continue
-        assert written and read <= written, (
-            "the poll reads a pid file this fence never wrote: editing either line "
-            f"alone makes `kill -0` fail on an absent pid and report DONE. "
-            f"writes={sorted(written)}, reads={sorted(read)}"
+        read = {
+            m.group(1)
+            for c in codes
+            for m in re.finditer(r"\[\s*-f\s+(/tmp/[\w.-]+)\s*\]", c)
+        }
+        cleared = {
+            token
+            for c in codes
+            for m in re.finditer(r"rm\s+-f\s+(.*)$", c)
+            for token in m.group(1).split()
+        }
+        assert read and read <= written, (
+            "the poll reads a status file this fence never writes: editing either line alone leaves "
+            f"the poll on an absent file and reports DONE. writes={sorted(written)}, reads={sorted(read)}"
+        )
+        assert written <= cleared, (
+            "a stale status file from an earlier run must be cleared before the launch (`rm -f`): "
+            "otherwise the poll reports DONE at once and Phase 4 diffs the PREVIOUS run's status. "
+            f"writes={sorted(written)}, cleared={sorted(cleared)}"
         )
     assert full_suite, "the doctrine no longer documents a full-suite run — re-point this guard"
 
@@ -1015,7 +1089,7 @@ def test_phase_1_checks_out_the_pinned_base_before_the_baseline_suite() -> None:
 def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
     """#10399 review ISSUE 3 (at ``f3c6c803b``) / P1-3: ``bisect run`` leaves HEAD detached.
 
-    ``git bisect run`` ends detached at the first bad commit, so the documented
+    ``git bisect run`` ends detached (at the last probe it tested), so the documented
     ``git revert -m 1`` commits onto a detached HEAD: ``integration/batch-1``
     keeps the culprit the doctrine says to drop, and the final full run measures
     a tree nobody lands. A ``git bisect reset`` (or an explicit ``git switch``
@@ -1034,7 +1108,7 @@ def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
     ]
     assert returns, (
         "no `git bisect reset` (or `git switch integration/batch-…`) anywhere: "
-        "`git bisect run` leaves HEAD DETACHED at the first bad commit, so the "
+        "`git bisect run` leaves HEAD DETACHED (at the last probe it tested), so the "
         "revert below never lands on the batch branch"
     )
     assert min(bisects) < min(returns) < min(reverts), (
@@ -1186,8 +1260,9 @@ def test_the_blame_sha_is_bound_to_a_batch_merge() -> None:
         if _READ_ONLY_CAPTURE.match(_code(c))
     ]
     assert captures, (
-        "the blame sha is never captured before the return — `BAD=\"$(git rev-parse HEAD)\"` must sit "
-        "BEFORE `git bisect reset`, which moves HEAD back to the batch tip"
+        "the blame sha is never captured before the return — `BAD=\"$(git rev-parse "
+        "refs/bisect/bad)\"` must sit BEFORE `git bisect reset`: `bisect run` leaves HEAD on the LAST "
+        "PROBE it tested, not on the culprit, and the reset deletes the ref that holds the answer"
     )
     for fence in _fences():
         codes = [_code(c) for c in fence]
@@ -1208,18 +1283,21 @@ def test_the_blame_sha_is_bound_to_a_batch_merge() -> None:
         i for i, c in enumerate(_fenced_commands()) if _code(c).startswith("git bisect reset")
     ]
     assert reset_at and min(capture_at) < min(reset_at), (
-        "the blame sha must be captured while HEAD is still the first bad commit — a capture after "
-        "`git bisect reset` records the batch tip, and the revert then drops the wrong thing"
+        "the blame sha must be captured BEFORE `git bisect reset`, which deletes `refs/bisect/bad` — "
+        "a capture after it records the batch tip, and the revert then drops the wrong thing"
     )
 
 
 def test_the_gate_run_must_complete_before_any_verdict() -> None:
-    """the ``c50628450`` P2: ``kill -0`` failing is not a PASS — a killed run reads as BATCH-GREEN.
+    """the ``c50628450`` P2: a poll that only says ``DONE`` is not a PASS — a killed run reads as BATCH-GREEN.
 
-    The poll prints ``DONE`` whenever the pid is gone, which is equally true of a run the kernel
-    OOM-killed (measured on #10399: five ``python`` processes killed in 23 minutes). A killed run
-    writes no summary, so it carries no failure ids; Phase 4 diffs ids, so it certifies `BATCH-GREEN`
+    Any liveness probe prints ``DONE`` the moment the process is gone, which is equally true of a run
+    the kernel OOM-killed (measured on #10399: five ``python`` processes killed in 23 minutes). A killed
+    run writes no summary, so it carries no failure ids; Phase 4 diffs ids, so it certifies `BATCH-GREEN`
     for a tree no run ever finished — and `UNPROVEN-FULL-SUITE` was keyed only on "a subset ran".
+
+    The status therefore has to come from the run's own shell: ``wait`` cannot reach it (the poll is a
+    later shell, rc=127), so the launch persists ``$?`` and this test reads that file.
     """
     gates = [
         fence
@@ -1228,12 +1306,22 @@ def test_the_gate_run_must_complete_before_any_verdict() -> None:
     ]
     assert gates, "the gate run no longer writes a junit report — re-point this guard"
     codes = [code for fence in gates for code in (_code(c) for c in fence)]
+    # The status must come from the file the run's OWN shell wrote. `wait` cannot supply it: the poll
+    # happens in a LATER shell, where the pid is not a child (measured, bash 5.2: `bash: wait: pid N
+    # is not a child of this shell`, rc=127) — so `wait` reported a COMPLETED, green run as unproven.
+    rc_files = [m.group("rc") for c in codes if (m := _STATUS_WRAPPER.match(c))]
+    assert rc_files, (
+        "the gate fence must launch the run in its own shell and persist the status "
+        "(`( uv run pytest …; echo $? > /tmp/batch.rc ) &`): `wait` on a pid from a previous shell "
+        "returns 127, not the run's status"
+    )
     assert any(
-        re.search(r'^wait\s+"\$\(cat\s+/tmp/batch\.pid\)"\s*;\s*RC=\$\?$', c) for c in codes
+        re.fullmatch(rf'RC="\$\(\s*cat\s+{re.escape(rc)}\s*\)"', c)
+        for c in codes
+        for rc in rc_files
     ), (
-        "the gate fence must WAIT for the run and keep its status (`wait \"$(cat "
-        "/tmp/batch.pid)\"; RC=$?`): without a status a killed run is indistinguishable from a "
-        "finished one"
+        "the gate fence must read the status the run wrote (`RC=\"$(cat /tmp/batch.rc)\"`): without "
+        f"a status a killed run is indistinguishable from a finished one (status files: {rc_files})"
     )
     status_checks = [c for c in codes if "$RC" in c and "-eq" in c]
     assert status_checks, (
