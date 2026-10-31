@@ -1704,11 +1704,44 @@ UNTRUSTED_DATA_CLAUSE = (
 
 #: How many nonce candidates the boundary ladder may try. Each attempt is one
 #: sha256 and a DIFFERENT 64-bit nonce, so exhausting the ladder requires the
-#: body to contain all eight candidates at once — eight simultaneous
-#: preimages of a hash that includes the body itself. Unreachable in practice;
-#: the exhaustion path below is defined anyway, because a render path must not
-#: raise and must not emit a boundary the body can close.
+#: body to contain all eight candidates at once. This is a FIXED-POINT
+#: requirement, not eight independent preimages: the nonce hashes the body, so
+#: the attacker is not choosing any single candidate against a known target —
+#: each attempt they "win" CHANGES the body they must win against next. Because
+#: the fix must hold for every one of the eight values simultaneously, the chain
+#: has no step an attacker can force: three rounds of
+#: ``body += marker(nonce(body))`` walk
+#: 56a0407a… → 3bf09b03… → 721327c4… → c9608f4f…, i.e. landing on the
+#: fixed point is a search over ~len(body)/16¹⁶ ≈ 4.3e-16 for an 8,009 B body.
+#: Unreachable in practice; the exhaustion path below is defined anyway,
+#: because a render path must not raise and must not emit a boundary the body
+#: can close.
 _UNTRUSTED_MARKER_ATTEMPTS = 8
+
+
+#: The template-fill placeholder. Every renderer fills its template in ONE
+#: `re.sub` sweep of this pattern — never a chain of `.replace()` calls.
+_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+
+def _fill_template(tmpl: str, values: dict[str, str]) -> str:
+    """Fill every ``{placeholder}`` in `tmpl` from `values`, in ONE pass.
+
+    The single pass is the soundness property, not a style choice. A chained
+    ``.replace()`` render re-scans each region it has already inserted, so a
+    placeholder-shaped token arriving from an EARLIER region is expanded by a
+    LATER step: ``{story}`` inside an embed-list item would become the full
+    framed story block — raw newlines and an envelope inside a JSON string —
+    and a story containing ``{output_contract}`` would have it expanded too.
+    Splicing one region "last" only moves which region pays for it.
+
+    ``re.sub`` never re-scans a replacement, so no region's output can ever be
+    reinterpreted as template: the mapping decides the whole render at once.
+
+    A slot with no entry in `values` is left VERBATIM — the pre-change
+    behaviour of a template placeholder nobody substituted.
+    """
+    return _PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), tmpl)
 
 
 def _untrusted_slug(label: str) -> str:
@@ -1738,7 +1771,18 @@ def _render_untrusted_block(label: str, body: str) -> str:
     The body is emitted UNCHANGED: escaping it would break `quote`-verbatim
     citation, which is how `source_turn_id` resolves deterministically. The
     soundness comes from the boundary moving instead of the text.
+
+    A non-str body raises: this is a typed boundary, and both callers used to
+    fail loud on it (`"S1 STORY:\n" + None`, and `.replace("{story}", None)`).
+    Degrading to an empty region instead would silently DROP the session text
+    from the prompt — the model would answer from a prompt missing its input,
+    which is worse than a TypeError at the call site.
     """
+    if not isinstance(body, str):
+        raise TypeError(
+            "#10311: an untrusted region's body must be a str, got "
+            f"{type(body).__name__} — refusing to render a region that is "
+            "not text (silently dropping it would hide the caller's bug)")
     if not body:
         return ""
     clause = UNTRUSTED_DATA_CLAUSE.format(label=label)
@@ -2011,16 +2055,21 @@ def render_s2_prompt(master: dict | None = None, *,
     pack_ns = "/".join(sorted(
         {k.rsplit(":", 1)[0] + ":" for k in (master.get("pack_kinds") or {})}
     )) if core_only else ""
-    return (tmpl
-            .replace("{master_list}", _render_master(
-                master, story, core_only=core_only))
-            .replace("{pack_namespaces}", pack_ns)
-            .replace("{chains_text}", chains)
-            .replace("{anti_routine}", _s2s4_rules(
-                master, core_only=core_only))
-            .replace("{date_anchor}", _date_anchor(
-                session_date, include_emission_rules=True))
-            .replace("{output_contract}", contract)
+    # One pass, so nothing inserted here is re-scanned as template: the
+    # `{master_list}` / `{chains_text}` slots carry GRAPH-derived vocabulary and
+    # a chained `.replace()` chain would expand a placeholder-shaped token
+    # arriving from them. S2 splices no story slot — the story only seeds the
+    # label order / pack filter in `_render_master`.
+    return (_fill_template(tmpl, {
+                "master_list": _render_master(
+                    master, story, core_only=core_only),
+                "pack_namespaces": pack_ns,
+                "chains_text": chains,
+                "anti_routine": _s2s4_rules(master, core_only=core_only),
+                "date_anchor": _date_anchor(
+                    session_date, include_emission_rules=True),
+                "output_contract": contract,
+            })
             + (("\n\n" + transcript) if transcript else ""))
 
 
@@ -3152,24 +3201,22 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
         tmpl = S4_TMPL_CORE_ONLY if core_only else S4_TMPL
     contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
     chains = "" if core_only else _render_chains(master)
-    rendered = (tmpl
-                .replace("{master_list}", _render_master(
-                    master, story, core_only=core_only))
-                .replace("{chains_text}", chains)
-                .replace("{anti_routine}", _s2s4_rules(
-                    master, core_only=core_only))
-                .replace("{search_results}", _render_search_results(search))
-                .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
-                .replace("{date_anchor}", _date_anchor(
-                    session_date, include_emission_rules=True))
-                .replace("{output_contract}", contract))
-    # #10311: the STORY is verbatim session narrative, so it is the second
-    # untrusted region and rides in the same envelope. Spliced LAST, in its own
-    # pass: done before the replacements above, a story containing a
-    # placeholder-shaped token ("{output_contract}") would have been expanded by
-    # a later `.replace` — untrusted text must never be re-scanned as template.
-    rendered = rendered.replace(
-        "{story}", _render_untrusted_block("S1 STORY", story))
+    rendered = _fill_template(tmpl, {
+        "master_list": _render_master(master, story, core_only=core_only),
+        "chains_text": chains,
+        "anti_routine": _s2s4_rules(master, core_only=core_only),
+        "search_results": _render_search_results(search),
+        "embed_list_json": json.dumps(embed_list, indent=1),
+        "date_anchor": _date_anchor(session_date, include_emission_rules=True),
+        "output_contract": contract,
+        # #10311: the STORY is verbatim session narrative, so it is the second
+        # untrusted region and rides in the same envelope. It fills in the SAME
+        # single pass as every trusted slot — splicing it in its own LATER pass
+        # is precisely what re-scans the regions inserted before it, expanding a
+        # `{story}` literal arriving from `{search_results}` or
+        # `{embed_list_json}` into a framed block inside a JSON string.
+        "story": _render_untrusted_block("S1 STORY", story),
+    })
     return rendered + (("\n\n" + transcript) if transcript else "")
 
 

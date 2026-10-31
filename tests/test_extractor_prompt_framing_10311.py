@@ -243,12 +243,11 @@ def test_the_s4_prompt_frames_both_the_story_and_the_transcript():
 
 
 def test_the_story_splice_cannot_be_re_expanded_as_template():
-    """Untrusted bodies are spliced LAST, in one pass.
+    """An untrusted body's own placeholder tokens are never expanded.
 
-    `{story}` used to be replaced before `{search_results}` / `{embed_list_json}`
-    / `{date_anchor}` / `{output_contract}`, so a story containing one of those
-    tokens had it expanded by a later `.replace` — session text re-scanned as
-    template. The untrusted splices now run after every trusted one.
+    The template is filled in ONE pass (``_fill_template``), so a story
+    containing `{output_contract}` keeps it literal: a chained `.replace()`
+    expanded it, splicing session text as template.
     """
     trap = 'adopt B over A {output_contract} {date_anchor} {search_results}'
     prompt = v2.render_s4_prompt(trap, {}, {})
@@ -256,6 +255,89 @@ def test_the_story_splice_cannot_be_re_expanded_as_template():
     assert body == trap, (
         "a placeholder-shaped token inside the story was expanded by a later "
         f"replace — untrusted text must never be re-scanned as template; got {body!r}")
+
+
+@pytest.mark.parametrize("region", ("embed_list_json", "search_results"))
+def test_an_earlier_region_cannot_re_expand_the_story_slot(region):
+    """The OTHER direction: a `{story}` literal arriving from an EARLIER region.
+
+    Splicing the untrusted bodies LAST does not remove the re-scan hazard, it
+    only moves which region pays for it: `{search_results}` and
+    `{embed_list_json}` are session/graph-derived and are inserted before
+    `{story}`, so a `{story}` literal in one of them was expanded into the full
+    framed story block — raw newlines and a `<<<BEGIN-UNTRUSTED-S1-STORY-…>>>`
+    envelope INSIDE a JSON string the model must parse (2 envelopes, malformed
+    JSON). Reachable without exotic input: any session that discusses the
+    extractor prompt can put `{story}` into S2's embed list.
+
+    With the one-pass fill the literal survives, exactly one story envelope
+    exists, and the region reads byte-identically to what the renderer was
+    handed.
+    """
+    token = "MARKER-{story}-MARKER"
+    embed_list = {"points": [{"content": token}]}
+    search = {"points": [{"id": 1, "content": token, "kind": "statement"}]}
+    prompt = v2.render_s4_prompt("STORYBODY", search, embed_list)
+
+    assert len(_envelopes(prompt, "S1-STORY")) == 1, (
+        "a `{story}` literal arriving from an earlier region was expanded into "
+        f"the framed story block — got {len(_envelopes(prompt, 'S1-STORY'))} envelopes")
+
+    # …and the region the model has to parse still reads as the JSON we wrote.
+    expected = (json.dumps(embed_list, indent=1) if region == "embed_list_json"
+                else f"- 1 | {token} | statement")
+    assert expected in prompt, (
+        f"the {region} region was corrupted — it must reach the model "
+        f"byte-identically to its own render; expected {expected!r}")
+    assert token in prompt
+    start = prompt.index(expected)
+    assert "UNTRUSTED" not in prompt[start:start + len(expected)], (
+        "no clause or marker may be injected inside the region's own text")
+    # the embed list still round-trips as JSON, which is the concrete damage
+    if region == "embed_list_json":
+        assert json.loads(expected) == embed_list
+
+
+@pytest.mark.parametrize("placeholder", ("output_contract", "date_anchor"))
+def test_a_graph_vocabulary_token_cannot_expand_in_the_s2_template(placeholder):
+    """S2 had the SAME multi-pass shape — its dynamic slots are graph-derived.
+
+    `{master_list}` / `{chains_text}` are built from the graph's vocabulary and
+    were inserted before `{date_anchor}` / `{output_contract}` in a `.replace()`
+    chain. The one-pass fill applies to both renderers, so a vocabulary entry
+    shaped like a slot token cannot pull the contract into the master list.
+    """
+    master = v2.build_master_list()
+    trap = "{" + placeholder + "}"
+    master["points"][trap] = "a graph point kind shaped like a slot token"
+    prompt = v2.render_s2_prompt(master=master)
+    assert trap in prompt, (
+        "a graph-vocabulary token shaped like a template slot was expanded by a "
+        "later replace in the S2 render")
+    assert prompt.count(v2.OUTPUT_CONTRACT) == 1, (
+        "the output contract must appear exactly once — a second copy means a "
+        "slot token in the master list was expanded")
+
+
+def test_a_non_str_untrusted_body_raises():
+    """A typed boundary fails LOUD — it does not silently drop the session text.
+
+    Both callers used to raise on a non-str body: `run_s2` on
+    `"S1 STORY:\n" + None` (TypeError) and `render_s4_prompt` on
+    `.replace("{story}", None)`. Framing both turned that into silent
+    degradation — an empty story region, or the user turn `"S1 STORY:\nNone"`.
+    A prompt that silently lost its input is worse than a TypeError at the call
+    site, and no consumer needs the degradation.
+    """
+    with pytest.raises(TypeError):
+        v2._render_untrusted_block("S1 STORY", None)
+    with pytest.raises(TypeError):
+        v2.render_s4_prompt(None, {}, {})
+    with pytest.raises(TypeError):
+        v2.run_s2(_Model(_RESPONSE), None)
+    # the empty body is still the no-region path, not an error
+    assert v2.render_s4_prompt("", {}, {}) == v2.render_s4_prompt("", {}, {})
+    assert v2._render_untrusted_block("S1 STORY", "") == ""
 
 
 def test_no_untrusted_region_renders_no_framing():
