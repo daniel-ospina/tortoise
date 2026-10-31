@@ -828,6 +828,35 @@ def _org_sdk_from_name(org_id: str, moved: str | None) -> TortoiseSDK:
     return _make_sdk(graph_name=moved) if moved else _make_sdk(namespace=org_id)
 
 
+async def _hydrate_default_namespace(org: dict) -> dict:
+    """Give an ORG-WIDE caller dict the default-graph namespace it lacks.
+
+    The REST auth seams stamp ``graph_namespace`` on the credential; the MCP
+    `tortoise_session_capture` tool builds its OWN dict and stamps it only for a
+    graph-BOUND key — and its SERVED implementation is frozen by
+    `tools/surface-guard.py`, so it cannot be changed to carry it (#3863/#4282).
+    Hydrating here is what keeps an org-wide MCP capture on the graph a
+    promotion MOVED it to: without it the data plane opened the DEMOTED graph
+    while the record rows (tenant = the credential's `default_graph_id`) named
+    the promoted one — the record/data split #10025 exists to remove, on the
+    lane agents write through.
+
+    A GRAPH-BOUND dict is returned UNTOUCHED: its ``graph_namespace`` is a CUSTOM
+    graph's, and "the default graph" is not the question it asks (the same
+    reason `_default_graph_name` refuses it). A dict that already carries the
+    field is untouched too — the REST lanes are unaffected. ONE primary-key read,
+    only on the branch that needs it, and OFF the loop.
+    """
+    if org.get("org_id") and not org.get("graph_id") \
+            and not org.get("graph_namespace"):
+        resolved = await _cp_offload(
+            lambda: _org_default_namespace(org["org_id"]),
+            op="org_default_ns")
+        if resolved:
+            return {**org, "graph_namespace": resolved}
+    return org
+
+
 def _org_sdk_for_credential(org: dict) -> TortoiseSDK:
     """The DEFAULT-graph SDK for an already-resolved credential dict — NO I/O.
 
@@ -15288,14 +15317,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # for a graph-BOUND key. Without this, an org-wide MCP capture wrote the
     # graph a promotion DEMOTED while its record rows (tenant = the credential's
     # `default_graph_id`) named the promoted one — the split #10025 exists to
-    # remove, on the lane agents write through. One PK read, only when the dict
-    # lacks the field (the REST lanes already carry it), and off the loop.
-    if org.get("org_id") and not org.get("graph_id") \
-            and not org.get("graph_namespace"):
-        _resolved_ns = await _cp_offload(
-            lambda: _org_default_namespace(org["org_id"]), op="org_default_ns")
-        if _resolved_ns:
-            org = {**org, "graph_namespace": _resolved_ns}
+    # remove, on the lane agents write through.
+    org = await _hydrate_default_namespace(org)
 
     # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
     # not an enforced consent gate. C6 #2115 (D-C6-3): the gate resolves
