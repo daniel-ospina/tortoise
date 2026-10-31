@@ -17637,8 +17637,25 @@ class TortoiseSDK:
         #    Cypher injection primitive AND would cause a partial transfer.
         #    Validation strictly precedes the outdated-flag/CORRECTS writes so
         #    a failure leaves the graph untouched.
+        # ⛔ The operator POPULATION is the CANONICAL one, not ``is_operator``
+        # alone (#10418 review P2). EP's Batch-1 predicate — the one the #2351
+        # backstop runs under — is
+        # ``(o.is_operator = true OR o.op_type IS NOT NULL)`` (``ep.py``: a
+        # legacy / migrated operator carries ``op_type`` and may have lost the
+        # boolean flag), and the repo spells that same disjunction at five other
+        # sites (``_is_operator_point``, :27460, :27487, :28464, :28522).
+        # A narrow predicate here is not an under-report — it is the fail-open:
+        # 2a-DIRECT's "is the far endpoint an operator?" set was the same narrow
+        # form, so the node this query missed was re-pointed THERE as an
+        # operator-LESS direct edge (``idx`` dropped — it is not in
+        # ``DIRECT_EDGE_ATTR_KEYS`` — plus a ``DirectEdgeRepoint`` for a factor
+        # the loader builds as an OPERATOR factor). That is #10195's harm,
+        # reached by REMOVING a property instead of writing a hostile one. So
+        # this query, the slot query below, 2a-INPUT and 2a-DIRECT's ``op_set``
+        # all read the ONE canonical form.
         edges_result = proj.g.query(
-            "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
+            "MATCH (op:Point)-[r]->(old:Point {id:$old_id}) "
+            "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
             "RETURN op.id, type(r), r.idx, op.label, ID(r)",
             params={"old_id": old_id},
         )
@@ -17647,8 +17664,9 @@ class TortoiseSDK:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
         # ── #10195: the 2a OPERATOR re-point's override pre-flight (#2351) ──
-        # The 2a arm below re-points every ``(op:Point {is_operator:true})
-        # -[IMPL|NAND {idx}]->(old)`` edge onto the successor with a raw edge
+        # The 2a arm below re-points every canonically-operator
+        # ``(op:Point)-[IMPL|NAND {idx}]->(old)`` edge onto the successor with
+        # a raw edge
         # MERGE + delete, without ever consulting the claim classes of the
         # operator's OTHER inputs — so a supersede could mint the
         # ``derived --IMPL--> asserted`` factor ``create_operator`` refuses
@@ -17696,7 +17714,7 @@ class TortoiseSDK:
             # operators' points (#6976; ``test_no_query_loses_its_id_predicate``).
             _slot_rows = proj.g.query(
                 "MATCH (op:Point) WHERE op.id IN $op_ids "
-                "AND coalesce(op.is_operator, false) = true "
+                "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                 "WITH op "
                 "MATCH (op)-[sr:IMPL|NAND]->(inp) "
                 "RETURN op.id, op.op_type, op.direction, sr.idx, inp.id "
@@ -17855,8 +17873,20 @@ class TortoiseSDK:
                 # A node with no ``op_type`` is pre-v3.6 legacy; the rel type that
                 # carried it into this set IS its mechanism then.
                 _dirs = {_d for _, _d in _meta_rows}
-                _op_types = sorted({t for t, _ in _meta_rows if t}) or [
-                    _repoint_ops[_oid]]
+                # ⛔ A stored ``op_type`` OUTSIDE the pair is no exemption
+                # (#10418 review P3). ``create_operator`` routes every other
+                # ``op_type`` to a ``hasPart`` edge (``:20244``), so
+                # ``op_type='hasPart'`` with ``IMPL`` edges into the
+                # predecessor is a RAW-WRITE shape — and EP's Batch-1 predicate
+                # filters on ``op_type IS NOT NULL``, not on its VALUE, so the
+                # loader still builds this factor and runs the #2351 backstop on
+                # it. A door that skipped it here was that backstop's only
+                # absent verdict. The mechanism to judge is therefore the REL
+                # TYPE that carried the operator into this set — the same
+                # fallback the absent-``op_type`` arm already takes.
+                _op_types = sorted({
+                    t for t, _ in _meta_rows
+                    if t in ("IMPL", "NAND")}) or [_repoint_ops[_oid]]
                 for _slot_source in _candidate_sources:
                     _slot_targets = list(_slot_ids)
                     _slot_targets.remove(_slot_source)
@@ -17865,8 +17895,10 @@ class TortoiseSDK:
                     _slot_target_classes = set().union(
                         *(_slot_classes.get(_t, set()) for _t in _slot_targets))
                     for _op_type in _op_types:
-                        if (_op_type not in ("IMPL", "NAND")
-                                or _slot_source not in _slot_classes
+                        # ``_op_types`` is provably within ``IMPL|NAND`` at this
+                        # point (the set above filters the stored value, and the
+                        # fallback is the rel type this query matched).
+                        if (_slot_source not in _slot_classes
                                 or not _slot_target_classes):
                             continue
                         # Every stored direction, canonicalized per ``op_type``
@@ -18095,8 +18127,8 @@ class TortoiseSDK:
         # op_type carries no typed edge still transfers its support source,
         # and the rebuild pass-2b leg can mirror this query exactly.
         input_rows = proj.g.query(
-            "MATCH (old:Point {id:$old_id})-[ri:INPUT]->"
-            "(op:Point {is_operator:true}) "
+            "MATCH (old:Point {id:$old_id})-[ri:INPUT]->(op:Point) "
+            "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
             "RETURN op.id, ri.idx, ID(ri), op.label",
             params={"old_id": old_id},
         ).result_set
@@ -18242,14 +18274,20 @@ class TortoiseSDK:
             # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
             # an operator target; 2a owns op->input edges and runs first;
             # repointing an operator target would create a topology
-            # create_direct_edge itself rejects). Operators carry
-            # is_operator=true.
+            # create_direct_edge itself rejects). Operators are the CANONICAL
+            # set — ``is_operator = true OR op_type IS NOT NULL``, the same
+            # population 2a and the #10195 pre-flight read (#10418 review P2):
+            # with a narrower set here, an ``op_type``-only operator's edge
+            # fell through to this leg as an operator-LESS direct edge, losing
+            # its ``idx`` slot position and emitting a ``DirectEdgeRepoint``
+            # for a factor the loader builds as an operator factor.
             plain = []
             if rows:
                 other_ids = [row[2] for row in rows]
                 op_rows = proj.g.query(
                     "MATCH (p:Point) WHERE p.id IN $ids AND "
-                    "coalesce(p.is_operator, false) = true RETURN p.id",
+                    "(p.is_operator = true OR p.op_type IS NOT NULL) "
+                    "RETURN p.id",
                     params={"ids": other_ids},
                 ).result_set
                 op_set = {r[0] for r in op_rows}

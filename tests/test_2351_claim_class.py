@@ -788,6 +788,150 @@ def test_supersede_repoint_leaves_an_alreadyDecided_operator_alone(lane):
     assert _operator_rows(lane, new) == []
 
 
+def _operator_shaped_rows(lane, claim_id):
+    """``(op_id, rel, idx)`` for every operator edge reaching ``claim_id``.
+
+    The CANONICAL operator population — ``is_operator = true OR op_type IS NOT
+    NULL``, the predicate EP's Batch-1 filter reads — so a legacy / migrated
+    operator that lost the boolean flag is still visible. ``_operator_rows``
+    above is deliberately the NARROW form: most cases in this file pin what the
+    ordinary writer mints; only the flag-less cases need this one.
+    """
+    return lane._get_proj().g.query(
+        "MATCH (op:Point)-[r:IMPL|NAND]->(n:Point {id:$id}) "
+        "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
+        "RETURN op.id, type(r), r.idx",
+        params={"id": claim_id}).result_set
+
+
+def test_supersede_repoint_judges_a_flag_less_operator(lane):
+    """The operator POPULATION is the canonical one, not ``is_operator`` alone.
+
+    EP's Batch-1 predicate is ``(o.is_operator = true OR o.op_type IS NOT
+    NULL)`` — a legacy / migrated operator carries ``op_type`` and may have
+    lost the boolean flag (`graph-scripts/backfill_is_operator.py` stamps
+    exactly that class) — and the repo spells that same disjunction at five
+    other sites. The pre-flight read only ``is_operator:true``, so this node was
+    invisible to it TWICE: the population query missed it (the whole guard was
+    skipped) and the slot query missed it (so the code took the "no slot rows
+    ⇒ no factor to judge" branch) — while 2a-DIRECT, whose "is the far endpoint
+    an operator?" set was the same narrow predicate, treated its ``IMPL`` edge
+    as an operator-LESS direct edge and re-pointed it. Net: #10195's exact harm,
+    reached by REMOVING a property instead of writing a hostile value:
+
+        src(derived) --IMPL(idx 1)--> old(derived)   # no ``is_operator``
+        supersede old -> new(asserted)               # door: no verdict
+        ⇒ derived --IMPL--> asserted, a factor the loader BUILDS (``op_type``
+          is set) and drops with ``derived_over_asserted`` — no verdict, no
+          warning, no record on the write side.
+
+    Pre-fix this is RED: the supersede returned success, so ``pytest.raises``
+    cannot pass.
+    """
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # The legacy / migrated operator shape: ``op_type`` present, the boolean
+    # flag never written or dropped by a migration — a MISSING property.
+    lane._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) REMOVE n.is_operator",
+        params={"id": op["id"]})
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    # Refused BEFORE any mutation: neither point terminalised, the edge is still
+    # at the predecessor with its slot position, and nothing reached the
+    # successor.
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_shaped_rows(lane, old) == [[op["id"], "IMPL", 1]]
+    assert _operator_shaped_rows(lane, new) == []
+
+
+def test_supersede_repoint_carries_a_flag_less_operator_edge_with_its_slot(
+        lane):
+    """The same population fix on the LEGAL case: 2a transfers it, 2a-DIRECT not.
+
+    An operator edge must keep its ``idx`` slot position across the supersede,
+    because that position IS the factor's source/target role, and its ``INPUT``
+    support mirror must follow the support source (#6180). Both are 2a's job.
+    2a-DIRECT's MERGE is BARE over ``DIRECT_EDGE_ATTR_KEYS`` — ``idx`` is not a
+    member, so the slot position is LOST — and it emits a ``DirectEdgeRepoint``
+    descriptor for a factor the loader builds as an OPERATOR factor, which is
+    the topology the replay then reproduces.
+
+    Pre-fix RED on all three assertions: the edge comes back with ``idx`` NULL,
+    the mirror stays on the dead prior, and one ``DirectEdgeRepoint`` is
+    emitted for an operator edge.
+    """
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) REMOVE n.is_operator",
+        params={"id": op["id"]})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    lane.supersede_point(old, new)
+
+    # The slot position survived, and the operator's SUPPORT mirror followed.
+    assert _operator_shaped_rows(lane, old) == []
+    assert _operator_shaped_rows(lane, new) == [[op["id"], "IMPL", 1]]
+    assert {
+        (row[0], row[1]) for row in lane._get_proj().g.query(
+            "MATCH (n:Point)-[ri:INPUT]->(op:Point {id:$op}) "
+            "RETURN n.id, ri.idx",
+            params={"op": op["id"]}).result_set
+    } == {(src, 0), (new, 1)}   # the support source, and the successor at the
+    # slot the predecessor held — never the dead prior.
+    # No direct-edge re-point descriptor for an OPERATOR edge (the replay would
+    # re-MERGE it as a bare direct edge).
+    assert lane._get_proj().g.query(
+        "MATCH (e:GraphEvent) WHERE e.type='DirectEdgeRepoint' "
+        "RETURN count(e)").result_set[0][0] == 0
+
+
+@pytest.mark.parametrize("stored_op_type", ["hasPart", "composedOf"])
+def test_supersede_repoint_judges_a_stored_op_type_outside_the_pair(
+        lane, stored_op_type):
+    """A stored ``op_type`` outside ``IMPL|NAND`` is no exemption.
+
+    ``create_operator`` routes every other ``op_type`` to a ``hasPart`` edge, so
+    this shape is raw-write only — but EP's Batch-1 predicate filters on
+    ``op_type IS NOT NULL``, not on its VALUE, so the loader still builds this
+    ``IMPL`` factor and runs the #2351 backstop on it. The door skipped it: it
+    iterated only the STORED ``op_type`` and ``continue``d on anything outside
+    the pair, so the supersede carried no verdict at all. The mechanism to
+    judge is the REL TYPE that carried the operator into the set — the same
+    fallback the absent-``op_type`` arm already takes.
+
+    Pre-fix RED: the supersede succeeded.
+    """
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    lane._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.op_type=$t",
+        params={"id": op["id"], "t": stored_op_type})
+    new = lane.create_point("statement", "authored v2")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _operator_shaped_rows(lane, old) == [[op["id"], "IMPL", 1]]
+    assert _operator_shaped_rows(lane, new) == []
+
+
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
 
 def _raw_direct_edge(lane, src, tgt, *, direction):
