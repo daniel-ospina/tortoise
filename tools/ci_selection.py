@@ -2372,8 +2372,12 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # ABSENT. The most likely follow-up to this exact instrument IS a change to the
              # instrument (every finding class on #10131's reviews so far has been in a read
              # path — `NEVER` licensing, the cleared-red loop, the wall bound), so the diff
-             # that can break all 44 of its pins was the one diff that ran none of them:
-             # the #1349/#3332/#3616 silent-drop class. CORE_ALSO (not TOOL_CARVEOUTS)
+             # that can break the whole pin set was the one diff that ran none of it:
+             # the #1349/#3332/#3616 silent-drop class. (No count is stated here on purpose:
+             # the pin set moves with the file, and a literal would rot exactly the way the
+             # `durations` note's count did — `tests/test_ci_catch_history.py::
+             # test_the_durations_note_counts_the_tests_this_file_actually_has` RUNS its own
+             # command so that one cannot.) CORE_ALSO (not TOOL_CARVEOUTS)
              # because the suite is hermetic (an archived runs.json, job JSON and in-memory
              # zips — no DB, no network) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::

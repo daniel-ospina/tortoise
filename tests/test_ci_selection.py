@@ -2601,12 +2601,17 @@ def test_ci_catch_history_tool_change_selects_core_not_tier1():
     early return and fell to the tier-1 smoke set, which does not contain the file. The
     most likely follow-up to this instrument IS a change to the instrument, so the diff
     that can weaken the rule that decides "never caught anything" would have been the one
-    diff that ran none of the 44 cases pinning it — the #1349/#3332/#3616 silent-drop
+    diff that ran none of the cases pinning it — the #1349/#3332/#3616 silent-drop
     class.
 
     Mutation check: removing the CORE_ALSO entry fails the FIRST assert
     (`"core" in r["surfaces"]`); the docs-only early return then yields
-    `full: False` with no pin, so the later asserts pass unexercised.
+    `full: False` with no pin, so the later asserts pass unexercised. MEASURED both ways
+    at the #10359 fix head (in-process `select(...)`, not by editing the tuple): without
+    the entry `surfaces=[]  full=False  n=68  guard=ABSENT`; with it
+    `surfaces=['core']  full=False  n=706  guard=PRESENT`. No count is stated in the
+    CORE_ALSO comment or here on purpose — the pin set moves with the file, and a literal
+    would rot the way the `durations` note's count did.
     """
     r = _sel(["tools/ci_catch_history.py"])
     assert "core" in r["surfaces"], r
