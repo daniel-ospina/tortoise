@@ -5135,23 +5135,39 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # this module exists to remove. #4821 review P2.
     #
     # ``match=`` is load-bearing (#4821 review P3): the pre-fix signature took
-    # no ``measured`` at all (fixed anchor: `48d745f2e` — the commit this PR
-    # branched from — whose `_print_winner` is `(winner, *, ingest_mode,
-    # context_cap)`; do NOT cite `origin/main`, which moved the moment this
-    # work landed and now carries `measured`), so this call raised `unexpected
-    # keyword argument 'measured'` — NOT a missing required argument. A bare
+    # no ``measured`` at all, so this call raised `unexpected keyword argument
+    # 'measured'` — NOT a missing required argument. A bare
     # ``pytest.raises(TypeError)`` was satisfied by that incompatible call, so
     # the arm could not tell the required-argument contract from a
-    # signature that merely does not accept the keyword. The earlier comment
-    # claimed the pre-fix signature "defaulted `measured=True` and printed
-    # SELECTED"; that default never existed on `main`, nor in this PR's
-    # history — it existed only on the intermediate branch commit `6269e7d08`,
-    # verified by `git show 6269e7d08:tools/longmem_eval/sweep_granularity.py`
-    # (`measured: bool = True`), a commit that is an ancestor of the pushed
-    # branch but never of `main`. Say it that way rather than as a universal
-    # "never existed": that over-shoots a temporal error into a factual one
-    # (#10355 review P2). The assertion is now tied to the wording only the
-    # required-argument shape produces.
+    # signature that merely does not accept the keyword.
+    #
+    # The anchor for that pre-fix shape is `48d745f2e`, and the wording
+    # matters because the claim is ancestry (#10355 review P2, corrected): it
+    # is the pre-#4821 BASELINE — the parent of this branch's base
+    # `8e49b7d2a`, NOT the commit this PR branched from. `8e49b7d2a` is
+    # #10348's squash merge and its `_print_winner` already carries
+    # `measured`, so a reader who takes "the commit this PR branched from"
+    # literally lands on a sha that refutes the comment. Verified:
+    # `git show 48d745f2e:tools/longmem_eval/sweep_granularity.py` →
+    # `def _print_winner(winner: dict | None, *, ingest_mode: str,
+    # context_cap: int) -> None`. Do NOT cite `origin/main` either: it moved
+    # the moment this work landed and now carries `measured`.
+    #
+    # The earlier comment claimed the pre-fix signature "defaulted
+    # `measured=True` and printed SELECTED"; that default never existed on
+    # `main`, nor in this PR's history — it existed only on the intermediate
+    # branch commit `6269e7d08`, verified by
+    # `git show 6269e7d08:tools/longmem_eval/sweep_granularity.py`
+    # (`measured: bool = True`), a commit on the SUPERSEDED branch
+    # `fix/4821-dense-leg-preflight` (still pushed to `origin`, which is how
+    # this sha stays resolvable), and never of `main` or of this branch. Name
+    # that branch explicitly: "an ancestor of the pushed branch" is false for
+    # the branch this comment lives on (`git merge-base --is-ancestor
+    # 6269e7d08 HEAD` → 1), and a reader who checks it there refutes the
+    # sentence instead of trusting it. Say it that way rather than as a
+    # universal "never existed": that over-shoots a temporal error into a
+    # factual one (#10355 review P2). The assertion is now tied to the
+    # wording only the required-argument shape produces.
     with pytest.raises(TypeError, match=r"required keyword-only argument.*measured"):
         sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
                           "context_tokens_mean": 10.0},
@@ -5534,16 +5550,21 @@ def test_points_census_reads_the_pair_from_one_filtered_list():
          "points_embedded": 0, "embedding_coverage": 0.0},
     ]
     assert _points_census(mixed) == {"points_total": 3,
-                                    "points_embedded": 0}
+                                    "points_embedded": 0,
+                                    "records_refused": 0}, (
+        "q0's half-known pair is an UNKNOWN, not a lie: it is excluded and "
+        "NOT counted as refused")
     assert _aggregate_embedding_coverage(mixed) == 0.0, (
         "a mixed census must never publish an impossible ratio")
 
     # The homogeneous shapes the rest of the suite relies on are unchanged.
     assert _points_census([{"points_total": 4, "points_embedded": 2}] * 2) \
-        == {"points_total": 8, "points_embedded": 4}
+        == {"points_total": 8, "points_embedded": 4,
+            "records_refused": 0}
     assert _points_census([{"points_total": None,
                             "points_embedded": None}] * 2) \
-        == {"points_total": None, "points_embedded": None}
+        == {"points_total": None, "points_embedded": None,
+            "records_refused": 0}
     assert _aggregate_embedding_coverage(
         [{"points_total": None, "points_embedded": None}] * 2) is None
 
@@ -5565,12 +5586,16 @@ def test_points_census_refuses_an_impossible_or_half_known_pair():
     The receipt exists to answer "how much of what this cell knows about was
     embedded?"; a number outside ``[0, 1]`` cannot be that answer. So a pair
     is admitted only when it is POSSIBLE (two ints that are not bools, with
-    ``0 <= embedded <= total``), and a refused pair is dropped whole.
+    ``0 <= embedded <= total``), and a refused pair is dropped whole — and
+    COUNTED OUT in ``records_refused``, which is what lets
+    ``_dense_leg_verified`` refute the cell instead of certifying whatever
+    survived (see ``test_a_refused_census_record_refutes_the_cell``).
 
     A half-known pair (``total`` known, ``embedded`` unknown) is the fourth
     state that lands in ``None/None`` — it must not publish the total as
     though the unknown half were zero, which is the fabricated-``0`` this PR
-    removes. Reachability is nil today (``retrieve.py`` derives both halves
+    removes — and it is an ABSENCE, so it is never counted as refused.
+    Reachability is nil today (``retrieve.py`` derives both halves
     from ONE Cypher row, so ``0 <= embedded <= total`` holds by construction);
     this pins the contract the next producer reads."""
     from tools.longmem_eval.sweep_granularity import (
@@ -5579,22 +5604,27 @@ def test_points_census_refuses_an_impossible_or_half_known_pair():
     )
 
     impossible = {
-        "embedded exceeds total": [{"points_total": 3,
-                                    "points_embedded": 7}],
-        "bool total": [{"points_total": True, "points_embedded": 5}],
-        "negative total": [{"points_total": -5, "points_embedded": 5}],
-        "half known": [{"points_total": 3, "points_embedded": None}],
-        "key absent": [{"points_total": 3}],
+        # A claimed pair that breaks the value rule is REFUSED: counted out so
+        # the predicate can fail the cell closed, never silently dropped.
+        "embedded exceeds total": ([{"points_total": 3,
+                                    "points_embedded": 7}], 1),
+        "bool total": ([{"points_total": True, "points_embedded": 5}], 1),
+        "negative total": ([{"points_total": -5, "points_embedded": 5}], 1),
+        # An ABSENT half is an unknown, not a lie: excluded and NOT refused.
+        "half known": ([{"points_total": 3, "points_embedded": None}], 0),
+        "key absent": ([{"points_total": 3}], 0),
     }
-    for why, outcomes in impossible.items():
+    for why, (outcomes, refused) in impossible.items():
         assert _points_census(outcomes) == {"points_total": None,
-                                            "points_embedded": None}, why
+                                            "points_embedded": None,
+                                            "records_refused": refused}, why
         assert _aggregate_embedding_coverage(outcomes) is None, why
 
     # A POSSIBLE pair still rolls up, including a real zero-of-N — the arm
     # that refuses a zero-of-N cell must keep seeing a total to fire on.
     assert _points_census([{"points_total": 12, "points_embedded": 0}]) \
-        == {"points_total": 12, "points_embedded": 0}
+        == {"points_total": 12, "points_embedded": 0,
+            "records_refused": 0}
     assert _aggregate_embedding_coverage(
         [{"points_total": 12, "points_embedded": 0}]) == 0.0
 
@@ -5603,6 +5633,84 @@ def test_points_census_refuses_an_impossible_or_half_known_pair():
                     {"points_total": 5, "points_embedded": 5}):
         coverage = _aggregate_embedding_coverage([outcome])
         assert coverage is None or 0.0 <= coverage <= 1.0, outcome
+
+
+def test_a_refused_census_record_refutes_the_cell(capsys):
+    """#10355 review P3: refusing an impossible record is NOT the same as
+    closing the class the rule names.
+
+    ``_points_census`` refuses a pair whose halves are impossible
+    (``embedded > total``, a bool, a negative). Dropping it silently leaves
+    the cell's census ``None/None``, which the coverage arm does not refute
+    (an unknown population is not a miss) — so a cell whose ONLY record was
+    impossible still read **MEASURED**, the exact certification the value rule
+    exists to prevent. In a MIXED cell the refused points left the population
+    and the published coverage could only rise, i.e. the exclusion fails in
+    the fail-open direction. So the refusal is carried out as
+    ``records_refused`` and fails the cell closed:
+
+        [{total: 3, embedded: 7}]                              -> refused, NOT MEASURED
+        [{1/1}, {3/7}]  -> census (1, 1), coverage 1.0         -> refused, NOT MEASURED
+        [{3, embedded: None}]   (a half-known, pre-R3 resume)  -> UNKNOWN, not refused
+
+    RED on the pre-fix head: ``_dense_leg_verified`` had no refused arm, so
+    both of the first two read **True** — the cell was certified as a dense
+    measurement over a population the producer had just contradicted. No
+    embedder involved, so this runs and fails in any environment."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    # (1) The cell's ONLY record is impossible. The census is unknown (None
+    # both halves) — and that is exactly why the refusal has to be carried
+    # out separately: the coverage arm cannot see it.
+    only = [{"points_total": 3, "points_embedded": 7}]
+    census = sg._points_census(only)
+    assert census == {"points_total": None, "points_embedded": None,
+                      "records_refused": 1}
+    assert sg._aggregate_embedding_coverage(only) is None
+    assert sg._dense_leg_verified([_sweep_cell(**census)]) is False
+
+    # (2) Mixed cell: a real point pair beside an impossible one. The RATIO is
+    # still published over the admitted records (1.0) — the number is not the
+    # verdict — but the cell is no longer certified, and the refusal is
+    # visible in the receipts instead of vanishing.
+    mixed = [{"points_total": 1, "points_embedded": 1},
+             {"points_total": 3, "points_embedded": 7}]
+    census = sg._points_census(mixed)
+    assert census == {"points_total": 1, "points_embedded": 1,
+                      "records_refused": 1}
+    row = _sweep_cell(embedding_coverage=sg._aggregate_embedding_coverage(mixed),
+                      **census)
+    assert row["embedding_coverage"] == 1.0
+    assert sg._dense_leg_verified([row]) is False
+
+    # ... and the operator sees WHY, in the line that carries the verdict.
+    capsys.readouterr()
+    sg._print_table([row], ingest_mode="v2", context_cap=8000,
+                    max_chunks_per_session=2)
+    line = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.startswith("dense leg:")]
+    assert line, "the table must carry the dense-leg verdict"
+    assert "NOT MEASURED" in line[0], line[0]
+    assert "records_refused=[1]" in line[0], line[0]
+
+    # (3) An ABSENCE is not a lie: a half-known pair and a pre-R3 resume are
+    # unknown, never refused, and the cell is not refuted on their account
+    # (the vector_strategy arm still governs it). This is the split that keeps
+    # the fail-closed rule from turning every resumed sweep red.
+    for absent in ({"points_total": 3, "points_embedded": None},
+                   {"points_total": 3}, {}):
+        assert sg._points_census([absent])["records_refused"] == 0, absent
+    unknown_cell = _sweep_cell(embedding_coverage=None, points_total=None,
+                               points_embedded=None)
+    assert sg._dense_leg_verified([unknown_cell]) is True
+    # ... and a clean cell's line carries no refusal note at all, so the note
+    # stays a signal rather than noise on every sweep.
+    capsys.readouterr()
+    sg._print_table([_sweep_cell()], ingest_mode="v2", context_cap=8000,
+                    max_chunks_per_session=2)
+    clean = [ln for ln in capsys.readouterr().out.splitlines()
+             if ln.startswith("dense leg:")]
+    assert clean and "records_refused" not in clean[0], clean
 
 
 def test_embedding_coverage_is_never_on_the_retrieval_aggregate(
@@ -5643,6 +5751,7 @@ def _sweep_cell(**over):
         "embedding_coverage": 1.0,
         "points_total": 40,
         "points_embedded": 40,
+        "records_refused": 0,
     }
     row.update(over)
     return row
