@@ -59,18 +59,34 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres``) whose omission
 would make the reproduced/not-reproduced list read as a complete partition.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted: **11 of 13 red** at ``a17576c43``, **8 of 13** at
-``f3c6c803b``, and **4 of 13** at ``a8be548762`` — the four there being exactly
-the findings that head's review raised (the landing pin's ``--jq -r``, the
-baseline's missing ``-m track_b`` half, the missing clean-tree precondition, and
-the two gate test legs the URI lane skips). The parser-sanity check is green on
-every revision by design: it guards against a re-pointed or deleted document, not
+revision rather than asserted — 14 checks at this head: **12 of 14 red** at
+``a17576c43``, **9 of 14** at ``f3c6c803b``, **5 of 14** at ``a8be548762``, and
+**2 of 14** at ``295d6d385``. The five at ``a8be548762`` are exactly the findings
+that head's review raised (the landing pin's ``--jq -r``, the baseline's missing
+``-m track_b`` half, the missing clean-tree precondition, and the two gate test
+legs the URI lane skips) plus the batch fence's own re-runnable-spelling check;
+the two at ``295d6d385`` are the checks the post-record commits added, so they are
+non-vacuous rather than bookkeeping. The parser-sanity check is green on every
+revision by design: it guards against a re-pointed or deleted document, not
 against a bad command. The contract-sentences check is green from ``f3c6c803b``
 on, which is when those sentences landed.
 
+**A revision matrix is not the whole measure — MUTANTS are the other axis, and
+they are measured too.** A doc revision only proves a check reds on the *mistakes
+that were made*; it says nothing about the next one. So every check that pins a
+command is also exercised against a mutated copy of the honest document, and the
+mutant must red: a refusal that only ``echo``es the test, a halt inside a
+subshell (``&`` / ``| cat``) or swallowed by ``|| true``, a suffix after the halt
+(``|| exit 1 && git switch -``), a second ``PINNED=`` assignment on the same line
+or behind a declarator, a fetch to a stale ref (``|| true``, ``--dry-run``,
+``main:refs/remotes/…``), and a wrapped or negated landing carrier. Each one is
+green on the *spelling* and wrong on the *behaviour*, which is the only class a
+substring predicate cannot see. **27 such mutants measured at this head: 0
+survive**, and the honest document is 0 of 14 red.
+
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
 session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
-this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports 13 ERRORS
+this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports 14 ERRORS
 that have nothing to do with the doctrine. Name a lane:
 
     TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_integration_doctrine.py -q
@@ -185,9 +201,10 @@ def _is_refusal(fence: list[str], i: int) -> bool:
     # dirty tree and refuses a clean one, i.e. it certifies the inversion.
     if code.startswith(("!", "echo ", "printf ", ":", "true")):
         return False
-    if "git status --porcelain" in code:
-        if not re.match(r"^(?:\[\s*-z\s|test\s+-z\s)", code):
-            return False
+    if "git status --porcelain" in code and not re.match(
+        r"^(?:\[\s*-z\s|test\s+-z\s)", code
+    ):
+        return False
     return _halts(_block(fence, i))
 
 
@@ -600,7 +617,7 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     # merge landing on the operator's local `main` while integration/batch-1
     # stays at the pin — the same silent wrong-tree the baseline fence's position
     # check closes on the other fence.
-    fence = [f for f in batch if any("batch-1" in _code(c) for c in f)][0]
+    fence = next(f for f in batch if any("batch-1" in _code(c) for c in f))
     merges = [i for i, c in enumerate(fence) if re.search(r"\bgit\s+merge\b", c)]
     assert merges, "the batch fence no longer merges anything — re-point this guard"
     before_merge = [c for c in fence[: min(merges)] if _MOVES_HEAD.search(_code(c))]
