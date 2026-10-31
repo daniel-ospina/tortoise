@@ -143,9 +143,14 @@ from .projection import _graph_metadata_write_scope
 # projection package (one home), not in a second copy at this call site.
 from .projection import _stored_prop_value, _UNSTORED
 from .projection.entities import (  # #3998: the declared :Source surface
-    _EVENT_SERVER_MANAGED_PROPS,
+    # #10389 review P2 (#3860 one-table rule): the label → server-managed set
+    # table is read by BOTH this live tenant route AND the replay fold
+    # (`projection._fold_entity_mutation`). Two copies of the contract is how the
+    # copy that drifts stops being true — and a set read by one arm is exactly
+    # the asymmetry that left an `EntityMutated {label: "Event"}` line replaying
+    # the narrative onto the anchor §9.1(b) calls prose-free.
+    _SERVER_MANAGED_PROPS_BY_LABEL,
     _SOURCE_NODE_PROP_NAMES,
-    _SOURCE_SERVER_MANAGED_PROPS,
     filter_source_props,
 )
 # #8006: the `search_keys` flatten rule has ONE home — the projection module that
@@ -38461,7 +38466,8 @@ class TortoiseSDK:
             # supplied, so an ordinary `update_entity(<eventId>, status=…)` pays
             # no extra round trip.
             _event_managed = sorted(
-                k for k in props if k in _EVENT_SERVER_MANAGED_PROPS)
+                k for k in props
+                if k in _SERVER_MANAGED_PROPS_BY_LABEL["Event"])
             if _event_managed and self._label_reachable_by(
                     self._get_proj().g, "Event", id_val):
                 raise ValueError(
@@ -38484,7 +38490,9 @@ class TortoiseSDK:
                         self._stored_source_document_kinds(
                             self._get_proj().g, id_val),
                         props, surface="update_entity", none_demotes=True)
-                _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
+                _managed = sorted(
+                    k for k in props
+                    if k in _SERVER_MANAGED_PROPS_BY_LABEL["Source"])
                 if _managed:
                     # #3998: the STATE and the merge TOKEN are refused through the
                     # generic surface.

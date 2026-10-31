@@ -5929,6 +5929,28 @@ class _EntityHandlers:
 
         # #228: persist arbitrary caller-supplied props (iterate inner dict
         # so nested {event:{...}} and flat formats both work)
+        # #10389 review P3-1(a): a DENIED key is DROPPED here, and that drop was
+        # SILENT — `_persist_extra_props` filters `_META_KEYS | _EVENT_HANDLED`
+        # and returns nothing about the filtered keys, so
+        # `create_event(..., story_arc=<prose>)` answered SUCCESS and discarded
+        # the key. Named instead, because silence is the failure shape this
+        # change closes elsewhere: `_upsert_source` WARNS on its allowlist
+        # refusal and the commit path reports `narrative_not_recorded` rather
+        # than a quiet 200. A LEGACY journal line reaching this same fold replays
+        # to the same warning, which states the declared trade (the key stays
+        # READABLE on a node that already carries it, and is never WRITTEN)
+        # rather than absorbing it.
+        _managed_dropped = sorted(
+            k for k in inner
+            if k in _EVENT_SERVER_MANAGED_PROPS and inner[k] is not None)
+        if _managed_dropped:
+            logger.warning(
+                "Event %r supplied %s — DROPPED, not written to the node "
+                "(#10000/D1, §9.1: the S1 narrative lives in "
+                "`public.session_narrative`, never on a node). No error is "
+                "raised and nothing is stored for the key, so a caller that "
+                "reads it back of this Event gets None.",
+                eid, _managed_dropped)
         self._persist_extra_props(
             "MATCH (n:Event {eventId: $eid})", {"eid": eid},
             inner, self._EVENT_HANDLED,
@@ -6841,6 +6863,30 @@ _EVENT_SERVER_MANAGED_PROPS: frozenset = frozenset({
     # FOLD, and this route writes caller props straight through `SET n += $props`.
     "story_arc",
 })
+
+# The label → server-managed-set TABLE (#10389 review P2, the #3860 one-table
+# rule this change already invokes elsewhere). TWO consumers, ONE contract:
+#   * the LIVE tenant route (`sdk._update_entity`, behind the MCP tool
+#     `tortoise_update_entity`), which writes caller props with a live
+#     `SET n += $props` and consults no label skip-set; and
+#   * the REPLAY fold (`projection._FalkorProjection__fold_entity_mutation`,
+#     reached by `apply`, `rebuild_all`, `recover_from_log` and
+#     `backup.restore`), which applies a JOURNALLED state map verbatim.
+# ⛔ Both halves are load-bearing and neither implies the other. A live-writer
+# fix cannot retire bytes already in a journal — the same argument the `:Source`
+# arm has carried since #3998 ("the bytes are already in the journal on any
+# deployment that ran one"). Measured at #10389's review head: the `:Source`
+# side was defended on BOTH arms while `:Event` was defended on ONE, so
+# `update_entity(<agentSession eventId>, story_arc=…)` on ANY pre-fix head left
+# an `EntityMutated {label: "Event", state: {story_arc: …}}` line that the next
+# `rebuild_all` re-materialised on the anchor §9.1(b) calls prose-free.
+# Keyed by label, so the next label that grows a managed set (or the next key on
+# one of these) cannot leave one arm behind: an arm reading the table is
+# automatically covered, and an arm NOT reading it is the visible defect.
+_SERVER_MANAGED_PROPS_BY_LABEL: dict[str, frozenset] = {
+    "Source": _SOURCE_SERVER_MANAGED_PROPS,
+    "Event": _EVENT_SERVER_MANAGED_PROPS,
+}
 
 # The IDENTITY keys of a `:Source` — NOT refused to a caller-supplied map.
 # `create_source` treats these as server-managed (it MERGEs on `url` and mints

@@ -406,3 +406,63 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_an_event():
             "and must still land through this route")
     finally:
         sdk.close()
+
+
+def test_the_event_journal_replay_drops_the_prose():
+    """The `EntityMutated` → `:Event` half — the deny that survives a rebuild.
+
+    The two doors the round-5 review named are refused at the WRITE
+    (`_EVENT_HANDLED` for the `EventRecorded` fold, `_EVENT_SERVER_MANAGED_PROPS`
+    for the tenant route), and one of them is refused at the REPLAY too because
+    that fold is the replay fold. This is the third surface, and neither of those
+    reaches it: `_fold_entity_mutation` applies an `EntityMutated` record's
+    `state` verbatim for every label it has no deny arm for. The tenant route
+    journalled `story_arc` that way BEFORE the guard existed, so without this arm
+    a `rebuild_all` keeps restoring the prose — the "SURVIVED `rebuild_all`" half
+    of the finding — while the live door is shut.
+
+    It mirrors the `:Source` arm this PR already carries, whose set is read by the
+    same replay code (and whose residual (a) had to stop saying "nodes already
+    carrying the prose keep it" while a replay reclaimed it). Residual (a) now
+    states it for BOTH anchors.
+
+    Two arms so neither can pass vacuously: the prose is gone, AND the journalled
+    op's own other key still replays — a deny that dropped the whole state map
+    would silently lose a legitimate Event mutation.
+    """
+    if not os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("TORTOISE_DB_URI not set — the fold needs a graph to write")
+    from tortoise.projection import FalkorProjection
+    from tortoise.projection import entities as _E
+
+    assert "story_arc" in _E._EVENT_SERVER_MANAGED_PROPS, (
+        "`story_arc` left `_EVENT_SERVER_MANAGED_PROPS` — the tenant route "
+        "accepts it on an `:Event` again AND the `EntityMutated` replay arm "
+        "stops dropping it (#10389 ISSUE 1)")
+
+    proj = FalkorProjection.from_uri(
+        os.environ["TORTOISE_DB_URI"],
+        graph_name=f"test_9555_narr_event_replay2_{uuid.uuid4().hex[:8]}")
+    try:
+        eid = f"ev-replay-mutated-{uuid.uuid4().hex[:8]}"
+        proj._upsert_event({"id": eid, "eventId": eid,
+                            "eventKind": "agentSession"})
+        proj._fold_entity_mutation({
+            "op": "restatus", "id": eid, "label": "Event",
+            "state": {"story_arc": NARRATIVE, "status": "completed"},
+        })
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:$e}) RETURN e.story_arc, e.status",
+            params={"e": eid}).result_set
+        assert rows, "the probe Event is missing — the refusal proved nothing"
+        arc, status = rows[0]
+        assert arc is None, (
+            "the `EntityMutated` → `:Event` replay arm restored §9.1's prose on "
+            f"the node, so a `rebuild_all` re-rents the RAM #10000 stops "
+            f"(#10389 ISSUE 1). Got {arc!r}")
+        assert status == "completed", (
+            "the replay arm dropped the WHOLE state map instead of the one "
+            "denied key — a journalled Event mutation must still replay its "
+            "other properties")
+    finally:
+        proj.close()

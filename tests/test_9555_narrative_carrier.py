@@ -1393,3 +1393,46 @@ def test_the_journal_replay_drops_the_prose_and_the_residual_says_so():
         "deny), so 'nodes already carrying the prose keep it' is true only for "
         "copies that did not arrive that way — the contradiction `#10389`'s "
         "review P1 measured")
+
+
+def test_section_9_1b_names_the_event_routes_it_counts():
+    """The enumeration is a ROUTING TABLE — a count without the rows is a trap.
+
+    `#10389`'s round-5 review (ISSUE 1, P2) measured the defect this pins: §9.1(b)
+    stated a count and an enumeration that were BOTH `:Source`-shaped, while this
+    PR's own pin asserts the AgentSession `:Event` anchor is prose-free and the
+    commit writer's `e.story_arc` SET is deleted. Two caller-reachable `:Event`
+    doors were therefore open and undocumented, and NO test could red on the
+    sentence — the count was prose, so nothing tied it to the code.
+
+    Three arms, all read from the DOCUMENT, so a code change that leaves the
+    passage stale reds here rather than passing:
+
+    (1) both `:Event` mounts are named by SYMBOL, so a renamed deny set cannot
+        leave the prose pointing at an orphan;
+    (2) the Source-only count is gone — the passage may not say "FOUR routes";
+    (3) the one route no deny set reaches is named with its issue, so "the
+        routes below" cannot be read as the whole closure while the `:Point`
+        passthrough still admits the key.
+    """
+    text = _STORAGE_DOC.read_text(encoding="utf-8")
+    start = text.index("(b) The key stays DECLARED")
+    residual = text[start:text.index("**Where that placement is now EXECUTABLE**", start)]
+
+    for symbol in ("_EVENT_HANDLED", "_EVENT_SERVER_MANAGED_PROPS"):
+        assert symbol in residual, (
+            f"§9.1(b) does not name `{symbol}` — the `:Event` routes are "
+            "undocumented again by an enumeration that only describes the "
+            "`:Source` half (#10389 review ISSUE 1)")
+
+    assert "FOUR routes" not in residual, (
+        "§9.1(b) is back to the `:Source`-only count: the two `:Event` routes "
+        "(the `EventRecorded` fold and the generic tenant route on the anchor "
+        "the commit path stops writing) are then undocumented, which is the "
+        "understatement #10389's review measured")
+
+    assert "#10429" in residual, (
+        "§9.1(b) no longer names the one route the enumeration does NOT reach "
+        "(the `:Point` passthrough). Without it the passage reads as a complete "
+        "closure while `create_point(..., story_arc=…)` still lands the prose "
+        "on a `:Point` — the same class of claim the last review red-ed")
