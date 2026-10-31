@@ -23,6 +23,8 @@ degrades to "no bound" (the caller's fallback) rather than to an empty filter.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from tools.longmem_eval.retrieve import TimeConstraint, _apply_time_window
@@ -129,6 +131,29 @@ def test_timestamp_shaped_iso_hit_on_the_boundary_day_is_now_kept():
         [{"session_date": "2023-04-11T00:00:00Z"}],
         TimeConstraint("recency", start="7"),
         question_date="2023-04-10") == []
+
+
+def test_the_raw_string_compare_is_why_normalization_is_required():
+    """The defect's MECHANISM, pinned as a fact rather than left in prose.
+
+    Both dead halves of the pre-fix seam were lexical, and both are reproduced
+    here on the exact values the producer and the ISO bounds carry. This is
+    the non-vacuity record for the rest of the module: if either assertion
+    ever starts holding, the shape changed and the surrounding tests stop
+    proving what they claim.
+    """
+    # interval, producer shape: "/" (0x2F) > "-" (0x2D) at index 4, so the
+    # ISO upper bound sorts BEFORE every slash-shaped date.
+    assert not ("2023-04-03" <= "2023/04/10 (Mon) 17:50" <= "2023-04-10")
+    # interval, ISO-with-time hit: the date-only bound is a PREFIX of the
+    # timestamp, so the shorter string sorts first and the same-day hit is
+    # dropped (the declared widening above).
+    assert not ("2023-04-10T00:00:00Z" <= "2023-04-10")
+    # recency, producer question date: ``strptime(..., "%Y-%m-%d")`` raises
+    # on the slash shape — the pre-fix ``except`` turned that into the
+    # caller's fallback signal, so the window never applied.
+    with pytest.raises(ValueError):
+        datetime.strptime(QUESTION_DATE[:10], "%Y-%m-%d")
 
 
 def test_absent_question_date_still_degrades_to_no_bound():
