@@ -1703,16 +1703,16 @@ UNTRUSTED_DATA_CLAUSE = (
 )
 
 #: How many nonce candidates the boundary ladder may try. Each attempt is one
-#: sha256 and a DIFFERENT 64-bit nonce, so exhausting the ladder requires the
-#: body to contain all eight candidates at once. This is a FIXED-POINT
-#: requirement, not eight independent preimages: the nonce hashes the body, so
-#: the attacker is not choosing any single candidate against a known target —
-#: each attempt they "win" CHANGES the body they must win against next. Because
-#: the fix must hold for every one of the eight values simultaneously, the chain
-#: has no step an attacker can force: three rounds of
-#: ``body += marker(nonce(body))`` walk
-#: 56a0407a… → 3bf09b03… → 721327c4… → c9608f4f…, i.e. landing on the
-#: fixed point is a search over ~len(body)/16¹⁶ ≈ 4.3e-16 for an 8,009 B body.
+#: sha256 over the SAME unchanged body with a DIFFERENT 64-bit nonce, so
+#: exhausting the ladder requires the body to contain all eight candidates at
+#: once. This is a FIXED-POINT requirement, not eight independent preimages: the
+#: nonce hashes the body, so the attacker is not choosing any single candidate
+#: against a known target — and the body is never rewritten between attempts, so
+#: there is no chain to walk either. What the body must defeat is all eight
+#: candidates SIMULTANEOUSLY, each of them a hash of that same body. Landing on
+#: that fixed point costs a search over ~len(body)/16¹⁶ ≈ 4.3e-16 at an 8,009 B
+#: body for ONE candidate — quoted because it is the WEAKEST form of the bound
+#: (holding for all eight at once can only be harder, never easier).
 #: Unreachable in practice; the exhaustion path below is defined anyway,
 #: because a render path must not raise and must not emit a boundary the body
 #: can close.
