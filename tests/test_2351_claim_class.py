@@ -565,33 +565,77 @@ def test_ep_backstop_does_not_narrow_a_direct_edge_to_a_non_point(lane):
     )
 
 
-def test_ep_backstop_leaves_an_unprovable_source_slot_alone(lane):
-    """No idx ⇒ the source slot is NOT provable, so no class verdict (#943).
+def test_ep_backstop_judges_the_override_on_an_idx_less_operator(lane):
+    """#10364: no ``idx`` must NOT stand the OVERRIDE guard down.
 
-    ``ORDER BY coalesce(r.idx, 0), c.id`` makes every idx-less input position
-    0 and breaks the tie lexicographically on a legacy/migrated operator, so
-    ``input_ids[0]`` may be a target. Judging a class against that slot can
-    block the CORROBORATION leg and leave the override leg flowing — the exact
-    inversion of this guard. The sibling source-slot guard already refuses to
-    act when ``op_idx_known`` is false (#943 review); the class guard must do
-    the same or it acts on a guess (#2351 review P2).
+    The two guards in ``_affected_factors`` need different evidence, which is
+    why they were wrongly gated together:
+
+      * the SOURCE-SLOT guard asks *"was the idx-0 source stripped?"* — a
+        verdict that is only meaningful if idx 0 IS the source, so it must
+        stand down when ``idx`` is absent (#943 review);
+      * the OVERRIDE guard asks a **positional** question — which leg of THIS
+        factor pushes a derived claim's belief into an asserted one — and the
+        positions it judges are exactly the ``input_ids`` ``_update_factor``
+        reads (``receives = bwd if c == input_ids[0] else fwd``). Belief flow is
+        positional, so the verdict is computable with no ``idx`` at all.
+
+    Measured before the fix: the idx-less factor kept its stored ``->``
+    unchanged (``_last_skipped_factors == []``) while the identical wiring with
+    ``idx`` was dropped as ``derived_over_asserted`` — the same wiring
+    propagated or not depending only on whether the edges carry ``idx``.
+
+    The edge order is pinned by leaving ``idx`` on the target edge, so the
+    derived input is provably ``input_ids[0]``; ``op_idx_known`` is still false
+    because an operator is idx-unknown as soon as ANY input edge lacks ``idx``.
     """
-    src = lane.create_point("statement", "authored source")["id"]
-    computed = lane.create_point("statement", "computed input")["id"]
-    op = lane.create_operator("IMPL", src, [computed])  # legal: both asserted
+    src = lane.create_point("statement", "computed source")["id"]
+    tgt = lane.create_point("statement", "authored target")["id"]
+    op = lane.create_operator("IMPL", src, [tgt], direction="->")
     # The class and the missing idx are written AFTER creation — the
     # pre-guard / bulk-written / migrated shape the backstop exists for.
     lane._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
-        params={"id": computed})
+        params={"id": src})
     lane._get_proj().g.query(
-        "MATCH (o:Point {id:$oid})-[r:IMPL]->(c) REMOVE r.idx",
-        params={"oid": op["id"]})
-    factor = _factor(lane, op["id"], computed)
-    assert factor is not None, "the factor must not be dropped"
-    assert factor[5] == "bidirectional", (
-        "with no idx the source slot is unprovable, so the guard must not "
-        f"narrow the factor on a guess; got {factor[5]!r}"
+        "MATCH (o:Point {id:$oid})-[r:IMPL]->(c) "
+        "WHERE c.id=$cid REMOVE r.idx",
+        params={"oid": op["id"], "cid": src})
+    ep = TortoiseEP(lane._get_proj())
+    factors = ep._affected_factors({tgt}, skipped=ep._last_skipped_factors)
+    reasons = [sk.get("reason") for sk in ep._last_skipped_factors]
+    assert "derived_over_asserted" in reasons, (
+        "an idx-less derived->asserted factor must be dropped and reported, "
+        f"never propagated with its direction unchanged; got {reasons!r}"
+    )
+    assert all(f[0] != op["id"] for f in factors), (
+        "the dropped operator must not appear in the factor list"
+    )
+
+
+def test_ep_backstop_narrows_rather_than_nukes_an_idx_less_factor(lane):
+    """#10364: the idx-less verdict NARROWS the live leg, keeping corroboration.
+
+    A guard that dropped every idx-less mixed-class factor would over-block the
+    shape the write doors keep (an authored belief corroborating a computed
+    one). On a ``<->`` factor the override leg is blocked and the reverse leg
+    survives, which is exactly the behaviour the idx-full path already has.
+    """
+    src = lane.create_point("statement", "computed source")["id"]
+    tgt = lane.create_point("statement", "authored target")["id"]
+    op = lane.create_operator("IMPL", src, [tgt])  # bidirectional
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
+        params={"id": src})
+    lane._get_proj().g.query(
+        "MATCH (o:Point {id:$oid})-[r:IMPL]->(c) "
+        "WHERE c.id=$cid REMOVE r.idx",
+        params={"oid": op["id"], "cid": src})
+    factor = _factor(lane, op["id"], tgt)
+    assert factor is not None, "the corroboration leg must survive"
+    assert factor[5] == "<-", (
+        "the derived->asserted leg must be blocked and the asserted->derived "
+        f"leg kept; got {factor[5]!r} (unchanged means the guard stood down)"
     )
 
 
