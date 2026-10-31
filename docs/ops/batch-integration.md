@@ -227,7 +227,10 @@ rm -f "$B/baseline-trackb.xml"
 uv run pytest tests/test_ingest_safety.py -q --junitxml="$B/baseline-trackb.xml" -m track_b
 BASELINE_TRACK_B_RC=$?
 [ "$BASELINE_TRACK_B_RC" -eq 0 ] || [ "$BASELINE_TRACK_B_RC" -eq 1 ] || { echo "the baseline's track_b half did not COMPLETE (rc=$BASELINE_TRACK_B_RC; 137=SIGKILL/OOM) — that half has no ledger, so Phase 4 cannot classify a track_b id at all"; exit 1; }
-BASELINE_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/baseline-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
+# ⛔ No `|| exit 1` on this: a pipeline's status is its LAST command's, and `awk … END{print s+0}`
+# always succeeds — so that halt could never fire (measured: a missing report prints grep's error, then
+# T=[0], and the assignment still exits 0). The `-gt 0` check on the next line IS the halt.
+BASELINE_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/baseline-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
 [ -n "$BASELINE_TOTAL" ] && [ "$BASELINE_TOTAL" -gt 0 ] || { echo "no baseline junit total — the baseline run wrote no report"; exit 1; }
 # ⛔ CARRY the total to Phase 3 in a FILE, not a shell variable. Phase 3 runs in a LATER shell (the
 # same reason the run's status and `$PINNED` are carried in files): there `[ "$BATCH_TOTAL" -ge
@@ -387,13 +390,20 @@ Same lane, same commands, same env as the baseline — **both** halves of the de
 # non-conflicting local modifications into the tree under test, so uncommitted work created during
 # phases 2-3 would be measured by the run that authorizes BATCH-GREEN.
 [ -z "$(git status --porcelain)" ] || { echo "dirty tree — the gate would measure it, not the batch"; exit 1; }
+# ⛔ ...and WHICH tree, not merely a clean one. This fence is usually a LATER shell than Phase 2's, and
+# `git switch` in any intervening shell — or a lane branch that was left checked out — makes this run
+# measure a tree that is not the batch. Every other phase halts on its tree (Phase 1 and Phase 2
+# `git switch -C … || exit 1`, Phase 4 `git switch integration/batch-1 || exit 1`); the gate phase is
+# the one whose tree the verdict is ABOUT, so it asserts the branch Phase 2 created.
+[ "$(git rev-parse --abbrev-ref HEAD)" = integration/batch-1 ] || { echo "not on integration/batch-1 (HEAD is $(git rev-parse --abbrev-ref HEAD)) — the gate would measure that tree, not the batch: switch to the batch branch and re-run"; exit 1; }
 
 # Half 1 — the deterministic suite. Detached and POLLED, never one blocking call: a wedged
 # foreground run takes the whole lane down with it and leaves no log.
 # ⛔ The STATUS is written by the run's OWN shell, never recovered with `wait`. `wait` only reaps THIS
-# shell's children, and the poll below happens in a LATER shell — the only way to satisfy the line
-# above (`never one blocking call`). Measured (bash 5.2): `bash: wait: pid N is not a child of this
-# shell`, rc=127 — so `wait` declared a COMPLETED, green run UNPROVEN and printed the wrong diagnosis.
+# shell's children, so `wait` cannot be used at all. Measured (bash 5.2): `bash: wait: pid N is not a
+# child of this shell`, rc=127 — it declared a COMPLETED, green run UNPROVEN and printed the wrong
+# diagnosis. The poll below reads the file the run's OWN shell writes, so it is correct in THIS shell
+# or in a LATER one — and it WAITS before it reads, which is what makes this fence runnable.
 # The subshell writes `$?` to a file, so no step here is shell-local.
 # ⛔ Re-derive the ledger directory: this fence is usually a LATER shell than Phase 0's, and `$B` is
 # a DERIVATION, not a carrier. A fence that skipped this would `rm -f` and write at `$B`'s path with
@@ -410,14 +420,21 @@ B="/tmp/batch-$BATCH"
 [ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
 rm -f "$B/batch.rc" "$B/batch-junit.xml"   # a stale status/report from an earlier run must not decide this one
 ( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
-[ -f "$B/batch.rc" ] && echo 'DONE — read $B/batch.rc' || echo RUNNING   # repeat until DONE
+# ⛔ WAIT before the poll, and BOUND the wait. The suite is detached (the `&` above), so a one-shot
+# read on the very next line is not a poll — it is a race this fence loses every time: the block would
+# print RUNNING and the halt below would then report "never launched in this shell" about a run it
+# launched one line earlier, and half 2 — the `track_b` gate member — would never be reached. So the
+# fence as written measured nothing on any tree. The loop is bounded (240 × 15 s = 60 min) so a wedged
+# run cannot hold the lane, and the run stays detached, so it outlives this shell.
+for _ in $(seq 1 240); do [ -f "$B/batch.rc" ] && break; sleep 15; done
+[ -f "$B/batch.rc" ] && echo 'DONE — read $B/batch.rc' || echo RUNNING   # reachable now: the wait above
 
 # ⛔ DONE is not PASSED. A pid that goes away fails exactly as fast for a run the kernel OOM-killed as
 # for one that finished — measured on #10399, five `python` processes were killed in 23 minutes — and a
 # killed run prints no summary, hence carries no failure ids, so Phase 4 would diff it straight to
 # BATCH-GREEN. The status the run itself wrote is the only thing that separates them; require a
 # COMPLETED report:
-[ -f "$B/batch.rc" ] || { echo "no $B/batch.rc — the gate run was never launched in this shell: launch it above, then poll"; exit 1; }
+[ -f "$B/batch.rc" ] || { echo "no $B/batch.rc after the bounded wait — the gate run did not finish within 60 min (read $B/batch.log for where it stopped), or this shell never launched it"; exit 1; }
 RC="$(cat "$B/batch.rc")"
 [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || { echo "the gate run did not COMPLETE (rc=$RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
 # ⛔ The baseline TOTAL does not survive Phase 1's shell either: Phase 3 may be a LATER shell, where
@@ -426,7 +443,9 @@ RC="$(cat "$B/batch.rc")"
 # wrote, exactly as the status and the pin are read, and refuse an absent one.
 [ -s "$B/baseline.total" ] || { echo "no $B/baseline.total — Phase 1 never recorded the baseline count; re-run Phase 1 (Landing route 1)"; exit 1; }
 BASELINE_TOTAL="$(cat "$B/baseline.total")"
-BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/batch-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
+# Same as Phase 1's total: `awk` always exits 0, so a `|| exit 1` here would be an unreachable halt.
+# The `-ge` comparison below is the real gate.
+BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/batch-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
 [ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the gate run reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — SHORTER than the baseline: investigate (a killed run, or a diff that legitimately removes or moves tests) — and never call it green: UNPROVEN-FULL-SUITE(<lane>)"; exit 1; }
 
 # Half 2 — the track_b leg CI runs as its own MUST-PASS, gate-member job (`-m track_b`).

@@ -131,19 +131,23 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-tes
 ``ci-introduced-failure``) whose omission
 would make the reproduced/not-reproduced list read as a complete partition, plus the lane
 ASSERTION (``TORTOISE_DB_URI`` or an explicit carve-out, HALTING) in every fence that runs the suite
-— a SELECTION in Phase 0's fence is a different shell's environment, so it cannot substitute for one.
+— a SELECTION in Phase 0's fence is a different shell's environment, so it cannot substitute for one,
+plus the TREE every full-suite fence runs on (named, un-moved between the name and the run) and the
+BOUNDED WAIT between a detached launch and the first read of the status file it is still writing.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **25 checks** at this head, **0 red**: **2 of 25** at
-``62c79b0b8`` (the lane assertion and the hand-written ordinal — the two findings of the round this
-head answers), **3 of 25** at
-``a6a71c1e5`` (the per-batch ledger, added there), **4 of 25**
-at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **6 of 25** at
+revision rather than asserted — **27 checks** at this head, **0 red**: **2 of 27** at
+``7fb722a9a`` (the two this round added — the gate fence's TREE assertion and the
+bounded wait before the status read), **4 of 27** at
+``62c79b0b8`` (those plus the lane assertion and the hand-written ordinal — the two findings of the
+round that preceded it), **5 of 27** at
+``a6a71c1e5`` (the per-batch ledger, added there), **6 of 27**
+at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **8 of 27** at
 ``a12792afe`` (those plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
-the baseline report's completion check), **21 of 25** at
-``a17576c43``, **18 of 25** at ``f3c6c803b``, **16 of 25** at ``a8be548762``, **14 of 25** at
-``295d6d385``, **12 of 25** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **11 of 25** at
-``ed1c03b82`` and ``c50628450``, and **10 of 25** at ``a888c6980`` / ``aede4190f`` — where three
+the baseline report's completion check), **23 of 27** at
+``a17576c43``, **20 of 27** at ``f3c6c803b``, **18 of 27** at ``a8be548762``, **16 of 27** at
+``295d6d385``, **14 of 27** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **13 of 27** at
+``ed1c03b82`` and ``c50628450``, and **12 of 27** at ``a888c6980`` / ``aede4190f`` — where three
 are exactly that round's findings (the bisect attribution, the gate run's completion, and
 the omitted ``changes`` member) and the fourth is the exit-status-persistence requirement,
 which landed AFTER those revisions. The fourth is the rule rather than an exception: a check
@@ -160,9 +164,7 @@ design — they guard against a re-pointed or deleted document, not against a ba
 the header-count check (green on every revision by construction: it reads THIS module's
 header, which a ``DOC`` re-point does not change), and the ``#2985`` extras trap, which every
 revision here already fixed and which is pinned by the ``uv sync`` mutants instead. The
-parser-sanity check is green on every revision by design: it guards against a re-pointed or
-deleted document, not against a bad command. The contract-sentences check is green from
-``f3c6c803b`` on, which is when those sentences landed.
+contract-sentences check is green from ``f3c6c803b`` on, which is when those sentences landed.
 
 **A revision matrix is not the whole measure — MUTANTS are the other axis, and
 they are measured too.** A doc revision only proves a check reds on the *mistakes
@@ -250,6 +252,15 @@ outside quoted spans). One survivor remains and is named rather than hidden:
 whose `|| exit 1` halts — a predicate-tightness miss, not a broken invariant. A
 separator appended to the poll line, the merge line, the after-merge log line or the
 revert line is the same class one fence over: every one of them must BE one command.
+
+**5 more measured with the tree assertion and the bounded wait, 5 killed**, each red on ONE check
+and on nothing else: insert `git switch main` between the tree assertion and the gate suite run
+(the presence-only form lets that through — the guard reads the run, not the name), delete the tree
+assertion, delete the bounded wait, replace the bounded loop
+with a single `sleep 900` (unbounded in practice — the bound is what makes the wait finite), and
+move the wait AFTER the poll it exists to protect. The first of those is the one a presence-only
+check lets through, which is why the tree check refuses a MOVER between the name and the run rather
+than merely requiring the name.
 
 **The review at ``aa1cd92d4`` added two COMMAND defects and their guards, each measured red on the
 pre-fix text.** (1) The blame sha was read from ``HEAD`` after ``git bisect run``, which leaves HEAD on
@@ -1296,6 +1307,114 @@ def test_the_lane_is_asserted_in_every_fence_that_runs_the_suite() -> None:
                 f"the lane assertion sits after fence {number}'s first write into the ledger: the "
                 "artifacts are already being produced for a run that cannot mean anything"
             )
+
+
+#: The batched tree Phase 2 creates. Phase 2's own fence is
+#: `git switch -C integration/batch-1 "$PINNED" || exit 1`, so the name is the doctrine's, not this
+#: guard's — `test_every_full_suite_fence_names_the_tree_it_runs_on` only requires that a fence
+#: ESTABLISHES its tree that way or ASSERTS it, never that it spells this particular branch.
+_TREE_SWITCH = re.compile(r"^git\s+switch\s+-C\s+\S+.*\|\|\s*exit\s+[1-9]\d*$")
+
+#: The only honest shape of "wait for the detached run": a BOUNDED loop on a literal count that
+#: sleeps between reads. Unbounded (`while [ ! -f … ]`) holds a wedged lane forever; unbounded-free
+#: (`sleep 900` once) guesses. A literal bound makes the wait provably finite.
+_BOUNDED_WAIT = re.compile(r"^for\b.*\$\(\s*seq\s+1\s+[0-9]+\s*\).*\bdo\b.*\bsleep\s+[0-9]+")
+
+
+def test_every_full_suite_fence_names_the_tree_it_runs_on() -> None:
+    """#10400 review P2: the GATE fence refused a dirty tree but never said WHICH tree.
+
+    Every other phase halts on its tree — Phase 1 and Phase 2 through
+    `git switch -C <branch> "$PINNED" || exit 1`, Phase 4 through `git switch integration/batch-1 ||
+    exit 1` — because the branch those phases leave HEAD on is not carried into the next shell. Phase
+    3 is the run the verdict is ABOUT, and it checked only `git status --porcelain`. So a `git switch`
+    in any intervening shell (or a lane branch left checked out) made the gate measure a tree that is
+    not the batch, and nothing said so: measured, inserting `git switch main` immediately before the
+    Phase 3 suite run left the whole guard GREEN.
+
+    A fence satisfies this either by CREATING its tree (`switch -C … || exit`, which is how Phase 1
+    and Phase 2 establish theirs) or by ASSERTING it (`git rev-parse --abbrev-ref HEAD`), and an
+    assertion must HALT — an `echo` of the wrong branch measures the wrong tree just as silently.
+    """
+    fences = _full_suite_fences()
+    assert len(fences) >= 2, (
+        "expected at least the Phase 1 and Phase 3 suite fences, parsed "
+        f"{len(fences)} — re-point this guard"
+    )
+    for number, fence in enumerate(fences, start=1):
+        codes = [_code(c) for c in fence]
+        establishes = [c for c in codes if _TREE_SWITCH.match(c)]
+        asserts = [c for c in codes if "git rev-parse --abbrev-ref HEAD" in c]
+        assert establishes or asserts, (
+            f"full-suite fence {number} never names the tree it runs on. A clean tree is not the "
+            "BATCH's tree: `git switch` in a later shell (or a lane branch left checked out) makes "
+            "this run measure something else, and the verdict is about the tree it actually read. "
+            'Create the tree (`git switch -C <branch> "$PINNED" || exit 1`) or assert it "\n            "(`[ "$(git rev-parse --abbrev-ref HEAD)" = <branch> ] || { … exit 1; }`) in THIS fence'
+        )
+        if not establishes:
+            assert any(_halts(c) for c in asserts), (
+                f"the tree assertion in full-suite fence {number} does not HALT: a bare compare, "
+                "`|| true` or an `echo` leaves a gate run on another branch certifying the batch"
+            )
+        # …and it must come before the suite line it guards, or the run it certifies is the one
+        # that moved the tree.
+        first_suite = min(i for i, code in enumerate(codes) if _SUITE_CMD.match(code))
+        asserted_at = [i for i, code in enumerate(codes) if _TREE_SWITCH.match(code)] + [
+            i for i, code in enumerate(codes) if "git rev-parse --abbrev-ref HEAD" in code
+        ]
+        assert min(asserted_at) < first_suite, (
+            f"fence {number} names its tree only AFTER the first suite run, so the run it guards is "
+            "exactly the one that may have moved it"
+        )
+        # …and nothing may MOVE the tree between the name and the run it names. Presence alone is
+        # not enough: `[ … = integration/batch-1 ] || exit 1` followed by `git switch main` and the
+        # suite satisfies every line above while measuring `main` (measured: that exact insertion
+        # left the presence-only form GREEN).
+        movers = [
+            i
+            for i, code in enumerate(codes)
+            if min(asserted_at) < i < first_suite
+            and re.match(r"^git\s+(?:switch|checkout|reset|rebase|restore)\b", code)
+        ]
+        assert not movers, (
+            f"fence {number} CHANGES the tree between naming it and running the suite on it "
+            f"(line {movers[0] + 1}: {codes[movers[0]]!r}): the run certifies that tree, not the one "
+            "the branch named"
+        )
+
+
+def test_a_fence_that_launches_the_suite_waits_before_it_reads_the_status() -> None:
+    """#10400 review P2: Phase 3's fence could not be executed at all.
+
+    The launch, a ONE-SHOT read of the status file and the "did it COMPLETE" halt sat in the same
+    fenced block, in that order. Executed top-to-bottom — which is how the document presents every
+    fence — the read lands before the detached run can possibly have written `$B/batch.rc`, the block
+    prints `RUNNING`, and the halt two lines later reports the run as "never launched in this shell"
+    about a run it launched one line earlier. Measured with a 2-second stand-in suite: `RUNNING`, then
+    the halt, `rc=1`, while the run's own shell wrote `0` three seconds later. So the gate phase could
+    not be run as written, and half 2 — the `track_b` MUST-PASS gate member — was never reached.
+
+    The fix is a BOUNDED wait between the launch and the read, not a blocking call: the suite stays
+    detached (`&`) and so outlives the shell, and the bound keeps a wedged run from holding the lane.
+    """
+    waited = 0
+    for number, fence in enumerate(_fences(), start=1):
+        codes = [_code(c) for c in fence]
+        launches = [i for i, c in enumerate(codes) if _STATUS_WRAPPER.match(c)]
+        if not launches:
+            continue
+        for poll in (i for i, c in enumerate(codes) if _RC_POLL.match(c)):
+            assert any(_BOUNDED_WAIT.match(codes[i]) for i in range(launches[0], poll)), (
+                f"fence {number} launches a detached suite run and then reads its status file with "
+                "no bounded wait in between, so the fence cannot execute: it prints RUNNING and the "
+                "halt below it reports a run it just launched as never launched. Put a bounded wait "
+                "(`for _ in $(seq 1 240); do [ -f $B/<run>.rc ] && break; sleep 15; done`) between "
+                "the launch and the poll"
+            )
+            waited += 1
+    assert waited, (
+        "no fence launches a detached suite run and polls its status — re-point this guard"
+    )
 
 
 #: The per-batch ledger directory. `BATCH` is REQUIRED (`:?` halts on an empty one — an empty name
@@ -2421,7 +2540,8 @@ def test_the_unreproduced_gate_legs_are_named() -> None:
         "surface-guard",
         "ci-introduced-failure",
         # `changes` is the diff SELECTOR: a non-deferrable row of the gate's own leg
-        # table (`.github/workflows/python-ci.yml:4483`, not in `DEFERRABLE_LEGS`),
+        # table (`.github/workflows/python-ci.yml:4484` — the row itself; `:4483` is the
+        # `cat > "$LEGS_FILE" <<'LEGS'` opener — not in `DEFERRABLE_LEGS`),
         # and the one leg whose failure makes every other leg skip — the selection a
         # batch's pytest run cannot exercise (#10400 P3).
         "`changes`",
