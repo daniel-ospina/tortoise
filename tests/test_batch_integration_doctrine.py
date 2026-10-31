@@ -174,6 +174,24 @@ or facts that were false against the tree they describe:
   earlier for the ``needs: changes`` set, and nothing pinned these. Both numbers are gone; both
   sections name the source. The **branch** name is stated as fixed (the LEDGER is per-batch, the branch
   is not), with a second concurrent batch declared out of scope.
+* **the DRAFT was credited with a guarantee it does not buy.** The draft rule closed the ``4dc214c02``
+  P1 — the landing assertion ran nowhere on the merge path — and then over-claimed: it called itself
+  *"the guarantee bors and GitHub's queue get by owning the merge"*. Mechanically it is not, and
+  ``.mergify.yml``'s own configuration contract says why in one line: ``queue_conditions`` gates
+  **ENTRY** (against the PR head) and ``merge_conditions`` gates the **MERGE** (against the queue
+  branch). ``-draft`` is an ENTRY condition, so un-drafting makes the PR *eligible* — it does not pin
+  the base. ``merge_method: squash`` then applies the batch's diff to ``main`` **as it is at merge
+  time**; the queue's only re-validation of that moved composition is ``check-success=python-ci-gate``
+  (the TIERED selection, never the full suite); and ``.github/settings.yml`` leaves ``strict``
+  **false**, so nothing forces the batch branch onto the moved base. ``.mergify.yml`` measures a full
+  cycle at ~37 min against continuous merges, so the window is the whole cycle, and ``PINNED' +
+  batch-diff`` can land with every check in the Landing section green. The document now states that
+  residual window, names route 2 (the declared freeze) as the ONLY route that closes it, and — for the
+  routes that leave it open — carries a **post-merge tree detector**: a squash onto ``PINNED``
+  reproduces the tested tree exactly, so the landed commit's tree must equal the batch branch's tree,
+  and ``git diff --quiet origin/integration/batch-1 "$LANDED"`` says so or halts. Measured in a scratch
+  remote, both directions: an honest landing (base == pin at merge time) → ``rc=0``; the base moved by
+  an unrelated merge before the landing → ``rc=1``, with the untested ``h.txt`` in the diff.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
@@ -195,24 +213,27 @@ BOUNDED WAIT between a detached launch and the first read of the status file it 
 assembly MERGE (halted, and followed by a halted ``HEAD^2`` merge-commit assertion — a no-op merge
 exits 0), the baseline-diffed SKIP carriers (a skipped test is collected, so neither the status nor
 the count can see it), the GRADED ``git bisect run`` (a non-``COMPLETED`` probe status is git's 125,
-not a culprit), the DRAFT-until-asserted landing rule, and no hand-written number for a live-config
+not a culprit), the DRAFT-until-asserted landing rule, the RESIDUAL-WINDOW detector that answers the
+window a draft cannot close (the landed tree against the tested tree, halted), and no hand-written
+number for a live-config
 property (the required contexts that ``check-required-set.py --live`` asserts, ``.mergify.yml``'s
 ``batch_size``).
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **32 checks**, **0 red**: **5 of 32** at ``4dc214c02`` (this round's
-five and nothing else: the skip carriers, the graded bisect, the halted merge + ``HEAD^2`` assert,
-the draft-until-asserted landing rule, and the live-config literals), **8 of 32** at
+revision rather than asserted — **33 checks**, **0 red**: **6 of 33** at ``4dc214c02`` (the five that
+round added and nothing else: the skip carriers, the graded bisect, the halted merge + ``HEAD^2``
+assert, the draft-until-asserted landing rule, and the live-config literals — plus this round's
+residual-window check, which did not exist then), **9 of 33** at
 ``7fb722a9a`` (those five plus the three that round added — the gate fence's TREE assertion, the
-bounded wait before the status read, and the reviewed-head fetch's force + halt), **10 of 32** at
+bounded wait before the status read, and the reviewed-head fetch's force + halt), **11 of 33** at
 ``62c79b0b8`` (plus the lane assertion and the hand-written ordinal — the two findings of the round
-that preceded it), **11 of 32** at ``a6a71c1e5`` (the per-batch ledger, added there), **12 of 32**
-at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **14 of 32** at
+that preceded it), **12 of 33** at ``a6a71c1e5`` (the per-batch ledger, added there), **13 of 33**
+at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **15 of 33** at
 ``a12792afe`` (those plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
-the baseline report's completion check), **28 of 32** at ``a17576c43``, **25 of 32** at
-``f3c6c803b``, **23 of 32** at ``a8be548762``, **21 of 32** at ``295d6d385``, **20 of 32** at
-``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **19 of 32** at ``ed1c03b82`` and ``c50628450``, and
-**18 of 32** at ``a888c6980`` / ``aede4190f`` — where three are exactly that round's findings (the
+the baseline report's completion check), **29 of 33** at ``a17576c43``, **26 of 33** at
+``f3c6c803b``, **24 of 33** at ``a8be548762``, **22 of 33** at ``295d6d385``, **21 of 33** at
+``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **20 of 33** at ``ed1c03b82`` and ``c50628450``, and
+**19 of 33** at ``a888c6980`` / ``aede4190f`` — where three are exactly that round's findings (the
 bisect attribution, the gate run's completion, and the omitted ``changes`` member) and the fourth is
 the exit-status-persistence requirement, which landed AFTER those revisions. The fourth is the rule
 rather than an exception: a check added later reds on every revision older than it, so a revision's
@@ -220,9 +241,11 @@ count is "its own round's findings plus the checks that did not exist yet". Ever
 re-measured at THIS head, not carried forward — a carried-forward count drifts silently as checks
 land (six of them were stale by exactly the check the status wrapper added), which is the same defect
 class as a hard-coded bare-run ERROR count, and it is why the numbers are re-measured when a check is
-added rather than inherited. Every revision in the list re-read at this head gained exactly the FIVE
-checks this round added (the same +5 on every entry), because none of those defects was fixed before
-``4dc214c02``; that is the same rule, applied to the newest set. Four checks the revision matrix
+added rather than inherited. Every revision in the list re-read at this head gained exactly the ONE
+check this round added (the same +1 on every entry, measured), because that defect was not fixed
+before ``c7a772628`` — which is also where the reviewed head itself sits: **1 of 33** at
+``c7a772628``, exactly this round's finding and nothing else. That is the same rule, applied to the
+newest set. Four checks the revision matrix
 alone cannot red are
 named rather than left implied: the parser-sanity check and the contract sentences (green by
 design — they guard against a re-pointed or deleted document, not against a bad command),
@@ -311,8 +334,21 @@ pre-fix ``|| exit 1`` bisect grader; keep the grading but drop ``exit 125``. Del
 paragraph; name a draft rule and a ``queue_conditions`` entry in UNRELATED sentences (so the
 mechanism is not identified — the check reads one sentence, not two words anywhere). Restore "the
 seven required contexts"; restore ``batch_size: 4``; delete the concurrent-batch clause. The honest
-document is **0 of 32 red**, and the review's own head ``4dc214c02`` is **5 of 32** — exactly these
-five findings and nothing else.
+document is **0 of 33 red**, and the review's own head ``4dc214c02`` is **6 of 33** — exactly these
+five findings plus the one check that did not exist yet, and nothing else.
+
+**13 more measured with the ``c7a772628`` round, 13 killed** — each red on
+``test_the_residual_landing_window_is_stated_and_detected`` and on nothing else: delete the detector
+fence; replace its diff halt with ``|| true``; drop the fetch's halt; read ``$LANDED`` AFTER the diff;
+make the diff compare two constant files instead of the landed tree; delete the ENTRY/MERGE split
+sentence; credit the draft with "the guarantee" unqualified; drop ``merge_method: squash``; drop the
+tiered re-check; drop the ``strict`` **false** clause; promote the detector to *prevention*
+("it does not prevent the landing" → "it prevents the landing"); make route 2 no longer the ONLY
+route that closes the window; and point the diff at ``origin/main`` vs ``$PINNED`` instead of the two
+trees. The detector's own semantics were reproduced in a scratch remote rather than asserted: an
+honest landing (base == pin at merge time) → ``git diff --quiet`` ``rc=0``, and a base moved by an
+unrelated merge before the landing → ``rc=1`` with the untested file in the diff — the direction the
+fence halts on, and the direction it must not halt on.
 
 **The `7fb722a9a` review's P2 is recorded as MEASURED FALSE, not "fixed".** It reported that
 ``ci-introduced-failure`` and ``DEFERRABLE_LEGS`` "do not exist" and that the leg-table pointer is out
@@ -3086,6 +3122,198 @@ def test_the_batch_pr_is_a_draft_until_the_landing_assertion_passes() -> None:
     assert re.search(r"draft", aftermath, re.IGNORECASE), (
         "the Aftermath section (where the batch PR is described) must carry the draft rule too: it "
         "is the list an operator reads while opening the PR"
+    )
+
+
+#: The post-merge detector's SUBJECT: the landed commit's tree against the tested batch tree.
+#: A squash-merge onto the pin reproduces the tested tree exactly, so a non-empty diff here means the
+#: base moved inside the queue's cycle and `main` now holds a composition no full-suite run has seen.
+_LANDED_TREE_DIFF = re.compile(
+    r'git\s+diff\s+--quiet\s+origin/integration/batch-1\s+"\$LANDED"'
+)
+
+#: The landed sha, READ in the detector's own fence (nothing is carried between shells).
+_LANDED_SHA_READ = re.compile(r'^LANDED="\$\(\s*git\s+rev-parse\s+origin/main\s*\)"$')
+
+
+def test_the_residual_landing_window_is_stated_and_detected() -> None:
+    """the ``c7a772628`` P2: the draft gates queue ENTRY, and its guarantee stops there.
+
+    The P1 of the ``4dc214c02`` round was that the landing assertion ran NOWHERE on the merge path,
+    and the fix was to hold the batch PR as a draft. That fix then over-claimed: it called the draft
+    "the guarantee bors and GitHub's queue get by owning the merge". Mechanically it is not.
+    ``.mergify.yml``'s own configuration contract splits the two condition lists —
+    ``queue_conditions`` gates ENTRY against the PR head, ``merge_conditions`` gates the MERGE against
+    the queue branch — and ``-draft`` is an ENTRY condition. Un-drafting therefore makes the PR
+    eligible; it does not pin the base. ``merge_method: squash`` then applies the batch's diff to
+    ``main`` as it is at merge time, the queue's only re-validation of the moved composition is
+    ``check-success=python-ci-gate`` (the TIERED selection, never the full suite), and
+    ``.github/settings.yml`` leaves ``strict`` false, so nothing forces the batch branch onto the moved
+    base. ``.mergify.yml`` measures a full cycle at ~37 min against continuous merges, so the window
+    is the whole cycle: ``PINNED' + batch-diff`` can land with every check in the Landing section
+    green.
+
+    Two things are pinned, because either one alone is a claim with no mechanism behind it:
+
+    1. the document STATES the entry/merge split and the residual window (one sentence naming both
+       condition lists — two words in unrelated sentences is not the mechanism), and
+    2. it carries an EXECUTABLE post-merge detector: the landed commit's tree against the tested
+       batch tree, with the landed sha read in the same fence, a fetch before it, and a HALT on the
+       diff — route 2 (the freeze) being the only route that closes the window rather than detecting
+       a violation of it.
+    """
+    text = _text()
+    landing = text[text.index("### Landing") : text.index("## Prior art")]
+    # 1. ENTRY vs MERGE, in ONE sentence naming BOTH lists. The draft rule's own check already
+    # requires a `queue_conditions` + `-draft` sentence; this one requires the other half, so an
+    # editor cannot keep the draft and silently drop the fact that it gates entry only.
+    split = [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s", landing)
+        if "queue_conditions" in sentence
+        and "merge_conditions" in sentence
+        and "ENTRY" in sentence
+        and "MERGE" in sentence
+    ]
+    assert split, (
+        "the Landing section must state the queue's OWN split in one sentence — `queue_conditions` "
+        "gates ENTRY (the PR head) and `merge_conditions` gates the MERGE (the queue branch): that "
+        "is why un-drafting cannot pin the base, and a mention of each list in unrelated sentences "
+        "is not the mechanism"
+    )
+    assert re.search(r"residual window", landing, re.IGNORECASE), (
+        "the Landing section must name the residual window the draft leaves open"
+    )
+    # The three facts that MAKE the window real, each read from live config rather than asserted:
+    # `merge_method: squash` (the base is whatever main is at merge time), the queue's only
+    # re-check (`python-ci-gate`, the tiered selection), and `strict: false` in `.github/settings.yml`
+    # (nothing requires the batch branch onto the moved base).
+    for needle, why in (
+        ("merge_method: squash", "the merge applies the batch's diff to main AS IT IS at merge time"),
+        (
+            "check-success=python-ci-gate",
+            "the queue's only re-validation of the moved composition is the TIERED selection",
+        ),
+    ):
+        assert needle in landing, (
+            f"the residual-window paragraph must name {needle!r}: {why}, which is the window"
+        )
+    strict = [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s", landing)
+        if "strict" in sentence and ".github/settings.yml" in sentence
+    ]
+    assert strict, (
+        "the residual-window paragraph must state that `.github/settings.yml` leaves `strict` false — "
+        "without it the moved base would be refused and the window would not exist"
+    )
+    assert re.search(r"only route that", landing), (
+        "the Landing section must say route 2 (the declared freeze) is the ONLY route that closes the "
+        "window: routes 1 and a plain pin-checked landing leave it open and therefore owe the detector"
+    )
+    # ⛔ POLARITY on the ROLE: the comparison runs after the landing, so it cannot prevent it. A sentence
+    # that calls it a detector must ALSO say it does not prevent the landing — otherwise the next editor
+    # promotes it to prevention and the document claims a guarantee no command in it provides (the
+    # class the ``7fb722a9a`` round fixed for the tree assertion, one window over).
+    role = [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s", landing)
+        if re.search(r"detector", sentence, re.IGNORECASE)
+        and re.search(
+            r"does not prevent|never prevents|cannot prevent|is not prevention|not a prevention",
+            sentence,
+            re.IGNORECASE,
+        )
+    ]
+    assert role, (
+        "the post-merge tree comparison is a DETECTOR (this document's own gate/detector split), and the "
+        "sentence that names it must also say it does not PREVENT the landing — a bark block run after the "
+        "merge cannot prevent anything, and the wording must not read as though it does"
+    )
+    # ⛔ POLARITY on the comparative claim: the pre-fix sentence said the draft borrows "the guarantee
+    # bors and GitHub's queue get by owning the merge". That is the over-claim this check exists to
+    # refuse, so any sentence mentioning it must QUALIFY it — a document may compare itself to the
+    # prior art, it may not credit the draft with what the prior art gets from owning the merge.
+    owning = [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s", landing)
+        if "owning the merge" in sentence
+    ]
+    assert owning, (
+        "the Landing section no longer compares the draft rule to the prior art it is shorter than — "
+        "re-point this guard if the comparison moved, but do not drop it: it is what an adopter reads "
+        "instead of assuming the draft is the bors guarantee"
+    )
+    unqualified = [
+        sentence
+        for sentence in owning
+        if not re.search(r"less than|rather than|cannot|never", sentence, re.IGNORECASE)
+    ]
+    assert not unqualified, (
+        "the draft rule is credited with 'the guarantee bors and GitHub's queue get by owning the "
+        "merge' without qualification — that guarantee comes from owning the merge, and a draft is an "
+        f"ENTRY condition: {unqualified}"
+    )
+    # 2. The DETECTOR, as an executable fence. A claim with no command is the defect the ``4dc214c02``
+    # round fixed for the pin; the same defect one window over would be a paragraph.
+    detector = [
+        fence for fence in _fences() if any(_LANDED_TREE_DIFF.search(_code(c)) for c in fence)
+    ]
+    assert detector, (
+        "the Landing section must carry the post-merge detector as a command: "
+        "`git diff --quiet origin/integration/batch-1 \"$LANDED\"` — a landed-tree comparison "
+        "nothing executes is the assertion-runs-nowhere defect with one more window"
+    )
+    assert len(detector) == 1, (
+        f"the detector must be ONE fence, not {len(detector)}: a second copy is where the halt gets "
+        "dropped from the one an operator reads"
+    )
+    fence = detector[0]
+    reads = [i for i, c in enumerate(fence) if _LANDED_SHA_READ.fullmatch(_code(c))]
+    diffs = [i for i, c in enumerate(fence) if _LANDED_TREE_DIFF.search(_code(c))]
+    assert len(reads) == 1, (
+        "the detector fence must read the landed sha exactly once, as "
+        f'`LANDED="$(git rev-parse origin/main)"`: {[fence[i] for i in reads]}'
+    )
+    assert min(reads) < min(diffs), (
+        "the landed sha must be read BEFORE it is compared: a detector that compares an empty or "
+        "stale `$LANDED` certifies every landing, including a moved base"
+    )
+    # A STALE remote-tracking ref compares equal to itself — the class this branch already fixed on
+    # the pin assertion — so the fetch must precede the read, and the fetch must HALT: an unhalted
+    # `git fetch` leaves `origin/main` and `origin/integration/batch-1` at whatever the last successful
+    # fetch left, and the diff then compares two stale trees.
+    fetch = re.compile(r"git\s+fetch\s+origin\s+main\s+integration/batch-1\b")
+    fetches = [i for i, c in enumerate(fence) if fetch.match(_code(c))]
+    assert fetches and min(fetches) < min(reads), (
+        "the detector fence must `git fetch origin main integration/batch-1` before reading anything: "
+        "without it the comparison reads local remote-tracking refs, which a moved `main` leaves stale "
+        "and an unreachable batch branch leaves absent"
+    )
+    halted_fetch = [
+        fence[i]
+        for i in fetches
+        if not re.search(r"\|\|\s*exit\s+[1-9]\d*\s*$", _code(fence[i]))
+    ]
+    assert not halted_fetch, (
+        "the detector's fetch must halt on failure (`… || exit 1`): an unhalted fetch leaves both refs "
+        f"stale and the diff then compares two trees nobody landed: {halted_fetch}"
+    )
+    unhalted = [
+        fence[i] for i in diffs if not _halts(_block(fence, i), subject=_LANDED_TREE_DIFF)
+    ]
+    assert not unhalted, (
+        "the detector's diff must STOP the fence on a non-zero status (`… || { …; exit 1; }`): "
+        "`git diff --quiet` returns 1 exactly when the landed tree is not the tested tree — the "
+        f"invariant violated — and an unhalted diff reports it as success: {unhalted}"
+    )
+    # The detector compares the LANDED commit to the TESTED tree, never to the pin: comparing
+    # `origin/main` to `$PINNED` after the merge is the pre-merge assertion run late, and a squash
+    # commit is never equal to the base it was squashed onto.
+    assert not re.search(r'\[\s*"\$\(git\s+rev-parse\s+origin/main\)"\s*=\s*"\$PINNED"', "\n".join(fence)), (
+        "the post-merge detector must compare TREES (the landed commit to the batch branch), never "
+        "repeat the pre-merge `origin/main == $PINNED` assertion: after a squash that comparison is "
+        "false on a perfect landing"
     )
 
 

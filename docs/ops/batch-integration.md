@@ -639,7 +639,9 @@ drops `parity` (pyarrow). The extras are part of the lane definition, not setup 
 - Landing the batch is a separate, human-routed step — and the batch PR is opened as a **draft**,
   un-drafted only once the [landing assertion](#landing--main-must-still-be-the-tree-you-tested)
   passes, because `-draft` is a `.mergify.yml` queue condition and the one lever that keeps an
-  unasserted batch out of the merge queue. The batch lane never merges its own PR.
+  unasserted batch out of the merge queue. The draft gates **entry**, not the merge: either declare
+  route 2's freeze (the only route that closes the window) or run the post-merge tree detector, since
+  `main` can still move inside the queue's own cycle. The batch lane never merges its own PR.
 
 ### Landing — `main` must still be the tree you tested
 
@@ -685,9 +687,50 @@ the `check-success` contexts, and `merge_protections_settings: auto_merge_condit
 squash-merged onto **whatever `main` is at that moment**, with this fence never run. The draft state is
 the one thing the assertion can control, because `-draft` is itself a queue condition: a draft is
 never queued, so it can never be merged. Open the batch PR as a draft, run the fence above, and
-un-draft it only when the pin still matches (or route 2's freeze is declared and real). That is what
-turns the assertion from a step someone may remember into a queue condition — the guarantee bors and
-GitHub's queue get by owning the merge, borrowed here from the one lever this repo already has.
+un-draft it only when the pin still matches (or route 2's freeze is declared and real). That converts
+the assertion from a step someone may remember into a **queue-entry** condition — more than a bash
+block, and strictly less than the guarantee bors and GitHub's queue get by owning the merge. The
+difference is the residual window below, and it is the one part of this section that a reader is most
+likely to over-credit.
+
+⛔ **The draft gates ENTRY, not the MERGE — the residual window is real, and it is one queue cycle
+wide.** `.mergify.yml`'s own configuration contract states the split in a single line:
+`queue_conditions` gates **ENTRY** (evaluated against the PR head) and `merge_conditions` gates the
+**MERGE** (evaluated against the queue branch). `-draft` is a `queue_conditions` entry, so
+un-drafting makes the PR *eligible*; it does not pin the base. From there:
+
+- `merge_method: squash` applies the batch's diff to `main` **as it is at merge time**, not to
+  `$PINNED`;
+- the queue does re-validate that moved composition — but its `merge_conditions` are
+  `check-success=python-ci-gate` on the queue branch, i.e. the **tiered** selection selected by
+  `config/ci-surfaces.yml` (the section above), never the full suite;
+- `.github/settings.yml` leaves the branch protection's `strict` **false**, so nothing requires the
+  batch branch to be updated onto the moved base before merging.
+
+So the draft closes the gap between "the assertion passed" and "the PR became eligible". It does not
+close the gap between eligibility and the merge, and that gap is not microseconds: `.mergify.yml`
+measures a full CI cycle at ~37 minutes while `main` merges continuously — the very premise this
+document is written on. A batch un-drafted at 09:00 and merged at 09:40 can land `PINNED' +
+batch-diff`: a composition no full-suite run has seen, arriving after every check this section
+describes has passed.
+
+**Route 2 closes that window; route 1 and a plain pin-checked landing do not — so they carry a
+post-merge detector.** The freeze (route 2) is the only route that makes the base unable to move
+inside the queue's cycle, and it is the route to take whenever the batch must land unattended. Where
+the window is left open, do not paper over it: a squash-merge onto `PINNED` reproduces the tested
+tree exactly, so the landed commit's **tree** must equal the batch branch's tree — and that is
+checkable the moment it lands. This is a *detector* in the gate/detector split this document opens
+with: it does not prevent the landing, it refuses to let the violation pass **silently**.
+
+```bash
+# Run AFTER the queue has landed the batch PR. Nothing here is carried from an earlier shell.
+git fetch origin main integration/batch-1 || exit 1
+LANDED="$(git rev-parse origin/main)"
+[ -n "$(git rev-parse -q --verify "$LANDED^{commit}")" ] || { echo "origin/main does not resolve to a commit — re-fetch before concluding anything about the landing"; exit 1; }
+git diff --quiet origin/integration/batch-1 "$LANDED" || {
+  echo "the landed tree is NOT the tested tree — main moved inside the queue's cycle: report it as a process failure, never validate it after the fact; re-baseline and re-run phases 1-3"; exit 1
+}
+```
 
 If that assertion fails, there are exactly two honest routes and no third:
 
