@@ -419,6 +419,19 @@ SERVED page.
 (`POST {app}/api/consent/token`) using the per-attempt key carried on its own URL; and `POST /oauth/consent`
 redeems that assertion for the code. The page holds no credential, writes no cookie and signs nobody in.
 
+**One home of the old rationale is frozen, and it is recorded here rather than edited.** The merged
+migration `supabase/migrations/20261030000001_oauth_consent_tickets.sql` (§9 step 1) explains *why the
+anon key may not be the signing key* with the sentence that the key is public because the page this step
+deleted used to embed it. Migrations are **append-only** (`.github/scripts/check-migration-append-only`
+refuses an edit to a migration present in the base tree), so that SQL comment cannot be corrected in
+place, and it is deliberately the one path excluded from
+`tests/test_oauth_consent_bridge.py::_ANON_KEY_PREMISE_CORPUS` — this paragraph is the pointer a reader
+who lands on that comment needs. The operative statement is `config/required-bindings.yml`'s
+`SUPABASE_ANON_KEY` note: the key is public by Supabase's **design** (designed for browser exposure,
+bounded only by Row Level Security), and it is in this API's own environment so that a collision with
+`CONSENT_TOKEN_SECRET` is **observable**. The migration's conclusion — that the signing key must not be
+the anon key — stands unchanged; only the mechanism it cites has moved to the server's environment.
+
 **`SCOPE.md` §10 item:** the hardcoded `COOKIE_DOMAIN = ".premiselabs.co"` is deleted with the cookie, so
 the item is discharged in full — parameterising a cookie this issue removes would have been churn against a
 doomed line. **Recorded as a decision, not an oversight.**

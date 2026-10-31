@@ -2957,8 +2957,18 @@ _FALSE_ANON_KEY_BROWSER_CLAIMS: tuple[tuple[str, str], ...] = (
 
 #: Every home the false premise reached, with the substrate each one is. Scanned as prose AND
 #: code because the claim lives in both (three docstrings/comments, two docs, two test comments,
-#: two operator-facing workflows).
+#: two operator-facing workflows, the Fly secret manifest).
 #: ⛔ This file is in the corpus ONLY above `_PREMISE_GATE_MARKER` (see the scan below).
+#: ⛔ THE ONE DELIBERATE EXCLUSION: `supabase/migrations/20261030000001_oauth_consent_tickets.sql`
+#: (§9 step 1, merged in #10179) carries the old rationale in a SQL comment — the anon key is
+#: described as public *because the page §9 step 4 deleted used to embed it*. Migrations are
+#: append-only (`.github/scripts/check-migration-append-only` refuses an edit to a base-tree
+#: migration), so it cannot be corrected here, and scanning it would only red on a file no PR may
+#: touch. It is therefore recorded in
+#: `docs/engineering/auth/consent-identity-bridge.md` §7 ("one home of the old rationale is
+#: frozen") — the pointer a reader who lands on that comment needs — and pinned by
+#: `test_the_append_only_migration_home_is_RECORDED_not_silently_skipped` below, so the exclusion
+#: cannot become silent-and-forgotten.
 _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
     "tortoise/consent_token.py",                       # §2.3 / §8 operator text + module prose
     "tortoise/hosted_api.py",                          # the verifier's home
@@ -2975,6 +2985,13 @@ _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
     # acts on, so it belongs in the scan and not only in the docs.
     ".github/workflows/deploy-hosted.yml",
     ".github/workflows/deploy-pages.yml",
+    # ⛔ And the manifest those two steps are generated from — the SIBLING of the home the round
+    # above found. `.github/scripts/fly-managed-secrets.txt` justified `CONSENT_TOKEN_SECRET`'s
+    # dedicated-ness with the same false half ("the anon key is public by construction — the …
+    # page embeds it in its HTML"), one file away from `deploy-hosted.yml`, and it is the copy an
+    # operator reads when deciding whether the key may be reused. Same corrected mechanism, and
+    # the existing `the consent page embeds it` needle is what bites here.
+    ".github/scripts/fly-managed-secrets.txt",
 )
 
 
@@ -3007,7 +3024,7 @@ def _false_anon_key_claims(text: str) -> list[str]:
 
 
 def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
-    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the eleven homes.
+    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the twelve homes.
 
     Why this is a test and not a review note: round 11 measured the false premise in FIVE homes
     after a previous round had already corrected the same family, and it is the *justification*
@@ -3024,7 +3041,7 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     corpus = {rel: (REPO / rel).read_text(encoding="utf-8").split(_PREMISE_GATE_MARKER)[0]
               for rel in _ANON_KEY_PREMISE_CORPUS}
     assert sum(len(t) for t in corpus.values()) > 100_000, (
-        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these eleven "
+        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these twelve "
         "files, so a clean result below would prove nothing")
 
     for rel, text in corpus.items():
@@ -3068,3 +3085,67 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     assert "refuse a collision" in bindings, (
         "config/required-bindings.yml — the canonical wording this PR points every other home "
         "at — no longer states that the API reads the key to REFUSE a collision")
+
+
+#: The pre-fix `fly-managed-secrets.txt` justification, kept VERBATIM below the scan marker so it
+#: is never itself a hit: this is the measurement that the manifest's newly-added corpus entry is
+#: not cosmetic. It is the literal that shipped, not a paraphrase.
+_PRE_FIX_MANIFEST_FRAGMENT = (
+    "# DEDICATED: §2.3 forbids reusing the service-role key or the anon key (the anon key is\n"
+    "# public by construction — the consent page embeds it in its HTML), and the verifier\n"
+    "# refuses a reused one with a typed 503 that names the collision.\n"
+)
+
+#: The one home the corpus may NOT hold: a merged, append-only migration whose SQL comment
+#: explains the old rationale. Edited by no PR — recorded in the doc instead.
+_APPEND_ONLY_HOME = "supabase/migrations/20261030000001_oauth_consent_tickets.sql"
+
+
+def test_the_frozen_append_only_home_is_RECORDED_not_silently_skipped():
+    """The fourth home of the same claim is in a file no PR may edit — so it is RECORDED, not dropped.
+
+    Why this exists rather than a shrug: the false half of the anon-key premise has now been found
+    in a NEW home one review round after every previously-known home was clean — three times
+    (`deploy-hosted.yml`, its sibling `fly-managed-secrets.txt`, and this migration). The migration
+    is the one home where "fix it here" is forbidden by a CI invariant (migrations are append-only;
+    `.github/scripts/check-migration-append-only` fails an edit to a base-tree migration), so the
+    choice is between recording a reachable pointer and leaving an operator-facing file that says
+    the deleted page embeds the key, with nothing to correct it.
+
+    Non-vacuity, both halves measured:
+      * the manifest fragment this round corrected is PROVEN to red the denylist, so the corpus
+        entry added for that file is doing work rather than padding the count;
+      * the recording asserted below is a real paragraph in §7 — delete it and this test fails,
+        which is what stops "documented elsewhere" from meaning "documented nowhere".
+    """
+    # (1) the newly-covered home was genuinely false before this round, and the needle bites
+    assert _false_anon_key_claims(_PRE_FIX_MANIFEST_FRAGMENT), (
+        "the denylist does not catch the pre-fix `fly-managed-secrets.txt` justification — then "
+        "adding that file to the corpus proves nothing, and the claim can return there green")
+    assert ".github/scripts/fly-managed-secrets.txt" in _ANON_KEY_PREMISE_CORPUS, (
+        "the Fly secret manifest dropped out of the corpus — it is a home the claim actually "
+        "reached, one file away from `deploy-hosted.yml`")
+
+    # (2) the un-editable home still exists, is NOT in the corpus, and IS recorded where §7 says
+    migration = REPO / _APPEND_ONLY_HOME
+    assert migration.is_file(), (
+        f"{_APPEND_ONLY_HOME} is gone — if it was ever replaced, drop this exclusion instead of "
+        "leaving a test that pins a file no longer in the tree")
+    assert _APPEND_ONLY_HOME not in _ANON_KEY_PREMISE_CORPUS, (
+        "the append-only migration was added to the corpus: it may not be edited, so the gate "
+        "would red on a file no PR is allowed to fix")
+
+    section7 = _flatten((REPO / "docs/engineering/auth/consent-identity-bridge.md").read_text())
+    assert _APPEND_ONLY_HOME in section7, (
+        "docs/engineering/auth/consent-identity-bridge.md §7 no longer names the append-only home "
+        "— a reader who lands on that migration's comment then has no pointer to the operative "
+        "wording, which is exactly the un-corrected claim this round exists to stop shipping")
+    assert "one home of the old rationale is frozen" in section7, (
+        "docs/engineering/auth/consent-identity-bridge.md §7 lost the RECORDING of the frozen "
+        "home (its heading sentence is gone). The paragraph exists so that the append-only "
+        "exclusion is a documented decision with a reachable pointer, not a silent skip — pinned "
+        "on its own sentence because 'append-only' also occurs in the invariant's PATH, so "
+        "matching that word would pass on a doc that no longer explains anything")
+    assert "check-migration-append-only" in section7 and "config/required-bindings.yml" in section7, (
+        "§7's record of the frozen home must say WHY it is not corrected (append-only) and WHERE "
+        "the operative statement lives (`config/required-bindings.yml`)")
