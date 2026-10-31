@@ -1260,3 +1260,32 @@ open is concrete: `criteria` is structural on this request shape — a `choice`'
 a `score`'s level list the request is refused without — so a rule sentence there would enter the set
 the answer is validated against. Since this file is a corpus member of that guard, the retracted
 spelling is described here rather than reprinted, for the reason the entry above gives.
+
+## 2026-10-30 — §4.2's D-b and D-d cells named no symbol, so nothing could resolve them (`#9894`)
+
+The four-dedup audit's `where` column carried a bare `:NNNN` for two of its four rows — `D-b` at
+`:3967-3969` and `D-d` at `:3021+` — while `D-c` named `_find_point_by_content` and read as
+verifiable. ⚠️ **Neither number was stale, and re-deriving them to HEAD would have been the
+regression:** read at the document's own pin (`c79ba1cf2`) they land exactly on the code they name
+(the `_norm(content)`/`point_ids` within-batch fold inside `execute_embed`, and
+`classify_consolidation`). The defect was narrower and worse — neither row named a symbol, so there
+was nothing to check them against at ANY pin, and a re-verify at HEAD lands those two numbers on
+code the rows do not name (the `DecisionRecord` class docstring, and `render_s4_prompt`),
+which reads exactly like rot.
+
+**What changed: design document, two cells, no number moved.** Each row now leads with its symbol,
+in the form `tests/test_extractor_v4_citation_rot.py` resolves: `execute_embed` for the
+`_norm(content)`-keyed `point_ids` map, and `classify_consolidation` for the against-priors semantic
+arm. ⚠️ **That arm's `_boundary` never-across guard is deliberately NOT named in the cell**, because
+it is not true at the pin the cell's `extractor_v2.py:3021+` number is read at: `_boundary` occurs
+**zero** times in `extractor_v2.py` at `c79ba1cf2`, where the NOOP arm is
+`if sig_equal … / elif ov >= NOOP_MIN_OVERLAP` with no boundary check — the guard landed ~20 h
+*after* the pin (`7c7973cac`, #5080). The D12 row names the guard as a design decision and carries
+no `file.py:NNNN` cite, so it does not license a post-pin symbol inside a pin-scoped code citation,
+and §4.2 is not one of the header's later-pin passages. The paraphrase-NOOP arm alone is pin-true;
+the guard's provenance and mechanism stay recorded in this file and in `near_dup_detect`'s row.
+`D-c` was
+re-verified against the pin and left as written. ⚠️ **No guard requires the `where` column to carry
+a resolvable symbol** — the citation-rot guard resolves a cell only when one is there, which is why
+two symbol-less cells sat in a load-bearing table; the proposal to close that lives on the issue,
+not in this file.
