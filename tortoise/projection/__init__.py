@@ -16758,8 +16758,17 @@ class FalkorProjection(
                     if final_id == oid:
                         continue
                     fseq = fold_seq.get(oid)
+                    # ⛔ The CANONICAL operator population, not ``is_operator``
+                    # alone — the same disjunction the live 2a leg reads (#10418
+                    # review P3). A narrow ``{is_operator:true}`` here mirrored
+                    # the predicate live used BEFORE #10418, so a node that lost
+                    # the boolean flag (legacy / migrated — the shape
+                    # ``graph-scripts/backfill_is_operator.py`` exists for) was
+                    # re-pointed by the live supersede and then left stranded at
+                    # the dead prior by the replay, which moved it back.
                     rows = self.g.query(
-                        "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$id}) "
+                        "MATCH (op:Point)-[r]->(old:Point {id:$id}) "
+                        "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
                         "RETURN op.id, type(r), r.idx, ID(r), op.label",
                         params={"id": oid},
                     ).result_set
@@ -16778,9 +16787,13 @@ class FalkorProjection(
                         repoints.append(
                             (row[0], row[1], row[2], row[3], oid, final_id,
                              row[4]))
+                    # Same canonical population as the typed leg above (and as
+                    # live's 2a-INPUT), so the #6180 INPUT mirror cannot
+                    # re-materialise on the superseded prior for an operator the
+                    # typed leg re-points (#10418 review P3).
                     for row in self.g.query(
-                        "MATCH (old:Point {id:$id})-[ri:INPUT]->"
-                        "(op:Point {is_operator:true}) "
+                        "MATCH (old:Point {id:$id})-[ri:INPUT]->(op:Point) "
+                        "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
                         "RETURN op.id, ri.idx, ID(ri), op.label",
                         params={"id": oid},
                     ).result_set:
