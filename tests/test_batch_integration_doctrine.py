@@ -625,40 +625,36 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     # 1: the landing fence has no `set -e`, so an unhalted `[ … ]` is discarded
     # and the operator merges onto a moved `main` — the document's headline
     # failure, certified green by its own guard.
-    guardish = [
-        i
-        for i, c in enumerate(landing[0])
-        if _code(c).lstrip()[:1] in ("[", "!") or _code(c).lstrip().startswith("test ")
+    # An anchored ALLOWLIST on the carrier, not a blacklist of prefixes. A
+    # blacklist is keyed on how the line STARTS, so any prefix it does not name
+    # carries the assertion while inverting it and is invisible here — measured:
+    # `if [ … = "$PINNED" ]; then … exit 1; fi` refuses an UNMOVED main and lands
+    # a MOVED one (the document's headline failure), and `bash -c '…'`,
+    # `{ ! [ … ]; }`, `command [ … ]` and `sh -c '…'` all do the same, all green.
+    carriers = [
+        i for i, c in enumerate(landing[0]) if _PINNED_MAIN_ASSERTION.search(_code(c))
     ]
-    # POLARITY: `!` inverts the enforcement (`! [ … = "$PINNED" ] || exit 1`
-    # refuses an UNMOVED main and lands a MOVED one), `true || …` makes it
-    # unreachable, and `:`/`echo` print instead of enforcing. The previous list
-    # silently SKIPPED a `!`-prefixed guard rather than refusing it.
-    neutered = [
+    wrapped = [
         landing[0][i]
-        for i in guardish
-        if _code(landing[0][i]).lstrip().startswith(("!", "true", ":", "echo ", "printf "))
+        for i in carriers
+        if not re.match(
+            r'^\[\s*"\$\(git\s+rev-parse\s+origin/main\)"\s*=\s*"\$PINNED"\s*\]\s*\|\|',
+            _code(landing[0][i]),
+        )
     ]
-    # ...and the same for the equality assertion wherever it sits: `guardish`
-    # above only sees lines that START like a guard, so `true || [ … = "$PINNED"
-    # ] || { … exit 1; }` slipped past as "not a guard" while making the check
-    # unreachable.
-    unreachable = [
-        landing[0][i]
-        for i, c in enumerate(landing[0])
-        if _PINNED_MAIN_ASSERTION.search(_code(c))
-        and _code(c).lstrip().startswith(("!", "true", ":", "echo ", "printf "))
-    ]
-    assert not neutered and not unreachable, (
-        "a landing guard must not be negated or neutralised: each of these makes "
-        "the tested-tree==landed-tree check pass when it should stop: "
-        f"{neutered + unreachable}"
+    assert not wrapped, (
+        "the landing assertion must BE the guard (`[ … = \"$PINNED\" ] || { …; "
+        "exit 1; }`) — not wrapped (`if [ … ]`, `bash -c '…'`, `{ … }`, "
+        "`command …`) and not negated: a wrapper carries the assertion while "
+        f"inverting or unreaching it: {wrapped}"
     )
-    refusals = [
-        i for i in guardish if _code(landing[0][i]).lstrip().startswith(("[", "test "))
-    ]
-    assert refusals, (
-        "the landing fence carries no guarded command at all — re-point this guard"
+    assert carriers, (
+        "the landing fence carries no executable base assertion — re-point this guard"
+    )
+    unhalted = [landing[0][i] for i in carriers if not _halts(_block(landing[0], i))]
+    assert not unhalted, (
+        "every landing guard must halt on failure (`|| { …; exit 1; }` — `|| true` "
+        f"is not a halt): these return 1 and are discarded: {unhalted}"
     )
     # ...and the pin guard's polarity: `[ -n "$PINNED" ]` refuses an EMPTY pin.
     # `[ -z "$PINNED" ]` refuses every non-empty one, so landing becomes
@@ -669,11 +665,6 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     ), (
         'the landing fence must guard the pin with `[ -n "$PINNED" ]`: a `-z` '
         "guard refuses every real sha, so the landing step can never pass"
-    )
-    unhalted = [landing[0][i] for i in refusals if not _halts(_block(landing[0], i))]
-    assert not unhalted, (
-        "every guard in the landing fence must halt on failure (`|| { …; exit 1; }` "
-        f"— `|| true` is not a halt): these return 1 and are discarded: {unhalted}"
     )
     assert any("--jq" in cmd or "--template" in cmd for cmd in defines), (
         "the landing pin must read the batch PR body through `--jq '.body'` or "
