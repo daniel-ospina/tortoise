@@ -17818,13 +17818,22 @@ class TortoiseSDK:
                 # ``_uniform_int`` holds, which is the only branch that reads it.
                 _ordered_slot_idxs: list[int] = []
                 _uniform_int = True
+                # Whether the candidate arm's cause is a CROSS-TYPE layout or ONE
+                # non-``int`` type group — the refusal states which, because they
+                # are two different facts (#10418 review P3): the engine orders
+                # within a type group (type-local comparison) and groups ACROSS
+                # them, so only the mixed layout's slots are genuinely unordered.
+                _slot_idx_types: set[type] = set()
                 for _slot_idx, _ in _slots:
                     if isinstance(_slot_idx, int) and not isinstance(
                             _slot_idx, bool):
                         _ordered_slot_idxs.append(_slot_idx)
+                        _slot_idx_types.add(int)
                     else:
                         _uniform_int = False
-                _unorderable = not _uniform_int
+                        _slot_idx_types.add(type(_slot_idx))
+                _slot_order = "proven" if _uniform_int else (
+                    "mixed" if len(_slot_idx_types) > 1 else "uniform-non-int")
                 if _uniform_int:
                     # The load side's own rule: the source is the input at the
                     # LOWEST slot idx, and a slot idx carried by TWO inputs is
@@ -17917,7 +17926,7 @@ class TortoiseSDK:
                                 raise ValueError(_claim_class.repoint_refusal(
                                     operator_id=_oid, op_type=_op_type,
                                     direction=_effective_dir,
-                                    source_proven=not _unorderable,
+                                    slot_order=_slot_order,
                                     old_id=old_id, new_id=new_id,
                                     source_id=_slot_source,
                                     target_ids=_slot_targets))

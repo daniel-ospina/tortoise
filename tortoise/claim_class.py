@@ -301,11 +301,36 @@ def supersede_refusal(*, old_id: str, new_id: str) -> str:
     )
 
 
+#: The three ways the caller can know (or not know) which slot is the SOURCE.
+#: A closed vocabulary rather than a bool because the CANDIDATE arm is entered by
+#: two layouts with two DIFFERENT causes, and a single "not proven" phrase named
+#: the wrong one (#10418 review P3).
+_SLOT_ORDER_PHRASES: dict[str, str] = {
+    # ``ep.py`` orders ``coalesce(r.idx, 0), c.id`` — position is proven.
+    "proven": "at the SOURCE position",
+    # Cross-type comparison is the ENGINE's inter-type hierarchy (``STRING``
+    # groups ahead of numeric, ``null`` last), which this door deliberately does
+    # not re-implement — so no numeric reading of a mixed layout names the
+    # source the loader reads.
+    "mixed": (
+        "at a position the load side may read as the SOURCE (the slots' idx "
+        "values are of MIXED types, and this door does not re-derive the "
+        "engine's cross-type slot order)"),
+    # One type group IS ordered by the engine (comparison inside a group is
+    # type-local), but the door still declines to re-implement that per-type
+    # order — so the slots ARE orderable and saying otherwise is false.
+    "uniform-non-int": (
+        "at a position the load side may read as the SOURCE (the slots' idx "
+        "values are non-integer, and this door does not re-derive the "
+        "engine's per-type slot order)"),
+}
+
+
 def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
                     new_id: str, source_id: str,
                     target_ids: Sequence[str],
                     direction: str,
-                    source_proven: bool = True) -> str:
+                    slot_order: str = "proven") -> str:
     """The refusal ``supersede_point``'s OPERATOR re-point raises (#10195).
 
     A separate message from :func:`override_refusal` because the caller's ways
@@ -329,16 +354,16 @@ def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
     here would be a SECOND copy of the absent->default rule (and would mislabel
     a NAND, whose absent default is ``unidirectional``).
 
-    ``source_proven`` marks whether slot position 0 is provably the SOURCE. On
-    the unorderable-idx arm it is not — every input is a candidate — so the
-    message says so instead of asserting a slot role the door itself declined
-    to infer.
+    ``slot_order`` is one of :data:`_SLOT_ORDER_PHRASES`' keys and states WHY
+    the source position is (or is not) provable — ``proven``, ``mixed`` (a
+    cross-type layout), or ``uniform-non-int`` (one non-``int`` type group).
+    ⛔ It is NOT a bool, and the candidate arm's phrase is NOT "cannot be
+    ordered": a uniform non-``int`` layout IS ordered by the engine (comparison
+    inside one type group is type-local) — the door declines to re-derive that
+    order, which is a different thing, and a refusal that names the wrong cause
+    sends the caller looking for a defect in their own graph (#10418 review P3).
     """
-    _source_phrase = (
-        "at the SOURCE position" if source_proven
-        else "at a position the load side may read as the SOURCE (the slots "
-             "carry an idx that cannot be ordered)"
-    )
+    _source_phrase = _SLOT_ORDER_PHRASES[slot_order]
     return (
         f"supersede_point: re-pointing the OPERATOR {operator_id!r} ({op_type}, "
         f"direction {direction!r}) from {old_id!r} onto {new_id!r} would leave a "

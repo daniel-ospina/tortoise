@@ -297,8 +297,14 @@ def test_supersede_repoint_refuses_a_derived_source_over_the_successor(lane):
                             claim_class="derived")["id"]
     op = lane.create_operator("IMPL", src, [old], direction="->")
 
-    with pytest.raises(ValueError, match="DERIVED"):
+    with pytest.raises(ValueError, match="DERIVED") as _exc:
         lane.supersede_point(old, new)
+    # The ordered arm PROVED the source slot (all-int idx, ``ep.py``'s own
+    # ``ORDER BY coalesce(r.idx, 0), c.id``), so the message asserts it instead
+    # of hedging — and it must NOT borrow the candidate arm's caveat.
+    _msg = str(_exc.value)
+    assert "at the SOURCE position" in _msg, _msg
+    assert "may read as the SOURCE" not in _msg, _msg
 
     # Refused BEFORE any mutation: neither point terminalised, the edge is
     # still at the predecessor, and nothing was created at the successor.
@@ -542,8 +548,17 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     # The successor is AUTHORED — issue #10195's reproduction, plus the layout.
     new = lane.create_point("statement", "authored v2")["id"]
 
-    with pytest.raises(ValueError, match="DERIVED"):
+    with pytest.raises(ValueError, match="DERIVED") as _exc:
         lane.supersede_point(old, new)
+
+    # ONE non-``int`` ``idx`` beside an ``int`` one is a MIXED layout: the slot
+    # order the loader reads is the engine's CROSS-TYPE grouping, which this door
+    # deliberately does not re-derive — so THAT is what the refusal must say
+    # (#10418 review P3). Pre-fix the message was a single phrase for the whole
+    # candidate arm: "the slots carry an idx that cannot be ordered".
+    _msg = str(_exc.value)
+    assert "MIXED types" in _msg, _msg
+    assert "cannot be ordered" not in _msg, _msg
 
     # Refused BEFORE any mutation, and the refused wiring is not in the graph.
     assert _props(lane, old).get("status") == "live"
@@ -580,8 +595,11 @@ def test_supersede_repoint_refuses_when_a_string_idx_outranks_the_source(lane):
         params={"op": op["id"], "tgt": src})
     new = lane.create_point("statement", "authored v2")["id"]
 
-    with pytest.raises(ValueError, match="DERIVED"):
+    with pytest.raises(ValueError, match="DERIVED") as _exc:
         lane.supersede_point(old, new)
+
+    # int ``0`` beside str ``'1'`` — the CROSS-TYPE arm, and the refusal says so.
+    assert "MIXED types" in str(_exc.value), _exc.value
 
     assert _props(lane, old).get("status") == "live"
     assert _props(lane, new).get("status") == "live"
@@ -621,8 +639,19 @@ def test_supersede_repoint_refuses_a_uniformly_non_int_slot_layout(lane):
     # The successor is AUTHORED — issue #10195's reproduction, plus the layout.
     new = lane.create_point("statement", "authored v2")["id"]
 
-    with pytest.raises(ValueError, match="DERIVED"):
+    with pytest.raises(ValueError, match="DERIVED") as _exc:
         lane.supersede_point(old, new)
+
+    # ⛔ THE STATED CAUSE IS THE DOOR'S OWN CHOICE, not an engine limitation
+    # (#10418 review P3). Both slots are strings, i.e. ONE type group — the
+    # engine DOES order them (comparison inside a group is type-local), so
+    # "cannot be ordered" was false and sent the caller hunting a graph defect
+    # that is not there. What is true is that the door declines to re-derive
+    # that per-type order, and the message must say that instead.
+    _msg = str(_exc.value)
+    assert "per-type slot order" in _msg, _msg
+    assert "cannot be ordered" not in _msg, _msg
+    assert "MIXED types" not in _msg, _msg
 
     # Refused BEFORE any mutation, and the refused wiring is not in the graph.
     assert _props(lane, old).get("status") == "live"
