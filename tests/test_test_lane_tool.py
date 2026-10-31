@@ -3207,7 +3207,7 @@ def test_flag_only_argv_still_targets_the_SUITE(lane, monkeypatch, capsys):
         seen = _capture_run(monkeypatch)
         tl.main(argv)
         assert seen["argv"] == [sys.executable, "-m", "pytest",
-                                *argv[2:], "tests/"], argv
+                                "tests/", *argv[2:]], argv
         assert "adding `tests/`" in capsys.readouterr().err, argv
 
 
@@ -3230,7 +3230,7 @@ def test_a_PATH_SHAPED_OPTION_VALUE_is_not_a_target(lane, monkeypatch, capsys):
         seen = _capture_run(monkeypatch)
         tl.main(argv)
         assert seen["argv"] == [sys.executable, "-m", "pytest",
-                                *argv[2:], "tests/"], argv
+                                "tests/", *argv[2:]], argv
         assert "adding `tests/`" in capsys.readouterr().err, argv
 
 
@@ -3264,7 +3264,7 @@ def test_a_bare_boolean_flag_before_a_path_over_runs_rather_than_under_runs(
     seen = _capture_run(monkeypatch)
     tl.main(["run", "--", "-q", "tests/test_guard.py"])
     assert seen["argv"] == [sys.executable, "-m", "pytest",
-                            "-q", "tests/test_guard.py", "tests/"]
+                            "tests/", "-q", "tests/test_guard.py"]
     assert "adding `tests/`" in capsys.readouterr().err
 
 
@@ -3308,3 +3308,24 @@ def test_run_and_up_emit_the_SAME_three_seam_vars(lane, monkeypatch, capsys):
         k: child_env[k] for k in exports
     }
     assert len(exports) == 3
+
+
+def test_the_default_target_cannot_itself_be_eaten_by_an_option(
+        lane, monkeypatch, capsys):
+    """The default is PREPENDED, so no option can swallow it.
+
+    The rule the classification rests on is "an option eats the next token", and
+    a default APPENDED at the end is subject to that same rule. Measured in
+    review: `run -- -q -k "$EXPR"` with EXPR unset expands to a trailing `-k`
+    (every bash tool call is a FRESH SHELL, so this is a live shape, not a typo),
+    the appended `tests/` became -k's VALUE, and pytest got no positional target
+    at all — 60/42103 collected, `Interrupted: 1 error during collection` from
+    `graph-scripts/`, exit 2 with zero of the suite run, while stderr claimed the
+    suite was added. In FIRST position nothing can consume it.
+    """
+    _stub_start(monkeypatch)
+    seen = _capture_run(monkeypatch)
+    tl.main(["run", "--", "-q", "-k"])
+    assert seen["argv"] == [sys.executable, "-m", "pytest", "tests/", "-q", "-k"]
+    assert seen["argv"][3] == "tests/"        # the target is the first pytest arg
+    assert "adding `tests/`" in capsys.readouterr().err

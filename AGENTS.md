@@ -638,7 +638,7 @@ calls `worktree_report.py check` rather than re-implementing the format.
 > WHY (#10399, measured): a full suite started with the 6379 URI on a cell
 > reports a wall of `E`s and no verdict, because the session-start gate refuses
 > ONCE PER COLLECTED TEST — `Failed: no TORTOISE_DB_URI database could be reached
-> at localhost:6379 …` (`tests/_embedded.py:954`). The count is therefore the size
+> at localhost:6379 …` (`tests/_embedded.py:955`). The count is therefore the size
 > of the population, not a constant: `tests/` collects **41,842** tests at
 > #10399's head, and a run that is KILLED mid-flight shows only as many as it
 > reached (the batch's own log held **405** before its process died). Nothing
@@ -646,7 +646,7 @@ calls `worktree_report.py check` rather than re-implementing the format.
 > (#6673) and a private lane on its own. A **URI-less** run fails the same way
 > from the other side, verbatim:
 > `Failed: default pytest requires TORTOISE_DB_URI (epic #1647 P4) …`
-> (`tests/_embedded.py:770`). Neither is a diff regression — both are the suite
+> (`tests/_embedded.py:771`). Neither is a diff regression — both are the suite
 > refusing a target that does not exist, which is why `run` (not a hand-eval'd
 > export) is the documented path.
 >

@@ -2322,7 +2322,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         # a run that tests none of the suite and exits 2. Flag-only calls are the
         # common shape (`-k`, `--collect-only`, `--timeout=N`), so the check is on
         # the whole argv, not on emptiness.
-        extra = [*extra, "tests/"]
+        # PREPENDED, never appended: the rule above is "an option eats the next
+        # token", and a default appended at the END is subject to that same rule.
+        # `run -- -q -k "$EXPR"` with EXPR unset expands to a trailing `-k`, and
+        # an appended `tests/` becomes -k's VALUE — pytest then gets no positional
+        # target at all, sweeps the ROOTDIR and exits 2 having run none of the
+        # suite, while this line claims it added the suite. First position cannot
+        # be eaten by anything.
+        extra = ["tests/", *extra]
         print(
             "test-lane: no test TARGET in the pytest argv — adding `tests/` (the "
             "suite). Put a path BEFORE the flags to override, e.g. "
