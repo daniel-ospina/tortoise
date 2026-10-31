@@ -251,6 +251,27 @@ or facts that were false against the tree they describe:
   ``switch -C`` branch where it creates one, else a real non-``main`` ref). Finally, the section that
   promises it "never restates" ``.mergify.yml``'s ``batch_size`` restated it in prose fifteen lines
   later, which the YAML-only literal could not see.
+* **the post-merge detector compared a BRANCH the doctrine never establishes, and three axes were
+  pinned somewhere rather than in every fence that issues a verdict.** The residual-window detector
+  diffed ``origin/integration/batch-1`` against the landed commit, and no step in the doctrine pushes
+  that branch: on the landing actor's box the ref is ABSENT (the fetch dies on a refspec nobody
+  wrote, behind a bare ``|| exit 1`` that shows only git's own fatal), and on the drop path it is
+  STALE — Phase 4 commits the revert locally and nothing pushes again — so a PERFECT landing differs
+  by exactly the dropped PR and is reported as a process failure, indistinguishable from the one real
+  violation. Even a live ref is the WRONG OBJECT: it records where the branch is NOW, so one commit
+  made after the run moves it while the tested tree stays behind, and the comparison certifies a
+  landing no run has seen. The detector now compares ``$(git rev-parse "$LANDED"^{tree})`` against a
+  ``tested-tree: <sha>`` line carried BY VALUE in the batch PR body — printed by Phase 3, re-printed
+  by the post-revert re-check after the revert changes it, and HALTED on when absent. "State the push"
+  was the cheaper remedy and was rejected: it cannot see the post-run-commit case. Two axes were
+  pinned at the population's weakest member: the half-1 skip check ``continue``d past a
+  ``batch-junit`` consumer with no comparison and let ANY one fence satisfy it, and the gate-status
+  check concatenated every gate's lines — measured, deleting Phase 3's half-1 skip block, flipping its
+  comparison to ``-ge``, and widening its ``$RC`` predicate to ``-ge 0`` each left the module GREEN
+  (0 of 37) while a sibling fence's intact copy covered it. Both are per fence now. And the document
+  contradicted itself about its one carrier: one paragraph said ``$BATCH`` "needs no carrier" while
+  the fence that EXPORTS it said the claim "would be false in exactly the normal case" — the first is
+  now the halt it actually has, and the guard refuses it.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
@@ -280,17 +301,21 @@ re-assignment preserves the attribute), the post-revert RE-CHECK (a fence after 
 detector, clearing the two reports Phase 4 diffs), and no hand-written
 number for a live-config
 property (the required contexts that ``check-required-set.py --live`` asserts, ``.mergify.yml``'s
-``batch_size``).
+``batch_size``) — and the TESTED TREE the landing is compared against, carried by VALUE in the batch
+PR body (``tested-tree: <sha>``, printed by both fences that run the suite on the batch branch),
+because a branch records where it is LATER while the invariant is about what was MEASURED.
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **37 checks**, **0 red**, and the head this round's review was taken
-at (``9f8e12192``) is **3 of 37**: the three findings of that review that red a CHECK there — the
+revision rather than asserted — **37 checks**, **0 red**, and the head the round-35 review was taken
+at (``9f8e12192``) is **4 of 37**: the three findings of that review that red a CHECK there — the
 ``-m track_b`` half's missing SKIP axis, the two unhalted ``git fetch origin main`` lines the pin and
 the landing gate ride on (one check, enumerated over fences) — plus the ``batch_size`` value restated
-in prose. The fourth, the tree assertion's unpinned SUBJECT, is GREEN on that document by
+in prose, plus (this round) the residual-window check, which now requires the tested tree to be
+carried BY VALUE. The tree assertion's unpinned SUBJECT is GREEN on that document by
 construction (it asserts a non-``main`` ref), which is exactly why it is pinned by a MUTANT rather
 than by the revision axis: pasting ``main`` in as the compared ref measured 0 of 37 red. The
-P1+P2 repair head, ``c6d4c8278``, is **0 of 37**; the ``c7a772628`` / ``657a544a4`` head is
+P1+P2 repair head, ``c6d4c8278``, is **1 of 37** (this round's residual-window requirement: its
+detector diffs a remote batch branch); the ``c7a772628`` / ``657a544a4`` head is
 **8 of 37** (the checks that did not exist yet — the residual-window check, the ``a66387f9f``
 round's CI-population, exported-ledger-name and fenced post-revert re-run checks, the pin-reading
 fetch check, the tightened argv on ``test_every_full_suite_command_is_one_of_the_two_deliberate_halves``,
@@ -433,8 +458,10 @@ the first, which reds its own check plus the argv allowlist that now requires th
 ``--ignore=tests/e2e`` from a ``tests/`` run (2 red); restore *"The filter is what makes the run
 comparable to CI at all."* (1 red); make the Phase 0 ledger name a plain assignment again (1 red); and
 delete the post-revert re-check fence, leaving the prose (1 red). The revision axis agrees: the head
-the review sat at, ``484a4911d``, is **7 of 37** — the three new checks plus the argv check plus this
-round's tightenings, which did not exist as requirements at that head — and nothing else.
+the review sat at, ``484a4911d``, is **8 of 37** — the three new checks plus the argv check plus this
+round's tightenings, which did not exist as requirements at that head — plus, since round 36, the
+residual-window check's tested-tree requirement, which reds there because that head's detector diffs
+a remote batch branch. (The earlier ``7`` was measured before that tightening.)
 
 **10 more measured with the ``9f8e12192`` round, 10 killed** (each red on ONE check and on nothing
 else): delete the gate fence's half-2 skip block; delete the baseline's half-2 skip recording; delete
@@ -450,6 +477,30 @@ than 4" (red ``test_no_hand_counted_literals_of_live_repo_properties``). The tre
 that mattered most: the pre-fix check read only the PRESENCE of ``git rev-parse --abbrev-ref HEAD``,
 and the branch name survived in the line's ``echo`` prose, so requiring the gate to run on ``main``
 measured **0 of 37 red** — it certified exactly the failure the check was written for.
+
+**13 more measured with the round-36 review (``c6d4c8278``), 13 killed, each red on exactly ONE
+check.** The review's own claim that five mutants survived is re-measured rather than inherited: at
+this head the half-2 pair (delete Phase 3's half-2 skip block; delete Phase 1's
+``baseline-trackb.skipped`` write) ALREADY dies on
+``test_the_track_b_half_is_completion_checked_like_the_deterministic_half`` — the per-fence
+``_track_b_skip_axis_misses`` the merge kept from ``5f9efcfb2``/``f8db4dbdc`` closed it — and is
+recorded, not re-fixed. What did survive, and is now killed: delete Phase 3's whole half-1 skip block,
+and flip its comparison to ``-ge`` (both red
+``test_a_skip_the_baseline_did_not_have_blocks_the_verdict``, which no longer ``continue``s past a
+``batch-junit`` consumer with no comparison); degrade Phase 3's ``$RC`` predicate to ``-ge 0`` (red
+``test_the_gate_run_must_complete_before_any_verdict``, now per fence instead of over the
+concatenation of every gate's lines). Four more on the landing detector's new object: diff a remote
+batch branch again, read the tested tree from the LIVE branch instead of the PR body, compare two
+constants, and un-halt the detector's fetch — all red
+``test_the_residual_landing_window_is_stated_and_detected`` — plus dropping the tested-tree capture
+from the gate fence and from the post-revert re-check (red the same check, which now requires BOTH
+full-suite-on-the-batch-branch fences to capture and print it). The ninth restores the
+``needs no carrier`` claim and reds ``test_the_ledger_name_is_exported_not_merely_assigned``. Two of
+the ``c7a772628`` round's 13 ("make the diff compare two constant files", "point the diff at
+``origin/main`` vs ``$PINNED``") were written against the OLD spelling: the comparison is now
+by value (``$LANDED_TREE`` vs ``$TESTED_TREE``), so they are re-measured in that shape above
+(constants; and the read-from-the-live-branch mutant, which is the same fail-open the ref comparison
+had).
 
 **The `7fb722a9a` review's P2 is recorded as MEASURED FALSE, not "fixed".** It reported that
 ``ci-introduced-failure`` and ``DEFERRABLE_LEGS`` "do not exist" and that the leg-table pointer is out
