@@ -576,8 +576,8 @@ def test_a_seeded_team_survives_the_seeder_that_wrote_it(monkeypatch):
     `_seed_org` returns before the app's LIFESPAN health probe has constructed
     any handle. It is NOT a single-client shape at this head, and an earlier
     revision of this docstring was wrong to call it one (#10424 review P3,
-    measured): `_seed_org` runs its seed-visibility guard (`:539`) BEFORE
-    `sdk.close()` (`:545`), and that guard's read goes through
+    measured): `_seed_org` runs its seed-visibility guard BEFORE `sdk.close()`,
+    and that guard's read goes through
     `ha_mod._registry_anchor()`, which constructs and caches the app's own
     handle on the store — measured by mutating the guard's org id, whose raised
     error reports a live `app_server=(socket=…, pid=…)`. So the close takes the
