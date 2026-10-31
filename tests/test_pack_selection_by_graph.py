@@ -24,6 +24,7 @@ whose kinds are already IN THE GRAPH stays writable after it is disabled.
 """
 from __future__ import annotations
 
+import gc
 import os
 import tempfile
 
@@ -397,6 +398,102 @@ def sel_client(monkeypatch):
             yield tc, db_path
 
 
+class SeedVisibilityError(RuntimeError):
+    """A registry Team this file just seeded is INVISIBLE to the app's own read
+    path (#10424).
+
+    Named and distinct on purpose (#3505's ``SeedVisibilityError`` shape): the
+    condition is a harness/server-identity failure — the request reads a
+    different embedded server than the test seeded into — and must never
+    surface later as `{"detail": "Unknown organization"}` (404) on an unrelated
+    assertion, which reads as a product defect in `_org_node`.
+    """
+
+
+def _app_addresses(db_path: str) -> bool:
+    """True when the hosted app's embedded read path resolves to `db_path`.
+
+    The seed-visibility guard below is only meaningful when the app would read
+    THIS store; a caller that seeds a DB the app never addresses (a URI-mode
+    lane, or a bare helper) skips it rather than failing on an identity it
+    never claimed.
+    """
+    from tortoise import hosted_api as ha_mod
+
+    if os.environ.get("TORTOISE_DB_URI"):
+        return False
+    try:
+        resolved = ha_mod._resolve_embedded_db_path()
+    except Exception:
+        return False
+    return os.path.abspath(resolved) == os.path.abspath(db_path)
+
+
+def _registry_team_rows(db_path: str, org_id: str) -> list:
+    """The Team row read through the SAME path `hosted_api._org_node` uses."""
+    from tortoise import hosted_api as ha_mod
+
+    return ha_mod._registry_anchor()._get_registry().query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)",
+        params={"id": org_id},
+    ).result_set
+
+
+def _assert_seed_visible(db_path: str, org_id: str) -> None:
+    """Fail LOUDLY if the app cannot see the Team that was just seeded (#10424).
+
+    A miss here is a server-identity failure between the seeder and the app's
+    cached registry handle — never a data-loss or auth regression — so it is
+    reported as such, with the identity evidence that tells the two apart,
+    instead of surfacing later as `{"detail": "Unknown organization"}` (404) on
+    an unrelated assertion, which reads as a product defect in `_org_node`.
+
+    WHAT THIS GUARDS (measured, not inferred). `_seed_org` built a
+    `TortoiseSDK(db_path=…, namespace="registry")`, wrote through it and dropped
+    it at return. In the CI window that SDK is the temp DB's ONLY client — the
+    lifespan health probe has not built its own handle yet — so the dangling
+    handle's GC teardown WAS the last-client teardown: the daemon went down
+    without a snapshot, and the next construction over the same path started an
+    EMPTY server. Measured at `7a6301142` as **0** Team rows read through
+    `hosted_api._registry_anchor()` — the exact helper `_org_node` uses — for a
+    team seeded moments earlier; that is the 404 that reddened CI `test (c)` of
+    run `41210146871` at `:957`
+    (`TestGraphPacksRest::test_graph_bound_key_reads_only_its_own_graph`).
+    `tests/_embedded.py:204-207` names the contract: redislite's "`_cleanup()`
+    last-client branch … shuts the daemon down", so "callers that need more than
+    the lock must therefore ALSO verify visibility at seed time".
+
+    THE FIX IS TWO INDEPENDENT HALVES, each measured sufficient on its own at
+    this head (each alone → this file's 54 tests pass): `sdk.close()` turns the
+    seeder's release into an EXPLICIT graceful close (a SAVE) instead of a
+    GC-timed NOSAVE teardown, and this guard's read through the app's OWN
+    anchor pins that handle, so the store has a live client that outlasts the
+    seeder. Both are kept because they prevent different failures: the close
+    removes the destructive teardown, the guard converts any recurrence into a
+    named `SeedVisibilityError` carrying the identity evidence — the diagnosis
+    that a bare 404 on an unrelated assertion cost a cycle to reach.
+    `patched_tortoise_sdk` closes the anchor at fixture exit, so no extra server
+    lifetime escapes the fixture.
+    """
+    if not _app_addresses(db_path):
+        return
+    if _registry_team_rows(db_path, org_id):
+        return
+    from tortoise import hosted_api as ha_mod
+
+    anchor = ha_mod._registry_anchor()
+    proj = getattr(anchor, "_proj", None)
+    client = getattr(getattr(proj, "db", None), "client", None)
+    raise SeedVisibilityError(
+        "the seeded registry Team is invisible to the app's own read path "
+        f"(#10424): org_id={org_id!r} db_path={db_path!r} "
+        f"app_registry_graph={anchor._get_registry().name!r} "
+        f"app_server=(socket={getattr(client, 'socket_file', None)!r} "
+        f"pid={getattr(client, 'pid', None)!r}). `_org_node` would answer "
+        "`{'detail': 'Unknown organization'}` for a team this test just wrote."
+    )
+
+
 def _seed_org(db_path: str, org_id: str) -> dict:
     """A Team node + its default Graph node (the registry lane's provisioning
     shape: ``/internal/provision`` mints the Team, ``_graph_create`` mints the
@@ -417,6 +514,13 @@ def _seed_org(db_path: str, org_id: str) -> dict:
     default = sdk._graph_create(org_id, "default", kind="default",
                                 namespace=f"org_{org_id}")
     custom = sdk._graph_create(org_id, "custom", kind="custom")
+    _assert_seed_visible(db_path, org_id)
+    # #10424: the guard's read went through the app's OWN registry handle, which
+    # now holds this store for the rest of the test. Releasing the seeder keeps
+    # the client count at ONE, so the fixture's teardown is the store's LAST
+    # client — a clean shutdown instead of a co-tenant deferral that would leave
+    # the daemon standing after the test.
+    sdk.close()
     return {"default": default, "custom": custom}
 
 
@@ -438,6 +542,37 @@ def _auth(tc, org_id: str, **extra):
            "scopes": [], "legacy_full_access": True, "graph_id": None}
     ctx.update(extra)
     app.dependency_overrides[get_current_org_session] = lambda: ctx
+
+
+def test_a_seeded_team_survives_the_seeder_that_wrote_it(monkeypatch):
+    """#10424: the seed's embedded server outlives the handle that wrote it.
+
+    Deliberately NO `TestClient` here: this is the CI window, in which
+    `_seed_org` returns before the app's lifespan health probe has constructed
+    any handle, so the seeder IS that temp DB's only client.
+
+    FAIL-ON (MEASURED on `main`'s tree at `7a6301142`): with the seeder's SDK
+    dropped rather than closed (#10424's pre-fix shape), `gc.collect()` runs the
+    last-client teardown, the next construction starts an EMPTY server, and
+    `hosted_api._registry_anchor()` — the exact helper `_org_node` reads —
+    returns **0** Team rows. Verified in both directions at this head: pre-fix
+    shape → `0 == 1` red; post-fix → `1` green.
+    """
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    quiesce_testclient_background_work(monkeypatch)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "sel-hold.db")
+        with patched_tortoise_sdk(db_path):
+            _seed_org(db_path, "t-sel-hold")
+            gc.collect()  # the seeder handles are out of scope by now
+            assert _registry_team_rows(db_path, "t-sel-hold"), (
+                "the seeded team is GONE: the seeder's embedded server was "
+                "torn down when its last client went away, so `_org_node` "
+                "would answer 404 'Unknown organization' for a team this "
+                "test just wrote (#10424)"
+            )
 
 
 class TestGraphPacksRest:
