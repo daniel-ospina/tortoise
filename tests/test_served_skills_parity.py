@@ -642,7 +642,30 @@ def test_4643_sync_re_cuts_the_derived_skill_archives_it_invalidates(monkeypatch
 
 
 def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
-    """`--dry-run` wrote nothing, so it re-cuts nothing — including archives."""
+    """`--dry-run` wrote nothing, so it re-cuts nothing — including archives.
+
+    ⛔ NON-VACUITY (review finding, P1). This test must RED on the mutant that
+    deletes the guard it exists to pin — `sync()`'s
+    `_rebuilt_archives(...) if not dry_run else ()` (`tools/served_skills_parity.py`).
+    The previous version could not: it drove `_sync_fixture`, which creates
+    neither `root` nor any served copy, so `rebuild()` hit
+    `if not source_path(name, root).is_file(): continue`
+    (`tools/build_skill_archives.py`) for every name, returned `[]`, never
+    reached `target.parent.mkdir(...)`, and satisfied both assertions with the
+    guard REMOVED.
+
+    Two things make a write observable here, and both are required:
+
+    1. the served copies EXIST and differ from upstream, so the sync has work;
+    2. the archives on disk are STALE **relative to those served copies** (cut
+       from an older copy), which is the one state a guard-less dry run would
+       repair — `rebuild()` is byte-idempotent, so served copies that already
+       agree with their archive would leave the mutant invisible even with (1).
+
+    State (2) is not contrived: it is the stale-derived-artifact state this PR
+    exists to repair (`f045ac953`, and `cd7410b80` a day earlier) — the served
+    copy re-derived while `website/skills/<name>.skill` was left behind.
+    """
     sys.path.insert(0, str(REPO))
     from tools import build_skill_archives as bsa
 
@@ -650,11 +673,35 @@ def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
         tmp_path, monkeypatch, "d" * 40,
         {e["upstream_path"]: b"# fresh upstream\n"
          for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+    # (1) served copies present, one revision behind upstream.
+    for entry in manifest["skills"].values():
+        served = root / entry["served_path"]
+        served.parent.mkdir(parents=True, exist_ok=True)
+        served.write_bytes(b"---\nname: served\n---\n# the CURRENT served copy\n")
+    # (2) every archive is stale against its served copy: cut from OLDER bytes.
+    for name in bsa.SKILL_NAMES:
+        served = bsa.source_path(name, root)
+        current = served.read_bytes()
+        served.write_bytes(b"---\nname: older\n---\n# the EVEN OLDER served copy\n")
+        stale = bsa.build(name, root)
+        served.write_bytes(current)
+        archive = bsa.archive_path(name, root)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(stale)
+    before = {n: bsa.archive_path(n, root).read_bytes() for n in bsa.SKILL_NAMES}
+
     result = sp.sync(root, pin, attempts=1, backoff=0, dry_run=True)
 
-    assert result.archives == (), f"--dry-run rebuilt {result.archives!r}"
-    assert not (root / bsa.SKILLS_DIR_REL).exists(), (
-        "--dry-run must not create the docs-origin archive directory")
+    assert result.changed, "fixture: upstream bytes must differ from the served copies"
+    assert result.archives == (), (
+        f"--dry-run rebuilt {result.archives!r} — `--dry-run` writes nothing, so it "
+        "re-cuts nothing")
+    for name in bsa.SKILL_NAMES:
+        assert bsa.archive_path(name, root).read_bytes() == before[name], (
+            f"--dry-run rewrote {name}.skill from the served copy")
+        assert bsa.source_path(name, root).read_bytes() == (
+            b"---\nname: served\n---\n# the CURRENT served copy\n"), (
+            f"--dry-run rewrote the served copy of {name}")
 
 
 def test_4643_sync_to_a_non_head_commit_is_not_a_pin_its_own_check_rejects(
