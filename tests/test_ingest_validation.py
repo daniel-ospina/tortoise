@@ -859,11 +859,15 @@ class TestTerminalStatusGuard:
         # then refused only by Phase-2 `_check_endpoint_race`, a mid-write raise
         # with point count 1 -> 2 and an orphan left behind).
         #
-        # ⛔ #9173: the MATCH no longer implies an ingest-level REFUSAL, and this
-        # test no longer asserts one — a bundle-local `points` ref is
-        # Point-bearing, the endpoint-kind gate (#8499) reifies the connection,
-        # and `create_direct_edge` (the primitive the old refusal predicted) is
-        # never reached. See the assertion block below.
+        # ⛔ #9173 scoped the OLD refusal away as an EDGE question only: a
+        # bundle-local `points` ref is Point-bearing, the endpoint-kind gate
+        # (#8499) reifies the connection, and `create_direct_edge` (the
+        # primitive that refusal predicted) is never reached. ⛔ #9819 put the
+        # refusal back on the axis #9173 never decided — the POINT WRITE:
+        # because the content fold MUTATES the terminal point it resolves
+        # (`batch_id` stamped, `updatedAt` moved), `_validate_bundle` refuses
+        # it in Phase 1. The MATCH this test pins via the #2971 hash-less
+        # fallback is what makes that refusal fire. See the block below.
         #
         # Scope note: this simulates the TERMINAL-STATUS state (`status=
         # 'superseded'`, `outdated` unset) — the shape a direct status write
@@ -881,12 +885,10 @@ class TestTerminalStatusGuard:
         assert _query(
             sdk, "MATCH (n:Point {id:$id}) RETURN n.content_hash",
             {"id": terminal["id"]})[0][0] is None
-        # The GUARD still matches (the hash-less fallback is what this test is
-        # about) — ⬛ #9173: what no longer follows is a REFUSAL of the
-        # bundle. The endpoint is a bundle-local `points` ref, so the pair is
-        # Point-bearing and the write reifies it into an operator; only
-        # `create_direct_edge` refuses a terminal endpoint, and that primitive
-        # is not reached. Asserting a refusal here asserted the over-refusal.
+        # The GUARD still matches — the hash-less fallback is what this test is
+        # about, and (per #9819 above) that MATCH is what makes the Phase-1
+        # refusal fire. Asserted on its own so a broken predicate is legible as
+        # a PREDICATE regression instead of only as a missing refusal.
         assert sdk._find_terminal_dedup_hit("same content", "statement") \
             == terminal["id"]
         bundle = {
