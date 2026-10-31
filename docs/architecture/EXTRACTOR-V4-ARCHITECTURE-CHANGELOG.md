@@ -1335,17 +1335,31 @@ require. It weakens nothing that matters: an attacker able to *predict* the nonc
 the real closing marker **inside** the body, and the candidate-absent rule rejects exactly that, so
 the boundary never depends on the session text's cooperation. The ladder tries up to eight candidates
 (each a different 64-bit nonce, one sha256 each); exhausting it needs the body to contain all eight at
-once — eight simultaneous preimages of a hash that includes the body. The exhaustion path is defined
+once. That is a **fixed-point** requirement, not eight independent preimages: the nonce hashes the
+body, so each attempt an attacker "wins" changes the body they must win against next — the chain has
+no step that can be forced (three rounds of `body += marker(nonce(body))` walk
+`56a0407a… → 3bf09b03… → 721327c4… → c9608f4f…`), so landing on the fixed point is a search over
+~`len(body)/16¹⁶` ≈ **4.3e-16** for an 8,009 B body. The exhaustion path is defined
 anyway, because a render path must not raise: it emits the clause **without** a marker, since a
 boundary the content can forge is worse than none — it invites the model to trust a border the
 attacker drew.
 
 **A third site, and a template hazard, closed with it.** The same story reaches the model one turn
 earlier in `run_s2`'s user message; it is framed with the same envelope, so the S2 and S4 turns frame
-session text identically. And the untrusted splices now run **last**: `{story}` was replaced before
-`{search_results}` / `{embed_list_json}` / `{date_anchor}` / `{output_contract}`, so a story containing
-one of those tokens had it expanded by a later `.replace` — session text re-scanned as template, with
-the contract itself as the thing it could reach.
+session text identically. The renderers also stopped being a `.replace()` **chain**: each replace
+re-scans the regions inserted before it, so `{story}` was replaced before `{search_results}` /
+`{embed_list_json}` / `{date_anchor}` / `{output_contract}` and a story containing one of those tokens
+had it expanded by a later step — session text re-scanned as template, with the contract itself as the
+thing it could reach. ⚠️ Splicing the untrusted region **last** does not fix that, it only moves which
+region pays: a `{story}` literal arriving from the session-derived `{search_results}` /
+`{embed_list_json}` regions was then expanded into the whole framed story block — raw newlines and a
+`<<<BEGIN-UNTRUSTED-S1-STORY-…>>>` envelope **inside a JSON string** the model must parse. Both
+renderers now fill their template in **one pass** (`_fill_template`: a single
+`re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), tmpl)` over a slot→value mapping),
+because `re.sub` never re-scans its own output: no substitution's output can be reinterpreted as
+template, whatever order the regions are named in. Pinned by tests on both directions — a placeholder
+token in the story, and a `{story}` token arriving from the embed list (literal survives, envelope
+count stays 1, the JSON region still parses).
 
 **What this does NOT claim.** Not that injection is impossible: the model still reads
 attacker-influenceable text, and the framing lowers the odds rather than removing them (OWASP's own
