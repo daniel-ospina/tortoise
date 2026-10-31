@@ -239,17 +239,31 @@ def main() -> int:
             public_turns = [{"role": "user" if i % 2 == 0 else "assistant",
                              "content": _trend_text(999, i, args.turn_chars)}
                             for i in range(min(args.turns, 6))]
-            with use_record_tenant(*tenant):
-                receipt = sdk.capture_session(public_turns,
-                                              session_id="10000-bytes-public")
-            public_report = {
-                "receipt_ok": bool(receipt.get("ok")),
-                "node_counts": _census(g)["nodes_by_label"],
-                "source_content_bytes": int(g.query(
-                    "MATCH (s:Source) RETURN coalesce(sum(size(coalesce(s.content,''))), -1)"
-                ).result_set[0][0]),
-                "turn_text_hits": _text_hits(g, [f"{MARKER} s999 "]),
-            }
+            # ⛔ #4282 (owner ruling 2026-10-27) deleted the public capture lane
+            # this census drives: ``TortoiseSDK.capture_session`` was the SDK's
+            # only in-process caller of ``_extract_session_v2``. The census is
+            # ONE block of this probe — the turn-store byte measurement below is
+            # the probe's subject and does not depend on it — so the block is
+            # reported as UNAVAILABLE rather than aborting the run, and no row
+            # pretends a capture happened.
+            if hasattr(sdk, "capture_session"):
+                with use_record_tenant(*tenant):
+                    receipt = sdk.capture_session(public_turns,
+                                                  session_id="10000-bytes-public")
+                public_report = {
+                    "receipt_ok": bool(receipt.get("ok")),
+                    "node_counts": _census(g)["nodes_by_label"],
+                    "source_content_bytes": int(g.query(
+                        "MATCH (s:Source) RETURN coalesce(sum(size(coalesce(s.content,''))), -1)"
+                    ).result_set[0][0]),
+                    "turn_text_hits": _text_hits(g, [f"{MARKER} s999 "]),
+                }
+            else:
+                public_report = {
+                    "unavailable": "TortoiseSDK.capture_session was deleted by "
+                                   "#4282, so the public capture lane has no "
+                                   "in-process door",
+                }
 
         before = _used_memory(g)
         # One needle per session — every turn of that session shares the

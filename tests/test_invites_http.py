@@ -963,7 +963,6 @@ class TestMembersRbac:
         assert r.status_code == 404
 
 
-
 # ── #1875: invitee-side pending / accept / decline ──────────────────────────
 
 
@@ -1167,26 +1166,6 @@ class TestExpiredInviteGhostCleanup:
         assert self._ghost_rows(client) == [], \
             "expired by-id accept must clean the ghost row"
 
-    def test_cleanup_expired_invitations_sweeps_ghost(self, client, reg):
-        """#1908 (sweep): mint → advance expiry → cleanup_expired_invitations
-        → the invite is marked expired AND its fake membership row is gone.
-        Previously the SDK sweep only stamped status='expired' on the
-        Invitation node, leaving the ghost row behind."""
-        inv = self._mint(client, reg)
-        assert len(self._ghost_rows(client)) == 1
-        self._expire(reg, inv["invite_id"])
-        sdk = TortoiseSDK(namespace="registry")
-        result = sdk.cleanup_expired_invitations()
-        assert result["cleaned"] >= 1
-        assert result["ghosts_deleted"] >= 1
-        rows = reg.query(
-            "MATCH (i:Invitation {id:$id}) RETURN i.status, i.accepted_at",
-            params={"id": inv["invite_id"]},
-        ).result_set
-        assert rows[0][0] == "expired"
-        _as_user(_U1, "owner@example.com")
-        assert self._ghost_rows(client) == [], \
-            "expiry sweep must clean the ghost row"
 
     def _seed_pre_1880_ghost(self, reg, iid, email, **inv_props):
         """Pre-#1880 fake row + backing Invitation node (no live cleanup

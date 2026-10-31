@@ -1107,8 +1107,8 @@ def test_the_read_surface_reports_a_local_record_not_a_server_verdict(
         places, capsys):
     """The ledger is retired only by the capture/re-import paths on THIS
     machine, so a session extracted since by another path (the hosted MCP
-    `tortoise_session_capture`, or `TortoiseSDK.capture_session`) is invisible
-    here. The report and `doctor` must say the record is LOCAL rather than
+    `tortoise_session_capture`, or `TortoiseSDK.capture_session` — deleted by #4282)
+    is invisible here. The report and `doctor` must say the record is LOCAL rather than
     assert a state this surface cannot know — the server-side status read is
     #3520's, deliberately not absorbed here.
 

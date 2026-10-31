@@ -2909,7 +2909,8 @@ def _point_added(snapshot_id: str, envelope_id: str | None) -> dict:
 def test_a_point_added_key_may_ride_the_snapshot_not_the_envelope():
     """Measured on #9078's lane: the CAPTURE writer emits exactly this shape.
 
-    `PointAdded` from `TortoiseSDK.capture_session` carries NO envelope `id` —
+    `PointAdded` from `TortoiseSDK.capture_session` (deleted by #4282; the surviving
+    writer is `hosted_api._capture_session_impl`) carries NO envelope `id` —
     the id is only in `payload["point"]` — while this module's table comment
     asserts the opposite. The graph fold always read
     `inner = event.get("point") or event`, so the snapshot was a legitimate

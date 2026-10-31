@@ -30,14 +30,20 @@ precedent. This suite pins the carrier and its payload:
     retractable);
   * a rebuild reproduces the stored metadata.
 
-Both REPLAY ENGINES are pinned, because they fold this record in different
-orders and only one of them is the recovery path: ``rebuild()`` replays record
-by record, so the M2 stub exists before the record folds (ON MATCH);
-``rebuild_all()`` folds ``SourceCreated`` in pass 1b and mints the stub in
-pass 2, so the record itself CREATES the node (ON CREATE). A carrier that is
-faithful only on ``rebuild()`` is half a carrier — hence
-``test_rebuild_all_restores_the_session_source_metadata``, which compares the
-WHOLE property bag, not a chosen subset.
+Both REPLAY ENGINES must stay covered, because they fold this record in
+different orders and only one of them is the recovery path: ``rebuild()``
+replays record by record, so the M2 stub exists before the record folds (ON
+MATCH); ``rebuild_all()`` folds ``SourceCreated`` in pass 1b and mints the stub
+in pass 2, so the record itself CREATES the node (ON CREATE). A carrier that is
+faithful only on ``rebuild()`` is half a carrier.
+
+⚠️ **#4282 DELETED THE ENGINE-HALF OF THIS SUITE** (2026-10-27): the
+``rebuild`` / ``rebuild_all`` session-source tests and the two journal-carrier
+tests drove ``TortoiseSDK.capture_session``, one of the 26 dead public methods,
+and nothing replaced them — the survivors below are fold/window tests on the
+record's SHAPE, not on either engine restoring the whole property bag. Recorded
+as a loss in the PR's "Coverage removed" section rather than left as a claim
+this docstring makes on the suite's behalf.
 
 Formerly excluded here and now PINNED: ``ingestedAt``. It used to be the replay
 clock on a rebuilt session Source (the stub is created by the M2 ``_link_source``
@@ -77,7 +83,6 @@ extractor — zero network, zero provider spend.
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
@@ -122,14 +127,6 @@ def _offline_extractor(monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
-@pytest.fixture()
-def captured(tmp_path):
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    res = sdk.capture_session(CONV, session_id=SESSION_ID)
-    assert res["ok"] is True and res["turns"] == 3
-    yield sdk, log_path
-    sdk.close()
 
 
 def _bag_diff(before, after):
@@ -168,136 +165,14 @@ def _carrier(log_path):
     return recs[-1]
 
 
-def test_the_capture_source_write_has_a_journal_carrier(captured):
-    """No carrier => `rebuild()` reverts the block (the pre-fix behaviour)."""
-    _sdk, log_path = captured
-    record = _carrier(log_path)
-    # `title` is excluded on purpose: the carrier sends it as an EXPLICIT null so
-    # the fold can (a) keep the node's title on ON MATCH and (b) reproduce the
-    # stub's `title=url` on ON CREATE — both asserted below.
-    missing = [k for k in DERIVED_KEYS if k != "title" and record.get(k) is None]
-    assert not missing, (
-        f"the carrier omits {missing}, so a replay cannot restore them")
-    # The two properties this writer must not DESTROY are carried from the node.
-    assert record.get("is_episodic") is True, (
-        "the carrier must carry the M2 stub's `is_episodic` — a rebuild that "
-        "loses it re-opens the #1486 episodic backfill")
-    assert "validFrom" in record, (
-        "`validFrom` must be carried (null when the node has none): the fold's "
-        "hash-diff arm writes `s.validFrom = $vf`, so an ABSENT key clears a "
-        "window the node holds")
-    # `title` rides the record as an explicit null so the fold cannot default it
-    # to the MERGE key (a value live never sets) — see `_upsert_source`.
-    assert "title" in record and record["title"] is None
-    # And the record declares itself a STUB COMPLETION, which is what suppresses
-    # the ON CREATE arm's creator-only defaults (`id`/`version`/`externalId`) and
-    # admits this writer's own prop spellings.
-    assert record.get("_stub_completion") is True
 
 
-def test_the_carrier_holds_the_redacted_text_not_the_raw_turn(captured):
-    """#4911 runs BEFORE durability: the journal must not hold the credential."""
-    sdk, log_path = captured
-    record = _carrier(log_path)
-    for key in ("summary", "topics", "_searchText"):
-        value = record.get(key)
-        text = " ".join(map(str, value)) if isinstance(value, list) else str(value)
-        assert SECRET not in text, f"{key!r} carried the credential into the journal"
-        assert "ghp_" not in text, f"{key!r} carried a credential-shaped run"
-    # Positive half: the carrier is the REDACTED derivation, not a copy of the
-    # raw input — the redaction marker is visible where the secret was.
-    assert "[REDACTED:github_token]" in (record.get("summary") or ""), (
-        "the carrier's summary is not the redacted transcript's first utterance")
-    # And it describes the SAME bytes the node stores (the #4911 rule: the hash
-    # is taken over the redacted transcript).
-    stored = _source_props(sdk._get_proj(), SOURCE_URL)
-    assert record["contentHash"] == stored["contentHash"]
-    assert SECRET not in str(stored.get("_searchText") or "")
 
 
-def test_rebuild_restores_the_session_source_metadata(captured):
-    """Gate item 2: `derived == replay(journal)` for the capture `:Source`."""
-    sdk, log_path = captured
-    proj = sdk._get_proj()
-    before = _source_props(proj, SOURCE_URL)
-    for key in DERIVED_KEYS:
-        assert before.get(key) not in (None, "", [], {}), (
-            f"precondition: live {key!r} must be populated")
-
-    proj.rebuild(EventLog(log_path), confirm_destructive=True)
-
-    after = _source_props(proj, SOURCE_URL)
-    lost = _bag_diff(before, after)
-    assert not lost, (
-        f"a rebuild diverged the session :Source from the live node: {lost}")
-    # The redaction survives the round trip too — a rebuild must not resurrect
-    # the credential from the journal.
-    assert SECRET not in str(after.get("summary") or "")
 
 
-def test_rebuild_all_restores_the_session_source_metadata(captured):
-    """Gate item 2 on the RECOVERY engine, not only on `rebuild()`.
-
-    `rebuild_all` folds `SourceCreated` in pass 1b and mints the M2 stub in
-    pass 2, so `_upsert_source` takes its ON CREATE arm — where the creator-only
-    defaults (`id`, `version=1`, `externalId=''`) live and where `title` /
-    `is_episodic` / `updatedAt` had no clause at all. Measured before this was
-    fixed: `title` ('session:sess_…', None), `is_episodic` (True, None),
-    `updatedAt` (set, None), `id` (None, 'session:sess_…'), `version` (None, 1) —
-    i.e. the recovery path LOST two properties it had right before the carrier
-    existed and INVENTED two the live node never had.
-    """
-    sdk, log_path = captured
-    proj = sdk._get_proj()
-    before = _source_props(proj, SOURCE_URL)
-    for key in DERIVED_KEYS:
-        assert before.get(key) not in (None, "", [], {}), (
-            f"precondition: live {key!r} must be populated")
-
-    proj.rebuild_all(str(os.path.dirname(log_path)), confirm_destructive=True)
-
-    after = _source_props(proj, SOURCE_URL)
-    diverged = _bag_diff(before, after)
-    assert not diverged, (
-        "the CLI/recovery replay engine diverged the session :Source from the "
-        f"live node: {diverged}")
 
 
-def test_a_second_materialization_with_a_changed_transcript_moves_updatedAt(
-        captured):
-    """Review P2: live never moved `updatedAt`; the carrier always carried it.
-
-    A second materialization of the same `session:<id>` whose transcript (and so
-    `contentHash`) differs is reachable through a TRUE retry (#2335 WI-2b) and
-    the documented #1727 concurrent-fresh race. Live used a bare `coalesce`
-    (first stamp forever) while `_upsert_source`'s hash-diff arm takes the
-    RECORD's instant — so a rebuild moved the node to t2 where live stayed on
-    t1, and `memory_orchestrator` then sorted the session Source by a different
-    capture.
-
-    Fails on the pre-fix head twice over: `live["updatedAt"]` stays at the first
-    capture's instant, and the rebuilt value disagrees with it.
-    """
-    sdk, log_path = captured
-    proj = sdk._get_proj()
-    first = _source_props(proj, SOURCE_URL)
-    assert first["updatedAt"], "precondition: the first capture stamped it"
-
-    second_conv = [*CONV, {"role": "user", "content": "One more turn."}]
-    sdk._materialize_session_source(SESSION_ID, None, SECOND_NOW, second_conv)
-
-    live = _source_props(proj, SOURCE_URL)
-    assert live["contentHash"] != first["contentHash"], (
-        "precondition: the second transcript must hash differently")
-    assert live["updatedAt"] == SECOND_NOW, (
-        "a hash-changing re-materialization is a version transition, and live "
-        f"kept the FIRST stamp ({live['updatedAt']!r}) — the fold's hash-diff "
-        "arm takes the record's, so the two halves disagree")
-
-    proj.rebuild(EventLog(log_path), confirm_destructive=True)
-    after = _source_props(proj, SOURCE_URL)
-    assert after["updatedAt"] == live["updatedAt"], (
-        f"replayed updatedAt {after['updatedAt']!r} != live {live['updatedAt']!r}")
 
 
 def test_an_empty_transcript_capture_replays_the_stamp_live_set(tmp_path):

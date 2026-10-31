@@ -70,7 +70,7 @@ def validate_filter_key(key: str) -> str:
     return key
 
 
-# ── Relationship types (sdk.traverse / supersede_point) ───────────────────
+# ── Relationship types (sdk.traverse — deleted by #4282 — / supersede_point) ─
 
 # Derived from the codebase edge-type inventory + documented predicates. See
 # module docstring for the derivation + drift test.
@@ -101,8 +101,8 @@ def validate_rel_type(rel_type: str) -> str:
 
     The relationship type appears in the query STRUCTURE (``-[:TYPE]->``) where
     parameterization is impossible — it MUST be allowlisted. Prevents Cypher
-    injection via relationship_type (sdk.traverse) and edge-type interpolation
-    (supersede_point transfer).
+    injection via relationship_type (`sdk.traverse`, deleted by #4282) and
+    edge-type interpolation (supersede_point transfer).
 
     Case-sensitive: ``"IMPL "``/``"impl"`` are rejected (the Cypher type token
     must match the stored edge type exactly).

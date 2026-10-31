@@ -404,10 +404,13 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **150** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **124** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
-   approved rows with no `def` yet, so the declaration stays at 40 — and
+   approved rows with no `def` yet, and 150 → 124 on 2026-10-27 when the surplus methods
+   nothing calls were deleted under the owner's ruling on this issue (26 methods, code
+   archived at tag `archive/4282-surplus-sdk-methods`) — in neither move did the declared
+   surface change, so the declaration stays at 40 — and
    `docs/product/canonical-sdk-methods.md` agrees; reconcile the per-name mapping when
    that pass starts). Renames there are mechanical for the
    MCP handlers; only a *capability* removal can force an MCP change — which the bridge

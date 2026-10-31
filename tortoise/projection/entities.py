@@ -1645,8 +1645,9 @@ class _EntityHandlers:
         # `_promote_incident_operators` (sdk.py, #7853) reads an Event
         # endpoint's `status` as a live/draft gate, so it suppresses operator
         # promotion exactly as a draft Point does. Of the three omitted keys,
-        # only `name` has a reader (`sdk.backfill_about_entities` matches an
-        # Event against a Point's content); `eventStatus` is an INGEST marker
+        # only `name` has a reader (what `sdk.backfill_about_entities` did — that
+        # reader was deleted by #4282, so today nothing reads it); `eventStatus`
+        # is an INGEST marker
         # (`scheduled` → `completed`, written by the session/meeting indexers),
         # not a state read. The typed commit path cannot populate the lane at
         # all — `CommitEvent` is `extra="forbid"` (`commit_schema.py`) — so
@@ -3085,7 +3086,8 @@ class _EntityHandlers:
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
         ``SessionRecorded`` the capture emits after the link pass
-        (``sdk.capture_session``) — the THIRD of the four, after the turn
+        (``sdk.capture_session``, DELETED by #4282 — the hosted lane keeps the
+        same four stamps) — the THIRD of the four, after the turn
         write's own trailing record (#4911) — so the counters the live raw SET
         writes are durable too — ``recover_from_log`` / a journal-only
         ``rebuild()`` otherwise came back with them null (review P2, #3722).

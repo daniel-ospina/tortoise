@@ -177,7 +177,7 @@ is **per-surface**, not uniform (#3615):
   are the Claude Code `session-end.sh` hook (plus `tortoise session drain`,
   which its `SessionStart` counterpart runs in the background), `tortoise
   session capture` / `tortoise sessions import`, and the SDK's client
-  transmission (`TortoiseSDK.commit_session` → `POST /v1/sessions/commit`).
+  transmission (`POST /v1/sessions/commit`, the hosted route — the SDK's `TortoiseSDK.commit_session` wrapper that used to call it was deleted by `#4282`).
 - **The hosted MCP tool `tortoise_session_capture` is not gated by this
   variable** — it executes on the server, which cannot read the client host's
   `TORTOISE_CAPTURE`. It carries the server-side recording policy
@@ -187,12 +187,15 @@ is **per-surface**, not uniform (#3615):
   so requiring it here is unanswerable — and the tool description tells the
   agent to disclose the filing to you before it happens. This is a deliberate
   departure from the per-session-opt-in default; see the `OVERRIDES:` marker on
-  #3662. `TortoiseSDK.capture_session` is likewise ungated,
-  and it is **not** egress-free: it writes the graph backend named by
-  `TORTOISE_DB_URI` **and** sends each turn verbatim to the configured BYOK
-  extractor provider (BYOK is the documented default), so a remote
-  `redis://`·`rediss://` backend is itself a data-egress choice and the
-  provider leg transmits regardless of which backend is named.
+  #3662. `TortoiseSDK.capture_session` was likewise ungated (the surviving capture lane is
+  `hosted_api._capture_session_impl`; the SDK method was **deleted by #4282**).
+  That deleted method was **not** egress-free: unlike the hosted handler it wrote
+  the graph backend named by `TORTOISE_DB_URI` **and** sent each turn verbatim to
+  the configured BYOK extractor provider (BYOK is the documented default), so a
+  remote `redis://`·`rediss://` backend was itself a data-egress choice and the
+  provider leg transmitted regardless of which backend was named. This is the
+  consent history for that door; the hosted handler's own gating is the paragraph
+  above.
 - **The ambient indexer sweep is not gated, and it does egress.** The Claude
   Code `session-end.sh` hook runs `tortoise index directory <corpus> --metadata`
   **unconditionally** — outside its `TORTOISE_CAPTURE` branch — and
@@ -302,7 +305,7 @@ silent until the session is imported explicitly: the Pi capture extension.
 
 **This is a local record, not the server's verdict.** A session extracted by
 another path since it was deferred — the hosted MCP `tortoise_session_capture`,
-or `TortoiseSDK.capture_session` — is not visible in the local ledger, so a
+or `TortoiseSDK.capture_session` (deleted by #4282) — is not visible in the local ledger, so a
 `not-processed` entry can be stale until the next `--process` replays it.
 
 ## 4. Use the REST API

@@ -434,11 +434,12 @@ def capture_sdk(tmp_path, monkeypatch):
        with the pin they do not.
 
     ``TORTOISE_SESSION_LLM_MOCK=1`` is the repo's documented deterministic,
-    ZERO-NETWORK extractor — the same seam ``_capture()`` below pins on these
-    exact grounds — so a leg whose subject is the RECORD WRITE refuses the same
-    way on every box, keyed or keyless. Pinned on the FIXTURE, not per test, so
-    an arm-gate leg that never goes through ``_capture()`` cannot reopen the
-    hole.
+    ZERO-NETWORK extractor, so a leg whose subject is the RECORD WRITE refuses the
+    same way on every box, keyed or keyless. Pinned on the FIXTURE, not per test,
+    so a leg that never reaches the extractor cannot reopen the hole by leaving the
+    seam unset. (#4282 deleted `capture_session` and with it the `_capture()`
+    stack this paragraph used to point at; the pin is on the extractor seam itself,
+    which is what those legs actually traverse.)
     """
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
@@ -452,10 +453,6 @@ def capture_sdk(tmp_path, monkeypatch):
     return _make
 
 
-@pytest.fixture()
-def no_record_dsn(monkeypatch):
-    monkeypatch.delenv(record_writer.RECORD_DSN_ENV, raising=False)
-    return record_writer.RECORD_DSN_ENV
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -674,25 +671,6 @@ def test_the_schema_resolves_without_the_repo_checkout(monkeypatch, tmp_path):
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_an_unarmed_capture_opens_no_record_connection(capture_sdk, no_record_dsn,
-                                                       monkeypatch):
-    """No DSN ⇒ no connection, no plan, no exception: §2.0's sequence."""
-    def _must_not_connect(dsn):                      # pragma: no cover - asserted
-        raise AssertionError(f"the record is unarmed but connected to {dsn!r}")
-
-    monkeypatch.setattr(record_writer, "_default_connect", _must_not_connect)
-    sdk, _journal = capture_sdk()
-    before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
-        {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-        {"role": "assistant", "content": "Noted."},
-    ])
-    assert receipt["ok"] is True
-    # A DELTA, not process-global equality (#9231 review P2): the counter is a
-    # module-level Prometheus Counter, so `== {}` would only hold while no other
-    # file in the suite arms the record — an accident, not the claim.
-    after = dict(monitoring.record_write_failure_counts())
-    assert after == before, (before, after)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -700,37 +678,6 @@ def test_an_unarmed_capture_opens_no_record_connection(capture_sdk, no_record_ds
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_an_armed_capture_without_a_tenant_is_refused_and_counted(
-        capture_sdk, monkeypatch):
-    """Armed with no tenant ⇒ REFUSED (counted `no_tenant`), never filed blind.
-
-    The DSN is syntactically valid and deliberately unreachable: a refusal that
-    had gone looking for a tenant's rows would first TRY to connect, so "no
-    connection attempted" is what proves the refusal happened before the guess.
-    """
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
-                       "postgresql://record:record@127.0.0.1:1/record")
-
-    def _must_not_connect(dsn):                      # pragma: no cover - asserted
-        raise AssertionError(
-            "an armed write with no tenant in scope connected to the record — "
-            "the tenant was guessed"
-        )
-
-    monkeypatch.setattr(record_writer, "_default_connect", _must_not_connect)
-    sdk, _journal = capture_sdk()
-    # A DELTA, not a process-global `>=` (#9231 review P2): the counter is a
-    # module-level Prometheus Counter, so `>= 1` would pass on some OTHER
-    # test's refusal — an accident, not this claim.
-    before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
-        {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-        {"role": "assistant", "content": "Noted."},
-    ])
-    assert receipt["ok"] is True
-    after = dict(monitoring.record_write_failure_counts())
-    assert after.get("no_tenant", 0) > before.get("no_tenant", 0), (before, after)
-    assert after.get("write_failed", 0) == before.get("write_failed", 0), after
 
 
 def test_the_single_tenant_environment_pair_resolves_a_tenant(capture_sdk,
@@ -834,29 +781,6 @@ def test_env_example_declares_the_record_tenant_pair():
         "record_writer.CONNECT_TIMEOUT_SECONDS")
 
 
-def test_an_armed_capture_without_a_journal_is_counted_not_silent(
-        capture_sdk, monkeypatch):
-    """A journal-less deployment with an armed record is a NAMED misconfiguration.
-
-    `tortoise/config.py` supports the journal-less lane by design, so an
-    operator can arm the record and forget the journal — and then nothing is
-    written and NOTHING could heal it later, because the record's sustainable
-    source is the journal. Silent would be the #9078 hole wearing a green
-    health check.
-    """
-    monkeypatch.setattr(record_writer, "_default_connect",
-                        lambda dsn: pytest.fail("connected with no journal"))
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
-                       "postgresql://record:record@127.0.0.1:1/record")
-    sdk, _journal = capture_sdk(journal=False)
-    before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
-        {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-        {"role": "assistant", "content": "Noted."},
-    ])
-    assert receipt["ok"] is True
-    after = dict(monitoring.record_write_failure_counts())
-    assert after.get("no_journal", 0) > before.get("no_journal", 0), after
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1192,32 +1116,6 @@ def test_the_seam_writes_nothing_from_a_scratch_buffer(monkeypatch):
         f"`record_write_failures` must stay zero-meaningful: {failures_after}")
 
 
-def test_the_sdk_door_reads_durability_off_its_log(capture_sdk, monkeypatch):
-    """A door READS `durable`; it must not assume every `EventLog` is a journal.
-
-    `EventLog` now declares `durable = True` explicitly rather than relying on
-    the doors' `getattr(log, "durable", True)` fallback, so a log constructed
-    onto a SCRATCH path can say so — which is exactly what the MCP mining
-    lane's temp-file journal does (`mcp_server`, `tempfile.mkdtemp`). Before
-    this, `sdk.py` and `mining.py` passed no `durable` at all, so such a buffer
-    filed rows whose journal was a directory nothing references, and no replay
-    could ever heal them (#9231 review P1).
-    """
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
-                       "postgresql://record:record@127.0.0.1:1/record")
-    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: pytest.fail(
-        "the SDK door filed a record from a log that declared itself a "
-        "scratch buffer"))
-    sdk, _journal = capture_sdk()
-    log = sdk._get_event_log()
-    assert log is not None, "the fixture configures a journal"
-    assert log.durable is True, "a real journal is durable by default"
-    log.durable = False
-    before = dict(monitoring.record_non_journal_skip_counts())
-    sdk.capture_session([{"role": "user", "content": "We chose FalkorDB."}])
-    after = dict(monitoring.record_non_journal_skip_counts())
-    assert after.get("no_durable_journal", 0) > before.get(
-        "no_durable_journal", 0), after
 
 
 def test_the_m2_capture_lane_never_files_a_row_its_journal_never_carried(        capture_sdk, monkeypatch):
@@ -1904,25 +1802,6 @@ def test_the_record_connection_is_bounded(monkeypatch):
         "a similarly-spelled query key is not `connect_timeout`")
 
 
-def test_a_malformed_dsn_on_the_journal_less_lane_is_counted(
-        capture_sdk, monkeypatch):
-    """A typo'd DSN with no journal produced ZERO signal before this fix.
-
-    On the journal-less lane the seam is never called (there is no append to
-    hook), so `write_live_record`'s own `malformed_dsn` count could never fire:
-    the bare `except Exception: return` swallowed the misconfiguration. The
-    armed-but-malformed shape is the one an operator hits first when arming.
-    """
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "mysql://not-postgres/nope")
-    sdk, _journal = capture_sdk(journal=False)
-    before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
-        {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-        {"role": "assistant", "content": "Noted."},
-    ])
-    assert receipt["ok"] is True
-    after = dict(monitoring.record_write_failure_counts())
-    assert after.get("malformed_dsn", 0) > before.get("malformed_dsn", 0), after
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2216,197 +2095,10 @@ def _journal_records(journal_path: Path) -> list[dict]:
             journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _capture(capture_sdk, monkeypatch,
-             tenant: tuple[str, str]) -> tuple[object, Path, int]:
-    """Seed, arm, capture through the PUBLIC API, return (sdk, journal, losses)."""
-    # The WRITER connects as the app role (the gate refuses the provisioning
-    # superuser); `_record_db()` keeps the superuser for seeding/assertions.
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
-                       _app_role_dsn(os.environ[RECORD_DB_ENV]))
-    # ⛔ The extraction leg must be HERMETIC (#3695/#5477 class). The semantic-
-    # layer claim below is asserted against the objects a capture EMITS, and on a
-    # box with no provider key the capture SKIPS extraction by design (#3892) —
-    # so the same armed leg passed on a keyed laptop and RED in CI, for an
-    # environment cause. Measured 2026-10-23 on PR #9772's own leg: armed and
-    # keyless, the journal held ['EventRecorded', 'PointAdded', 'SessionRecorded',
-    # 'SourceCreated'] and the run failed on `assert objects`. The mock seam is
-    # the repo's documented deterministic, ZERO-NETWORK extractor (the same one
-    # `test_capture_session.py` uses), so the leg exercises the real capture →
-    # record path identically on every box.
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    sdk, journal_path = capture_sdk()
-    before = dict(monitoring.record_write_failure_counts())
-    with use_record_tenant(*tenant):
-        receipt = sdk.capture_session([
-            {"role": "user", "content": "We chose FalkorDB for the hot cache."},
-            {"role": "assistant", "content": "Noted: FalkorDB holds the hot cache."},
-        ])
-    lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
-            - before.get("write_failed", 0))
-    assert receipt["ok"] is True, receipt
-    return sdk, journal_path, lost
 
 
-def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
-                                                  tenant):
-    """The record, written by the PUBLIC capture path — and the residue NAMED.
-
-    Layer by layer, from the schema's own shape:
-
-    * **event stream** — `event` / `source` / `session` (migration 1's episodic
-      tables) AND `journal_event`, the position row layer 1 IS (exposed as
-      `public.record_event_stream`). The row is keyed on the ordinal
-      `EventLog.append` reported (#9190), so the live write and a later replay
-      give one record one number;
-    * **semantic** — `object` only, asserted against the objects the capture
-      actually emitted (counted from the journal, so the claim is non-vacuous
-      either way: a capture that emits no Object record must produce no Object
-      row). The layer's **Subject** half is a SEPARATE leg below: this sentence
-      used to claim `subject` here, which was never true of this leg, and this
-      file's capture lane is its deterministic `TORTOISE_SESSION_LLM_MOCK`
-      payload, whose one entity classifies as an Object (`core:strategy`) — so
-      a `subject` assertion against THIS capture would be vacuous (#9893). A
-      capture CAN emit `SubjectAdded` (the v2 lane routes any payload entity of
-      a declared Subject kind to `create_entity("subject", …)`); it is this
-      lane's payload, not the product, that produces none.
-    * **procedural** — a VIEW, never a table ("the procedural layer owns no
-      table", migration 4): `object_current_status` folds the `object` rows.
-
-    Then the RESIDUE, per RECORD and unconditionally: every journal record is
-    replayed on its own, and a refusal must name a known cause — either a
-    schema/producer disagreement (the emitted value does not fit the declared
-    column) or one of the pre-existing fold refusals PR #9200 fixes. Anything
-    else is a NEW defect and fails here. Every allowance is derived from what
-    the record itself carries or from a MEASURED fold behaviour, so nothing can
-    go stale in silence.
-    """
-    conn = _record_db()
-    try:
-        _ensure_record_schema(conn)
-        _seed_tenant(conn, tenant)
-        # The layer-1 count is a property of THIS run (#9307 review F4).
-        # `journal_event` is append-only by trigger, so nothing clears it; taken
-        # as a DELTA against a tenant only this test has used, it stays correct
-        # on a database a previous run migrated, and the count can only move in
-        # the direction the door writes it.
-        before = _count(conn, "journal_event", tenant)
-        _sdk, journal_path, lost = _capture(capture_sdk, monkeypatch, tenant)
-        after = _count(conn, "journal_event", tenant)
-        written = after - before
-
-        # 1. the event stream, from the production path
-        for table in ("event", "source", "session"):
-            assert _count(conn, table, tenant) >= 1, (
-                f"{table} received no row from the public capture path")
-        # 2. layer 1 is written from the journal's OWN ordinal (#9190).
-        #    `journal_event` is `public.record_event_stream`'s source, and it is
-        #    the acceptance sentence of the epic: before the ordinal was
-        #    threaded it stayed EMPTY on every live write (the deferral this PR
-        #    shipped), and the row count must therefore be at least one per
-        #    record the journal carried — never zero, and never more than the
-        #    journal holds (an invented number would invent rows).
-        records = _journal_records(journal_path)
-        assert written >= 1, (
-            "the live door wrote no position row — layer 1 "
-            "(`public.journal_event`, exposed as `public.record_event_stream`) "
-            "is empty, so the epic's event-stream claim is unmet by the very "
-            "path that is supposed to meet it (#9190's ordinal)")
-        # One row per record, at most: a row numbered beyond the journal's own
-        # length would be an invented seq (the collision #9190 removes). The
-        # journal file is the ground truth for that length.
-        assert written <= len(records), (
-            f"the record gained {written} position row(s) for "
-            f"{len(records)} journal record(s) — a row numbered past the "
-            "journal is an invented seq")
-
-        # 3. the semantic + procedural layers, counted against the journal.
-        #    `assert objects` FIRST and unconditionally: without it the count
-        #    comparison below is satisfiable by `0 >= 0`, i.e. by a capture that
-        #    emitted no ObjectRegistered record at all — which is the pre-fix
-        #    world (nothing written) reading as a pass. Measured: the public
-        #    capture emits ObjectRegistered, so this is a real assertion.
-        objects = [r for r in records if r.get("type") == "ObjectRegistered"]
-        assert objects, (
-            "the capture emitted no ObjectRegistered record, so the semantic- "
-            f"layer claim would be vacuous — journal types: "
-            f"{sorted({r.get('type') for r in records})}")
-        assert _count(conn, "object", tenant) >= len(objects), (
-            f"the record holds {_count(conn, 'object', tenant)} Object row(s) for "
-            f"the {len(objects)} ObjectRegistered record(s) the journal carried")
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM public.object_current_status "
-                        "WHERE org_id=%s", (tenant[0],))
-            assert int(cur.fetchone()[0]) >= len(objects), (
-                "the procedural layer's view returns fewer rows than the "
-                "objects the record holds")
-
-        # 4. the residue, per record — on the APP-ROLE connection, inside a
-        #    transaction. `replay()` gates the connecting role and verifies the
-        #    tenant GUC before the plan, so the superuser/autocommit handle this
-        #    loop used to borrow is refused before a single statement (#9600
-        #    review cycle 7).
-        refused = 0
-        replay_conn = _record_replay_db()
-        for record in records:
-            try:
-                record_projection.replay([record], replay_conn, org_id=tenant[0],
-                                         graph_id=tenant[1], position=False)
-                replay_conn.commit()
-            except Exception as exc:
-                replay_conn.rollback()
-                message = str(exc)
-                if _engine_refusal(message) is not None:
-                    # A pre-existing fold refusal: the record never reached
-                    # Postgres, so it cannot be judged on its values yet.
-                    refused += 1
-                    continue
-                disagreement = _disagreement(record)
-                assert disagreement is not None, (
-                    f"{record.get('type')} cannot be projected and the refusal "
-                    f"is not a schema/producer disagreement: {message}. That is "
-                    "a NEW defect, not a widened allowance."
-                )
-                assert _SCHEMA_DISAGREEMENTS[disagreement] in message, (
-                    f"{record.get('type')} carries a {disagreement} "
-                    f"disagreement but the error does not name it: {message}"
-                )
-                refused += 1
-            else:
-                assert _disagreement(record) is None, (
-                    f"{record.get('type')} now projects cleanly, so its "
-                    f"{_disagreement(record)!r} disagreement is FIXED — delete "
-                    "it from _SCHEMA_DISAGREEMENTS. A pin that outlives its "
-                    "defect hides the next one."
-                )
-        replay_conn.close()
-        # 5. the capture lost exactly those records and nothing else
-        assert lost == refused, (
-            f"the capture counted {lost} lost record(s); replaying the journal "
-            f"shows {refused} refused record(s)")
-    finally:
-        conn.close()
 
 
-@pytest.mark.xfail(condition=_fold_refuses_captured_points(), strict=True,
-                   reason=_ENGINE_DEPENDENCY)
-def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
-                                                            monkeypatch, tenant):
-    """`point` / `relation` receive rows from the production path.
-
-    THE claim the epic makes about a user's data ("a user's Points … exist in
-    Postgres"). It is the ONLY assertion gated on the engine, because it is the
-    only one the pre-existing fold defect makes unreachable: on a tree without
-    #9200 every captured Point is refused, so `point` would be empty.
-    """
-    conn = _record_db()
-    try:
-        _ensure_record_schema(conn)
-        _seed_tenant(conn, tenant)
-        _capture(capture_sdk, monkeypatch, tenant)
-        assert _count(conn, "point", tenant) >= 1, (
-            "the epistemic layer received no row from the capture")
-    finally:
-        conn.close()
 
 
 def test_the_public_subject_door_writes_the_semantic_layers_subject_half(

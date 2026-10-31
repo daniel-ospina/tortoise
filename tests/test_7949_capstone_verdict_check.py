@@ -1231,13 +1231,23 @@ def test_gate_counts_reads_the_bare_classify_shape_it_documents():
     assert _gate_counts([]) == {}
 
 def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch):
-    """#9116, the WIRING: the real ``capture_session`` returns the seam's record.
+    """#9116, the WIRING: the production assembly returns the seam's record.
 
     Everything above builds the receipt by calling the helper directly, so none of
     it can tell whether ``_extract_session_v2`` — the production assembly —
-    actually puts the helper's output on the receipt. This drives the real entry
-    point over the deterministic mock extractor and reads the receipt it hands
-    back.
+    actually puts the helper's output on what it returns. This drives that
+    assembly over the deterministic mock extractor and reads the ``stats`` block
+    it hands back.
+
+    ⚠️ #4282 (2026-10-27) DELETED ``TortoiseSDK.capture_session`` — the public
+    wrapper this pin originally drove — so the pin now drives
+    ``_extract_session_v2`` directly (the same production assembly, privatised
+    rather than removed) and reads the identical ``stats["step_witness"]``. The
+    wrapper added ``ok``/``errors``/``graph_ops`` around it; none of those is what
+    this pin measures, and the receipt it re-forms below carries ``stats`` alone
+    so ``observe_steps`` sees exactly the object it always saw. The mutation still
+    reds: revert the meta fold to ``"stats": out.get("stats")`` and the key
+    disappears from a REAL pass.
 
     Mutation that reds it: revert the meta fold to ``"stats": out.get("stats")``
     (the pre-fix line) and the ``step_witness`` key disappears from a REAL
@@ -1276,16 +1286,18 @@ def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch
     graph = f"test_capstone_9116_{_uuid.uuid4().hex[:10]}"
     sdk = TortoiseSDK(graph_name=graph)
     try:
-        receipt = sdk.capture_session(
+        _extracted, meta = sdk._extract_session_v2(
             [{"role": "user",
               "content": ("Daniel Ospina at Premise Labs decided on 2026-10-10 "
                           "to adopt the Postgres record as the system of "
                           "record; the rollout is owned by Ana Ruiz.")}],
-            session_id=graph)
+            session_id=graph,
+            now="2026-10-31T00:00:00+00:00")
     finally:
         sdk.close()
 
-    assert receipt.get("ok") is True, receipt.get("errors")
+    assert isinstance(meta, dict), meta
+    receipt = {"ok": True, "stats": meta.get("stats") or {}}
     stats = receipt.get("stats") or {}
     witness = stats.get("step_witness")
     assert isinstance(witness, dict) and witness, (
@@ -1961,15 +1973,23 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     }
 
     # (a) The entry-point cites: the def, the CALL site and the one-pass body.
-    sdk_cites = re.search(r"`sdk\.py:(\d+)`; called at `:(\d+)`", readme)
+    # ⚠️ #4282 DELETED `TortoiseSDK.capture_session`, which held the only in-`sdk.py`
+    # call (`self._extract_session_v2(`). The surviving production caller is the
+    # hosted capture lane, which passes the method as a CALLABLE — so the cite is
+    # resolved in `hosted_api.py`, and it is still an assertion about a real call
+    # site rather than about a number nobody checks.
+    sdk_cites = re.search(
+        r"`sdk\.py:(\d+)`; called from the hosted capture lane at `hosted_api\.py:(\d+)`",
+        readme)
     assert sdk_cites, "the sdk.py cite paragraph moved; re-derive it, do not drop the pin"
     def_line, call_line = (int(n) for n in sdk_cites.groups())
     assert sources["sdk"][def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"README cites the _extract_session_v2 def at sdk.py:{def_line}, which is "
         f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did not")
-    assert "self._extract_session_v2(" in sources["sdk"][call_line - 1], (
-        f"README cites the call at sdk.py:{call_line}, which is "
-        f"{sources['sdk'][call_line - 1].strip()!r} — the line moved and the cite did not")
+    hosted = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
+    assert "sdk._extract_session_v2," in hosted[call_line - 1], (
+        f"README cites the call at hosted_api.py:{call_line}, which is "
+        f"{hosted[call_line - 1].strip()!r} — the line moved and the cite did not")
     # Anchored on the entry-point SENTENCE, not on the first backticked
     # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
     # dozens of lines in that file (the flag reads, the gates, the surfaces),
@@ -2041,7 +2061,13 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     # `from tortoise.commit_schema import compute_client_commit_id` — so the
     # call-site assertion reds there. It is the assertion that was already red
     # in the README before this round; the pin now covers the second site too.
-    probe_entry = re.search(r"`sdk\.py:(\d+)`, called at `:(\d+)`", probe)
+    # ⚠️ The CALL half moved to `hosted_api.py` with #4282 (the deleted
+    # `TortoiseSDK.capture_session` held the only in-`sdk.py` call); the cite names the
+    # surviving caller, which passes the method as a CALLABLE, and this pin resolves it
+    # THERE rather than dropping the claim it makes.
+    probe_entry = re.search(
+        r"`sdk\.py:(\d+)`, called from the hosted capture lane at "
+        r"`tortoise/hosted_api\.py:(\d+)`", probe)
     assert probe_entry, (
         "the probe's entry-point cite moved or was reformatted; re-derive it, "
         "do not drop the pin")
@@ -2050,9 +2076,10 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         f"the probe cites the _extract_session_v2 def at sdk.py:{p_def}, which "
         f"is {sources['sdk'][p_def - 1].strip()!r} — the line moved and the "
         "cite did not")
-    assert "self._extract_session_v2(" in sources["sdk"][p_call - 1], (
-        f"the probe cites the call at sdk.py:{p_call}, which is "
-        f"{sources['sdk'][p_call - 1].strip()!r} — the line moved and the cite "
+    hosted_lines = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
+    assert "sdk._extract_session_v2," in hosted_lines[p_call - 1], (
+        f"the probe cites the call at hosted_api.py:{p_call}, which is "
+        f"{hosted_lines[p_call - 1].strip()!r} — the line moved and the cite "
         "did not")
 
 
@@ -2806,13 +2833,21 @@ def test_the_probes_line_citations_resolve_too():
     sdk = (_REPO / "tortoise/sdk.py").read_text().splitlines()
     extractor = (_REPO / "tortoise/extractor_v2.py").read_text().splitlines()
 
-    entry = re.search(r"``sdk\.py:(\d+)``, called at ``:(\d+)``", probe)
+    # ⚠️ #4282 deleted `TortoiseSDK.capture_session`, the only in-`sdk.py` caller, so the
+    # cite names the surviving caller — the hosted capture lane, which passes the method as a
+    # CALLABLE. Same re-pointing as the README's twin check, and still an assertion about a
+    # line that does something rather than about a number nobody reads.
+    entry = re.search(
+        r"``sdk\.py:(\d+)``, called from the hosted capture lane at "
+        r"``tortoise/hosted_api\.py:(\d+)``", probe)
     assert entry, "the probe's sdk.py cite moved; re-derive it, do not drop the pin"
     def_line, call_line = (int(n) for n in entry.groups())
     assert sdk[def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"probe cites the def at sdk.py:{def_line}, which is {sdk[def_line - 1].strip()!r}")
-    assert "self._extract_session_v2(" in sdk[call_line - 1], (
-        f"probe cites the call at sdk.py:{call_line}, which is {sdk[call_line - 1].strip()!r}")
+    hosted = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
+    assert "sdk._extract_session_v2," in hosted[call_line - 1], (
+        f"probe cites the call at hosted_api.py:{call_line}, which is "
+        f"{hosted[call_line - 1].strip()!r}")
 
     module_cite = re.search(r"``extractor_v2\.py:(\d+)``", probe)
     assert module_cite, "the probe's extractor_v2 entry cite is gone"

@@ -25,12 +25,26 @@ What this suite pins:
 * the record is in the journal BEFORE the statement reaches the handle (the
   ordering that makes the lane declaration honest — the same property
   ``tests/test_9124_declared_live_doors.py`` pins textually for whole doors);
-* the statement is authorized by ITS OWN lane under an ARMED handle (the
-  reason read back AT the write handle, not the outer scope's);
-* ``rebuild()`` AND ``rebuild_all()`` restore the four fields on a minted
-  Point that is never promoted;
 * the hosted twin (`hosted_api._capture_session_impl`) does the same — the two
   lanes are byte-parity on these fields.
+
+⚠️ **SIX LEGS THIS SUITE USED TO HAVE WENT WITH `TortoiseSDK.capture_session`
+(#4282, 2026-10-27), and the loss is stated here because they pinned the two
+properties that make the lane declaration HONEST.** Deleted: the armed-handle
+read-back (`test_the_stamp_is_authorized_by_its_own_lane_under_an_armed_handle`),
+the record-before-statement ordering
+(`test_the_record_precedes_the_stamp_statement`), the one-record-per-minted-id
+census (`test_the_capture_stamp_journals_one_record_per_minted_id`), the
+refused-record-skips-the-cache-write leg, and both never-promoted rebuild legs
+(`test_a_rebuild_restores_the_provenance_of_an_unpromoted_point`,
+`test_a_rebuild_all_of_a_re_creation_drops_the_dead_provenance`). **Measured, not
+assumed:** every one of them either called `capture_session` directly or took the
+`un_promoted_capture` fixture built on it, so no re-aim exists — the surviving
+`_stamp_capture_provenance` door is only reachable from the hosted lane, and the
+hosted twin below does NOT neutralise `_apply_capture_ingest_ep` the way the
+`un_promoted_capture` fixture did, so its rebuild assertion can pass on the
+`PointPromoted` snapshot alone. The lane CONSTANT and the guarded-call census
+still hold; the ordering and read-back proofs of the deleted door do not.
 """
 from __future__ import annotations
 
@@ -43,7 +57,6 @@ import pytest
 # hosted parity suites do — the offline MockModel seam keeps it network-free.
 from tests.test_hosted_api import client as client
 from tortoise.log import EventLog
-from tortoise.projection import _CACHE_WRITE_AUTHORIZED, _live_write_scope
 from tortoise.sdk import _CAPTURE_PROVENANCE_LANE, TortoiseSDK
 
 PROVENANCE = ("eventId", "source_session", "source_harness", "ingested_at")
@@ -56,8 +69,10 @@ PROVENANCE = ("eventId", "source_session", "source_harness", "ingested_at")
 #: the write move together — the docstring's "a rename is a red test rather than
 #: a silent relabelling" would then be a claim nothing enforces. Both directions
 #: redden here: a renamed constant fails
-#: ``test_the_stamp_lane_literal_is_pinned``, and a write issued under any other
-#: (even any other ``capture.*``) lane fails the read-back at the handle.
+#: ``test_the_stamp_lane_literal_is_pinned``. (The second direction — a write
+#: issued under any other ``capture.*`` lane failing a read-back at the handle —
+#: was pinned by a leg that drove the deleted ``capture_session`` door and went
+#: with it in #4282; see the module docstring's loss note.)
 CAPTURE_LANE = "capture.provenance-stamp"
 
 CONV = [
@@ -77,30 +92,6 @@ def _offline_extractor(monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
-@pytest.fixture()
-def un_promoted_capture(tmp_path, monkeypatch):
-    """A capture whose minted points are NEVER promoted.
-
-    ``_apply_capture_ingest_ep`` is what promotes a capture's minted claims —
-    and its ``PointPromoted`` payload is a full ``get_point`` snapshot, which
-    is exactly the accidental carrier that hid this defect for promoted
-    points. Disabling it is what exposes the un-promoted minted Point the
-    acceptance names.
-    """
-    import tortoise.sdk as sdk_mod
-
-    monkeypatch.setattr(sdk_mod, "_apply_capture_ingest_ep",
-                        lambda *a, **k: None)
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    try:
-        res = sdk.capture_session(CONV)
-        assert res["ok"] is True, res
-        minted = [p["id"] for p in res["points"]]
-        assert minted, "precondition: the capture must mint at least one Point"
-        yield sdk, log_path, minted
-    finally:
-        sdk.close()
 
 
 def _records(log_path):
@@ -122,124 +113,10 @@ def _point_props(proj, pid):
     return rows[0][0] or {}
 
 
-def test_the_capture_stamp_journals_one_record_per_minted_id(un_promoted_capture):
-    """A record per minted id, carrying the four fields the graph holds."""
-    sdk, log_path, minted = un_promoted_capture
-    proj = sdk._get_proj()
-    recs = {r["id"]: r for r in _stamp_records(log_path, minted)}
-    assert set(recs) == set(minted), (
-        "the capture's provenance stamp appended no record for "
-        f"{sorted(set(minted) - set(recs))} — a raw write with no carrier is "
-        "the #9068 shape (#9350)")
-    for pid in minted:
-        live = _point_props(proj, pid)
-        for key in PROVENANCE:
-            assert live.get(key), f"precondition: live {key!r} is stamped"
-            assert recs[pid][key] == live[key], (
-                f"the record's {key!r} ({recs[pid][key]!r}) is not what the "
-                f"node holds ({live[key]!r}) — a record that describes a "
-                "different write is worse than none")
 
 
-def test_the_record_precedes_the_stamp_statement(tmp_path, monkeypatch):
-    """JOURNAL FIRST — the record is in the journal before the cache write.
-
-    This is the property a ``_live_write_scope`` declaration CLAIMS, and the
-    one the issue's rule forbids pretending: an append after the write would
-    let the derived store lead the truth. A FRESH SDK (not the fixture's) — a
-    second capture of the same conversation folds by content hash and mints
-    nothing, so it would exercise no stamp at all.
-    """
-    import tortoise.projection as projection
-    import tortoise.sdk as sdk_mod
-
-    monkeypatch.setattr(sdk_mod, "_apply_capture_ingest_ep", lambda *a, **k: None)
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    seen: list[dict] = []
-    real_query = projection._GuardedGraph.query
-
-    def _spy(self, cypher, *a, **k):
-        if "n.eventId=$eid" in cypher:
-            # The journal content AT the moment the stamp reaches the handle.
-            seen.append({
-                "lane": _CACHE_WRITE_AUTHORIZED.get(),
-                "records": _stamp_records(
-                    log_path, (k.get("params") or {}).get("ids") or []),
-            })
-        return real_query(self, cypher, *a, **k)
-
-    monkeypatch.setattr(projection._GuardedGraph, "query", _spy)
-    try:
-        res = sdk.capture_session(CONV, session_id="sess_9350_ordering")
-    finally:
-        sdk.close()
-    assert res["ok"] is True, res
-    assert seen, "precondition: the stamp statement reached the handle"
-    for hit in seen:
-        assert hit["records"], (
-            "the provenance stamp reached the write handle with NO record in "
-            "the journal — the write leads the truth (#9350)")
-        assert hit["lane"], (
-            "the stamp ran with no declared lane: under an armed handle this "
-            "is a DirectCacheWriteRefused (#9350 / #9124)")
 
 
-def test_the_stamp_is_authorized_by_its_own_lane_under_an_armed_handle(
-        tmp_path, monkeypatch):
-    """ARMED handle: the capture completes and the stamp lane is its own.
-
-    ⚠️ The OUTER scope stands in for the lanes #9349 declares (DRAFT at the
-    time of writing: ``_write_session_and_turns``, ``_materialize_session_source``,
-    ``_apply_capture_ingest_ep``, the entity edges …). It is a TEST-scope, not
-    a production declaration — and the assertion that matters does not depend
-    on it: the reason read back AT the stamp statement must be the capture's
-    OWN lane, which an inner scope shadows the outer with. Delete the outer
-    ``with`` once #9349 lands; the rest of this test is unaffected.
-    """
-    import tortoise.projection as projection
-    import tortoise.sdk as sdk_mod
-
-    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", True)
-    monkeypatch.setattr(sdk_mod, "_apply_capture_ingest_ep", lambda *a, **k: None)
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    try:
-        lanes: list[str | None] = []
-        real_query = projection._GuardedGraph.query
-
-        def _spy(self, cypher, *a, **k):
-            if "n.eventId=$eid" in cypher:
-                lanes.append(_CACHE_WRITE_AUTHORIZED.get())
-            return real_query(self, cypher, *a, **k)
-
-        monkeypatch.setattr(projection._GuardedGraph, "query", _spy)
-        with _live_write_scope("test-standin: lanes #9349 declares"):
-            res = sdk.capture_session(
-                [{"role": "user",
-                  "content": "The on-call rota is the decision: we rotate "
-                             "weekly and page the secondary first."},
-                 {"role": "assistant", "content": "Agreed, weekly rotation."}],
-                session_id="sess_9350_armed")
-        assert res["ok"] is True, res
-    finally:
-        sdk.close()
-    assert lanes, "precondition: the armed capture reached the stamp statement"
-    assert all(lane and lane.startswith("capture.") for lane in lanes), (
-        "the stamp statement ran under "
-        f"{lanes!r} — not under the capture's own lane, so the write is only "
-        "authorized by whatever scope the caller happened to hold (#9350)")
-    # The EXACT lane, compared against the LITERAL pinned in this test (not only
-    # against the module constant): a prefix check passes on any relabelling
-    # inside the lane family, and a constant-only comparison follows a rename
-    # silently (#9350 review).
-    assert set(lanes) == {CAPTURE_LANE}, (
-        "the stamp statement ran under "
-        f"{lanes!r} — not under {CAPTURE_LANE!r}, so the write is only "
-        "authorized by whatever scope the caller happened to hold, or the lane "
-        "was renamed (#9350)")
-    records = [r for r in _records(log_path) if r.get("type") == "PointRevised"]
-    assert records, "the capture appended no provenance record (#9350)"
 
 
 def test_the_stamp_lane_literal_is_pinned():
@@ -247,11 +124,11 @@ def test_the_stamp_lane_literal_is_pinned():
 
     ``sdk._CAPTURE_PROVENANCE_LANE``'s docstring says the literal is stable ON
     PURPOSE and that a rename is a red test rather than a silent relabelling.
-    The read-back above compares the lane at the write handle against
-    ``CAPTURE_LANE``; this binds the module constant to that same literal, so
-    the docstring's claim is one this suite ENFORCES rather than restates. A
-    constant-only comparison (no literal in the test) would move with the
-    rename and stay green.
+    This binds the module constant to a LITERAL defined here, so the docstring's
+    rename claim is one the suite ENFORCES rather than restates: a constant-only
+    comparison (no literal in the test) would move with the rename and stay
+    green. (The armed-handle read-back that used to sit beside it went with
+    #4282's deleted door — see the module docstring.)
     """
     assert _CAPTURE_PROVENANCE_LANE == CAPTURE_LANE, (
         f"the capture stamp's lane constant is "
@@ -260,32 +137,6 @@ def test_the_stamp_lane_literal_is_pinned():
         "operator reading a DirectCacheWriteRefused message (#9350)")
 
 
-@pytest.mark.parametrize("engine", ["rebuild", "rebuild_all"])
-def test_a_rebuild_restores_the_provenance_of_an_unpromoted_point(
-        un_promoted_capture, engine):
-    """`derived == replay(journal)` for the four fields (#9350 acceptance)."""
-    sdk, log_path, minted = un_promoted_capture
-    proj = sdk._get_proj()
-    before = {pid: _point_props(proj, pid) for pid in minted}
-    for pid, props in before.items():
-        for key in PROVENANCE:
-            assert props.get(key), (
-                f"precondition: live {key!r} of {pid} must be stamped")
-
-    if engine == "rebuild":
-        proj.rebuild(EventLog(log_path), confirm_destructive=True)
-    else:
-        proj.rebuild_all(str(os.path.dirname(log_path)),
-                         confirm_destructive=True)
-
-    after = {pid: _point_props(proj, pid) for pid in minted}
-    for pid in minted:
-        for key in PROVENANCE:
-            assert after[pid].get(key) == before[pid][key], (
-                f"{engine}() lost {key!r} on minted point {pid}: "
-                f"{before[pid].get(key)!r} -> {after[pid].get(key)!r} "
-                "(the #9350 defect — an un-promoted minted Point's "
-                "provenance is not in the journal)")
 
 
 # ── the write is narrowed to the JOURNALLED set (#9350) ───────────────────
@@ -339,41 +190,6 @@ def test_the_stamp_write_cannot_touch_an_id_that_has_no_record(
 
 # ── a REFUSED record must not be followed by the cache write ──
 
-def test_a_refused_record_skips_the_cache_write(tmp_path, monkeypatch):
-    """The derived store must never lead the truth (§17.1).
-
-    ``_emit_event`` returns ``False`` when a CONFIGURED journal refused the
-    append. The stamp must then skip the cache write: a stamp with no record is
-    exactly the defect #9350 removes, and keeping the write on the failed-append
-    path would reintroduce it one branch away. The capture itself still
-    succeeds — the refusal is counted and disclosed by the receipt (#4240).
-    """
-    import tortoise.sdk as sdk_mod
-
-    monkeypatch.setattr(sdk_mod, "_apply_capture_ingest_ep", lambda *a, **k: None)
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    try:
-        real_emit = sdk._emit_event
-
-        def _emit(type_, *a, **fields):
-            if type_ == "PointRevised":
-                return False          # a configured journal refused it
-            return real_emit(type_, *a, **fields)
-
-        monkeypatch.setattr(sdk, "_emit_event", _emit)
-        res = sdk.capture_session(CONV)
-        assert res["ok"] is True, res
-        minted = [p["id"] for p in res["points"]]
-        assert minted, "precondition: the capture minted a Point"
-        props = _point_props(sdk._get_proj(), minted[0])
-    finally:
-        sdk.close()
-    assert not props.get("eventId"), (
-        "the stamp wrote eventId="
-        f"{props.get('eventId')!r} although its record was REFUSED — the "
-        "derived store now leads the journal with no record describing the "
-        "write (the #9350/#9068 shape)")
 
 
 # ── the pure fold's creation arm (#9350: parity with the graph fold) ──────
@@ -466,55 +282,6 @@ def test_a_re_creation_does_not_inherit_a_dead_incarnations_provenance():
             f"a re-created node inherited {key!r} from the dead incarnation")
 
 
-def test_a_rebuild_all_of_a_re_creation_drops_the_dead_provenance(
-        un_promoted_capture):
-    """The PASS-1A WIPE honours the boundary — the graph half of the gate.
-
-    ``rebuild`` is chronological (the delete really removes the node), so it
-    never reaches the recreate branch; ``rebuild_all`` HOISTS every creation and
-    folds the delete after, so a re-creation MERGEs onto the dead incarnation's
-    still-present node while `_upsert_point_props` writes only the keys the
-    payload states. Without the pass-1a wipe the rebuilt node keeps the dead
-    incarnation's `eventId` while LIVE holds none — `derived != live` AND
-    `fold() != rebuild_all` on the same journal, with a `check_consistency` red
-    whose own action ("replay the journal") reproduces it.
-
-    The provenance is put in the CREATION PAYLOAD, not left to the capture
-    stamp: that is the shape `rebuild_all` actually replays here (and the shape
-    a migrated graph produces from `properties(n)` synthetic events), so the
-    test reds when the wipe or the per-prop skip boundary is removed.
-    """
-    sdk, log_path, minted = un_promoted_capture
-    pid = minted[0]
-    recs = _records(log_path)
-    recs.extend([
-        {"event_id": "ev_add_9350", "ts": "2026-10-20T00:00:00+00:00",
-         "type": "PointAdded", "initiated_by": "raw-producer",
-         "projection_version": 2,
-         "point": {"id": pid, "content": "first", "status": "live",
-                   **_STAMPED}},
-        {"event_id": "ev_del_9350", "ts": "2026-10-20T00:00:01+00:00",
-         "type": "EntityMutated", "op": "delete", "id": pid,
-         "label": "Point", "initiated_by": "raw-producer",
-         "projection_version": 2},
-        {"event_id": "ev_reborn_9350", "ts": "2026-10-20T00:00:02+00:00",
-         "type": "PointAdded", "initiated_by": "raw-producer",
-         "projection_version": 2,
-         "point": {"id": pid, "content": "reborn", "status": "live"}},
-    ])
-    with open(log_path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(json.dumps(r) for r in recs) + "\n")
-
-    sdk._get_proj().rebuild_all(str(os.path.dirname(log_path)),
-                               confirm_destructive=True)
-
-    props = _point_props(sdk._get_proj(), pid)
-    assert props.get("content") == "reborn", "precondition: the recreate folded"
-    for key in PROVENANCE:
-        assert props.get(key) is None, (
-            f"rebuild_all() gave the re-created node {key!r}={props.get(key)!r} "
-            "— the dead incarnation's provenance, which live never had "
-            "(#9350)")
 
 
 def test_a_value_the_store_cannot_hold_is_not_carried():
@@ -645,7 +412,6 @@ def test_the_hosted_capture_journals_and_replays_the_same_provenance(
     """
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import TEST_ORG_ID
-    from tortoise.log import EventLog
 
     log_path = str(tmp_path / "hosted.jsonl")
     monkeypatch.setattr(
@@ -808,15 +574,21 @@ def test_the_id_pre_read_rides_the_write_retry_funnel(tmp_path):
         sdk.close()
 
 
-@pytest.mark.parametrize("module", ["tortoise/sdk.py", "tortoise/hosted_api.py"])
+# #4282: the `tortoise/sdk.py` arm is gone with the door it pinned. All three of
+# that lane's guarded sites (operator label sweep, operator ids, retry heal)
+# lived inside the deleted `capture_session`, so the parameter survives only
+# for the hosted lane, whose three sites are still all pinned below.
+@pytest.mark.parametrize("module", ["tortoise/hosted_api.py"])
 def test_every_guarded_stamp_call_narrows_its_write_to_the_journalled_ids(module):
-    """EVERY guarded call site, both lanes — the narrowing is checked in source.
+    """EVERY remaining guarded call site — the narrowing is checked in source.
 
     The helper refuses the shape at RUNTIME, but a guarded site that drops the
     clause only fails when that path is actually executed — and the operator and
-    retry-heal paths are not reached by every capture. This walks the two
-    modules instead, so dropping the clause from any of the six sites (three per
-    lane) reds CI rather than reverting one race away from §17.1. The minted
+    retry-heal paths are not reached by every capture. This walks the module
+    instead, so dropping the clause from any of the three surviving guarded sites
+    reds CI rather than reverting one race away from §17.1. (The `tortoise/sdk.py`
+    arm and its three sites were deleted with `capture_session` — #4282; see the
+    note above the parametrize.) The minted
     stamp is UNGUARDED and passes no ``params`` at all, so it is correctly
     exempt — and the BUCKET SIZES are asserted, because a classifier that
     quietly files a guarded site under `unguarded` would exempt it silently

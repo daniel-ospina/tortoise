@@ -82,7 +82,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXTRACTOR = ROOT / "tortoise" / "extractor_v2.py"
-SDK = ROOT / "tortoise" / "sdk.py"
 DOC = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
 
 #: The anchor the S4 call site names ("see the ``G5 record — the live S4 stage
@@ -204,157 +203,18 @@ def _env_flag_default_true(call: ast.expr) -> bool:
     )
 
 
-def _comparison_kind(node: ast.expr) -> str:
-    """Label one operand of the sdk v1 dispatch, or `""` for anything else.
-
-    The OPERATOR is part of the label. An operator-blind match accepted the
-    semantics-inverting rewrites `extractor != "v1"` and `summary is None`,
-    which would leave the marker's bypass paths (i)/(ii) false while the guard
-    reported clean (the #8601 review proved it).
-    """
-    if not isinstance(node, ast.Compare) or not isinstance(node.left, ast.Name):
-        return ""
-    if len(node.comparators) != 1 or len(node.ops) != 1:
-        return ""
-    op = node.ops[0]
-    comparator = node.comparators[0]
-    if (
-        node.left.id == "extractor"
-        and isinstance(op, ast.Eq)
-        and isinstance(comparator, ast.Constant)
-        and comparator.value == "v1"
-    ):
-        return "extractor_v1"
-    if (
-        node.left.id == "summary"
-        and isinstance(op, ast.IsNot)
-        and isinstance(comparator, ast.Constant)
-        and comparator.value is None
-    ):
-        return "summary_not_none"
-    return ""
 
 
-def _is_v1_dispatch(test: ast.expr) -> bool:
-    """`extractor == "v1" or summary is not None` — the sdk v1 route.
-
-    Order-insensitive: the operands are matched as a SET, because swapping the
-    two logically-equivalent comparisons is behaviour-preserving and must not
-    red the guard (the #8601 review proved the positional match did).
-    """
-    if not isinstance(test, ast.BoolOp) or not isinstance(test.op, ast.Or):
-        return False
-    kinds = {_comparison_kind(value) for value in test.values}
-    return kinds == {"extractor_v1", "summary_not_none"}
 
 
-#: The callee each arm of the v1 dispatch MUST route to. The `v1`/`summary=`
-#: arm is bypass (i)/(ii): it must land on the S4-less v1 path, and the
-#: fall-through on the S4-running v2 path. Pinned because the #8601 review
-#: swapped them and every test stayed green while the bypass claims went false.
-V1_BYPASS_CALLEE = "_commit_session_v1"
-V2_FALLTHROUGH_CALLEE = "_commit_session_v2"
 
 
-def _iter_stmt_lists(node: ast.AST) -> list[list[ast.stmt]]:
-    """Every statement list inside `node`, NOT descending into nested defs.
-
-    Needed because `ast.walk` gives no parent: to read the statement that
-    FOLLOWS the dispatch `If` (the v2 fall-through) it must be located inside
-    its own sibling list.
-    """
-    lists: list[list[ast.stmt]] = []
-    for field in ("body", "orelse", "finalbody"):
-        block = getattr(node, field, None)
-        if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
-            lists.append(block)
-    for handler in getattr(node, "handlers", []) or []:
-        lists.extend(_iter_stmt_lists(handler))
-    for case in getattr(node, "cases", []) or []:
-        lists.extend(_iter_stmt_lists(case))
-    for block in list(lists):
-        for stmt in block:
-            if isinstance(
-                stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-            ):
-                continue
-            lists.extend(_iter_stmt_lists(stmt))
-    return lists
 
 
-def _enclosing_stmt_list(
-    tree: ast.Module, node: ast.If
-) -> tuple[list[ast.stmt], int] | None:
-    """The statement list holding `node`, and `node`'s index in it."""
-    for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef):
-            continue
-        if not (fn.lineno <= node.lineno <= (fn.end_lineno or fn.lineno)):
-            continue
-        for body in _iter_stmt_lists(fn):
-            if node in body:
-                return body, body.index(node)
-    return None
 
 
-def _return_callee(stmts: list[ast.stmt]) -> str:
-    """The callee of the first `return <call>(...)` in this statement list.
-
-    `""` when there is no such return, so the caller reports a missing route
-    rather than silently accepting it.
-    """
-    for stmt in stmts:
-        if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call):
-            return _call_name(stmt.value.func)
-    return ""
 
 
-def _v1_dispatch_routing_violations(source: str) -> list[str]:
-    """Every reason the `v1`/`summary=` dispatch is not a BYPASS of S4.
-
-    The #8601 review proved that matching only the PREDICATE left the ROUTING
-    unconstrained: swapping the two callees at `sdk.py:6934` sent
-    ``TORTOISE_EXTRACTOR=v1`` and ``summary=`` into the S4-RUNNING pipeline
-    while every test in this file stayed green — falsifying the record's bypass
-    paths (i)/(ii). So the branch bodies are pinned, not just the condition.
-    """
-    tree = ast.parse(source)
-    matches = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.If) and _is_v1_dispatch(node.test)
-    ]
-    if not matches:
-        return [
-            "the `v1` / `summary=` dispatch (the record's bypass paths (i) and "
-            "(ii)) is gone or was rewritten — re-derive the record's bypass list."
-        ]
-    if len(matches) > 1:
-        return [
-            f"{len(matches)} `v1` / `summary=` dispatch sites exist — the record "
-            "names one route, so re-derive the bypass list rather than letting "
-            "an unrelated look-alike satisfy the pin"
-        ]
-    node = matches[0]
-    site = _enclosing_stmt_list(tree, node)
-    if site is None:
-        return ["the `v1` / `summary=` dispatch is no longer inside a function body"]
-    body, index = site
-    violations: list[str] = []
-    bypass = _return_callee(node.body)
-    if bypass != V1_BYPASS_CALLEE:
-        violations.append(
-            "the `v1` / `summary=` arm routes to "
-            f"`{bypass or '<no return>'}` instead of `{V1_BYPASS_CALLEE}` — "
-            "`TORTOISE_EXTRACTOR=v1` / `summary=` would reach the S4-RUNNING path"
-        )
-    fallthrough = _return_callee(body[index + 1:])
-    if fallthrough != V2_FALLTHROUGH_CALLEE:
-        violations.append(
-            "the fall-through after the `v1` / `summary=` arm routes to "
-            f"`{fallthrough or '<no return>'}` instead of "
-            f"`{V2_FALLTHROUGH_CALLEE}` — the S4-RUNNING v2 route moved"
-        )
-    return violations
 
 
 def _mentions_name(call: ast.Call, name: str) -> bool:
@@ -809,24 +669,24 @@ def test_the_e4_union_is_consumed_not_discarded():
     )
 
 
-def test_the_three_side_effect_bypass_paths_exist():
-    """The record states these are the ONLY skips ON THE ROUTE THAT REACHES
-    `extract_session_v2`, and that none is an S4 switch. If one disappears the
-    record's enumeration is wrong; the NEGATIVE half — a fourth, undocumented
-    bypass — is pinned by `test_no_undocumented_early_exit_skips_s4`.
 
-    The `sdk.py` arm is pinned as a ROUTING, not merely as a predicate: the
-    #8601 review swapped the two callees and every test stayed green while
-    bypass paths (i)/(ii) went false.
+
+def test_the_empty_conversation_bypass_still_reports_degraded():
+    """The record's bypass path (iii), which is the one that SURVIVED #4282.
+
+    Paths (i) and (ii) were the `v1` / `summary=` routing inside
+    `TortoiseSDK.commit_session`, and that door was deleted on 2026-10-27
+    (`docs/product/canonical-mcp-tools.md`, "Amended 2026-10-27"), so the two
+    guards that pinned its predicate and its routing were deleted with it — a
+    synthetic fixture asserting a dispatch that no longer exists anywhere pins
+    nothing.
+
+    Path (iii) is different and is why this test exists: the empty-conversation
+    early return lives in `extractor_v2.extract_session_v2`, which this change
+    did not touch, and it must report the VALUE `degraded: True`. Nothing else
+    covers that: `test_extractor_v2.py::test_empty_conversation` asserts only
+    `payload is None` plus a warning, and it passes with `degraded: False`.
     """
-    routing = _v1_dispatch_routing_violations(SDK.read_text(encoding="utf-8"))
-    assert not routing, (
-        "the `v1` / `summary=` dispatch (the record's bypass paths (i) and (ii)) "
-        "is gone, was rewritten, or no longer BYPASSES S4 — the predicate alone "
-        "is not the bypass, the routing must reach the S4-less path. "
-        + "; ".join(routing)
-    )
-
     scan = _scan()
     assert scan.s4_call is not None
     fn = _function(
@@ -931,84 +791,10 @@ def test_the_design_position_check_survives_an_honest_reflow():
     assert GUARD_NAME in flat
 
 
-def test_the_v1_dispatch_match_is_order_insensitive():
-    """#8601 review finding 1, second instance — operand order in the `sdk.py`
-    dispatch is behaviour-preserving; matching positionally red the guard."""
-    canonical = ast.parse('if extractor == "v1" or summary is not None:\n    pass\n')
-    swapped = ast.parse('if summary is not None or extractor == "v1":\n    pass\n')
-    assert _is_v1_dispatch(canonical.body[0].test) is True
-    assert _is_v1_dispatch(swapped.body[0].test) is True, (
-        "the logically-equivalent operand swap must not red the guard"
-    )
-    unrelated = ast.parse("if other or extra:\n    pass\n")
-    assert _is_v1_dispatch(unrelated.body[0].test) is False
 
 
-def test_the_v1_dispatch_match_is_operator_sensitive():
-    """#8601 review finding — the label asserted semantics the code never checked.
-
-    An operator-blind `_comparison_kind` accepted these semantics-inverting
-    rewrites, so the marker's bypass paths (i)/(ii) could go false while the
-    guard reported clean. Each of these must red.
-    """
-    inverted = (
-        'extractor != "v1" or summary is not None',
-        'extractor == "v1" or summary is None',
-        'extractor is not "v1" or summary is not None',
-    )
-    for source in inverted:
-        test = ast.parse(f"if {source}:\n    pass\n").body[0].test
-        assert _is_v1_dispatch(test) is False, (
-            "a comparison operator was ignored — the dispatch match accepted the "
-            f"semantics-inverting form: {source}"
-        )
 
 
-def test_the_v1_dispatch_routing_is_pinned():
-    """#8601 review finding (P2) — the guard pinned the PREDICATE, not the bypass.
-
-    Swapping the two callees at `sdk.py:6934` (`_commit_session_v1` <->
-    `_commit_session_v2`) sends `TORTOISE_EXTRACTOR=v1` and `summary=` into the
-    S4-RUNNING pipeline while the predicate is untouched — falsifying the
-    record's bypass paths (i)/(ii) behind a green guard. The ROUTING, not just
-    the condition, must be pinned.
-    """
-
-    def synthetic(bypass: str, fallthrough: str) -> str:
-        return (
-            "class S:\n"
-            "    def commit_session(self, extractor, summary, conversation):\n"
-            '        extractor = (extractor or "v2").lower()\n'
-            '        if extractor == "v1" or summary is not None:\n'
-            f"            return self.{bypass}(conversation)\n"
-            f"        return self.{fallthrough}(conversation)\n"
-        )
-
-    clean = synthetic(V1_BYPASS_CALLEE, V2_FALLTHROUGH_CALLEE)
-    assert _v1_dispatch_routing_violations(clean) == [], (
-        "the unmutated dispatch shape must stay clean — or this fixture proves "
-        "nothing"
-    )
-    swapped = synthetic(V2_FALLTHROUGH_CALLEE, V1_BYPASS_CALLEE)
-    violations = _v1_dispatch_routing_violations(swapped)
-    assert violations, (
-        "a routing inversion (the v1 arm landing on the S4-RUNNING path, and "
-        "the `v1` / `summary=` bypass becoming false) must red the guard — "
-        "pinning only the predicate let it through"
-    )
-    assert any("S4-RUNNING" in v for v in violations), (
-        f"the routing inversion was not the violation reported: {violations}"
-    )
-
-    gone = (
-        "class S:\n"
-        "    def commit_session(self, extractor, conversation):\n"
-        "        return self._commit_session_v2(conversation)\n"
-    )
-    assert _v1_dispatch_routing_violations(gone), (
-        "a missing `v1` dispatch must red — the record's bypass list would be "
-        "false"
-    )
 
 
 def test_the_marker_tracker_check_is_scoped_to_the_marker():

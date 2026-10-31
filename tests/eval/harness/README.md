@@ -4,6 +4,17 @@ The Cat-34-shaped **scripted-conversation harness**: replay committed
 conversations through the REAL product seams on hermetic per-cell graphs and
 grade the written/recalled surface with mechanical graders.
 
+> ⛔ **The replay gate this README describes NO LONGER RUNS (#4282).** Its write
+> seam was the SDK's `capture_session`, which #4282 deleted, and no surviving
+> SDK entry point reaches an in-memory conversation capture. `replay_and_grade`,
+> `run_benchmark` and the receipt/bless CLI were removed with it (see
+> `runner.py`), so the table below is the design record of that gate, not a
+> description of what CI runs today. What still runs from this directory: the
+> hermetic **corpus** and **receipt-schema** contract tests
+> (`test_harness_corpus.py`, `test_harness_schema.py`) and the graded-reflex
+> replay helper `runner.replay_reflex`, used by
+> `tests/test_volunteer_reflex_harness_seam.py`.
+
 | | |
 |---|---|
 | Issue | #2099 (W3-a) — epic #2080 (gbrain measurable-memory adoption) |
@@ -137,8 +148,8 @@ uv run python tests/eval/harness/generate_corpus.py --validate
 
 # tests
 uv run pytest tests/eval/harness/ -q          # schema+corpus+grading 52 hermetic
-TORTOISE_SESSION_LLM_MOCK=1 TORTOISE_SESSION_EXTRACTOR=m2 \
-  uv run pytest tests/eval/harness/test_harness_benchmark.py -q   # real replay (9)
+# The real-replay probe (`test_harness_benchmark.py`) went with `run_benchmark`: both
+# drove `capture_session`, and #4282 left no SDK door to replay through.
 ```
 
 ## Failure classes (fix-wave protocol)

@@ -35,7 +35,7 @@ from tortoise.hosted_api import (  # noqa: I001
     get_current_user,
     ForwardedProtoMiddleware,
 )
-from tortoise.sdk import SESSION_READ_FIELDS, TortoiseSDK
+from tortoise.sdk import TortoiseSDK
 
 from tests._verdict import require_answered, verdict_client
 
@@ -4059,71 +4059,6 @@ class TestSessionList:
         body = r.json()
         assert body["sessions"] == []
 
-    def test_sdk_session_read_parity_with_the_hosted_projection(self, client):
-        """#3557: the SDK's session read and the hosted read serve ONE
-        projection.
-
-        The capture lane writes a durable ``:Session`` node (plus a
-        ``sessionCaptured`` Event) and never an ``AgentSession`` Event, so
-        ``TortoiseSDK.get_session`` — which queried the indexer lane's Event
-        kind — returned ``None`` for every captured session: the read half of
-        the capture lane was missing. Both the list and the by-id hosted
-        surfaces must agree with it on the shared projection.
-
-        The assertion iterates ``SESSION_READ_FIELDS`` rather than a
-        hardcoded subset, and pins the hosted response KEY SETS against it,
-        so a field added to the SDK read or to either hosted handler fails
-        here instead of drifting silently. (The tuple itself is declared
-        SDK-side and imports nothing from ``tortoise/hosted_api.py``, whose
-        handlers spell their columns inline — the key-set assertion is what
-        binds the hosted side.)
-        """
-        captured = _ha_mod._make_sdk(namespace=TEST_ORG_ID).capture_session([
-            {"role": "user",
-             "content": "We decided to ship serve --http first."},
-        ])
-        session_id = captured["session_id"]
-
-        served = next(
-            row for row in client.get("/v1/sessions").json()["sessions"]
-            if row["id"] == session_id)
-        detail = client.get(f"/v1/sessions/{session_id}").json()
-
-        read = _ha_mod._make_sdk(namespace=TEST_ORG_ID).get_session(session_id)
-        assert read is not None, (
-            "the SDK session read must see a captured :Session — the capture "
-            "lane writes no AgentSession Event (#3557)")
-        # #3557 review (P2): the tuple is declared SDK-side; nothing imports
-        # it from ``tortoise/hosted_api.py``, whose handlers spell their
-        # columns inline. Pinning the hosted KEY SETS against it is what
-        # converts "a field added to one read surface without the other fails
-        # here" from a claim into a fact — a column ADDED to either handler
-        # (the likely drift direction) reddens these lines.
-        assert set(read) == set(detail) == set(SESSION_READ_FIELDS) | {
-            "actor_display", "turn_points", "extracted_points", "source"}
-        assert set(served) == set(SESSION_READ_FIELDS) | {"actor_display"}
-        for field in SESSION_READ_FIELDS:
-            # #3555: `extracted` is compared on ALL THREE surfaces now. It was
-            # excluded below this comment because the list endpoint computed
-            # that one field differently (legacy `pointKind IN
-            # ['decision','statement']` against the SDK/detail non-turn
-            # filter); the list now counts with the same predicate, so the
-            # exclusion is retired WITH the divergence instead of left to hide
-            # a re-divergence.
-            assert read[field] == served[field], (
-                f"{field} diverges between the SDK read ({read[field]!r}) "
-                f"and GET /v1/sessions ({served[field]!r})")
-            assert read[field] == detail[field], (
-                f"{field} diverges between the SDK read ({read[field]!r}) "
-                f"and GET /v1/sessions/{{id}} ({detail[field]!r})")
-        # The hosted surfaces and the SDK read one node, so the shared field
-        # list is one vocabulary. A zero count would make the parity
-        # assertion vacuous — the mock extractor mints a TYPED point
-        # ('statement', a kind the legacy pair counted too), so this test
-        # binds SURFACE PARITY only; the predicate itself is discriminated by
-        # test_list_sessions_extracted_counts_non_turn_points_regardless_of_kind
-        # (#3555).
-        assert read["extracted"] >= 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7572,14 +7507,6 @@ class _State:
 
 # ── #1532 P4: capture-path parity (speaker / truncation / quota) ──────────
 
-def _stored_turns(sdk):
-    """[(content, speaker)] ordered by turn id — the SDK/hosted stored-turn
-    byte-identity assertion (#1532 D1/D2)."""
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (t:Point {pointKind:'event'}) "
-        "RETURN t.content, t.speaker ORDER BY t.id").result_set
-    return [(r[0], r[1]) for r in rows]
 
 
 class TestCaptureSpeakerParity:
@@ -7639,29 +7566,6 @@ class TestCaptureSpeakerParity:
         assert rows and rows[0][0] == "[user] " + _clip_capture_turn_content(content), rows
         assert _CAPTURE_TRUNCATION_SENTINEL in rows[0][0], (
             "the hosted path must mark the cut too (#4897)")
-
-
-class TestCaptureStoredTurnParity:
-    def test_sdk_and_hosted_store_identical_turns(self, client, tmp_path):
-        """#1532 D1/D2: identical input -> identical stored turns (content +
-        speaker) on the SDK path and the hosted path — the shared window +
-        role helpers keep the two loops byte-identical."""
-        from tortoise.hosted_api import TortoiseSDK as _HASDK
-        from tortoise.sdk import TortoiseSDK
-        conv = [{"role": "user", "content": "prefix sentence. " + "x" * 6000},
-                {"role": None, "content": "short sentence here."},
-                {"role": 123, "content": "y"}]
-        # hosted capture
-        r = client.post("/v1/sessions", json={
-            "session_id": "byte-same", "conversation": conv})
-        assert r.status_code == 200, r.text[:200]
-        hosted_turns = _stored_turns(_HASDK(namespace=TEST_ORG_ID))
-        # sdk capture of the same conversation + session_id
-        sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
-        sdk.capture_session(conv, session_id="byte-same")
-        sdk_turns = _stored_turns(sdk)
-        assert sdk_turns == hosted_turns, (
-            f"SDK {sdk_turns!r} != hosted {hosted_turns!r}")
 
 
 class TestV2SessionFloodGate:
@@ -8524,10 +8428,16 @@ class TestProvisioningService:
             assert body["graph"]["kind"] == "custom"
             assert body["key"]["scopes"] == ["graphs:read", "graphs:write"]
             assert body["key"]["graph_id"] == body["graph"]["id"]
-            # Reveal-once: listing keys never re-exposes plaintext
-            keys = sdk.apikey_list(tid)
-            for k in keys:
-                assert "key_plaintext" not in k
+            # Reveal-once: the registry NODES never carry plaintext. Read the
+            # nodes, not a projection — #4282 deleted `apikey_list`, and this
+            # assertion is about what the store holds, so a whole-node read is
+            # strictly stronger than the old 10-column projection was.
+            nodes = sdk._get_registry().query(
+                "MATCH (k:APIKey {org_id:$tid}) RETURN properties(k)",
+                params={"tid": tid}).result_set
+            assert nodes, "the reveal-once assertion had no rows to read"
+            for (props,) in nodes:
+                assert "key_plaintext" not in props
             # minted key has deleg=0 (one-level-deep by construction)
             gid = body["graph"]["id"]
             node = sdk._get_registry().query(
@@ -9014,9 +8924,13 @@ class TestProvisioningService:
             # revoked it. Revoked keys stay listed (revoked_at set), so
             # assert revocation, not absence.
             caller_key_id = key["id"]
-            orphans = [k for k in sdk.apikey_list(tid)
-                       if k.get("created_by_key_id") == caller_key_id
-                       and k.get("revoked_at") is None]
+            # #4282 deleted `apikey_list`; the two props this assertion reads
+            # are read straight off the registry nodes it projected.
+            orphans = [row[0] for row in sdk._get_registry().query(
+                "MATCH (k:APIKey {org_id:$tid}) "
+                "WHERE k.created_by_key_id = $ck AND k.revoked_at IS NULL "
+                "RETURN k.id",
+                params={"tid": tid, "ck": caller_key_id}).result_set]
             assert not orphans, \
                 f"active orphan key(s) after failed mint: {orphans}"
         finally:
@@ -9044,7 +8958,10 @@ class TestGraphLifecycle:
             gid = r.json()["graph"]["id"]
             minted_plaintext = r.json()["key_plaintext"]
             # Envelope key.id is a REAL key (listable — the registry node id)
-            listed = [k["id"] for k in sdk.apikey_list(tid)]
+            # #4282 deleted `apikey_list`; list the ids off the nodes it read.
+            listed = [row[0] for row in sdk._get_registry().query(
+                "MATCH (k:APIKey {org_id:$tid}) RETURN k.id",
+                params={"tid": tid}).result_set]
             assert r.json()["key"]["id"] in listed
             # Delete with a graphs:delete-scoped key
             delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])

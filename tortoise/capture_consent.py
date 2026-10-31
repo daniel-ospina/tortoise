@@ -29,9 +29,11 @@ Consumers:
   * `tortoise/sdk.py` — the SDK's client TRANSMISSION primitive
     (``_post_commit`` → ``POST {TORTOISE_API_URL}/v1/sessions/commit``) is the
     third client-side upload path (#3662), and it refuses here too. Its public
-    caller ``TortoiseSDK.commit_session`` refuses FIRST, before any extraction
-    runs, so no provider call is spent on an unauthorised transmission; the
-    primitive re-checks so a future caller cannot bypass consent by calling it
+    caller was ``TortoiseSDK.commit_session``, which refused FIRST, before any
+    extraction runs, so no provider call is spent on an unauthorised
+    transmission; that method (and its consent-first refusal) was deleted by
+    #4282, so the primitive's own re-check is now the ONLY enforcement point
+    on this path — kept so a future caller cannot bypass consent by calling it
     directly. Two ENFORCEMENT points, one predicate — the verdict string comes
     from ``capture_declined_reason`` below.
 
@@ -49,11 +51,13 @@ enumeration lives in the docs' seam lists, #3662):
     agent invocation IS the agreement, and the §6 disclosure obligation lives
     in the tool description the recording agent reads, not in this comment.
     OVERRIDES the per-session-opt-in default; the marker is on #3662.
-  * ``TortoiseSDK.capture_session`` writes to the GRAPH (embedded, or
-    ``TORTOISE_DB_URI``) AND sends each turn to the configured BYOK extractor
-    provider. It is out of scope here because gating it would also refuse pure
-    local writes — but it is NOT egress-free: the provider leg transmits
-    regardless of which backend ``TORTOISE_DB_URI`` names.
+  * ``TortoiseSDK.capture_session`` wrote to the GRAPH (embedded, or
+    ``TORTOISE_DB_URI``) AND sent each turn to the configured BYOK extractor
+    provider. It was out of scope here because gating it would also refuse
+    pure local writes — but it was NOT egress-free: the provider leg transmits
+    regardless of which backend ``TORTOISE_DB_URI`` names. The method itself
+    was deleted by #4282; the shared capture primitive it used survives, so
+    this note still governs any future synchronous SDK capture lane.
   * the ambient INDEXER sweep (``tortoise index directory <corpus> --metadata``,
     which the Claude Code ``session-end.sh`` hook runs unconditionally, outside
     its ``TORTOISE_CAPTURE`` branch) sends conversation-derived text to the

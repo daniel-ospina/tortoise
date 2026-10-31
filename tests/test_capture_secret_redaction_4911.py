@@ -7,22 +7,23 @@ extraction and search. Nothing had leaked yet only because capture is
 session-end and the count was a coincidence of timing — the control was simply
 absent.
 
-What these tests pin, one acceptance criterion each:
+What these tests pin, one acceptance criterion each.
 
-1. ``test_every_credential_shape_is_redacted_end_to_end`` — a turn containing
-   each anchored shape is captured through ``sdk.capture_session`` and the row
-   read back from the graph carries ``[REDACTED:<kind>]``, never the value.
-2. ``test_redaction_is_visible_not_a_silent_truncation`` — the marker is
-   present AND the surrounding text survives, so a reader can tell the text is
-   incomplete. (The same silent-loss class as #4897, inverted.)
-3. ``test_redaction_count_is_recorded_per_session_and_surfaced`` — the count is
-   on the ``:Session`` node (``capture_redactions``) AND on the capture receipt.
-4. ``test_control_lives_at_the_single_stored_text_chokepoint`` — exactly ONE
+⚠️ **#4282 (2026-10-27) deleted criteria 1-3 with the `TortoiseSDK.capture_session`
+door they drove through.** `test_every_credential_shape_is_redacted_end_to_end`,
+`test_redaction_is_visible_not_a_silent_truncation` and
+`test_redaction_count_is_recorded_per_session_and_surfaced` were end-to-end legs —
+each captured a turn through that door and read the row back — so they are gone and
+their loss is recorded in the PR's "Coverage removed" section rather than restated
+here as coverage this file no longer has. The scrubber itself is untouched, and the
+criterion that survives is the one that makes it unskippable:
+
+1. ``test_control_lives_at_the_single_stored_text_chokepoint`` — exactly ONE
    place in the capture paths applies the scrubber (``_redact_turn_contents``)
    and every capture consumer derives its text through it — the stored turns,
    the session Source and the extractor — so no lane can drift and no
    persisting sink can be forgotten.
-5. ``test_local_spool_keeps_the_raw_turn_by_decision`` — the deliberate scope
+2. ``test_local_spool_keeps_the_raw_turn_by_decision`` — the deliberate scope
    decision (see that test's docstring): the LOCAL raw store is out of scope.
 
 Plus the invariants a naive implementation breaks: the prose false positives
@@ -46,13 +47,11 @@ import pytest
 from tortoise import capture_spool
 from tortoise.sdk import (
     TortoiseSDK,
-    _capture_turn_role_text,
     _capture_turn_texts,
-    _content_hash,
     _redact_summary_strings,
     _redact_turn_contents,
 )
-from tortoise.security import CREDENTIAL_KINDS, redact_secrets
+from tortoise.security import redact_secrets
 
 _REPO = Path(__file__).resolve().parent.parent
 
@@ -249,240 +248,18 @@ def _session_redactions(sdk: TortoiseSDK, session_id: str):
 
 # ── AC1: every shape, end to end, marker in / value out ────────────────────
 
-def test_every_credential_shape_is_redacted_end_to_end(sdk, monkeypatch):
-    """One captured turn per shape; the GRAPH ROW carries the marker only."""
-    _keyless(monkeypatch)
-    assert {kind for _case, kind, _v in CASES} == set(CREDENTIAL_KINDS), (
-        "the sample table no longer covers every kind the scrubber emits — "
-        "a new shape needs a sample row here")
-
-    conv = [{"role": "user", "content": f"leaked value: {value} (please rotate)"}
-            for _case, _kind, value in CASES]
-    sid = "sess-4911-shapes"
-    res = sdk.capture_session(conv, session_id=sid)
-
-    stored = _stored(sdk, sid)
-    assert len(stored) == len(CASES)
-    for i, (case, kind, value) in enumerate(CASES):
-        content, _hash = stored[f"{sid}_t{i}"]
-        assert value not in content, (
-            f"{case}: the {kind} VALUE survived into the stored turn: {content!r}")
-        assert f"[REDACTED:{kind}]" in content, (
-            f"{case}: expected the visible marker for {kind}, got {content!r}")
-        # The rest of the turn is untouched — this is a replacement, not a cut.
-        assert "leaked value: " in content and "(please rotate)" in content
-        # The OTHER persistence sink on the same write: the session `:Source`
-        # derives its summary/topics from the same turn text.
-        assert value not in _session_source_blob(sdk, sid), (
-            f"{case}: the {kind} VALUE survived into the session :Source")
-    assert res["capture_redactions"] == len(CASES)
 
 
-def test_a_multipart_credential_is_not_left_in_the_source_as_fragments(
-        sdk, monkeypatch):
-    """The sentence segmenter splits a JWT and rejoins it with SPACES.
-
-    ``_session_llm_transcript`` runs the conversation through ``extractor._SENT``
-    and flattens newlines before the Source derives its summary/topics, so a
-    scrubber applied to the ASSEMBLED transcript can never see a JWT: the
-    segmenter splits it on its dots and the three fragments — still a usable
-    key when concatenated — land in ``Source.summary``/``topics`` while the
-    receipt reports a redaction. Redacting per turn, before assembly, is what
-    closes it; this asserts the FRAGMENTS, not just the contiguous value.
-    """
-    _keyless(monkeypatch)
-    value = next(v for _c, k, v in CASES if k == "jwt")
-    segments = value.split(".")
-    assert all(len(s) >= 10 for s in segments)
-    sid = "sess-4911-source-fragments"
-    sdk.capture_session(
-        [{"role": "user", "content": f"my token is {value} rotate it"}],
-        session_id=sid)
-
-    blob = _session_source_blob(sdk, sid)
-    assert value not in blob, blob
-    for segment in segments:
-        assert segment not in blob, (
-            "a JWT segment survived in the session :Source — the credential is "
-            f"reconstructable from the graph: {blob!r}")
-    # The space-rejoined form is what the segmenter produces; it must not be
-    # present either (i.e. the value was never there to be split).
-    assert " ".join(segments) not in blob, blob
-    assert _stored(sdk, sid)[f"{sid}_t0"][0].count("[REDACTED:jwt]") == 1
 
 
-def test_redaction_is_visible_not_a_silent_truncation(sdk, monkeypatch):
-    """The marker is present and the surrounding span survives verbatim.
-
-    A ``***``-style scrub or a truncation would pass "the secret is gone" while
-    destroying the record. The contract is: the fact is gone, the SPACE it
-    occupied says so, and everything else is byte-identical.
-    """
-    _keyless(monkeypatch)
-    secret = "sk_live_" + _fill(24)
-    prefix, suffix = "preceding context ", " trailing context"
-    sid = "sess-4911-visible"
-    sdk.capture_session([{"role": "user", "content": prefix + secret + suffix}],
-                        session_id=sid)
-
-    content, text_hash = _stored(sdk, sid)[f"{sid}_t0"]
-    assert content == f"[user] {prefix}[REDACTED:stripe_secret_key]{suffix}"
-    # Visible, not truncated: nothing was silently dropped.
-    assert len(content) == len(f"[user] {prefix}{secret}{suffix}") - len(secret) \
-        + len("[REDACTED:stripe_secret_key]")
-    # #4194: the stored hash describes the REDACTED text (a hash of the raw
-    # text would disagree with every reader that recomputes it from content).
-    assert text_hash == _content_hash(content)
-    assert text_hash != _content_hash(f"[user] {prefix}{secret}{suffix}")
 
 
-def test_the_extraction_leg_writes_the_marker_not_the_credential(
-        tmp_path, monkeypatch):
-    """The capture's OTHER write path: the extractor→``create_point`` leg.
-
-    Redacting only the turn store left a live hole: the extractor was handed the
-    RAW conversation, and when a model echoes the pasted value into a claim the
-    Point was written by ``create_point`` — a different sink with no scrubber —
-    so the capture reported a redaction while storing the credential verbatim
-    in a non-episodic Point. Both extractor lanes now take the scrubbed
-    conversation (this exercises the M2 lane, the deterministic CI seam).
-    """
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
-    sdk = TortoiseSDK(str(tmp_path / "ext.db"))
-    try:
-        secret = "sk-proj-" + _fill(64)
-        sid = "sess-4911-extract"
-        res = sdk.capture_session(
-            [{"role": "user",
-              "content": f"My OpenAI API key is {secret} — keep it safe."}],
-            session_id=sid)
-        assert res["capture_redactions"] == 1
-        assert res["extraction_mode"] == "llm", res
-        assert res["extracted"] >= 1, "the extractor did not run — nothing proven"
-
-        # EVERY node, not just the turns: a leak in any of them is the defect.
-        rows = sdk._get_proj().g.query(
-            "MATCH (n) RETURN n.id, labels(n), n.content, n.summary").result_set
-        assert rows
-        for node_id, _labels, content, summary in rows:
-            blob = f"{content or ''}{summary or ''}"
-            assert secret not in blob, f"{node_id} stored the raw credential"
-        # And the extracted claim carries the visible marker, so a reader can
-        # tell a credential was removed from it.
-        claims = sdk._get_proj().g.query(
-            "MATCH (p:Point) WHERE p.is_episodic IS NULL "
-            "RETURN p.content").result_set
-        assert claims, "no extracted claim landed"
-        assert any("[REDACTED:openai_api_key]" in (c or "") for c, in claims)
-    finally:
-        sdk.close()
 
 
-def test_an_over_long_turn_matches_between_client_and_server(sdk, monkeypatch):
-    """The #4675 confirmation must compare like with like on a cut turn.
-
-    The server CAPS then SCRUBS (its capture windows the conversation before the
-    writer runs); if the client instead scrubs the RAW turn and only then cuts,
-    any turn over 5,000 chars containing a credential produces a different
-    string on each side — the confirmation never matches, and the spool entry
-    defers forever. Both sides now window first.
-    """
-    from tortoise.session_confirm import expected_turns
-
-    _keyless(monkeypatch)
-    secret = "sk_live_" + _fill(24)
-    long_turn = "x" * 4989 + " " + secret + " tail"
-    assert len(long_turn) > 5000
-    sid = "sess-4911-cut"
-    sdk.capture_session([{"role": "user", "content": long_turn}], session_id=sid)
-
-    stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
-    client = expected_turns(sid, [{"role": "user", "content": long_turn}])
-    _role, expected_text = client[f"{sid}_t0"]
-    _role2, stored_text = _capture_turn_role_text(stored)
-    assert expected_text == stored_text, (
-        "client and server computed different stored text for a cut turn — the "
-        "spool confirmation would defer forever")
-    assert secret not in stored_text, (
-        "the whole credential survived the cut, so this test proves nothing")
 
 
-@pytest.mark.parametrize("secret,kind,direction", [
-    # SHRINKS: 72 chars -> 25 (`[REDACTED:openai_api_key]`) — the old test's
-    # only shape, which made the post-scrub re-clip a no-op and hid the defect.
-    ("sk-proj-" + _fill(64), "openai_api_key", "shrinking"),
-    # EXPANDS: 20 chars -> 28 (`[REDACTED:aws_access_key_id]`) — the P1 shape.
-    ("AKIA" + "ABCDEFGHIJKLMNOP", "aws_access_key_id", "expanding"),
-    # EXPANDS: 30 chars -> 32 (`[REDACTED:stripe_webhook_secret]`) — a second
-    # expanding shape alongside aws, so the direction is pinned twice.
-    ("whsec_" + _fill(24), "stripe_webhook_secret", "expanding-whsec"),
-])
-def test_a_credential_in_a_truncated_turn_is_redacted_and_the_cut_is_marked(
-        sdk, monkeypatch, secret, kind, direction):
-    """#4911 and #4897 COMPOSE: a turn that is both cut AND carrying a
-    credential must (a) still have the credential redacted and counted, and
-    (b) still carry the truncation marker — neither control may eat the other.
-
-    The cut and the scrub are separate passes over the same window; a marker
-    appended after the cut must not be removed by the scrubber, and the
-    scrubber's replacement must not sit where the marker's length reservation
-    assumed text — so the two markers coexist and the count is still recorded.
-
-    ⛔ BOTH redaction DIRECTIONS are pinned. A shrinking replacement (the
-    original shape only) makes a post-scrub re-clip a silent no-op, so the
-    marker could report the SCRUBBED length (5,008 for a 6,927-char turn) and
-    this test still passed. The marker's length is the turn as POSTed, either
-    way.
-    """
-    _keyless(monkeypatch)
-    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
-    # The credential sits INSIDE the kept window; the turn is long enough that
-    # a marker must also be appended.
-    content = f"My key is {secret} and here is why. " + "context " * 800
-    assert len(content) > _CAPTURE_TURN_CAP
-    sid = f"sess-4897-4911-compose-{direction}"
-    res = sdk.capture_session([{"role": "user", "content": content}],
-                              session_id=sid)
-    stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
-    assert secret not in stored, "the credential survived the combined cut+scrub"
-    assert f"[REDACTED:{kind}]" in stored, (
-        "the credential must be MARKED redacted, not silently dropped")
-    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
-        "the truncation marker must survive alongside the redaction marker")
-    assert f"original length {len(content)}" in stored, (
-        "the marker's true length must be the turn as POSTed (pre-scrub)")
-    assert res["capture_redactions"] == 1
 
 
-def test_a_dangling_pem_header_past_the_cut_still_carries_the_marker(
-        sdk, monkeypatch):
-    """#4897 round-2 P2: a fail-closed PEM redaction must not eat the marker.
-
-    The ``private_key`` rule's ``\\Z`` branch consumes from a dangling header to
-    the END OF THE TEXT, so when the header sits inside the window and its
-    ``-----END`` falls past the cut, the scrubber replaced everything after the
-    header — the truncation marker included — and a cut turn was stored UNMARKED.
-    Reproduced end-to-end: an 11,263-char turn stored as 4,823 chars with no
-    sentinel. Every such cut the fuzz below produced carried a PEM. A cut
-    turn with no marker is exactly the silent truncation #4897 exists to end.
-    """
-    _keyless(monkeypatch)
-    from tortoise.sdk import _CAPTURE_TRUNCATION_SENTINEL, _CAPTURE_TURN_CAP
-    content = ("p" * 4800 + " " + _pem("RSA PRIVATE KEY") + "\n"
-               + "MIIEowIBAAKCAQEA" * 400 + "\n"
-               + _pem_end("RSA PRIVATE KEY"))
-    assert len(content) > _CAPTURE_TURN_CAP
-    sid = "sess-4897-pem-marker"
-    sdk.capture_session([{"role": "user", "content": content}], session_id=sid)
-    stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
-    assert "[REDACTED:private_key]" in stored, (
-        "the dangling key header must still be redacted")
-    assert _CAPTURE_TRUNCATION_SENTINEL in stored, (
-        "a fail-closed PEM redaction ate the truncation marker — a cut turn is "
-        "stored UNMARKED, which is the silent truncation #4897 exists to end")
-    assert f"original length {len(content)} chars]" in stored, (
-        "the re-attached marker must carry the turn's TRUE length")
 
 
 def test_the_truncation_marker_is_never_in_the_scanned_text(monkeypatch):
@@ -798,139 +575,12 @@ def test_a_marker_lookalike_cannot_hide_a_credential_tail():
         "absent by accident")
 
 
-def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
-    """The Source scrub is bounded, and a non-str content cannot dodge it.
-
-    Both halves are the same defect seen from two directions: the Source
-    transcript builder receives the RAW, client-controlled conversation, so an
-    unbounded scan is seconds of CPU per capture (the hosted caller runs it off
-    the event loop on ``_CAPTURE_EXECUTOR`` — the bound is window parity and
-    cost, not loop protection, #4911); and a ``content`` that is not a str used
-    to be skipped by the scrubber and then stringified by that same builder —
-    the credential landed in ``Source.summary`` while the receipt said 0.
-
-    ⛔ The assertion on the non-str turn is the marker's PRESENCE, not merely the
-    secret's ABSENCE. Absence alone is satisfied VACUOUSLY by any arrangement in
-    which the turn never reaches the summary, and it therefore did not bind the
-    control: neutralising ``redact_secrets`` left this test GREEN. The non-str
-    turn is placed FIRST and kept short enough to be the first substantive
-    utterance, so it IS the summary — which makes the marker check load-bearing.
-    """
-    _keyless(monkeypatch)
-    # #4897 round 6: capture every string the scrubber is handed on the Source
-    # path so the WINDOW itself is asserted, not just the absence of one value.
-    # Row (b)'s absence assertion is vacuous on its own: dropping
-    # ``_capture_turn_window`` from ``_materialize_session_source`` still scans
-    # the whole raw turn (``len(raw)`` below) and still redacts ``beyond``, so
-    # the test stayed GREEN under that mutation (measured). The scan-length
-    # bound is what binds the control.
-    from tortoise import sdk as sdk_mod
-    from tortoise.sdk import _CAPTURE_TURN_CAP
-
-    scanned: list[int] = []
-    _real_redact = sdk_mod.redact_secrets
-
-    def _spy(text: str):
-        scanned.append(len(text))
-        return _real_redact(text)
-
-    monkeypatch.setattr(sdk_mod, "redact_secrets", _spy)
-    secret = "sk_live_" + _fill(24)
-    beyond = "sk-proj-" + _fill(64)
-    sid = "sess-4911-source-bound"
-    # A turn far larger than the stored window (its credential sits past the
-    # 5,000-char cap), plus a structurally odd first turn carrying the secret.
-    # The size is bound to a NAME so the prose and the failure message below can
-    # reference it instead of a hand-copied number that drifts (round 6).
-    raw = "pad " * 200_000 + beyond
-    sdk.capture_session(
-        [{"role": "user", "content": {"note": f"my key is {secret}"}},
-         {"role": "user", "content": raw}],
-        session_id=sid)
-
-    rows = sdk._get_proj().g.query(
-        "MATCH (s:Source {url:$u}) RETURN s.summary, s.topics",
-        params={"u": f"session:{sid}"}).result_set
-    assert rows
-    blob = (rows[0][0] or "") + " " + " ".join(rows[0][1] or [])
-    # (a) the non-str turn's credential was COERCED, SCANNED and MARKED. This is
-    #     the assertion that binds: with the scrubber neutralised the raw value
-    #     is here instead of the marker and this reds.
-    assert "[REDACTED:stripe_secret_key]" in blob, (
-        "a credential was dropped rather than marked — or the non-str turn was "
-        f"never scanned: {blob!r}")
-    assert secret not in blob, (
-        "a credential reached the session :Source — check the coercion path "
-        "and the per-turn ordering")
-    # (b) the turn beyond the 5,000-char cap was never persisted, so its
-    #     credential cannot reach this sink (the documented residual is a
-    #     PREFIX of a value cut mid-body in the stored TURN, not this sink).
-    assert beyond not in blob, blob
-    # (c) the WINDOW is load-bearing: every string the Source path scans is
-    #     bounded by the cap. Without this assertion the mutation named above is
-    #     invisible — and the sink is cheap *here* only because the cap holds.
-    assert scanned, "the capture path never reached redact_secrets"
-    assert max(scanned) <= _CAPTURE_TURN_CAP, (
-        "the Source sink scanned an UNBOUNDED window — max scanned "
-        f"{max(scanned)} chars vs the {_CAPTURE_TURN_CAP}-char cap; the "
-        f"{len(raw)}-char raw turn should have been windowed before the scan")
 
 
 # ── AC3: count recorded per session AND surfaced ───────────────────────────
 
-def test_redaction_count_is_recorded_per_session_and_surfaced(sdk, monkeypatch):
-    """The count is on the Session node and on the receipt, with a warning."""
-    _keyless(monkeypatch)
-    sid = "sess-4911-count"
-    conv = [
-        {"role": "user", "content": "two here: sk_live_" + _fill(24)
-         + " and whsec_" + _fill(24)},
-        {"role": "assistant", "content": "nothing sensitive in this one"},
-    ]
-    res = sdk.capture_session(conv, session_id=sid)
-
-    assert res["capture_redactions"] == 2
-    assert any("redacted" in w for w in res["warnings"]), res["warnings"]
-    assert _session_redactions(sdk, sid) == 2
-
-    clean_sid = "sess-4911-clean"
-    clean = sdk.capture_session(
-        [{"role": "user", "content": "a session with no credentials in it"}],
-        session_id=clean_sid)
-    assert clean["capture_redactions"] == 0
-    assert not any("redacted" in w for w in clean["warnings"])
-    assert _session_redactions(sdk, clean_sid) == 0
 
 
-def test_capture_redactions_survives_a_journal_only_replay(tmp_path, monkeypatch):
-    """The Session property has a journal carrier, so a rebuild restores it.
-
-    The live write is a raw ``SET`` inside ``_write_capture_turns``; without a
-    trailing ``SessionRecorded`` a journal-only rebuild restored the field null
-    — the same live/replay divergence #3664/#3722 removed for ``capture_ok``.
-    Exercised through the apply()-based engine (wipe + ``recover_from_log``),
-    the pattern ``tests/test_capture_entity_attachment_3664.py`` established.
-    """
-    _keyless(monkeypatch)
-    events = tmp_path / "events"
-    events.mkdir()
-    sdk = TortoiseSDK(str(tmp_path / "g.db"),
-                      event_log_path=str(events / "events.jsonl"))
-    try:
-        sid = "sess-4911-journal"
-        sdk.capture_session(
-            [{"role": "user", "content": "key sk_live_" + _fill(24)}],
-            session_id=sid)
-        proj = sdk._get_proj()
-        assert _session_redactions(sdk, sid) == 1
-
-        proj.g.query("MATCH (n) DETACH DELETE n")
-        from tortoise.consistency import recover_from_log
-        result = recover_from_log(str(events), proj)
-        assert result["recovered"] is True, result
-        assert _session_redactions(sdk, sid) == 1
-    finally:
-        sdk.close()
 
 
 # ── AC4: one control site, at the shared stored-text definition ────────────

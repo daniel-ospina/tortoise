@@ -27,7 +27,7 @@ The system under test is the epistemic layer in three compositions, each with it
 |---|---|---|
 | **EP engine** (`TortoiseEP` + `quadrature.phi_*`) | Beta-message belief propagation over IMPL/NAND factors | Property tests (§2) |
 | **Graph as built by the pipeline** (extraction → operators → supersession → dream) | The *input* the engine reasons over | Graph-quality tests (§3) |
-| **Query/endpoint surface** (`get_confidence`, `traverse`, `get_contested_claims`, ledger, bi-temporal) | What a user/agent actually experiences | Reasoning-endpoint scenarios (§4) |
+| **Query/endpoint surface** (`get_confidence`, `traverse` *(deleted by #4282; the surviving walk is `explore_connections`)*, `get_contested_claims`, ledger, bi-temporal) | What a user/agent actually experiences | Reasoning-endpoint scenarios (§4) |
 | **Whole system under hostile input** | Noise, loops, Sybil, flapping | Adversarial tests (§5) |
 
 **Method rules (non-negotiable):**
