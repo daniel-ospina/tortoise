@@ -86,15 +86,18 @@ line or behind a declarator, a pin whose source falls back
 ``--dry-run``, ``main:refs/remotes/…``), and a wrapped or negated landing carrier.
 an allowlisted no-op placed AFTER the subject so it owns the halt
 (``; true || exit 1``, ``; :``, ``; echo ok``, ``; cd .``, ``; printf ''``,
-``; git fetch origin main``), and the subject in a PIPELINE (``| true || exit 1``,
-which runs it in a subshell so HEAD never moves in the parent) — the same set at
-the pin creates, the batch fence and the dirty-tree refusals. Each one is green on
+``; git fetch origin main``), the subject behind a PIPE or a JOB SEPARATOR
+(``| true || exit 1``, ``& true || exit 1`` — a pipeline's status is its LAST
+command's and ``&`` does not wait, so a failed subject never reaches the halt),
+and ``cd`` relocation (``cd /other-worktree``; worktrees share an object DB, so the
+pin then succeeds in another repo) — the same set at the pin creates, the batch
+fence and the dirty-tree refusals. Each one is green on
 the *spelling* and wrong on the *behaviour*, which is the only class a substring
 predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **45 such mutants
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **50 such mutants
 measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
@@ -142,7 +145,11 @@ _PINNED_MAIN_ASSERTION = re.compile(
 #: checked out. Anything else must BE a re-runnable pin create (see
 #: ``_ends_at_halt``) — an allowlist, because a hard reset moves the tree without
 #: matching ``_MOVES_HEAD``.
-_SAFE_SEGMENT = re.compile(r"^(?:git\s+fetch\b|cd\s+\S+|echo\b|printf\b|true\b|:)\s*")
+#: ``cd`` is limited to the no-op forms: ``cd /other-worktree`` would relocate the
+#: fence, and worktrees share an object DB, so the pin then succeeds in another repo.
+_SAFE_SEGMENT = re.compile(
+    r"^(?:git\s+fetch\b|cd\s+(?:\.|-)(?=\s|$)|echo\b|printf\b|true\b|:)\s*"
+)
 
 #: The dirty-tree subject: the command whose failure must reach the halt.
 _DIRTY_TEST = re.compile(r"^(?:\[\s*-z\s|test\s+-z\s)")
@@ -281,11 +288,13 @@ def _ends_at_halt(code: str, allow=_allows_pin_segment) -> bool:
     Two things go wrong without this, and both were measured:
 
     * ``pin ; true || exit 1`` — the halt belongs to ``true``, which never fails,
-      so the fence runs the whole suite and exits **0**; ``pin | true || exit 1``
-      is worse: the pin runs in a PIPELINE SUBSHELL and HEAD never moves in the
-      parent, so the baseline measures the operator's lane unconditionally. Every
-      word there (``true``, ``:``, ``echo``, ``cd``, ``printf``, ``git fetch``) is
-      in ``_SAFE_SEGMENT``, so an allowlist over SEGMENTS alone blesses it.
+      so the fence runs the whole suite and exits **0**. ``pin | true || exit 1``
+      and ``pin & true || exit 1`` are the same failure one separator over: a
+      pipeline's status is its LAST command's, and ``&`` does not wait at all, so
+      a FAILED pin never reaches the halt (HEAD still moves — the fork writes it —
+      which makes the race worse, not better). Every word there (``true``, ``:``,
+      ``echo``, ``cd``, ``printf``, ``git fetch``) is in ``_SAFE_SEGMENT``, so an
+      allowlist over SEGMENTS alone blesses it.
     * ``A || exit 1 && C`` parses as ``(A || exit 1) && C``, so a suffix steals the
       halt rather than being stopped by it.
 
@@ -299,11 +308,16 @@ def _ends_at_halt(code: str, allow=_allows_pin_segment) -> bool:
     )
     if halt is None:
         return False
-    parts = re.split(r"(;|&&|\|\||\|)", halt.group("head"))
+    parts = re.split(r"(;|&&|\|\||\||&)", halt.group("head"))
     segments = [piece.strip() for piece in parts[0::2]]
     separators = parts[1::2]
-    if "|" in separators:
-        return False  # the subject would run in a subshell
+    if "|" in separators or "&" in separators:
+        # `a | b` yields b's status; `a &` does not even wait, so neither can
+        # deliver the subject's failure to the halt. The bare `&` HAS to be in the
+        # split alphabet: left inside the segment, `_re_runnable` blesses
+        # `pin & true` as a pin create one character away from the accepted
+        # `pin && true`.
+        return False
     subjects = [
         i
         for i, segment in enumerate(segments)
