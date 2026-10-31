@@ -773,6 +773,67 @@ def test_a_shallow_checkout_cannot_call_an_ancestor_drift(monkeypatch) -> None:
     assert "SHALLOW" not in unverified[0], unverified
 
 
+def test_an_unreadable_completeness_answer_cannot_certify_drift(monkeypatch) -> None:
+    """Fails if an exit-0 payload this code cannot READ is scored as "complete".
+
+    `_is_shallow_clone()` is a tri-state — `True` (this checkout is shallow),
+    `False` (it can walk its whole history), `None` (git could not say) — and only
+    a positive `False` may promote git's status 1 to DRIFT. The pre-#10406 shape,
+    `return proc.stdout.strip() == "true"`, collapses every UNRECOGNISED exit-0
+    payload onto `False`, i.e. onto the strongest claim the probe can make ("this
+    clone can walk its whole history"). A status-1 ancestry answer then reds the
+    REQUIRED `docs` job with "the document and the tree disagree — do not delete
+    the row to make this green" about a document that is right: the exact defect
+    this module exists to stop, reached through the one input the docstring
+    already reserved `None` for.
+
+    git prints exactly `true` or `false` today, so this arm is unreachable on the
+    versions measured — the #10406 reviewer recorded it as noted-not-a-finding.
+    It is closed anyway because the fallthrough is INVERTED (an unanswerable
+    probe is the one path that may accuse a correct document), which is the same
+    asymmetry `test_a_shallow_checkout_cannot_call_an_ancestor_drift` guards.
+
+    ⛔ Non-vacuous: on the pre-fix tool BOTH halves fail — the first loop gets
+    `False` for the unrecognised payloads, and the end-to-end arm gets a drift
+    problem instead of the state error.
+    """
+    # The two words git actually prints keep their meaning (positive controls).
+    for payload, expected in (("true\n", True), ("false\n", False)):
+        monkeypatch.setattr(
+            smc.subprocess,
+            "run",
+            lambda *a, _p=payload, **k: subprocess.CompletedProcess(a[0], 0, _p, ""),
+        )
+        assert smc._is_shallow_clone() is expected, payload
+
+    # Anything else is "git could not say" — never "the history is whole".
+    for payload in ("yes\n", "TRUE\n", "\n", "fatal: not a git repository\n"):
+        monkeypatch.setattr(
+            smc.subprocess,
+            "run",
+            lambda *a, _p=payload, **k: subprocess.CompletedProcess(a[0], 0, _p, ""),
+        )
+        assert smc._is_shallow_clone() is None, payload
+
+    # End to end, through the LIVE `_is_shallow_clone` (not a stub of it): the
+    # ancestry probe answers status 1 and the completeness probe answers an
+    # unreadable exit-0 word, which must land in the state error, not in drift.
+    def _unreadable_completeness(argv, **_kwargs):
+        if "--is-shallow-repository" in argv:
+            return subprocess.CompletedProcess(argv, 0, "yes\n", "")
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr(smc.subprocess, "run", _unreadable_completeness)
+    problems, unverified = smc.check_measured_at_commit(_doc())
+    assert problems == [], (
+        f"an unanswerable completeness probe cannot certify drift: {problems}")
+    assert len(unverified) == 1, unverified
+    assert "cannot be verified here" in unverified[0], unverified[0]
+    # It must not claim the checkout IS shallow either — the honest cause is that
+    # git did not answer, and the two causes read differently on purpose.
+    assert "SHALLOW" not in unverified[0], unverified
+
+
 def test_status_1_for_a_PRESENT_yet_grafted_commit_is_the_real_git_verdict(
     monkeypatch, tmp_path: Path
 ) -> None:

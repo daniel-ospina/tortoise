@@ -538,6 +538,11 @@ def _is_shallow_clone() -> bool | None:
     which a truncated history produces for a commit that is present (#10356).
     In the second case this answer is what separates "the document is wrong"
     from "this checkout cannot tell".
+
+    ⛔ **The answer is total over that tri-state: only the exact word `true`
+    means shallow and only the exact word `false` means complete.** Any other
+    exit-0 payload is `None`, not `False` — see the arm at the end, which is the
+    difference between "git did not say" and "git said the history is whole".
     """
     try:
         proc = subprocess.run(
@@ -552,7 +557,21 @@ def _is_shallow_clone() -> bool | None:
         return None
     if proc.returncode != 0:
         return None
-    return proc.stdout.strip() == "true"
+    answer = proc.stdout.strip()
+    if answer == "true":
+        return True
+    if answer == "false":
+        return False
+    # ⛔ An exit-0 payload that is NEITHER word is not evidence of a complete
+    # history. `return answer == "true"` — the pre-#10406 shape — reads it as
+    # `False`, i.e. as the strongest possible claim ("this clone can walk its
+    # whole history"), which promotes a status-1 answer to DRIFT and accuses a
+    # document that is right. That is the exact defect this module exists to
+    # stop, reached through the one input the docstring already reserved `None`
+    # for; the arm must not be shadowed by the `== "true"` comparison (#10406
+    # review, noted-not-a-finding: unreachable with the git versions measured
+    # today, and inverted in the unsafe direction if that ever changes).
+    return None
 
 
 def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
