@@ -1,0 +1,364 @@
+"""#9836 — the ID-ADDRESSED structural repoint family (`aboutAction`, `wasDerivedFrom`).
+
+THE DEFECT THIS PINS. `supersede_point`'s 2b leg MOVES every rel in
+`SUPERSEDE_STRUCTURAL_RELS` from the retired point to the successor live — but it
+journalled a `DirectEdgeRepoint` descriptor for the SNAPSHOT-DERIVABLE subset
+only (`if derivable:`). `aboutAction` (Action dissolved in ONTOLOGY v3.0) and
+`wasDerivedFrom` (the A10 raw family) are transferred but are not
+snapshot-derivable, so they moved live and journalled NOTHING. The two rebuild
+routes then disagreed, each losing the edge a different way:
+
+* **journal-rebuild** — the edge was GONE. Its `DirectEdgeCreated` is skipped by
+  the superseded-endpoint gate (`_supersede_took_this_edge`, correct: replaying
+  the creation at the old point would mint a phantom at a dead point, E2E-11.6)
+  and nothing else re-creates it;
+* **record-rebuild** — the `relation` row survived AT THE PRE-SUPERSEDE POINT,
+  because the only record the move ever produced was the plain
+  `DirectEdgeCreated` upsert at `src=old_id`.
+
+Measured on `8e49b7d2a` (before the fix), per rel, one supersede:
+``LIVE=[('NEW','TGT')] REPOINTS=[] JREBUILD=[]``.
+
+WHAT IT IS FIXED BY, and why the family needs its OWN addressing rather than two
+more rows in `STRUCTURAL_REL_LABELS`:
+
+* a Point has no `name`, so `stub_key`'s natural-key arm cannot mint a key for
+  `aboutAction`'s `Point -> Point` target (that is the `aboutPoint` defect
+  #10313 owns); and
+* `wasDerivedFrom`'s target label is not a function of the rel — ONTOLOGY §3.2
+  declares `Object -> Object` while BOTH its writers (`create_derivation`,
+  `create_edge`) type-check nothing, and the class-4 mint produces the Point
+  shape.
+
+So the target is addressed the way every other epistemic endpoint in this tree
+is: by its OWN `id`, with the label the descriptor OBSERVED live riding
+`target_label` (the field's own meaning on the structural route). Both routes
+resolve `(label, id)` — the graph through `resolve_structural_target(..., by_id=
+True)`, the record by delegating to `_endpoint_resolution`, the same resolution
+every other edge endpoint uses.
+
+THE ACCEPTANCE BAR is `live == journal-rebuild == record-rebuild`, so this module
+measures the LIVE and JOURNAL halves end to end (embedded graph, real journal,
+real `rebuild_all`) and pins the RECORD half where it can be pinned without a
+database: the PLAN the record emits for a descriptor. The row-count facts are
+measured against real Postgres by `supabase/tests/pglite/validate.mjs` cases
+13-16 (moves to the successor, filed under the descriptor's label; an
+unaddressable label is a NO-MOVE, never delete-without-insert) — a pytest leg
+cannot assert a row count, and a plan-text assertion cannot see one.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from tortoise import record_projection as rp
+from tortoise.projection import FalkorProjection
+from tortoise.projection.edges import (
+    DERIVABLE_STRUCTURAL_RELS,
+    EPISTEMIC_LABEL_ORDER,
+    ID_ADDRESSED_STRUCTURAL_RELS,
+    RECORD_ADDRESSABLE_EDGE_LABELS,
+    STRUCTURAL_REPOINT_RELS,
+    id_addressed_target,
+)
+from tortoise.sdk import SUPERSEDE_STRUCTURAL_RELS, TortoiseSDK
+
+#: The two rels. Restated rather than imported into the assertions so a rel
+#: silently dropped from the producer's set — the defect, inverted — reds here.
+FAMILY = ("aboutAction", "wasDerivedFrom")
+
+
+@pytest.fixture()
+def edge_sdk(tmp_path):
+    """A real SDK over an embedded graph, with a JSONL journal (so it emits)."""
+    journal = tmp_path / "journal.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "graph.db"), event_log_path=str(journal))
+    try:
+        yield sdk, journal, tmp_path
+    finally:
+        sdk.close()
+
+
+def _records(journal) -> list[dict]:
+    return [json.loads(line) for line in journal.read_text().splitlines()
+            if line.strip()]
+
+
+def _repoints(journal) -> list[dict]:
+    return [r for r in _records(journal) if r.get("type") == "DirectEdgeRepoint"]
+
+
+def _edges(proj, rel: str) -> set[tuple[str, str]]:
+    return {(row[0], row[1]) for row in proj.g.query(
+        f"MATCH (s)-[r:{rel}]->(t) RETURN s.id, t.id").result_set}
+
+
+def _world(sdk) -> dict[str, str]:
+    """Three Points: the claim, a target, and the successor."""
+    return {
+        "old": sdk.create_point("claim", "one", pointKind="statement")["id"],
+        "target": sdk.create_point("claim", "two", pointKind="statement")["id"],
+        "new": sdk.create_point("claim", "three", pointKind="statement")["id"],
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 1. The census: live == journal-rebuild, per rel (the red-before/green-after leg)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("rel", FAMILY)
+def test_a_supersede_MOVES_the_edge_and_the_journal_rebuild_agrees(
+        edge_sdk, rel):
+    """`live == journal-rebuild` for a `Point -> Point` edge of the family.
+
+    Before the fix this measured `LIVE=[('NEW','TGT')] JREBUILD=[]`: the edge was
+    transferred live and the journal rebuild had nothing to replay, because the
+    2b emission was gated on `derivable` and neither of these rels is.
+    """
+    sdk, journal, tmp_path = edge_sdk
+    ids = _world(sdk)
+    assert sdk.create_edge(rel, ids["old"], ids["target"])["created"] is True
+    sdk.supersede_point(ids["old"], ids["new"])
+
+    live = _edges(sdk._proj, rel)
+    assert live == {(ids["new"], ids["target"])}, live
+    # The descriptor exists, and it names the TARGET'S OWN ID under the label the
+    # transfer observed — never the internal node id, never a natural key.
+    [rep] = [r for r in _repoints(journal) if r.get("edge_type") == rel]
+    assert rep["src"] == ids["old"]
+    assert rep["tgt"] == ids["target"]
+    assert rep["target_label"] == "Point"
+    assert rep.get("delete_only") is None
+
+    rebuilt = FalkorProjection(str(tmp_path / "rebuilt.db"))
+    try:
+        rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert _edges(rebuilt, rel) == live, (
+            f"{rel}: the journal rebuild disagrees with the live graph — the "
+            "descriptor the 2b emission used to omit is what carries the move")
+    finally:
+        rebuilt.close()
+
+
+@pytest.mark.parametrize("rel", FAMILY)
+def test_the_descriptor_is_NOT_emitted_when_the_target_cannot_be_addressed(
+        edge_sdk, rel):
+    """A target outside the record's sweep is NOT half-journaled.
+
+    A `:Source` endpoint is url-keyed and outside pass-2b's id sweep
+    (`RECORD_ADDRESSABLE_EDGE_LABELS`), so a descriptor for it would be
+    un-replayable — while the record route COULD act on it, making the record
+    richer than the graph, the one direction Interface A forbids. The emission
+    skips it completely (no partial descriptor), exactly as `stub_key` skips an
+    unresolvable natural key for the derivable family.
+    """
+    sdk, journal, _tmp = edge_sdk
+    ids = _world(sdk)
+    src = sdk.create_source("https://9836.test/doc", sourceKind="document")
+    url = src.get("url") or src.get("id")
+    assert sdk.create_edge(rel, ids["old"], url)["created"] is True
+    sdk.supersede_point(ids["old"], ids["new"])
+    assert [r for r in _repoints(journal) if r.get("edge_type") == rel] == []
+
+
+def test_the_no_self_edge_guard_still_journals_nothing_for_this_family(edge_sdk):
+    """The transfer's existing guard, unchanged for the new members.
+
+    When the target IS the successor the leg DELETES the edge and transfers
+    nothing. For a derivable rel a `delete_only` descriptor is required (pass-2
+    re-mints the old edge from the point's snapshot); for this family nothing
+    ever re-creates it, so a descriptor here would be a permanent no-op
+    delete-leg. Live and rebuild must both hold NO edge.
+    """
+    sdk, journal, tmp_path = edge_sdk
+    ids = _world(sdk)
+    assert sdk.create_edge("wasDerivedFrom", ids["old"], ids["new"])["created"]
+    sdk.supersede_point(ids["old"], ids["new"])
+
+    assert _edges(sdk._proj, "wasDerivedFrom") == set()
+    assert [r for r in _repoints(journal)
+            if r.get("edge_type") == "wasDerivedFrom"] == []
+
+    rebuilt = FalkorProjection(str(tmp_path / "rebuilt.db"))
+    try:
+        rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert _edges(rebuilt, "wasDerivedFrom") == set(), (
+            "a rebuild minted the no-self-edge phantom (E2E-11.6)")
+    finally:
+        rebuilt.close()
+
+
+def test_a_rel_the_supersede_does_not_move_is_untouched(edge_sdk):
+    """The family is a SUBSET of the transfer set — `dependsOn` is not in it.
+
+    Anchor for the census: this is what "a rel supersede never moves" looks like
+    (the edge stays at the old point on BOTH routes), so a fix that widened the
+    emission to every structural rel would red here.
+    """
+    sdk, journal, tmp_path = edge_sdk
+    ids = _world(sdk)
+    assert sdk.create_edge("dependsOn", ids["old"], ids["target"])["created"]
+    sdk.supersede_point(ids["old"], ids["new"])
+
+    live = _edges(sdk._proj, "dependsOn")
+    assert live == {(ids["old"], ids["target"])}, live
+    assert [r for r in _repoints(journal)
+            if r.get("edge_type") == "dependsOn"] == []
+    rebuilt = FalkorProjection(str(tmp_path / "rebuilt.db"))
+    try:
+        rebuilt.rebuild_all(str(tmp_path), confirm_destructive=True)
+        assert _edges(rebuilt, "dependsOn") == live
+    finally:
+        rebuilt.close()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 2. The record half: the descriptor is a MOVE, addressed by id
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _descriptor(rel="wasDerivedFrom", *, src="p1", tgt="tp-9836",
+                target_label="Point", **extra):
+    return {"type": "DirectEdgeRepoint", "ts": "T",
+            "id": f"{src}->p2:{rel}:{tgt}",
+            "src": src, "tgt": tgt, "target_label": target_label,
+            "edge_type": rel, **extra}
+
+
+@pytest.mark.parametrize("rel", FAMILY)
+def test_the_record_applies_the_descriptor_as_a_MOVE(rel):
+    """DELETE at the superseded point + INSERT at the successor — two halves.
+
+    ONE mutation for the family, shared with the derivable set: the descriptor
+    is a MOVE, and the only thing that differs is how the target is addressed.
+    A single statement here is the plain-upsert defect #10244 retired (it would
+    ADD the successor row and LEAVE the old one on a family whose old row the
+    graph has already deleted).
+    """
+    statements = rp.mutations_for(_descriptor(rel), org_id="o", graph_id="g")
+    assert len(statements) == 2, statements
+    delete, insert = statements[0].sql, statements[1].sql
+    assert "DELETE FROM public.relation" in delete
+    assert "INSERT INTO public.relation" in insert
+    assert "WITH RECURSIVE succ" in delete and "WITH RECURSIVE succ" in insert
+    # The destination is the record's own successor chain — the descriptor
+    # carries no successor, and must not start to.
+    assert "superseded_by" in delete
+    assert "new_id" not in delete + insert
+    assert insert.rstrip().endswith("DO NOTHING")
+    # ... and the target is resolved by the descriptor's LABEL against the node's
+    # own id — the label is BOUND (never interpolated) and it is the value the
+    # descriptor carried, so an Object target files as Object. A hardcoded
+    # 'Point' would land NO row for an Object target while the graph moved the
+    # edge.
+    assert "Point" in statements[1].params, statements[1].params
+    assert rel in statements[1].params, statements[1].params
+    assert "target_label" not in insert, insert
+
+
+@pytest.mark.parametrize("label,column", [
+    ("Point", "node_key"),
+    ("Object", "id"),
+    ("Subject", "id"),
+])
+def test_the_target_is_resolved_by_the_labels_own_canonical_key(label, column):
+    """The id-addressed arm delegates to `_endpoint_resolution` (one rule).
+
+    `relation.tgt_key` is a composite FK into `node_identity`, so the endpoint
+    must be filed by the label's CANONICAL key: `Point`/`Session`/`Event` →
+    `node_key`, `Object`/`Subject` → `id` (#9881). A restated resolution here
+    would be a second rule for the same fact.
+    """
+    sql, params = rp._structural_target_resolution(
+        "o", "g", label, "wasDerivedFrom", "tp-9836", "tgt", by_id=True)
+    assert f"{column} = %s" in sql, sql
+    assert params == ["o", "g", "tp-9836"], params
+    # The graph's twin match — same label, same id — so one descriptor cannot
+    # resolve onto two different nodes.
+    assert sql.count("%s") == 3
+
+
+def test_an_unaddressable_label_is_a_no_move():
+    """A label the arm cannot address moves NOTHING — never delete-without-insert.
+
+    The graph's replay leg SKIPS such a descriptor; if the record acted on it,
+    the DELETE half would run with no INSERT and the row would leave its endpoint
+    and land nowhere (the atomicity the `moved` conjunct exists to protect).
+    Returning `None` sends the descriptor back to the plain-upsert path, which is
+    the same no-move the fold performs.
+    """
+    doc = _descriptor("wasDerivedFrom", tgt="https://x.test/d",
+                      target_label="Source")
+    assert rp._structural_repoint_statements("o", "g", doc) is None
+
+
+def test_a_label_outside_the_addressable_set_is_a_REFUSAL_not_a_guess():
+    """Reaching the resolver with a bad label fails LOUD (the vocabulary pin).
+
+    The caller validates the label too, so this can only be reached by a
+    vocabulary change that did not reach the arm; a silent fallback would file
+    the row under a label the fold never resolved.
+    """
+    with pytest.raises(rp.RecordProjectionError):
+        rp._structural_target_resolution(
+            "o", "g", "DropTable", "wasDerivedFrom", "x", "", by_id=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 3. The contracts: one vocabulary, mirrored and pinned (no drift either way)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_writer_still_transfers_exactly_the_families_we_claim():
+    """`SUPERSEDE_STRUCTURAL_RELS` ⊇ the family, and the replay set is the split.
+
+    A rel added to the writer's transfer set without being classified into one
+    of the two families is the #9836 defect repeating one rel over.
+    """
+    assert set(FAMILY) <= set(SUPERSEDE_STRUCTURAL_RELS)
+    assert set(FAMILY) == set(ID_ADDRESSED_STRUCTURAL_RELS)
+    assert not (ID_ADDRESSED_STRUCTURAL_RELS & DERIVABLE_STRUCTURAL_RELS), (
+        "a rel cannot be snapshot-derivable AND id-addressed: the derivable set "
+        "is the resurrection set, and the replay's delete-leg reasons about it")
+    assert STRUCTURAL_REPOINT_RELS == (
+        DERIVABLE_STRUCTURAL_RELS | ID_ADDRESSED_STRUCTURAL_RELS)
+
+
+def test_the_record_mirrors_the_folds_own_rel_set_and_labels():
+    """Both directions, so neither side can drift silently.
+
+    `record_projection` restates these constants for the STANDALONE reason every
+    other constant in that block is (the PGlite harness loads the module without
+    the package), so the pin is what keeps the restatement honest.
+    """
+    assert rp._ID_ADDRESSED_STRUCTURAL_RELS == ID_ADDRESSED_STRUCTURAL_RELS
+    assert rp._ID_ADDRESSED_TARGET_LABELS == RECORD_ADDRESSABLE_EDGE_LABELS
+
+
+def test_the_label_order_is_the_folds_sweep_order():
+    """Point-first, and the SAME tuple the fold sweeps.
+
+    A multi-labelled node must resolve to one label on the write, the transfer
+    and both replay routes; two orders would let them disagree.
+    """
+    from tortoise.live import EPISTEMIC_LABELS
+
+    assert EPISTEMIC_LABEL_ORDER == EPISTEMIC_LABELS
+    assert set(EPISTEMIC_LABEL_ORDER) == RECORD_ADDRESSABLE_EDGE_LABELS
+
+
+def test_id_addressed_target_picks_the_labels_own_key():
+    """`id_addressed_target` picks the label and the key THAT LABEL is filed by.
+
+    Measured directly, because a label/key mismatch is the one failure mode this
+    family can have that still lands a row: `#9972`-with-a-different-spelling.
+    """
+    subject = {"id": "sub-1", "name": "Alice"}
+    assert id_addressed_target(["Subject"], subject) == ("Subject", "sub-1")
+    assert id_addressed_target(["Point", "Event"], {"id": "x"}) == ("Point", "x")
+    # A node the record cannot address → no descriptor at all.
+    assert id_addressed_target(["Source"], {"url": "u"}) is None
+    assert id_addressed_target(["Point"], {}) is None
+    assert id_addressed_target([], {"id": "x"}) is None

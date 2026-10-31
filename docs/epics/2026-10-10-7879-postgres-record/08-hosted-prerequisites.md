@@ -497,14 +497,15 @@ learned it (`_supersede_took_this_edge`):
 Measured across 16 combinations (rel × direction × before/after supersede) plus the exists-and-is-re-asserted
 shape: everything agrees live↔rebuild except the residuals below.
 
-- **journal route, `wasDerivedFrom`/`aboutAction`** — MOVED live by 2b but not derivable, so 2b journals no
-  repoint: live has the edge at the successor, the journal rebuild has it nowhere.
-- **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191**:
+- **journal route, `wasDerivedFrom`/`aboutAction`** — **CLOSED by #9836**: MOVED live by 2b, not derivable, and
+  now journalled as the ID-ADDRESSED family (the target is addressed by the node's own `id`, with the label the
+  transfer observed riding `target_label`) — so the journal rebuild has the edge at the successor, as live does.
+- **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191**, and closed for the
+  ID-ADDRESSED family by #9836:
   the record applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the
-  hop `superseded_by` names — one hop per descriptor, so a chain reaches the terminal row as each hop runs — `ON CONFLICT … DO NOTHING`), so `relation` follows the edge to the successor too. What
-  remains open in **#9836** is the *non-derivable* family (`wasDerivedFrom`/`aboutAction`): 2b journals no
-  descriptor for them at all, so nothing moves the row and the record keeps the row at the pre-supersede point
-  (live moved it to the successor). A shape the producer DECLINES at the mint (`_record_addressable`) holds
+  hop `superseded_by` names — one hop per descriptor, so a chain reaches the terminal row as each hop runs — `ON CONFLICT … DO NOTHING`), so `relation` follows the edge to the successor too. ⛔ The boundary that remains
+  is the PRE-FIX JOURNAL: a supersede journaled before #9836 carries no descriptor for those two rels, so on that
+  journal the record keeps the row at the pre-supersede point (live moved it to the successor). A shape the producer DECLINES at the mint (`_record_addressable`) holds
   nothing at all, and the `:Source`-targeted shape is one of those rather than the only one: the same gate also
   declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`).
   ⚠️ The retired claim here read *the record's `DirectEdgeRepoint` is a plain upsert* — true before #10191, and

@@ -765,10 +765,12 @@ STALE_TERMINAL_STATUSES = TERMINAL_EXCLUDED_STATUSES
 # The structural rels `supersede_point` transfers in its 2b leg (#122). Single
 # source of truth for the WRITER and for every mirror of it: the MCP dry-run
 # preview imports this name rather than re-listing the rels, so a rel added to
-# (or dropped from) the transfer cannot drift out of the preview. Superset of
+# (or dropped from) the transfer cannot drift out of the preview. A superset of
 # `projection.edges.STRUCTURAL_REL_LABELS` (which carries only the
 # snapshot-derivable subset): `aboutAction` (Action dissolved in Ontology v3.0)
-# and `wasDerivedFrom` (A10 raw family) transfer but are never snapshot-recreated.
+# and `wasDerivedFrom` (A10 raw family) transfer but are never snapshot-recreated
+# — their repoint descriptor is keyed by the target's OWN `id`
+# (`projection.edges.ID_ADDRESSED_STRUCTURAL_RELS`, #9836), not by a natural key.
 SUPERSEDE_STRUCTURAL_RELS = (
     'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
     'aboutPoint', 'aboutDocument', 'extractedFrom', 'wasDerivedFrom',
@@ -17769,24 +17771,33 @@ class TortoiseSDK:
         # These edges connect the Point to entities (Subject, Object, Source, etc.)
         #
         # #2489 (structural-edge transfer parity): the transfer is now JOURNALED
-        # for the snapshot-derivable rel set (extractedFrom +
-        # aboutSubject/Object/Event/Document/Point) as flat DirectEdgeRepoint
-        # descriptors {src=old_id, tgt=<replay key>, target_label=<label>,
-        # edge_type=<rel>} emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER,
-        # §4.4 — same crash discipline as 2a-DIRECT). Rebuild pass-2 resurrects
-        # these edges at OLD from the point's immutable snapshot (extractedFrom
-        # prop / aboutEntities list), so the pass-2b replay must move them to the
-        # successor THAT SUPERSEDE NAMED (`succ[src]`, ONE HOP per descriptor —
-        # NOT the terminal `_final(src)`, which is only the skip guard) AND
-        # delete the resurrection at old. Non-derivable rels
-        # (aboutAction — Action dissolved in Ontology v3.0; wasDerivedFrom — A10
-        # raw family) are NEVER snapshot-recreated: no descriptor (do NOT half-
-        # own the A10 raw-edge family). The journal carries the target's LOGICAL
-        # identity only (tgt=<key> or, for the delete-only guard, tgt=new_id) —
-        # never the FalkorDB internal ID (internal ids die at rebuild).
+        # for BOTH structural families (see `ID_ADDRESSED_STRUCTURAL_RELS`,
+        # #9836) as flat DirectEdgeRepoint descriptors {src=old_id, tgt=<replay
+        # key>, target_label=<label>, edge_type=<rel>} emitted BEFORE the transfer
+        # (EMIT-BEFORE-TRANSFER, §4.4 — same crash discipline as 2a-DIRECT):
+        #
+        #   * the SNAPSHOT-DERIVABLE family (extractedFrom +
+        #     aboutSubject/Object/Event/Document/Point) keys its target by the
+        #     node's NATURAL key (`stub_key`). Rebuild pass-2 resurrects these
+        #     edges at OLD from the point's immutable snapshot (extractedFrom prop
+        #     / aboutEntities list), so the pass-2b replay must move them to the
+        #     successor THAT SUPERSEDE NAMED (`succ[src]`, ONE HOP per descriptor —
+        #     NOT the terminal `_final(src)`, which is only the skip guard) AND
+        #     delete the resurrection at old.
+        #   * the ID-ADDRESSED family (`aboutAction`, `wasDerivedFrom`, #9836)
+        #     keys its target by the node's OWN `id` and carries the label it
+        #     observed live — the only addressing that resolves for them (a Point
+        #     has no `name`; `wasDerivedFrom`'s target label is not a function of
+        #     the rel). Nothing ever resurrects these at old, so the descriptor's
+        #     whole job is the MOVE, which live already performs.
+        # The journal carries the target's LOGICAL identity only (`tgt=<key>` or,
+        # for the delete-only guard, `tgt=new_id`) — never the FalkorDB internal
+        # ID (internal ids die at rebuild).
         from .projection.edges import (
             DERIVABLE_STRUCTURAL_RELS,
+            ID_ADDRESSED_STRUCTURAL_RELS,
             STRUCTURAL_REL_LABELS,
+            id_addressed_target,
             stub_key,
         )
         structural_rels = SUPERSEDE_STRUCTURAL_RELS
@@ -17876,9 +17887,16 @@ class TortoiseSDK:
                     # NEXT rebuild — old's immutable snapshot re-mints the
                     # phantom on every rebuild, so without the descriptor
                     # old-side zero-incident is violated in exactly this lane.
-                    # Non-derivable rels emit NOTHING (never snapshot-recreated;
-                    # a delete_only descriptor would journal a permanent no-op
-                    # delete-leg for a family this fix does not own).
+                    # ⛔ For the ID-ADDRESSED family (#9836) no descriptor is
+                    # needed and none is emitted: nothing ever re-creates their
+                    # old-side edge (they are not snapshot-recreated, and the
+                    # `DirectEdgeCreated` fold skips the creation because the rel
+                    # is in `SUPERSEDE_TRANSFERRED_RELS` with a superseded src),
+                    # so a delete-only descriptor here would journal a permanent
+                    # no-op delete-leg. `aboutAction`/`wasDerivedFrom` therefore
+                    # emit NOTHING on this arm and a repoint on the transfer arm
+                    # below — the two arms are the WHOLE of the family's
+                    # journalling, and the transfer arm is #9836's fix.
                     if derivable and rel not in emitted_self_deletes:
                         emitted_self_deletes.add(rel)
                         self._emit_event(
@@ -17895,8 +17913,9 @@ class TortoiseSDK:
                     )
                     transferred += 1
                     continue
-                # #2489: per-rel key extraction via the SHARED resolver — never
-                # target.id (Subjects MERGE by name, Sources by url — and D10: a
+                # #2489: per-rel key extraction via the SHARED resolver —
+                # never target.id for the NAME-KEYED family (Subjects MERGE by
+                # name, Sources by url — and D10: a
                 # document IS a :Source, so aboutDocument and extractedFrom both
                 # key by `url`, the SAME key the target label moved with; a
                 # title-keyed aboutDocument descriptor is no longer resolvable and
@@ -17904,6 +17923,11 @@ class TortoiseSDK:
                 # an id-targeted create_about_edge; a Source target lacking url):
                 # a null-key descriptor is un-replayable — those edges die at
                 # rebuild today anyway (zero regression).
+                # ⛔ #9836: `target.id` IS the key for the ID-ADDRESSED family
+                # (`elif rel in ID_ADDRESSED_STRUCTURAL_RELS` below) — those rels
+                # have no natural key to read, which is WHY they are a separate
+                # family. The two branches are mutually exclusive and the rel set
+                # decides which one runs; nothing here guesses per target.
                 if derivable:
                     keyed = stub_key(rel, target_props)
                     if keyed is not None:
@@ -17930,6 +17954,41 @@ class TortoiseSDK:
                         # attributes to carry" from "carry an empty map", and an
                         # empty map is not writable by FalkorDB (the projection
                         # degrades it to null with a `#7369` warning).
+                        self._emit_event(
+                            "DirectEdgeRepoint",
+                            id=f"{old_id}->{new_id}:{rel}:{target_key}",
+                            src=old_id, tgt=target_key,
+                            target_label=target_label,
+                            edge_type=rel,
+                            **edge_props,
+                        )
+                elif rel in ID_ADDRESSED_STRUCTURAL_RELS:
+                    # #9836 — the ID-ADDRESSED family (`aboutAction`,
+                    # `wasDerivedFrom`): transferred by this leg, but NOT
+                    # snapshot-derivable, so before this they moved LIVE and
+                    # journaled NOTHING — the journal route then lost the edge
+                    # (its `DirectEdgeCreated` is skipped by the superseded-
+                    # endpoint gate, and pass-2 never resurrects them) while the
+                    # record route kept the pre-supersede row. The `derivable`
+                    # gate above was the whole of that loss.
+                    # ⛔ The target is addressed the way every other epistemic
+                    # endpoint in this tree is: by its OWN `id`, label-agnostic
+                    # (`id_addressed_target`, Point-first via the fold's own
+                    # `EPISTEMIC_LABELS` order — the SAME rule the 2a-DIRECT leg
+                    # above applies to a far endpoint, #8622). A name/url key is
+                    # unavailable by construction: a Point has no `name`, and
+                    # `wasDerivedFrom`'s target label is not a function of the
+                    # rel (ONTOLOGY §3.2 says Object->Object; the writers type-
+                    # check nothing). The OBSERVED label rides `target_label`,
+                    # which is what that field means on the structural route.
+                    # SKIP (never half-journal) a target the record cannot
+                    # address — a `:Source` is outside the fold's sweep, so a
+                    # descriptor for it would make the record richer than the
+                    # graph. Same reason, same helper as the 2a leg's label
+                    # resolution.
+                    id_keyed = id_addressed_target(row[2], target_props)
+                    if id_keyed is not None:
+                        target_label, target_key = id_keyed
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:{target_key}",

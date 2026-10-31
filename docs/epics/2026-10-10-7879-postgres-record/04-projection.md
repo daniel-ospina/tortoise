@@ -360,13 +360,16 @@ closed at both layers:
   > journal seq with the supersede's and replays it; (3) THE DELETE-LEG'S BLIND SPOT — a replayed post-supersede
   > creation is exempted from the 2b repoint delete-leg (which cleans pass-2's resurrection and cannot tell the
   > two apart) by `(src, edge_type, RESOLVED target node)`, while the successor-side transfer still runs. Residuals:
-  > (a) `wasDerivedFrom`/`aboutAction` are moved live but not derivable, so 2b journals no repoint for them and the
-  > journal route loses them after a supersede; (b) **CLOSED for the derivable set by #10191** — the record now
+  > (a) **CLOSED by #9836** — `wasDerivedFrom`/`aboutAction` are MOVED live by 2b but are not derivable, so 2b
+  > used to journal no repoint and the journal route lost them after a supersede. They now carry a descriptor
+  > too (the ID-ADDRESSED family: the target is addressed by the node's own `id`, with the label the transfer
+  > observed riding `target_label`), and both routes resolve `(label, id)`, so `live == journal-rebuild` for the
+  > whole family. ⛔ The boundary that remains is the PRE-FIX JOURNAL: a supersede journaled before #9836
+  > carries no descriptor for these two rels, so on that journal the record keeps the row at the pre-supersede point
+  > while live moved the edge to the successor (a rebuild does not repair historical graphs).
+  > (b) **CLOSED for the derivable set by #10191**, and closed for the ID-ADDRESSED family by #9836 — the record
   > applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the
-  > hop `superseded_by` names — one hop per descriptor, so a chain reaches the terminal row as each hop runs), so the row follows the edge; what stays open in **#9836** is the *non-derivable* half of
-  > (a) on the record route, and its shape differs by endpoint: 2b journals **no** descriptor for them, so nothing
-  > moves the row and the record keeps the row at the pre-supersede point while live moved the edge to the
-  > successor. A shape the producer DECLINES at the mint (`_record_addressable`) holds nothing at all — no
+  > hop `superseded_by` names — one hop per descriptor, so a chain reaches the terminal row as each hop runs), so the row follows the edge. A shape the producer DECLINES at the mint (`_record_addressable`) holds nothing at all — no
   > snapshot, no row — and the `:Source`-targeted edge is one of those, not the only one: the same gate also
   > declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`), so a
   > non-`:Source` edge of that shape lands nothing for the same reason.

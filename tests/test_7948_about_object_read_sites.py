@@ -63,7 +63,10 @@ census already named** — which is why the census below is keyed on
     `SUPERSEDE_STRUCTURAL_RELS` member (MCP `tortoise_supersede`);
   * `projection.FalkorProjection._rebuild_all_replay` — the replay delete-leg matches
     `[r:{etype}]` where `etype` is a RUN-TIME name gated on
-    `DERIVABLE_STRUCTURAL_RELS`.
+    `STRUCTURAL_REPOINT_RELS` (the snapshot-derivable family PLUS the
+    ID-ADDRESSED family, `#9836`); the `delete_only` guard beside it stays gated
+    on `DERIVABLE_STRUCTURAL_RELS`, because that descriptor is emitted for the
+    derivable rels alone.
 
 A module-level census cannot see any of them: each module was already named by
 a row, and no row count changes when a reader is added beside it.
@@ -624,7 +627,7 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
         'f"MATCH (o:Point {{id:$old}})-[r:{rel}]->(t) "',
     ),
     "projection/__init__.py::FalkorProjection._rebuild_all_replay": (
-        'if (isinstance(etype, str) and etype in DERIVABLE_STRUCTURAL_RELS',
+        'if (isinstance(etype, str) and etype in STRUCTURAL_REPOINT_RELS',
         'or etype not in DERIVABLE_STRUCTURAL_RELS',
         'f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "',
     ),
