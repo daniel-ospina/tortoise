@@ -204,6 +204,78 @@ def _ancestry_is_verifiable_here() -> bool:
     return False
 
 
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    assert done.returncode == 0, f"git {' '.join(args)}: {done.stderr}"
+    return done.stdout.strip()
+
+
+def _commit(repo: Path, message: str) -> str:
+    """Commit the staged tree and return the new sha (hermetic identity)."""
+    done = subprocess.run(
+        [
+            "git", "-c", "user.name=substrate-map", "-c", "user.email=t@example.invalid",
+            "commit", "-qm", message,
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _deepened_shallow_clone(tmp_path: Path) -> tuple[Path, str]:
+    """A depth-1 PR-merge-ref clone that ANOTHER ref has since deepened.
+
+    The state the `test` job's clone is in by the time this guard runs, built here
+    with real git rather than described: `actions/checkout` fetches the merge ref
+    at `--depth=1`, then another test in the SAME shard fetches `origin main` into
+    the same object store (`tests/test_9397_about_edge_properties.py::_ensure_commit`
+    does exactly that, by design — it is what makes that leg run in CI). Main's
+    history therefore arrives while HEAD stays the shallow boundary.
+
+    Returns `(clone, sha)` where `sha` is an ancestor of HEAD in the full history
+    and is PRESENT in the object store, yet unreachable through the boundary.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    _git(src, "init", "-q", ".")
+    _git(src, "symbolic-ref", "HEAD", "refs/heads/main")
+    (src / "f").write_text("1", encoding="utf-8")
+    _git(src, "add", "f")
+    reachable = _commit(src, "A")
+    (src / "f").write_text("2", encoding="utf-8")
+    _git(src, "add", "f")
+    base = _commit(src, "M0")
+    _git(src, "checkout", "-q", "-b", "feature")
+    (src / "g").write_text("3", encoding="utf-8")
+    _git(src, "add", "g")
+    _commit(src, "X")
+    _git(src, "checkout", "-q", "main")
+    (src / "f").write_text("4", encoding="utf-8")
+    _git(src, "add", "f")
+    _commit(src, "M1")
+    _git(src, "checkout", "-q", "-b", "pr", base)
+    (src / "h").write_text("5", encoding="utf-8")
+    _git(src, "add", "h")
+    _commit(src, "X2")
+    _git(
+        src, "-c", "user.name=substrate-map", "-c", "user.email=t@example.invalid",
+        "merge", "-q", "--no-ff", "-m", "P", "main",
+    )
+    clone = tmp_path / "clone"
+    _git(
+        tmp_path, "clone", "-q", "--depth=1", "--branch", "pr",
+        f"file://{src}", str(clone),
+    )
+    assert _git(clone, "rev-parse", "--is-shallow-repository") == "true"
+    # The deepen: main's history enters the object store; HEAD's boundary stays.
+    _git(clone, "fetch", "-q", "--depth=200", "origin", "main")
+    _git(clone, "cat-file", "-e", f"{reachable}^{{commit}}")
+    return clone, reachable
+
+
 def test_the_shipped_map_is_clean() -> None:
     """Fails if the document and the tree disagree about any guarded claim.
 
@@ -683,77 +755,6 @@ def test_a_truncated_history_cannot_certify_drift(monkeypatch) -> None:
     assert "cannot be verified here" in unverified[0]
     assert "SHALLOW" not in unverified[0], unverified
 
-
-def _git(repo: Path, *args: str) -> str:
-    done = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
-    assert done.returncode == 0, f"git {' '.join(args)}: {done.stderr}"
-    return done.stdout.strip()
-
-
-def _commit(repo: Path, message: str) -> str:
-    """Commit the staged tree and return the new sha (hermetic identity)."""
-    done = subprocess.run(
-        [
-            "git", "-c", "user.name=substrate-map", "-c", "user.email=t@example.invalid",
-            "commit", "-qm", message,
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-    )
-    assert done.returncode == 0, done.stderr
-    return _git(repo, "rev-parse", "HEAD")
-
-
-def _deepened_shallow_clone(tmp_path: Path) -> tuple[Path, str]:
-    """A depth-1 PR-merge-ref clone that ANOTHER ref has since deepened.
-
-    The state the `test` job's clone is in by the time this guard runs, built here
-    with real git rather than described: `actions/checkout` fetches the merge ref
-    at `--depth=1`, then another test in the SAME shard fetches `origin main` into
-    the same object store (`tests/test_9397_about_edge_properties.py::_ensure_commit`
-    does exactly that, by design — it is what makes that leg run in CI). Main's
-    history therefore arrives while HEAD stays the shallow boundary.
-
-    Returns `(clone, sha)` where `sha` is an ancestor of HEAD in the full history
-    and is PRESENT in the object store, yet unreachable through the boundary.
-    """
-    src = tmp_path / "src"
-    src.mkdir()
-    _git(src, "init", "-q", ".")
-    _git(src, "symbolic-ref", "HEAD", "refs/heads/main")
-    (src / "f").write_text("1", encoding="utf-8")
-    _git(src, "add", "f")
-    reachable = _commit(src, "A")
-    (src / "f").write_text("2", encoding="utf-8")
-    _git(src, "add", "f")
-    base = _commit(src, "M0")
-    _git(src, "checkout", "-q", "-b", "feature")
-    (src / "g").write_text("3", encoding="utf-8")
-    _git(src, "add", "g")
-    _commit(src, "X")
-    _git(src, "checkout", "-q", "main")
-    (src / "f").write_text("4", encoding="utf-8")
-    _git(src, "add", "f")
-    _commit(src, "M1")
-    _git(src, "checkout", "-q", "-b", "pr", base)
-    (src / "h").write_text("5", encoding="utf-8")
-    _git(src, "add", "h")
-    _commit(src, "X2")
-    _git(
-        src, "-c", "user.name=substrate-map", "-c", "user.email=t@example.invalid",
-        "merge", "-q", "--no-ff", "-m", "P", "main",
-    )
-    clone = tmp_path / "clone"
-    _git(
-        tmp_path, "clone", "-q", "--depth=1", "--branch", "pr",
-        f"file://{src}", str(clone),
-    )
-    assert _git(clone, "rev-parse", "--is-shallow-repository") == "true"
-    # The deepen: main's history enters the object store; HEAD's boundary stays.
-    _git(clone, "fetch", "-q", "--depth=200", "origin", "main")
-    _git(clone, "cat-file", "-e", f"{reachable}^{{commit}}")
-    return clone, reachable
 
 
 def test_status_1_for_a_PRESENT_yet_grafted_commit_is_the_real_git_verdict(
