@@ -756,7 +756,6 @@ def test_a_truncated_history_cannot_certify_drift(monkeypatch) -> None:
     assert "SHALLOW" not in unverified[0], unverified
 
 
-
 def test_status_1_for_a_PRESENT_yet_grafted_commit_is_the_real_git_verdict(
     monkeypatch, tmp_path: Path
 ) -> None:

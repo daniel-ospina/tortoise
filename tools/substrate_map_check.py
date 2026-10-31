@@ -531,9 +531,13 @@ def check_registered(doc_text: str) -> list[str]:
 def _is_shallow_clone() -> bool | None:
     """Whether this checkout is shallow; `None` when git cannot say.
 
-    Local and cheap (no network, no lazy fetch) — called only on the path where
-    the ancestry probe already failed to resolve the object, to say WHY in the
-    report instead of blaming the document.
+    Local and cheap (no network, no lazy fetch) — called on BOTH ancestry
+    failure paths, to say WHY in the report instead of blaming the document:
+    when the probe could not resolve the object at all (exit 128, a missing
+    object), and when it resolved it yet answered "not an ancestor" (exit 1),
+    which a truncated history produces for a commit that is present. In the
+    second case this answer is what separates "the document is wrong" from
+    "this checkout cannot tell".
     """
     try:
         proc = subprocess.run(
