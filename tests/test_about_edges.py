@@ -2,8 +2,10 @@
 aboutDocument producers.
 
 Covers:
-- backfill_about_entities creates aboutEvent + aboutDocument edges
 - create_event wires aboutPoint + aboutDocument edges
+  (⚠️ the `backfill_about_entities` arm was REMOVED with the method itself — one of
+  the 26 public SDK methods #4282 deleted, 2026-10-27 — so this module covers the
+  producer half that survives; the backfill's own tests went with it)
 - existing aboutSubject/aboutObject edges unbroken
 """
 from __future__ import annotations
@@ -29,9 +31,6 @@ def sdk():
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
-
-
-# ── backfill_about_entities ─────────────────────────────────────────────
 
 
 # ── create_event aboutPoint / aboutDocument ─────────────────────────────

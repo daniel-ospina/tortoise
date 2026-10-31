@@ -5,9 +5,10 @@ ONTOLOGY §3.4). Before #1417 the three capture paths wrote point→source-event
 with ``aboutEvent`` as PROVENANCE — silently merging "produced by X" with
 "about X". Since #1417:
 
-  - capture_session (SDK + hosted) stamps the sessionCaptured Event's eventId
-    onto the extracted Points (their provenance surface) and mints NO
-    aboutEvent edges;
+  - the capture path stamps the sessionCaptured Event's eventId onto the
+    extracted Points (their provenance surface) and mints NO aboutEvent edges.
+    ⚠️ That guarantee now lives on the HOSTED lane alone: `TortoiseSDK.capture_session`
+    (the SDK half) was deleted by #4282, and its two tests went with it;
   - mining stamps the meeting Event's eventId onto its extraction Points the
     same way (DE2E-1 anchor);
   - the D10 subject fallback (fetch_point_epistemic_state) resolves the
@@ -75,11 +76,6 @@ def _scan(sdk, limit=100):
     requires a kind; the test stamps pointKind on the extracted points below."""
     return sdk.tortoise_fts_query(query=None, kind="statement",
                                   entity_type="point", limit=limit)
-
-
-# ── capture_session: provenance surface, no content edge ──────────────────
-
-
 
 
 

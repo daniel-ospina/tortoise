@@ -9,8 +9,9 @@ protocol "ingest transcripts → hybrid retrieval from graph + raw sessions").
 Per session we write (all deterministic — no LLM keys required):
   * a ``:Session`` node (id ``lme:{qid}:s{si}``) with the session timestamp,
   * one episodic turn Point per turn (id ``lme:{qid}:s{si}:t{i}``,
-    pointKind ``event``, content ``[role] text`` — mirrors
-    ``TortoiseSDK.capture_session``'s episodic-turn shape, plus a
+    pointKind ``event``, content ``[role] text`` — mirrors the episodic-turn
+    shape ``TortoiseSDK.capture_session`` wrote (that method was DELETED by
+    #4282; the shape is defined HERE now), plus a
     ``has_answer`` flag on evidence turns for turn-level recall),
   * turn-granular raw chunk Points (R1 #1540): pointKind
     ``session-transcript``, ids ``lme:{qid}:s{si}:c{ci}`` — non-overlapping
@@ -60,7 +61,8 @@ DEFAULT_CHUNK_TURNS = 2
 # Raw-session transcript points live under this pointKind (open-ended
 # vocabulary — registration suppresses the SDK warning, mirroring the sdk's
 # own register_kind("diary") pattern). "event" is the episodic turn-point
-# kind used by TortoiseSDK.capture_session (registered here so the pack
+# kind `TortoiseSDK.capture_session` used (DELETED by #4282; the pack defines
+# its own shape now) (registered here so the pack
 # vocabulary doesn't warn on every turn write). C4 (#2517): the literal is
 # re-exported from the PRODUCT constant (tortoise.retrieval) — the ingest
 # lane no longer owns a second copy.
