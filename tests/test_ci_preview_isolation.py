@@ -706,6 +706,48 @@ def test_preflight_still_refuses_once_the_budget_is_spent() -> None:
     )
 
 
+def test_the_refusal_keeps_the_first_observation_and_counts_every_distinct_one() -> None:
+    """A refusal must name BOTH ends of the failure, and count them all (#10305).
+
+    `_probe` renders a status failure as `HTTPError: HTTP Error <code>: ...`, so
+    six distinct codes are six distinct observations. The retained list is
+    capped at `MAX_TRAIL`, and the pre-fix trim (`del trail[:-MAX_TRAIL]`) cut
+    from the FRONT — deleting exactly the opening 500 that
+    `MAX_TRAIL`'s own comment says the trail exists to preserve, so the message
+    led with a later problem as if it were the first and reported "4 distinct
+    observations" for six.
+
+    Non-vacuity: on the pre-fix source this message leads with `HTTP Error 503`
+    (the first sample, 500, is gone) and says "4", so both count assertions red.
+    """
+    from tests.e2e.preview_preflight import MAX_TRAIL
+
+    auth = "http://127.0.0.1:8836/"
+    opener = _StatusScript({auth: [500, 502, 503, 504, 505, 506]}, default=500)
+    clock = _Clock(step=0.5)
+
+    with pytest.raises(pytest.exit.Exception) as excinfo:
+        _preflight(targets=(("auth", auth),), budget=2.5, interval=0.5,
+                   opener=opener, sleep=clock.sleep, monotonic=clock.monotonic)
+
+    message = str(excinfo.value)
+    assert "HTTP Error 500:" in message, (
+        "the refusal must still name the FIRST sample: a preview that 500s from "
+        "the start and later fails differently reads as a different fault "
+        f"otherwise, which is the #10305 misreading: {message}"
+    )
+    assert "HTTP Error 506:" in message, (
+        f"the refusal must name the MOST RECENT sample too: {message}"
+    )
+    assert "6 distinct observations" in message, (
+        "the count is every distinct problem seen, never the retained-list "
+        f"cap (MAX_TRAIL={MAX_TRAIL}): {message}"
+    )
+    assert message.index("HTTP Error 500:") < message.index("HTTP Error 506:"), (
+        f"the first sample must still read as first: {message}"
+    )
+
+
 def test_a_serving_preview_costs_exactly_one_probe_and_no_sleep() -> None:
     """The happy path stays fail-FAST — the budget must not slow a green job.
 

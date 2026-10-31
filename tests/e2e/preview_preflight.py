@@ -55,10 +55,14 @@ DEFAULT_BUDGET_SECONDS = 20.0
 #: the interval only trades a little request load against reaction time.
 POLL_INTERVAL_SECONDS = 0.5
 
-#: How many distinct observations per server the refusal reports. A refusal that
-#: names only its LAST sample cannot distinguish "never came up" (all 500s) from
-#: "came up and then died" (200 then nothing) — which is precisely the reading
-#: this gate got wrong in #10305.
+#: How many observations per server are RETAINED, so a refusal can name both ends
+#: of a failure: the FIRST sample and the most recent one. A refusal that names
+#: only its LAST sample cannot distinguish "never came up" (all 500s) from "came
+#: up and then died" (200 then nothing) — which is precisely the reading this
+#: gate got wrong in #10305. This caps the RETAINED list, never the reported
+#: count: the number of distinct problems seen is tracked separately, so a
+#: preview that keeps failing in new ways is not reported as "4 distinct
+#: observations" when it produced more.
 MAX_TRAIL = 4
 
 
@@ -179,6 +183,10 @@ def preflight_local_servers(
         return
 
     trails: dict[str, list[str]] = {label: [] for label, _ in pending}
+    #: Every DISTINCT problem seen per server, unbounded — `trails` is capped at
+    #: MAX_TRAIL, so `len(trails[label])` is not the count once a preview keeps
+    #: failing in new ways (#10305 review). `describe` reports this, not the cap.
+    problems: dict[str, set[str]] = {label: set() for label, _ in pending}
     refused: list[str] = []
     deadline = monotonic() + budget
 
@@ -187,7 +195,13 @@ def preflight_local_servers(
             trail = trails[label]
             if not trail or trail[-1] != problem:
                 trail.append(problem)
-                del trail[:-MAX_TRAIL]
+                problems[label].add(problem)
+                # Trim the SECOND-OLDEST, never the head: `describe` leads with
+                # `trail[0]`, and trimming the front (`del trail[:-MAX_TRAIL]`)
+                # deleted exactly the opening sample this list is kept for, so
+                # the refusal led with a later problem as if it were the first.
+                if len(trail) > MAX_TRAIL:
+                    del trail[1]
 
     while True:
         next_pending: list[tuple[str, str]] = []
@@ -219,8 +233,8 @@ def preflight_local_servers(
         if len(trail) == 1:
             return f"{label} {url} -> {trail[0]}"
         return (f"{label} {url} -> {trail[0]} (still not serving after "
-                f"{budget:g}s; last: {trail[-1]}; {len(trail)} distinct "
-                "observations)")
+                f"{budget:g}s; last: {trail[-1]}; {len(problems[label])} "
+                "distinct observations)")
 
     unreachable = [describe(label, url) for label, url in pending]
     pytest.exit(
