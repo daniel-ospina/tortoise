@@ -7706,6 +7706,20 @@ class TestCompactReferenceClosure:
         (so the assertion is not vacuous), and the closure leaves NONE — for
         every shipped namespace that is story-selected.
 
+        ⛔ The count is over pairs where BOTH endpoints are in `pack_kinds`, and
+        that is not a convenience, it is the reachable universe: a kind declared
+        in `objectKinds`/`documentKinds` with no `kindDef` never reaches the
+        catalog brief (the narrow-prompt asymmetry recorded in
+        `docs/EXPANSION_PACKS.md`), so no selector — this closure or any other —
+        can offer it. "ZERO" here therefore means zero AMONG THE ENDPOINTS THE
+        BRIEF CARRIES; the declared-but-brief-less residuals are enumerated in
+        `test_declared_endpoints_absent_from_the_brief_are_known` so the
+        qualification cannot silently grow. Without that pairing, "zero" reads
+        as a claim about all declared relations, which would be false (measured:
+        `marketing:content → marketing:keyword` and
+        `agent-ops:rule → agent-ops:rationale` are half-offered on any story that
+        selects their namespace, and always were — pre-existing, not this fix's).
+
         Reads the pairings off the BRIEF (`pack_refs`), not off a second YAML
         parse, so it cannot drift from what the selector actually consumes.
         """
@@ -7763,6 +7777,54 @@ class TestCompactReferenceClosure:
         assert not regressed, (
             "the closure left a declared relation unspellable: "
             f"{regressed}")
+
+    def test_declared_endpoints_absent_from_the_brief_are_known(self):
+        """The RESIDUAL SET behind "zero half-offered relations", enumerated.
+
+        `_relation_endpoint_refs` collects every namespaced endpoint a manifest
+        declares, but `compile_value_brief`'s CATALOG loop iterates only
+        `kindDefs` — so a kind declared in `objectKinds`/`documentKinds` with no
+        `kindDef` is absent from `pack_kinds`, and a relation pointing at one is
+        half-offered in the rendered prompt no matter what the selector does.
+        (The TENANT loop synthesizes those kinds; the catalog loop does not — the
+        narrow-prompt asymmetry `docs/EXPANSION_PACKS.md` already records.)
+
+        That is pre-existing and out of #9733's scope, but it means the "zero"
+        in `_select_pack_kinds`' docstring and in the docs holds only for
+        endpoints the brief carries. This row is what keeps that qualifier
+        honest: the residual set is pinned, so a new one reds HERE instead of
+        quietly widening the gap under a claim of zero. If a future change
+        closes the asymmetry (synthesize kindDefs-less declared kinds in the
+        catalog loop, as the tenant loop does), this row is the place to update.
+        """
+        from pathlib import Path as _Path
+
+        import yaml as _yaml
+
+        m = v2.build_master_list()
+        pack_kinds = m["pack_kinds"]
+        residual = set()
+        for path in sorted(_Path("packs").glob("*/manifest.yaml")):
+            raw = _yaml.safe_load(path.read_text()) or {}
+            for rel in ((raw.get("ontology") or {}).get("relations") or []):
+                if not isinstance(rel, dict):
+                    continue
+                for side in ("fromKind", "toKind"):
+                    v = rel.get(side)
+                    if (isinstance(v, str) and ":" in v
+                            and v.split(":")[0] != "core"
+                            and v not in pack_kinds):
+                        residual.add(v)
+        assert residual == {
+            "agent-ops:rationale", "dev:api", "dev:database",
+            "marketing:keyword",
+        }, (
+            "the declared-but-brief-less endpoint set moved. If it GREW, the "
+            "\"zero half-offered relations\" claim (extractor_v2 docstring, "
+            "docs/EXPANSION_PACKS.md) is now wrong by more than it says and the "
+            "docs must be updated with it; if it SHRANK, that is an improvement "
+            "worth saying out loud. Either way, do not just re-pin this set \u2014 "
+            f"update the claim. got: {sorted(residual)}")
 
     def test_nothing_matched_still_returns_everything(self):
         """The all-packs fallback returns before the closure runs — it is

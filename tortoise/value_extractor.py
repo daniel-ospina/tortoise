@@ -64,14 +64,17 @@ def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
     relation is emittable only when BOTH endpoints are offered, so the closure
     is over the pairing itself: whichever endpoint is selected pulls the other.
 
-    Collected from the two declaration sites that name a KIND on both sides of a
-    typed edge: ``ontology.relations[].fromKind/toKind`` and
+    Collected from the two declaration sites that name an ENDPOINT on both sides
+    of a typed edge: ``ontology.relations[].fromKind/toKind`` and
     ``extraction.relationTemplates[].fromKind/toKind``. Kind-to-kind prose
     (``nearMisses``, descriptions) is deliberately NOT collected: prose mentions
     a kind, an endpoint IS one — only the latter needs vocabulary to be
     emittable. The legacy ``from``/``to`` relation spelling is likewise not
     read: it carries ENTITY TYPES (``Object``/``Subject``), never a namespaced
-    kind (``pack_registry`` dataclass comment).
+    kind (``pack_registry`` dataclass comment). Note that ``fromKind``/``toKind``
+    CAN also carry an entity type — ``packs/venture`` declares
+    ``assignedTo … toKind: Subject`` and ``holds … toKind: Subject`` — so the
+    value is classified by shape, not by which key it arrived under.
 
     ⚠️ ``extraction.relationTemplates[].fromKind/toKind`` is read for the same
     reason as ``ontology.relations[]``: it is the second declaration site that
@@ -80,8 +83,11 @@ def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
     its own hermetic unit test rather than by the catalog sweep — otherwise
     deleting the site would leave every test green.
 
-    Bare names and ``core:`` refs are dropped: a bare name resolves against the
-    declaring pack's own namespace and a ``core:`` kind is always rendered.
+    Bare names and ``core:`` refs are dropped, for the same reason: the
+    validator only accepts a PascalCase CORE kind or a ``namespace:kind`` in
+    ``fromKind``/``toKind`` (``pack_registry``: "must be a core PascalCase kind
+    or 'namespace:kind'" — an unprefixed camelCase value is an error), so a bare
+    value here is a core kind, and core is rendered on every path.
     First-seen order, de-duplicated; shape is NOT trusted — this reads raw YAML,
     so a malformed section degrades to nothing rather than raising (the manifest
     validator reports it). ``tests/test_extractor_v2.py

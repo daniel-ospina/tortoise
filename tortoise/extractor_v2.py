@@ -1005,12 +1005,18 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict,
     pack actually references are the ones whose absence makes a declared
     relation unemittable, and they are named by the declarations themselves — so
     the closure is taken over THOSE. Measured over the real catalog, the
-    fixpoint leaves every story narrow and leaves ZERO half-offered relations —
-    measured 1-24 of the 47 shipped kinds across all 53 trigger words, i.e. never
-    the all-packs set. A relation is half-offered when exactly one of its two
-    namespaced endpoints is in the list, i.e. exactly the unspellable state this
-    fix exists to remove; ``TestCompactReferenceClosure
-    ::test_no_relation_is_left_half_offered`` pins the metric.
+    fixpoint leaves every story narrow and leaves ZERO half-offered relations
+    AMONG THE ENDPOINTS THE BRIEF CARRIES — measured 1-24 of the 47 shipped kinds
+    across all 53 trigger words, i.e. never the all-packs set. Both qualifiers are
+    measurements, not hedges: the count is over the endpoints `pack_kinds` holds
+    (a declared endpoint with no `kindDef` never reaches the catalog brief — the
+    narrow-prompt gap recorded in `docs/EXPANSION_PACKS.md` — so no closure can
+    offer it), and the residual set is pinned by
+    `TestCompactReferenceClosure::test_declared_endpoints_absent_from_the_brief_are_known`.
+    A relation is half-offered when exactly one of its two namespaced endpoints is
+    in the list, i.e. exactly the unspellable state this fix exists to remove;
+    `TestCompactReferenceClosure::test_no_relation_is_left_half_offered` pins the
+    metric.
     """
     if not story:
         return dict(pack_kinds)
@@ -1095,11 +1101,13 @@ def _classify_later_enabled() -> bool:
     callers (sdk, hosted_api, ingest_v2, run_v2_pipeline) inherit it without
     threading a param. Unset/0 → the legacy pipeline: the classify-later
     machinery is entirely off-path and the flag-off renders are
-    byte-identical to main — scoped to the DEFAULT (verbose) render (the
-    compact-mode S2 story-threading is pre-existing and identical to main;
-    the chain enforcer runs unconditionally on every arm and its result key
-    reflects that run; only the additive ``classify_later`` result key is
-    an empty block when the flag is off — see ``extract_session_v2``).
+    byte-identical to main — scoped to the DEFAULT (verbose) render. Compact
+    mode's S2 story-threading is NOT main-identical since #9733: it co-selects
+    the kinds a selected pack's own declared relations pair with, so a flags-off
+    ``TORTOISE_EXTRACTOR_PROMPT=compact`` render differs from main by exactly the
+    closure kinds (the chain enforcer runs unconditionally on every arm and its
+    result key reflects that run; only the additive ``classify_later`` result key
+    is an empty block when the flag is off — see ``extract_session_v2``).
     Value matching is case-insensitive (True/TRUE/ON/yes all enable —
     review FIX B) and goes through the declared truthy contract (#4097)."""
     return is_truthy(os.environ.get("TORTOISE_CLASSIFY_LATER"))

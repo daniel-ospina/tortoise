@@ -291,12 +291,18 @@ extraction:
 #                      round-trips rather than being refused as unknown.)
 #   relationTemplates: pack-typical edge shapes, so the extractor recognizes
 #                      the domain's IMPL/NAND phrasings.
-#                      ⛔ Deliberately NO consumer (#4894), for the same
-#                      reason: a predicate + mechanism pair is ALREADY declared
-#                      and READ in `ontology.relations` (whose write-path
-#                      verdict is enforced — #2766), so a second declared
-#                      spelling of the same pair would be a second source of
-#                      truth. It validates and round-trips; it does not render.
+#                      ⛔ NO write-path consumer (#4894), for the same reason: a
+#                      predicate + mechanism pair is ALREADY declared and READ
+#                      in `ontology.relations` (whose write-path verdict is
+#                      enforced — #2766), so a second declared spelling of the
+#                      same pair would be a second source of truth.
+#                      ⚠️ Its `fromKind`/`toKind` endpoints ARE read, for
+#                      vocabulary only: `value_extractor._relation_endpoint_refs`
+#                      carries them on the `pack_refs` brief section so compact
+#                      mode co-selects the kinds a declared relation is spelled
+#                      with (#9733). So declaring this slot DOES reach the
+#                      rendered compact prompt vocabulary — `predicate` and
+#                      `mechanism` remain unconsumed.
 #                        predicate:        the domain verb
 #                        mechanism:        IMPL | NAND — the same pair
 #                                          `ontology.relations` accepts.
