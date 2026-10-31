@@ -535,13 +535,14 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     lifetime escapes the fixture.
 
     ⚠️ THE CO-TENANT GUARD IS NOT THE WHOLE STORY — MEASURED CAVEAT (#10424
-    review cycle 5, from the same mutation harness as the table above). The
-    claim below that "with no co-tenant the guard does not fire, so
-    `sdk.close()` is exactly as destructive as dropping the handle" does not
-    survive the close-only row of that table: with the GUARD REMOVED there is no
-    co-tenant at all when the release runs, and the test is still green. What
-    `close()` does in that shape is write the store: after the release the db
-    file is ON DISK (`probe.db` present, no `.settings`-only state) and the
+    review cycle 5, from the same mutation harness as the table above). This
+    paragraph used to say "with no co-tenant the guard does not fire, so
+    `sdk.close()` is exactly as destructive as dropping the handle", and the
+    close-only row of that table does not support the tail: with the GUARD
+    REMOVED there is no co-tenant at all when the release runs, and the test is
+    still green. What `close()` does in that shape is write the store: after
+    the release the db file is ON DISK (`probe.db` present, no
+    `.settings`-only state) and the
     next construction starts a NEW server (different pid) that loads the rows
     from it. So BOTH paths preserve the rows — the co-tenant guard keeps the
     original daemon reachable, and a close with no co-tenant leaves a store a
