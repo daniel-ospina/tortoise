@@ -156,7 +156,14 @@ BASELINE_RC=$?
 # writes no summary, and by the Baseline rule a missing id set reads as "nothing was red on main":
 # that is the ledger corruption the whole phase exists to prevent, arriving silently.
 [ "$BASELINE_RC" -eq 0 ] || [ "$BASELINE_RC" -eq 1 ] || { echo "the baseline run did not COMPLETE (rc=$BASELINE_RC; 137=SIGKILL/OOM) — no ledger, so no honest verdict is possible"; exit 1; }
-uv run pytest tests/test_ingest_safety.py -q -m track_b
+# ⛔ Half 2 gets the SAME two treatments, for the same two reasons: it is a MUST-PASS `python-ci-gate`
+# member, and a half whose run is never status-checked and never writes an id artifact fails open —
+# a killed `-m track_b` run is indistinguishable from a finished one, and a red one contributes no
+# ids to EITHER side of the Phase 4 diff, so the verdict diff never sees the gate member at all.
+rm -f /tmp/baseline-trackb.xml
+uv run pytest tests/test_ingest_safety.py -q --junitxml=/tmp/baseline-trackb.xml -m track_b
+BASELINE_TRACK_B_RC=$?
+[ "$BASELINE_TRACK_B_RC" -eq 0 ] || [ "$BASELINE_TRACK_B_RC" -eq 1 ] || { echo "the baseline's track_b half did not COMPLETE (rc=$BASELINE_TRACK_B_RC; 137=SIGKILL/OOM) — that half has no ledger, so Phase 4 cannot classify a track_b id at all"; exit 1; }
 BASELINE_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/baseline-junit.xml | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')" || exit 1
 [ -n "$BASELINE_TOTAL" ] && [ "$BASELINE_TOTAL" -gt 0 ] || { echo "no baseline junit total — the baseline run wrote no report"; exit 1; }
 # ⛔ CARRY the total to Phase 3 in a FILE, not a shell variable. Phase 3 runs in a LATER shell (the
@@ -341,7 +348,14 @@ BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' /tmp/batch-junit.xml | grep -o '[0-9]*' 
 [ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the gate run reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — SHORTER than the baseline: investigate (a killed run, or a diff that legitimately removes or moves tests) — and never call it green: UNPROVEN-FULL-SUITE(<lane>)"; exit 1; }
 
 # Half 2 — the track_b leg CI runs as its own MUST-PASS, gate-member job (`-m track_b`).
-uv run pytest tests/test_ingest_safety.py -q -m track_b
+# ⛔ Instrumented exactly like half 1, because the fail-open is the same one: rc 0/1 is a COMPLETED
+# run and anything else is a run that did not finish, and the junit report is what puts its ids in
+# the Phase 4 diff. Without the report a red `track_b` half has ids in NEITHER set, so the diff
+# reads it as green — the MUST-PASS gate member the gate phase exists to observe, unobserved.
+rm -f /tmp/batch-trackb.xml
+uv run pytest tests/test_ingest_safety.py -q --junitxml=/tmp/batch-trackb.xml -m track_b
+TRACK_B_RC=$?
+[ "$TRACK_B_RC" -eq 0 ] || [ "$TRACK_B_RC" -eq 1 ] || { echo "the track_b half did not COMPLETE (rc=$TRACK_B_RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
 ```
 
 A run that skips half 2 has not run the gate, so it cannot produce `BATCH-GREEN` — see the verdict
@@ -349,6 +363,10 @@ table and the `UNPROVEN-FULL-SUITE(<lane>)` rule.
 
 ### 4. Compare to the baseline and blame
 
+- **The id sets are the junit reports, one per half**: `/tmp/batch-junit.xml` **and**
+  `/tmp/batch-trackb.xml`, against `/tmp/baseline-junit.xml` **and** `/tmp/baseline-trackb.xml`.
+  Diffing the deterministic half alone leaves every `track_b` id in neither set — which is how a red
+  MUST-PASS gate member reads as green.
 - **A failure id that is in the baseline set is a `BASELINE(<ids>)` failure.** Not a PR's fault. Do not
   drop a PR for it, and do not fix it inside the batch. One line on whether the batch makes it worse.
 - **A failure id that is NOT in the baseline set is NEW** and convicts a PR. Find which one:

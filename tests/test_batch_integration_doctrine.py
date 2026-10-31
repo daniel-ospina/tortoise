@@ -82,6 +82,12 @@ or facts that were false against the tree they describe:
   ``$PINNED`` in files for exactly that reason) — there ``[ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ]``
   compares against the empty string, bash rejects it (rc=2), and the count halt reports a COMPLETE,
   green batch as SHORTER than the baseline;
+* **the ``-m track_b`` half was instrumented in NEITHER phase** (the ``bc5d78b77`` P2, still open at
+  ``a4028e8d7``): it is a MUST-PASS ``python-ci-gate`` member, and the doctrine ran it bare — no
+  junit report, so a red ``track_b`` id sat in neither side of the Phase 4 diff and ``BATCH-GREEN``
+  stayed reachable on a tree whose gate member was red; and no status capture, so a half the kernel
+  killed (measured on #10399: five ``python`` processes in 23 minutes) read exactly like a finished
+  one. Half 1 had both treatments; the half whose whole purpose is the gate member had neither;
 * the carve-out file count was quoted from memory and was stale.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
@@ -99,12 +105,13 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-tes
 would make the reproduced/not-reproduced list read as a complete partition.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **21 checks** at this head, **0 red**: **2 of 21** at
-``a12792afe`` (the two this round added — the baseline count's carrier and the baseline report's
-completion check; every older revision is red on them too, by the rule below), **17 of 21** at
-``a17576c43``, **14 of 21** at ``f3c6c803b``, **12 of 21** at ``a8be548762``, **10 of 21** at
-``295d6d385``, **8 of 21** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **7 of 21** at
-``ed1c03b82`` and ``c50628450``, and **6 of 21** at ``a888c6980`` / ``aede4190f`` — where three
+revision rather than asserted — **22 checks** at this head, **0 red**: **1 of 22** at
+``a4028e8d7`` (the ``-m track_b`` instrumentation, added here), **3 of 22** at
+``a12792afe`` (that one plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
+the baseline report's completion check), **18 of 22** at
+``a17576c43``, **15 of 22** at ``f3c6c803b``, **13 of 22** at ``a8be548762``, **11 of 22** at
+``295d6d385``, **9 of 22** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **8 of 22** at
+``ed1c03b82`` and ``c50628450``, and **7 of 22** at ``a888c6980`` / ``aede4190f`` — where three
 are exactly that round's findings (the bisect attribution, the gate run's completion, and
 the omitted ``changes`` member) and the fourth is the exit-status-persistence requirement,
 which landed AFTER those revisions. The fourth is the rule rather than an exception: a check
@@ -168,6 +175,11 @@ suffix on the merge line pass GREEN, which is exactly what the quote-aware cut k
 carrier write, delete the consumer's ``cat`` bind, stop clearing the carrier, drop the
 absent-carrier halt; stop clearing the baseline report, drop the ``BASELINE_RC=$?`` capture,
 widen its predicate to accept ``137`` (SIGKILL/OOM), and make the predicate ``|| true``.
+**7 more measured with the ``-m track_b`` instrumentation, 7 killed**, each red on
+``test_the_track_b_half_is_completion_checked_like_the_deterministic_half`` and on nothing else:
+delete the gate half's ``--junitxml``, delete the baseline half's ``--junitxml``, stop clearing
+the gate half's report, move that clear to AFTER the run, drop the ``TRACK_B_RC=$?`` capture,
+widen its predicate to accept ``137``, and make it ``|| true``.
 **The surviving CLASS — and it is the reason #10434 exists.** Earlier rounds named a
 single survivor; rounds 30-34 measured ~90 further mutants and the honest claim is
 weaker than "one survivor": the guard decides SHELL CONTROL FLOW by pattern-matching
@@ -175,13 +187,13 @@ text, so any ONE-LINE edit that changes a subject's INPUTS rather than its wordi
 leaves a textually perfect halt bash-dead. Measured witness: inserting
 ``BASELINE_TOTAL=0`` between the fence's own ``[ "$BASELINE_TOTAL" -gt 0 ]`` guard and
 the count halt makes the count halt dead (``bash`` prints CONTINUED) with the guard
-**0 of 21 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
+**0 of 22 red**. The same treadmill continues one level up (``env BASELINE_TOTAL=0 …``,
 ``unset``, deleting the ``-gt 0`` line). No accumulation of spellings closes it; the
 closure is to EXECUTE the fences under a stubbed PATH and assert the fence STOPS,
 which is #10434. One instance of that class is still named explicitly below:
 ``git switch --detach -C <branch> "$PINNED"``, which git refuses outright (rc=128) and
 whose ``|| exit 1`` halts — a predicate-tightness miss, not a broken invariant — and
-the honest document is 0 of 21 red.
+the honest document is 0 of 22 red.
 
 Two more classes belong to that list: an append-a-mover SUFFIX on any of
 those lines — `git bisect reset <branch> && git switch main`, `git log --oneline -1
@@ -1639,6 +1651,97 @@ def test_the_baseline_report_is_cleared_and_its_status_checked() -> None:
             "code (137=SIGKILL/OOM, 2=interrupted) certifies a KILLED baseline as COMPLETED: "
             f"{bad}"
         )
+
+
+#: A `-m track_b` run's OWN status capture, whatever the doctrine calls it. Named separately from
+#: ``_BASELINE_RC_CAPTURE`` because this rule is per-FENCE: half 2 sits in the same fence as half 1,
+#: so the variable it captures has to be the one the 0/1 predicate carries.
+_TRACK_B_RC_CAPTURE = re.compile(r"^(?P<var>[A-Z][A-Z0-9_]*_RC)=\$\?$")
+
+
+def test_the_track_b_half_is_completion_checked_like_the_deterministic_half() -> None:
+    """the ``bc5d78b77`` P2 — still open at ``a4028e8d7``: half 2 is instrumented in NEITHER phase.
+
+    ``-m track_b`` is a MUST-PASS ``needs:`` of the required ``python-ci-gate``, and the doctrine
+    says so itself — then runs it bare. Two fail-open paths follow, both mechanical:
+
+    1. **Its ids reach neither side of the Phase 4 diff.** Half 2 writes no junit report, so a
+       composition-introduced ``track_b`` red is in the baseline id set and the batch id set alike
+       — absent from both — and ``BATCH-GREEN`` stays reachable on a tree whose gate member is red.
+    2. **A killed half 2 is indistinguishable from a finished one.** ``kill -0``-style liveness and
+       a bare foreground run both succeed for a process the kernel SIGKILLed (measured on #10399:
+       five ``python`` processes in 23 minutes), and no status is captured, so nothing separates
+       them.
+
+    Half 1 got both treatments (``test_the_gate_run_must_complete_before_any_verdict``,
+    ``test_the_baseline_report_is_cleared_and_its_status_checked``); the half whose whole purpose is
+    the gate member did not. Pinned here for every fence that runs it: a junit artifact, cleared
+    before the run, a status captured after it, and a predicate that accepts EXACTLY 0 and 1.
+    """
+    fences = [
+        fence
+        for fence in _fences()
+        if any(_SUITE_CMD.match(_code(c)) and TRACK_B_FILTER in _code(c) for c in fence)
+    ]
+    assert fences, "the doctrine no longer runs the `-m track_b` half — re-point this guard"
+    for fence in fences:
+        codes = [_code(c) for c in fence]
+        runs = [i for i, c in enumerate(codes) if _SUITE_CMD.match(c) and TRACK_B_FILTER in c]
+        for run_at in runs:
+            report = re.search(r"--junitxml=(/tmp/[\w.-]+)", codes[run_at])
+            assert report, (
+                "the `-m track_b` run writes no junit report: its failure ids then reach NEITHER "
+                "side of the Phase 4 diff, so a red MUST-PASS gate member cannot be classified "
+                f"BASELINE or NEW and the verdict reads green: {codes[run_at]}"
+            )
+            path = report.group(1)
+            cleared = {
+                token
+                for c in codes
+                for match in re.finditer(r"rm\s+-f\s+(.*)$", c)
+                for token in match.group(1).split()
+            }
+            assert path in cleared, (
+                f"the `-m track_b` report ({path}) is never cleared: pytest truncates a junit file "
+                "only in `pytest_sessionfinish`, so a killed half 2 leaves the PREVIOUS run's report "
+                "at that path and it is read as this run's ids"
+            )
+            clear_at = [
+                i for i, c in enumerate(codes) if re.search(rf"rm\s+-f\s+.*{re.escape(path)}", c)
+            ]
+            assert min(clear_at) < run_at, (
+                f"the `-m track_b` report ({path}) is cleared AFTER the run, so it guards nothing"
+            )
+            after = [
+                i
+                for i, c in enumerate(codes)
+                if i > run_at and _TRACK_B_RC_CAPTURE.match(c)
+            ]
+            assert after, (
+                "the `-m track_b` run captures no exit status: pytest exits 0/1 on a COMPLETED run "
+                "and 2/3/4/5 — or 128+N — when it was interrupted or KILLED, so without a capture a "
+                "half the kernel killed is indistinguishable from a finished one"
+            )
+            var = _TRACK_B_RC_CAPTURE.match(codes[min(after)]).group("var")  # type: ignore[union-attr]
+            preds = [c for c in codes if f'"${var}"' in c and "-eq" in c]
+            assert preds, (
+                f"no exit-status predicate on `${var}`: a `track_b` status that is captured and "
+                "never checked leaves a KILLED half 2 reading as a finished one"
+            )
+            head = _status_head(var)
+            bad = [
+                c
+                for c in preds
+                if not (
+                    (matched := head.match(c))
+                    and _STATUS_TAIL.match(_unquoted(c)[matched.end() :])
+                )
+            ]
+            assert not bad, (
+                "the `track_b` status predicate must accept EXACTLY 0 and 1 — any additional "
+                "accepted code (137=SIGKILL/OOM, 2=interrupted) certifies a KILLED half 2 as "
+                f"COMPLETED: {bad}"
+            )
 
 
 def test_the_baseline_refuses_a_dirty_tree() -> None:
