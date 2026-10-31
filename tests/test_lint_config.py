@@ -172,3 +172,47 @@ def test_f822_and_ruf022_still_fire_for_every_other_module() -> None:
     assert proc.returncode == 1, f"the probe should fail; got rc={proc.returncode}: {output}"
     assert "F822" in output, f"F822 was switched off tree-wide: {output}"
     assert "RUF022" in output, f"RUF022 was switched off tree-wide: {output}"
+
+
+# ── A dead `noqa` reds the required lint gate (#10423) ────────────────────────
+#
+# `# noqa: <CODE>` is only meaningful for a code the select list ENABLES. Naming a
+# rule ruff cannot raise (here `BLE001` — `BLE` is not in `select`) leaves a directive
+# that suppresses nothing, and `RUF100` (unused-noqa, itself in `RUF`) then reds the
+# required `agent-infra-ci / lint` gate on the whole tree. PR #10423's head
+# `787b68f40` reddened exactly that way — run 41237922683, job 124646988652:
+#
+#   RUF100 Unused `noqa` directive (non-enabled: `BLE001`)
+#     --> tools/served_skills_parity.py:823:31
+#
+# The parent commit was clean, so the defect was the new directive rather than the
+# config. The surface this pins is the tool that carried it: a directive can only be
+# dead where the rule set says it is, so this runs the real repo config over the path.
+#
+# Scoped to the path on purpose, NOT `ruff check .`: a whole-tree run inside a unit
+# test turns every lane's unrelated uncommitted work into a red here, and the
+# tree-wide pass is already CI's (`ci.yml` `lint-command: ruff check .`). This is the
+# local, path-level signal for the module in question, mirroring the declaration-module
+# test above.
+
+SERVED_SKILLS_PARITY = "tools/served_skills_parity.py"
+
+
+def test_the_served_skills_parity_tool_is_clean_under_the_repo_lint() -> None:
+    """`tools/served_skills_parity.py` carries no dead `noqa` (#10423).
+
+    Genuinely fails on the pre-fix head: `787b68f40` reported exactly one RUF100 there
+    (an unused `# noqa: BLE001`), and `7b93aa652` (its parent) plus `origin/main` were
+    clean. Dropping the directive — the code was never enabled, so there was nothing to
+    suppress — is what makes this pass, not a config change.
+    """
+    proc = subprocess.run(
+        [_ruff(), "check", "--no-cache", SERVED_SKILLS_PARITY],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"{SERVED_SKILLS_PARITY} must be ruff-clean under the repo config; got "
+        f"rc={proc.returncode}:\n{proc.stdout}{proc.stderr}"
+    )

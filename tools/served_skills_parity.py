@@ -820,7 +820,7 @@ def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
         return ()
     try:
         return tuple(builder.write_stale_archives(root, wanted))
-    except Exception as exc:  # noqa: BLE001 — see the best-effort note above
+    except Exception as exc:  # best-effort by design — see the note above
         _note(f"re-cutting the derived `website/skills/*.skill` archives FAILED "
               f"({type(exc).__name__}: {exc}). The served copies and the pin were "
               f"already written, so this tree is HALF-derived: run "
