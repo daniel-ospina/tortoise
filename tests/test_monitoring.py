@@ -864,10 +864,21 @@ class TestProbeDbBoundedAcquisition:
 
         LOAD-BEARING (mutation: drop ``- acquisition_elapsed`` from the return):
         ``excluded`` collapses to this test's own bracket (~0 s) instead of the
-        acquisition's ~0.5 s, and the assertion below reds. The discrimination
-        is the acquisition's 0.5 s, not a millisecond threshold. The sdk=
-        control is load-bearing too: a 300 ms inflation on that shape reds it
-        (minima on both sides, so no single stall can fake either direction).
+        acquisition's ~0.5 s, and the assertion below reds. The primary
+        discrimination is the acquisition's 0.5 s, not a millisecond threshold.
+        The sdk= control is load-bearing too: a 300 ms inflation on that shape
+        reds it (minima on both sides, so no single stall can fake either
+        direction).
+
+        ⚠️ AND ONE ABSOLUTE CEILING SURVIVES, ON THE 3-SAMPLE MINIMUM — not on
+        a bare sample. The relational assertions alone are invariant to a
+        SYMMETRIC inflation of both probe phases (probe work growing from ~1 ms
+        to ~300 ms inflates both sides and both still hold), so dropping every
+        absolute bound would lose the only reading that can see probe-side
+        growth. ``acquired_min < 250`` keeps it with the stall sensitivity gone:
+        a stall can only inflate ONE of the three samples, so it cannot reach a
+        minimum. That is the review's P3 on #10424 and the reason the ceiling
+        reads the minimum rather than ``acquired["latency_ms"]``.
         """
         # A leftover abandoned acquisition from an earlier test in this class
         # must not share the single probe slot and be charged to this probe.
@@ -918,6 +929,26 @@ class TestProbeDbBoundedAcquisition:
             )
             samples.append(acquired["latency_ms"])
         acquired_min = min(samples)
+        # The ABSOLUTE ceiling the bare per-sample assertion could not carry
+        # (P3, second fresh review of #10424). The pre-#10424 test asserted
+        # ``latency_ms < 250`` on ONE sample and reddened a green shard on a
+        # 583.9 ms reading that measured a STALLED RUNNER, not probe work —
+        # which is why the bare-sample threshold had to go. The MINIMUM of the
+        # three samples is the quiet reading a ceiling can safely be applied
+        # to: a stall can only inflate one sample, so it cannot reach this.
+        # What it restores is the only discrimination the relational
+        # assertions lack — both `excluded >= acquisition * 0.9` and
+        # `supplied_min < acquired_min + 50` are INVARIANT to a symmetric
+        # inflation of both phases (if the probe's own work grew from ~1 ms to
+        # ~300 ms, every side grows together and both still hold). Measured on
+        # a quiet box: ~1 ms against a 250 ms ceiling.
+        assert acquired_min < 250, (
+            f"the quietest of three acquire= probes reported "
+            f"latency_ms={acquired_min} (samples={samples}) — probe latency is "
+            "~1 ms of real work, so this is probe-side work that grew (or all "
+            "three samples stalled), not a runner artefact; the acquisition "
+            "must stay OUTSIDE the reported field (#3446)"
+        )
 
         # The equivalent sdk= shape reports the SAME ORDER — the acquisition's
         # cost belongs to NEITHER (the module docstring's claim). Minima on both
