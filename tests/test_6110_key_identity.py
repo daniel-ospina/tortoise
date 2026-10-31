@@ -38,8 +38,11 @@ import pytest
 from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import (
     TortoiseSDK,
+    _POINT_ITEM_MINT_STATUS_DEPTH,
     _content_candidate_resolution,
     _content_hash,
+    _item_effective_status,
+    _item_stored_point_kind,
 )
 
 
@@ -550,6 +553,94 @@ class TestPhase1GuardSeesTheContentIdentity:
             "Phase-1 must reject BEFORE any write — the bundle minted a point "
             "and folded onto the terminal one it had just created (#9819)")
 
+    def test_an_item_whose_KEY_folds_mints_nothing_on_the_content_axis(
+            self, sdk):
+        """#9819 review P1: the bundle-order records must describe the WRITE, and
+        the writer resolves the KEY **first**.
+
+        Bundle order: points[0] mints key K live with content "A"; points[1]
+        re-uses K (legal — the key leg refuses only a key minted TERMINAL) and
+        carries fresh content "B", but ``create_point`` resolves K BEFORE
+        content, so points[1] FOLDS onto points[0] by key and never writes
+        "B". The simulation's ``minted_content`` record for points[1] was
+        therefore a phantom, and that phantom then suppressed the terminal
+        record of points[2] — the item that really mints "B" — so points[3]
+        content-folded onto points[2]'s RETRACTED node in Phase 2, with Phase 1
+        certifying the bundle. Measured on the pre-fix head: the bundle
+        COMMITTED (created=2, deduped=2) and points[2]'s node came back with
+        ``batch_id`` stamped and ``confidence`` written, status still
+        ``retracted`` — the exact #8400/#9819 mutation, one statement inside the
+        bundle.
+
+        Discriminating: pre-fix no ``BundleValidationError`` is raised (the
+        bundle commits and mutates), so the ``pytest.raises`` fails on the
+        missing raise and the zero-write assertion fails too.
+        """
+        k = "#9819 key-first phantom mint"
+        with pytest.raises(BundleValidationError, match="reuses content"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p0", "kind": "statement", "content": "PH-A",
+                     "key": k},
+                    {"ref": "p1", "kind": "statement", "content": "PH-B",
+                     "key": k},
+                    {"ref": "p2", "kind": "statement", "content": "PH-B",
+                     "status": "retracted"},
+                    {"ref": "p3", "kind": "statement", "content": "PH-B",
+                     "props": {"confidence": 0.9}},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['PH-A','PH-B'] "
+            "OR n.key = $k RETURN n.id",
+            params={"k": k},
+        ).result_set == [], (
+            "Phase-1 must reject BEFORE any write — the phantom content mint "
+            "certified a fold onto a terminal node this bundle minted (#9819)"
+        )
+
+    def test_a_key_fold_declaring_a_terminal_status_is_not_a_terminal_mint(
+            self, sdk):
+        """…and the MIRROR, from the same root cause — an over-reject.
+
+        points[1] re-uses items[0]'s key and declares ``retracted``, but
+        ``create_point`` pops the declared status BEFORE its dedup branch
+        (#1905) and the key hits, so it mints NOTHING terminal: points[0]'s node
+        stays ``live``. Recording ``minted_terminal`` for it refused points[2]
+        (which also key-folds) with *"reuses key K, which points[1] in THIS
+        bundle mints with status 'retracted'"* — a statement that is false about
+        the write, on a bundle ``origin/main`` commits.
+
+        Discriminating: pre-fix this raises ``BundleValidationError`` matching
+        "reuses key" and nothing is written; post-fix it commits with one live
+        carrier of the key.
+        """
+        k = "#9819 key-first phantom terminal"
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p0", "kind": "statement", "content": "PT-A",
+                 "key": k},
+                {"ref": "p1", "kind": "statement", "content": "PT-B",
+                 "key": k, "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "PT-C",
+                 "key": k},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 1, (
+            f"the first item mints and both re-uses key-fold onto it (got {res})")
+        assert res["deduped"]["points"] == 2
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {key:$k}) RETURN n.status, n.content, n.id",
+            params={"k": k},
+        ).result_set
+        assert len(rows) == 1, (
+            f"one carrier of the key — every item folded onto points[0] (got {rows})")
+        assert rows[0][0] == "live", (
+            "the key fold pops the declared status, so no terminal mint ever "
+            f"happens and points[0]'s node stays live (got {rows})")
+
     def test_intra_bundle_content_guard_does_not_over_reject(self, sdk):
         """A terminal item followed by an item with DIFFERENT content is the
         writer's legal path and must commit."""
@@ -715,6 +806,81 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert [r[0] for r in rows] == ["live"], (
             "the double-wrapped status was never stored, so nothing minted "
             "terminal (#9819 P2)")
+
+    def test_the_mint_depth_is_the_depth_the_write_door_folds(self, sdk):
+        """WRITER PARITY for ``_POINT_ITEM_MINT_STATUS_DEPTH`` (#9819 review
+        P1, round 8 — reported as a fail-open, MEASURED as already correct).
+
+        The round-8 finding argued the constant must be 2, on the model that the
+        item's ``props`` value reaches ``create_point`` as ``props=`` and that
+        one ``_coerce_props`` fold then surfaces ``item["props"]["props"]``.
+        The second step is wrong by ONE level: ``**props`` in the signature means
+        the ``props=`` kwarg becomes a KEY called ``props`` INSIDE the
+        passthrough dict, so the fold surfaces ``item["props"]``'s own keys —
+        depth 1 — and the dict one level deeper is stored as a literal ``props``
+        property (which FalkorDB cannot write, so it is degraded to null, #7369).
+
+        Asserted as a WRITE, not as arithmetic on the helper: the call below is
+        the ingest loop's own shape (``create_point(kind, content, dedup=True,
+        **write_item)``), and the node it returns is the writer's answer.
+
+        Discriminating: a lane that "fixes" the constant to 2 to make
+        ``test_double_wrapped_status_is_not_recorded_as_a_terminal_mint`` pass
+        by another route reds the last assertion here, and reads the door's own
+        verdict in the failure message instead of re-deriving the fold model.
+        """
+        item = {"kind": "statement", "content": "MINT-DEPTH-PIN",
+                "props": {"props": {"status": "retracted"}}}
+        # The read the round-8 finding proposed — depth 2 DOES see the inner
+        # spelling, which is exactly why reading it would predict a terminal
+        # mint the writer never performs.
+        assert _item_effective_status(item, 2) == "retracted"
+        # The door's own answer, on the ingest loop's own call shape.
+        minted = sdk.create_point(dedup=True, **item)
+        assert minted["status"] == "live", (
+            "the double-wrapped status is NOT stored: **props puts the item's "
+            "props value one level deeper than the item, so one fold reaches "
+            f"only item['props']'s keys (got {minted['status']!r})")
+        # ONE wrap is one fold deep, so it IS stored — the record must exist.
+        assert sdk.create_point(
+            "statement", "MINT-DEPTH-PIN-1",
+            props={"status": "retracted"})["status"] == "retracted"
+        assert _item_effective_status(
+            item, _POINT_ITEM_MINT_STATUS_DEPTH) is None, (
+            "the guard's mint read must agree with the door: depth "
+            f"{_POINT_ITEM_MINT_STATUS_DEPTH} sees no declared status, and the "
+            "writer stores none — raising the depth re-opens the round-5 "
+            "over-reject (a wrong 'mints with status retracted' refusal on a "
+            "bundle the writer completes)")
+
+    def test_the_stored_kind_read_is_at_the_same_writer_depth(self, sdk):
+        """The ``pointKind`` arm of the same constant (``_item_stored_point_kind``
+        uses ``_POINT_ITEM_MINT_STATUS_DEPTH``): it must be read at the SAME
+        depth as the status, because both answer "what does the MINT store".
+
+        A double-wrapped ``pointKind`` is not stored either — the node keeps the
+        ITEM's positional kind — so keying the minted-node record by the inner
+        spelling would attribute the mint to a ``(kind, content)`` identity no
+        dedup query can resolve (the fail-open direction
+        ``TestTheMintRecordIsKeyedByTheSTOREDKind`` exists to prevent).
+
+        Discriminating: at depth 2 the helper answers ``'decision'`` for this
+        item while the door stores ``'statement'``.
+        """
+        item = {"kind": "statement", "content": "MINT-KIND-DEPTH-PIN",
+                "props": {"props": {"pointKind": "decision"}}}
+        stored = sdk.create_point(dedup=True, **item)
+        assert stored["pointKind"] == "statement", (
+            f"the double-wrapped kind is not stored (got {stored['pointKind']!r})")
+        assert _item_stored_point_kind(item) == stored["pointKind"], (
+            "the record's kind must be the kind the door STORED")
+        # …and the single-wrapped spelling, one fold deep, really does win.
+        single = sdk.create_point("statement", "MINT-KIND-DEPTH-PIN-1",
+                                  props={"pointKind": "decision"})
+        assert single["pointKind"] == "decision"
+        assert _item_stored_point_kind(
+            {"kind": "statement", "props": {"pointKind": "decision"}}
+        ) == "decision"
 
     def test_a_real_one_fold_terminal_mint_is_still_recorded(self, sdk):
         """NEGATIVE CONTROL for the test above: reading the recorded status at

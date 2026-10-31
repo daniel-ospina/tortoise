@@ -6375,6 +6375,25 @@ _POINT_ITEM_FLATTEN_DEPTH = 2
 #: double-wrapped ``{"props": {"props": {"status": "retracted"}}}`` point item:
 #: the writer stores ``live`` while the bundle-order simulation reported "mints
 #: with status 'retracted'" and refused the NEXT item (#9819 review P2).
+#:
+#: ⛔ WHY ONE FOLD IS DEPTH ONE — the step that has been re-derived wrong twice,
+#: so it is written down. ``create_point``'s signature ends ``**props``, and the
+#: ingest loop calls it as ``create_point(kind, content, dedup=True,
+#: **write_item)`` — so an item's ``props`` VALUE becomes the ``props`` KEYWORD,
+#: and lands as a KEY CALLED ``props`` inside the passthrough dict, ONE LEVEL
+#: DEEPER THAN THE ITEM. The door's single ``_coerce_props`` fold then surfaces
+#: that dict's own keys, i.e. exactly ``item["props"][…]`` = depth 1; the dict
+#: one level further in is written as a literal ``props`` property, which
+#: FalkorDB cannot store and degrades to null (#7369). MEASURED, both
+#: directions: ``create_point("statement", "x", props={"status":
+#: "retracted"})`` stores ``retracted`` and ``…props={"props": {"status":
+#: "retracted"}}`` stores ``live``. Pinned by
+#: ``tests/test_6110_key_identity.py::…::test_the_mint_depth_is_the_depth_the_
+#: write_door_folds`` (which also asserts depth 2 DOES report ``retracted``, so
+#: the divergence is deliberate rather than a narrow read) and its kind sibling.
+#: A later review proposed raising this to 2 on the model that one fold surfaces
+#: ``item["props"]["props"]``; that model omits the ``**props`` wrapping, and
+#: raising it re-opens the #9819 round-5 over-reject.
 _POINT_ITEM_MINT_STATUS_DEPTH = 1
 
 
@@ -6390,7 +6409,11 @@ def _item_stored_point_kind(item: dict) -> str | None:
     ``tests/test_kind_layer_partition_9964.py``). The depth is the MINT's own
     single fold, the same ``_POINT_ITEM_MINT_STATUS_DEPTH`` the sibling status
     record reads and for the same reason: a deeper spelling is a fold
-    ``create_point`` never performs before its dedup branch.
+    ``create_point`` never performs before its dedup branch. ⚠️ "One fold" is
+    depth ONE from the item, not two — ``create_point``'s ``**props`` receives
+    the item's ``props`` VALUE under a ``props`` KEY, so the fold reaches
+    ``item["props"]``'s own keys and no further; see that constant for the
+    measurement and its pinning test.
 
     ⛔ THIS IS NOT A REPLACEMENT FOR ``_item_point_kind`` — the two answer
     different questions and the guard needs BOTH. The writer's dedup QUERY
@@ -23877,6 +23900,27 @@ class TortoiseSDK:
         # carries the stored one. One kind for both sides is the drift
         # `_item_stored_point_kind` and `_item_point_kind` exist to stop.
         minted_content: dict[tuple[str, str], int] = {}
+        # FIRST-WRITER-WINS on the KEY identity, recorded for EVERY minting item
+        # (unlike `minted_terminal`, which records only a TERMINAL mint). The
+        # writer resolves the key FIRST (`_resolve_dedup_hit`), so an item whose
+        # key an EARLIER item of this bundle minted does NOT write content at
+        # all — it folds onto that node by key. Without this map the simulation
+        # still recorded `minted_content` for it, i.e. a CONTENT mint the writer
+        # never performs, and that phantom record then suppressed the terminal
+        # record of the item that DOES mint that content — so a later item
+        # folded onto a bundle-minted TERMINAL point with Phase 1 certifying the
+        # bundle. Measured on the pre-fix head: `[{key: K, content: A},
+        # {key: K, content: B}, {content: B, status: retracted},
+        # {content: B, props: {confidence: 0.9}}]` COMMITTED, and the node
+        # points[2] minted came back with `batch_id` stamped and `confidence`
+        # written, `status` still `retracted` — the #8400/#9819 hazard, over a
+        # node the same bundle minted (#9819 review P1).
+        # ⛔ A repeated key is NOT a Phase-1 violation by itself: the key leg
+        # above refuses only a key minted TERMINAL, so a re-run under one key
+        # with recomputed content (exactly the #6110 path, and the shape a
+        # timed-out write forces a caller down) stays legal — it just mints
+        # nothing here, and nothing must be recorded for it.
+        minted_keys: dict[tuple[str, str], int] = {}
         # #9819 review P2: the CONTENT identity is now resolved in ONE query for
         # the whole bundle instead of three per item (`_find_terminal_dedup_hit`
         # → any-hash → hash-less fallback), which had made `_validate_bundle`
@@ -24037,10 +24081,21 @@ class TortoiseSDK:
             # content FOLDS onto that node and mints nothing. FIRST WRITER WINS
             # (`minted_content`), exactly as the key simulation does: the
             # record below must describe the write, not the graph read.
+            # ⛔ …and the writer's order is KEY FIRST. An item whose key an
+            # earlier item of THIS bundle minted folds onto that node by key,
+            # never reaches its content leg, and therefore mints nothing on the
+            # CONTENT axis (`_key_folds_here`). Recording it was a phantom mint
+            # on BOTH axes — the fail-open above and its mirror over-reject.
+            _key_folds_here = _has_pkey and (pkind, pkey) in minted_keys
+            _key_mints_here = (_has_pkey and not _key_folds_here
+                               and mkind is not None)
             # ⛔ The TERMINAL record is still written by the FIRST minting item,
             # so a fold onto an intra-bundle TERMINAL point stays refused. Its
             # key is the STORED kind (`mkind`) — see the map declarations.
-            _mints_here = _mints and (pkind, _content_id) not in minted_content
+            _mints_here = (_mints and not _key_folds_here
+                           and (pkind, _content_id) not in minted_content)
+            if _key_mints_here:
+                minted_keys[(mkind, pkey)] = j
             if _mints_here and mkind is not None:
                 minted_content[(mkind, _content_id)] = j
             if (isinstance(mint_status, str)
@@ -24053,7 +24108,7 @@ class TortoiseSDK:
                 # on a key which content-folds onto a live point and then
                 # reuses the key — is preferred to letting a fold land on a
                 # terminal mint.
-                if _has_pkey and mkind is not None:
+                if _key_mints_here:
                     minted_terminal[(mkind, pkey)] = (j, mint_status)
                 # Content is an identity too, so the same simulation covers a
                 # later item with the SAME content under a DIFFERENT (or no)
