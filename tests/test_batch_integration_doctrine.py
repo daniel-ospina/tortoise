@@ -86,6 +86,9 @@ _PINNED_MAIN_ASSERTION = re.compile(
 #: Commands that move HEAD onto a ref — what Phase 1 must do before its suite run.
 _MOVES_HEAD = re.compile(r"\bgit\s+(?:switch|checkout)\b")
 
+#: The test target a marker-scoped run names (``tests/test_ingest_safety.py``).
+_TARGET_FILE = re.compile(r"\b(tests/[\w./-]+\.py)\b")
+
 
 def _text() -> str:
     assert DOC.is_file(), f"{DOC.relative_to(ROOT)} is missing — re-point this guard"
@@ -175,6 +178,17 @@ def test_every_full_suite_command_is_one_of_the_two_deliberate_halves() -> None:
         "`test-track-b` job runs that half as a MUST-PASS need of the required "
         "`python-ci-gate`, so a batch that skips it leaves a gate member unrun"
     )
+    for cmd in track_b:
+        assert _TARGET_FILE.search(cmd), (
+            f"the `-m track_b` command names no test target: {cmd!r}"
+        )
+        target = ROOT / _TARGET_FILE.search(cmd).group(1)
+        assert target.is_file(), (
+            f"the doctrine runs `-m track_b` against {target.relative_to(ROOT)!s}, "
+            "which does not exist — CI's test-track-b job runs "
+            "tests/test_ingest_safety.py, so a rename leaves the documented gate "
+            "pointing at nothing"
+        )
 
 
 def test_the_track_b_gate_leg_is_run_in_the_gate_phase() -> None:

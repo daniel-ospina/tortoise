@@ -140,8 +140,8 @@ Two corrections to the quantifier, because both decide whether the batch is a ga
 
 - **`-m track_b` is NOT deselected upstream.** `python-ci.yml`'s `test-track-b` job runs
   `tests/test_ingest_safety.py -m track_b` as its own **MUST-PASS** member — it is a `needs:` of the
-  required `python-ci-gate` (measured max 1.15 m, `python-ci.yml:2450`). CI runs the deterministic
-  suite in two marker **halves**; a batch that runs only the `not track_b` half leaves a gate member
+  required `python-ci-gate`, and its own measured job max is 1.15 m. CI runs the deterministic suite
+  in two marker **halves**; a batch that runs only the `not track_b` half leaves a gate member
   unrun, and a `track_b` regression introduced by the composition reaches `main` unseen — the exact
   class the invariant forbids. So Phase 3 runs **both** halves.
 - **`post-merge-validation.yml` does NOT use this filter.** Its run is
