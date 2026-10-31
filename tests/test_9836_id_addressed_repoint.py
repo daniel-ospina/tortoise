@@ -354,6 +354,32 @@ def test_the_label_order_is_the_folds_sweep_order():
     assert set(EPISTEMIC_LABEL_ORDER) == RECORD_ADDRESSABLE_EDGE_LABELS
 
 
+def test_the_label_order_is_the_WRITE_resolvers_order_too():
+    """⛔ The emitted `target_label` must be the label the MINT already used.
+
+    A node carrying more than one epistemic label is resolved by the FIRST
+    branch that matches (`_resolve_entity`'s `LIMIT 1` UNION, one row per
+    branch, deduped by identity), so the class-4 mint journals the edge with
+    THAT branch's label — while the 2b repoint writes its own. If the two orders
+    disagreed, the repoint's DELETE (keyed on the descriptor's `tgt_label`, part
+    of `relation`'s primary key) would miss the row the creation landed and the
+    INSERT would add a SECOND row at the successor: one edge, two record rows,
+    and a `live != record-rebuild` divergence reachable only through this order.
+    Pinned here because nothing else in the tree ties the two tuples together.
+    """
+    from tortoise.live import EPISTEMIC_LABELS
+    from tortoise.projection import FalkorProjection
+
+    # The resolver's epistemic branches, in ITS order, deduped (Source appears
+    # twice but is not an epistemic label; nothing else repeats).
+    resolved = [label for label, _prop in FalkorProjection._RESOLVE_BRANCHES
+                if label in EPISTEMIC_LABELS]
+    assert tuple(dict.fromkeys(resolved)) == EPISTEMIC_LABEL_ORDER, (
+        f"the write resolver's label order {tuple(dict.fromkeys(resolved))} is "
+        f"not the repoint's {EPISTEMIC_LABEL_ORDER} — a multi-labelled node "
+        "would be journalled under one label and repointed under another")
+
+
 def test_id_addressed_target_picks_the_labels_own_key():
     """`id_addressed_target` picks the label and the key THAT LABEL is filed by.
 
