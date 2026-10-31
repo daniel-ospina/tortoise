@@ -2929,6 +2929,15 @@ _FALSE_ANON_KEY_BROWSER_CLAIMS: tuple[tuple[str, str], ...] = (
      "mechanism (designed for exposure + RLS-bounded + in this API's env), not browser delivery"),
     ("the consent page embeds it",
      "#3524 §9 step 4 DELETED that page and its inline client; nothing embeds the anon key"),
+    # ⛔ The OPERATOR-FACING half of the same claim, found one review round later in a home the
+    # corpus could not see (`.github/workflows/deploy-hosted.yml`, the `fly secrets` step). It
+    # said the key was "public client key the OAuth consent page embeds (supabase-js
+    # createClient)" — i.e. it gave the operator running that step a REASON TO KEEP PUBLISHING
+    # it, and it contradicted `config/required-bindings.yml`, edited by the same PR. The needle
+    # is the literal that survived (`the oauth consent page embeds`, flattened), not a pattern.
+    ("the oauth consent page embeds",
+     "that page is DELETED (§9 step 4) — the key is synced so the §2.3 collision check can SEE "
+     "it (`_REUSED_KEY_ENVS`), never so a page can render it"),
     # ⛔ The two below are the §8 operator-checklist pair that a previous round reported and round
     # 11 found STILL unfixed. They are literals, not patterns, for the reason this denylist is
     # literals: `anyone who loaded the page` is the CONSEQUENCE sentence that made the deleted
@@ -2947,7 +2956,8 @@ _FALSE_ANON_KEY_BROWSER_CLAIMS: tuple[tuple[str, str], ...] = (
 )
 
 #: Every home the false premise reached, with the substrate each one is. Scanned as prose AND
-#: code because the claim lives in both (three docstrings/comments, two docs, two test comments).
+#: code because the claim lives in both (three docstrings/comments, two docs, two test comments,
+#: two operator-facing workflows).
 #: ⛔ This file is in the corpus ONLY above `_PREMISE_GATE_MARKER` (see the scan below).
 _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
     "tortoise/consent_token.py",                       # §2.3 / §8 operator text + module prose
@@ -2959,16 +2969,35 @@ _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
     "website/website_architecture.md",
     "tests/test_pages_bindings.py",
     "tests/test_oauth_consent_bridge.py",              # this file's own §2.3 comments (2072 chars)
+    # ⛔ The OPERATOR-FACING homes. `deploy-hosted.yml`'s `fly secrets` step carried the claim
+    # one review round after every file above was clean, and `deploy-pages.yml` is the sibling
+    # operator surface a re-derivation would land in — the deployed copy is what an operator
+    # acts on, so it belongs in the scan and not only in the docs.
+    ".github/workflows/deploy-hosted.yml",
+    ".github/workflows/deploy-pages.yml",
 )
 
 
 def _flatten(text: str) -> str:
-    """Case-folded, whitespace-collapsed — the gate's own comparison form.
+    """Case-folded, whitespace-collapsed, comment-marker-stripped — the gate's comparison form.
 
     A claim survives re-wrapping and re-casing; it does not survive being a paste. Used on BOTH
     sides so a needle cannot pass by being re-flowed across two lines in the doc.
+
+    ⛔ Comment markers are stripped per line, because the comment is EXACTLY where these claims
+    live in the code/YAML homes. Measured 2026-10-31: with the plain whitespace collapse, the
+    pre-fix `.github/workflows/deploy-hosted.yml` line —
+
+        # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
+        # embeds (supabase-js createClient).
+
+    flattened to `… the oauth consent page # embeds (supabase-js …`, so the needle
+    `the oauth consent page embeds` did NOT bite and the gate reported an 11-home corpus clean
+    over the exact sentence it exists to catch. A YAML/shell comment prefix between two wrapped
+    words is a re-wrap, not a different claim — so it is collapsed like the newline it sits on.
     """
-    return re.sub(r"\s+", " ", text).strip().casefold()
+    de_commented = re.sub(r"(?m)^[ \t]*#+[ \t]*", " ", text)
+    return re.sub(r"\s+", " ", de_commented).strip().casefold()
 
 
 def _false_anon_key_claims(text: str) -> list[str]:
@@ -2978,7 +3007,7 @@ def _false_anon_key_claims(text: str) -> list[str]:
 
 
 def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
-    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the nine homes.
+    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the eleven homes.
 
     Why this is a test and not a review note: round 11 measured the false premise in FIVE homes
     after a previous round had already corrected the same family, and it is the *justification*
@@ -2995,7 +3024,7 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     corpus = {rel: (REPO / rel).read_text(encoding="utf-8").split(_PREMISE_GATE_MARKER)[0]
               for rel in _ANON_KEY_PREMISE_CORPUS}
     assert sum(len(t) for t in corpus.values()) > 100_000, (
-        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these nine "
+        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these eleven "
         "files, so a clean result below would prove nothing")
 
     for rel, text in corpus.items():

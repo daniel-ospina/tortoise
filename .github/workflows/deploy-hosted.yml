@@ -893,9 +893,15 @@ jobs:
           # GITHUB_SHA is the checked-out commit on push AND workflow_dispatch
           # (the ref head), so it always matches what this run deploys.
           ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")
-          # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
-          # embeds (supabase-js createClient). Was never synced to Fly, so the
-          # page rendered with an empty key ('supabaseKey is required').
+          # #1703 / #3524 §9 step 4: SUPABASE_ANON_KEY still has to reach the
+          # API's OWN environment, but NOT for the reason it was first synced —
+          # the consent page that embedded it was DELETED, and no browser
+          # receives this key (#4054/#4178). It is required because
+          # `consent_token_secret_problem()` (`tortoise/consent_token.py`)
+          # compares `CONSENT_TOKEN_SECRET` against `_REUSED_KEY_ENVS`, which
+          # includes `SUPABASE_ANON_KEY`; the §2.3 dedicated-secret check cannot
+          # refuse a collision with a value this process cannot see. Same
+          # wording as `config/required-bindings.yml`. Do NOT drop the secret.
           [ -n "$SUPABASE_ANON_KEY" ] && ARGS+=(SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY")
           # #4126: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY were hand-set on Fly
           # with no managing source (both showed `Deployed`, i.e. never touched by
