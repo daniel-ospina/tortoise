@@ -3857,6 +3857,12 @@ surfaces:
   - test_extractor_priors.py
   - test_extractor_reliability.py
   - test_extractor_embed_coerce_5060.py  # #5060: execute_embed must not raise on a non-string name/content (whole-session payload loss)
+  # #10311: the S2/S4 prompt BODIES frame session text as untrusted DATA — the
+  # clause, the body-derived boundary, and the parsing contract that must not
+  # move. `core` for the same reason as the rest of the extractor guards: its
+  # subject is `tortoise/extractor_v2.py`. Hermetic (no DB read of its own, no
+  # network, no real model).
+  - test_extractor_prompt_framing_10311.py
   - test_extractor_v2.py
   # #2684 (Slice B): the value-span census — the wave's per-question T leg
   # ("the value-bearing evidence is verbatim-present") measured over the

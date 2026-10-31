@@ -916,8 +916,8 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
         assert site in vet_cause, (site, vet_cause)
     # … and NOT one line of the classify pass's, nor its flag/gate TOKENS
     for site in _EXTRACTOR_SITES["classify_later"].values():
-        # a range cite reds on its FIRST line too: the reader sent to `:8612`
-        # has landed on the classify early return even if `-8615` is not printed
+        # a range cite reds on its FIRST line too: the reader sent to `:8700`
+        # has landed on the classify early return even if `-8703` is not printed
         for form in {site, site.split("-", 1)[0]}:
             assert form not in vet_cause, (form, vet_cause)
     for classify_token in ("classify_later", "if classify_later"):
@@ -1479,7 +1479,7 @@ def test_the_bundle_does_not_state_the_pre_seam_receipt_as_the_current_one():
 # (two row-scoped documents, not whole: the index routes 142 table rows and the
 # architecture doc carries ~15 cites belonging to other epics, so another epic's
 # `sdk.py` cite must not be told to add a phrase for a line it is not about). A bare `:NNNN`
-# continuation (the docs write `` `extractor_v2.py:8596` and `:8616` ``) is NOT a
+# continuation (the docs write `` `extractor_v2.py:8684` and `:8704` ``) is NOT a
 # cite this leg can resolve, because the file is named only once for several
 # numbers; the README's bare `` `symbol` `:NNN` `` step table is owned by
 # `test_7949_capstone_verdict_check.py`. `extractor_v2.py` was the first gap: its
@@ -1544,7 +1544,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     return scope is None or bool(scope.search(line))
 
 # `tortoise/sdk.py:14725`, ``tortoise/projection/edges.py:2832-2857``, `edges.py:747`,
-# ``tortoise/extractor_v2.py:9062-9066``
+# ``tortoise/extractor_v2.py:9063-9067``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")
@@ -1659,7 +1659,7 @@ def _bundle_rule(source: str, paragraph: str, base: int, cite_pos: int):
     """The rule whose naming phrase sits NEAREST this cite — distance, not order.
 
     A document names a line with the phrase right beside it (`` `vet_enabled` is
-    computed at `extractor_v2.py:8596` ``), so the closest phrase is the one that
+    computed at `extractor_v2.py:8684` ``), so the closest phrase is the one that
     names THIS cite. Table order cannot decide it: `docs/00_index.md`'s #7949 row
     names the CLASSIFY pass and then the VET flag on one line, and taking the first
     table match bound the VET cite to the classify phrase ~40 characters away (a
@@ -1936,7 +1936,7 @@ def _cited_spans(doc_name: str, path: Path) -> set[str]:
     """Every `:N` / `:N-M` this bundle's rows cite, bare OR prefixed.
 
     Prefixed cites are normalised to the same ``:N`` shape so one assertion can
-    read both: the prose writes `extractor_v2.py:8683` and `:8703` in the same
+    read both: the prose writes `extractor_v2.py:8684` and `:8704` in the same
     sentence, and the question here is only WHICH LINES the document names.
     """
     text = path.read_text(encoding="utf-8")
@@ -1970,10 +1970,10 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
     that must agree — never a third typed table. Non-vacuity, measured at
     `7b6b2180f`: the pre-fix README carried `:8565`/`:8616`/`:8684`/`:8806` and
     `:8965`/`:8975`, and this leg reds on every one of them, because the derived
-    numbers (`:8652`, `:8703`, `:8771`, `:8893`, `:9052`, `:9062`) appear nowhere
+    numbers (`:8653`, `:8704`, `:8772`, `:8894`, `:9053`, `:9063`) appear nowhere
     in it. It also reds if a site is cited by its RANGE START only while the
     document prints the wrong half of the span, which is how `:8478-8481` (a
-    docstring) survived a `:8562-8565` (the fail-open `except`) re-derivation.
+    docstring) survived a `:8563-8566` (the fail-open `except`) re-derivation.
     """
     for surface, sites in _EXTRACTOR_SITES.items():
         for name, site in sites.items():
@@ -1985,7 +1985,7 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
             for doc_name, path in _BARE_CITE_DOCS:
                 spans = _cited_spans(doc_name, path)
                 # a single-line site is cited as-is; a range is cited either
-                # whole or by its start line (`:9052` for `:9052-9058`)
+                # whole or by its start line (`:9053` for `:9053-9059`)
                 assert site in spans or start in spans, (
                     f"{doc_name} does not cite `{site}` "
                     f"(`{surface}.{name}`), which extractor_v2.py carries at "
