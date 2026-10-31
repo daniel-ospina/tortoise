@@ -251,12 +251,21 @@ def test_skill_markers_contract():
     exists (the served mirror), it must carry the operational markers —
     bundle shape, granularity, the gated default, the interim promotion
     entry, idempotent resubmission, the retry/decision tables, and all
-    THIRTEEN warning keys. SKIPPED until #1057 (J8) lands the section — the
-    marker-grep is the enforcement the moment it does."""
+    THIRTEEN warning keys.
+
+    ⛔ Only an ABSENT mirror skips. The skip used to fire on
+    `"promotion_policy" not in text` as well, which made the marker-grep green
+    by SKIP in exactly the case it exists to catch: a sync that dropped the
+    marker. #1057 (J8) has landed and the served file is tracked in-repo, so
+    that branch was dead code whose only reachable outcome was the fail-open
+    one — the same defect the sibling gate at
+    `test_served_skill_advertises_only_keys_the_product_emits` carried, one
+    function below (fix-review finding, P3)."""
     text = _skill_text()
-    if text is None or "promotion_policy" not in text:
-        pytest.skip("J8 skill section (#1057) not yet landed — markers "
-                    "absent/untracked")
+    if text is None:
+        pytest.skip("the served mirror is absent from this tree — nothing to "
+                    "grade (`website/apps/dashboard/public/skills/"
+                    "how-to-use-tortoise/SKILL.md`)")
     assert "bundle" in text, "bundle-shape marker"
     assert "granularity" in text
     assert "gated" in text

@@ -841,7 +841,15 @@ def _rebuild_archives(root: Path, manifest: dict, payloads: dict[str, bytes],
                 "an archive name for it. `_rebuild_archives` is fed the bytes "
                 "`sync` fetched for EVERY pinned skill; a missing one is a bug "
                 "in this caller, not a case to skip — skipping is how a "
-                "derived artifact goes stale with the gate green (#10088).")
+                "derived artifact goes stale with the gate green (#10088). "
+                "⚠️ This is DETERMINISTIC: re-running cannot clear it, unlike "
+                "the network failures that share this exception type. It is "
+                "raised as `ParityError` rather than `PinDefect` (which routes "
+                "to `problems`) because no pin byte is wrong here — but the "
+                "`cannot_verify` heading it lands under is the wrong label for "
+                "it, and that mismatch is recorded rather than papered over "
+                "with a third exception class: the branch is unreachable from "
+                "`sync` today (fix-review finding, P3).")
         target = root / ARCHIVES_REL / f"{name}.skill"
         wanted = bsa.build_from_bytes(name, payload)
         if target.is_file() and target.read_bytes() == wanted:
