@@ -1543,11 +1543,16 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
+<<<<<<< HEAD
 # Shapes this matches, ILLUSTRATIVE ONLY — the live cites are in the bundle docs, so
 # a number quoted here is not pinned by anything and would drift with the next
 # insertion above it (the exact failure mode the sweep exists to catch):
 # `tortoise/sdk.py:<line>`, ``tortoise/projection/edges.py:<start>-<end>``,
 # `edges.py:<line>`, ``tortoise/extractor_v2.py:<start>-<end>``.
+=======
+# `tortoise/sdk.py:14722`, ``tortoise/projection/edges.py:2573-2598``, `edges.py:587`,
+# ``tortoise/extractor_v2.py:8975-8979``
+>>>>>>> origin/main
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
     r"(sdk|edges|extractor_v2)\.py:(\d+)(?:-(\d+))?")

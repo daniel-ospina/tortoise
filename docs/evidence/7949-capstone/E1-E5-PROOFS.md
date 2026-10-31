@@ -175,7 +175,11 @@ here so "swept" is never read into a number nothing re-checks.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
+<<<<<<< HEAD
 `tortoise/sdk.py:14595` is the meta fold — while the extractor builds
+=======
+`tortoise/sdk.py:14722` is the meta fold — while the extractor builds
+>>>>>>> origin/main
 `result["classify_later"]` (`tortoise/extractor_v2.py:8965`) and `result["vet"]`
 (`tortoise/extractor_v2.py:8975`) on the extractor's OWN return.
 
