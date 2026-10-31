@@ -479,6 +479,21 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
         f"leaves the following --no-ff merge on the wrong branch: {flat}"
     )
 
+    # ...and the batch branch must still be the one checked out when the FIRST
+    # merge runs. A HEAD-moving line carrying no `$PINNED` is invisible to the
+    # checks above: `git switch main` inserted after the pin create leaves every
+    # merge landing on the operator's local `main` while integration/batch-1
+    # stays at the pin — the same silent wrong-tree the baseline fence's position
+    # check closes on the other fence.
+    fence = [f for f in batch if any("batch-1" in _code(c) for c in f)][0]
+    merges = [i for i, c in enumerate(fence) if re.search(r"\bgit\s+merge\b", c)]
+    assert merges, "the batch fence no longer merges anything — re-point this guard"
+    before_merge = [c for c in fence[: min(merges)] if _MOVES_HEAD.search(_code(c))]
+    assert all('"$PINNED"' in _code(c) and _re_runnable(_code(c)) for c in before_merge), (
+        "every HEAD-moving command before the batch's first merge must be the pin "
+        f"create; these move HEAD off the batch branch: {before_merge}"
+    )
+
 
 def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     """#10399 review P1-3 / P2-1: the tested tree must be the landed tree.
