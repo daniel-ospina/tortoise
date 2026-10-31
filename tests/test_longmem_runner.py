@@ -5135,12 +5135,27 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # SELECTED vocabulary by omission — the same permissive-default shape
     # this module exists to remove. #4821 review P2.
     #
-    # ``match=`` is load-bearing (#4821 review P3): the pre-fix signature took
-    # no ``measured`` at all, so this call raised `unexpected keyword argument
-    # 'measured'` — NOT a missing required argument. A bare
-    # ``pytest.raises(TypeError)`` was satisfied by that incompatible call, so
-    # the arm could not tell the required-argument contract from a
-    # signature that merely does not accept the keyword.
+    # What makes the arm below discriminating is that the call names NEITHER
+    # required keyword, not the ``match=``: on the pre-fix signature (three
+    # parameters, no ``measured``) that call satisfies every parameter,
+    # raises NOTHING and prints ``SELECTED granularity`` — measured by
+    # executing the three signature shapes. ``match=`` pins the WORDING of
+    # the required-argument failure, which is `main`'s
+    # `missing 1 required keyword-only argument: 'measured'`.
+    #
+    # This paragraph used to claim the call below raised `unexpected keyword
+    # argument 'measured'`, and that a bare ``pytest.raises(TypeError)`` was
+    # therefore non-discriminating (carried into `52fe93a1e`'s message too).
+    # Both halves are false and the cited anchor refutes them: the call below
+    # never names ``measured``, so no signature lacking the keyword can make
+    # it say that — the `unexpected keyword argument 'measured'` message
+    # belongs to the ``measured=False`` call ABOVE (:5125). The inverted
+    # lesson is the real one: bare and anchored behave IDENTICALLY against
+    # both reachable shapes (pre-fix — no exception, both red; `main` — the
+    # required-argument wording, both accept), so dropping ``match=`` is a
+    # no-op and must not read as a regression. It is kept as the wording pin;
+    # the ``excinfo`` assertions below are what actually assert the contract
+    # (#10355 review P2).
     #
     # The anchor for that pre-fix shape is `48d745f2e`, and the wording
     # matters because the claim is ancestry (#10355 review P2, corrected): it
@@ -5169,10 +5184,21 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # universal "never existed": that over-shoots a temporal error into a
     # factual one (#10355 review P2). The assertion is now tied to the
     # wording only the required-argument shape produces.
-    with pytest.raises(TypeError, match=r"required keyword-only argument.*measured"):
+    with pytest.raises(
+            TypeError,
+            match=r"required keyword-only argument.*measured") as excinfo:
         sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
                           "context_tokens_mean": 10.0},
                          ingest_mode="v2", context_cap=8000)
+    # BOTH required keywords are pinned, not just the one ``match=`` names: a
+    # future ``results: list[dict] = ()`` default would still raise for
+    # ``measured`` and leave this arm green (#10355 review P3, optional).
+    assert "results" in str(excinfo.value), str(excinfo.value)
+    # ... and the arm cannot have degenerated into the OTHER failure message:
+    # it names no ``measured``, so this is unreachable for it, and asserting
+    # it keeps the corrected paragraph above honest.
+    assert "unexpected keyword argument" not in str(excinfo.value), \
+        str(excinfo.value)
     # ... and the permissive path is gone: SELECTED is unreachable by omission.
     assert "SELECTED granularity" not in capsys.readouterr().out
 
