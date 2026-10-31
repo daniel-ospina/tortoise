@@ -308,6 +308,9 @@ def test_the_receipt_says_the_narrative_is_not_in_its_record_home():
 # ── §2 the record effect, through the shape-keyed projection ────────────────
 
 def _narrative_statements(records):
+
+
+# ── §2 the record effect, through the shape-keyed projection ────────────────
     return [s for s in rp.replay_plan(records, org_id="org", graph_id="graph")
             if rp.NARRATIVE_TABLE in s.sql]
 

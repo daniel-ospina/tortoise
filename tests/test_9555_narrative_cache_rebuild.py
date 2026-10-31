@@ -201,3 +201,68 @@ def test_the_public_capture_path_REBUILDS_THE_CACHE_FROM_THE_RECORD_and_the_narr
             t.body for t in before.session.turns]
     finally:
         conn.close()
+
+
+def test_the_document_fold_cannot_put_the_narrative_back_on_a_source():
+    """#10389 review ISSUE 1, door 1 — the OPEN passthrough is now closed.
+
+    ⚠️ IT LIVES IN THIS FILE, NOT IN `test_9555_narrative_carrier.py`, because it
+    needs a GRAPH: the carrier file is executed by CI's `test-record-postgres`
+    job, whose leg gate FAILS the job on ANY skip (#9551) and which exports no
+    `TORTOISE_DB_URI` — a URI-gated test there would red a job over a cache it
+    does not provision. This file is the one that is deliberately NOT in that
+    job for exactly this reason (see its module docstring).
+
+    `_upsert_document` passes NO `allow_keys` DELIBERATELY (#228 pins the
+    document route as a caller passthrough), and `story_arc` was in none of
+    `_SOURCE_HANDLED` / `_DOC_PASSTHROUGH_HANDLED` / `_DOC_RETIRED_KEYS` — so a
+    `DocumentCreated` carrying it landed §9.1's prose on the `:Source` node
+    verbatim. MEASURED before the fix: `create_document(url, kind,
+    story_arc=<narrative>)` (the SDK door behind the MCP tool
+    `tortoise_create_document`) left `s.story_arc` = the PROSE on the node.
+
+    (1) FAILS pre-fix at the first `is None`: the prose is on the node.
+    (2) DOES NOT CLOSE #228: a genuinely arbitrary caller prop still lands, so
+        this is a deny-list entry and not a blanket refusal. It also asserts the
+        key stays DECLARED for reads — declared ⇒ readable, listed in the
+        passthrough reserve ⇒ never written from a payload (#3998/D30).
+    (3) REACHABLE: the fold the production writer calls, on a real graph.
+    """
+    if not os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("TORTOISE_DB_URI not set — the fold needs a graph to write")
+    from tortoise.projection import FalkorProjection
+    from tortoise.projection.entities import _EntityHandlers as _FP
+
+    assert "story_arc" in _FP._DOC_PASSTHROUGH_HANDLED, (
+        "the document passthrough admits `story_arc` again — a DocumentCreated "
+        "carrying §9.1's narrative then writes the PROSE onto a :Source node "
+        "(#10389 ISSUE 1 door 1)")
+    assert "story_arc" in _FP._SOURCE_NODE_PROPS, (
+        "`story_arc` left the READ declaration — legacy nodes that still carry "
+        "it would stop reading back, which is the opposite defect")
+
+    proj = FalkorProjection.from_uri(
+        os.environ["TORTOISE_DB_URI"],
+        graph_name=f"test_9555_narr_doc_{uuid.uuid4().hex[:8]}")
+    try:
+        url = "docs/narrative-door.md"
+        proj._upsert_document({
+            "id": url, "title": "narrative door", "document_kind": "note",
+            "story_arc": NARRATIVE, "project": "kept-228",
+            "suppress_embedding": True,
+        })
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$u}) RETURN s.story_arc, s.project",
+            params={"u": url}).result_set
+        assert rows, "the document fold minted no :Source — the probe proved nothing"
+        arc, project = rows[0]
+        assert arc is None, (
+            "§9.1's narrative reached a `:Source` node through the DOCUMENT "
+            "fold — D1 puts it in public.session_narrative only, and a "
+            "record-sourced restore would then re-rent the RAM #10000 exists "
+            f"to stop (#10389 ISSUE 1 door 1). Got {arc!r}")
+        assert project == "kept-228", (
+            "#228's arbitrary-prop passthrough was closed along with "
+            "`story_arc` — the deny entry must be ONE key, not a blanket refusal")
+    finally:
+        proj.close()
