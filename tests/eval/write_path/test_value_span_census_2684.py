@@ -23,14 +23,14 @@ The T's per-question leg is *"the value-bearing evidence is verbatim-present"*
   ``_value_verbatim_span``, called in the SHIPPED ORDER (resolve, then stamp
   against the resolved turn). **The two stamp-side inputs are the ones
   production hands it** — content clamped to ``_MAX_CONTENT`` and the quote to
-  200 chars (``extractor_v2.py:7350`` / ``:7383``), while the resolver gets the
-  raw point (``:7488``). See ``_stamp_inputs``.
+  200 chars (``extractor_v2.py:7548`` / ``:7610``), while the resolver gets the
+  raw point (``:7740``). See ``_stamp_inputs``.
 
 ⛔ **The resolver is not optional in this census.** The receipt's
 ``source_turn_id`` is the model's ADVISORY index; the write path resolves the
 turn from the quote first and never lets a wrong model index win
-(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:7488`` →
-``:7504``). Passing the receipt field straight through measures a population
+(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:7740`` →
+``:7756``). Passing the receipt field straight through measures a population
 production never produces *and* never fires the resolver's own E3 anchor
 warning — it under-counts ``no_turn`` and over-counts ``band`` (measured: 3
 points, all ``wp06_quarry_rollout``/``narrative``, which the resolver reports
@@ -42,8 +42,8 @@ observation: it answers *"what would the shipped mechanism stamp on these
 committed points?"*. The structural reason is that the measuring harness
 persists the S2 *model* output (``tests/eval/write_path/raw_vs_narrative.py`` →
 ``ev2.run_s2(...)``), which is pre-``pt_entry``; the span is stamped later, when
-``pt_entry`` is built (``extractor_v2.py:7489-7496``, stamped at
-``:7504-7507``). It is NOT a question of
+``pt_entry`` is built (``extractor_v2.py:7741-7748``, stamped at
+``:7756-7759``). It is NOT a question of
 dates — the receipts (committed 2026-10-19, ``ecc7bc8ca8``) postdate #8659
 (``2312845b6``, 2026-10-14) — so no re-ingest through that harness can ever put
 a span key in a receipt.
@@ -199,7 +199,7 @@ def _edus(session: str) -> list[dict]:
     ``_resolve_source_turn`` — "position and value can diverge"). A hand-rolled
     copy keeps the empty turns, so its list is LONGER and the divergence lands
     on the resolver's in-range bound, ``0 <= model_idx < len(edus)``
-    (``extractor_v2.py:6888``): a model index that fell inside the hand-rolled
+    (``extractor_v2.py:7052``): a model index that fell inside the hand-rolled
     list can fall outside production's, so the resolved ``turn_idx`` differs for
     exactly those points. That flips them between ``no_turn`` (``turn_idx is
     None``) and ``band``/``valuefree_quote``, changes which warning variant an
@@ -444,7 +444,7 @@ def test_the_census_resolves_the_turn_the_way_the_write_path_does():
     """The census must not measure a population production never produces.
 
     The write path resolves the source turn from the quote BEFORE stamping
-    (``extractor_v2.py:7488`` → ``:7504``), and the receipt's
+    (``extractor_v2.py:7740`` → ``:7756``), and the receipt's
     ``source_turn_id`` is only the model's ADVISORY index. Reading that field
     straight through puts three ``wp06_quarry_rollout``/``narrative`` points on
     turns the resolver refuses (quote-overlap < 0.6), which (a) hides the
@@ -749,7 +749,7 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
 
     ⛔ Not the receipt's own ``source_turn_id``. That field is the S2 model's
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
-    answer before the point is committed (``extractor_v2.py:7488`` → ``:7495``),
+    answer before the point is committed (``extractor_v2.py:7740`` → ``:7747``),
     and ``_same_fact`` groups on the committed field
     (``retrieval.py:2403-2405``). Same defect class as §2.1's, one leg over —
     grouping by the advisory index counts pairs production never forms."""
@@ -957,7 +957,7 @@ def test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt(monkeypatc
     assert committed == {"consulted": 1, "value_flagged": 0,
                          "value_guard_decisive": 0, "collapsed": 1}, (
         f"the route did not read the COMMITTED quote: {committed} — production "
-        f"commits quote[:_MAX_QUOTE] (extractor_v2.py:7383), so the pair is a "
+        f"commits quote[:_MAX_QUOTE] (extractor_v2.py:7610), so the pair is a "
         "collapse, not a value conflict")
 
     # … and the SAME pair read the way this file used to read it, to show the
@@ -1102,18 +1102,18 @@ def _longest_quote_run(turn: str, quote: str):
 # lines reds until the numbers are re-derived, and a cite edited without
 # re-deriving reds too. That is the contract, not an inconvenience.
 _PUBLISHED_CITES = {
-    7350: ("content = _raw_content[:_MAX_CONTENT]", "the content clamp"),
-    7383: ('quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]',
+    7548: ("content = _raw_content[:_MAX_CONTENT]", "the content clamp"),
+    7610: ('quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]',
            "the quote clamp, at the point's own commit"),
-    6888: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
+    7052: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
            "the resolver's in-range bound"),
-    7488: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+    7740: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
            "the resolver call"),
-    7489: ("pt_entry = {", "the point entry the span is stamped into"),
-    7495: ('"source_turn_id": turn_idx,',
+    7741: ("pt_entry = {", "the point entry the span is stamped into"),
+    7747: ('"source_turn_id": turn_idx,',
            "the resolved turn the point COMMITS"),
-    7496: ("}", "the end of the point entry"),
-    7504: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+    7748: ("}", "the end of the point entry"),
+    7756: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
            "the stamp itself"),
 }
 
@@ -1121,7 +1121,7 @@ _PUBLISHED_CITES = {
 #: artifacts this PR adds (they disagreed about it: the index row said
 #: `:3603-3604`, which is prose INSIDE the same docstring, while the runbook said
 #: `:3613-3614`). One site, three readers — so all three are pinned together.
-_VALUE_FREE_GATE = (3613, "if not _carries_value(content, quote):")
+_VALUE_FREE_GATE = (3777, "if not _carries_value(content, quote):")
 
 
 def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
