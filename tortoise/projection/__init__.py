@@ -16647,11 +16647,20 @@ class FalkorProjection(
                     # "supersede already transferred (or collapsed) this edge LIVE,
                     # and journaled its own `DirectEdgeRepoint` descriptor for the
                     # NEW endpoint", so re-creating it here would leave a phantom at
-                    # the DEAD source. That premise is TRUE for exactly two
+                    # the DEAD source. That premise is TRUE for exactly three
                     # families: the direct IMPL/NAND edges (`sdk.supersede_point`
-                    # 2a transfers them and ALWAYS emits a repoint) and the
-                    # `DERIVABLE_STRUCTURAL_RELS` (2b's `structural_rels` loop emits
-                    # a repoint only `if derivable`).
+                    # 2a transfers them and ALWAYS emits a repoint), the
+                    # `DERIVABLE_STRUCTURAL_RELS` (2b's `structural_rels` loop
+                    # emits a repoint `if derivable`, keyed by the target's
+                    # natural key) and, since #9836, the
+                    # `ID_ADDRESSED_STRUCTURAL_RELS` (the loop's SECOND, mutually
+                    # exclusive arm — `elif rel in ID_ADDRESSED_STRUCTURAL_RELS`
+                    # — which keys the target by its own identity property). The
+                    # two structural families are disjoint and their union IS
+                    # `STRUCTURAL_REPOINT_RELS`; every other rel 2b transfers
+                    # carries no descriptor, and the one residual that leaves
+                    # (an id-addressed target whose identity property is absent)
+                    # is disclosed in the paragraph below.
                     #
                     # It is FALSE for every other rel a `DirectEdgeCreated` can now
                     # carry (the structural-edge lane's `ownedBy`/`hasPart`/

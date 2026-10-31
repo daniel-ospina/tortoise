@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -77,6 +78,8 @@ from tortoise.sdk import SUPERSEDE_STRUCTURAL_RELS, TortoiseSDK
 #: The two rels. Restated rather than imported into the assertions so a rel
 #: silently dropped from the producer's set — the defect, inverted — reds here.
 FAMILY = ("aboutAction", "wasDerivedFrom")
+
+_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture()
@@ -820,3 +823,51 @@ def test_an_event_target_keeps_its_OWN_node_across_the_rebuild(edge_sdk):
             "Event — the id-addressed arm resolved fewer nodes than live moved")
     finally:
         rebuilt.close()
+
+
+def test_the_skip_gates_own_justification_names_the_THIRD_family():
+    """The comment above `_supersede_took_this_edge`'s call is the ARGUMENT.
+
+    It is the skip gate for the `DirectEdgeCreated` fold, and its reasoning is
+    what stops the next lane from narrowing `_supersede_moved_rels()` back to the
+    derivable set: "the premise is TRUE for exactly N families" is the licence
+    for skipping the re-creation. It said **two** families and "2b's
+    `structural_rels` loop emits a repoint only `if derivable`" — the exact
+    sentence this family retires, and the opposite of the `⚠️ WAS a residual`
+    paragraph 13 lines below it in the same block. A reader who believes the
+    retired half concludes that `aboutAction`/`wasDerivedFrom` fall in "it is
+    FALSE for every other rel … 2b never touches them" and must be replayed at
+    the OLD point — the phantom-at-a-dead-point shape `E2E-11.6` forbids, i.e.
+    #9836 re-opened from the documentation.
+
+    Non-vacuity: the retired clause is present in the pre-fix source (`a repoint
+    only ``if derivable``), so this reds on it; it is pinned as PROSE on purpose —
+    the finding is that the code was right and its written argument was wrong, so
+    no behavioural leg can see it. It survived two review rounds before this pin.
+    """
+    src = (_ROOT / "tortoise/projection/__init__.py").read_text(encoding="utf-8")
+    marker = "# A SUPERSEDED endpoint OF A RELATION SUPERSEDE ACTUALLY MOVED."
+    assert marker in src, (
+        "the skip gate's argument block moved or was deleted — re-anchor this pin "
+        "on the comment that now carries the argument, do not drop it")
+    block = src[src.index(marker):]
+    block = block[:block.index("labels: dict[str, str] = {}")]
+    # The block is COMMENT WRAPPED at ~78 cols, so a phrase can straddle a line
+    # break; a raw `in` on the block is vacuous for exactly the sentence this pin
+    # exists for (measured: "emits a repoint only" is split across two lines in
+    # the pre-fix text, so the un-normalised check read GREEN on it). Join the
+    # comment bodies into one line before asking.
+    prose = " ".join(
+        ln.strip().lstrip("#").strip() for ln in block.splitlines())
+    assert "emits a repoint only" not in prose, (
+        "the justification still says 2b emits a repoint ONLY for the derivable "
+        "set — that is the sentence #9836 retires (the loop's second arm emits for "
+        "ID_ADDRESSED_STRUCTURAL_RELS), and in this block it contradicts the "
+        "`⚠️ WAS a residual` paragraph below it")
+    assert "ID_ADDRESSED_STRUCTURAL_RELS" in block, (
+        "the justification does not name the third family, so its 'premise is "
+        "TRUE for exactly N families' argument is false about the one family this "
+        "module exists for")
+    assert "STRUCTURAL_REPOINT_RELS" in block, (
+        "the block never ties the three families to the set the replay gate reads "
+        "(`STRUCTURAL_REPOINT_RELS`), which is the union it should name")
