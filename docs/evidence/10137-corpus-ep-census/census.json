@@ -1,0 +1,235 @@
+{
+  "source": "checkpoint",
+  "questions_in_run": 24,
+  "questions": 24,
+  "questions_with_ep": 24,
+  "questions_with_ep_ratio": 1.0,
+  "claim_coverage": {
+    "points_with_ep": 2696,
+    "points_unmeasured": 24912,
+    "ratio": 0.09765285424514633
+  },
+  "belief_layer": "activated",
+  "cells": {
+    "measured": 24,
+    "questions_inert": 0,
+    "questions_neutral": 0,
+    "questions_off_neutral": 24,
+    "questions_contribution_unknown": 0,
+    "operators": 1710,
+    "operators_unread": 0,
+    "factor_edges": 0,
+    "factor_edges_unread": 0,
+    "points_with_ep": 2696,
+    "points_unmeasured": 24912,
+    "points_off_neutral": 185,
+    "points_moved_off_neutral": 185,
+    "ep_ran": 24,
+    "failed": 0
+  },
+  "inert_by_reason": {},
+  "inert_questions": [],
+  "by_question_type": {
+    "knowledge-update": {
+      "questions": 4,
+      "questions_measured": 4,
+      "questions_with_ep": 4,
+      "questions_off_neutral": 4,
+      "questions_inert": 0,
+      "questions_neutral": 0,
+      "questions_contribution_unknown": 0,
+      "operators": 268,
+      "operators_unread": 0,
+      "factor_edges": 0,
+      "factor_edges_unread": 0,
+      "points_off_neutral": 29,
+      "points_off_neutral_unread": 0,
+      "points_moved_off_neutral": 29,
+      "points_moved_off_neutral_unread": 0
+    },
+    "multi-session": {
+      "questions": 4,
+      "questions_measured": 4,
+      "questions_with_ep": 4,
+      "questions_off_neutral": 4,
+      "questions_inert": 0,
+      "questions_neutral": 0,
+      "questions_contribution_unknown": 0,
+      "operators": 292,
+      "operators_unread": 0,
+      "factor_edges": 0,
+      "factor_edges_unread": 0,
+      "points_off_neutral": 34,
+      "points_off_neutral_unread": 0,
+      "points_moved_off_neutral": 34,
+      "points_moved_off_neutral_unread": 0
+    },
+    "single-session-assistant": {
+      "questions": 4,
+      "questions_measured": 4,
+      "questions_with_ep": 4,
+      "questions_off_neutral": 4,
+      "questions_inert": 0,
+      "questions_neutral": 0,
+      "questions_contribution_unknown": 0,
+      "operators": 259,
+      "operators_unread": 0,
+      "factor_edges": 0,
+      "factor_edges_unread": 0,
+      "points_off_neutral": 33,
+      "points_off_neutral_unread": 0,
+      "points_moved_off_neutral": 33,
+      "points_moved_off_neutral_unread": 0
+    },
+    "single-session-preference": {
+      "questions": 4,
+      "questions_measured": 4,
+      "questions_with_ep": 4,
+      "questions_off_neutral": 4,
+      "questions_inert": 0,
+      "questions_neutral": 0,
+      "questions_contribution_unknown": 0,
+      "operators": 320,
+      "operators_unread": 0,
+      "factor_edges": 0,
+      "factor_edges_unread": 0,
+      "points_off_neutral": 27,
+      "points_off_neutral_unread": 0,
+      "points_moved_off_neutral": 27,
+      "points_moved_off_neutral_unread": 0
+    },
+    "single-session-user": {
+      "questions": 4,
+      "questions_measured": 4,
+      "questions_with_ep": 4,
+      "questions_off_neutral": 4,
+      "questions_inert": 0,
+      "questions_neutral": 0,
+      "questions_contribution_unknown": 0,
+      "operators": 311,
+      "operators_unread": 0,
+      "factor_edges": 0,
+      "factor_edges_unread": 0,
+      "points_off_neutral": 36,
+      "points_off_neutral_unread": 0,
+      "points_moved_off_neutral": 36,
+      "points_moved_off_neutral_unread": 0
+    },
+    "temporal-reasoning": {
+      "questions": 4,
+      "questions_measured": 4,
+      "questions_with_ep": 4,
+      "questions_off_neutral": 4,
+      "questions_inert": 0,
+      "questions_neutral": 0,
+      "questions_contribution_unknown": 0,
+      "operators": 260,
+      "operators_unread": 0,
+      "factor_edges": 0,
+      "factor_edges_unread": 0,
+      "points_off_neutral": 26,
+      "points_off_neutral_unread": 0,
+      "points_moved_off_neutral": 26,
+      "points_moved_off_neutral_unread": 0
+    }
+  },
+  "errors": [],
+  "completed": [
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user"
+    },
+    {
+      "question_id": "51a45a95",
+      "question_type": "single-session-user"
+    },
+    {
+      "question_id": "e47becba",
+      "question_type": "single-session-user"
+    },
+    {
+      "question_id": "58bf7951",
+      "question_type": "single-session-user"
+    },
+    {
+      "question_id": "0a995998",
+      "question_type": "multi-session"
+    },
+    {
+      "question_id": "6d550036",
+      "question_type": "multi-session"
+    },
+    {
+      "question_id": "gpt4_59c863d7",
+      "question_type": "multi-session"
+    },
+    {
+      "question_id": "b5ef892d",
+      "question_type": "multi-session"
+    },
+    {
+      "question_id": "8a2466db",
+      "question_type": "single-session-preference"
+    },
+    {
+      "question_id": "06878be2",
+      "question_type": "single-session-preference"
+    },
+    {
+      "question_id": "75832dbd",
+      "question_type": "single-session-preference"
+    },
+    {
+      "question_id": "0edc2aef",
+      "question_type": "single-session-preference"
+    },
+    {
+      "question_id": "gpt4_59149c77",
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "question_id": "gpt4_f49edff3",
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "question_id": "71017276",
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "question_id": "b46e15ed",
+      "question_type": "temporal-reasoning"
+    },
+    {
+      "question_id": "6a1eabeb",
+      "question_type": "knowledge-update"
+    },
+    {
+      "question_id": "6aeb4375",
+      "question_type": "knowledge-update"
+    },
+    {
+      "question_id": "852ce960",
+      "question_type": "knowledge-update"
+    },
+    {
+      "question_id": "830ce83f",
+      "question_type": "knowledge-update"
+    },
+    {
+      "question_id": "7161e7e2",
+      "question_type": "single-session-assistant"
+    },
+    {
+      "question_id": "c4f10528",
+      "question_type": "single-session-assistant"
+    },
+    {
+      "question_id": "89527b6b",
+      "question_type": "single-session-assistant"
+    },
+    {
+      "question_id": "e9327a54",
+      "question_type": "single-session-assistant"
+    }
+  ]
+}
