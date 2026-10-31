@@ -91,22 +91,26 @@ def _weak_prior(tag: str) -> str:
     normalisation (``b=0.75``) pushes it below every echo in the wall.
 
     WHY padding is needed at all (#10405, #10240): the sparse leg is the BM25
-    arm, ON by default since #10240, and BM25 is a relevance ranking. Its
-    term-frequency SATURATION (``k1=1.2``) and length NORMALISATION both favour a
-    short document, so the query-twice prior this module used to seed scored
-    0.014157 and ranked FIRST of 151, ahead of every echo (11-token, query three
-    times: 0.013835; 5-token, query once: 0.011189 — token counts as the shipped
-    ``keep_numeric=False`` tokeniser sees them, which drops the bare turn index).
-    MEASURED with ``tortoise.bm25.bm25_rank`` on the ``_ECHOES`` fixture.
+    arm, ON by default since #10240, and BM25 is a relevance ranking. Its length
+    NORMALISATION (``b=0.75``) is what prices that length, so the query-twice
+    prior this module used to seed scored 0.014157 and ranked FIRST of 151, ahead
+    of every echo (11-token, query three times: 0.013835; 5-token, query once:
+    0.011189 — token counts as the shipped ``keep_numeric=False`` tokeniser sees
+    them, which drops the bare turn index). MEASURED with
+    ``tortoise.bm25.bm25_rank`` on the ``_ECHOES`` fixture. ``k1=1.2``'s
+    term-frequency SATURATION bounds how much a 3x repetition can earn, but it is
+    NOT what decides this ordering: measured with ``k1`` effectively removed
+    (1000) the query-twice prior still ranks 0 of 151, while with ``b=0`` it
+    drops to 50 of 151 — so ``b`` alone produces the inversion, and the property
+    that matters here is the padding, not the repetition.
     Diluting the prior (query once, then filler) puts it at rank 150 of 151, the
     last row — the wall outranks it on relevance, which is the shape these bounds
     are about (a prior captured earlier in the session, then the session keeps
-    talking). A prior that ranks
-    first cannot be starved by any window, so the old prior made the premise of
-    every bound below unconstructible rather than merely stale — it relied on the
-    pre-#10240 scorer ranking every row EQUAL, which is not a relevance decision
-    at all. The filler is deliberately NOT query text: it must add length, never
-    term frequency.
+    talking). A prior that ranks first cannot be starved by any window, so the
+    old prior made the premise of every bound below unconstructible rather than
+    merely stale — it relied on the pre-#10240 scorer ranking every row EQUAL,
+    which is not a relevance decision at all. The filler is deliberately NOT
+    query text: it must add length, never term frequency.
     """
     return f"{QUERY} " + " ".join(f"{tag}{i}" for i in range(40))
 
@@ -352,8 +356,10 @@ def _seed_echo_wall_production(sdk, session_id: str, prior_id: str,
 
     The rows are not tied against the shipped scorer: the sparse leg is the BM25
     arm (#10240, ON by default), so who fills the pool is decided by RELEVANCE —
-    term-frequency saturation (``k1=1.2``) and length normalisation
-    (``b=0.75``), both of which favour a short document. #10121's
+    length normalisation (``b=0.75``) is what prices the prior's padding and so
+    favours the short echo over the long prior (``k1``'s saturation caps what a
+    repetition can earn but is not what decides this ordering; see
+    ``_weak_prior``). #10121's
     recency-then-id tie decided this when every row scored alike; against a
     relevance ranking the tie never fires, so the prior that starves is the
     LEXICALLY WEAKEST row, which ``_PRIOR_TEXT`` constructs. That is the
@@ -441,6 +447,19 @@ def test_within_the_pool_the_exclusion_recovers_the_prior_in_production_shape(sd
     """
     n_echoes = _DOCUMENTED_PROD_POOL // 2
     _seed_echo_wall_production(sdk, "s1", "zz_pt_real", n_echoes)
+
+    # DISCRIMINATOR, pinned so this sibling cannot silently go vacuous the way
+    # `test_limit_applies_...` did: the docstring's claim "if the seam were
+    # broken, this test would fail too" holds ONLY while the prior ranks outside
+    # the unfiltered page. If a future fixture change put it back inside, both
+    # assertions below would pass against an after-the-cut filter and nothing
+    # would red — so state the requirement instead of leaving it implicit.
+    unfiltered = _ids(sdk.tortoise_fts_query(
+        QUERY, entity_type="point", limit=_OLD_LIMIT))
+    assert unfiltered, "fixture invalid: the unfiltered page is empty"
+    assert not set(unfiltered) & {"zz_pt_real"}, (
+        "fixture invalid: the prior must NOT be in the unfiltered page, or an "
+        f"after-the-cut filter would pass too — page={unfiltered}")
 
     rows = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT,
