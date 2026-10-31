@@ -506,8 +506,9 @@ mechanisms:
       cannot pass by vacancy — measured before that test: appending the rule to
       `_render_master_verbose`, the DEFAULT render, shipped a second copy of one
       instruction inside one prompt with every gate green); and — since `#9775` —
-      the carve-out and its vocabulary PRESENT, whole, on every render path and
-      through both dispatch entry points, by
+      the carve-out PRESENT, whole, on every render path, its vocabulary on both
+      master renders (S1 renders granularity, never the master list), and through
+      both dispatch entry points, by
       `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires`,
       exercised over three story shapes (matched, `None`, unmatched) precisely
       because a carve-out appended INSIDE the story gate passes the matched case
