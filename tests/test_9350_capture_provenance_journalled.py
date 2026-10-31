@@ -28,7 +28,7 @@ What this suite pins:
 * the hosted twin (`hosted_api._capture_session_impl`) does the same — the two
   lanes are byte-parity on these fields.
 
-⚠️ **FOUR LEGS THIS SUITE USED TO HAVE WENT WITH `TortoiseSDK.capture_session`
+⚠️ **SIX LEGS THIS SUITE USED TO HAVE WENT WITH `TortoiseSDK.capture_session`
 (#4282, 2026-10-27), and the loss is stated here because they pinned the two
 properties that make the lane declaration HONEST.** Deleted: the armed-handle
 read-back (`test_the_stamp_is_authorized_by_its_own_lane_under_an_armed_handle`),

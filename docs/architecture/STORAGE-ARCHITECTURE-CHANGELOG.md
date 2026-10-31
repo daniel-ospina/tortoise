@@ -875,7 +875,7 @@ deliberately rather than discovered later:
   `is_episodic` is the `#1486` discriminator), but it IS a behaviour change on
   that lane, and it is pinned rather than disclosed-away.
 
-**What now prevents a repeat.** `tests/test_8501_capture_path_anchor.py` — the
+**What now prevents a repeat.** `tests/test_8501_capture_path_anchor.py` (**deleted by #4282 — it drove `TortoiseSDK.capture_session`, one of the 26 dead public SDK methods; the anchor invariant now has NO pin, see §17 and the #4282 note in `STORAGE-ARCHITECTURE.md`**) — the
 anchor must be non-NULL, equal to the Source's stored `contentHash`, and present
 in the Point's own journaled `sourceVersionTransit`; it must survive a
 destructive `rebuild_all()`; a re-capture must neither advance nor drop it; the
@@ -952,7 +952,7 @@ still false. The review is the reason the count below moved in the direction tha
   `TortoiseSDK._state_related_objects` / `_state_related_points` (`sdk.py`, no line hint — it
   builds `"MATCH (n)-[a:" + self._ABOUT_TYPES + "]…"`, and the numbers this entry originally
   shipped with were already wrong by a few lines when written), `supersede_point`
-  (`sdk.py:12263`) and `_preview_supersede` (`mcp_server.py:6804`), both looping over
+  (`sdk.py::TortoiseSDK.supersede_point`) and `_preview_supersede` (`mcp_server.py:6804`), both looping over
   `SUPERSEDE_STRUCTURAL_RELS`.
   Worse, the table and the census **agreed perfectly** on the 13 sites the literal scan could see,
   and that agreement was circular: both were blind in the same place. Adding rows alone would have

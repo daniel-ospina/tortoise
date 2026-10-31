@@ -7,8 +7,8 @@
 # <testcase> (passed OR skipped) or the run reds, naming the one that
 # vanished. Supersets are fine — new marked tests need no edit.
 #
-# WHAT IS IN THE 72 ENTRIES — two kinds, and they assert different things:
-#   * 37 are real test nodeids (`path::test_name`): that test is still COLLECTED.
+# WHAT IS IN THE 71 ENTRIES — two kinds, and they assert different things:
+#   * 36 are real test nodeids (`path::test_name`): that test is still COLLECTED.
 #   * 35 are module-level collection-abort markers, spelled `path::dotted.module`
 #     (pytest's synthetic <testcase> with an empty classname). Each pins that the
 #     module STILL ABORTS AT COLLECTION in this lane. THREE gate families produce
@@ -34,12 +34,14 @@
 #   by class (their skip IS their expected state), so only a real test counts
 #   against the budget.
 #
-# PROVENANCE (regenerate, never hand-edit): the 72 entries are the junitxml
+# PROVENANCE (regenerate, never hand-edit): the 71 entries are the junitxml
 # <testcase> set of CI run 35518962357 (head fd23a4033), job
 # test-d14-hosted-api, artifact junit-d14.xml, with its single
 # `test_onboarding_state_split.py` marker REPLACED BY the four
 # `test_onboarding_state_split_*` markers #6133 added (they postdate that run,
-# so 72 = the run's 69, minus that one marker, plus these four). Restore the
+# so 71 = the run's 69, minus that one marker, plus these four, minus the
+# `test_lme_m6_evidence.py::test_session_id_written_by_sdk_capture_path` entry
+# #4282 deleted with the SDK capture door it drove). Restore the
 # single marker once a d14 run has regenerated this file. Reconstructed with
 # tools/skip-guard.py's own `reconstruct_nodeid`, so the spelling cannot diverge
 # from what the guard compares against.

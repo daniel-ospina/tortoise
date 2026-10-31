@@ -1539,12 +1539,15 @@ def test_apply_supersessions_prefers_id_match_over_same_string_name(sdk):
 # ── #2164 Task 7: indicator 5 (helper-routed) — the shared helper's OWN
 #    terminal rules for OUT-OF-BAND records (journal replay, hosted §6b
 #    reconcile re-runs, direct calls). Real capture can never reach these
-#    branches: S3's terminal exclusion kills record formation at the SOURCE
-#    (pinned by test_chain_pin_and_no_double_fold in
-#    tests/test_capture_session_supersession_e2e.py — re-capture is
-#    byte-unchanged). These tests pin the helper's defense-in-depth for
-#    records that arrive WITHOUT a capture: same successor → silent dedup;
-#    divergent successor → warn + keep-first (never blind-overwrite). ──────
+#    branches: S3's terminal exclusion kills record formation at the SOURCE.
+#    ⚠️ The pin that said so (`test_chain_pin_and_no_double_fold` in
+#    `tests/test_capture_session_supersession_e2e.py`) was deleted WHOLE by
+#    #4282 — the file drove `TortoiseSDK.capture_session`, one of the 26 dead
+#    public methods — so "re-capture is byte-unchanged" is now an unpinned
+#    claim, not a fact this tree can check. The tests below pin the helper's
+#    defense-in-depth for records that arrive WITHOUT a capture: same
+#    successor → silent dedup; divergent successor → warn + keep-first (never
+#    blind-overwrite). ──────
 
 def _entity_fold_state(proj, name: str) -> tuple | None:
     """(status, supersededBy) of one Object — None when absent."""
@@ -1571,12 +1574,12 @@ def test_apply_supersessions_same_payload_idempotent(sdk):
     ObjectSuperseded event); the SECOND call is a SILENT no-op (applied=0 —
     the same-successor terminal branch: A's supersededBy already equals the
     record's successor): no second fold, no second journal line, NO new
-    warning. This branch can never fire through real capture (S3 excludes
-    terminal Objects, so record formation dies at the source — see
-    test_chain_pin_and_no_double_fold in
-    tests/test_capture_session_supersession_e2e.py for the source-side
-    pin); this test pins the helper's own defense-in-depth for the
-    out-of-band path.
+    warning. This branch cannot fire through real capture (S3 excludes
+    terminal Objects, so record formation dies at the source). The source-side
+    pin for that (`test_chain_pin_and_no_double_fold`) went with
+    `tests/test_capture_session_supersession_e2e.py` when #4282 deleted the SDK
+    capture door; this test pins the helper's own defense-in-depth for the
+    out-of-band path, which is the half that survives.
 
     Absorbents (the full dedup stack, capture→commit): (1) reconcile-merge
     delta-0 — a re-reconcile whose payload has no diff produces no

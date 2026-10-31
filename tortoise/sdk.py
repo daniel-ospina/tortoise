@@ -2740,11 +2740,11 @@ def _write_capture_turns(
 ) -> int:
     """Write a capture's episodic turn stream — to the RECORD when it can hold it (#10000).
 
-    The ONE turn store, called by ``_write_session_and_turns`` — which BOTH
-    capture lanes call: ``TortoiseSDK.capture_session`` (sync, no loop to free)
-    and hosted ``_capture_session_impl`` (off the event loop, on
-    ``_CAPTURE_EXECUTOR``). It replaces the per-turn loop the two lanes each
-    kept, so the turn store can no longer fork.
+    The ONE turn store, called by ``_write_session_and_turns``, which the hosted
+    capture lane calls (``_capture_session_impl``, off the event loop, on
+    ``_CAPTURE_EXECUTOR``). It was the shared turn store for BOTH lanes — the
+    SDK one went with #4282 — and it replaces the per-turn loop each lane kept,
+    so the turn store cannot fork again if a second lane returns.
 
     ``turn_embs`` must be the batch from ``_capture_turn_embeddings`` over
     ``_capture_turn_texts(windowed)``. The stored text is the caller-supplied
@@ -3386,10 +3386,12 @@ def _write_session_and_turns(
 ) -> dict:
     """The ONE shared Session + turn store writer (#3551).
 
-    Called from BOTH capture lanes: ``TortoiseSDK.capture_session`` (sync, no
-    loop to free) and hosted ``_capture_session_impl`` (off the event loop, on
-    ``_CAPTURE_EXECUTOR``). It owns everything the two lanes used to keep
-    BYTE-IDENTICAL COPIES of and could therefore drift on:
+    Called from the hosted capture lane, ``_capture_session_impl`` (off the
+    event loop, on ``_CAPTURE_EXECUTOR``). It was written for TWO lanes —
+    ``TortoiseSDK.capture_session`` was the other, until #4282 deleted that
+    public method — and the single-writer property is what stops the two from
+    drifting, so the hosted lane keeps the whole contract. It owns everything
+    the two lanes used to keep BYTE-IDENTICAL COPIES of:
 
       * the ``:Session`` MERGE field list (``created_at``/``turn_count``/
         ``is_episodic`` + the conditional ``harness``/``capture_lane``/
@@ -7407,8 +7409,11 @@ def _index_no_network_enabled() -> bool:
 def _holds_role_available(graph) -> bool:
     """True when this graph can carry ``holdsRole`` edges at all (#4889).
 
-    ``get_org_structure`` returns ``roles`` from a ``holdsRole`` traversal
-    whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``. That predicate has
+    ``get_org_structure`` (DELETED by #4282) returned ``roles`` from a
+    ``holdsRole`` traversal whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``.
+    The reason string this probe produces outlived its reader — it is still
+    returned by the traversal helpers below — so the explanation is kept, in the
+    past tense. That predicate has
     **no producer anywhere in the tree** — every reference is an edge
     allow-list, the read query itself, or an explicit
     ``create_edge``/``create_entity`` caller. On a graph where it is absent the
@@ -7460,8 +7465,9 @@ _HOLDS_ROLE_SCOPED_PROBE = (
 _HOLDS_ROLE_PROBE_TIMEOUT_MS = 200
 
 
-#: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returns
-#: when the ``holdsRole`` leg has no producer on this graph.
+#: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returned
+#: when the ``holdsRole`` leg has no producer on this graph. (#4282 deleted that
+#: method; the string is still produced by the traversal helpers, so it stays.)
 HOLDS_ROLE_UNAVAILABLE = (
     "holdsRole has no producer anywhere in the tree — only an explicit "
     "create_edge/create_entity caller — so 'roles' is structurally empty "
@@ -8195,6 +8201,7 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     Called from EVERY caller-facing row-returning read path that has a known
     LABEL. The named set is carried by §17.4.6, not duplicated here — a case
     where it was duplicated: this docstring once named only `query()`,
+    `traverse()` (since deleted by #4282),
     `paginated_query()` and `query_points_by_tag()` while omitting six callers
     that were already here. An audit surface that under-reports its own call
     sites invites a second hook at one of them, which would record a candidate
@@ -11718,7 +11725,8 @@ class TortoiseSDK:
         landed), "mode" is "empty" | "error" | "llm", and a completed
         run with zero points is an additive warning, never a silent 0.
 
-        Shared by the hosted copy so the two capture_session loops stay in
+        Shared with the hosted copy (the only capture lane left after #4282
+        deleted ``TortoiseSDK.capture_session``) so the extraction loops stay in
         sync — the regex decision/claim loop is removed as a product path
         and no-key SKIPS EXTRACTION (the caller short-circuits with
         extraction_mode "no-provider" before reaching here, #3892).
@@ -12984,9 +12992,12 @@ class TortoiseSDK:
         # `sourceKind`, `title=url`, `canonicalUrl`, `urlAliases`, empty
         # `contentHash`, `ingestedAt` (`projection/edges.py::_mint_source_stub`
         # is the replay-shared twin of this shape) — and the SET clauses then
-        # upgrade it. Running earlier must not change the node a capture lands:
-        # `test_capture_path_source_shape_is_unchanged_by_the_early_materialization`
-        # pins the resulting property set against the pre-#8501 shape.
+        # upgrade it. Running earlier must not change the node a capture lands —
+        # the claim `test_capture_path_source_shape_is_unchanged_by_the_early_materialization`
+        # used to pin against the pre-#8501 shape, until #4282 deleted
+        # `tests/test_8501_capture_path_anchor.py` whole with the SDK capture
+        # door. NOTHING in the tree pins that property set now; a caller reading
+        # this comment should treat the invariance as asserted, not verified.
         from .projection.edges import _mint_source_stub
         # `now` is the CAPTURE's instant, not a fresh clock read: for a capture
         # that mints no Point this is the only writer of `ingestedAt` on the arm
@@ -32506,7 +32517,8 @@ class TortoiseSDK:
             rather than assume one entry per leg. #2952: combine with
             :func:`tortoise.search_engine.declared_degraded_read` (declare the
             single-leg read) or :func:`tortoise.search_engine.require_hybrid_read`
-            (fail loud) — see also :meth:`retrieval_legs`.
+            (fail loud). See also ``retrieval_legs`` — DELETED by #4282; the
+            leg breakdown it returned is not on the public surface any more.
         read_status_out (B6 #3892): the read-path status contract — when
             provided, the dict receives ``{"status": <term>}`` with ONE of the
             four recorded terms (``tortoise.status_vocabulary``, consumed by
@@ -37503,7 +37515,12 @@ class TortoiseSDK:
 
     def _index_resolve_corpus_root(self, file_path: str, corpus_root: str | None,
                                    corpus_name: str | None) -> tuple:
-        """§6.1 I6 pin: index_file's corpus_root default resolution.
+        """§6.1 I6 pin: the corpus_root default resolution ``index_file`` used.
+
+        ⚠️ ``index_file``/``index_directory`` are among the 26 SDK methods #4282
+        deleted, and this helper is one of the three that lost its caller (it is
+        kept for the pinned resolution contract and its own tests, not as live
+        surface).
 
         Explicit param → realpath-resolved. Else the nearest ancestor of the
         file that equals TORTOISE_INGEST_BASE_DIR; else ValueError demanding
@@ -37531,12 +37548,12 @@ class TortoiseSDK:
                     break
                 p = parent
             raise ValueError(
-                f"index_file: file {file_path!r} is not under "
+                f"corpus root: file {file_path!r} is not under "
                 f"TORTOISE_INGEST_BASE_DIR ({base_real}) and no corpus_root "
                 f"was given — pass corpus_root explicitly (§6.1 I6)."
             )
         raise ValueError(
-            f"index_file: corpus_root required — TORTOISE_INGEST_BASE_DIR is "  # noqa: F541
+            f"corpus root: corpus_root required — TORTOISE_INGEST_BASE_DIR is "  # noqa: F541
             f"unset and no corpus_root was given (§6.1 I6)."  # noqa: F541
         )
 
@@ -37654,7 +37671,9 @@ class TortoiseSDK:
                             election_owner, single_file: bool) -> dict:
         """The per-file unit op — the whole W1 pipeline for ONE file.
 
-        Returns a per-file result dict consumed by index_file/index_directory:
+        Returns a per-file result dict that was consumed by
+        ``index_file``/``index_directory`` (both DELETED by #4282; those names
+        are the public entry points this pipeline used to hang off):
         {status, reason?, retryable?, url?, eventId?, documentId?, sourceKind?,
          skipped_reason?, error? (errors[] entry), keyed? (fast-skip
          eligibility), fast_skip_key? (dict), db_failure?, db_reason?}

@@ -274,7 +274,6 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # (documented divergence): the redirect honors test_* verbatim, collapsing
     # every test in a file onto ONE server graph (77 URI failures).
     "test_index_surfacing.py": {"e2e-900": "redirect-derived per-path"},
-    "test_backfill_sources.py": {"e2e-900": "redirect-derived per-path"},
     "test_index_restore.py": {"e2e-900": "redirect-derived per-path"},
     "test_index_directory.py": {"e2e-900": "redirect-derived per-path"},
     # #5137 landed this fixture without a route, which reds this guard on main.
