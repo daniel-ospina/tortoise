@@ -17643,6 +17643,128 @@ class TortoiseSDK:
         for row in edges_result.result_set:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
+        # ── #10195: the 2a OPERATOR re-point's override pre-flight (#2351) ──
+        # The 2a arm below re-points every ``(op:Point {is_operator:true})
+        # -[IMPL|NAND {idx}]->(old)`` edge onto the successor with a raw edge
+        # MERGE + delete, without ever consulting the claim classes of the
+        # operator's OTHER inputs — so a supersede could mint the
+        # ``derived --IMPL--> asserted`` factor ``create_operator`` refuses
+        # (the same defect class as #9727's direct-edge arm, a distinct door).
+        #
+        # Operator SLOT POSITION is what the door reads: ``inputs[0]`` is the
+        # factor's SOURCE slot and the rest are targets, so replacing an input
+        # can move a claim ACROSS the class boundary in either direction — the
+        # predecessor may be a target whose successor is authored, or the
+        # predecessor may BE the source slot. So the question is asked of the
+        # REBUILT layout (old substituted by new, slots in idx order), not of a
+        # diff against the pre-supersede layout: a diff would let exactly that
+        # pre-existing violation ride through into a fresh node, and the door's
+        # job is "may the graph hold this wiring after the write".
+        #
+        # ⛔ ONE predicate: ``claim_class.direction_blocks_create``, the same
+        # one ``create_operator`` / ``create_direct_edge`` / ``ingest``'s
+        # partial-absorb branch use, fed the operator's stored direction
+        # canonicalized with ``_canonical_direction`` (absent is NOT the mutual
+        # default for NAND — the #2351-review lesson the ingest door records).
+        # A second copy of "may this edge exist" would be a finding of its own.
+        #
+        # Skipped, deliberately (the issue's scope): ``hasPart`` and the other
+        # non-``IMPL|NAND`` rel types are not epistemic cascades (no belief
+        # transfers, so the override rule does not apply), and an operator
+        # labelled ``alreadyDecided`` is NOT re-pointed at all (the #1080
+        # carve-out in 2a), so its slots do not move.
+        #
+        # ORDER: collected + judged HERE, beside the #329 edge-type validation
+        # and BEFORE the ``PointSuperseded`` append and every other mutation — a
+        # refusal that lands after the transfer is the #329/#4021
+        # partial-mutation defect no matter how good its message is.
+        _repoint_ops: dict[str, str] = {}
+        for row in edges_result.result_set:
+            if row[1] in ("IMPL", "NAND") and row[3] != "alreadyDecided":
+                _repoint_ops.setdefault(row[0], row[1])
+        if _repoint_ops:
+            # ONE statement for every affected operator's slots. ``op.op_type``
+            # / ``op.direction`` are the node's own record; ``sr.idx`` is the
+            # slot position EP reads (``ORDER BY coalesce(r.idx, 0)``).
+            # ⛔ ``WITH op`` between the predicate and the following MATCH is
+            # load-bearing, not style: on the canonical engine a variable
+            # filtered in one clause and re-bound by a LATER clause has its
+            # predicate DROPPED, so the slot rows would come back for OTHER
+            # operators' points (#6976; ``test_no_query_loses_its_id_predicate``).
+            _slot_rows = proj.g.query(
+                "MATCH (op:Point) WHERE op.id IN $op_ids "
+                "AND coalesce(op.is_operator, false) = true "
+                "WITH op "
+                "MATCH (op)-[sr:IMPL|NAND]->(inp) "
+                "RETURN op.id, op.op_type, op.direction, sr.idx, inp.id",
+                params={"op_ids": sorted(_repoint_ops)},
+            ).result_set
+            _slot_map: dict[str, list] = {}
+            _op_meta: dict[str, tuple] = {}
+            for _srow in _slot_rows:
+                _sid, _sop_type = _srow[0], _srow[1]
+                _sdir, _sidx, _sinp = _srow[2], _srow[3], _srow[4]
+                _op_meta.setdefault(_sid, (_sop_type, _sdir))
+                _slot_map.setdefault(_sid, []).append((_sidx, _sinp))
+            for _oid in sorted(_repoint_ops):
+                _srows = _slot_map.get(_oid) or []
+                # An UNPROVABLE layout is not judged. A slot edge carrying no
+                # ``idx`` (legacy/migrated operator), one ``idx`` that is not an
+                # ``int`` (a schemaless graph accepts ``r.idx='1'`` from any
+                # hand/foreign writer, and the keys are sorted below), or one
+                # ``idx`` carried by two different inputs, means position 0 is
+                # not provably the SOURCE — and EP's backstop stands down on
+                # exactly that evidence (``op_idx_known``, #943-review). A door
+                # refusing a shape the load side keeps is the divergence this
+                # module warns against, so the same evidence silences both. The
+                # type leg is part of the SAME stand-down, not a separate rule:
+                # ``sorted({0: …, '1': …})`` raises ``TypeError`` and would turn
+                # "cannot prove it" into a traceback that aborts a supersede
+                # this guard is not even about.
+                if not _srows or any(
+                        not isinstance(_sidx, int) for _sidx, _ in _srows):
+                    continue
+                _rebuilt: dict[int, set] = {}
+                for _sidx, _sinp in _srows:
+                    _rebuilt.setdefault(_sidx, set()).add(
+                        new_id if _sinp == old_id else _sinp)
+                if any(len(_ids) > 1 for _ids in _rebuilt.values()):
+                    continue
+                _slot_ids = [next(iter(_rebuilt[_i])) for _i in sorted(_rebuilt)]
+                _slot_source, _slot_targets = _slot_ids[0], _slot_ids[1:]
+                if not _slot_targets:
+                    continue  # a unary factor overrides nobody
+                # The slots are judged AS WRITTEN — every input, in idx order —
+                # which is how ``create_operator`` reads a caller's request. EP's
+                # load side additionally strips draft/terminal inputs and takes
+                # the first SURVIVING one as the source, but that is a reading of
+                # a factor after the fact, not the wiring the caller asked to
+                # write: a draft input can be promoted later, and the factor is
+                # then exactly the one this door refuses.
+                # ⛔ ``classes_for_ids`` is ``:Point``-anchored: an id ABSENT
+                # from it is not a claim at all (:Subject/:Object/:Event —
+                # #7902), and its absence must not read as the ASSERTED
+                # default. Same parity as the ingest partial-absorb door.
+                _slot_classes = _claim_class.classes_for_ids(proj.g, _slot_ids)
+                _slot_target_classes = set().union(
+                    *(_slot_classes.get(_t, set()) for _t in _slot_targets))
+                _node_op_type, _node_dir = _op_meta.get(_oid, (None, None))
+                # A node with no ``op_type`` is pre-v3.6 legacy; the rel type
+                # that carried it into this set IS its mechanism then.
+                _op_type = _node_op_type or _repoint_ops[_oid]
+                if (_op_type in ("IMPL", "NAND")
+                        and _slot_source in _slot_classes
+                        and _slot_target_classes
+                        and _claim_class.direction_blocks_create(
+                            self._canonical_direction(_op_type, _node_dir),
+                            _slot_classes.get(_slot_source),
+                            _slot_target_classes)):
+                    raise ValueError(_claim_class.repoint_refusal(
+                        operator_id=_oid, op_type=_op_type,
+                        old_id=old_id, new_id=new_id,
+                        source_id=_slot_source,
+                        target_ids=_slot_targets))
+
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
         # before validation produced phantoms on corrupt-edge data).
