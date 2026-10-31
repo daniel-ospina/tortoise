@@ -763,7 +763,11 @@ class _LegScript:
         self.outcomes = list(outcomes)
         self.calls = 0
 
-    def query(self, cypher, params=None, timeout=None):  # noqa: ARG002
+    # No ARG002 suppression here (#10375): `ARG` is not in `[tool.ruff.lint] select`, so a
+    # suppression naming it matches nothing and RUF100 — which IS selected — reds the
+    # directive itself. The unused params are the stub signature this pins, and no
+    # selected rule objects to them.
+    def query(self, cypher, params=None, timeout=None):
         out = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
         self.calls += 1
         if isinstance(out, BaseException):
