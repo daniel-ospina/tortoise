@@ -1608,35 +1608,6 @@ which is the same GUARD (the same test) whose other arm moved §13's issue map o
 
 **2026-10-27 — `#9417`.** `sdk.supersede_point` stopped being a declared false positive: its structural transfer now carries the old edge's properties (`ON CREATE SET nr += $attrs`), so an `about*` edge keeps the binder's `confidence`. **Review round 2 corrected the form:** a bare `SET nr += $attrs` overwrites per key, so on the COMMON restatement path — where the successor already holds its own binding to the same subject — the RETIRED point's value replaced the successor's live one (measured 0.91 -> 0.42, unrecoverable: the repoint descriptor carries no `attrs`). `ON CREATE` states the precedence the pre-`#9417` bare `MERGE` already had: the successor's own value wins. The dead `source_version` whitelist entry went with it — the graph writes the anchor as `sourceVersion` (`projection/edges.py:504`), so the entry could never match and only implied a carry that never happened. The census composition is therefore **2 originating + 4 re-materializing** (6 writers: 3 NAMED + 3 MAP) with **one** declared false positive (`projection._rebuild_all_replay`). The REBUILD half is still bare — `#10139`.
 
-## §9.1's carrier paragraph — the design stayed, the delivery state left (`#10067`, 2026-10-29)
-
-The rule in §9.1 is unchanged: the transcript lives outside the graph, the CAPABILITY decides which
-store holds a capture's turns, and where the record holds them the graph keeps no turn node. What
-moved here is the paragraph that said **where that rule stood** — the `✅ … has landed (#10067)`
-stamp, the "instead of" / "stops re-creating" narration, the named residuals' issue state, and the
-pointer at a `log.py` note deferring the torn-tail classification to step 7. Issue state and the
-narrative of what changed belong in this file (#8542); §9.1 states the rule they settled on.
-
-What the design document now says in that place, as design: the carrier states its turn rows itself
-(`_turns_statements`, one `public.point` row per snapshot at `cache_tier = 'record_only'`, the tier
-from the record TYPE's declaration and never from a payload), its graph fold is nothing
-(`_NO_PROJECTION_FOLD`) so a `rebuild()` replay cannot re-create turns the graph does not hold, and
-the three consequences (a) the `:GraphEvent` feed keeps every row via payload-only emissions, (b) the
-stale-turn sweep keeps the `PointRetracted` subscriber row paired with its `EntityMutated` op=delete
-(`#3300`), (c) a tenant that cannot be NAMED takes nothing. The two residuals — a record write refused
-after the decision (`#10021`), and a torn carrier tail (`#10017`) — are stated as design gaps with
-their owners, without their issue state.
-
-Why it left: the class guard
-(`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
-is red on this PR's own head with both lines named — `STORAGE-ARCHITECTURE.md:525` on the delivery
-arm (`has landed`) and `:527` on an issue-state word adjacent to a `#NNN` (`still OPEN`) — which is
-required CI, so the PR cannot merge while the design document narrates delivery.
-
-The evidence for the design statements themselves lives in the PR and in the producer's own pin
-(`tests/test_10017_record_carrier.py` §7): a record-armed capture journals one carrier and no
-per-turn `PointAdded`, its plan writes both turn rows at `record_only`, and `recover_from_log` over
-that journal materialises the `:Session` and no turn node.
 **2026-10-27 — `#10149`: the census pins CLAIMS, and §13.8 q2's pre-`#9417` sentence went with it.** The
 `aboutObject` census compared the documents' NUMERALS to its tables (`"6 writers"`, `"2 ORIGINATING"`,
 `"one declared false positive"`) and never the sentences around them, so a section could state the
@@ -1786,3 +1757,58 @@ reproduce the measured 0.91 → 0.42 destruction). `sourceVersion` stays uncarri
 fold drops it too — so the two routes agree by both losing that anchor rather than the record keeping
 an attribute the graph does not have. Pinned by
 `tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.
+
+## §9.1's carrier paragraph — the design stayed, the delivery state left (`#10067`, 2026-10-29)
+
+The rule in §9.1 is unchanged: the transcript lives outside the graph, the CAPABILITY decides which
+store holds a capture's turns, and where the record holds them the graph keeps no turn node. What
+left §9.1 with step 7 (`#10017`'s carrier, landed as `#10076`; the type declared by `#10129`) is the
+paragraph that said **where that rule stood** — the delivery stamp, the "instead of" / "stops
+re-creating" narration, the named residuals' issue state, and the pointer at a `log.py` note
+deferring the torn-tail classification. Issue state and the narrative of what changed belong in this
+file (`#8542`); §9.1 states the rule they settled on. This entry is the record of that move, kept
+next to the paragraph's subject rather than in the design documents.
+
+What the design document now says in that place, as design:
+
+- **The row.** The carrier states its turn rows itself — `_turn_row_statements`
+  (`tortoise/record_projection.py:3901`), one `public.point` row per snapshot at
+  `cache_tier = 'record_only'`, the tier from the record TYPE's declaration and never from a payload.
+  Doing it in the PROJECTION rather than at the writer is what keeps `record == replay(journal)`:
+  the live write and a record rebuilt from the same journal run the same statement.
+- **The fold.** The carrier's graph fold is nothing (`_NO_PROJECTION_FOLD`,
+  `tortoise/projection/__init__.py:7492`), so neither replay engine can re-create a turn the graph
+  deliberately does not hold — the `#3316` RESURRECTION class, refused at the declaration.
+- **The change feed.** The carrier is deliberately NOT in `sdk._GRAPH_EVENT_TYPES`, so an armed
+  capture's turns leave `poll_events`: a `:GraphEvent` for a turn the writer deliberately skipped
+  would advertise an entity the graph does not have. The capture sweep's `PointRetracted` row is
+  suppressed on the same lane for the same reason (decided on `#10325`), and that asymmetry — a
+  pre-change turn's creation row with no matching retraction — is accepted rather than repaired by
+  re-announcing turns. The `EntityMutated` op=delete record the replay folds is kept, so a shorter
+  re-capture is durable even though the feed is one-sided.
+- **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:204`, step 7's settled answer
+  to `#10129`'s placeholder): `_emit_event` returns on an append failure BEFORE the record write, so
+  that capture's rows reached the record either way and refusing the tail would cost the whole
+  journal while recovering nothing. The R1 removal record (`EntityMutated` op=delete) stays REFUSED,
+  because a tolerated torn delete is a resurrection.
+- **The tenant.** The store decision asks the tenant the SEAM will file under, not the ambient one:
+  `record_tenant_effective` (`tortoise/record_writer.py:842`) is **carried > scope > env pair**, and
+  `is_usable_tenant` (`tortoise/record_writer.py:875`) is the seam's own admissibility test, so the
+  decision that picks the store and the write that fills it cannot disagree about who the row
+  belongs to. A write the record cannot attribute keeps the turns in the graph, and a scratch buffer
+  is not a journal.
+
+Why it left: the class guard
+(`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`)
+refuses, in the design documents, an issue-state claim adjacent to a `#NNN`, the narration of a
+change, and delivery spoken as delivery. A delivery stamp and a residual stated with its issue's
+state are exactly those shapes, so the record belongs here and §9.1 keeps only the rule.
+
+The pins for the statements above are the carrier's own:
+`tests/test_10017_turn_carrier_replay.py::test_the_record_held_lane_journals_the_carrier_not_point_added`,
+`test_the_record_writes_one_ROW_per_turn_and_the_tier_goes_to_the_COLUMN`,
+`test_a_rebuild_from_the_carrier_journal_creates_no_turn_nodes`, the torn-tail arm
+`test_a_torn_tail_carrying_the_carrier_does_not_block_recovery`, and — for the tenant resolution that
+the store decision depends on — the capability arms in `tests/test_10000_turns_record_only.py`
+(a tenant CARRIED on the SDK arms the record-only lane; a tenant that cannot be named, and a scratch
+log, keep the turns in the graph).
