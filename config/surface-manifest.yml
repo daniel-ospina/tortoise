@@ -241,7 +241,7 @@ response_fields:
   unchanged_when_off: yes — absent when no covering candidate has an unknown end
 - response: tortoise_traverse
   field: idx
-  emitted_when: always, on every hop in nodes[] — the traversed edge's idx, same value sdk:traverse returns (#6101)
+  emitted_when: always, on every hop in nodes[] — the traversed edge's idx (the value the #4282-deleted `sdk:traverse` used to return; the surviving SDK walk is `explore_connections`) (#6101)
   unchanged_when_off: n/a — not flag-gated; additive key on each nodes[] entry, present (null where the edge carries
     no idx), and node/relationship/depth are unchanged
 - response: tortoise_entity_profile

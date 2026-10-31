@@ -5,8 +5,9 @@ Lazy-opens on first call. Returns structured dicts, never raw FalkorDB result se
 
 Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
 referenced in the builder capability catalog (onboarding) — catalog module
-'Session recorder' (``TortoiseSDK.capture_session`` is the SDK recorder
-facade) — tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename
+'Session recorder' (``TortoiseSDK.capture_session`` WAS the SDK recorder
+facade — DELETED by #4282, so the catalog entry's module reference is now the
+hosted lane) — tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename
 an extractor/indexer, update the catalog reference.
 
 ⛔ SURFACE APPROVAL MANDATE (#4282, owner ruling)
@@ -762,7 +763,8 @@ INGEST_PROMOTION_POLICIES = ("gated", "auto")
 # extraction is the DEFAULT (and only) capture extraction. These helpers build
 # the M2 two-stage LLMExtractor (tortoise/extractor.py) from the configured
 # provider and run it over a conversation; both hosted_api.capture_session and
-# TortoiseSDK.capture_session consume them so the two copies stay in sync.
+# TortoiseSDK.capture_session consumed them so the two copies stayed in sync — the
+# SDK half was DELETED by #4282, so the hosted lane is the only consumer now.
 
 # Provider priority when MULTIPLE keys are set (first configured wins — the
 # deploy-time decision is which key is present; a key is only ever sent to the
@@ -847,8 +849,10 @@ def _journal_write_failure_warning(count: int) -> str:
 #: the NON-convergent M2 lane. The re-attempt is refused (re-running M2 could
 #: mint duplicate claims), so the re-capture replays — said OUT LOUD, because
 #: "already captured" would be a false statement of this state and the remedy
-#: is one env var away. Shared by ``sdk.capture_session`` and the hosted
-#: capture lane so the two surfaces disclose the SAME state in the SAME words.
+#: is one env var away. Was shared by ``sdk.capture_session`` and the hosted
+#: capture lane so the two surfaces disclosed the SAME state in the SAME words;
+#: the SDK half was DELETED by #4282 and the string is kept because the hosted
+#: lane still emits it.
 _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING = (
     "this session's turns were stored WITHOUT a provider key and no "
     "extraction has ever run for it; extraction was NOT re-attempted "
@@ -6803,9 +6807,10 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
 
     Fail-open (P1 #1529 posture): a promotion or EP hiccup never fails a
     committed capture — every failure surfaces as an additive warning via
-    ``warn`` (never a raise after partial writes). Shared by
+    ``warn`` (never a raise after partial writes). Was shared by
     ``sdk.capture_session`` and hosted ``_capture_session_impl`` so the two
-    capture surfaces can never drift (byte-parity).
+    capture surfaces could never drift (byte-parity); the SDK half was DELETED
+    by #4282, so this helper now serves the hosted lane alone.
     """
     # No-op only when there is NOTHING to do: no claim to promote/calibrate
     # AND no operator this capture created. #1088 P2 — keying this on

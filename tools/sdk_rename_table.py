@@ -560,8 +560,11 @@ CITES: dict[str, tuple[str, str]] = {
     "w13_canon": (CANON, "| W13 | `stabilize_beliefs` | #19 |"),
     "w15": (BETA, "| `mitigate_operator`, `operator_action`, `annotate_operator` | 3 | "
                   "→ `adjust_relationship` for strength, `update_knowledge` for "
-                  "annotation. `operator_action(**kwargs)` currently **accepts and "
-                  "silently ignores** `credibility` — a bug. |"),
+                  "annotation. `operator_action(**kwargs)` **accepted and silently "
+                  "ignored** `credibility` — a bug that #4282 rendered moot by "
+                  "DELETING the method (with `mitigate_operator`/`annotate_operator` "
+                  "surviving as the writes, neither of which takes `credibility` "
+                  "through a `**kwargs` funnel). |"),
     "w17_ulid": (BETA, "| `ulid` | 1 | A ULID generator. Not a memory operation. |"),
     # The anchor names the blockquote's opening line; the extracted region is the WHOLE
     # paragraph (beta lines 107–111). The old quote stopped at line 108 and so could

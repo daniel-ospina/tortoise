@@ -15201,7 +15201,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # store through the shared primitive. It owns the Session field list, the
     # batched `UNWIND $turns` Cypher (`_write_capture_turns`), the `CONTAINS`
     # wiring, the offset-aware turn-id derivation, the stale-turn sweep and the
-    # optional `embed_fn` — so this lane and `sdk.capture_session` can no
+    # optional `embed_fn` — so this lane and `sdk.capture_session` (DELETED by
+    # #4282) could no
     # longer drift (#1532's drift class). It computes the stored text itself
     # (the #4911 scrub) and RETURNS it, so the linker further down REUSES this
     # exact result rather than paying a second scrub of the same window. All of
@@ -15285,8 +15286,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "sessionCaptured Event write failed (non-fatal)")
         # #1352: materialize the typed session `:Source` (capture metadata +
         # sessionId + capturedAt + eventId) and wire
-        # (Source)-[:references]->(sessionCaptured Event) — parity with
-        # sdk.capture_session via the shared `_materialize_session_source`.
+        # (Source)-[:references]->(sessionCaptured Event) — parity with the
+        # #4282-DELETED `sdk.capture_session`, via the shared
+        # `_materialize_session_source` (which survives).
         # P1 #1529 (D4): non-fatal, surfaced as an additive warning — never a
         # 500 after writes.
         try:
@@ -15323,7 +15325,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # additive warning the assembly below reports. Placed BEFORE the
         # #1727 replay branch ON PURPOSE: a keyless call must ALWAYS be
         # reported as keyless, never as a silent "replayed" that hides the
-        # missing provider. Byte-parity with sdk.capture_session (#4014) — for
+        # missing provider. Byte-parity with the #4282-DELETED sdk.capture_session (#4014) — for
         # keyless calls this branch defines the behaviour, and keyed behaviour
         # is byte-identical (no_provider is False for a keyed call).
         if state is not None and not session_existed:
@@ -15363,7 +15365,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # NEVER run for it. When this deployment is on the non-convergent
             # M2 lane the re-attempt is refused, so a bare "already captured"
             # would be a FALSE statement of this state and would hide the
-            # remedy. Disclose it, in the SAME words as sdk.capture_session.
+            # remedy. Disclose it, in the SAME words as the #4282-DELETED
+            # sdk.capture_session.
             _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
         elif (prior_capture_ok is False
               and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
@@ -15510,7 +15513,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #3892: the receipt reads the meta of WHICHEVER branch ran — including
     # the keyless "no-provider" branch and a keyless RE-capture of an EXISTING
     # session (which the replay-meta block below would otherwise leave with
-    # unset warnings). Mirrors sdk.capture_session's unconditional read.
+    # unset warnings). Mirrors the #4282-DELETED sdk.capture_session's
+    # unconditional read.
     extraction_errors = list(meta.get("errors") or [])
     extraction_warnings = list(meta.get("warnings") or [])
     # #8501: the mint/materialize half now runs BEFORE extraction, so its
@@ -15576,8 +15580,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
         # materialization — a keyless attempt extracts nothing, so there is
         # nothing to stamp, while re-minting re-journals EventRecorded and
-        # refreshes startedAt on every call. Byte-parity with
-        # sdk.capture_session.
+        # refreshes startedAt on every call. Byte-parity with the
+        # #4282-DELETED sdk.capture_session.
         # #8501: the MINT and the Source MATERIALIZATION already ran in phase 1,
         # BEFORE extraction — that ordering is what lets each extracted Point
         # read the session Source's `contentHash` and record it as
@@ -15608,8 +15612,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # its original ingest; re-stamping would clobber the first
                 # session's single-eventId provenance (mirror byte-parity).
                 minted_ids = _capture_minted_ids(extracted)
-                # #9350: JOURNAL-FIRST (§17.1), byte-parity with
-                # `sdk.capture_session` — one `PointRevised` per minted id is
+                # #9350: JOURNAL-FIRST (§17.1), byte-parity with the
+                # #4282-DELETED `sdk.capture_session` — one `PointRevised` per minted id is
                 # appended BEFORE the stamp reaches the write handle, and the
                 # stamp then runs inside its own `_live_write_scope` lane. A
                 # raw write here had no carrier at all, so a journal-only
@@ -16135,7 +16139,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #3892: the keyless capture — turns stored, extraction skipped.
         # Reported under its OWN name, never folded into "llm" (which would
         # claim an extraction that did not happen) nor "replayed". Checked
-        # before `route` for parity with sdk.capture_session.
+        # before `route` for parity with the #4282-DELETED sdk.capture_session.
         effective_mode = _CAPTURE_NO_PROVIDER_MODE
     elif mode == _CAPTURE_EXTRACTION_DISABLED_MODE:
         # #4258: the team turned extraction off — turns stored, extraction
@@ -16143,8 +16147,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # keyless case has one: the causes are different and the receipt must
         # not conflate them. Checked before `route` so an off setting is never
         # reported as an "llm" extraction that did not run. (Unlike the keyless
-        # branch this has no SDK counterpart today: sdk.capture_session does
-        # not read the setting — that lane is the deferred follow-up #4288.)
+        # branch this has no SDK counterpart: sdk.capture_session did not read
+        # the setting, and #4282 deleted that lane, so the deferred follow-up
+        # #4288 now applies to the hosted lane alone.)
         effective_mode = _CAPTURE_EXTRACTION_DISABLED_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
@@ -16346,7 +16351,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # the #1727 replay branch, silently extracting nothing and leaving the
     # stored session permanently points-less. False + "none" is what the #2335
     # TRUE-retry gate consumes, so the later keyed capture re-attempts and the
-    # deterministic turn ids converge. Byte-parity with sdk.capture_session
+    # deterministic turn ids converge. Byte-parity with the #4282-DELETED
+    # sdk.capture_session
     # (#4014). A keyless attempt records this ONLY when it CREATES the session:
     # a keyless RE-capture must not rewrite a prior attempt's record (a prior
     # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
@@ -16410,14 +16416,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # of the marker is #1976's — this is the engine data exposure only.
     surfaced = surfaced_marker(extracted, verified_ids=set(facts))
     # #4911: a capture that redacted a credential says so — byte-parity with
-    # the SDK receipt (`sdk.capture_session`), appended only when non-zero so
+    # the #4282-DELETED SDK receipt (`sdk.capture_session`), appended only when non-zero so
     # an ordinary capture's warning list is unchanged.
     if _capture_redactions:
         extraction_warnings.append(
             _capture_redaction_warning(_capture_redactions))
     # #4240 review F1: a journal append that failed during THIS capture is
     # disclosed on the HOSTED receipt too. The hosted lane builds its own
-    # receipt (it never calls ``sdk.capture_session``), so without this the
+    # receipt (it never called ``sdk.capture_session``, now DELETED by #4282),
+    # so without this the
     # customer could not see that the capture is live-only — only the operator
     # counter/ERROR log showed it. Byte-parity with the SDK lane via the shared
     # helper, and appended only when non-zero so an ordinary capture's warning
@@ -17698,8 +17705,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # repairs an unclassifiable entity to `core:other`. Writing that repair
         # as the discriminator reached the fold's
         # `ON MATCH … =coalesce($k, stored)` as a real kind, so this door — the
-        # PRODUCTION capture entry point (`TortoiseSDK.commit_session` POSTs
-        # here) — reset a stored `capability` on a bare re-mention. ONE
+        # PRODUCTION capture entry point (`TortoiseSDK.commit_session` POSTed
+        # here before #4282 DELETED it; this hosted route is what remains) —
+        # reset a stored `capability` on a bare re-mention. ONE
         # predicate, shared with `sdk._payload_entity_kind`
         # (`tortoise.kind_fallbacks`): a repair is not a discriminator, so it is
         # omitted and the fold's `ON CREATE` arm supplies `other`.
@@ -23954,8 +23962,9 @@ async def invite_info(token: str):
         # (#1890), so an invite that expires by the clock alone sat at
         # 'pending' — scanned on every request — until a sweep ran.
         #
-        # Stored form: both writers (``invite_to_org`` above and
-        # ``TortoiseSDK.invitation_create``) write ``expires_at`` as
+        # Stored form: BOTH writers wrote ``expires_at`` this way —
+        # ``invite_to_org`` above, and ``TortoiseSDK.invitation_create``
+        # (DELETED by #4282) — as
         # ``datetime.now(UTC).isoformat()`` — a ``+00:00``-offset ISO-8601
         # STRING — so the comparison is the same lexicographic ISO compare the
         # sibling registry predicates use (the #1890 dup-check below,

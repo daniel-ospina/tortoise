@@ -3115,7 +3115,7 @@ surfaces:
   # being checked. That is the #3154 silent-drop shape exactly.
   - test_rest_surface_inventory.py
   # #5199 read half: the note is actually READABLE — the SDK provenance reader
-  # (`get_provenance_chain`) reports it per link. `tortoise/search_engine.py`
+  # (`get_provenance_chain` — DELETED by #4282) reported it per link. `tortoise/search_engine.py`
   # selects this surface too, so the wiring's guard runs with the code it guards.
   - test_source_version_read_wiring_5199.py
   # #5581 (the #5038 READ-path half): the Point-level §4.6 currency verdict —

@@ -69,7 +69,7 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8965-8971`` and
 ``result["vet"]`` at ``:8975-8979``); they are dropped at the meta fold,
-``tortoise/sdk.py:12827`` (``"stats": out.get("stats") or {}`` inside
+``tortoise/sdk.py:12832`` (``"stats": out.get("stats") or {}`` inside
 ``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
 rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
@@ -160,7 +160,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2467-2492``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:13113`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:13118`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -175,7 +175,7 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2467-2492 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:13113 "
+    "the capture path at tortoise/sdk.py:13118 "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:537-545 "
@@ -203,7 +203,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2375`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2379`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -1111,7 +1111,7 @@ def point_composition_line(composition: dict | None) -> str:
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2375, t.is_episodic=true, wired only by CONTAINS), and "
+        f"tortoise/sdk.py:2379, t.is_episodic=true, wired only by CONTAINS), and "
         f"operator Points are written by create_operator (tortoise/sdk.py — the "
         f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
         f"(measured: {operators_anchored} of {operators} anchored). Whether an "
@@ -1189,7 +1189,7 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"classes cannot carry a derivation link AT ALL and are named "
         f"rather than folded into the figure: the turn rows carry none BY "
         f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
-        f"tortoise/sdk.py:2375, t.is_episodic=true, wired only by "
+        f"tortoise/sdk.py:2379, t.is_episodic=true, wired only by "
         f"CONTAINS), and the operator Points are written by "
         f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
         f"operator writer), which never writes extractedFrom. So "
@@ -1320,14 +1320,14 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"this run does not claim the pass ran. Its surface EXISTS one layer "
             f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8975-8979. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:12827 (\"stats\": out.get(\"stats\") "
+            f"the meta fold tortoise/sdk.py:12832 (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
             f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:12827 is the line its fix "
+            f"#9116 is the seam, and tortoise/sdk.py:12832 is the line its fix "
             f"must target; reading a wrapper instead is the instrumentation "
             f"E4's row forbids")
 
@@ -1355,12 +1355,12 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"surface EXISTS one layer down: extract_session_v2 emits "
             f"result['classify_later'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8965-8971. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:12827 "
+            f"is DROPPED at the same meta fold, tortoise/sdk.py:12832 "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:12827 is the line its fix must target")
+            f"tortoise/sdk.py:12832 is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "

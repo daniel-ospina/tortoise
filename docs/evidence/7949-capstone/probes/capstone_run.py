@@ -16,7 +16,7 @@ the corrected reading:
 1. **A single entry point DOES exist.**
    The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
-   the SDK's capture door → ``sdk._extract_session_v2`` (``sdk.py:11999``) →
+   the SDK's capture door → ``sdk._extract_session_v2`` (``sdk.py:12004``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
    ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
    ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
@@ -25,7 +25,7 @@ the corrected reading:
    ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``).
    ⚠️ #4282 deleted ``capture_session``, the SDK's ONLY caller of
    ``_extract_session_v2``, so no ``sdk.py`` call-site cite is printed; the hosted
-   handler still reaches the helper (``tortoise/hosted_api.py:15500``), which is why
+   handler still reaches the helper (``tortoise/hosted_api.py:15503``), which is why
    the claim is scoped to the SDK.
    The SYMBOL is
    authoritative and the line is a convenience: the three FILE-NAMED cites

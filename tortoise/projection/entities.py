@@ -2712,7 +2712,8 @@ class _EntityHandlers:
 
         ``entity_links_attempted`` / ``entity_links_created`` are carried by a
         ``SessionRecorded`` the capture emits after the link pass
-        (``sdk.capture_session``) — the THIRD of the four, after the turn
+        (``sdk.capture_session``, DELETED by #4282 — the hosted lane keeps the
+        same four stamps) — the THIRD of the four, after the turn
         write's own trailing record (#4911) — so the counters the live raw SET
         writes are durable too — ``recover_from_log`` / a journal-only
         ``rebuild()`` otherwise came back with them null (review P2, #3722).
