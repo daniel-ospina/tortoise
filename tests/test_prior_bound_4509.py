@@ -21,27 +21,24 @@ starved-prior bound MOVES to that set (each leg's ``DEFAULT_POOL_SIZE``, times t
 live legs) instead of disappearing at 500 turns. See ``_DOCUMENTED_PROD_POOL``
 and ``test_production_pool_bound_still_starves_the_prior`` below.
 
-ORDERING note (#10240): the fused pool is ordered by the BM25 lexical arm's
-RELEVANCE ranking, which is ON by default since #10240 — so WHICH prior the
-bound starves is the LEXICALLY WEAKEST row (``_PRIOR_TEXT``), not the oldest.
-Before #10240 the rows all tied and the shared recency-then-id tie
-(``search_engine.recency_tie_clause``) decided it, so the starved row was the
-OLDEST (#10121; and #3019's ``id ASC`` before it). Against a relevance ranking
-that tie does not fire. The bound itself is unchanged.
-
 These tests are HERMETIC (per-test embedded store, no provider keys, no
 network): the query embedder is pinned to None so the sparse leg is the only one
 submitted and ranking is that leg's own ordering, and ``TORTOISE_POOL_FLOOR`` is
 deleted so a caller's environment cannot move the window these bounds are
 measured against.
 
-#10405 / #10240 note: the sparse leg's ordering is the BM25 lexical arm, which
-since #10240 is ON by default, and it is a RELEVANCE ranking (k1=1.2, b=0.75) —
-not the tie-broken all-equal ordering the pre-#10240 shipped scorer produced.
-Both bounds below are measured against a prior that the echo wall OUTRANKS, so
-the fixture's prior must be the WEAKEST lexical match, which is what ``_PRIOR_TEXT``
-constructs and documents. The assertions themselves are unchanged: what the arm
-re-ordered is which prior sits outside the window, never the seam or the bound.
+#10405 / #10240 note — the ONE ordering note for this module: the sparse leg's
+ordering is the BM25 lexical arm, which since #10240 is ON by default, and it is
+a RELEVANCE ranking (k1=1.2, b=0.75) — not the tie-broken all-equal ordering the
+pre-#10240 shipped scorer produced. So WHICH prior the bound starves is the
+LEXICALLY WEAKEST row (``_PRIOR_TEXT``), not the oldest: before #10240 every row
+tied and the shared recency-then-id tie (``search_engine.recency_tie_clause``)
+decided it, so the starved row was the OLDEST (#10121; and #3019's ``id ASC``
+before it) — against a relevance ranking that tie does not fire. Both bounds
+below are measured against a prior that the echo wall OUTRANKS, so the fixture's
+prior must be the WEAKEST lexical match, which is what ``_PRIOR_TEXT`` constructs
+and documents. The assertions themselves are unchanged: what the arm re-ordered
+is which prior sits outside the window, never the seam or the bound.
 """
 from __future__ import annotations
 
