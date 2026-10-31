@@ -2868,46 +2868,72 @@ try {
   //      guard is therefore pinned where it is reachable — at the descriptor's own
   //      plan — by `tests/test_9836_id_addressed_repoint.py::
   //      test_an_unaddressable_label_is_a_no_move`, which asserts
-  //      `_structural_repoint_statements` returns `None` (the plain-upsert/no-move
-  //      path) rather than the DELETE half alone.
+  //      `_structural_repoint_statements` returns `[]` — an EMPTY MUTATION LIST,
+  //      the record's half of the graph's `continue` — and NOT `None`: `None` sends
+  //      the descriptor back to `_declared_mutations`' plain-upsert fall-through,
+  //      which has no superseded-endpoint gate, so the row would land AT the
+  //      retired point (or, for a label outside the node vocabulary, the whole
+  //      journal record would be refused with `RecordProjectionError`) while the
+  //      graph leg `continue`s. Skip-vs-write/vs-raise is not "both routes agree
+  //      on the miss", which is why that test also pins
+  //      `mutations_for(<the same descriptor>, …) == []` — the CONSEQUENCE, not
+  //      just the helper's return value.
 
-  // (18) #9836 review P2 — the NO-SELF-EDGE guard's `delete_only` descriptor, on
-  //      the ID-ADDRESSED family. When the structural target IS the successor the
-  //      2b leg deletes the edge and transfers nothing; the graph's other two
-  //      routes hold no edge afterwards (nothing re-creates it for this family),
-  //      but the `DirectEdgeCreated` fold already wrote a relation row at the OLD
-  //      point and the record has no superseded-endpoint skip of its own — so
-  //      without this descriptor `relation` keeps an edge the graph DELETED
-  //      (measured before the fix: `{src_key:'p1', tgt_key:'p2'}` survived).
-  const selfRecords = [
-    { type: 'PointAdded', ts: '2026-10-25T00:16:01Z', id: 'p1',
-      point: { id: 'p1', content: 'the claim', status: 'live' } },
-    { type: 'PointAdded', ts: '2026-10-25T00:16:02Z', id: 'p2',
-      point: { id: 'p2', content: 'the restatement', status: 'live' } },
-    { type: 'DirectEdgeCreated', ts: '2026-10-25T00:16:03Z',
-      id: 'p1:wasDerivedFrom:p2', edge_type: 'wasDerivedFrom',
-      src: 'p1', tgt: 'p2', source_label: 'Point', target_label: 'Point' },
-    { type: 'PointSuperseded', ts: '2026-10-25T00:16:04Z', id: 'p1',
-      new_id: 'p2', valid_from: '2026-10-25T00:16:04Z',
-      valid_to: '2026-10-25T00:16:05Z', expired_at: '2026-10-25T00:16:05Z' },
-    { type: 'DirectEdgeRepoint', ts: '2026-10-25T00:16:05Z',
-      id: 'p1->p2:wasDerivedFrom:self', src: 'p1', tgt: 'p2',
-      target_label: 'Point', edge_type: 'wasDerivedFrom', delete_only: true },
-  ];
-  const selfRows = await run('9836-self-delete', selfRecords);
-  if (selfRows.length !== 0) {
-    throw new Error('#9836 no-self-edge: rows = '
-      + `${JSON.stringify(selfRows)} — the graph DELETED this edge (its target IS `
-      + 'the successor, so there is no transfer), and the record must apply the '
-      + 'same DELETE; a surviving row is an edge `live` does not hold and both '
-      + 'graph rebuilds lose');
+  // (18) #9836 review — an `Event` target is keyed by its `eventId`, NOT by its
+  //      `id`. This is the one label whose two candidate identities DIVERGE in a
+  //      live-reachable shape: `entities._event_guarded_merge`'s SUFFIX branch
+  //      MERGEs on the suffixed `eventId` while the props it writes keep
+  //      `id = <candidate>` (`live.py::EPISTEMIC_ID_KEYS` states it and forbids
+  //      using the coalesced value as an identity). The record files and resolves
+  //      an Event under `node_key` = `event_id`, so a descriptor carrying the
+  //      graph's `id` would resolve a DIFFERENT Event than the one the edge
+  //      points at — the record richer than the graph, the one direction
+  //      Interface A forbids. The descriptor here carries `eventId`
+  //      (`cand-9836`), and the Event row below is filed under it; `id` is the
+  //      shared candidate and must NOT be what resolves.
+  //      The record below is the SDK PRODUCER's own shape — a flat `eventId` and
+  //      NO `id` (`sdk.py`: `payload = {**inner, "eventId": resolved}` with `id`
+  //      dropped) — so `node_key` is the resolved `eventId`. That is what makes
+  //      this case discriminate: a resolver that reached for the node's `id`
+  //      finds no `id` here at all (0 rows) instead of the row the graph points at.
+  const eventTarget = {
+    type: 'EventRecorded', ts: '2026-10-25T00:17:01Z',
+    eventId: 'cand-9836-abcd1234', eventKind: 'meeting',
+  };
+  const eventMoved = await run('9836-wasderivedfrom-event',
+    supersedeRecords('p1', 'p2', 'cand-9836-abcd1234', {
+      preamble: [eventTarget],
+      edgeType: 'wasDerivedFrom',
+      targetLabel: 'Event',
+      link: { type: 'DirectEdgeCreated', ts: '2026-10-25T00:17:02Z',
+        id: 'p1:wasDerivedFrom:cand-9836-abcd1234',
+        edge_type: 'wasDerivedFrom', src: 'p1', tgt: 'cand-9836-abcd1234',
+        source_label: 'Point', target_label: 'Event' },
+    }));
+  if (eventMoved.length !== 1 || eventMoved[0].src_key !== 'p2'
+      || eventMoved[0].tgt_label !== 'Event'
+      || eventMoved[0].tgt_key !== 'cand-9836-abcd1234') {
+    throw new Error('#9836 Event target: rows = '
+      + `${JSON.stringify(eventMoved)} — an Event target is addressed by its `
+      + '`eventId` (what this route files it under) and must MOVE to the '
+      + 'successor filed as Event/<eventId>. 0 rows, or a row left at some other '
+      + 'src_key, is the arm resolving NOTHING — the MOVE never matched; a tgt_key '
+      + 'that is not the eventId is the arm resolving by `id`'
+    );
   }
 
-  // (17) #9836 review (P2) — the NO-SELF-EDGE guard's descriptor, on the RECORD
-  //      route. When the structural target IS the successor the live leg deletes
-  //      the edge and transfers nothing, and it journals a `delete_only`
-  //      `DirectEdgeRepoint`. For the RECORD that descriptor is not a no-op — it
-  //      is the ONLY statement that removes the row the pre-supersede
+  // (19) #9836 review P2 — the NO-SELF-EDGE guard's `delete_only` descriptor, on
+  //      the ID-ADDRESSED family, with the PRE-FIX journal run beside it. When the
+  //      structural target IS the successor the 2b leg deletes the edge and
+  //      transfers nothing; the graph's other two routes hold no edge afterwards
+  //      (nothing re-creates it for this family), but the `DirectEdgeCreated` fold
+  //      already wrote a relation row at the OLD point and the record has no
+  //      superseded-endpoint skip of its own — so without this descriptor
+  //      `relation` keeps an edge the graph DELETED (the pair below measures it:
+  //      `{src_key:'p1', …}` survives the pre-fix journal).
+  //      When the live leg deletes the edge and transfers nothing it journals a
+  //      `delete_only` `DirectEdgeRepoint`. For the RECORD that descriptor is not
+  //      a no-op — it is the ONLY statement that removes the row the pre-supersede
   //      `DirectEdgeCreated` wrote at the retired point (`_relation_delete_statement`
   //      honours `delete_only` for any rel). Emitted for the ID-ADDRESSED family
   //      only since the review fix; before it, the row survived at `p1`.
