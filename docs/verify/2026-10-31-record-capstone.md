@@ -1,8 +1,8 @@
 # The record, proven end to end on a live box — #9567 capstone (run 2026-10-31)
 
-**Verdict: `PARTIAL(turns as a graph tier REMOVED + both prose tiers' record home proven / the PROSE's
-absence from the graph NOT proven on either tier — needs #10389 + #10428, and the `:Source.summary`
-route`)`.**
+**Verdict: `PARTIAL` — turns as a graph tier are REMOVED and both prose tiers' record home is proven,
+while the PROSE's absence from the graph is NOT proven on either tier (that needs #10389 + #10428 and
+the `:Source.summary` route).**
 
 Read that precisely: **no turn `Point` node and no turn `CONTAINS` edge exists on the armed arm** — that
 is what was measured, and it is the tier §9.1/D1 names. The *prose itself* still reaches two nodes
@@ -21,8 +21,8 @@ deployment runs.
 | FalkorDB | private lane `fdb-lane-44bd557920` on `127.0.0.1:16400` (Docker, `falkordb/falkordb-server:v4.20.6`), flushed to **0 nodes** before each arm |
 | Record | Postgres 16 `p10000-record-pg` on `127.0.0.1:32988`, repo record migrations applied, tenant `org-9567c` / `g-9567c` (a `public.graphs` row was inserted first — the FK the projection relies on) |
 | Doors used (product's own) | turns: `TortoiseSDK.capture_session`; narrative: `hosted_api._execute_commit_writes` → `sdk._emit_event("SessionNarrated")` (the #9555 carrier) |
-| Instrument | `/tmp/t9567/probe.py`; wrappers `/tmp/t9567/run-{a,b,dep}.sh` (Arm A vs B differ only in the DSN's role; `PROBE_SID` labels the session) |
-| Deployed-tree arm (B′) | `git archive b101355a8 | tar -x -C /tmp/t9567-dep`, then the same probe with `PYTHONPATH=/tmp/t9567-dep`; the run prints `tortoise.__file__: /tmp/t9567-dep/tortoise/__init__.py`, and `sdk.py`/`hosted_api.py`/`record_projection.py`/`record_writer.py` there are sha256-identical to `git show b101355a8:` |
+| Instrument | `/tmp/t9567/probe.py`; wrappers `/tmp/t9567/run-{a,b,dep}.sh` (Arm A vs B differ only in the DSN's role; `PROBE_SID` labels the session) — ⚠️ **not committed**, see §7's reproducibility gap |
+| Deployed-tree arm (B′) | `git archive b101355a8 \| tar -x -C /tmp/t9567-dep`, then the same probe with `PYTHONPATH=/tmp/t9567-dep`; the run prints `tortoise.__file__: /tmp/t9567-dep/tortoise/__init__.py`, and `sdk.py`/`hosted_api.py`/`record_projection.py`/`record_writer.py` there are sha256-identical to `git show b101355a8:` |
 | Lane state | no production surface was written to, no config flipped |
 
 ## 1. The measured table
@@ -70,7 +70,7 @@ set_config('app.current_org_id',…)`) the same rows are visible — so the writ
 tenancy boundary that R6/§9.1 depend on, not around it. Verbatim, Arm B (unfiltered by session — this
 is the whole tenant, which is why only B's rows appear):
 
-```
+```text
 R2 (record, tortoise_record_app + app.current_org_id — the RLS boundary)
   point rows  : [('cap9567-session_t0', 87), ('cap9567-session_t1', 45),
                  ('pt_f07a9c5c90ddea2a7d85a197db70ef9eba2f8af07f0800d7eca2eb0543d642', 27)]
@@ -90,7 +90,7 @@ The graph was flushed to **0 nodes** immediately before this arm (an explicit `M
 DELETE n`; the probe prints Q5 only once, *after* the capture, so the 0 is a stated precondition, not
 an instrument line):
 
-```
+```text
 BASELINE (before the capture)        : {"point":0,"point_episodic":0,"session":0,
                                         "session_narrative":0,"journal_event":0}   ← record
 Q5 after the capture                 : [[12]]
@@ -104,10 +104,18 @@ Q1 every node whose text holds either marker (content | summary | story_arc):
    hits: 3
 ```
 
+Legend for those three rows: `[labels, id, len(content), len(summary), len(story_arc)]` — the node's
+label list, its `id` property, then the byte length of each of the three text properties **in that
+order**. Read with the legend: row 1 is the `:Event` whose `story_arc` holds the 129 B narrative; row 2
+is the transcript `:Source` carrying the same 129 B; row 3 is the `:Source` whose `summary` holds the
+80 B of raw turn text (§4.2). Row 3's `id` prints `None` — that node carried no `id` value in this run
+— so it cannot be attributed by id from this output; the `TURN-ZEBRA-9567 …` prefix in its `summary`
+is what identifies it, and §4.2's claim is read off that prefix, not off node identity.
+
 Arm A, same probe, same **lane flushed again to 0 nodes** (so its 14 is a fresh 12 + the two fallback
 turn nodes, not Arm B's 12 + 2) — and the two turn nodes are back:
 
-```
+```text
 Q5 after the capture                 : [[14]]
    by label: Point 3 · … · Session 1
 Q4 _capture_turn_ids                 : ['cap9567a-session_t0', 'cap9567a-session_t1']
@@ -116,17 +124,20 @@ Q2 Session's outgoing edges          : CONTAINS -> Point cap9567a-session_t0 (87
                                        CONTAINS -> Point pt_f07a9c5c… (27 B, the extracted claim)
 ```
 
-⇒ **The one variable is the record's role capability, and the store follows it.** Armed as the app
-role: turns in Postgres, no turn node, no turn `CONTAINS` edge. Armed with a role that bypasses RLS:
-the seam refuses (below) and `sdk._write_capture_turns`'s post-write fallback puts the turns in the
-graph, per turn.
+⇒ **The role decides whether the write lands; the store decision follows the write's own outcome.**
+Armed as the app role the write lands — turns in Postgres, no turn node, no turn `CONTAINS` edge. Armed
+with a role that bypasses RLS the seam refuses (below), and `sdk._write_capture_turns`'s post-write
+fallback (`tortoise/sdk.py:3438-3482`) puts the turns in the graph, per turn. Not the preflight:
+`record_writer.record_holds_turns` asks journal-configured + armed + tenant + breaker and never reads
+the role (`tortoise/record_writer.py:1358-1361`), which is why Arm A's two turn nodes exist **only**
+because the fallback re-created them after the refusal.
 
 ## 3. The refusal proof — an unsupported shape is refused LOUDLY, and nothing is dropped
 
 Arm A's DSN names a role the seam must not accept. The refusal is raised, named, counted, and the
 turns were **not** silently dropped — they went to the graph instead ("a drop is not a fix"):
 
-```
+```text
 the record write did not happen (write_failed) — the journal has the record and a replay heals the
 record: the record write failed after 1 journal record(s) were materialized from position 43
 (RecordProjectionError)
@@ -137,7 +148,7 @@ _capture_turn_ids : ['cap9567a-session_t0', 'cap9567a-session_t1']
 
 The exception's own text (called directly, same DSN, same tenant):
 
-```
+```text
 RecordProjectionError: the record's connection runs as a role that BYPASSES RLS — superuser,
 BYPASSRLS, a member of such a role, or the owner of a record table. RLS is this record's tenancy
 boundary (R6, epic #7879), so every read and write on that connection would cross tenants with the
@@ -195,8 +206,8 @@ scenario-A pass with a role control, not a falsifier battery). Everything below 
 | D1, D4–D6, D8–D12 | **NOT MEASURED here** — different scenarios (arm/replay/backup/tenancy/quota) and, for D11–D12, #9559 is still `FOLLOW` |
 
 Nothing is claimed about a *production* capture: no production credential exists on this box, so
-whether the hosted deployment's tenant resolves for a real capture (the `no_tenant` refusal measured on
-#9548 in October) is **`UNMEASURED(no production credential on this box)`** — `/health` reports
+whether the hosted deployment's tenant resolves for a real capture — the `no_tenant` refusal measured
+on #9548 in October — is **`UNMEASURED(no production credential on this box)`** — `/health` reports
 `armed: true` and a *decline-only* counter set (`{}`), which is exactly what an inert-but-configured
 deployment also prints, so it is not evidence of a write.
 
@@ -246,3 +257,14 @@ Arm A vs Arm B differ in **one** shell variable that can affect behaviour: `TORT
 `TORTOISE_RECORD_ORG_ID` / `TORTOISE_RECORD_GRAPH_ID`
 plus `TORTOISE_RECORD_SINGLE_TENANT=1` — the pair is refused outright without the declaration
 (`record_writer._refused_tenant_env_note`), which is why it is stated here rather than left implicit.
+
+⚠️ **Reproducibility gap, named rather than hidden: the instrument was not committed.** The probe and
+its three wrappers lived under `/tmp/t9567/` and `/tmp/t9567-dep/` on the box that ran the arms, and
+they were not captured into the repo before that box was reaped — so the command above is not runnable
+from this tree, and a future reviewer cannot read which Cypher Q1–Q5 actually ask. That is the gap the
+2026-10-26 artifact's D10 row records as *improved* ("the prior run measured it with a probe outside
+the repo"), and this run did **not** inherit the improvement. Rewriting the probe from the pasted
+output is not a repair: it would be an instrument that is not the one that ran, so the artifact will
+not do it. What stays verifiable from the repo — and is all §6's claims rest on — are the two write
+paths (`sdk._write_capture_turns`, `hosted_api._execute_commit_writes` → `sdk._emit_event`), the
+record tables, and the SDK reader leg this run explicitly does not exercise.
