@@ -817,9 +817,10 @@ jobs:
         # `test` job checks out at the default `fetch-depth: 1`, whose grafted
         # graph cannot answer that question at all — the object is usually
         # absent (exit 128) but can also be present-and-unreachable, where git
-        # answers "not an ancestor" about a REAL ancestor (#10356) — so the tool
-        # reports that claim UNVERIFIED (exit 2) rather than blaming the document
-        # (#5086 review P1-1). This job checks out at
+        # answers "not an ancestor" about a REAL ancestor — so the tool reports
+        # that claim UNVERIFIED (exit 2) rather than blaming the document
+        # (#5086 review P1-1; the same defect found and fixed independently as
+        # #10356, plus #10420's unresolvable arm). This job checks out at
         # `fetch-depth: 0` (see the checkout above), so this is where the ancestry
         # claim is actually proved. `--check` is verify-only; stdlib only, so it
         # needs nothing from the `pip install` above (kept for its siblings).
