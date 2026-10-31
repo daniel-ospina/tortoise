@@ -222,8 +222,7 @@ B="/tmp/batch-$BATCH"
 # `pytest_sessionfinish`, so a baseline run the kernel killed leaves the PREVIOUS batch's report at
 # this path — and the count below then reads it as THIS baseline, which is the ledger every later
 # verdict is diffed against (main's own red is hidden, and an innocent PR is convicted).
-rm -f "$B/baseline-junit.xml" "$B/baseline.total" "$B/baseline.skipped" "$B/baseline.skipped-reasons" \
-      "$B/baseline-trackb.xml" "$B/baseline-trackb.skipped" "$B/baseline-trackb.skipped-reasons"
+rm -f "$B/baseline-junit.xml" "$B/baseline.total" "$B/baseline.skipped" "$B/baseline.skipped-reasons"
 # BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
 # `--junitxml` is not decoration: Phase 3 compares the gate run's test COUNT to this file,
 # because a run the kernel killed reports no summary and would otherwise read as green.
@@ -238,7 +237,7 @@ BASELINE_RC=$?
 # member, and a half whose run is never status-checked and never writes an id artifact fails open —
 # a killed `-m track_b` run is indistinguishable from a finished one, and a red one contributes no
 # ids to EITHER side of the Phase 4 diff, so the verdict diff never sees the gate member at all.
-rm -f "$B/baseline-trackb.xml"
+rm -f "$B/baseline-trackb.xml" "$B/baseline-trackb.skipped" "$B/baseline-trackb.skipped-reasons"
 uv run pytest tests/test_ingest_safety.py -q --junitxml="$B/baseline-trackb.xml" -m track_b
 BASELINE_TRACK_B_RC=$?
 [ "$BASELINE_TRACK_B_RC" -eq 0 ] || [ "$BASELINE_TRACK_B_RC" -eq 1 ] || { echo "the baseline's track_b half did not COMPLETE (rc=$BASELINE_TRACK_B_RC; 137=SIGKILL/OOM) — that half has no ledger, so Phase 4 cannot classify a track_b id at all"; exit 1; }
@@ -683,8 +682,8 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   [ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
   # ⛔ CLEAR BOTH halves first: these are Phase 3's paths, so a stale report from the PRE-revert run
   # would be diffed as if it were this one.
-  rm -f "$B/batch.rc" "$B/batch-junit.xml" "$B/batch-trackb.xml" "$B/batch.skipped-reasons" "$B/new-skip-reasons" \
-        "$B/batch-trackb.skipped-reasons" "$B/new-skip-reasons-trackb"
+  rm -f "$B/batch.rc" "$B/batch-junit.xml" "$B/batch-trackb.xml" "$B/batch.skipped-reasons" "$B/new-skip-reasons"
+  rm -f "$B/batch-trackb.skipped-reasons" "$B/new-skip-reasons-trackb"
   ( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' --ignore=tests/e2e > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
   for _ in $(seq 1 240); do [ -f "$B/batch.rc" ] && break; sleep 15; done
   [ -f "$B/batch.rc" ] && echo 'RECHECK DONE — read $B/batch.rc' || echo RUNNING
@@ -703,7 +702,7 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   comm -13 "$B/baseline.skipped-reasons" "$B/batch.skipped-reasons" > "$B/new-skip-reasons"
   [ -s "$B/new-skip-reasons" ] && { echo "the re-check has SKIP REASONS the baseline did not (listed in $B/new-skip-reasons) — a test that must run did not, and no failure id records it: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
   # Half 2, instrumented exactly as in Phase 3 — a green that excludes `-m track_b` is not a green.
-  rm -f "$B/batch-trackb.xml"
+  rm -f "$B/batch-trackb.xml" "$B/batch-trackb.skipped-reasons" "$B/new-skip-reasons-trackb"
   uv run pytest tests/test_ingest_safety.py -q --junitxml="$B/batch-trackb.xml" -m track_b
   TRACK_B_RC=$?
   [ "$TRACK_B_RC" -eq 0 ] || [ "$TRACK_B_RC" -eq 1 ] || { echo "the re-check's track_b half did not COMPLETE (rc=$TRACK_B_RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
