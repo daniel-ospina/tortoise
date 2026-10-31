@@ -1051,10 +1051,14 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict,
     if refs:
         worklist = list(selected)
         while worklist:
-            for partner in refs.get(worklist.pop()) or ():
-                # a row built by hand or from JSON may carry garbage (a nested
-                # list is unhashable, an int is not a kind); the RENDER path
-                # must never raise on a malformed master — same direction as
+            row = refs.get(worklist.pop())
+            for partner in (row if isinstance(row, (list, tuple)) else ()):
+                # a row built by hand or from JSON may carry garbage: a truthy
+                # non-iterable ROW (`{"a:one": 7}`) raises on the `for` itself,
+                # before any element test runs — and a nested list is
+                # unhashable, an int is not a kind. The RENDER path must never
+                # raise on a malformed master, so the row and each element are
+                # guarded separately — same direction as
                 # `value_extractor._relation_endpoint_refs`' own shape guard,
                 # and as `_values_suffixes`' "the render path must never raise"
                 if (isinstance(partner, str) and partner in pack_kinds

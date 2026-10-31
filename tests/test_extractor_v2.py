@@ -7671,6 +7671,25 @@ class TestCompactReferenceClosure:
                                     m["pack_refs"])
         assert hit == {"a:one": "d"}, hit
 
+    def test_a_non_iterable_row_cannot_make_the_render_raise(self):
+        """The same contract, for the ROW rather than its elements.
+
+        `_build_master_from_brief` filters each row to a list/tuple, so this
+        reaches only a HAND-BUILT or caller-supplied master — which is exactly
+        the master the contract names (“a master built by hand (or from JSON) can
+        carry a non-dict here, and the RENDER path must never raise on it”).
+        `refs.get(k) or ()` guards only a FALSY row, so a truthy non-iterable
+        raised `TypeError: 'int' object is not iterable` from the `for` itself,
+        before the per-element `isinstance(partner, str)` test could run.
+        """
+        m = v2._build_master_from_brief({"a:one": "d"})
+        m["pack_refs"] = {"a:one": 7}  # hand-built: a truthy non-iterable row
+        rendered = v2._render_master_compact(m, "a story about a")
+        assert "a:one" in rendered, (
+            "the malformed row must not cost the selected kind its render")
+        assert v2._select_pack_kinds("a story about a", m["pack_kinds"],
+                                     m["pack_refs"]) == {"a:one": "d"}
+
     def test_the_refs_are_undirected_and_drop_core_and_bare(self):
         """The DIRECT contract of `_relation_endpoint_refs` — the only pin on it.
 

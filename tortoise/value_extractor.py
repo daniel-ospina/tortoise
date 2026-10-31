@@ -104,11 +104,16 @@ def _relation_endpoint_refs(raw: object, namespace: str | None = None) \
       because it is never a kindDef of this namespace. With no ``namespace``
       known the bare value is dropped, not guessed.
 
-    Each side of a pair is normalized INDEPENDENTLY, so a side that closes
-    nothing (core, an entity type, a malformed value) no longer discards its
-    partner — before this, ``{fromKind: "valuationMark", toKind:
-    "venture:investment"}`` contributed nothing at all, which is the very defect
-    #9733 removes, surviving on the second declaration site.
+    Each side of a pair is normalized INDEPENDENTLY, and a side that RESOLVES
+    (a ``namespace:kind``, or a BARE ``relationTemplates`` value, which ``_norm``
+    resolves to the declaring namespace's own kind) no longer discards its
+    partner: before the template-site fix, ``{fromKind: "valuationMark",
+    toKind: "venture:investment"}`` contributed nothing there either, which is
+    the very defect #9733 removes surviving on the second declaration site.
+    ⚠️ A side that closes NOTHING — core, an entity type, a malformed value, or a
+    bare value at the ``ontology.relations`` site — still drops the PAIR, and the
+    partner with it: such an edge is never emittable from this pack, so offering
+    the partner alone would be half an edge.
     First-seen order, de-duplicated; shape is NOT trusted — this reads raw YAML,
     so a malformed section degrades to nothing rather than raising (the manifest
     validator reports it). ``tests/test_extractor_v2.py
@@ -152,8 +157,10 @@ def _relation_endpoint_refs(raw: object, namespace: str | None = None) \
         return f"{namespace}:{ref}"
 
     def _pair(a: object, b: object, site: str) -> None:
-        # Both sides, so the map is undirected — and normalized separately, so a
-        # side that closes nothing cannot discard its partner.
+        # Both sides, so the map is undirected. A side that closes nothing drops
+        # the PAIR (see the docstring): an edge is emittable only when BOTH
+        # endpoints are, so keeping the half that DID resolve would offer a
+        # relation whose other end this pack never names.
         a_ref, b_ref = _norm(a, site), _norm(b, site)
         if a_ref is None or b_ref is None or a_ref == b_ref:
             return
