@@ -467,7 +467,9 @@ class JobAttempts:
     ``cleared`` holds RED attempts that a NEWER SUCCESS re-measured. They are not catches
     under the newest-attempt rule — but they are exactly the records that could hide a real
     catch, so they are cited as ``flake-cleared`` and, when their artifact is gone, they
-    make the leg ``UNKNOWN`` instead of ``NEVER``.
+    make the leg ``UNKNOWN`` instead of ``NEVER`` — either because their artifact is gone,
+    or because the run's PER-RUN artifact now holds the passing attempt that re-measured
+    them (the commoner live shape).
 
     ``superseded`` holds the OTHER kind of older red: one that no newer SUCCESS re-measured
     (a cancelled re-run cannot clear a red, and neither can a second red). ⛔ Those are NOT
@@ -952,7 +954,16 @@ class GhClient:
             except ValueError as exc:
                 raise ReadError(f"gh api {url} returned unparseable JSON: {exc}") from exc
             batch = payload.get(ci_verdict.RUNS_KEY) if isinstance(payload, Mapping) else None
-            if not isinstance(batch, list) or not batch:
+            if not isinstance(batch, list):
+                if page == 1:
+                    # ⛔ A 200 with no `workflow_runs` is an error body (`{"message": …}`),
+                    # not an empty listing: reporting "no runs in the window" for it is the
+                    # same fail-open the offline path just closed.
+                    raise ReadError(
+                        f"gh api {url} carried no workflow_runs list — not a runs listing"
+                    )
+                break
+            if not batch:
                 break  # an empty page is the end of the listing, not an unreadable surface
             runs.extend(item for item in batch if isinstance(item, Mapping))
             if len(batch) < 100:
@@ -1053,12 +1064,26 @@ class OfflineClient:
         """
         pages = self._pages(self.root / "runs.json")
         runs: list[Mapping[str, Any]] = []
+        witnessed = False
         for page in pages:
             if not isinstance(page, Mapping):
                 raise ReadError("offline fixture runs.json carries a non-object page")
             batch = page.get(ci_verdict.RUNS_KEY)
             if isinstance(batch, list):
+                witnessed = True
                 runs.extend(item for item in batch if isinstance(item, Mapping))
+        if not witnessed:
+            # ⛔ Dropping the `total_count` refusal (it is the POPULATION's size, and the
+            # service caps at page 10, so an archived busy-window read is always short) must
+            # not drop the SHAPE witness with it: `{"message": "Not Found"}` or a
+            # `workflow_runs` of the wrong type would otherwise read as an empty window at
+            # exit 0 — "the report was produced" for a surface that was never a runs listing.
+            # A real listing always carries the key (empty windows carry it too), so this
+            # cannot false-positive.
+            raise ReadError(
+                "offline fixture runs.json carries no workflow_runs list — it is not a runs "
+                "listing (an API error body or a mis-archived file)"
+            )
         picked = [
             run
             for run in runs
@@ -1312,6 +1337,10 @@ def build_history(
         #: ``(run_id, job)`` already cited as flake-cleared. Two cleared attempts of one job
         #: share the run's ONE artifact, so a second citation would be the same evidence twice.
         cited_cleared: set[tuple[str, str]] = set()
+        #: ``(job, leg)`` already made UNKNOWN by a cleared red. A job retried 4-5x yields
+        #: one cleared attempt per retry, and marking the leg's whole partition once per
+        #: attempt repeats the same UNKNOWN block in every row of the leg.
+        marked_cleared: set[tuple[str, str]] = set()
         #: This run's artifact LISTING, read at most once however many legs it carried.
         artifacts = RunArtifacts(client, ref.run_id, api_notes)
 
@@ -1371,10 +1400,9 @@ def build_history(
                                 f"artifact {name} is absent or unreadable on run {ref.run_id} "
                                 f"({ref.created_at or 'unknown date'}) — "
                                 + (
-                                    f"the artifact LISTING for that run could not be read "
-                                    f"({artifacts.listing_failed}), so nothing is known about "
-                                    f"it — UNKNOWN, not an expired artifact"
-                                    if artifacts.listing_failed
+                                    f"it could not be READ ({artifacts.unread}), so nothing is "
+                                    f"known about it — UNKNOWN, not an expired artifact"
+                                    if artifacts.unread
                                     else (
                                         f"expired past the repo's "
                                         f"{retention or DEFAULT_RETENTION_DAYS}-day retention, "
@@ -1489,6 +1517,9 @@ def build_history(
                         api_notes,
                     )
                 if cleared_evidence is None:
+                    if (group.job, leg) in marked_cleared:
+                        continue
+                    marked_cleared.add((group.job, leg))
                     _mark_unknown(
                         histories,
                         leg_files,
@@ -1521,6 +1552,9 @@ def build_history(
                     # that very PR head, while `coverage.reds_cleared_by_a_rerun` counted the
                     # red it had just discarded. The attempt's own evidence is gone, so the
                     # LEG is unattributable: UNKNOWN, never a clean bill.
+                    if (group.job, leg) in marked_cleared:
+                        continue
+                    marked_cleared.add((group.job, leg))
                     _mark_unknown(
                         histories,
                         leg_files,
@@ -1655,6 +1689,14 @@ class RunArtifacts:
         #: is not in the listing", which is what an expired/absent artifact looks like. A row
         #: reason must not claim expiry when the listing was never read.
         self.listing_failed: str | None = None
+        #: Why the artifact's BYTES could not be read (a budget-exhausted or failed download,
+        #: a bad zip). Same rule one level down: an unread download is not an expired artifact.
+        self.download_failed: str | None = None
+
+    @property
+    def unread(self) -> str | None:
+        """The reason nothing is known about this leg's artifact, or None if it was looked at."""
+        return self.listing_failed or self.download_failed
 
     def get(self, name: str) -> Mapping[str, Any] | None:
         if self._items is None:
@@ -1693,6 +1735,7 @@ def _leg_evidence(
         data = client.artifact_zip(artifact_id)
     except (BudgetExhausted, ReadError, TypeError, ValueError) as exc:
         notes.append(f"artifact {name} could not be downloaded: {exc}")
+        artifacts.download_failed = f"artifact {name} could not be downloaded: {exc}"
         return None
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -1732,6 +1775,7 @@ def _leg_evidence(
             )
     except (zipfile.BadZipFile, OSError) as exc:
         notes.append(f"artifact {name} is not a readable zip: {exc}")
+        artifacts.download_failed = f"artifact {name} is not a readable zip: {exc}"
         return None
 
 
@@ -1895,7 +1939,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_seconds=args.max_seconds,
             progress=True,
         )
-    except (ReadError, OSError, ci_verdict.SurfaceReadError, ValueError) as exc:
+    #: ⛔ NOT bare `ValueError`: `int(run.get("run_attempt"))` and friends raise it too,
+    #: and a bug reported as "could not read a surface" wears a read-failure costume.
+    #: Only the two decode failures are genuinely read failures here.
+    except (
+        ReadError,
+        OSError,
+        ci_verdict.SurfaceReadError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as exc:
         print(f"ci_catch_history: could not read a surface: {exc}", file=sys.stderr)
         return 2
 

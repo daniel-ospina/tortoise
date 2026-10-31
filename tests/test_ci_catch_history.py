@@ -862,6 +862,24 @@ def test_an_unparseable_offline_listing_exits_2(tmp_path, capsys):
     assert "could not read a surface" in capsys.readouterr().err
 
 
+def test_a_runs_file_that_is_not_a_runs_listing_is_a_read_failure_not_an_empty_window(tmp_path):
+    """Dropping the `total_count` refusal must not drop the SHAPE witness with it.
+
+    `total_count` is the POPULATION's size (and the service caps at page 10), so an archived
+    busy-window page set is legitimately short — but an API error body (`{"message": …}`) or a
+    mistyped `workflow_runs` is not an empty window. Reading it as one would exit 0 with
+    "the report was produced" for a surface that was never read at all.
+    """
+    for label, payload in (
+        ("error-body", {"message": "Not Found"}),
+        ("total-only", {"total_count": 2500}),
+        ("wrong-type", {"total_count": 3, "workflow_runs": {"a": 1}}),
+    ):
+        root = _world(tmp_path / label, runs=[_run(RUN_PR, SHA, "pull_request", pr=5)])
+        (root / "runs.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert catch.main(["--offline-dir", str(root), "--summary"]) == 2, label
+
+
 def test_a_budget_exhausted_artifact_listing_does_not_claim_expiry(tmp_path):
     """An unread listing is not an expired artifact — the row reason must say which it is.
 
@@ -888,6 +906,53 @@ def test_a_budget_exhausted_artifact_listing_does_not_claim_expiry(tmp_path):
     assert "retention" not in reason, "the artifact was never looked up — it is not expired"
     assert "budget exhausted" in reason.lower()
     assert any("budget exhausted" in note for note in report["window"]["api_notes"])
+
+    # The same rule one level down: the LISTING was read, the DOWNLOAD was not. The row must
+    # not claim expiry for bytes that were never fetched either.
+    downloaded = catch.OfflineClient(root)
+    downloaded.artifacts = lambda run_id: {  # type: ignore[method-assign]
+        catch.artifact_name(family, leg): {"name": catch.artifact_name(family, leg), "id": "x"}
+    }
+
+    def _no_download(artifact_id: str) -> bytes:
+        raise catch.BudgetExhausted("API-call bound reached (2)")
+
+    downloaded.artifact_zip = _no_download  # type: ignore[method-assign]
+    blocked = _row(catch.build_history(MANIFEST, downloaded), "test_billing.py")
+    assert blocked["status"] == catch.UNKNOWN
+    assert "retention" not in blocked["unknown"][0]["reason"]
+    assert "could not be READ" in blocked["unknown"][0]["reason"]
+
+
+def test_a_job_retried_many_times_marks_the_leg_unknown_once(tmp_path):
+    """A retried job yields one cleared attempt per retry — and ONE UNKNOWN block per row."""
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    green_run = _run(RUN_PR, SHA, "pull_request", pr=58, conclusion="success")
+    green_run["run_attempt"] = 4
+    root = _world(
+        tmp_path,
+        runs=[green_run],
+        jobs={
+            RUN_PR: [
+                _check(100, RUN_PR, job, "failure"),
+                _check(150, RUN_PR, job, "failure"),
+                _check(180, RUN_PR, job, "failure"),
+                _check(200, RUN_PR, job, "success"),
+            ]
+        },
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", False)])
+            )
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    assert len(row["unknown"]) == 1, "one block per leg, not one per retried attempt"
+    # Every cleared red is still COUNTED even though only one block is written.
+    assert report["coverage"]["reds_cleared_by_a_rerun"] == 3
 
 
 # --- 7. a tree that cannot answer the lane question fails closed ------------
