@@ -154,6 +154,7 @@ import weakref
 from collections import Counter
 from typing import Any
 
+from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
@@ -2672,6 +2673,38 @@ def _story_topics(story: str, cap: int = 6) -> list[str]:
     return topics
 
 
+def _sanitise_query_text(raw: str) -> str:
+    """The searchable form of one derived query — sanitised, truncated to 160.
+
+    #1350 D3: RediSearch treats 'word:' as a field-prefix and punctuation as
+    syntax — sanitize derived query text so an FTS failure never kills a search
+    leg. ⛔ ONE home: `_derive_queries` stores this form and `_query_key` keys on
+    it, so the query that RUNS and the key that reports coverage cannot drift.
+    """
+    q = (raw or "").strip()
+    if not q:
+        return ""
+    q = re.sub(r"\b\w+:", " ", q)
+    q = re.sub(r"[^\w\s-]", " ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q[:160]
+
+
+def _query_key(entity_type: str, raw: str) -> str | None:
+    """The IDENTITY of one derived query — ``<leg>:<normalised text>``.
+
+    `_derive_queries` derives with it and `_candidate_covered` asks the same
+    question of a single candidate with it. A second copy of this normalisation
+    would let a candidate's key drift from the query that was actually run, and
+    the drift would be invisible — the record would simply say *"not run"* about
+    a query that ran. Returns ``None`` for a query with no searchable text.
+    """
+    q = _sanitise_query_text(raw)
+    if not q:
+        return None
+    return f"{entity_type}:{_norm_sent(q)}"
+
+
 def _derive_queries(embed_list: dict, story: str) -> dict:
     """Deterministic query derivation: entity names → object/subject,
     event contents → event, point contents → point, story topics → point.
@@ -2680,20 +2713,11 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     seen: set[str] = set()
 
     def _add(entity_type: str, q: str) -> None:
-        q = (q or "").strip()
-        if not q:
-            return
-        # #1350 D3: RediSearch treats 'word:' as a field-prefix and
-        # punctuation as syntax — sanitize derived query text so an FTS
-        # failure never kills a search leg.
-        q = re.sub(r"\b\w+:", " ", q)
-        q = re.sub(r"[^\w\s-]", " ", q)
-        q = re.sub(r"\s+", " ", q).strip()
-        key = f"{entity_type}:{_norm_sent(q)}"
-        if key in seen:
+        key = _query_key(entity_type, q)
+        if key is None or key in seen:
             return
         seen.add(key)
-        queries[entity_type].append(q[:160])
+        queries[entity_type].append(_sanitise_query_text(q))
 
     for e in embed_list.get("entities", []) or []:
         if isinstance(e, dict) and e.get("name"):
@@ -2900,6 +2924,19 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     bucket = {"object": "entities", "subject": "entities",
               "event": "events", "point": "points"}
     results: dict[str, dict] = {"entities": {}, "points": {}, "events": {}}
+    # #5095 (§4.4 G3): the lookup's COMPLETENESS, reported rather than assumed.
+    # `degraded` alone cannot express it — a failure on query 2..N is swallowed
+    # below (correctly: one bad query is not a dead graph), and the run then
+    # returns `degraded: False` with a genuinely PARTIAL prior set. That is the
+    # reachable incomplete shape, and the reason `failure_policy.lookup_state`
+    # reads these counters rather than the single `degraded` bit.
+    coverage: dict[str, dict[str, int]] = {
+        "derived": {leg: len(qs) for leg, qs in queries.items()},
+        "ran": {leg: 0 for leg in queries},
+        "failed": {leg: 0 for leg in queries},
+    }
+    ran_keys: list[str] = []
+    failed_keys: list[str] = []
     q_run = 0
     try:
         first = True
@@ -2922,7 +2959,15 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                     # dead graph).
                     if first:
                         raise
+                    coverage["failed"][entity_type] += 1
+                    key = _query_key(entity_type, q)
+                    if key:
+                        failed_keys.append(key)
                     continue
+                coverage["ran"][entity_type] += 1
+                key = _query_key(entity_type, q)
+                if key:
+                    ran_keys.append(key)
                 first = False
     except Exception as e:  # backend unreachable — degrade, don't raise
         _enrich_point_priors(sdk, list(results["points"].values()))
@@ -2933,6 +2978,12 @@ def search_graph(sdk, embed_list: dict, story: str, *,
             "points": list(results["points"].values()),
             "events": list(results["events"].values()),
             "queries_run": q_run,
+            # A degraded lookup ran no query to completion (the handler is
+            # reachable only from the FIRST query), so its coverage is zeros —
+            # reported rather than omitted, so a reader can tell "reported as
+            # zero" from "not reported".
+            "query_coverage": coverage,
+            "query_results": {"ran": [], "failed": []},
         }
     _enrich_point_priors(sdk, list(results["points"].values()))
     return {
@@ -2941,15 +2992,101 @@ def search_graph(sdk, embed_list: dict, story: str, *,
         "points": list(results["points"].values()),
         "events": list(results["events"].values()),
         "queries_run": q_run,
+        "query_coverage": coverage,
+        "query_results": {"ran": ran_keys, "failed": failed_keys},
     }
 
 
+def _candidate_covered(search: dict, entity_type: str, raw: str) -> bool:
+    """Did the run's OWN identity query for THIS candidate actually run?
+
+    Per-candidate, not per-run: with a bounded lookup some candidates' queries
+    ran and others' did not, and folding them into one answer is the same defect
+    this whole change removes — a claim about a check that did not happen.
+
+    Fallbacks, both stated: a ``search`` built by something other than
+    `search_graph` carries no ``query_results``, so the run-level state is all
+    there is (``failure_policy`` falls back the same way and for the same
+    reason); and a candidate that derives no searchable text has no query at all,
+    so its identity was never tested.
+    """
+    results = (search or {}).get("query_results") if isinstance(search, dict) else None
+    key = _query_key(entity_type, raw)
+    if not isinstance(results, dict):
+        return _failure_policy.lookup_state(search) == _failure_policy.LOOKUP_RESOLVED
+    if key is None:
+        return False
+    ran = results.get("ran")
+    return isinstance(ran, list) and key in ran
+
+
+def _identity_report(search: dict, candidates: dict) -> dict:
+    """§4.4 G3's run-level report — how much of this run's identity is unresolved.
+
+    Per CANDIDATE, not per run: a bounded lookup leaves some candidates' queries
+    run and others' unrun, and the difference is exactly what the next slice
+    (I1's create gate) has to act on. `operators` and `retractions` are counted
+    but not attributed: both name OTHER items, so their identity is the identity
+    of what they reference rather than of a query of their own — a stated limit,
+    not an oversight.
+
+    I2's *"never silently"* is the whole point: nothing here drops or suppresses
+    anything. It makes the run's own record say which part of what it committed
+    was never checked against the graph.
+    """
+    if not isinstance(candidates, dict):
+        candidates = {}
+    counts: dict[str, int] = {}
+    unresolved: dict[str, int] = {}
+    for section, leg in _failure_policy.LEG_BY_SECTION.items():
+        items = [item for item in (candidates.get(section) or [])
+                 if isinstance(item, dict)]
+        counts[section] = len(items)
+        text_key = {"entities": "name", "events": "content", "points": "content"}[section]
+        short = {"entities": None, "events": 80, "points": 80}[section]
+        missing = 0
+        for item in items:
+            raw = str(item.get(text_key) or "")
+            if short:
+                raw = raw[:short]
+            if not raw.strip():
+                continue
+            if not _candidate_covered(search, leg, raw):
+                missing += 1
+        unresolved[section] = missing
+    for section in ("operators", "retractions"):
+        counts[section] = len([item for item in (candidates.get(section) or [])
+                               if isinstance(item, dict)])
+    return _failure_policy.plan_identity(
+        search, candidates=counts, unresolved=unresolved)
+
+
+
 def _render_search_results(search: dict) -> str:
+    """The S4 prompt's view of the S3 lookup — and the TRUTH about what it checked.
+
+    #5095 (§4.4 G3): this used to answer a degraded lookup with *"no existing
+    items available"* and an instruction to treat everything as new — a claim
+    about a check that never happened, on the one pass (`run_s4`, the GAP
+    REVIEWER) whose output becomes the committed candidate list. Both halves are
+    the inverse of invariant I1, so the clause now comes from
+    `failure_policy.lookup_note`: what is true (*unresolved*, not absent), what
+    not to infer (nothing is *new*), and what not to claim (omit a
+    `link_before_create` entry for a search that did not happen) — while keeping
+    the EMISSION requirement, because forbidding the false claim must not read
+    as forbidding the work.
+
+    A `partial` lookup keeps its real hits: the results are shown, and the note
+    is prepended. A `resolved` lookup renders byte-identically to pre-#5095.
+    """
     if not search:
         return "(no graph search results)"
+    note = _failure_policy.lookup_note(search)
     if search.get("degraded"):
-        return (f"(graph search DEGRADED — {search.get('reason') or 'skipped'}; "
-                "no existing items available; assume everything is new)")
+        # A degraded lookup has no priors to render (the handler is reachable
+        # only from the FIRST query, so zero rows were collected) — the note is
+        # the whole render, and it substitutes for the old inverted sentence.
+        return note or "(graph search DEGRADED; the existing-item lookup did not run)"
     parts = []
     if search.get("entities"):
         parts.append("EXISTING ENTITIES (id | name | kind):\n" + "\n".join(
@@ -2964,8 +3101,13 @@ def _render_search_results(search: dict) -> str:
             f"- {e['id']} | {e.get('content', '')[:120]} | {e.get('kind', '')}"
             for e in search["events"][:40]))
     if not parts:
+        # No hits is a MEASURED absence only when the lookup completed; a
+        # partial lookup's empty leg is not evidence of anything.
+        if note:
+            return note + "\n\n(graph search returned no existing items)"
         return "(graph search returned no existing items)"
-    return "\n\n".join(parts)
+    body = "\n\n".join(parts)
+    return f"{note}\n\n{body}" if note else body
 
 
 # ── S4: REVIEW GAPS — the complete embed list ──────────────────────────────
@@ -7413,9 +7555,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                 "across namespaces in the existing graph — "
                                 "created with the explicit kind (link-before-"
                                 "create cannot disambiguate)")
-            link_before_create.append({
-                "searched_for": f"entity '{name}'", "found": False,
-                "note": "no match — created"})
+            link_before_create.append(_failure_policy.created_record(
+                f"entity '{name}'",
+                query_ran=_candidate_covered(search, "object", name)))
         lifecycle = str(e.get("lifecycle", "") or "").strip()
         supersedes_ref = str(e.get("supersedes") or "").strip()
         supersedes_collected = bool(supersedes_ref and supersedes_ref
@@ -7534,9 +7676,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     "note": f"existing {eid} — connect, do not re-create"})
                 break
         else:
-            link_before_create.append({
-                "searched_for": f"event '{content[:60]}'", "found": False,
-                "note": "no match — created"})
+            link_before_create.append(_failure_policy.created_record(
+                f"event '{content[:60]}'",
+                query_ran=_candidate_covered(search, "event", content[:80])))
         event_ids[n] = eid
         ev_entry = {
             "id": eid, "eventKind": ekind.rsplit(":", 1)[-1] if ":" in ekind else ekind,
@@ -7802,9 +7944,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                 "value change)"})
         else:
             reason = "NEW"
-            link_before_create.append({
-                "searched_for": f"point '{content[:60]}'", "found": False,
-                "note": "no match — created"})
+            link_before_create.append(_failure_policy.created_record(
+                f"point '{content[:60]}'",
+                query_ran=_candidate_covered(search, "point", content[:80])))
         # #2552 (op_04): collect an explicit point-level ``supersedes`` ref
         # (the DECISION-REVERSAL channel — a NEW decision/claim replaces a
         # prior-session one). Resolution runs after the loop against the S3
@@ -8866,6 +9008,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                                    "restamp_overrides": 0,
                                    "slot_rekeys": 0},
                 "vet": {"enabled": vet_enabled, "s2": {}, "union": {}},
+                # #5095: the always-present rule applies to this hand-enumerated
+                # return too — and this branch's `search` is the most unresolved
+                # one there is (nothing ran), so an absent block here would be
+                # the one omission that matters.
+                "identity": _identity_report(
+                    {"mode": resolve_backend_mode(), "degraded": True,
+                     "reason": "no conversation content"}, {}),
                 "chain_enforcer": {"notes": [], "stats": {
                     "items_checked": 0, "violations": 0,
                     "rewired": 0, "warned": 0}}}
@@ -9262,6 +9411,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["embed_list"] = complete_list
     result["s2_embed"] = embed_list          # S2 raw (pre-S4) — owner loop
     result["search"] = search
+    # #5095 (§4.4 G3): the identity surface — always present, additive. It says
+    # which candidates the run committed WITHOUT ever checking them against the
+    # graph, so nothing about an unrun lookup is silent (I2). The held/averted
+    # count is the input the next slice (I1's create gate) reads.
+    result["identity"] = _identity_report(search, complete_list)
+    if result["identity"]["state"] != _failure_policy.LOOKUP_RESOLVED:
+        _id = result["identity"]
+        result.setdefault("warnings", []).append(
+            f"S3 identity {_id['state']}: {_id['unresolved_total']} of "
+            f"{sum(_id['candidates'].values())} committed candidate(s) were "
+            f"never checked against the graph — recorded as UNRESOLVED, never "
+            f"as 'not found'{(': ' + _id['reason']) if _id['reason'] else ''}")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface
