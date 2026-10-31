@@ -6017,9 +6017,11 @@ def test_census_refusal_coverage_attributes_the_refusal_per_cell(capsys):
                      ingest_mode="v2", context_cap=8000,
                      measured=sg._dense_leg_verified(both), results=both)
     flat = " ".join(capsys.readouterr().err.split())
-    assert "1 of the cells that refused a record still publish a numeric" \
-        in flat, flat
-    assert "1 publish NO ratio at all" in flat, flat
+    assert "are MIXED: some still publish a numeric coverage" in flat, flat
+    assert "others publish NO ratio at all" in flat, flat
+    # Neither sweep-wide answer is asserted here: the sweep has BOTH
+    # populations, so the sentence names both rather than picking one.
+    assert "Each cell that refused a record" not in flat, flat
 
     # A sweep whose census cause cannot be attributed to a row names no
     # population rather than inventing one (the census arm is absent, so this

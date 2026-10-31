@@ -600,12 +600,13 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
                   file=sys.stderr)
             if UNMEASURED_EMBEDDER not in causes \
                     and UNMEASURED_ZERO_COVERAGE not in causes:
-                # "its coverage is numeric" is NOT implied by the cause set
+                # "its coverage is numeric" is NOT implied by the cause set,
+                # and neither is "the refusing cell published no ratio"
                 # (#10355 review P3): a cell whose ONLY record was refused
                 # publishes no ratio at all, and its cause is this same one.
                 # Claim exactly what the cause set proves — and claim it of the
-                # cells that REFUSED, not of the sweep (#10355 review P3): the
-                # sweep-wide gate printed the no-ratio sentence for a run whose
+                # cells that REFUSED, not of the sweep: the sweep-wide gate
+                # this replaces printed the no-ratio sentence for a run whose
                 # refusing cell published a ratio and whose ratio-less cell
                 # refused nothing, which is the same "the diagnostic asserts a
                 # fact its gate does not prove" class this PR removes.
@@ -624,13 +625,13 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
                         "for it.")
                 elif refused_without_ratio:
                     coverage_note = (
-                        f"{refused_with_ratio} of the cells that refused a "
-                        f"record still publish a numeric coverage and "
-                        f"{refused_without_ratio} publish NO ratio at all "
-                        "(embedding_coverage=None) — read records_refused "
-                        "per cell: a numeric one was computed over the "
-                        "population its refused record was removed from, "
-                        "and a None one has no ratio to trust.")
+                        "The cells that refused a record are MIXED: some "
+                        "still publish a numeric coverage, others publish "
+                        "NO ratio at all (embedding_coverage=None) — read "
+                        "records_refused per cell: a numeric one was "
+                        "computed over the population its refused record "
+                        "was removed from, and a None one has no ratio to "
+                        "trust.")
                 else:
                     coverage_note = (
                         "Read records_refused per cell on the `dense leg:` "
