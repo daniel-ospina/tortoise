@@ -956,8 +956,15 @@ class GhClient:
         self.truncations: list[str] = []
 
     def note_truncation(self, fact: str) -> None:
-        """Record a cut and keep it visible in the rendered ``window.truncation``."""
-        self.truncations.append(fact)
+        """Record a cut and keep it visible in the rendered ``window.truncation``.
+
+        Deduplicated: once the API budget is exhausted EVERY remaining population's listing
+        raises, so the budget sentence would otherwise be appended once per population and
+        the window would render the same sentence six times. A genuinely different cut always
+        names its own population/page, so nothing real is folded.
+        """
+        if fact not in self.truncations:
+            self.truncations.append(fact)
         self.truncation = " · ".join(self.truncations)
 
     def _spend(self, count: int = 1) -> None:
