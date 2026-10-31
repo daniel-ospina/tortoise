@@ -277,10 +277,14 @@ def test_skill_markers_contract():
 # repo pins the bytes — `config/served-skills-upstream.yml`), so neither side can
 # be trusted to describe the other.
 
-_NUMBER_WORDS = {word: value for value, word in enumerate(
-    "ZERO ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ELEVEN TWELVE "
-    "THIRTEEN FOURTEEN FIFTEEN SIXTEEN SEVENTEEN EIGHTEEN NINETEEN TWENTY"
-    .split())}
+# A tuple literal, not `" … ".split()`: SIM905 is in the lint select (`SIM`), and
+# `main-lint.yml` runs `ruff check .` on every merged tree with no `paths:`
+# filter, so the split form reddens the first post-merge run — the same "the
+# remedy returns a red tree" defect this PR exists to close.
+_NUMBER_WORDS = {word: value for value, word in enumerate((
+    "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT",
+    "NINE", "TEN", "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN",
+    "SIXTEEN", "SEVENTEEN", "EIGHTEEN", "NINETEEN", "TWENTY"))}
 _WARNINGS_SECTION = re.compile(r"^## Warnings\b.*?(?=^## |\Z)", re.M | re.S)
 _DECLARED_COUNT = re.compile(r"\bthe ([A-Z]+)(?:-key table| keys)\b")
 _KEY_TOKEN = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
