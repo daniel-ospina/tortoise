@@ -129,7 +129,8 @@
 # router · #5010 fan-out cap · #2453 the verbatim state-value carve-out
 # (`state_value_carve_out`; #5064's Verification Checklist names it as one of
 # the three write-path behaviours to verify, and its omission from the compact
-# render is tracked at #9775).
+# render was tracked at #9775 — the render half, closed; the enforcement half is
+# #10360).
 
 version: 1
 
@@ -478,56 +479,54 @@ mechanisms:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §7, the narrower-than-it-looks carve-out (#2453)
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §7, the two-class retain table
     state: not-implemented
-    tracking_issue: 9775
+    tracking_issue: 10360
     note: >-
       The MECHANISM is the guarantee: a state value or a decision-relevant
       operational value (a measurement, deadline, threshold/TTL, version or
       count) survives extraction VERBATIM, so any mechanical filter must carry
       the carve-out rather than drop it. ⚠️ The state is `not-implemented` on
       purpose, and naming the halves is the whole point of the row:
-      WHAT EXISTS — the prompt-side carve-out. `STATE_VALUE_CARVE_OUT`
-      (`tortoise/extractor_v2.py`) is rendered into S1 (`_granularity_text`) and
-      S2/S4 (`_render_master_core_only`, `_render_master_verbose`), and
-      `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
-      `_s2s4_rules()` — never S1, never a master render. Pinned, in three
-      places because each catches a different insertion: never-S1 by
+      WHAT EXISTS — the prompt-side carve-out, on EVERY path that builds a
+      prompt. `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered
+      into S1 (`_granularity_text`), S2/S4 (`_render_master_core_only`,
+      `_render_master_verbose`) and — since `#9775` — S2/S4 compact
+      (`_render_master_compact`), which appends it and the user-personal-state
+      vocabulary it names UNCONDITIONALLY, OUTSIDE its `if story:` gate: the
+      compaction rule may drop HINTS (the matched-domain granularity block, the
+      story-selected pack sections), never the guarantee. That row used to record
+      an ABSENCE here; it now records the rule that keeps the absence from coming
+      back. `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
+      `_s2s4_rules()` — never S1, never a master render. Pinned, in four places
+      because each catches a different insertion: never-S1 by
       `tests/test_extractor_v4_citation_rot.py`; the core-only render
-      byte-for-byte by `tests/test_extractor_v2.py`; and — added 2026-10-24,
-      because it was NOT pinned — the `VALUE_FIDELITY_RULE` text absent from all
-      three renders by
-      `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`,
-      which also asserts the rule still rides `_s2s4_rules()` so the absence cannot
-      pass by vacancy. Measured before that test: appending the rule to
-      `_render_master_verbose` (the DEFAULT render) shipped a second copy of the
-      instruction in one S2/S4 prompt with every gate green. ⚠️ It is pinned and
-      NOT read off a comment: the `SEAMS:` comment above `SHORT_SESSION_FACT_RULE`
-      belongs to a different constant and names S1 as one of ITS seams, so citing
-      it as authority for value-fidelity's never-S1 would say the opposite of what
-      the row claims. The FILTER side is
-      mechanical and is NOT what this row records as absent:
-      `tortoise/value_gate.py::identifier_only` is the SELECTION predicate
-      that drops identifier-like residues (`#4899`), and the EMBED gate reuses
-      the same rule set (row `embed_gate`). WHAT DOES NOT — (a) there is no
-      mechanical enforcement of the GUARANTEE: VERBATIM SURVIVAL is prompt-only
-      (#2453's own closing records this), and the strict-verbatim measurement is
-      38/77 = 49.4% on the flags-on arm against a 49/90 = 54.4% committed
-      baseline (#5064 comment 2026-10-13, #7949 E2);
-      (b) `_render_master_compact` — selected by the documented
-      `TORTOISE_EXTRACTOR_PROMPT=compact` opt-in — appends no
-      `STATE_VALUE_CARVE_OUT` at all, so one render path silently drops the
-      guarantee. ⚠️ The omission is MEASURED, not read off a comment: the
-      comment above the compact render's hint blocks
-      (`tortoise/extractor_v2.py:1175-1177`) only excludes them from the SHUFFLE
-      ("only the kind vocabulary randomizes") and then emits a FILTERED
-      `MEMORY GRANULARITY` block, so it neither says nor implies that the
-      carve-out is dropped —
-      `test_the_compact_render_omits_the_carve_out_the_row_records` is the
-      evidence, and the code comment that would say why does not exist yet. ⚠️ The row records the OMISSION,
-      not a justification for it: whether the compact render is deliberately out
-      of the carve-out's scope is #9775's decision, and the code-side comment
-      that decision would need does not exist yet — do not read "deliberately"
-      into this row. A row marked `implemented`
-      would make the prompt text read as the guarantee — the exact
+      byte-for-byte by `tests/test_extractor_v2.py`; the `VALUE_FIDELITY_RULE`
+      text absent from all three renders by
+      `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`
+      (which also asserts the rule still rides `_s2s4_rules()`, so the absence
+      cannot pass by vacancy — measured before that test: appending the rule to
+      `_render_master_verbose`, the DEFAULT render, shipped a second copy of one
+      instruction inside one prompt with every gate green); and — since `#9775` —
+      the carve-out and its vocabulary PRESENT, whole, on every render path and
+      through both dispatch entry points, by
+      `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires`,
+      exercised over three story shapes (matched, `None`, unmatched) precisely
+      because a carve-out appended INSIDE the story gate passes the matched case
+      — measured red before that test existed, and the mutation it is written to
+      catch is the story-gated variant, not deletion alone.
+      ⚠️ Pinned, and NOT read off a comment: the `SEAMS:` comment above
+      `SHORT_SESSION_FACT_RULE` belongs to a different constant and names S1 as
+      one of ITS seams, so citing it as authority for value-fidelity's never-S1
+      would say the opposite of what the row claims.
+      ⚠️ PRESENT-IN-A-PROMPT IS NOT THE GUARANTEE, and this row is where the
+      distinction is kept. The FILTER side is mechanical
+      (`tortoise/value_gate.py::identifier_only` is the SELECTION predicate that
+      drops identifier-like residues, `#4899`, and the EMBED gate reuses the same
+      rule set — row `embed_gate`), but nothing enforces RETENTION. VERBATIM
+      SURVIVAL is prompt-only (`#2453`'s own closing records this; the enforcement
+      half is `#10360`) and it is measured SHORT: 38/77 = 49.4% strict verbatim
+      survival on the flags-on arm against a 49/90 = 54.4% committed baseline
+      (`#5064` comment 2026-10-13, `#7949` E2). A row marked `implemented` would
+      make the prompt text read as the guarantee — the exact
       declared-implies-present defect this registry exists to catch.
 
   - id: atomic_point_write
