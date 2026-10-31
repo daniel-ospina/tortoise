@@ -4702,11 +4702,21 @@ def _supersede_moved_rels() -> frozenset[str]:
     family and DO carry a descriptor, so the skip below is again exactly the
     families 2b MOVES.
 
-    ⛔ The residual that REMAINS is a target this family cannot NAME: a `:Source`
-    (url-keyed, outside `RECORD_ADDRESSABLE_EDGE_LABELS`) or an `Event` with no
-    `eventId` gets no descriptor (`id_addressed_target` → `None`), so live still
-    MOVES that edge while BOTH rebuild routes hold nothing. Making `:Source`
-    addressable is a FOLD change (#9834), not this leg's.
+    ⛔ A `:Source` target IS journalled — by its `url`, on BOTH routes
+    (`id_addressed_target`'s Source arm; `resolve_structural_target(by_url=True)`
+    here, `public.source.node_key` in the record). An earlier revision of this
+    docstring named the `:Source` as the residual and called it a FOLD change,
+    which the code that landed in #9836 refutes: `#9834`'s remaining subject is
+    the `DirectEdgeCreated` CARRIER's id sweep (`EPISTEMIC_LABELS`), a different
+    leg — not this descriptor.
+
+    ⛔ The residual that REMAINS is a target with NO NAMEABLE IDENTITY: an
+    epistemic node missing its own identity property (an `Event` with no
+    `eventId` — whose `id` the meeting guard can share between two distinct
+    nodes, so it may not be used — a Point/Subject/Object with no `id`), or a
+    node that is neither epistemic nor a `:Source`. `id_addressed_target` returns
+    `None` for those, so live still MOVES that edge while BOTH rebuild routes
+    hold nothing.
 
     Late import: `tortoise.projection.edges` imports THIS module (the same reason
     `_structural_edge_write_scope` imports late).
@@ -4752,9 +4762,13 @@ def _supersede_took_this_edge(etype, ev_seq, src, tgt, succ, supersede_last) -> 
     the `E2E-11.6` no-dead-point invariant at the price of losing the edge on the
     journal route (`#9836`). They are the ID-ADDRESSED family now and carry one, so
     the journal route and the record route both keep the edge at the successor —
-    EXCEPT when the target has no nameable identity (a `:Source`, an `Event` with
-    no `eventId`): there no descriptor exists at all, so live holds the edge at the
-    successor and both rebuild routes hold nothing (#9834 owns `:Source`).
+    for a Point, a Subject, an Object, an `Event` (by its `eventId`) and a
+    `:Source` (by its `url`) alike, which is every label the family addresses.
+    ⛔ The ONE shape still outside that: a target with NO NAMEABLE IDENTITY (an
+    `Event` with no `eventId`, an epistemic node with no `id`, and anything that
+    is neither epistemic nor a `:Source`) — `id_addressed_target` returns `None`,
+    so no descriptor exists at all, live holds the edge at the successor and both
+    rebuild routes hold nothing.
     """
     if etype in SUPERSEDE_DIRECT_RELS:
         return src in succ or tgt in succ

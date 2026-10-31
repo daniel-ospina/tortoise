@@ -64,9 +64,13 @@ census already named** — which is why the census below is keyed on
   * `projection.FalkorProjection._rebuild_all_replay` — the replay delete-leg matches
     `[r:{etype}]` where `etype` is a RUN-TIME name gated on
     `STRUCTURAL_REPOINT_RELS` (the snapshot-derivable family PLUS the
-    ID-ADDRESSED family, `#9836`); the `delete_only` guard beside it stays gated
-    on `DERIVABLE_STRUCTURAL_RELS`, because that descriptor is emitted for the
-    derivable rels alone.
+    ID-ADDRESSED family, `#9836`) — and the `delete_only` guard beside it is
+    gated on that SAME union (`or etype not in STRUCTURAL_REPOINT_RELS`), because
+    since #9836 review round 2 the producer emits that descriptor for the
+    ID-ADDRESSED family too (the no-self-edge arm, `sdk.py`
+    `if rel in STRUCTURAL_REPOINT_RELS and rel not in emitted_self_deletes:`).
+    For that family the descriptor is the RECORD leg's only delete path, not a
+    graph resurrection — the graph deletes the self-edge at the transfer itself.
 
 A module-level census cannot see any of them: each module was already named by
 a row, and no row count changes when a reader is added beside it.

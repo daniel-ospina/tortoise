@@ -502,17 +502,29 @@ def test_the_target_is_resolved_by_the_labels_own_canonical_key(label, column):
 
 
 def test_an_unaddressable_label_is_a_no_move():
-    """A label the arm cannot address moves NOTHING — never delete-without-insert.
+    """A label the arm cannot address writes NOTHING — the graph's `continue`.
 
-    The graph's replay leg SKIPS such a descriptor; if the record acted on it,
-    the DELETE half would run with no INSERT and the row would leave its endpoint
-    and land nowhere (the atomicity the `moved` conjunct exists to protect).
-    Returning `None` sends the descriptor back to the plain-upsert path, which is
-    the same no-move the fold performs.
+    The graph's replay leg SKIPS such a descriptor (`continue`, with a warning);
+    the record must SKIP it too. ⛔ The assertion is the CONSEQUENCE, not the
+    helper's return value: `_structural_repoint_statements` returning `None`
+    still fell through `_declared_mutations` into the plain upsert, which has no
+    superseded-endpoint gate — so the row landed AT the retired point (or, for a
+    label outside the node vocabulary, the whole journal record was refused with
+    `RecordProjectionError`). Skip-vs-raise is not "agree on the miss".
     """
-    doc = _descriptor("wasDerivedFrom", tgt="https://x.test/d",
-                      target_label="Tag")
-    assert rp._structural_repoint_statements("o", "g", doc) is None
+    # (a) a label outside the addressable set — the shape the graph warns on
+    unknown = _descriptor("wasDerivedFrom", tgt="https://x.test/d",
+                          target_label="Tag")
+    assert rp._structural_repoint_statements("o", "g", unknown) == []
+    # pre-fix this raised `RecordProjectionError` (the label is not a record
+    # node label), so the assertion below is not vacuous.
+    assert rp.mutations_for(unknown, org_id="o", graph_id="g") == []
+    # (b) no label at all — pre-fix the plain upsert wrote a row at `src`, the
+    # SUPERSEDED point, which is the `live != record-rebuild` divergence itself.
+    unlabelled = _descriptor("wasDerivedFrom")
+    unlabelled["target_label"] = None
+    assert rp._structural_repoint_statements("o", "g", unlabelled) == []
+    assert rp.mutations_for(unlabelled, org_id="o", graph_id="g") == []
 
 
 def test_a_label_outside_the_addressable_set_is_a_REFUSAL_not_a_guess():
@@ -533,12 +545,20 @@ def test_a_label_outside_the_addressable_set_is_a_REFUSAL_not_a_guess():
 
 
 def test_the_writer_still_transfers_exactly_the_families_we_claim():
-    """`SUPERSEDE_STRUCTURAL_RELS` ⊇ the family, and the replay set is the split.
+    """The writer's transfer set IS the union of the two families — total.
 
     A rel added to the writer's transfer set without being classified into one
-    of the two families is the #9836 defect repeating one rel over.
+    of the two families is the #9836 defect repeating one rel over: the 2b leg
+    MOVES it live and `supersede_point`'s `if derivable: … elif rel in
+    ID_ADDRESSED_STRUCTURAL_RELS:` emits NOTHING for it. So the classification
+    is pinned against the WRITER's set by EQUALITY, not by a subset — a subset
+    assertion (and a restatement of `STRUCTURAL_REPOINT_RELS`'s own definition,
+    which the union line below is) stays green while a ninth rel transfers and
+    journals nothing.
     """
-    assert set(FAMILY) <= set(SUPERSEDE_STRUCTURAL_RELS)
+    assert frozenset(SUPERSEDE_STRUCTURAL_RELS) == STRUCTURAL_REPOINT_RELS, (
+        "a rel the writer TRANSFERS but neither family classifies is #9836 one "
+        "rel over: live moves it and no descriptor is emitted")
     assert set(FAMILY) == set(ID_ADDRESSED_STRUCTURAL_RELS)
     assert not (ID_ADDRESSED_STRUCTURAL_RELS & DERIVABLE_STRUCTURAL_RELS), (
         "a rel cannot be snapshot-derivable AND id-addressed: the derivable set "

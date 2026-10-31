@@ -2775,11 +2775,20 @@ def _structural_repoint_statements(
     """The MOVE a 2b structural `DirectEdgeRepoint` describes (#9972/#9973).
 
     Returns `None` for every other shape — a 2a direct descriptor, a malformed
-    one, a `delete_only` guard, or an ID-ADDRESSED descriptor (`#9836`) whose
-    `target_label` is not an addressable epistemic label — so those keep the
-    existing path byte for byte (a 2a `src` is ALREADY the successor and an
-    upsert `DELETE`s nothing; an unaddressable id-addressed descriptor is a
-    NO-MOVE on both routes, never a DELETE whose INSERT cannot run).
+    one, a `delete_only` guard — so those keep the existing path byte for byte
+    (a 2a `src` is ALREADY the successor and an upsert `DELETE`s nothing).
+
+    Returns `[]` — this shape, and NO mutation — for an ID-ADDRESSED descriptor
+    (`#9836`) whose `target_label` is not an addressable label. ⛔ An EMPTY LIST,
+    not `None`: `None` sends the descriptor back to the plain-upsert fall-through
+    in `_declared_mutations`, which has no superseded-endpoint gate — it would
+    write a relation row AT the retired point (or raise, for a label the record
+    cannot address) while the graph leg `continue`s. That is the
+    `live != record-rebuild` divergence this family exists to close, one shape
+    over. `[]` is the record's half of the graph's SKIP: a descriptor neither
+    route can address moves NOTHING and deletes NOTHING, and the plain-upsert
+    path is NOT that no-op (unreachable from a live producer either way — the
+    producer only emits a label `id_addressed_target` resolved).
 
     Two statements, in this order, and both gated on the SAME condition: the
     descriptor has an effect only when `src` is (a) TERMINAL and (b) has a
@@ -2891,9 +2900,14 @@ def _structural_repoint_statements(
             # A descriptor whose label cannot be addressed moves NOTHING and
             # deletes NOTHING — never a partial move (the DELETE without the
             # INSERT is the measured defect the atomic `moved` gate exists to
-            # prevent, one line below). The graph leg SKIPS the same descriptor,
-            # so the two routes agree on the miss rather than diverging on it.
-            return None
+            # prevent, one line below). The graph leg SKIPS the same descriptor
+            # (`continue`), so the two routes agree on the miss — and `[]` is
+            # how this layer says SKIP: returning `None` would fall through to
+            # `_relation_upsert_statement`, whose plain upsert has no
+            # superseded-endpoint gate and therefore writes a row at the RETIRED
+            # point (or raises `RecordProjectionError` for a label outside the
+            # node vocabulary) where the graph holds nothing.
+            return []
     else:
         label = (_STRUCTURAL_REL_LABELS.get(etype)
                  if isinstance(etype, str) else None)
@@ -4178,7 +4192,12 @@ def _declared_mutations(
             # target by its replay key, remove the row at the superseded point,
             # and re-create it at the DIRECT successor live named. `None` = not that shape (the 2a
             # direct descriptor, whose `src` is already the successor), and it
-            # keeps the plain upsert below byte for byte.
+            # keeps the plain upsert below byte for byte. `[]` = the ID-ADDRESSED
+            # family's SKIP (a descriptor whose target label neither route can
+            # address): the graph leg `continue`s on the same record, so the
+            # record must write nothing — the upsert below is NOT that no-op
+            # (it has no superseded-endpoint gate), which is why the skip is
+            # returned here rather than as `None`.
             moved = _structural_repoint_statements(
                 org_id, graph_id, record, columns, refused)
             if moved is not None:
