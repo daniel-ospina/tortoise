@@ -18133,8 +18133,25 @@ class TortoiseSDK:
         # why/support chain went empty, and the superseded point kept
         # exerting influence through the operator. Driven by the INPUT edges
         # themselves (not by the typed-edge loop) so an operator whose
-        # op_type carries no typed edge still transfers its support source,
-        # and the rebuild pass-2b leg can mirror this query exactly.
+        # op_type carries no typed edge still transfers its support source.
+        # ⛔ KNOWN ASYMMETRY with the replay leg, recorded rather than left to
+        # be discovered (#10418 review P3). This query is the CANONICAL
+        # population (``is_operator = true OR op_type IS NOT NULL``), but the
+        # rebuild pass-2b mirror in ``projection/__init__.py``
+        # (``supersede_last``) still matches ``{is_operator:true}`` alone — as
+        # does its typed-edge sibling. The claim here used to be "the rebuild
+        # leg can mirror this query EXACTLY", which this PR's population
+        # widening made false. The asymmetry is UNOBSERVABLE, and measured, not
+        # assumed: ``_upsert_point_props`` derives operator-ness from the
+        # event's NESTED ``operator`` key, which every operator-journaling arm
+        # writes (``OperatorAdded``; the #548 graph-only snapshot synthesizes it
+        # from the flat props), so pass 1a stamps ``is_operator=true`` BEFORE
+        # pass-2b runs — a flag-less canonical operator cannot survive a
+        # rebuild. ``tests/test_pointsuperseded_rebuild.py``
+        # ``test_rebuild_normalises_a_flag_less_operator_before_pass2b`` pins
+        # that. If a rebuild arm ever learns to preserve a flag-less operator,
+        # that pin reddens and the two replay queries must be widened to this
+        # same disjunction.
         input_rows = proj.g.query(
             "MATCH (old:Point {id:$old_id})-[ri:INPUT]->(op:Point) "
             "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "

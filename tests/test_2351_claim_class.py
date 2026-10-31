@@ -289,6 +289,11 @@ def test_supersede_repoint_refuses_a_derived_source_over_the_successor(lane):
     AUTHORED — so re-pointing makes ``src(derived) --IMPL--> new(asserted)``,
     the exact wiring ``create_operator`` refuses. Pre-fix the supersede
     reported success and the graph held the refused factor.
+
+    ⚠️ The message assertions at the end are a PIN, not a discriminator: the
+    ordered arm already said "at the SOURCE position" and never borrowed the
+    candidate arm's caveat, so they hold on the pre-fix code too. They are here
+    so a future edit cannot start hedging a position the door DID prove.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]

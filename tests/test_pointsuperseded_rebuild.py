@@ -187,6 +187,59 @@ def test_operator_edge_repoints_through_chain_to_final_successor(sup):
     assert _sem_edges(proj, x) == pre_x, "untouched input edge drifted"
 
 
+def test_rebuild_normalises_a_flag_less_operator_before_pass2b(sup):
+    """#10418 review P3 — the pass-2b replay predicate stays ``{is_operator:true}``
+    while the live legs are now the CANONICAL disjunction; this pins why that
+    asymmetry cannot diverge.
+
+    Live 2a / 2a-INPUT read ``(op.is_operator = true OR op.op_type IS NOT NULL)``
+    (``sdk.py``), but the replay queries
+    (``projection/__init__.py``, ``supersede_last`` fold) still filter the flag
+    alone. The difference is UNOBSERVABLE because a rebuild cannot reproduce a
+    flag-less canonical operator in the first place: ``_upsert_point_props``
+    derives operator-ness from the event's NESTED ``operator`` key, and every
+    arm that journals an operator writes that key — the journal's
+    ``OperatorAdded``, and the #548 GRAPH-ONLY snapshot, which synthesizes it
+    from the flat props precisely so a live operator survives the wipe. So the
+    node is stamped ``is_operator=true`` in pass 1a, BEFORE pass-2b's repoint
+    query runs, and the narrow predicate matches it.
+
+    ⚠️ This is a PIN, not a discriminator: it passes on the narrow predicate
+    too. It reddens the day a rebuild arm learns to preserve a flag-less
+    operator — which is the day the two replay queries must be widened to the
+    canonical disjunction (the remedy recorded at ``sdk.py``'s 2a-INPUT comment).
+    """
+    _, events, sdk = sup
+    a = sdk.create_point("statement", "A", status="live")["id"]
+    b = sdk.create_point("statement", "B", status="live")["id"]
+    succ = sdk.create_point("statement", "A'", status="live")["id"]
+    op = sdk.create_operator("IMPL", a, [b])["id"]
+    sdk.supersede_point(a, succ)
+    proj = sdk._get_proj()
+    pre_new = _sem_edges(proj, succ)
+    assert pre_new, "successor should hold the transferred edge live"
+    # The RAW-WRITE shape the widened POPULATION covers: the flag is gone, the
+    # ``op_type`` that EP's Batch-1 predicate reads remains.
+    proj.g.query(
+        "MATCH (op:Point {id:$op}) REMOVE op.is_operator",
+        params={"op": op})
+    assert not proj.g.query(
+        "MATCH (op:Point {id:$op}) WHERE op.is_operator = true RETURN op.id",
+        params={"op": op}).result_set, "fixture must actually clear the flag"
+    _rebuild(sdk, events)
+    # The rebuild stamps operator-ness from the journal's nested ``operator``
+    # key, so the flag-less state does not survive it.
+    assert proj.g.query(
+        "MATCH (op:Point {id:$op}) WHERE op.is_operator = true RETURN op.id",
+        params={"op": op}).result_set, (
+        "a rebuild must normalise operator-ness — if a flag-less operator can "
+        "survive pass 1a, the pass-2b queries must read the canonical "
+        "disjunction (#10418 review P3)")
+    assert not _sem_edges(proj, a), "operator edge stranded on superseded A"
+    assert _sem_edges(proj, succ) == pre_new, (
+        "transferred operator edge drifted post-rebuild")
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Indicator 2 + E2E-11.6: DirectEdgeRepoint descriptor replay — transferred
 # direct edges survive rebuild at the successor with their attrs

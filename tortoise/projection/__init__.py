@@ -16758,6 +16758,18 @@ class FalkorProjection(
                     if final_id == oid:
                         continue
                     fseq = fold_seq.get(oid)
+                    # ⚠️ NARROW BY DESIGN, with a measured bound (#10418 review
+                    # P3): live 2a / 2a-INPUT read the CANONICAL operator
+                    # population (``sdk.py``: ``is_operator = true OR op_type IS
+                    # NOT NULL``), these two replay mirrors still match the flag
+                    # alone. A flag-less canonical operator cannot reach this
+                    # fold — pass 1a stamps operator-ness from the event's nested
+                    # ``operator`` key (``_upsert_point_props``), and every
+                    # operator-journaling arm writes it, including the #548
+                    # graph-only snapshot's synthesized key. Widening these to
+                    # the same disjunction is the remedy the day a rebuild arm
+                    # preserves a flag-less operator; the pin is
+                    # ``test_rebuild_normalises_a_flag_less_operator_before_pass2b``.
                     rows = self.g.query(
                         "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$id}) "
                         "RETURN op.id, type(r), r.idx, ID(r), op.label",
