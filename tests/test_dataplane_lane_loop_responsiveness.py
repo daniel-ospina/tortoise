@@ -566,13 +566,16 @@ def test_delete_session_does_not_freeze_the_event_loop(client, monkeypatch):
     moved into ONE worker hand-off precisely so the sequence stays
     uninterleaved. Two assertions that fail on the inline shape:
 
-    * ``ticks_in_stall >= MIN_TICKS_IN_STALL`` — the loop kept scheduling while
+    * ``ticks in the stall window >= floor`` — the loop kept scheduling while
       the attach was blocked (inline yields 0: the ticker's next wake-up cannot
-      run until the freeze releases). The window this counts over is
+      run until the freeze releases). ``floor`` is the CALIBRATED value
+      ``_stall_tick_floor`` returns (#5049 rule 1), ``MIN_TICKS_IN_STALL`` only
+      for a normally-ticking host. The window this counts over is
       SNAPSHOTTED while the ticker runs, never read from the mutable probe
       dict at assert time — a late off-loop call would otherwise manufacture
       the inline RED shape on an idle machine (#10115,
-      ``test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict``).
+      ``test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict``,
+      ``test_the_dataplane_guard_never_reads_the_probe_window_at_assert_time``).
     * ``/health`` answered INSIDE the blocking window — the user-visible
       consequence: a concurrent client is served DURING the graph call, not
       queued behind it. /health is pure in-memory (#2850), so a delay in it can
@@ -702,12 +705,12 @@ def test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict(
     cannot stop an already-submitted pool thread.
 
     This reproduces that late call and pins the difference: the raw-dict window
-    collapses to zero ticks, the snapshot does not move.
+    collapses to zero ticks while the sampled one still holds them.
     """
     import tortoise.hosted_api as ha_mod
 
-    # Shorter stand-in than the 2.0 s used above: the assertion under test is
-    # "ticks were sampled", and 0.5 s / TICK_S still yields ~25 of them.
+    # Shorter stand-in than the 2.0 s used above; the contrast under test needs
+    # the ticker to sample the window, not a specific count.
     monkeypatch.setitem(globals(), "STALL_S", 0.5)
     state: dict = {}
     _RequestScopedProbe(monkeypatch, ha_mod, state, block=True)
@@ -744,9 +747,30 @@ def test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict(
     assert state.get("ran_on_loop") is False, (
         "the attach ran on the loop in the setup, not in a worker thread")
     sampled = _ticks_in_window(ticks, t_enter, t_exit)
-    assert len(sampled) >= MIN_TICKS_IN_STALL, (
-        f"the SETUP is broken, not the fix: only {len(sampled)} tick(s) were "
-        f"sampled during a 0.5s blocked attach that did NOT block the loop")
+    # #5049 rule 1: the SETUP check below is a tick count too, so it may not
+    # red a host that cannot schedule the loop. `_measure_idle_ticks` is given
+    # the SAME span the window used (the patched 0.5 s, not the module-level
+    # `CALIBRATION_SPAN_S`, which was bound to 2.0 at import), and an
+    # uncalibratable host exits INCONCLUSIVE rather than FAIL.
+    if not sampled:
+        baseline_ticks = _measure_idle_ticks(span_s=STALL_S)
+        if _stall_tick_floor(baseline_ticks) == 0:
+            inconclusive(
+                "this host completed the loop "
+                f"{baseline_ticks} time(s) over a {STALL_S:.1f}s IDLE span, "
+                "so 'the ticker sampled the blocked attach' could not be "
+                "observed at all",
+                deadline_s=STALL_S,
+                diagnosis=(
+                    "The mechanism assertions above hold (`ran_on_loop is "
+                    "False`, the late call moved the window), so this is a "
+                    "missing MEASUREMENT, not a product verdict."),
+            )
+        raise AssertionError(
+            f"the SETUP is broken: this host ticks ({baseline_ticks} over "
+            f"{STALL_S:.1f}s idle) but sampled 0 tick(s) across a "
+            f"{STALL_S:.1f}s off-loop block — the contrast this case exists "
+            f"to show is missing")
 
     # The late call: the ticker has stopped, exactly like a pool thread that
     # outlived the request. It rewrites the probe's window.
@@ -756,12 +780,62 @@ def test_a_LATE_attach_cannot_manufacture_a_zero_tick_verdict(
         "longer reproduces #10115 — the snapshot is now untested here")
     assert [t for t in ticks
             if state["entered"] < t < state["exited"]] == [], (
-        "the raw-dict window was expected to collapse to 0 tick(s); it did "
-        "not, so this case is no longer reproducing the manufactured RED")
-    assert len(_ticks_in_window(ticks, t_enter, t_exit)) == len(sampled), (
-        "a LATE call to the patched attach changed the measured verdict — the "
-        "window is being read from the mutable probe dict again, which is how "
-        "this file manufactures a 0-tick RED on an idle machine (#10115)")
+        f"the raw-dict window was expected to collapse to 0 tick(s) while "
+        f"the sampled one holds {len(sampled)}; it did not, so this case is "
+        f"no longer reproducing the manufactured RED")
+
+
+def test_the_dataplane_guard_never_reads_the_probe_window_at_assert_time():
+    """#10115: the PRODUCTION guard's window is snapshotted, pinned structurally.
+
+    The behavioural case above proves the mechanism can manufacture a 0-tick
+    RED; it cannot notice if the guard itself goes back to reading
+    ``state["entered"]``/``state["exited"]`` at assert time, because the two
+    tests share no state. So this pins the shape in the source, the way this
+    repo pins an un-seeable seam: inside
+    ``test_delete_session_does_not_freeze_the_event_loop``, those two keys may
+    be read only AFTER the snapshot is taken — i.e. no read may sit after the
+    ``asyncio.run(_drive())`` call that ends the measurement. Restoring the
+    pre-fix `entered, exited = state[...]` block moves a read below that line
+    and reddens here.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(
+        test_delete_session_does_not_freeze_the_event_loop))
+    tree = ast.parse(source)
+
+    drive_line = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "asyncio"):
+            drive_line = node.lineno
+    assert drive_line is not None, (
+        "the guard no longer calls asyncio.run(_drive()) — this pin cannot "
+        "locate the end of the measurement and would pass vacuously")
+
+    late_reads = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "state"
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value in {"entered", "exited"}
+        and node.lineno > drive_line
+    ]
+    assert late_reads == [], (
+        f"the guard reads the probe's last-call-wins window from the mutable "
+        f"dict at assert time (lines {late_reads}, after the asyncio.run on "
+        f"line {drive_line}) — a late off-loop call rewrites it to a span the "
+        f"ticker never sampled and this guard reports a 0-tick RED on an idle "
+        f"machine (#10115). Assert through `_ticks_in_window(ticks, t_enter, "
+        f"t_exit)` instead.")
+
 
 
 def test_public_demo_seed_is_serialized_per_org(client, monkeypatch):
