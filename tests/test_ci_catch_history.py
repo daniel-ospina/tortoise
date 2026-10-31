@@ -10,7 +10,10 @@ properties. Each has a test here that FAILS when the property is broken:
    newest-by-id.
 2. **Grouping is `(app, workflow, job)`** — two workflows can publish the same job name,
    and then a newer green of one masks the red of the other.
-   `test_two_workflows_sharing_a_job_name_...` fails on a name-only grouping.
+   `test_two_workflows_sharing_a_job_name_...` fails on a name-only grouping — and it calls
+   `reduce_attempts` DIRECTLY with a multi-entry workflow map, because `build_history`
+   reduces one run at a time (where the workflow component is constant and a name-only
+   reducer would produce the same rows): the end-to-end shape cannot fail there.
 3. **An unreadable artifact is UNKNOWN, never NEVER** — "we could not check" and "we
    checked and it was clean" are different facts, and folding the first into the second is
    how a report becomes a licence for a wrong decision.
@@ -23,6 +26,19 @@ properties. Each has a test here that FAILS when the property is broken:
    non-gating lane is folded into either bucket, and the 74-row test fails if the 74 are
    not fully partitioned by the lanes `ci_selection` derives (a hardcoded split rotted once
    already — that is what the merge with #10194 broke).
+5. **A leg RUNNING is not a FILE running** — the `test-slow` legs are diff-SCOPED on tier-2,
+   so coverage is counted per FILE from the leg's artifact (`junit.xml` testcases +
+   `expected-nodeids.txt`).
+   `test_a_leg_that_ran_covers_only_the_files_its_artifact_names` fails if coverage is
+   credited from the leg's PARTITION, which mints NEVER for files that never ran.
+6. **A red a re-run CLEARED is inside a GREEN run** — a run's conclusion is its newest
+   attempt's, so a failure-only sample can never see one.
+   `test_a_red_cleared_by_a_rerun_is_visible_because_green_runs_are_read` fails if
+   `success`-conclusion runs are not enumerated.
+7. **A tree that cannot answer the lane question is refused, not guessed from** — the
+   non-gating lane is disk-derived, so a partial tree must not produce a report.
+   `test_a_tree_without_the_subtree_lane_directories_fails_closed` fails if that read fails
+   open.
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `check-runs/<sha>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -35,6 +51,8 @@ import json
 import sys
 import zipfile
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -79,6 +97,19 @@ def _zip(xml: bytes) -> bytes:
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("junit.xml", xml)
     return buffer.getvalue()
+
+
+def _zip_members(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+    return buffer.getvalue()
+
+
+def _nodeids(paths: list[str]) -> bytes:
+    """`expected-nodeids.txt` as `skip-guard.py --emit-manifest` writes it."""
+    return ("# expected nodeids (collect-only)\n" + "".join(f"{p}::test_one\n" for p in paths)).encode()
 
 
 def _run(
@@ -317,9 +348,35 @@ def test_two_workflows_sharing_a_job_name_do_not_mask_each_other(tmp_path):
 
     This is the AGENTS.md failure mode: a name-keyed grouping takes the newer green of the
     other workflow and reports the commit clean, hiding a real red on a PR head.
+
+    ⛔ The DISCRIMINATING half is the direct reduction below, and it has to be: `build_history`
+    reduces ONE RUN AT A TIME (`workflow_map = {ref.run_id: …}`), so the workflow component of
+    the key is constant inside every call and the end-to-end fixture below cannot tell the
+    two groupings apart — a name-only reducer would produce the same rows. The property lives
+    in `reduce_attempts`, which is the shape `ci_verdict.group_latest_attempts` is written
+    for: many runs' job lists, one multi-entry `run_workflow_map`.
     """
     family, leg = _leg_of("test_billing.py")
     job = f"{family} ({leg})"
+
+    # (a) the grouping itself, on the input where it can actually fail.
+    groups = catch.reduce_attempts(
+        [
+            _check(100, RUN_PR, job, "failure"),
+            _check(900, RUN_OTHER_WORKFLOW, job, "success"),  # NEWER id, other workflow
+        ],
+        {
+            str(RUN_PR): ("111", "python-ci"),
+            str(RUN_OTHER_WORKFLOW): ("222", "ci"),
+        },
+    )
+    # ⛔ Fails on a name-only grouping: one group, whose newest attempt (id 900) is GREEN.
+    assert len(groups) == 2, "the two workflows must stay two groups"
+    by_run = {group.latest.run_id: group for group in groups}
+    assert by_run[str(RUN_PR)].latest.state == "red"
+    assert by_run[str(RUN_OTHER_WORKFLOW)].latest.state == "green"
+
+    # (b) end to end: the run loop must not collapse them either.
     root = _world(
         tmp_path,
         runs=[
@@ -328,8 +385,6 @@ def test_two_workflows_sharing_a_job_name_do_not_mask_each_other(tmp_path):
         ],
         jobs={
             RUN_PR: [_check(100, RUN_PR, job, "failure")],
-            # A DIFFERENT run (another workflow) whose same-named job is green: it must not
-            # supersede this run's red, and a name-keyed rollup across runs would.
             RUN_OTHER_WORKFLOW: [_check(900, RUN_OTHER_WORKFLOW, job, "success")],
         },
         artifacts={
@@ -337,7 +392,6 @@ def test_two_workflows_sharing_a_job_name_do_not_mask_each_other(tmp_path):
         },
     )
     row = _row(_report(root), "test_billing.py")
-    # ⛔ Fails on a name-only grouping: the newer `success` (id 900) would win and mask it.
     assert row["status"] == catch.CATCH_PR
     assert [c["run_id"] for c in row["pr_head_catches"]] == [str(RUN_PR)]
 
@@ -571,6 +625,160 @@ def test_the_cli_writes_the_markdown_table_from_an_offline_fixture(tmp_path, cap
     assert rendered.startswith("| file | status | lane |")
     assert rendered.count("\n") >= 74  # header + separator + one row per slow file
     assert "NOT-PREMERGE" in rendered  # the non-gating lane is named in the table
+
+
+# --- 5. a leg RUNNING is not a FILE running --------------------------------
+
+
+def test_a_leg_that_ran_covers_only_the_files_its_artifact_names(tmp_path):
+    """A green leg is coverage for the files it EXECUTED — not for its partition.
+
+    ⛔ The legs are diff-SCOPED on tier-2 (`.github/workflows/python-ci.yml` builds each leg's
+    `FILES` from `matrix.files` ∩ `changes.outputs.slow_selected`), so a leg that ran can have
+    executed 2 of its 13 files. Counting the partition credited the whole leg and minted
+    `NEVER` ("we checked and it was clean") for files that never ran — the clean bill of
+    health #10131 forbids, with the false evidence printed in a rendered column.
+    """
+    family, leg = _leg_of("test_billing.py")
+    ran_path = catch.to_observed("test_billing.py")
+    not_run = sorted(LEGS[family][leg] - {ran_path})[0]
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=31)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "success")]},
+        artifacts={
+            # The leg executed ONE of its files — the shape a diff-scoped selection produces.
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", False)])
+            )
+        },
+    )
+    report = _report(root)
+
+    executed = _row(report, "test_billing.py")
+    assert executed["pr_runs_attested"] == 1
+    assert executed["status"] == catch.NEVER  # ran, clean: that IS the answer NEVER means
+
+    skipped = _row(report, not_run)
+    # ⛔ Pre-fix these two assertions read NEVER/1: the leg's partition was credited as
+    # coverage. The leg running says nothing about a file it did not touch.
+    assert skipped["status"] == catch.UNKNOWN
+    assert skipped["status"] != catch.NEVER
+    assert skipped["pr_runs_attested"] == 0
+    assert skipped["pr_leg_runs_unattested"] == 1
+    # And the reason names the shape, so the UNKNOWN is actionable rather than a shrug.
+    assert any("diff-scoped" in u["reason"] for u in skipped["unknown"])
+
+
+def test_the_expected_nodeids_attest_a_file_whose_tests_all_skipped(tmp_path):
+    """`expected-nodeids.txt` is the second per-file witness, in the same artifact zip.
+
+    A file whose tests were all skipped/deselected has no JUnit testcase, so JUnit alone
+    would read it as never executed. The leg was still SCOPED to it — the manifest the
+    workflow writes is that scope — so the file is attested and reads NEVER, not UNKNOWN.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=32)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "success")]},
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip_members(
+                {
+                    "junit.xml": _junit([]),  # every test skipped: zero testcases
+                    "expected-nodeids.txt": _nodeids(["tests/test_billing.py"]),
+                }
+            )
+        },
+    )
+    row = _row(_report(root), "test_billing.py")
+    assert row["pr_runs_attested"] == 1
+    assert row["status"] == catch.NEVER
+
+
+def test_a_green_leg_with_no_artifact_attests_nothing(tmp_path):
+    """An unreadable GREEN leg is no evidence either — it may not license NEVER."""
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=33)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "success")]},
+        artifacts={},  # expired past retention
+    )
+    row = _row(_report(root), "test_billing.py")
+    assert row["status"] == catch.UNKNOWN
+    assert row["pr_runs_attested"] == 0
+    assert row["pr_leg_runs_unattested"] == 1
+
+
+# --- 6. a red a re-run cleared is inside a GREEN run ------------------------
+
+
+def test_a_red_cleared_by_a_rerun_is_visible_because_green_runs_are_read(tmp_path):
+    """The `flake_cleared` bucket is unreachable from a failure-only sample — and was empty live.
+
+    A run's `conclusion` is its NEWEST attempt's, so re-running the only failing job flips the
+    whole run to `success`: the red lives in a run the failure population never returns. The
+    code claimed the sample was complete ("a green run is a complete answer for 'no catch
+    here'"), which is exactly wrong for this shape — and the disclosure the comment promised
+    was never rendered.
+    """
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    green_run = _run(RUN_PR, SHA, "pull_request", pr=55, conclusion="success")
+    green_run["run_attempt"] = 2  # a re-run: the only shape that can carry a cleared red
+    root = _world(
+        tmp_path,
+        runs=[green_run],
+        jobs={
+            RUN_PR: [
+                _check(100, RUN_PR, job, "failure"),
+                _check(200, RUN_PR, job, "success"),  # the re-run
+            ]
+        },
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            )
+        },
+    )
+    report = _report(root)
+    row = _row(report, "test_billing.py")
+
+    # ⛔ Pre-fix: `success` runs were never enumerated, so this row was UNKNOWN with an empty
+    # `flake_cleared` — a red that happened, invisible.
+    assert [c["run_id"] for c in row["flake_cleared"]] == [str(RUN_PR)]
+    assert row["status"] == catch.NEVER
+    assert report["coverage"]["reds_cleared_by_a_rerun"] == 1
+    window = report["window"]
+    assert window["success_runs"] == 1
+    assert window["rerun_success_runs"] == 1
+    assert "success-conclusion runs: 1 read (1 of them re-runs" in catch.render_summary(report)
+
+
+# --- 7. a tree that cannot answer the lane question fails closed ------------
+
+
+def test_a_tree_without_the_subtree_lane_directories_fails_closed(tmp_path, monkeypatch):
+    """The non-gating lane is derived from DISK — a tree without it must not be reported.
+
+    `on_demand` carries subtree entries (`eval/**`, `longmem_eval/**`) that
+    `ci_selection.on_demand_subtree_files` expands by globbing `tests/<prefix>`. A `tools/` +
+    `config/`-only extraction therefore derives an EMPTY non-gating lane and every eval suite
+    reads as a gating leg — a confidently wrong partition. (That exact state produced a
+    review finding that the five eval rows could not exist at all.) Fail closed instead.
+    """
+    healthy = _world(tmp_path / "healthy", runs=[])
+    assert catch.dead_subtree_prefixes(MANIFEST) == ()  # the real tree answers the question
+
+    monkeypatch.setattr(ci_selection, "TESTS_DIR", tmp_path / "no-such-tests-dir")
+    dead = catch.dead_subtree_prefixes(MANIFEST)
+    assert dead, "a tree with no tests/ must be named"
+    with pytest.raises(catch.ReadError) as excinfo:
+        catch.build_history(MANIFEST, catch.OfflineClient(healthy))
+    assert "on_demand" in str(excinfo.value)
+    # And the CLI surfaces it as its documented exit 2 (a read failure, not a report).
+    assert catch.main(["--offline-dir", str(healthy)]) == 2
 
 
 # --- coverage arithmetic ---------------------------------------------------

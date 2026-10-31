@@ -33,6 +33,20 @@ Three facts decide it, and each is a defect in a naive reading:
 3. **An expired artifact is NOT "never caught anything".** An unattributable red is
    ``UNKNOWN``, it names its reason, and it is scoped to the leg whose artifact is missing
    — never folded into "never", and never extrapolated over.
+4. **A leg RUNNING is not a FILE running.** The `test-slow` legs are diff-SCOPED on tier-2
+   PRs: `.github/workflows/python-ci.yml` builds each leg's `FILES` as the intersection of
+   the leg's `matrix.files` with `changes.outputs.slow_selected`, so a leg that ran can
+   have executed 2 of its 13 files. Coverage is therefore counted per FILE, from the leg's
+   own artifact — the JUnit testcases it executed plus the `expected-nodeids.txt` it was
+   scoped to, both uploaded inside `pytest-log-<job>-<leg>` — and a file that artifact does
+   not name is ``UNKNOWN``, never ``NEVER``. Counting the leg PARTITION instead mints
+   "never caught anything" for a file that never ran, which is the clean bill of health
+   #10131 explicitly forbids.
+5. **A red a re-run CLEARED lives inside a green run.** A run's `conclusion` is its newest
+   attempt's, so re-running the only failing job turns the whole run `success` and the red
+   disappears from any failure-only sample. `success`-conclusion runs are therefore read
+   too (`--max-success-runs`), and the report states how many of them are re-runs
+   (`run_attempt > 1`) — the only shape that can carry a cleared red.
 
 WHAT "THE 74" ACTUALLY SPLIT INTO (DERIVED, never hardcoded)
 -------------------------------------------------------------
@@ -52,6 +66,15 @@ partition that no longer exists (#10194 already re-cut it once, under this PR):
   as `UNKNOWN` would present a decision as a measurement gap, and reporting it as `NEVER`
   would present it as a clean bill of health. (Where the answer must not be invented, the
   report still says `UNKNOWN`; that rule is unchanged.)
+
+THE LANES ARE READ OFF THE TREE, AND A BROKEN READ FAILS CLOSED
+---------------------------------------------------------------
+The non-gating lane is `ci_selection.on_demand_files()`, whose `eval/**` /
+`longmem_eval/**` subtree entries are expanded from DISK. A tree that does not carry
+`tests/eval/` (an extracted `tools/` + `config/`, a partial checkout) therefore derives an
+EMPTY non-gating lane and would report those files as gating — a wrong premise, silently.
+`dead_subtree_prefixes()` names that state and `build_history` refuses to report from it
+(exit 2), rather than describing a partition the tree does not have.
 
 THE WINDOW, NAMED
 -----------------
@@ -166,6 +189,11 @@ DEFAULT_DAYS = 90
 DEFAULT_MAX_PR_RUNS = 500
 DEFAULT_MAX_PUSH_RUNS = 250
 DEFAULT_MAX_CANCELLED_RUNS = 60
+#: `success`-conclusion runs are read as well, for a fact the failure sample cannot give: a
+#: red a RE-RUN cleared sits inside an otherwise-green run (see fact 5 in the module
+#: docstring), so a failure-only sample can never see one. That population is much larger
+#: than the red one, so it has its own, smaller bound — and the bound is reported.
+DEFAULT_MAX_SUCCESS_RUNS = 120
 DEFAULT_MAX_API_CALLS = 2000
 #: A wall-clock bound, because the API-call bound alone does not bound TIME: on this cell
 #: every `gh` call is relayed through the fleet's rate-limit wrapper, and a measured walk ran
@@ -279,26 +307,50 @@ def slow_lane(manifest: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
+def dead_subtree_prefixes(manifest: Mapping[str, Any]) -> tuple[str, ...]:
+    """`on_demand` subtree entries whose directory is MISSING from this tree.
+
+    ⛔ The lane split is read off disk (`ci_selection.on_demand_subtree_files` globs
+    `tests/<prefix>`), so a tree without `tests/eval/` derives an EMPTY non-gating lane and
+    every eval suite reads as a gating leg — the partition would describe a tree that does
+    not exist, and the rows would be confidently wrong. That exact state was reached by
+    probing this module from a `tools/` + `config/`-only extraction, so it is named here
+    and refused in `build_history` rather than trusted.
+    """
+    tests_dir = Path(ci_selection.TESTS_DIR)
+    return tuple(
+        prefix
+        for prefix in ci_selection.on_demand_subtree_prefixes(dict(manifest))
+        if not (tests_dir / prefix).is_dir()
+    )
+
+
 # --- JUnit attribution ------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class JunitFacts:
-    """What one leg's JUnit says: the failing FILES, and whether it could be read."""
+    """What one leg's JUnit says: the failing FILES, the EXECUTED files, and readability."""
 
     failed_paths: frozenset[str] = frozenset()
+    executed_paths: frozenset[str] = frozenset()
     testcases: int = 0
     unreadable: str | None = None
 
 
 def parse_junit(data: bytes, index: Mapping[str, str]) -> JunitFacts:
-    """Attribute failures/errors to slow-file paths from a leg's JUnit XML.
+    """Attribute failures/errors to slow-file paths from a leg's JUnit XML, and the
+    EXECUTED file set alongside them.
 
     ``file`` is the authoritative attribute (the workflow pins ``-o junit_family=xunit1``
     precisely so ``file``/``line`` exist). ``classname`` is the fallback for a producer that
     omitted it — resolved longest-prefix-first against the manifest index, so
     ``tests.test_x.TestClass`` finds ``tests/test_x.py`` and never guesses a path that is
     not a slow file.
+
+    ⛔ EVERY testcase is resolved, not only the failing ones: the non-failing testcases are
+    the only per-FILE proof that this leg executed a given file (a leg is diff-SCOPED on
+    tier-2, so its partition says nothing about what it ran).
 
     A malformed XML is ``unreadable`` with its reason — an unparsed artifact must never
     read as "no failures".
@@ -309,15 +361,61 @@ def parse_junit(data: bytes, index: Mapping[str, str]) -> JunitFacts:
         return JunitFacts(unreadable=f"junit XML is not parseable: {exc}")
 
     failed: set[str] = set()
+    executed: set[str] = set()
     cases = 0
     for case in root.iter("testcase"):
         cases += 1
-        if case.find("failure") is None and case.find("error") is None:
-            continue
         resolved = _resolve_case_file(case, index)
-        if resolved is not None:
+        if resolved is None:
+            continue
+        executed.add(resolved)
+        if case.find("failure") is not None or case.find("error") is not None:
             failed.add(resolved)
-    return JunitFacts(failed_paths=frozenset(failed), testcases=cases)
+    return JunitFacts(
+        failed_paths=frozenset(failed),
+        executed_paths=frozenset(executed),
+        testcases=cases,
+    )
+
+
+def parse_expected_nodeids(data: bytes, index: Mapping[str, str]) -> frozenset[str]:
+    """The files a leg was SCOPED to, from the `expected-nodeids.txt` in its artifact.
+
+    The workflow writes one `--collect-only` nodeid per line (`tests/test_x.py::test_y`, with
+    a `#` header), inside the same `pytest-log-<job>-<leg>` zip as the JUnit
+    (`.github/workflows/python-ci.yml`, the slow-legs manifest step + upload). It is the
+    second per-file witness: a file whose tests were all skipped/deselected still has no
+    JUnit testcase, but it was collected for that leg — which is what the leg was scoped to.
+    """
+    out: set[str] = set()
+    for raw in data.decode("utf-8", "replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "::" not in line:
+            continue
+        path = to_observed(line.split("::", 1)[0])
+        if path in index:
+            out.add(path)
+    return frozenset(out)
+
+
+@dataclass(frozen=True)
+class LegEvidence:
+    """What ONE leg artifact attests about the files of that leg.
+
+    ``failed_paths`` — files the JUnit attributed a FAILURE/ERROR to.
+    ``executed_paths`` — files this leg provably TOUCHED: every JUnit testcase's file union
+    every `expected-nodeids.txt` file.
+
+    ⛔ Coverage is counted from ``executed_paths``, never from the leg's partition: the legs
+    are diff-SCOPED on tier-2, so a leg that ran may have executed 2 of its 13 files, and
+    counting the partition mints ``NEVER`` ("never caught anything") for files that never
+    ran — the clean bill of health #10131 forbids.
+    """
+
+    failed_paths: frozenset[str] = frozenset()
+    executed_paths: frozenset[str] = frozenset()
+    sources: tuple[str, ...] = ()
+    testcases: int = 0
 
 
 def _resolve_case_file(case: ET.Element, index: Mapping[str, str]) -> str | None:
@@ -519,6 +617,9 @@ class RunRef:
     html_url: str | None = None
     workflow_id: str | None = None
     workflow_name: str | None = None
+    #: The run's OWN conclusion — the newest attempt's. `success` here does NOT mean "no red
+    #: ever happened in this run": a re-run that turned a failed job green flips it.
+    conclusion: str | None = None
 
     @property
     def kind(self) -> str:
@@ -637,8 +738,16 @@ class FileHistory:
     push_catches: list[Citation] = field(default_factory=list)
     flake_cleared: list[Citation] = field(default_factory=list)
     unknowns: list[Unknown] = field(default_factory=list)
-    pr_leg_runs: int = 0
-    push_leg_runs: int = 0
+    #: How many times THIS FILE is attested as executed on a PR head / main push — counted
+    #: from the leg artifact's own testcase/nodeid evidence, never from the leg partition.
+    #: A non-zero count is what licences ``NEVER`` ("we ran it and it caught nothing").
+    pr_runs_attested: int = 0
+    push_runs_attested: int = 0
+    #: How many times this file's leg RAN without the artifact naming this file — the
+    #: diff-scoped-selection shape (a leg that ran can execute 2 of its 13 files). Not
+    #: coverage: the leg running says nothing about this file.
+    pr_leg_runs_unattested: int = 0
+    push_leg_runs_unattested: int = 0
 
     @property
     def status(self) -> str:
@@ -649,12 +758,14 @@ class FileHistory:
             return CATCH_PUSH_ONLY
         if self.unknowns:
             return UNKNOWN
-        if self.pr_leg_runs or self.push_leg_runs:
+        if self.pr_runs_attested or self.push_runs_attested:
+            # ⛔ Per-FILE evidence, not "its leg ran": the leg is diff-SCOPED on tier-2.
             return NEVER
         if self.lane == LANE_NON_GATING:
             # Excluded by decision, not unmeasured — see NON_GATING_DECISION.
             return NOT_PREMERGE
-        # No red, and no leg ever measured it: the window says nothing about this file.
+        # No red, and nothing attests this file ever executed: the window says nothing
+        # about this file.
         return UNKNOWN
 
     def to_dict(self) -> dict[str, Any]:
@@ -662,13 +773,19 @@ class FileHistory:
         if self.status == UNKNOWN and not unknown:
             # UNKNOWN is never a blank cell: "no artifact" and "no run ever measured this
             # file" are different facts, and both must be readable off the row.
+            unattested = self.pr_leg_runs_unattested + self.push_leg_runs_unattested
             unknown.append(
                 {
                     "kind": "window",
                     "reason": (
-                        "no run in the window measured this file's leg — it was never "
-                        "selected on these PR heads, its job never ran, or the window does "
-                        "not reach a run that did"
+                        "no per-file evidence in the window that this FILE executed"
+                        + (
+                            f" — its leg ran {unattested} time(s) naming none of it (a "
+                            f"diff-scoped selection runs only the surfaces a PR touched)"
+                            if unattested
+                            else " — its job never ran, or the window does not reach a run "
+                            "that did"
+                        )
                     ),
                     "run_id": None,
                     "pr": None,
@@ -684,8 +801,10 @@ class FileHistory:
             "push_main_catches": [c.to_dict() for c in self.push_catches],
             "flake_cleared": [c.to_dict() for c in self.flake_cleared],
             "unknown": unknown,
-            "pr_leg_runs": self.pr_leg_runs,
-            "push_leg_runs": self.push_leg_runs,
+            "pr_runs_attested": self.pr_runs_attested,
+            "push_runs_attested": self.push_runs_attested,
+            "pr_leg_runs_unattested": self.pr_leg_runs_unattested,
+            "push_leg_runs_unattested": self.push_leg_runs_unattested,
         }
 
     def _note(self) -> str | None:
@@ -991,6 +1110,7 @@ def runs_to_refs(
                 html_url=run.get("html_url"),
                 workflow_id=str(run["workflow_id"]) if run.get("workflow_id") is not None else None,
                 workflow_name=str(run.get("name")) if run.get("name") else None,
+                conclusion=str(run["conclusion"]) if run.get("conclusion") else None,
             )
         )
     return out
@@ -1019,6 +1139,7 @@ def build_history(
     max_pr_runs: int = DEFAULT_MAX_PR_RUNS,
     max_push_runs: int = DEFAULT_MAX_PUSH_RUNS,
     max_cancelled_runs: int = DEFAULT_MAX_CANCELLED_RUNS,
+    max_success_runs: int = DEFAULT_MAX_SUCCESS_RUNS,
     max_seconds: float = DEFAULT_MAX_SECONDS,
     now: datetime | None = None,
     progress: bool = False,
@@ -1026,20 +1147,40 @@ def build_history(
     """Collect and reduce everything, returning the report object (pure data)."""
     now = now or datetime.now(UTC)
     started = time.monotonic()
+
+    # ⛔ Fail closed on a tree that cannot answer the lane question: the non-gating lane is
+    # derived from DISK (`on_demand` subtree entries), so a partial tree derives an empty
+    # lane and every eval suite would be reported as gating. A wrong premise is worse than
+    # no report.
+    dead = dead_subtree_prefixes(manifest)
+    if dead:
+        raise ReadError(
+            "the non-gating lane cannot be derived from this tree: `on_demand` subtree "
+            f"entr{'y' if len(dead) == 1 else 'ies'} {', '.join(dead)} ha"
+            f"{'s' if len(dead) == 1 else 've'} no directory under {ci_selection.TESTS_DIR} "
+            "— the lane split would read those files as gating. Run this from the repo root "
+            "(a `tools/` + `config/`-only extraction cannot answer it)."
+        )
+
     retention = client.retention_days()
     window_days = min(days, retention) if retention else days
     since = now - timedelta(days=window_days)
 
-    # The populations that can carry a red. A run whose conclusion is `success` cannot:
-    # a job whose newest attempt failed fails its run, so the newest-attempt rule makes a
-    # green run a complete answer for "no catch here". That exclusion is DERIVED from the
-    # rule, not a sampling shortcut — and it is why this report cannot see a red that a
-    # re-run cleared inside an otherwise-green run (said out loud in the report).
+    # The populations that are read. `failure` carries the reds; `cancelled` measured nothing
+    # (neither a catch nor a clean miss); **`success` is read because a red a re-run CLEARED
+    # lives inside a green run** — a run's conclusion is its newest attempt's, so re-running
+    # the only failing job flips the whole run to `success` and a failure-only sample could
+    # never see the red that was cleared (`flake_cleared` would be unreachable live). The
+    # earlier justification here — "a green run is a complete answer for 'no catch here'" —
+    # was WRONG about exactly that shape, and `RunRef.attempt` (now reported) names the runs
+    # where it applies. Every bound that cuts the sample is reported, never quietly applied.
     populations: list[tuple[str, str | None, str, int]] = [
         ("pull_request", None, "failure", max_pr_runs),
         ("push", "main", "failure", max_push_runs),
         ("pull_request", None, "cancelled", max_cancelled_runs),
         ("push", "main", "cancelled", max_cancelled_runs),
+        ("pull_request", None, "success", max_success_runs),
+        ("push", "main", "success", max_success_runs),
     ]
     refs: list[RunRef] = []
     read_of: dict[str, dict[str, Any]] = {}
@@ -1067,6 +1208,7 @@ def build_history(
     attributed_jobs = 0
     unattributable_jobs = 0
     superseded_reds = 0
+    cleared_reds = 0
     api_notes: list[str] = []
     detailed = 0
 
@@ -1127,35 +1269,46 @@ def build_history(
         #: Jobs whose red this run has already read (cited, or marked UNKNOWN). A leftover
         #: red of the same job is the SAME artifact — cited once, not twice.
         red_accounted: set[str] = set()
+        #: This run's artifact LISTING, read at most once however many legs it carried.
+        artifacts = RunArtifacts(client, ref.run_id, api_notes)
 
         for group in groups:
             base, leg = job_family(group.job) or (JOB_SLOW, group.leg)
             files = leg_files.get(f"{base}\x00{leg}", set())
             latest = group.latest
-            measured = (
-                latest is not None
-                and latest.state == ci_verdict.GROUP_GREEN
-                and latest.conclusion == "success"
+            measured = latest is not None and (
+                (latest.state == ci_verdict.GROUP_GREEN and latest.conclusion == "success")
+                or latest.state == ci_verdict.GROUP_RED
             )
-            if latest is not None and (measured or latest.state == ci_verdict.GROUP_RED):
-                # The leg EXECUTED (it passed, or it failed) — coverage, not a catch.
+            name = artifact_name(base, leg)
+            # ONE read of the leg's artifact answers both questions: what did it fail, and
+            # what did it EXECUTE. ⛔ Coverage is counted from `executed_paths` (per FILE),
+            # never from `files` (the leg's PARTITION): the legs are diff-SCOPED on tier-2,
+            # so a leg that ran may have executed 2 of its 13 files, and crediting the whole
+            # partition mints NEVER for files that never ran.
+            evidence = (
+                _leg_evidence(client, artifacts, name, index, api_notes) if measured else None
+            )
+            if measured:
+                attested = evidence.executed_paths if evidence is not None else frozenset()
                 for observed in files:
                     history = histories.get(observed)
                     if history is None:
                         continue
-                    if ref.event == "pull_request":
-                        history.pr_leg_runs += 1
+                    if observed in attested:
+                        if ref.event == "pull_request":
+                            history.pr_runs_attested += 1
+                        else:
+                            history.push_runs_attested += 1
+                    elif ref.event == "pull_request":
+                        history.pr_leg_runs_unattested += 1
                     else:
-                        history.push_leg_runs += 1
+                        history.push_leg_runs_unattested += 1
 
             if latest is not None and latest.state == ci_verdict.GROUP_RED:
                 red_jobs += 1
                 red_accounted.add(group.job)
-                name = artifact_name(base, leg)
-                facts = _junit_facts(
-                    client, _artifact(client, ref.run_id, name, api_notes), index, name, api_notes
-                )
-                if facts is None:
+                if evidence is None:
                     unattributable_jobs += 1
                     _mark_unknown(
                         histories,
@@ -1179,7 +1332,7 @@ def build_history(
                             ),
                         ),
                     )
-                elif not facts.failed_paths:
+                elif not evidence.failed_paths:
                     # A red with no failing testcase is the watchdog/skip-guard shape: the leg
                     # ran and was killed, so its partition is unattributable — not clean.
                     unattributable_jobs += 1
@@ -1198,7 +1351,7 @@ def build_history(
                             created_at=ref.created_at,
                             url=ref.html_url,
                             reason=(
-                                f"artifact {name} parsed ({facts.testcases} testcases) but names no "
+                                f"artifact {name} parsed ({evidence.testcases} testcases) but names no "
                                 f"failing slow file — a watchdog kill, a skip-guard red or a "
                                 f"non-test failure"
                             ),
@@ -1215,10 +1368,10 @@ def build_history(
                         pr_number=ref.pr_number,
                         created_at=ref.created_at,
                         url=ref.html_url,
-                        files=tuple(sorted(index[p] for p in facts.failed_paths)),
+                        files=tuple(sorted(index[p] for p in evidence.failed_paths)),
                         branch=ref.branch,
                     )
-                    for path in facts.failed_paths:
+                    for path in evidence.failed_paths:
                         history = histories.get(path)
                         if history is None:
                             continue
@@ -1266,12 +1419,17 @@ def build_history(
 
             for cleared in group.cleared:
                 # A red a NEWER SUCCESS re-measured. Not a catch under the newest-attempt
-                # rule — but not nothing either, so it is labelled and cited.
+                # rule — but not nothing either, so it is labelled and cited. ⛔ Reachable
+                # LIVE only because `success`-conclusion runs are read: a re-run that turned
+                # the failing job green flips the run's own conclusion to `success`.
                 name = artifact_name(base, leg)
-                facts = _junit_facts(
-                    client, _artifact(client, cleared.run_id, name, api_notes), index, name, api_notes
+                cleared_run = (
+                    artifacts
+                    if cleared.run_id == ref.run_id
+                    else RunArtifacts(client, cleared.run_id, api_notes)
                 )
-                if facts is None:
+                evidence = _leg_evidence(client, cleared_run, name, index, api_notes)
+                if evidence is None:
                     _mark_unknown(
                         histories,
                         leg_files,
@@ -1294,7 +1452,8 @@ def build_history(
                         ),
                     )
                     continue
-                if not facts.failed_paths:
+                cleared_reds += 1
+                if not evidence.failed_paths:
                     continue
                 citation = Citation(
                     kind=ref.kind,
@@ -1305,10 +1464,10 @@ def build_history(
                     pr_number=ref.pr_number,
                     created_at=ref.created_at,
                     url=ref.html_url,
-                    files=tuple(sorted(index[p] for p in facts.failed_paths)),
+                    files=tuple(sorted(index[p] for p in evidence.failed_paths)),
                     branch=ref.branch,
                 )
-                for path in facts.failed_paths:
+                for path in evidence.failed_paths:
                     history = histories.get(path)
                     if history is not None:
                         history.flake_cleared.append(citation)
@@ -1336,6 +1495,14 @@ def build_history(
             "populations": read_of,
             "pr_runs": sum(1 for r in refs if r.event == "pull_request"),
             "push_runs": sum(1 for r in refs if r.event == "push"),
+            "success_runs": sum(1 for r in refs if r.conclusion == "success"),
+            #: `success`-conclusion runs whose earlier attempt could be a CLEARED RED. A run
+            #: at `run_attempt == 1` has no earlier attempt, so it cannot hide one; anything
+            #: above 1 is a re-run and is the only shape that can (`RunRef.attempt`, which
+            #: this report previously populated and never used).
+            "rerun_success_runs": sum(
+                1 for r in refs if r.conclusion == "success" and r.attempt > 1
+            ),
             "oldest_run": oldest,
             "newest_run": newest,
             "truncation": getattr(client, "truncation", None) or stopped_on_time,
@@ -1350,6 +1517,9 @@ def build_history(
             "red_jobs_attributed": attributed_jobs,
             "red_jobs_unattributable": unattributable_jobs,
             "older_reds_superseded": superseded_reds,
+            #: Reds a newer attempt re-measured inside a run that ended GREEN — the bucket
+            #: the failure-only sample could never fill live.
+            "reds_cleared_by_a_rerun": cleared_reds,
             **{f"status_{key}": value for key, value in counts.items()},
             **{f"lane_{key}": value for key, value in lane_counts.items()},
         },
@@ -1370,26 +1540,52 @@ def _mark_unknown(
             history.unknowns.append(unknown)
 
 
-def _artifact(client: Any, run_id: str, name: str, notes: list[str]) -> Mapping[str, Any] | None:
-    try:
-        artifacts = client.artifacts(run_id)
-    except BudgetExhausted:
-        notes.append(f"artifact listing for run {run_id} not read — budget exhausted")
-        return None
-    artifact = artifacts.get(name)
-    if artifact is None or artifact.get("expired"):
-        return None
-    return artifact
+JUNIT_MEMBER = "junit.xml"
+NODEIDS_MEMBER = "expected-nodeids.txt"
 
 
-def _junit_facts(
+class RunArtifacts:
+    """One RUN's artifact listing, read at most ONCE (1 call, not one per leg).
+
+    The listing is per run (`actions/runs/<id>/artifacts`), so a per-leg lookup would pay
+    for the same page once per leg. Every leg of the run reads through this.
+    """
+
+    def __init__(self, client: Any, run_id: str, notes: list[str]) -> None:
+        self._client = client
+        self._run_id = run_id
+        self._notes = notes
+        self._items: Mapping[str, Mapping[str, Any]] | None = None
+
+    def get(self, name: str) -> Mapping[str, Any] | None:
+        if self._items is None:
+            try:
+                self._items = self._client.artifacts(self._run_id)
+            except BudgetExhausted:
+                self._notes.append(
+                    f"artifact listing for run {self._run_id} not read — budget exhausted"
+                )
+                self._items = {}
+        artifact = self._items.get(name)
+        if artifact is None or artifact.get("expired"):
+            return None
+        return artifact
+
+
+def _leg_evidence(
     client: Any,
-    artifact: Mapping[str, Any] | None,
-    index: Mapping[str, str],
+    artifacts: RunArtifacts,
     name: str,
+    index: Mapping[str, str],
     notes: list[str],
-) -> JunitFacts | None:
-    """Parse the artifact's `junit.xml`. ``None`` == could not read (an UNKNOWN, not a zero)."""
+) -> LegEvidence | None:
+    """Parse ONE leg artifact: `junit.xml` + `expected-nodeids.txt`. ``None`` == unreadable.
+
+    Both members travel in the same `pytest-log-<job>-<leg>` zip, so this is ONE download
+    that answers both questions this tool asks of a leg: what did it FAIL, and what did it
+    actually EXECUTE. ``None`` is "we could not read it" — an UNKNOWN, never a zero.
+    """
+    artifact = artifacts.get(name)
     if artifact is None:
         return None
     artifact_id = artifact.get("id")
@@ -1400,11 +1596,40 @@ def _junit_facts(
         return None
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            member = next((n for n in archive.namelist() if n.endswith("junit.xml")), None)
-            if member is None:
-                notes.append(f"artifact {name} carries no junit.xml")
+            members = archive.namelist()
+            junit_member = next((n for n in members if n.endswith(JUNIT_MEMBER)), None)
+            nodeids_member = next((n for n in members if n.endswith(NODEIDS_MEMBER)), None)
+            if junit_member is None and nodeids_member is None:
+                notes.append(
+                    f"artifact {name} carries neither {JUNIT_MEMBER} nor {NODEIDS_MEMBER}"
+                )
                 return None
-            return parse_junit(archive.read(member), index)
+            sources: list[str] = []
+            executed: set[str] = set()
+            failed: frozenset[str] = frozenset()
+            cases = 0
+            if junit_member is not None:
+                facts = parse_junit(archive.read(junit_member), index)
+                if facts.unreadable:
+                    notes.append(f"artifact {name}: {facts.unreadable}")
+                else:
+                    sources.append("junit")
+                    failed = facts.failed_paths
+                    executed |= facts.executed_paths
+                    cases = facts.testcases
+            if nodeids_member is not None:
+                scoped = parse_expected_nodeids(archive.read(nodeids_member), index)
+                if scoped:
+                    sources.append("expected-nodeids")
+                    executed |= scoped
+            if not sources:
+                return None
+            return LegEvidence(
+                failed_paths=failed,
+                executed_paths=frozenset(executed),
+                sources=tuple(sources),
+                testcases=cases,
+            )
     except (zipfile.BadZipFile, OSError) as exc:
         notes.append(f"artifact {name} is not a readable zip: {exc}")
         return None
@@ -1425,6 +1650,10 @@ def render_summary(report: Mapping[str, Any]) -> str:
         "populations: "
         + ", ".join(f"{name}={info['read']}/{info['requested']}" for name, info in window["populations"].items())
         + " (read/requested; a population at its requested count is BOUNDED, not complete)",
+        f"success-conclusion runs: {window.get('success_runs', 0)} read "
+        f"({window.get('rerun_success_runs', 0)} of them re-runs, the only shape that can hide a "
+        f"red a later attempt cleared) · reds a later attempt re-measured: "
+        f"{coverage.get('reds_cleared_by_a_rerun', 0)}",
         f"API calls: {window['api_calls']} · wall {window.get('wall_clock_seconds', '?')}s"
         + (f" · TRUNCATED: {window['truncation']}" if window.get("truncation") else ""),
         f"red slow jobs seen: {coverage['red_jobs_seen']} "
@@ -1463,8 +1692,9 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
     }
     wanted = alias.get(only, only)
     rows = [
-        "| file | status | lane | PR legs run | main legs run | PR-head catches | main catches | UNKNOWN |",
-        "|---|---|---|---|---|---|---|---|",
+        "| file | status | lane | PR runs (attested) | main runs (attested) "
+        "| leg runs w/o this file | PR-head catches | main catches | UNKNOWN |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for row in report["files"]:
         if wanted and row["status"] != wanted:
@@ -1476,9 +1706,13 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
         unknown = (
             "; ".join(unknown_label(u) for u in row["unknown"]) or row.get("note") or "-"
         )
+        # ⛔ "attested" is per FILE (the artifact named it), never "its leg ran": the legs
+        # are diff-SCOPED on tier-2, so the leg column counts runs that did NOT touch it.
+        unattested = row.get("pr_leg_runs_unattested", 0) + row.get("push_leg_runs_unattested", 0)
         rows.append(
             f"| `{row['file']}` | {row['status']} | {row.get('lane', '-')} "
-            f"| {row['pr_leg_runs']} | {row['push_leg_runs']} "
+            f"| {row.get('pr_runs_attested', 0)} | {row.get('push_runs_attested', 0)} "
+            f"| {unattested} "
             f"| {prs} | {pushes} | {unknown} |"
         )
     return "\n".join(rows)
@@ -1500,6 +1734,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-pr-runs", type=int, default=DEFAULT_MAX_PR_RUNS)
     parser.add_argument("--max-push-runs", type=int, default=DEFAULT_MAX_PUSH_RUNS)
     parser.add_argument("--max-cancelled-runs", type=int, default=DEFAULT_MAX_CANCELLED_RUNS)
+    parser.add_argument(
+        "--max-success-runs",
+        type=int,
+        default=DEFAULT_MAX_SUCCESS_RUNS,
+        help=(
+            "how many `success`-conclusion runs to read — a red a RE-RUN cleared lives "
+            "inside a green run, so this population is the only one that can see one"
+        ),
+    )
     parser.add_argument("--max-api-calls", type=int, default=DEFAULT_MAX_API_CALLS)
     parser.add_argument(
         "--max-seconds",
@@ -1548,6 +1791,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_pr_runs=args.max_pr_runs,
             max_push_runs=args.max_push_runs,
             max_cancelled_runs=args.max_cancelled_runs,
+            max_success_runs=args.max_success_runs,
             max_seconds=args.max_seconds,
             progress=True,
         )
