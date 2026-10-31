@@ -118,7 +118,15 @@ def _points_census(outcomes: list[dict]) -> dict:
     Derived as ONE pair, never two independent sums (#4821 review P2): only an
     outcome that knows BOTH halves contributes, so a cell whose records mix
     known and unknown censuses cannot publish a coverage assembled from two
-    different populations. The sum of ``points_embedded`` is ``0`` whenever
+    different populations. The pair must also be POSSIBLE — two ints, not
+    bools, with ``0 <= points_embedded <= points_total`` — because a pair that
+    is impossible per record (``(3, 7)``, ``(True, 5)``, ``(-5, 5)``) rolls up
+    to a coverage above 1.0 or below 0.0, and ``_dense_leg_verified``'s
+    zero-coverage arm only fires on ``== 0.0`` with a positive total, so an
+    impossible receipt would be certified as a dense MEASUREMENT — the exact
+    class this receipt exists to close (#10355 review P2). A record that fails
+    either half of the rule is excluded as a record; it is never half-counted.
+    The sum of ``points_embedded`` is ``0`` whenever
     the cell's outcomes carry no census at all — so pairing it with ``points_total: None`` published
     ``{points_total: None, points_embedded: 0}``, where a consumer summing
     ``points_embedded`` across cells reads "0 embedded" for a population it
@@ -129,19 +137,36 @@ def _points_census(outcomes: list[dict]) -> dict:
     halves, and a cell that embedded none of N reports ``(N, 0)`` — a real
     zero, which ``_dense_leg_verified`` reads as not-measured.
 
-    One honest wrinkle (#4821 review P3): a cell whose outcomes all report
-    ``points_total == 0`` is a KNOWN zero and lands in the same ``None/None``
-    shape as an unknown. Harmless here — a cell with no points can neither
-    reach the context cap nor produce evidence recall, so it is never a
-    winner — but it means "unknown" in this pair covers two states, and the
-    coverage arm treats both as un-refuted rather than inventing a zero."""
+    One honest wrinkle (#4821 review P3). The ``None/None`` shape covers four
+    states, and this function cannot tell them apart: (a) a cell whose outcomes
+    all report ``points_total == 0`` — a KNOWN zero; (b) a cell whose records
+    carry no census at all; (c) a cell that knows its total but not how many of
+    its points were embedded — excluded as a pair, so the half it does know is
+    not published as a whole; and (d) a record whose pair is impossible
+    (``points_embedded > points_total``, a bool, a negative) — refused rather
+    than summed. Safe here for the same reason in every case: a cell with no
+    points can neither reach the context cap nor produce evidence recall, so it
+    is never a winner; (c) still has its ``vector_strategy`` witness; and (d)
+    is unreachable from a real report — ``retrieve.py`` derives both halves
+    from ONE Cypher row (``count(p), count(p.embedding)``), so
+    ``0 <= points_embedded <= points_total`` holds by construction. Recorded
+    rather than implied: the coverage arm treats all four as un-refuted instead
+    of inventing a zero, which is the documented rule for an unknown population
+    (see ``_dense_leg_verified``) and is what stops this function publishing a
+    ratio nobody measured."""
     # ONE pair per outcome: an outcome that knows its total but not how many
     # of its points were embedded is excluded from BOTH halves, never counted
     # on one side only — that is what "one pair, never two independent sums"
     # buys, and it is why this sums a filtered list instead of summing two
-    # independently filtered lists.
+    # independently filtered lists. The pair is also checked for POSSIBILITY
+    # (ints, not bools, 0 <= embedded <= total): a per-record lie rolls up to
+    # a coverage outside [0, 1] that the zero-coverage arm cannot see, i.e. an
+    # impossible receipt certified as a MEASUREMENT (#10355 review P2).
     pairs = [(o.get("points_total"), o.get("points_embedded")) for o in outcomes]
-    known = [(t, e) for t, e in pairs if isinstance(t, int) and isinstance(e, int)]
+    known = [(t, e) for t, e in pairs
+             if isinstance(t, int) and not isinstance(t, bool)
+             and isinstance(e, int) and not isinstance(e, bool)
+             and 0 <= e <= t]
     known_total = sum(t for t, _ in known)
     known_embedded = sum(e for _, e in known)
     if not known_total:

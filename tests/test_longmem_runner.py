@@ -5144,8 +5144,14 @@ def test_sweep_granularity_waiver_labels_but_never_selects(
     # the arm could not tell the required-argument contract from a
     # signature that merely does not accept the keyword. The earlier comment
     # claimed the pre-fix signature "defaulted `measured=True` and printed
-    # SELECTED"; that default never existed at any commit, and the assertion is
-    # now tied to the wording only the required-argument shape produces.
+    # SELECTED"; that default never existed on `main`, nor in this PR's
+    # history — it existed only on the intermediate branch commit `6269e7d08`,
+    # verified by `git show 6269e7d08:tools/longmem_eval/sweep_granularity.py`
+    # (`measured: bool = True`), a commit that is an ancestor of the pushed
+    # branch but never of `main`. Say it that way rather than as a universal
+    # "never existed": that over-shoots a temporal error into a factual one
+    # (#10355 review P2). The assertion is now tied to the wording only the
+    # required-argument shape produces.
     with pytest.raises(TypeError, match=r"required keyword-only argument.*measured"):
         sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
                           "context_tokens_mean": 10.0},
@@ -5228,24 +5234,50 @@ def _option_help_block(help_text, flag):
 
 def _comment_blocks(source):
     """The comment text of `source`, de-wrapped and grouped into CONTIGUOUS
-    blocks.
+    COMMENT runs.
 
     A claim split across a line wrap (`… (fully` / `# offline; …`) is one
     sentence in the code, so it must be one string here — otherwise a
     substring pin silently misses the very claim it was added for (#10348
-    review-2 P2). Blocks break at any row gap, so two unrelated comments are
-    never glued into a sentence that exists nowhere."""
+    review-2 P2). A bare `#` row inside a run is DROPPED rather than injected
+    as an empty string: it would otherwise split the claim across a double
+    space and hand back a false green for the shape it exists to catch.
+
+    What this does NOT guarantee (measured, #10355 review P2): a run breaks at a
+    row gap, not at a change of subject, so a trailing comment on a code line
+    followed by an unrelated comment merges with it. Callers must therefore
+    filter to the blocks that name their subject — this module's user does."""
     blocks, rows = [], []
     for tok in tokenize.generate_tokens(io.StringIO(source).readline):
         if tok.type != tokenize.COMMENT:
             continue
         if rows and tok.start[0] != rows[-1][0] + 1:
-            blocks.append(" ".join(text for _, text in rows))
+            blocks.append(" ".join(text for _, text in rows if text))
             rows = []
         rows.append((tok.start[0], " ".join(tok.string.lstrip("#").split())))
     if rows:
-        blocks.append(" ".join(text for _, text in rows))
-    return blocks
+        blocks.append(" ".join(text for _, text in rows if text))
+    return [block for block in blocks if block]
+
+
+def test_comment_blocks_stitches_a_wrap_and_documents_its_merge():
+    """#10355 review P2: the helper's two load-bearing properties, pinned.
+
+    (1) A claim wrapped across lines — including across a BARE `#` row, which
+    a naive join turns into a double space that no substring pin can match —
+    must come back as one sentence. That is the whole reason the helper exists
+    (#10348 review-2 P2: the flat source-substring pin was GREEN on a
+    byte-for-byte revert of the wrapped pre-fix comment).
+
+    (2) A run is CONTIGUOUS, not RELATED: two unrelated adjacent comments do
+    merge. Pinned because the docstring says so — a helper whose documented
+    guarantee is looser than its name suggests is how the next caller trusts
+    it for something it cannot do."""
+    stitched = _comment_blocks("# --mock is fully\n#\n# offline as far as it knows\n")
+    assert stitched == ["--mock is fully offline as far as it knows"], stitched
+
+    merged = _comment_blocks("x = 1  # first subject\n# second subject\n")
+    assert merged == ["first subject second subject"], merged
 
 
 def test_sweep_mock_contract_is_not_documented_as_a_dense_leg_waiver(capsys,
@@ -5514,6 +5546,63 @@ def test_points_census_reads_the_pair_from_one_filtered_list():
         == {"points_total": None, "points_embedded": None}
     assert _aggregate_embedding_coverage(
         [{"points_total": None, "points_embedded": None}] * 2) is None
+
+
+def test_points_census_refuses_an_impossible_or_half_known_pair():
+    """#10355 review P2: the pair rule needs a VALUE invariant, not only a
+    both-known one.
+
+    Filtering on ``isinstance(x, int)`` alone still lets a per-record lie
+    through, and every one of these rolls up to a coverage that
+    ``_dense_leg_verified`` reads as MEASURED — its zero-coverage arm only
+    fires on ``== 0.0`` with a positive total, so a ratio outside ``[0, 1]``
+    was never refuted:
+
+        [{total: 3, embedded: 7}]      -> (3, 7)   coverage 2.3333
+        [{total: True, embedded: 5}]   -> (1, 5)   coverage 5.0   (bool is int)
+        [{total: -5, embedded: 5}]     -> (-5, 5)  coverage -1.0
+
+    The receipt exists to answer "how much of what this cell knows about was
+    embedded?"; a number outside ``[0, 1]`` cannot be that answer. So a pair
+    is admitted only when it is POSSIBLE (two ints that are not bools, with
+    ``0 <= embedded <= total``), and a refused pair is dropped whole.
+
+    A half-known pair (``total`` known, ``embedded`` unknown) is the fourth
+    state that lands in ``None/None`` — it must not publish the total as
+    though the unknown half were zero, which is the fabricated-``0`` this PR
+    removes. Reachability is nil today (``retrieve.py`` derives both halves
+    from ONE Cypher row, so ``0 <= embedded <= total`` holds by construction);
+    this pins the contract the next producer reads."""
+    from tools.longmem_eval.sweep_granularity import (
+        _aggregate_embedding_coverage,
+        _points_census,
+    )
+
+    impossible = {
+        "embedded exceeds total": [{"points_total": 3,
+                                    "points_embedded": 7}],
+        "bool total": [{"points_total": True, "points_embedded": 5}],
+        "negative total": [{"points_total": -5, "points_embedded": 5}],
+        "half known": [{"points_total": 3, "points_embedded": None}],
+        "key absent": [{"points_total": 3}],
+    }
+    for why, outcomes in impossible.items():
+        assert _points_census(outcomes) == {"points_total": None,
+                                            "points_embedded": None}, why
+        assert _aggregate_embedding_coverage(outcomes) is None, why
+
+    # A POSSIBLE pair still rolls up, including a real zero-of-N — the arm
+    # that refuses a zero-of-N cell must keep seeing a total to fire on.
+    assert _points_census([{"points_total": 12, "points_embedded": 0}]) \
+        == {"points_total": 12, "points_embedded": 0}
+    assert _aggregate_embedding_coverage(
+        [{"points_total": 12, "points_embedded": 0}]) == 0.0
+
+    # And no admitted shape can ever publish a ratio outside [0, 1].
+    for outcome in ({"points_total": 0, "points_embedded": 0},
+                    {"points_total": 5, "points_embedded": 5}):
+        coverage = _aggregate_embedding_coverage([outcome])
+        assert coverage is None or 0.0 <= coverage <= 1.0, outcome
 
 
 def test_embedding_coverage_is_never_on_the_retrieval_aggregate(
