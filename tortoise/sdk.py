@@ -12855,7 +12855,9 @@ class TortoiseSDK:
         cheap summary + topics, sessionId, capturedAt, eventId. It wires
         ``(Source)-[:references]->(sessionCaptured Event)`` — parity with the
         ``_session_event_write`` agentSession pattern and the backfill's
-        references edge (test_backfill_sources.py).
+        references edge (the witness for this parity used to be
+        `tests/test_backfill_sources.py`, which #4282 deleted with the SDK
+        backfill door — so the claim is now unverified by any test).
 
         #4911: the transcript is SCRUBBED before anything is derived from it or
         persisted. ``summary`` is the first substantive utterance and ``topics``

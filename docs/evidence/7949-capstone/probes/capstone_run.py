@@ -153,11 +153,20 @@ STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 HEAD_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
 #: Every key ``observe_steps`` reads off the object it is handed. Declared so a
-#: witness can never be added silently: the contract test
-#: ``test_every_witness_observe_steps_reads_is_on_the_receipt_or_declared``
-#: derives the READ set from this module's source and the RECEIPT set from
-#: ``tortoise/sdk.py``'s ``resp = {...}`` literal, then requires
-#: ``WITNESS_KEYS - receipt == WITNESS_KEYS_OFF_RECEIPT`` exactly. Drop a key
+#: witness can never be added silently. The surviving contract test is
+#: ``test_every_witness_observe_steps_reads_is_declared``
+#: (`tests/test_7949_capstone_verdict_check.py`): it derives the READ set from
+#: this module's source and requires it to equal this declaration, plus
+#: ``WITNESS_KEYS_OFF_RECEIPT ⊆ WITNESS_KEYS``, and it pins that
+#: ``TortoiseSDK.capture_session`` has NOT come back.
+#:
+#: ⚠️ What it no longer checks: the RECEIPT side. The test used to derive the
+#: receipt key set from ``tortoise/sdk.py``'s ``resp = {...}`` literal and require
+#: ``WITNESS_KEYS - receipt == WITNESS_KEYS_OFF_RECEIPT`` exactly — that half was
+#: dropped with #4282, because the literal belonged to the deleted door. If a
+#: capture receipt ever returns, the receipt half must be RE-DERIVED here rather
+#: than assumed; the `OFF_RECEIPT` declaration is now a claim nothing cross-checks
+#: against a real receipt. Drop a key
 #: from the receipt, or read an undeclared one, and it reds.
 WITNESS_KEYS = ("stats", "story_arc", "embed_list", "vet",
                 "classify_later", "search", "payload")

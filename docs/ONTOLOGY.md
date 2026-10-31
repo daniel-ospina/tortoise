@@ -203,7 +203,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | `managedBy` | Entity → Subject | unidirectional | N-ary | RACI Responsible | Operational responsibility |
 | `ownedBy` | Entity → Subject | unidirectional | N-ary | RACI Accountable | Accountability, data boundary |
 
-> **memberOf is canonical.** `get_org_structure` queries `memberOf` for membership (Subject→Subject, member→org). `holdsRole` is retained as a distinct concept (person→role is not membership). The legacy `hasMember` predicate (org→member) remains in valid_predicates for backward compatibility with existing graph edges.
+> **memberOf is canonical.** `get_org_structure` queried `memberOf` for membership (Subject→Subject, member→org) — it was the predicate's ONLY served reader, and **#4282 deleted it** (one of the 26 dead public `TortoiseSDK` methods, 2026-10-27). No served code queries `memberOf` now: the remaining references are an allowlist entry (`tortoise/security.py`), a rel-type docstring, registry prose and the structural-predicate note in `ep.py`. The canonicality argument therefore rests on the predicate's MODELLING (member→org is what the edge means, and the hosted auth-context seeding still writes it), not on a reader existing. `holdsRole` is retained as a distinct concept (person→role is not membership). The legacy `hasMember` predicate (org→member) remains in valid_predicates for backward compatibility with existing graph edges.
 
 ### §3.7 Object ↔ Object
 
