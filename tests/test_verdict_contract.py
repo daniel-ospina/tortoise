@@ -1065,6 +1065,29 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
         "test_concurrent_create_team_one_minted",
         "test_concurrent_create_team_one_minted_registry",
         "test_concurrent_onboarding_sub_team_one_minted"})),
+
+    # ── #10067: the conversion the capture-carrier lane added ───────────────
+    # The same #8582 seam, landed WITHOUT its declaration: #10067 converted this
+    # file's fixtures and in-class reads but did not touch this registry, so the
+    # parametrized pin below generated NO case for it and every conversion here
+    # went unchecked (the mechanism `_CONVERTED_CLIENT_SEAMS`'s own docstring
+    # warns about — a file absent from the dict is never checked, not
+    # checked-and-failing). `POST /v1/packs/manifests` is NOT in
+    # `hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT`, so each read binds a client over
+    # the wait-bound app: reverting any one of them to `TestClient` puts the
+    # transport refusal back into an `assert 504 == 201` product FAIL (#5049
+    # rule 1). `client`/`client_b` are fixtures; `test_upload_401_unauth`,
+    # the two 500 pins (`raise_server_exceptions=False` carried THROUGH the
+    # seam) and `test_tenant_a_pack_invisible_to_tenant_b` — the red that
+    # motivated the conversion — build their own.
+    # +1: the `TestVerdictContract` pin's own control client, which must stay
+    # PLAIN to observe the 504 it proves is real.
+    "tests/test_pack_manifest_store.py": (1, frozenset({
+        "client", "client_b",
+        "test_upload_401_unauthenticated",
+        "test_upload_malformed_json_500",
+        "test_upload_empty_body_500",
+        "test_tenant_a_pack_invisible_to_tenant_b"})),
 }
 
 
