@@ -798,6 +798,21 @@ def _org_sdk(org_id: str, *, namespace: str | None = None) -> TortoiseSDK:
     """
     moved = (_moved_default_namespace(org_id, namespace) if namespace is not None
              else _org_default_namespace(org_id))
+    return _org_sdk_from_name(org_id, moved)
+
+
+def _org_sdk_from_name(org_id: str, moved: str | None) -> TortoiseSDK:
+    """Build the DEFAULT-graph SDK from an ALREADY-RESOLVED name — NO I/O.
+
+    Split out of `_org_sdk` so a background job that has to do the resolving
+    READ anyway can run it in a WORKER and still CONSTRUCT on the event loop.
+    The split is not cosmetic: ``_make_sdk`` resolves the store path, and built
+    in a POOLED worker thread that path comes from the thread's stale inherited
+    test-module stamp once the pool reuses it — the job then writes to a store
+    the test's reader never looks at (tortoise#7500; measured as 3 reds under
+    #4645, which is why those hand-offs were reverted). So: off-load the READ,
+    keep the CONSTRUCTION on the loop.
+    """
     return _make_sdk(graph_name=moved) if moved else _make_sdk(namespace=org_id)
 
 
@@ -15008,6 +15023,23 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         quota_refusal_payload,
     )
     from tortoise.sdk import _current_actor_user_id  # #2600 actor stamp
+
+    # #10180: an ORG-WIDE caller that handed us a dict WITHOUT the default
+    # namespace gets it resolved HERE, not in the caller. The MCP
+    # `tortoise_session_capture` tool builds its own dict (it cannot be changed:
+    # minting/altering that tool's SERVED implementation is a surface change —
+    # `tools/surface-guard.py` freezes the file), and it only stamped the field
+    # for a graph-BOUND key. Without this, an org-wide MCP capture wrote the
+    # graph a promotion DEMOTED while its record rows (tenant = the credential's
+    # `default_graph_id`) named the promoted one — the split #10025 exists to
+    # remove, on the lane agents write through. One PK read, only when the dict
+    # lacks the field (the REST lanes already carry it), and off the loop.
+    if org.get("org_id") and not org.get("graph_id") \
+            and not org.get("graph_namespace"):
+        _resolved_ns = await _cp_offload(
+            lambda: _org_default_namespace(org["org_id"]), op="org_default_ns")
+        if _resolved_ns:
+            org = {**org, "graph_namespace": _resolved_ns}
 
     # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
     # not an enforced consent gate. C6 #2115 (D-C6-3): the gate resolves
@@ -37243,7 +37275,8 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
       persist is caught and folded into the terminal status — never allowed to
       wedge the job at ``started``.
     * WHAT STAYS ON THE LOOP, and why it is not an omission: the
-      ``_make_sdk`` construction and the single ``org_sdk._get_proj()`` attach
+      ``_org_sdk_from_name`` SDK construction and the single
+      ``org_sdk._get_proj()`` attach
       handed to ``backfill_legacy_closed``; ``index_repo``'s own attach too
       (it attaches on ITS caller's loop before handing the handle to the
       worker). Off-loading those resolves the store path from a POOLED worker
@@ -37251,6 +37284,9 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
       is reused across tests — the job then writes where the test's reader
       never looks (tortoise#7500; measured as 3 reds under #4645, which is why
       its hand-offs were reverted). They can move only once #7500 lands.
+      What IS off-loaded is the #10180 default-graph NAME read
+      (``_org_default_namespace``): one control-plane round trip, taken in a
+      worker and handed to a construction that stays here.
     * ``backfill_legacy_closed``'s OWN SCAN is ALSO still inline, and it is a
       declared residual too — but NOT a #7500 site. It runs two full-:Event
       reads plus one journaled ``apply`` per mint (``github_indexer.py``), all
@@ -37334,7 +37370,12 @@ async def _run_indexing(job_id: str, org_id: str, org: str,
     terminal_status: str | None = None
     terminal_error: str | None = None
     try:
-        org_sdk = await _cp_offload(lambda: _org_sdk(org_id), op="org_sdk")
+        # The default-graph NAME is resolved in a worker (one control-plane
+        # round trip, which must not run on the loop), but the SDK is
+        # CONSTRUCTED back here, ON the loop — ``_make_sdk`` in a pooled worker
+        # resolves the store path from that thread's stale stamp (#7500).
+        org_sdk = _org_sdk_from_name(org_id, await _cp_offload(
+            lambda: _org_default_namespace(org_id), op="org_sdk"))
         # #10047: the walk is a DETACHED task carrying only `org_id`, so it
         # cannot see the credential that started it; it opens the org's DEFAULT
         # graph, so that graph's record tenant is the answer for every Object /
@@ -37907,7 +37948,10 @@ async def _run_docs_indexing(job_id: str, org_id: str, org: str,
               "blobs_skipped_oversized": 0, "repos_processed": 0,
               "repos_total": 0, "errors": [], "quota_hit": False}
     try:
-        org_sdk = await _cp_offload(lambda: _org_sdk(org_id), op="org_sdk")
+        # Same split as `_run_indexing`: the NAME is read in a worker, the SDK
+        # is constructed on the loop (#7500 — see `_org_sdk_from_name`).
+        org_sdk = _org_sdk_from_name(org_id, await _cp_offload(
+            lambda: _org_default_namespace(org_id), op="org_sdk"))
         # #10047: same detached-task reason as `_run_indexing` — the docs walk
         # writes the org's DEFAULT graph and carries no credential to resolve a
         # tenant from.
