@@ -45,7 +45,14 @@ or facts that were false against the tree they describe:
 * **the leg list was a partition claim that was false**: ``test-d14-hosted-api``
   (``-m embedded_only``, URI-less) and ``test-record-postgres``
   (``[postgres]`` + ``TEST_RECORD_DB_URI``) are ``python-ci-gate`` members the
-  batch's URI lane *skips* rather than reproduces;
+  batch's URI lane *skips* rather than reproduces — and the list named only four of
+  the gate's **five** non-test members, omitting ``ci-introduced-failure`` (the #9984
+  predicate, the rail's own automated version of Phase 1);
+* **Phase 0 made the SHARED FalkorDB instance the default** under a ``docker ps``
+  precondition that is always true in this fleet, demoting ``tools/test_lane.py`` to a
+  fallback — inverting the repo's recorded #5084 rule for the very measurement the
+  doctrine calls non-negotiable (peer lanes' graphs enter the batch id set and not the
+  baseline's, so Phase 4 convicts an innocent PR);
 * the carve-out file count was quoted from memory and was stale.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
@@ -53,26 +60,32 @@ command edit that would not run reds this file, and a wording edit that keeps th
 commands honest does not. Three things are additionally pinned as **substrings**
 because they are the document's contract rather than its wording — the
 ``OVERRIDES:`` line, the verdict markers, and the "never green on a partial lane"
-rule — plus the two marker strings (``--no-ff``, ``export TORTOISE_DB_URI=``) that
+rule — plus the two marker strings (``--no-ff``, and a lane SELECTION — the literal
+``export TORTOISE_DB_URI=…`` or ``lane="$(… tools/test_lane.py uri)"`` + ``eval "$lane"``,
+both executable, since a commented-out export selects nothing) that
 must sit in the *fence* they belong to, not merely somewhere in the prose, and
-the leg names (``test-d14-hosted-api``, ``test-record-postgres``) whose omission
+the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-test
+``packs-compile`` / ``manifest-integrity`` / ``workflow-lint`` / ``surface-guard`` /
+``ci-introduced-failure``) whose omission
 would make the reproduced/not-reproduced list read as a complete partition.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — 15 checks at this head: **12 of 15 red** at
-``a17576c43``, **9 of 15** at ``f3c6c803b``, **6 of 15** at ``a8be548762``, and
-**3 of 15** at ``295d6d385`` — the DENOMINATOR is the whole of that correction: the
-red sets at all four revisions are unchanged, and the numerators 5/2 in the older text
-were simply stale. The six at ``a8be548762`` are exactly the findings
-that head's review raised (the landing pin's ``--jq -r``, the baseline's missing
-``-m track_b`` half, the missing clean-tree precondition, and the two gate test
-legs the URI lane skips) plus the batch fence's own re-runnable-spelling and
-bisect-return checks;
-the three at ``295d6d385`` are the checks the post-record commits added, so they are
-non-vacuous rather than bookkeeping. The parser-sanity check is green on every
-revision by design: it guards against a re-pointed or deleted document, not
-against a bad command. The contract-sentences check is green from ``f3c6c803b``
-on, which is when those sentences landed.
+revision rather than asserted — 16 checks at this head: **13 of 16 red** at
+``a17576c43``, **10 of 16** at ``f3c6c803b``, **7 of 16** at ``a8be548762``, **5 of 16**
+at ``295d6d385``, **3 of 16** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, and
+**2 of 16** at ``ed1c03b82`` (this round's pre-fix head) — and those last two are
+exactly the findings that head's review raised: the
+``ci-introduced-failure`` member missing from the leg list, and the shared FalkorDB
+instance as the default lane. Each round's head is red on its own round's findings and
+on nothing that a later round introduced, so no check reds on a revision that did not
+raise it. Three checks the revision matrix alone cannot red are named rather than left
+implied: the parser-sanity check and the contract sentences (green by design — they
+guard against a re-pointed or deleted document, not against a bad command), and the
+``#2985`` extras trap, which every revision here already fixed and which is pinned by
+the ``uv sync`` mutants instead. The parser-sanity check is green on every revision by
+design: it guards against a re-pointed or deleted document, not against a bad command.
+The contract-sentences check is green from ``f3c6c803b`` on, which is when those
+sentences landed.
 
 **A revision matrix is not the whole measure — MUTANTS are the other axis, and
 they are measured too.** A doc revision only proves a check reds on the *mistakes
@@ -100,16 +113,24 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **109 such mutants
-measured at this head. Every one that can certify a wrong tree or a wrong landing is
-killed; the single survivor is `git switch --detach -C <branch> "$PINNED"`, which git
-refuses outright (`fatal: '--detach' cannot be used with '-b/-B/--orphan'`, rc=128) and
-whose `|| exit 1` halts — a predicate-tightness miss, not a broken invariant.** The
-honest document is 0 of 15 red.
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **111 such mutants
+measured at this head: 0 survive** (109 measured at ``c50628450``, plus the two this
+round added) — the two this round added are the omitted
+``ci-introduced-failure`` member and a fence that executes the SHARED instance as
+the lane, each killed by its own check, measured — and the honest document is
+0 of 16 red.
+
+This round adds one more class to that list: an append-a-mover SUFFIX on any of
+those lines — `git bisect reset <branch> && git switch main`, `git log --oneline -1
+; git reset --hard main` — because naming the branch is not the same as HEAD ENDING
+on it, so the return and the window's benign lines must BE one command (no separator
+outside quoted spans). One survivor remains and is named rather than hidden:
+`git switch --detach -C <branch> "$PINNED"`, which git refuses outright (rc=128) and
+whose `|| exit 1` halts — a predicate-tightness miss, not a broken invariant.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
 session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
-this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports 15 ERRORS
+this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports 16 ERRORS
 that have nothing to do with the doctrine. Name a lane:
 
     TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_integration_doctrine.py -q
@@ -253,6 +274,51 @@ _DIRTY_TEST = re.compile(r"^(?:\[\s*-z\s|test\s+-z\s)")
 
 #: Commands that move HEAD onto a ref — what Phase 1 must do before its suite run.
 _MOVES_HEAD = re.compile(r"\bgit\s+(?:switch|checkout)\b")
+
+#: A lane SELECTION that actually selects, never merely a mention of one. Two
+#: mechanisms, both executable: the literal ``export TORTOISE_DB_URI=…``, or
+#: ``lane="$(… tools/test_lane.py uri)"`` followed by ``eval "$lane"`` (the form
+#: Phase 0 uses since #5084 made a private container the default). ``_fences()``
+#: drops whole-line comments and ``_code()`` strips trailing ones, so naming an
+#: export in prose or in an annotation still cannot satisfy this — the property
+#: the ``P1-4 / ISSUE 3`` fix was written for.
+_LANE_LITERAL = "export TORTOISE_DB_URI="
+_LANE_CAPTURE = re.compile(
+    r'^(?:export\s+|readonly\s+|declare\s+(?:-\w+\s+)*|typeset\s+(?:-\w+\s+)*)?'
+    r'(?P<var>\w+)="?\$\(\s*uv\s+run\s+python\s+tools/test_lane\.py\s+uri\s*\)"?'
+    # the trailing halt is optional for MATCHING but the doc carries it: a failed
+    # `uri` left the fence running with `$lane` empty (`eval ""` selects nothing).
+    r'(?:\s*\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\}))?\s*$'
+)
+_LANE_EVAL = re.compile(r'^eval\s+"?\$\{?(?P<var>\w+)\}?"?$')
+
+#: The batch lane's ledger must be PRIVATE by default (#5084): a shared instance is
+#: contaminated by peer lanes while the batch runs, and the batch's id lists ARE
+#: the ledger every verdict is diffed against.
+_LANE_SHARED = "localhost:6379"
+
+#: The private-container tool. Pinned in the FENCE, never in the prose.
+_TEST_LANE = "tools/test_lane.py"
+
+
+def _lane_exports(fence: list[str]) -> list[int]:
+    """Indices of the commands in ``fence`` that EXPORT a lane (executable only)."""
+    codes = [_code(c) for c in fence]
+    found: list[int] = []
+    for i, code in enumerate(codes):
+        if code.startswith(_LANE_LITERAL):
+            found.append(i)
+            continue
+        capture = _LANE_CAPTURE.match(code)
+        if not capture:
+            continue
+        var = capture.group("var")
+        if any(
+            (match := _LANE_EVAL.match(codes[j])) and match.group("var") == var
+            for j in range(i + 1, len(codes))
+        ):
+            found.append(i)
+    return found
 
 
 #: A single- or double-quoted span. Blanked (same length, so offsets survive)
@@ -725,20 +791,68 @@ def test_the_lane_is_selected_and_exported_before_the_first_suite_run() -> None:
     Resolved against the FENCED COMMANDS, not raw lines: a prose mention of
     ``TORTOISE_DB_URI`` (the doc explains the gate in words, earlier) must not
     satisfy this, or deleting the whole export fence would leave it green.
+
+    Since #10400's P2-2 the selection is filled in two ways: the literal
+    ``export TORTOISE_DB_URI=…`` (the shared lane) **or** the private-container
+    form ``lane="$(… tools/test_lane.py uri)"`` + ``eval "$lane"``. Both must be
+    EXECUTABLE — a commented-out export selects nothing, so it cannot satisfy this.
     """
-    commands = _fenced_commands()
-    exports = [i for i, cmd in enumerate(commands) if "export TORTOISE_DB_URI=" in cmd]
-    suites = [i for i, cmd in enumerate(commands) if _SUITE_CMD.match(cmd)]
+    fences = _fences()
+    exports = [i for i, fence in enumerate(fences) if _lane_exports(fence)]
+    suites = [
+        i
+        for i, fence in enumerate(fences)
+        if any(_SUITE_CMD.match(_code(cmd)) for cmd in fence)
+    ]
     assert exports, (
-        "no fenced command exports TORTOISE_DB_URI= — the documented suite would "
-        "die at session start (tests/_embedded.py::_assert_p4_uri_required)"
+        "no fenced command exports a lane — neither `export TORTOISE_DB_URI=` nor "
+        '`lane="$(… tools/test_lane.py uri)"` + `eval "$lane"`. The documented '
+        "suite would die at session start "
+        "(tests/_embedded.py::_assert_p4_uri_required)"
     )
     assert suites, "the doctrine no longer documents a full-suite run — re-point this guard"
     assert min(exports) < min(suites), (
-        "the lane is exported only at fenced command "
-        f"{min(exports) + 1} but the first full-suite command is at "
-        f"{min(suites) + 1}: the baseline would die at session start "
-        "(tests/_embedded.py::_assert_p4_uri_required)"
+        f"the lane is selected only in fence {min(exports) + 1} but the first "
+        f"full-suite fence is {min(suites) + 1}: the baseline would die at session "
+        "start (tests/_embedded.py::_assert_p4_uri_required)"
+    )
+
+
+def test_the_batch_lane_defaults_to_a_private_container() -> None:
+    """#10400 review P2-2: a batch IS the multi-lane case, so its lane must be private.
+
+    Phase 0 made the SHARED FalkorDB instance the default (`docker ps` works — which in
+    this fleet is always true), with `tools/test_lane.py` demoted to a fallback gated on
+    the shared instance being "contended or absent". That inverts the repo's own recorded
+    #5084 rule for exactly the measurement the doctrine calls non-negotiable: peer lanes'
+    graphs land in the shared instance during Phase 1/3, so a failure caused only by that
+    interference enters the batch id set and not the baseline's, Phase 4 classifies it
+    `NEW`, and an innocent PR is convicted.
+    """
+    fences = _fences()
+    selections = [i for i, fence in enumerate(fences) if _lane_exports(fence)]
+    assert selections, "no fence selects a lane — re-point this guard"
+    lane_fence = fences[selections[0]]
+    codes = [_code(c) for c in lane_fence]
+    assert any(_TEST_LANE in c and " uri" in c for c in codes), (
+        "the lane fence must select the PRIVATE container with "
+        f"`tools/test_lane.py uri` as an executable command: {lane_fence}"
+    )
+    shared = [c for c in codes if _LANE_SHARED in c]
+    assert not shared, (
+        "the lane fence must not execute the SHARED instance as the default — its "
+        "graphs are not a ledger while peer lanes run (#5084): "
+        f"{shared}"
+    )
+    text = _text()
+    assert "#5084" in text, (
+        "the doctrine must name the #5084 rule it follows here: the private lane is "
+        "the recorded repo rule for more than one live lane, and an unmarked departure "
+        "from it is invisible to the operator who reads it next"
+    )
+    assert "no other lane is live" in text, (
+        "the shared instance is admissible only under an explicit precondition; the "
+        "doctrine must state it rather than leave `docker ps` to imply it"
     )
 
 
@@ -1286,15 +1400,25 @@ def test_the_unreproduced_gate_legs_are_named() -> None:
     """
     text = _text()
     for needle in (
+        # the two TEST legs the batch's URI lane skips rather than runs
         "test-d14-hosted-api",
         "test-record-postgres",
         "embedded_only",
         "TEST_RECORD_DB_URI",
+        # …and the NON-TEST members, which no pytest run can reproduce at all.
+        # `ci-introduced-failure` is the #9984 predicate: the rail's own automated
+        # version of Phase 1, and the one member this list dropped (#10400 P2-1).
+        "packs-compile",
+        "manifest-integrity",
+        "workflow-lint",
+        "surface-guard",
+        "ci-introduced-failure",
     ):
         assert needle in text, (
             f"the doctrine must name {needle!r} where it lists the legs a pytest run "
-            "does not reproduce: both are python-ci-gate members the batch's URI "
-            "lane skips, so omitting them makes the list read as a complete partition"
+            "does not reproduce: every one is a `needs:` of the required "
+            "`python-ci-gate`, so omitting it makes the list read as a complete "
+            "partition while a gate member goes unmentioned"
         )
 
 
