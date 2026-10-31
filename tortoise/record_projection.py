@@ -2626,6 +2626,13 @@ def _structural_target_resolution(org_id: str, graph_id: str, label: str,
     identity has no target, and `LIMIT 1` would let the record land an edge on a
     different carrier than the graph did.
 
+    ⛔ `by_id=True` (#9836) is the OTHER addressing, and it is not a fifth arm of
+    the map below: for the ID-ADDRESSED family (`wasDerivedFrom`/`aboutAction`)
+    the rel fixes no label, so the label arrives on the DESCRIPTOR and the key is
+    the node's OWN `id` — the resolution is then `_endpoint_resolution`, the same
+    one every other edge endpoint in this module uses. The arms below are the
+    NAME/url family and stay untouched.
+
     Per label (each verified against the fold's own arm):
 
     * `Subject`/`Object`/`Event` → `name` (a PRIMARY column on all three).
@@ -2730,8 +2737,11 @@ def _structural_repoint_statements(
     """The MOVE a 2b structural `DirectEdgeRepoint` describes (#9972/#9973).
 
     Returns `None` for every other shape — a 2a direct descriptor, a malformed
-    one, or a `delete_only` guard — so those keep the existing path byte for byte
-    (a 2a `src` is ALREADY the successor and an upsert `DELETE`s nothing).
+    one, a `delete_only` guard, or an ID-ADDRESSED descriptor (`#9836`) whose
+    `target_label` is not an addressable epistemic label — so those keep the
+    existing path byte for byte (a 2a `src` is ALREADY the successor and an
+    upsert `DELETE`s nothing; an unaddressable id-addressed descriptor is a
+    NO-MOVE on both routes, never a DELETE whose INSERT cannot run).
 
     Two statements, in this order, and both gated on the SAME condition: the
     descriptor has an effect only when `src` is (a) TERMINAL and (b) has a
