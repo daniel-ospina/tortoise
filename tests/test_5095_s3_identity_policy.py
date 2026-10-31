@@ -456,6 +456,59 @@ class TestCandidateCovered:
         assert v2._candidate_covered(search, "point", "   ") is False
 
 
+class TestTheReportCannotContradictItself:
+    """Two ways the run's report could contradict the run's own records.
+
+    *(review B1)* `execute_embed` COERCES a non-string falsy content (`None`,
+    `0`, `False`) to its text and writes it, while the query derivation skipped
+    it as falsy — so such a candidate is committed and was never checked. The
+    report used to skip it, and published `resolved` beside a record saying
+    `found: null`.
+
+    *(review B2)* the budget can cut only the story-topic queries that follow
+    every candidate query, so `partial` with NOTHING unchecked is the ordinary
+    shape — and a warning that then says candidates "were recorded as
+    UNRESOLVED" is false about that run's records.
+    """
+
+    def test_a_coerced_falsy_candidate_is_reported_unresolved(self):
+        candidates = {"entities": [{"name": "ACME Corp"}],
+                      "points": [{"content": None, "pointKind": "statement"}]}
+        report = v2._identity_report(_search(), candidates)
+        assert report["candidates"]["points"] == 1
+        assert report["unresolved"]["points"] == 1, report
+        assert report["state"] == fp.LOOKUP_PARTIAL, (
+            "a Point that S5 will commit as 'None' with no derived query must "
+            "not leave the run reading 'resolved'")
+        # ...and the record agrees, which is the whole point of the assertion.
+        # The search carries a real `query_results` log (what `search_graph`
+        # always supplies): the derived query set holds the candidates S3 saw, and
+        # the coerced `None` -> "None" candidate is not among them.
+        ran = [v2._query_key("object", v2._candidate_query_text("object", "ACME Corp"))]
+        result = v2.execute_embed(
+            {"entities": [], "events": [], "operators": [], "chain_notes": [],
+             "points": [{"content": None, "pointKind": "statement"}]},
+            _search(query_results={"ran": ran, "failed": []}), session_id="s1")
+        point_recs = [r for r in result["link_before_create"]
+                      if str(r["searched_for"]).startswith("point ")]
+        assert point_recs and point_recs[0]["found"] is None, point_recs
+
+    def test_a_partial_lookup_with_nothing_unchecked_says_so(self):
+        out = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
+        assert out["identity"]["unresolved_total"] >= 1
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert messages, out["warnings"]
+        assert "never checked against the graph" in messages[0]
+        assert "never 'not found'" in messages[0]
+        # the zero-numerator shape is a DIFFERENT sentence, never the one above
+        partial_zero = fp.plan_identity(
+            _search(query_coverage={"derived": {"point": 13},
+                                    "ran": {"point": 12}, "failed": {"point": 0}}),
+            candidates={"points": 3}, unresolved={"points": 0})
+        assert partial_zero["state"] == fp.LOOKUP_PARTIAL
+        assert partial_zero["unresolved_total"] == 0
+
+
 # ── 9. the record the caller keeps ─────────────────────────────────────────
 
 _EMBED = {

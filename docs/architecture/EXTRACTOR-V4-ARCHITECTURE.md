@@ -555,7 +555,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:9107-9110`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:9123-9126`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -682,7 +682,7 @@ unfirable (block at the top of §10).
 
 **1. Classification happens INLINE — inside S2.1's big call.** When the flag is on, `core_only=classify_later` is passed to S2 (`:4782`) so the extractor **only assigns core kinds and leaves domain kinds `unclassified`**, and the separate pass fills them in. When it is off, the extraction LLM emits kinds as part of its prose output. **That is the wrong place for them** — see below.
 
-**2. It must run on SURVIVORS.** ⚠️ `_collect_classify_items` collects from **`embed_list`** — the whole candidate set — and **`classify_consolidation` does not remove items from `embed_list`; it decides a write operation per point** (`:3994`). **So a `DISCARD` (`#4899`) would currently be classified anyway.** *Classifying a row you are about to throw away is wasted work **and** it is worse than wasted: **the discards are exactly the rows whose kind is least meaningful**, so they pollute the classifier's own signals.*
+**2. It must run on SURVIVORS.** ⚠️ `_collect_classify_items` collects from **`embed_list`** — the whole candidate set — and **`classify_consolidation` does not remove items from `embed_list`; it decides a write operation per point** (`:3967-3969`). **So a `DISCARD` (`#4899`) would currently be classified anyway.** *Classifying a row you are about to throw away is wasted work **and** it is worse than wasted: **the discards are exactly the rows whose kind is least meaningful**, so they pollute the classifier's own signals.*
 > **⇒ The wiring requirement: a discarded candidate must be removed from (or marked in) `embed_list`, or `_collect_classify_items` must skip it.** Without that, `#4899` and S2.3 ship in the wrong order and S2.3 pays for `#4899`'s savings.
 
 **3. It should be its OWN step, not a S2.2 substep — and the reason is the fast path.**
@@ -722,7 +722,7 @@ Resolved by call graph:
 |---|---|---|
 | 1st | `:4803` | classify pass on `embed_list` |
 | 2nd | `:4888` | classify pass on `complete_list` (after S4's merge) |
-| **last** | **`:4995`** | **`execute_embed(...)` — which contains `classify_consolidation` (`:3994`), i.e. the dedup/consolidation gate** |
+| **last** | **`:4995`** | **`execute_embed(...)` — which contains `classify_consolidation` (`extractor_v2.py:3967-3969`), i.e. the dedup/consolidation gate** |
 
 **⇒ Today we classify the whole set TWICE and then dedup it.** The mechanical, free, set-reducing operation runs **dead last**, after the two most expensive passes. **Every ordering principle says the opposite.**
 

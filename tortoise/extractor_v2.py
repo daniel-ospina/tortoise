@@ -2946,8 +2946,14 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     question this function could not previously answer.
     """
     mode = resolve_backend_mode()
+    # `query_coverage` / `query_results` are present on EVERY return path, zeroed
+    # here: the documented shape is what a caller indexes, and these two paths are
+    # exactly the unresolved ones — a KeyError on the unresolved shape would be the
+    # worst place to have one (#5095 review A5).
     empty = {"mode": mode, "degraded": True, "reason": None,
-             "entities": [], "points": [], "events": [], "queries_run": 0}
+             "entities": [], "points": [], "events": [], "queries_run": 0,
+             "query_coverage": {"derived": {}, "ran": {}, "failed": {}},
+             "query_results": {"ran": [], "failed": []}}
     if not _is_searchable_backend(mode, sdk):
         store = ("FalkorDBLite (embedded)"
                  if _sdk_backend_is_embedded(sdk) else repr(mode))
@@ -3053,10 +3059,15 @@ def _candidate_covered(search: dict, entity_type: str, raw: str) -> bool:
     """
     results = (search or {}).get("query_results") if isinstance(search, dict) else None
     key = _query_key(entity_type, raw)
+    if key is None:
+        # No searchable text means NO derived query existed, so this candidate was
+        # never tested — whatever the run-level state says. Checked BEFORE the
+        # fallback below: a resolved run with no `query_results` (a foreign search
+        # dict) would otherwise answer "covered" for a candidate nothing queried
+        # (#5095 review B1).
+        return False
     if not isinstance(results, dict):
         return _failure_policy.lookup_state(search) == _failure_policy.LOOKUP_RESOLVED
-    if key is None:
-        return False
     ran = results.get("ran")
     return isinstance(ran, list) and key in ran
 
@@ -3090,8 +3101,13 @@ def _identity_report(search: dict, candidates: dict) -> dict:
             # a second width applied to a differently-stripped string — that
             # drift is what made a ran query read as unrun (#5095 review B2).
             raw = _candidate_query_text(leg, str(item.get(text_key) or ""))
-            if not raw.strip():
-                continue
+            # ⛔ NO `continue` on empty text: `execute_embed` COERCES a non-string
+            # falsy (`None` / `0` / `False`) to its text and writes it ("None"),
+            # while the derivation skipped it as falsy — so such a candidate is
+            # committed and was never checked. Skipping it here reported the run
+            # `resolved` beside a record that says `found: null`, which is the
+            # contradiction this report exists to prevent (#5095 review B1). An
+            # empty-text candidate is UNRESOLVED, not exempt.
             if not _candidate_covered(search, leg, raw):
                 missing += 1
         unresolved[section] = missing
@@ -9473,16 +9489,27 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         # name OTHER items and are reported as counts only, so folding them in
         # here would print a share over two different populations (#5095 review
         # B4). And the set is the run's PROPOSED candidate list, before S5's own
-        # dedup drops any of it — the warning says "candidate", never
-        # "committed", because a candidate S5 folds away was never going to be
-        # checked anyway.
+        # dedup drops any of it — the text says "candidate", never "committed".
         _denominator = sum(_id["candidates"].get(section, 0)
                            for section in _failure_policy.LEG_BY_SECTION)
-        result.setdefault("warnings", []).append(
-            f"S3 identity {_id['state']}: {_id['unresolved_total']} of "
-            f"{_denominator} candidate(s) were never checked against the graph "
-            f"— recorded as UNRESOLVED, never as 'not found'"
-            f"{(': ' + _id['reason']) if _id['reason'] else ''}")
+        _reason = f" ({_id['reason']})" if _id["reason"] else ""
+        if _id["unresolved_total"]:
+            # A zero numerator is a DIFFERENT run and gets a different sentence
+            # (#5095 review B2): the budget can cut only the story-topic queries
+            # that follow every candidate query, so `partial` with nothing
+            # unchecked is the ordinary shape — and telling an operator that
+            # candidates "were recorded as UNRESOLVED" then is a false claim
+            # emitted by the very channel this change made truthful.
+            result.setdefault("warnings", []).append(
+                f"S3 identity {_id['state']}{_reason}: "
+                f"{_id['unresolved_total']} of {_denominator} candidate(s) were "
+                f"never checked against the graph — their record says UNRESOLVED, "
+                f"never 'not found'")
+        else:
+            result.setdefault("warnings", []).append(
+                f"S3 identity {_id['state']}{_reason}: the lookup did not run "
+                f"over the whole candidate set, but every committed candidate's "
+                f"own query DID run — no candidate was left unchecked")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface
