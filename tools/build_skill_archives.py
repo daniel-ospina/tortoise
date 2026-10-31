@@ -106,6 +106,24 @@ def build(name: str, source: Path | None = None) -> bytes:
     src = source_path(name) if source is None else source
     if not src.is_file():
         raise SystemExit(f"missing source skill: {src}")
+    return build_from_bytes(name, src.read_bytes())
+
+
+def build_from_bytes(name: str, payload: bytes) -> bytes:
+    """Bytes of the `.skill` archive for `name` from a skill body in MEMORY.
+
+    The archive is a pure function of the skill body, so the body does not have
+    to exist on disk to be archived. That is what lets a caller report the
+    archive it WOULD derive without writing anything — `--sync --dry-run` reads
+    no post-write file (there is none) and must still name the artifacts a real
+    run would rewrite; building from the fetched payload it already holds is the
+    only way to say that truthfully. A dry run that built from disk would zip
+    the PRE-sync mirror, find it equal to the stale archive, and report "no
+    archive changes" on exactly the #10088 shape.
+
+    ``build`` delegates here, so the two entry points cannot drift apart about
+    what a `.skill` byte stream is.
+    """
     import io
 
     buf = io.BytesIO()
@@ -113,7 +131,7 @@ def build(name: str, source: Path | None = None) -> bytes:
         info = zipfile.ZipInfo(f"{name}/SKILL.md", date_time=_FIXED_DATE)
         info.external_attr = 0o644 << 16
         info.compress_type = zipfile.ZIP_DEFLATED
-        zf.writestr(info, src.read_bytes())
+        zf.writestr(info, payload)
     return buf.getvalue()
 
 

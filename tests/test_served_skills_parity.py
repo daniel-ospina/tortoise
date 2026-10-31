@@ -584,18 +584,29 @@ def test_4643_sync_dry_run_writes_nothing(monkeypatch, tmp_path):
 def _seed_mirror_and_stale_archives(root: Path, manifest: dict) -> None:
     """The exact #10088 shape: a served copy, and an archive built from the OLD one.
 
+    ⛔ The archive must be a REAL zip OF the stale served copy — not garbage. In
+    the wild that is what #10088 held: the served mirror was the previous pin and
+    the `.skill` was correctly built FROM it, so the pair was internally
+    consistent and only the UPSTREAM move made it stale. A garbage seed cannot
+    detect the dry-run defect, because `wanted != target` for any source: a dry
+    run that zipped the still-unwritten (pre-sync) mirror still looked like it
+    had reported a change (#10437 review, Issue 2). Seeding the real shape is
+    what makes `test_10437_the_cli_reports_the_archives_and_dry_run_writes_none`
+    red on the pre-fix code.
+
     A pre-fix `sync()` moved the served copy and left `website/skills/<name>.skill`
     holding the previous bytes, so `tests/test_onboarding_variants.py::
     test_9660_skill_archive_holds_exactly_its_own_skill` failed — after a green
     exit from both parity arms (#10088 measured `1 failed, 2869 passed`).
     """
+    bsa = sp._build_skill_archives()
     for name, entry in manifest["skills"].items():
         served = root / entry["served_path"]
         served.parent.mkdir(parents=True, exist_ok=True)
-        served.write_bytes(b"# stale mirror\n")
+        served.write_bytes(f"# stale mirror — {name}\n".encode())
         archive = root / sp.ARCHIVES_REL / f"{name}.skill"
         archive.parent.mkdir(parents=True, exist_ok=True)
-        archive.write_bytes(b"PK\x03\x04 stale archive, not even a zip")
+        archive.write_bytes(bsa.build(name, served))  # a REAL zip of the OLD bytes
 
 
 def _archive_payload(root: Path, name: str) -> tuple[list[str], bytes]:
@@ -668,9 +679,56 @@ def test_10437_a_second_sync_rewrites_no_archive(monkeypatch, tmp_path):
 
     second = sp.sync(root, pin, attempts=1, backoff=0)
     assert second.changed == [], second.changed
-    assert second.archives == [], second.archives
+    assert second.archives == (), second.archives
     for name, payload in after_first.items():
         assert (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes() == payload
+
+
+def test_10437_dry_run_names_the_archives_the_real_run_rewrites(
+        monkeypatch, tmp_path):
+    """`--dry-run` must not UNDER-report the derived artifacts (review, Issue 2).
+
+    Seeded with the real #10088 shape (a served copy plus a VALID archive built
+    from it), a pre-fix dry run built the "wanted" archive from the still
+    unwritten, pre-sync mirror — byte-equal to the stale archive already on disk
+    — so it reported `archives: []` while the real run rewrote all three. The
+    operator previewing a sync, and the reviewer reading the preview, were told
+    the `.skill` files do not move.
+
+    Asserts the dry run's answer EQUALS the real run's, and that the preview
+    still wrote nothing.
+    """
+    src = REPO / sp.MANIFEST_REL
+    pin = tmp_path / "pin.yml"
+    shutil.copyfile(src, pin)
+    manifest = sp.load_manifest(pin)
+    root = tmp_path / "root"
+    _seed_mirror_and_stale_archives(root, manifest)
+    upstream_bytes = {entry["upstream_path"]: f"# fresh upstream — {name}\n".encode()
+                      for name, entry in manifest["skills"].items()}
+    _pin_upstream(monkeypatch, manifest, "b" * 40, upstream_bytes)
+    stale = {name: (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes()
+             for name in manifest["skills"]}
+    expected = {str(sp.ARCHIVES_REL / f"{name}.skill") for name in manifest["skills"]}
+
+    preview = sp.sync(root, pin, attempts=1, backoff=0, dry_run=True)
+
+    assert len(preview.changed) == 3, preview.changed
+    assert {line.split(" (", 1)[0] for line in preview.archives} == expected, (
+        "the dry run must name every archive the real run would rebuild",
+        preview.archives)
+    for name, payload in stale.items():
+        assert (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes() == payload, (
+            "--dry-run must not write the archives")
+
+    real = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert {line.split(" (", 1)[0] for line in real.archives} == expected, (
+        real.archives)
+    for name, entry in manifest["skills"].items():
+        _, payload = _archive_payload(root, name)
+        assert payload == upstream_bytes[entry["upstream_path"]]
+        assert payload != stale[name], f"{name}.skill was not rebuilt"
 
 
 def test_10437_the_cli_reports_the_archives_and_dry_run_writes_none(

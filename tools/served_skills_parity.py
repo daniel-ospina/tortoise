@@ -760,7 +760,11 @@ class SyncResult(NamedTuple):
     target: str
     previous: str
     at_head: bool | None  # None = could not be read (the note is still printed)
-    archives: list[str] = []
+    #: A TUPLE, deliberately: a `NamedTuple` field with a mutable default (`list`)
+    #: is one list object shared by every `SyncResult` built without the field
+    #: (RUF012 — and `RUF` is in the lint select, so a `list` default reds
+    #: `ruff check .`). Immutability is also what a NamedTuple promises.
+    archives: tuple[str, ...] = ()
 
 
 def _build_skill_archives():
@@ -780,7 +784,8 @@ def _build_skill_archives():
     return mod
 
 
-def _rebuild_archives(root: Path, manifest: dict, dry_run: bool = False) -> list[str]:
+def _rebuild_archives(root: Path, manifest: dict, payloads: dict[str, bytes],
+                      dry_run: bool = False) -> tuple[str, ...]:
     """Re-derive `website/skills/<name>.skill` under ``root``; return what moved.
 
     The archive is BUILT from the served copy, so any sync that moves a served
@@ -790,31 +795,34 @@ def _rebuild_archives(root: Path, manifest: dict, dry_run: bool = False) -> list
     arms green, CI `1 failed, 2869 passed`).
 
     Skills are taken from the PIN (not from the builder's own list) so a pin that
-    serves a subset never gains an archive here, and the bytes come from the
-    file just written under ``root`` — a throwaway root stays throwaway.
+    serves a subset never gains an archive here.
+
+    ``payloads`` is the bytes ``sync`` fetched, keyed by skill name — NOT the
+    file under ``root``. In a writing run those are the same bytes (``sync``
+    wrote them a few lines above, or they already matched), and in a ``--dry-run``
+    run the disk still holds the PRE-sync mirror. Reading the disk there zipped
+    the old mirror, found it equal to the stale archive the root was seeded with,
+    and reported that no archive would move — while the real run rewrote all
+    three. `--dry-run` is documented as "report the changes without writing", so
+    it has to report these from the only bytes that describe the change.
     """
     bsa = _build_skill_archives()
     moved: list[str] = []
     for name in bsa.SKILL_NAMES:
-        entry = manifest["skills"].get(name)
-        if entry is None:
+        if name not in manifest["skills"]:
             continue
-        source = root / entry["served_path"]
-        if not source.is_file():
-            # A `--dry-run` root that holds no mirror yet: sync wrote nothing, so
-            # there are no bytes to derive an archive FROM and inventing them is
-            # worse than reporting nothing. A real (writing) sync always has the
-            # file — it wrote it a few lines above.
+        payload = payloads.get(name)
+        if payload is None:  # pragma: no cover - sync fetches every pinned skill
             continue
         target = root / ARCHIVES_REL / f"{name}.skill"
-        wanted = bsa.build(name, source)
+        wanted = bsa.build_from_bytes(name, payload)
         if target.is_file() and target.read_bytes() == wanted:
             continue
         moved.append(f"{ARCHIVES_REL / f'{name}.skill'} ({len(wanted)} bytes)")
         if not dry_run:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(wanted)
-    return moved
+    return tuple(moved)
 
 
 def sync(root: Path, manifest_path: Path, commit: str | None = None,
@@ -844,10 +852,15 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
             # the pin is written either way, and the note below still applies.
             at_head = None
     changed: list[str] = []
+    #: name -> the bytes this sync fetched for it (== what a writing run puts on
+    #: disk). ``_rebuild_archives`` builds from THIS, so a `--dry-run` can name
+    #: the archives it would rewrite without a written file to read.
+    payloads: dict[str, bytes] = {}
 
     for name in sorted(manifest["skills"]):
         entry = manifest["skills"][name]
         payload = fetch_raw(repo, target, entry["upstream_path"], attempts, backoff)
+        payloads[name] = payload
         digest = sha256_bytes(payload)
         served = root / entry["served_path"]
         if not served.is_file() or served.read_bytes() != payload:
@@ -864,7 +877,9 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
     # AFTER the served copies are on disk (and only from those bytes): the
     # archives are derived FROM the mirror, so building them before the write
     # would zip the previous mirror — the stale-archive defect, one level down.
-    archives = _rebuild_archives(root, manifest, dry_run=dry_run)
+    # Built from `payloads`, which IS what the write above put on disk (and, in a
+    # dry run, what it WOULD have put there — the disk still holds the old bytes).
+    archives = _rebuild_archives(root, manifest, payloads, dry_run=dry_run)
     return SyncResult(changed=changed, target=target, previous=previous,
                       at_head=at_head, archives=archives)
 
