@@ -1076,10 +1076,11 @@ _CONVERTED_CLIENT_SEAMS: dict[str, tuple[int, frozenset[str]]] = {
     # `hosted_api._TRANSPORT_WAIT_BOUND_EXEMPT`, so each read binds a client over
     # the wait-bound app: reverting any one of them to `TestClient` puts the
     # transport refusal back into an `assert 504 == 201` product FAIL (#5049
-    # rule 1). `client`/`client_b` are fixtures; `test_upload_401_unauth`,
-    # the two 500 pins (`raise_server_exceptions=False` carried THROUGH the
-    # seam) and `test_tenant_a_pack_invisible_to_tenant_b` — the red that
-    # motivated the conversion — build their own.
+    # rule 1). `client`/`client_b` are fixtures;
+    # `test_upload_401_unauthenticated`, the two 500 pins
+    # (`raise_server_exceptions=False` carried THROUGH the seam) and
+    # `test_tenant_a_pack_invisible_to_tenant_b` — the red that motivated the
+    # conversion — build their own.
     # +1: the `TestVerdictContract` pin's own control client, which must stay
     # PLAIN to observe the 504 it proves is real.
     "tests/test_pack_manifest_store.py": (1, frozenset({
