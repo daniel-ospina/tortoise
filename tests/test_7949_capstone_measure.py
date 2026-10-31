@@ -1993,3 +1993,104 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
                     f"tree-derived table have drifted apart. Re-derive the "
                     f"document's cites; do not relax this leg. "
                     f"cited spans: {sorted(spans)}")
+
+
+# ── E2's blocker names the LIVE half, not the closed render issue ─────────
+#
+# PR #10382 closed #9775's render half: every path that builds a prompt now
+# carries `STATE_VALUE_CARVE_OUT`, the compact render included. What still blocks
+# E2 is the OTHER half — nothing in the write path ENFORCES retention — plus the
+# 1-of-14 value loss that sits upstream of the filter, and both are #10360. Until
+# this pin, four routes still sent a reader to #9775 as an OPEN blocker, i.e. to a
+# lane that had LANDED — and the fourth (the `#9080` capstone row of
+# `docs/00_index.md`, which is a DIFFERENT line of the same file from the
+# "Blockers named per row" line) survived the round that fixed the other three,
+# because the pin only read the one line it knows how to find. A pin that reads one
+# line of a file that carries two cannot claim the file is clean; leg 4 reads rows.
+#
+# This is a different rule from "a row moves to a different verdict only by
+# RE-RUNNING the probe": a verdict is a MEASUREMENT, but a blocker name is a
+# ROUTE. `capstone_run.py::ALSO_BLOCKED_BY` exists for exactly this failure — E5
+# read `#7947` for two commits after that lane closed (#9089) — so the same
+# misattribution in the E2 row is a defect of the same class.
+#
+#: The pre-fix spellings, kept as the mutation this pin catches: each one asserted
+#: an absence that PR #10382 removed, in a bundle whose whole purpose is that a
+#: claim carries an artifact.
+_RETRACTED_E2_RENDER_ABSENCE = (
+    "#9775 records that the state-value carve-out is absent on one render path",
+    "| `#9775` the state-value carve-out on one render path |",
+    "the carve-out is absent on the compact render path",
+)
+
+
+def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
+    """E2 is blocked by the enforcement half, not by the render #10382 fixed.
+
+    Four surfaces say it, and each had to move: the row the probe EMITS
+    (`build_rows`), the E2 row of the audit bundle, the `docs/00_index.md`
+    "Blockers named per row" line that is the bundle's entry point, and — leg 4 —
+    the `#9080` capstone row of the same index, which is the row a reader meets
+    first and which still cited `#9775` as E2's blocker at `136bf8e65` while the
+    other three named `#10360`. Leg 4 reads ROWS rather than the one line part 3
+    knows how to find, and it lives on that row by name, not by line number.
+
+    Non-vacuity: on the pre-fix tree the probe emitted `blocked_by="#9775"` and
+    the README carried both retracted sentences, so legs 1 and 2 both red there;
+    leg 4 reds on the `136bf8e65` index (measured: `git show
+    136bf8e65:docs/00_index.md`), and it asserts its own subject exists so it
+    cannot pass by vacancy on an index that stops routing E2 at all.
+    """
+    # 1. The row the probe emits names the live half.
+    by_id = {row["criterion"]: row for row in _rows()}
+    assert by_id["E2"]["blocked_by"] == "#10360", (
+        "the probe still emits E2's blocker as "
+        f"{by_id['E2']['blocked_by']!r} — #9775's render half is CLOSED (PR "
+        "#10382); the live blocker is #10360")
+
+    # 2. No bundle document still asserts the absence the merge removed.
+    for name, path in _BUNDLE_DOCS:
+        text = path.read_text(encoding="utf-8")
+        for phrase in _RETRACTED_E2_RENDER_ABSENCE:
+            assert phrase not in text, (
+                f"{name} still asserts E2's closed render absence: {phrase!r} — "
+                "PR #10382 makes every render path carry the carve-out, so the "
+                "blocker is the enforcement half (#10360)")
+
+    # 3. The two entry points a reader is routed through name it too.
+    proofs = (_REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md").read_text(
+        encoding="utf-8")
+    e2_row = next(line for line in proofs.splitlines() if line.startswith("| E2 |"))
+    assert "`#10360`" in e2_row, e2_row
+
+    index = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+    blockers = next(line for line in index.splitlines()
+                    if "Blockers named per row:" in line)
+    assert "`#10360` (E2)" in blockers, blockers[:400]
+    assert "`#9775` (E2)" not in blockers, blockers[:400]
+
+    # 4. ⛔ EVERY route, not one line of the file. `docs/00_index.md` carries TWO
+    #    routes to E2's verdict: the `#9080` capstone row (which cites every row's
+    #    blocker as ``(`#NNNN`)`` right beside `E2 BLOCKED`) and the "Blockers
+    #    named per row" line that part 3 above reads. A pin that reads one line of a
+    #    file that carries two cannot claim the file is clean — measured at
+    #    `136bf8e65`: the "Blockers" line named `#10360` while the `#9080` row
+    #    still sent a reader to the CLOSED `#9775`, so the file contradicted
+    #    itself on E2's blocker and every gate was green.
+    #
+    #    The rule is over rows, not over the `#9775` spellings found today: a row
+    #    that marks E2 BLOCKED must name the live blocker and must not name the
+    #    closed one, whichever words it uses to do it.
+    e2_blocked_rows = [line for line in index.splitlines()
+                       if "E2" in line and "BLOCKED" in line]
+    assert e2_blocked_rows, (
+        "no line of docs/00_index.md marks E2 blocked — this leg is vacuous "
+        "(it would pass on an index that stopped routing E2 at all)")
+    for row in e2_blocked_rows:
+        assert "`#10360`" in row, (
+            "an index row marks E2 blocked without naming the live blocker "
+            f"`#10360`: {row[:400]}")
+        assert "`#9775`" not in row, (
+            "an index row still routes a reader to `#9775` as E2's blocker — "
+            "#9775's render half is CLOSED (PR #10382), so the live blocker is "
+            f"`#10360`: {row[:400]}")
