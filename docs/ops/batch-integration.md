@@ -232,6 +232,11 @@ mode this process exists to prevent.
 Same lane, same commands, same env as the baseline — **both** halves of the deterministic suite:
 
 ```bash
+# Same clean-tree precondition as Phase 1, and for the same reason: `git switch -C` CARRIES
+# non-conflicting local modifications into the tree under test, so uncommitted work created during
+# phases 2-3 would be measured by the run that authorizes BATCH-GREEN.
+[ -z "$(git status --porcelain)" ] || { echo "dirty tree — the gate would measure it, not the batch"; exit 1; }
+
 # Half 1 — the deterministic suite. Detached and POLLED, never one blocking call: a wedged
 # foreground run takes the whole lane down with it and leaves no log.
 uv run pytest tests/ -q --junitxml=/tmp/batch-junit.xml -m 'not track_b and not live and not integration' > /tmp/batch.log 2>&1 &

@@ -122,6 +122,20 @@ def _code(line: str) -> str:
     return line.rstrip().split("#", 1)[0].rstrip()
 
 
+def _halts(code: str) -> bool:
+    """Does this command stop the fence on failure?
+
+    A pin create is only SAFE because of its trailing halt: on a dirty lane
+    ``git switch -C`` refuses (rc=1), and an unhalted fence then runs the merges
+    or the suite with HEAD still on the operator's branch — the P1 the fence's
+    own comment says ``-C`` prevents. `|| true` is the negation of that, so it
+    is refused even though it "contains" a halt-looking token.
+    """
+    if "|| true" in code:
+        return False
+    return re.search(r"\|\|\s*(exit\s+[1-9]|\{[^}]*exit\s+[1-9])", code) is not None
+
+
 def _re_runnable(code: str) -> bool:
     """Is this move command idempotent — safe on a RE-baseline / RE-build?
 
@@ -416,11 +430,33 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     first = _fence_index(lambda fence: any(_FULL_SUITE.search(c) for c in fence))
     assert first >= 0, "no baseline fence found — re-point this guard"
     baseline = fences[first]
-    assert any("git status --porcelain" in c for c in baseline), (
-        "the baseline fence must refuse a dirty tree (`[ -z \"$(git status "
-        "--porcelain)\" ]`) before switching: `git switch -c` carries uncommitted "
-        "and untracked files into the baseline tree, so the run measures the lane"
+    # A MENTION is not a refusal: `[ -z "$(git status --porcelain)" ]` on its own,
+    # `|| true`, and an `echo "[ -z ... ]"` all "contain" the substring, and this
+    # test's whole point is that the fence STOPS on a dirty tree.
+    dirty_ok = [
+        c for c in baseline
+        if "git status --porcelain" in c and "exit 1" in c and "|| true" not in c
+    ]
+    assert dirty_ok, (
+        "the baseline fence must REFUSE a dirty tree in the same command "
+        "(`[ -z \"$(git status --porcelain)\" ] || { …; exit 1; }`): `git switch -C` "
+        "carries uncommitted and untracked files into the baseline tree, so the "
+        "run would measure the lane"
     )
+
+    # ...and the same precondition on EVERY fence that runs the full suite: the
+    # Phase 3 run is the one that authorizes BATCH-GREEN, so a tree dirtied during
+    # phases 2-3 must stop it too.
+    for fence in fences:
+        if not any(_FULL_SUITE.search(c) for c in fence):
+            continue
+        assert any(
+            "git status --porcelain" in c and "exit 1" in c and "|| true" not in c
+            for c in fence
+        ), (
+            "every fence that runs the full suite must refuse a dirty tree first; "
+            f"this one does not: {fence[:3]}"
+        )
 
     # The idempotency half (final-head review P2). A RE-baseline is the normal
     # case — Landing route 1 re-runs phases 1 and 3 — and a one-shot create
@@ -442,6 +478,10 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
         f"$PINNED; these do not: {before}"
     )
     assert moves, "the baseline fence no longer switches to the pinned base — re-point this guard"
+    assert all(_halts(_code(c)) for c in moves), (
+        "a pin create must HALT on failure (`|| exit 1`): unhalted, a refused "
+        f"switch leaves the fence running on the operator's branch: {moves}"
+    )
     assert all(_re_runnable(_code(c)) for c in moves), (
         "a re-baseline must be re-runnable: a one-shot create dies with 'a branch "
         "named ... already exists', and the fence then measures the wrong tree; "
@@ -489,7 +529,10 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     merges = [i for i, c in enumerate(fence) if re.search(r"\bgit\s+merge\b", c)]
     assert merges, "the batch fence no longer merges anything — re-point this guard"
     before_merge = [c for c in fence[: min(merges)] if _MOVES_HEAD.search(_code(c))]
-    assert all('"$PINNED"' in _code(c) and _re_runnable(_code(c)) for c in before_merge), (
+    assert all(
+        '"$PINNED"' in _code(c) and _re_runnable(_code(c)) and _halts(_code(c))
+        for c in before_merge
+    ), (
         "every HEAD-moving command before the batch's first merge must be the pin "
         f"create; these move HEAD off the batch branch: {before_merge}"
     )
