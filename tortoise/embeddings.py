@@ -183,8 +183,20 @@ def pin_embed_threads() -> dict:
     trees and for any child process spawned later.
 
     ⛔ This call pins the LOAD thread, which is not where the forward passes
-    run — see :func:`ensure_embed_threads` for the thread-locality trap and the
-    per-encode re-assert.
+    run — see :func:`ensure_embed_threads` for the measured per-thread
+    behaviour and the per-encode re-assert.
+
+    **What the vendor does and does not promise** (the citation #10010's review
+    asked for, because the re-assert rests on it and an uncited premise is what
+    the next reader trusts): the ``torch.set_num_threads`` page
+    (<https://docs.pytorch.org/docs/2.15/generated/torch.set_num_threads.html>,
+    fetched 2026-10-31) says only *"Sets the number of threads used for intraop
+    parallelism on CPU"* plus the warning that it *"must be called before
+    running eager, JIT or autograd code"* — it promises **no** scope, and in
+    particular does not guarantee the count is one process-wide value. It
+    cannot be assumed either way, so it is MEASURED (see
+    :func:`ensure_embed_threads`), and the re-assert is what makes the pin
+    independent of the answer.
     """
     global _embed_thread_pin
     threads, source = resolve_embed_threads()
@@ -227,14 +239,28 @@ def embed_thread_pin() -> dict | None:
 def ensure_embed_threads() -> None:
     """Re-assert the pin on THIS thread, immediately before a forward pass.
 
-    ⛔ ``torch.set_num_threads`` is **not** fully process-global: a thread that
-    has ever set its own count keeps it, and a new thread reads the value that
-    was global when it was created. Measured on torch 2.x — a worker thread's
-    ``set_num_threads(1)`` is visible to itself while the main thread still
-    reads its own ``2``. The load runs on a WORKER thread
-    (``EmbeddingModel.__init__``), so pinning only there is exactly the kind of
-    "applied, but not where it matters" fix #10296 is about: the forward pass
-    runs on whichever thread calls ``encode``.
+    ⛔ ``torch.set_num_threads`` is **not** one process-wide scalar, and the
+    vendor docs do not claim it is: the ``set_num_threads`` page
+    (<https://docs.pytorch.org/docs/2.15/generated/torch.set_num_threads.html>,
+    fetched 2026-10-31) says only *"Sets the number of threads used for intraop
+    parallelism on CPU"* and that it *"must be called before running eager, JIT
+    or autograd code"* — no scope sentence either way. So this is MEASURED.
+    torch 2.13.0+cu130, main thread set to 2, then a worker:
+
+        worker sets 1  -> worker reads 1, a NEW thread spawned INSIDE the
+                          worker reads 1, and the main thread still reads 2
+
+    (reproduce with the two-thread probe in
+    ``tests/test_embeddings.py::test_the_thread_pin_is_not_one_process_wide_scalar``).
+    Two readings follow, and both are load-bearing here: the count a forward
+    pass uses follows the CALLING thread's own context (so a thread that set
+    its own count keeps it), and a new thread inherits its CREATOR's count
+    rather than the process-global one — which is why there is no "correct"
+    single value to write at load time only.
+
+    The load runs on a WORKER thread (``EmbeddingModel.__init__``), so pinning
+    only there is exactly the kind of "applied, but not where it matters" fix
+    #10296 is about: the forward pass runs on whichever thread calls ``encode``.
 
     So every encode site calls this first. When the count already matches it is
     two C calls and no-op; it never raises (a pin must never fail a write).
