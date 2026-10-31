@@ -595,7 +595,9 @@ _SECTION_13_8 = ("### 13.8 What this does to our design", "## 14. Not establishe
 
 #: A `module.py::symbol` citation — the form §13 and §13.8 both use, and the one
 #: that survives any code move. `_Symbol` allows a dotted `Class.attr`.
-_SECTION_13_8_SYMBOL = re.compile(r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][\w.]*)`")
+#: ONE definition, because two guards read it (§13.8's and §9.1's): two copies
+#: would be two contracts, and the one that drifts is the one that stops being true.
+_SYMBOL_CITATION = re.compile(r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][\w.]*)`")
 
 #: A stale `file.py:NNNN` line citation. §13.8 carries none.
 _LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.py:[0-9]+")
@@ -653,7 +655,7 @@ def test_section_13_8_carries_no_line_citations_and_its_symbols_resolve():
 
     found = [
         (text.count("\n", 0, start + match.start()) + 1, match.group(1), match.group(2))
-        for match in _SECTION_13_8_SYMBOL.finditer(section)
+        for match in _SYMBOL_CITATION.finditer(section)
     ]
     assert len(found) >= 10, (
         f"only {len(found)} `module.py::symbol` citations parsed in §13.8 — the "
@@ -677,6 +679,91 @@ def test_section_13_8_carries_no_line_citations_and_its_symbols_resolve():
 
     assert not unresolved, (
         "§13.8 cites these readers as living in these modules, and they do not "
+        "— the citation has rotted (re-verify the passage, or re-point it to "
+        "the symbol that replaced it):\n  - "
+        + "\n  - ".join(
+            f"doc line {line}: `{cited_file}::{sym}` ({why})"
+            for line, sym, cited_file, why in unresolved
+        )
+    )
+
+
+#: §9.1 of `STORAGE` is the placement ruling this change enforces, and §9.1(b)
+#: names the four routes that can still put the prose back on a node. Its
+#: citations were `file.py:NNNN` — the same form §13.8 retired in `#7948` — and
+#: they rotted INSIDE one integration: `#10389`'s review measured
+#: `_SOURCE_SERVER_MANAGED_PROPS` at `entities.py:6766-6773`, and merging
+#: `origin/main` moved that same declaration to 6757 with `story_arc` at 6797.
+#: No code was wrong and no symbol changed; only the line. A reader who cannot
+#: follow a citation cannot check the closure, so §9.1 is symbol-keyed now for
+#: the same reason §13.8 is, and guarded the same way.
+_SECTION_9_1 = "### 9.1 The narrative lives in"
+
+
+def test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve():
+    """§9.1 pins a SYMBOL per route, never a line — and every symbol resolves.
+
+    Two arms, both measured on the pre-fix text:
+
+    * NO `file.py:NNNN` survives in the section — reverting any one of the four
+      citations this PR converted reds it and names the line (measured);
+    * every `` `module.py::symbol` `` resolves in that module at HEAD, so the
+      symbol-keyed form cannot rot into a name that no longer exists.
+
+    ``_symbol_span`` only sees `def`/`class` nodes, and §9.1 cites module/class
+    CONSTANTS (`_SOURCE_EXTRA_PROPS`, `_SOURCE_SERVER_MANAGED_PROPS`) as well as
+    functions, so an assignment counts as resolving when the name is present as
+    a word — the contract the document-wide guard above already uses. The floor
+    stops the first arm going vacuous if the section's citation shape changes.
+    """
+    text = STORAGE.read_text(encoding="utf-8")
+    heading = text.index(_SECTION_9_1)
+    section = _section_body(STORAGE, "9.1")
+    body_start = text.index(section, heading)
+
+    surplus = [
+        (text.count("\n", 0, body_start + match.start()) + 1, match.group(0))
+        for match in _LINE_CITATION.finditer(section)
+    ]
+    assert not surplus, (
+        "§9.1 carries line citations again, and a line in a design document "
+        "rots: it reds every unrelated code move in a large file while being "
+        "unable to tell a correct line from a wrong one. Symbol-key them "
+        "(`module.py::symbol`) — the form §13 and §13.8 use:\n  - "
+        + "\n  - ".join(f"line {line}: `{cite}`" for line, cite in surplus)
+    )
+
+    found = [
+        (text.count("\n", 0, body_start + match.start()) + 1, match.group(1), match.group(2))
+        for match in _SYMBOL_CITATION.finditer(section)
+    ]
+    assert len(found) >= 10, (
+        f"only {len(found)} `module.py::symbol` citations parsed in §9.1 — the "
+        "section's citation shape changed (or the extractor broke) and this "
+        "guard would otherwise pass vacuously. TEN is the measured count: the "
+        "six test/pin citations §9.1 already carried, plus the four the "
+        "`entities.py` line ranges became."
+    )
+
+    unresolved = []
+    for doc_line, cited_file, symbol in found:
+        path = ROOT / cited_file
+        if not path.exists():
+            path = ROOT / "tortoise" / cited_file
+        if not path.exists():
+            unresolved.append((doc_line, symbol, cited_file, "file not found"))
+            continue
+        base = re.sub(r"\(\)$", "", symbol).rsplit(".", 1)[-1]
+        source = path.read_text(encoding="utf-8")
+        if _symbol_span(path, base) is None and not re.search(
+            rf"\b{re.escape(base)}\b", source
+        ):
+            unresolved.append(
+                (doc_line, symbol, cited_file, "symbol does not resolve at HEAD")
+            )
+
+    assert not unresolved, (
+        "§9.1 cites these symbols as living in these modules, and they do not "
         "— the citation has rotted (re-verify the passage, or re-point it to "
         "the symbol that replaced it):\n  - "
         + "\n  - ".join(

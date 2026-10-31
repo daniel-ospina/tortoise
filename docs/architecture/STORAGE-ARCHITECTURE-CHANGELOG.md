@@ -1883,3 +1883,17 @@ design document states the design, the changelog keeps the record of how it got 
 states the four routes and their mechanisms in the present tense, with the measurement as evidence
 that the deny holds rather than as a before/after of the change; the delivery state and the
 before/after figure live here.
+
+**§9.1(b)'s citations are symbol-keyed, and both directions are guarded.** The section cited each
+route as a `file.py:NNNN` line. `#10389`'s review found those lines already ~40 stale within this PR
+(`_SOURCE_SERVER_MANAGED_PROPS` cited at `entities.py:6766-6773`), and merging `origin/main`'s
+`#10067` tenant work moved the same declaration to a set beginning at 6757 with `story_arc` at 6797
+— no code wrong, no symbol changed, just the line. That is the rot `#7948` retired from §13.8: a
+line in a design document reds every unrelated code move in a large file while being unable to tell
+a correct line from a wrong one. §9.1(b) now names a symbol per route
+(`projection/entities.py::_SOURCE_EXTRA_PROPS`, `projection/entities.py::_SOURCE_SERVER_MANAGED_PROPS`,
+`projection/entities.py::_upsert_document`, plus the door-2 test by name), and
+`tests/test_extractor_v4_citation_rot.py::test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve`
+pins both directions, each measured on the pre-fix text: a `file.py:NNNN` in the section reds (all
+four converted citations named), and a symbol that no longer resolves reds (measured by renaming
+`_upsert_document`).
