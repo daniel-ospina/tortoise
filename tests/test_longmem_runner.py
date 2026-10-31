@@ -6433,8 +6433,24 @@ def test_e2e10_budget_capped_context_v3_part(tmp_path):
     context stays <= cap, ordering follows RANK (points and chunks
     interleaved — the R1 points-first partition is deliberately reversed),
     and context_tokens is honest."""
+    # The filler shares the query's content word ("destination") ON PURPOSE.
+    # This test's subject is the per-session CHUNK CAP, so the near-duplicate
+    # chunks have to actually be RETRIEVED — otherwise the cap is handed a
+    # one-chunk set, never fires, and `chunks_capped == 0` reads as a dedup
+    # regression when the dedup pass simply had nothing to cap (#10277).
+    # Lexical reachability is what makes the assertion arm-independent: before
+    # #10240 the shipped graph scorer's TF-IDF *fallback* leg returned all 15
+    # documents regardless of relevance (it runs only when every primary leg is
+    # empty), so a filler with zero token overlap still reached the pool. #10240
+    # turned the BM25 arm ON by default, the lexical leg now SUCCEEDS on the
+    # real question, the fallback stops running, and the irrelevant duplicates
+    # correctly drop out — measured `chunks_retrieved: 1` vs `5`. Overlapping
+    # the filler with the query keeps the fixture's premise true under EITHER
+    # arm state (measured 5/2 with the arm ON and with TORTOISE_BM25_LEXICAL=0),
+    # so a future default flip cannot silently zero this counter.
     filler = [{"role": "user", "content": f"planning detail number {i} "
-               "about the upcoming trip itinerary", "has_answer": False}
+               "about the destination for the upcoming trip itinerary",
+               "has_answer": False}
               for i in range(9)] + [
         {"role": "user", "content": "the destination is Kyoto",
          "has_answer": True}]
