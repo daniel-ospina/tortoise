@@ -213,6 +213,9 @@ def test_the_newest_attempt_decides_and_the_older_red_is_cited_as_cleared(tmp_pa
     assert row["pr_head_catches"] == []
     assert [c["run_id"] for c in row["flake_cleared"]] == [str(RUN_PR)]
     assert row["flake_cleared"][0]["files"] == ["test_billing.py"]
+    # A red a SUCCESS re-measured is cleared — not "superseded", which is the bucket for a
+    # red nothing cleared. The two must not collapse into one number.
+    assert report["coverage"]["older_reds_superseded"] == 0
 
     # The SAME fixture without the newer attempt IS a catch — that is what makes the
     # assertion above bite: the only difference is the newer attempt's existence.
@@ -269,6 +272,41 @@ def test_a_newer_attempt_that_is_cancelled_does_not_clear_the_red(tmp_path):
         },
     )
     assert _row(_report(root), "test_billing.py")["status"] == catch.CATCH_PR
+
+
+def test_an_older_red_that_nothing_cleared_is_never_labeled_flake_cleared(tmp_path):
+    """`flake_cleared` asserts a clean re-measurement. A cancelled (or second red) re-run is
+    not one, and the attempt's artifact is the SAME artifact the run's red already cites.
+
+    ⛔ Before this was separated, the older red of the same run+job was emitted BOTH as a
+    `pr_head_catches` citation and as a `flake_cleared` citation of the identical run — a
+    reader counting `flake_cleared` would read "a later attempt re-ran this file green" for a
+    file whose only later attempt was cancelled. Nothing was cleared, so nothing may say it
+    was; the red is `superseded` (counted in coverage) instead.
+    """
+    family, leg = _leg_of("test_billing.py")
+    job = f"{family} ({leg})"
+    artifact = _zip(_junit([("tests/test_billing.py", "t", True)]))
+    for label, newer in (("cancelled", "cancelled"), ("second-red", "failure")):
+        root = _world(
+            tmp_path / label,
+            runs=[_run(RUN_PR, SHA, "pull_request", pr=7)],
+            jobs={
+                RUN_PR: [
+                    _check(100, RUN_PR, job, "failure"),
+                    _check(300, RUN_PR, job, newer),
+                ]
+            },
+            artifacts={(RUN_PR, catch.artifact_name(family, leg)): artifact},
+        )
+        report = _report(root)
+        row = _row(report, "test_billing.py")
+        assert row["status"] == catch.CATCH_PR
+        assert row["flake_cleared"] == [], f"{label}: nothing cleared this red"
+        # Cited ONCE, not once per attempt: both attempts' evidence is the run's one artifact.
+        assert [c["run_id"] for c in row["pr_head_catches"]] == [str(RUN_PR)]
+        # Accounted for, not dropped — the red is visible in the counts.
+        assert report["coverage"]["older_reds_superseded"] == 1
 
 
 # --- 2. the group key is (app, workflow, job) ------------------------------

@@ -363,12 +363,20 @@ class JobAttempts:
     under the newest-attempt rule — but they are exactly the records that could hide a real
     catch, so they are cited as ``flake-cleared`` and, when their artifact is gone, they
     make the leg ``UNKNOWN`` instead of ``NEVER``.
+
+    ``superseded`` holds the OTHER kind of older red: one that no newer SUCCESS re-measured
+    (a cancelled re-run cannot clear a red, and neither can a second red). ⛔ Those are NOT
+    ``cleared`` — calling them that asserts a clean re-measurement that never happened —
+    and they are not a second citation either, because the attempt's artifact IS the run's
+    artifact, which the run's own RED entry already read. They are carried so the number of
+    reds this report accounted for is legible (``coverage.older_reds_superseded``).
     """
 
     job: str
     leg: str
     latest: Attempt | None
     cleared: tuple[Attempt, ...] = ()
+    superseded: tuple[Attempt, ...] = ()
 
 
 def _family_attempts(
@@ -414,11 +422,13 @@ def reduce_attempts(
     about which attempt measured the commit.
 
     ⛔ **Every red is accounted for.** The older attempts of a group are re-derived here
-    (same run, same job, smaller ``id``) and attributed as cleared-by-re-run; an attempt
-    that matches no group (a red in a run the grouping collapsed into another run's group)
-    is emitted as its own leftover entry rather than dropped. A red that disappears between
-    the raw surface and this table would read as "never caught anything", which is the
-    fabrication this whole report exists to avoid.
+    (same run, same job, smaller ``id``) and split two ways by what actually superseded them:
+    a NEWER SUCCESS re-measured them (``cleared``), or a newer attempt did not (a
+    cancellation, or another red — ``superseded``). An attempt that matches no group (a red
+    in a run the grouping collapsed into another run's group) is emitted as its own leftover
+    entry rather than dropped. A red that disappears between the raw surface and this table
+    would read as "never caught anything", which is the fabrication this whole report exists
+    to avoid.
     """
     records = [normalise_job(job) for job in check_runs]
     latest_groups = [
@@ -465,8 +475,8 @@ def reduce_attempts(
 
     # Leftovers: a red the canonical grouping placed in ANOTHER group (two runs of one
     # workflow on one commit, so one's newest attempt superseded the other). It is still a
-    # red that happened, and it was still cleared by a newer measurement — cite it, don't
-    # drop it.
+    # red that happened — and nothing CLEARED it, so it is carried as superseded, never as
+    # flake-cleared.
     grouped: dict[tuple[str, str], list[Attempt]] = {}
     for attempt, name in reds:
         if attempt.check_id in accounted:
@@ -481,13 +491,13 @@ def reduce_attempts(
                 job=name,
                 leg=family[1],
                 latest=None,
-                cleared=tuple(sorted(older, key=lambda a: a.check_id, reverse=True)),
+                superseded=tuple(sorted(older, key=lambda a: a.check_id, reverse=True)),
             )
         )
 
     def _order(entry: JobAttempts) -> tuple[str, str]:
-        run_id = entry.latest.run_id if entry.latest else entry.cleared[0].run_id
-        return run_id, entry.job
+        newest = entry.latest or (entry.cleared or entry.superseded)[0]
+        return newest.run_id, entry.job
 
     return tuple(sorted(out, key=_order))
 
@@ -1030,6 +1040,7 @@ def build_history(
     red_jobs = 0
     attributed_jobs = 0
     unattributable_jobs = 0
+    superseded_reds = 0
     api_notes: list[str] = []
     detailed = 0
 
@@ -1087,6 +1098,9 @@ def build_history(
         # red, never supersede one.
         workflow_map = {ref.run_id: (ref.workflow_id, ref.workflow_name)}
         groups = reduce_attempts(jobs, workflow_map)
+        #: Jobs whose red this run has already read (cited, or marked UNKNOWN). A leftover
+        #: red of the same job is the SAME artifact — cited once, not twice.
+        red_accounted: set[str] = set()
 
         for group in groups:
             base, leg = job_family(group.job) or (JOB_SLOW, group.leg)
@@ -1110,6 +1124,7 @@ def build_history(
 
             if latest is not None and latest.state == ci_verdict.GROUP_RED:
                 red_jobs += 1
+                red_accounted.add(group.job)
                 name = artifact_name(base, leg)
                 facts = _junit_facts(
                     client, _artifact(client, ref.run_id, name, api_notes), index, name, api_notes
@@ -1188,9 +1203,44 @@ def build_history(
                         )
                         target.append(citation)
 
+            if latest is None:
+                # A red no newer attempt re-measured, carried so it cannot vanish. Its
+                # artifact is the RUN's artifact, which this run's RED entry above already
+                # read and cited — so this is bookkeeping, NOT a second citation, and never
+                # "flake-cleared" (nothing cleared it). If this run produced no RED entry for
+                # the job, nothing was cited for it: fail closed to UNKNOWN rather than let a
+                # red go unaccounted.
+                if group.job in red_accounted:
+                    superseded_reds += len(group.superseded)
+                else:
+                    for attempt in group.superseded:
+                        _mark_unknown(
+                            histories,
+                            leg_files,
+                            base,
+                            leg,
+                            Unknown(
+                                kind=ref.kind,
+                                run_id=attempt.run_id,
+                                job=group.job,
+                                leg=leg,
+                                sha=ref.sha,
+                                pr_number=ref.pr_number,
+                                created_at=ref.created_at,
+                                url=ref.html_url,
+                                reason=(
+                                    f"run {attempt.run_id} carries a red (job id "
+                                    f"{attempt.check_id}) that no newest-attempt entry of "
+                                    f"this job accounts for — its artifact cannot be reached "
+                                    f"from here, so the file it named cannot be ruled out"
+                                ),
+                            ),
+                        )
+                continue
+
             for cleared in group.cleared:
-                # A red a NEWER attempt cleared. Not a catch under the newest-attempt rule —
-                # but not nothing either, so it is labelled and cited.
+                # A red a NEWER SUCCESS re-measured. Not a catch under the newest-attempt
+                # rule — but not nothing either, so it is labelled and cited.
                 name = artifact_name(base, leg)
                 facts = _junit_facts(
                     client, _artifact(client, cleared.run_id, name, api_notes), index, name, api_notes
@@ -1273,6 +1323,7 @@ def build_history(
             "red_jobs_seen": red_jobs,
             "red_jobs_attributed": attributed_jobs,
             "red_jobs_unattributable": unattributable_jobs,
+            "older_reds_superseded": superseded_reds,
             **{f"status_{key}": value for key, value in counts.items()},
             **{f"lane_{key}": value for key, value in lane_counts.items()},
         },
