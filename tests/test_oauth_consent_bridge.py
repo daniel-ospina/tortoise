@@ -48,6 +48,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import tempfile
 import time
 import unicodedata
@@ -2966,6 +2967,13 @@ _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
     # in a new direction: a corpus is only as good as the homes it enumerates.
     "supabase/migrations/20261030000001_oauth_consent_tickets.sql",  # the RLS block's premise
     "supabase/tests/20261030000001_oauth_consent_tickets.sql",       # its pgTAP suite's header
+    # ⛔ The deploy manifest. Twelfth home, found by the completeness scan below (`git ls-files`,
+    # not this tuple) after the two above were added: it is the JUSTIFICATION for
+    # `CONSENT_TOKEN_SECRET` being dedicated, so a reader deciding whether that key may be reused
+    # from the anon key reads it as our own permission slip — the same role that made the two
+    # Supabase homes matter. Kept in the tuple as well as being covered by the derived scan, so
+    # the corpus scan (which reads the whole file, no marker) reds on it too.
+    ".github/scripts/fly-managed-secrets.txt",        # CONSENT_TOKEN_SECRET's DEDICATED note
 )
 
 
@@ -2985,7 +2993,7 @@ def _false_anon_key_claims(text: str) -> list[str]:
 
 
 def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
-    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the eleven homes.
+    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the twelve homes.
 
     Why this is a test and not a review note: round 11 measured the false premise in FIVE homes
     after a previous round had already corrected the same family, and it is the *justification*
@@ -3002,7 +3010,7 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     corpus = {rel: (REPO / rel).read_text(encoding="utf-8").split(_PREMISE_GATE_MARKER)[0]
               for rel in _ANON_KEY_PREMISE_CORPUS}
     assert sum(len(t) for t in corpus.values()) > 100_000, (
-        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these eleven "
+        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these twelve "
         "files, so a clean result below would prove nothing")
 
     for rel, text in corpus.items():
@@ -3046,3 +3054,150 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     assert "refuse a collision" in bindings, (
         "config/required-bindings.yml — the canonical wording this PR points every other home "
         "at — no longer states that the API reads the key to REFUSE a collision")
+
+
+#: Every tracked file that is either binary or absent from the tree is counted, not dropped, so a
+#: scan that read nothing cannot present as a scan that found nothing.
+
+
+def _tracked_text_files() -> tuple[dict[str, str], int]:
+    """Every TRACKED file's text, keyed by repo-relative path — the population, DERIVED.
+
+    `git ls-files`, deliberately not the corpus above and deliberately not `os.walk`.
+
+    ⛔ WHY THIS EXISTS. The corpus is an ENUMERATION, and the enumeration is precisely what keeps
+    failing: round 11 measured the false premise in five homes after one sweep had already
+    corrected the family; the review of this PR then found the identical sentence still in the
+    migration and its pgTAP suite (nine homes corrected, two never read); and a third pass (this
+    one) found it again in `.github/scripts/fly-managed-secrets.txt`. Each time the gate reported
+    CLEAN — correctly, about the files it had been handed. **A gate whose population is a hand
+    list is only as good as the list**, so the population here is the tracked set, which cannot
+    go stale: a file added later is in scope on the first run that sees it.
+
+    `os.walk` would be WRONG for the same reason `tests/test_ci_selection.py::_tracked_files`
+    rejects it: this repo carries sibling checkouts under `.worktrees/` (~720k files walked vs
+    ~2.4k tracked), so a walk times out on noise git never ships and still cannot tell a shipped
+    file from a local one.
+
+    Returns `(texts, skipped)`. `skipped` counts tracked files that could not be read as text
+    (a NUL byte, or absent from the tree); bytes are decoded with `errors="replace"` rather than
+    dropped, so a stray non-UTF-8 byte cannot hide an ASCII needle behind it.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=REPO, check=False, capture_output=True
+        )
+    except FileNotFoundError as exc:  # no git binary at all
+        raise AssertionError(
+            f"git is not on PATH, so the tracked set is unknown — a scan here would report "
+            f"every home clean by reading none: {exc}"
+        ) from exc
+    assert proc.returncode == 0, (
+        "git ls-files failed, so the tracked set is unknown — this scan cannot decide anything "
+        "and must not report a clean tree by reading nothing: "
+        + proc.stderr.decode("utf-8", "replace").strip()
+    )
+    texts: dict[str, str] = {}
+    skipped = 0
+    for rel in proc.stdout.decode("utf-8").split("\0"):
+        if not rel:
+            continue
+        try:
+            raw = (REPO / rel).read_bytes()
+        except OSError:  # tracked-but-absent (a sparse export, a wedged checkout)
+            skipped += 1
+            continue
+        if b"\0" in raw:  # binary: no prose needle can live in a file we cannot read
+            skipped += 1
+            continue
+        texts[rel] = raw.decode("utf-8", "replace")
+    return texts, skipped
+
+
+def _claims_beyond_the_corpus(population: dict[str, str]) -> dict[str, list[str]]:
+    """Which non-corpus homes carry a denylisted claim (empty == the corpus is complete).
+
+    Any file may declare the same `_PREMISE_GATE_MARKER` opt-out the corpus files use, so a doc
+    that must QUOTE the false premise (a changelog describing the correction) can still do so
+    below that line. Nothing is exempt by path.
+    """
+    found: dict[str, list[str]] = {}
+    for rel, text in population.items():
+        if rel in _ANON_KEY_PREMISE_CORPUS:
+            continue  # scanned by the corpus test above, which owns its own reporting
+        why = _false_anon_key_claims(text.split(_PREMISE_GATE_MARKER)[0])
+        if why:
+            found[rel] = why
+    return found
+
+
+def test_no_TRACKED_file_outside_the_corpus_carries_the_false_premise():
+    """⛔ The corpus must ENUMERATE every home, and this is the test that says so.
+
+    The test above can only speak about its tuple. Three passes have now each found the same
+    sentence in a home that tuple did not name — most recently
+    `.github/scripts/fly-managed-secrets.txt`, whose `CONSENT_TOKEN_SECRET` note justified a real
+    guard with "the consent page embeds it in its HTML" (the page #3524 §9 step 4 deleted). So the
+    population is derived from `git ls-files` and the corpus is checked AGAINST it: a home the
+    next doc edit adds is in scope without anyone remembering to register it.
+
+    Non-vacuity, three ways: the population is asserted substantial; the scan is proved to SEE a
+    needle in a file that is outside the corpus (so a clean result is not the scan reading no
+    text); and every corpus entry is asserted TRACKED, so a rename cannot leave the corpus
+    pointing at a path that no longer exists while the corpus test reports clean on the rest.
+    """
+    texts, skipped = _tracked_text_files()
+
+    # (1) the population is real, and the skips are not the whole of it
+    assert len(texts) > 3_000, (
+        f"the tracked set resolved to {len(texts)} text files — that is not this repo, so a "
+        "clean result below would prove nothing about the homes that exist"
+    )
+    assert skipped < len(texts) // 10, (
+        f"{skipped} of {len(texts) + skipped} tracked files could not be read as text — too "
+        "many for the remainder to stand for the tree"
+    )
+
+    # (2) every corpus entry is a TRACKED path: a rename otherwise leaves the corpus test
+    # scanning a file it cannot find while its other homes pass
+    untracked = [rel for rel in _ANON_KEY_PREMISE_CORPUS if rel not in texts]
+    assert not untracked, (
+        "these `_ANON_KEY_PREMISE_CORPUS` entries are not tracked text files, so the scan above "
+        f"cannot have read them: {untracked}"
+    )
+
+    # (3) the claim itself: no TRACKED home outside the corpus may carry it
+    off_corpus = _claims_beyond_the_corpus(texts)
+    assert not off_corpus, (
+        "these tracked files carry the false anon-key premise and are NOT in "
+        "`_ANON_KEY_PREMISE_CORPUS`, so the corpus scan above reported CLEAN without reading "
+        "them — correct the sentence (see `config/required-bindings.yml`'s SUPABASE_ANON_KEY "
+        "note for the wording) and add the file to the corpus:\n  "
+        + "\n  ".join(f"{rel}: {why}" for rel, why in off_corpus.items())
+    )
+
+    # (4) …and the scan BITES outside the corpus, proved on a file it just read
+    victim = next(rel for rel in texts if rel not in _ANON_KEY_PREMISE_CORPUS)
+    injected = dict(texts)
+    injected[victim] += (
+        "\n# the anon key is public: the consent page embeds it, so reuse cannot matter.\n"
+    )
+    assert _claims_beyond_the_corpus(injected) == {
+        victim: [
+            "#3524 §9 step 4 DELETED that page and its inline client; nothing embeds the anon key"
+        ]
+    }, (
+        f"injecting a denylisted claim into {victim!r} (a tracked, non-corpus file) was NOT "
+        "reported — the comparison form is broken, and every home above was cleared by a "
+        "detector that cannot fire"
+    )
+
+    # (5) the marker opt-out is ORDERED, so it cannot be a hole: text ABOVE the marker is
+    # scanned, text BELOW it is exempt. That is what lets a doc QUOTE the premise as a
+    # refutation, and it means an offender cannot escape by appending the marker.
+    assert _claims_beyond_the_corpus(
+        {victim: "# the consent page embeds it\n" + _PREMISE_GATE_MARKER + "\n"}
+    ), "a claim ABOVE the marker must still be caught — the opt-out would be a hole, not a quote"
+    assert _claims_beyond_the_corpus(
+        {victim: _PREMISE_GATE_MARKER + "\n# the consent page embeds it\n"}
+    ) == {}, "text BELOW the marker is the documented opt-out and must be exempt"
