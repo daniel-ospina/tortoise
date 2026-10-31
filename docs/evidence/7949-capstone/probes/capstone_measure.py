@@ -57,7 +57,7 @@ longer reports them as unobservable-by-construction.** Pre-seam, ``capture_sessi
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:9052-9058`` and
-``result["vet"]`` at ``:8975-8979``) while the meta fold dropped them with
+``result["vet"]`` at ``:9062-9066``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
 ``_capture_stats_with_step_witness`` (``tortoise/sdk.py:14725``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so

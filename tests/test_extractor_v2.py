@@ -7797,14 +7797,19 @@ class TestCompactReferenceClosure:
         closes the asymmetry (synthesize kindDefs-less declared kinds in the
         catalog loop, as the tenant loop does), this row is the place to update.
         """
-        from pathlib import Path as _Path
+        from tortoise.pack_registry import default_packs_dir
 
         import yaml as _yaml
 
         m = v2.build_master_list()
         pack_kinds = m["pack_kinds"]
         residual = set()
-        for path in sorted(_Path("packs").glob("*/manifest.yaml")):
+        # `default_packs_dir()`, not a cwd-relative `Path("packs")`: the manifests
+        # this test reads must be the ones `build_master_list()` actually compiled,
+        # and that resolution honours `TORTOISE_PACKS_DIR` first and falls back to
+        # the repo root. A cwd-relative glob agrees with it only when pytest is run
+        # from the repo root.
+        for path in sorted(default_packs_dir().glob("*/manifest.yaml")):
             raw = _yaml.safe_load(path.read_text()) or {}
             for rel in ((raw.get("ontology") or {}).get("relations") or []):
                 if not isinstance(rel, dict):
