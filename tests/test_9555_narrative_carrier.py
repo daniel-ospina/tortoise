@@ -185,8 +185,8 @@ def test_the_commit_path_READS_the_record_outcome_it_cannot_assume():
     `sdk.py::TortoiseSDK._emit_event` is best-effort by contract: no journal
     configured returns BEFORE the record leg (its `if log is None:` arm), and a
     raising append returns `False` and skips it (its per-call `return False`).
-    Either lane leaves the prose in NO
-    store while the commit answers 200 — the state this pin refuses.
+    Either lane leaves the prose in NO store while the commit answers 200 — the
+    state this pin refuses.
 
     (1) FAILS on the pre-fix phase, on both counts: no `record_sink=` at the
         carrier emit (so the outcome is unobservable) and no call to the

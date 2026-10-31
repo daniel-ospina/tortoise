@@ -17092,9 +17092,9 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
     `_record_write_without_journal` and returns before the record) or when the
     journal append RAISED (its per-call `return False`; the caller's
     `record_sink` then stays empty). Measured consequence before this report
-    existed: the commit answered 200 with the narrative in
-    no store at all, which is the state the sibling pin calls out — "with the
-    node write gone (#10000) the narrative would then be stored NOWHERE".
+    existed: the commit answered 200 with the narrative in no store at all,
+    which is the state the sibling pin calls out — "with the node write gone
+    (#10000) the narrative would then be stored NOWHERE".
 
     Three destinations, and the returned term is the decision (so a caller or a
     test reads a term rather than string-matching a log line):
@@ -17503,11 +17503,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # (its `if log is None:` arm) and when the append raised (its per-call
     # `return False`), and this door used to ignore the return. Before #10000
     # those two lanes degraded to "the prose still sits on the node"; after it
-    # they stored the narrative
-    # NOWHERE while the commit answered 200. So the record's per-call outcome is
-    # read here (`record_sink`, the mechanism `_write_capture_turns` already
-    # gates its own store decision on) and `_report_narrative_home` turns it
-    # into an ERROR log plus a `narrative_not_recorded` advisory on the receipt.
+    # they stored the narrative NOWHERE while the commit answered 200. So the
+    # record's per-call outcome is read here (`record_sink`, the mechanism
+    # `_write_capture_turns` already gates its own store decision on) and
+    # `_report_narrative_home` turns it into an ERROR log plus a
+    # `narrative_not_recorded` advisory on the receipt.
     # ⚠️ WHAT IS STILL TRUE, AND WHAT IS NOT (#10000). The `:Source` write ABOVE
     # is fail-closed before this carrier, so a record can never outlive THAT
     # write. It no longer states a NODE write at all — the key it carries is read
