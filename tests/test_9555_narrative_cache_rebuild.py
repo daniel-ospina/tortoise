@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import uuid
 
 import pytest
@@ -311,10 +312,18 @@ def test_the_event_fold_and_its_replay_cannot_put_the_narrative_on_an_event():
         "rebuild restores it (#10389 ISSUE 1 door 1)")
 
     graph = f"test_9555_narr_event_{uuid.uuid4().hex[:8]}"
-    sdk = TortoiseSDK(graph_name=graph)
+    # ⛔ THE DOOR NEEDS A HOME TO ACCEPT THE KEY (#10000, #10389 review cycle 2 P1).
+    # `_refuse_unpaired_narrative` refuses a narrative with no session and an SDK
+    # with no journal, because either shape stores the prose NOWHERE — so this
+    # fixture must arm the pair to reach the FOLD this test is about. The pin is
+    # unchanged: the key must not reach the node, and `project` must still land.
+    _tmp = tempfile.mkdtemp(prefix="narr9555-")
+    sdk = TortoiseSDK(graph_name=graph,
+                      event_log_path=os.path.join(_tmp, "journal.jsonl"))
     try:
         ev = sdk.create_event("narrative-event-door", "AgentSession",
-                              story_arc=NARRATIVE, project="kept-228")
+                              story_arc=NARRATIVE, project="kept-228",
+                              sessionId="test-9555-event-fold-session")
         rows = sdk._get_proj().g.query(
             "MATCH (e:Event {eventId:$e}) RETURN e.story_arc, e.project",
             params={"e": ev["id"]}).result_set

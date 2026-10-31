@@ -5408,12 +5408,15 @@ _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
 
 
-#: §9.1's narrative key, and the two spellings of the SESSION it must name.
-#: Module-level names rather than inline literals because TWO doors refuse with
-#: this vocabulary and one projection (`record_projection._NARRATIVE_KEY`) files
-#: by it — a second hand-written copy is how the pair drifts apart.
+from tortoise.record_projection import (  # noqa: E402
+    _SESSION_COORDINATE_KEYS as _NARRATIVE_SESSION_COORDINATE_KEYS)
+
+#: §9.1's narrative key, and the SESSION it must name — read from the record's
+#: own projection (`_SESSION_COORDINATE_KEYS`) rather than re-typed (#10389 review
+#: cycle 2 P3): a spelling this door accepts and the projection no longer
+#: recognises would file nothing, silently, which is the defect being closed.
 _NARRATIVE_PROP = "story_arc"
-_NARRATIVE_SESSION_KEYS: tuple[str, ...] = ("sessionId", "session_id")
+_NARRATIVE_SESSION_KEYS: tuple[str, ...] = _NARRATIVE_SESSION_COORDINATE_KEYS
 
 
 def _refuse_unpaired_narrative(props: dict, *, door: str,
@@ -5489,8 +5492,27 @@ def _refuse_unpaired_narrative(props: dict, *, door: str,
     rather than half-closed here; this helper's message no longer claims
     otherwise.
     """
-    if not isinstance(props, dict) or not props.get(_NARRATIVE_PROP):
+    if not isinstance(props, dict):
         return
+    value = props.get(_NARRATIVE_PROP)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return
+    if not isinstance(value, str):
+        # ⛔ A NON-STRING narrative is the same silent loss in a different
+        # costume (#10389 review cycle 2 P2, measured): the fold drops the key
+        # and `record_projection._narrative_statements` projects only a
+        # non-empty `str`, so `story_arc={"a": …}` / `[<prose>]` / `42` all
+        # answered 2xx with the narrative in NO store. Refused here rather than
+        # coerced: `_jsonb_or_scalar` would put a dict in a TEXT column, which is
+        # a false claim about §9.1's prose, not a narrative.
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} must be the narrative TEXT (§9.1/D1, #10000): "
+            f"got {type(value).__name__}. The record projects only a non-empty "
+            f"string into `public.session_narrative.narrative` and the graph "
+            f"refuses the key, so this value would be stored in no store at "
+            f"all. Pass the prose as a string, together with "
+            f"{' or '.join(_NARRATIVE_SESSION_KEYS)!r}."
+        )
     if label is None:
         raise ValueError(
             f"{_NARRATIVE_PROP!r} cannot be written through {door}: §9.1/D1 puts "
@@ -37773,7 +37795,7 @@ class TortoiseSDK:
         # applied and nothing is journalled.
         _refuse_unpaired_narrative(props, door=f"create_{label.lower()}",
                                    label=label,
-                                   journal_armed=self._event_log_path is not None)
+                                   journal_armed=bool(self._event_log_path))
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
         # ``create_entity("Point", …)`` raises `unknown type`
@@ -38566,11 +38588,13 @@ class TortoiseSDK:
         # create doors because it is the SAME helper.
         self._refuse_unapproved_kinds_in_props(props)
         # #10000 / §9.1: the UPDATE door has the same hole as the create doors —
-        # measured at #10389's head, `update_entity(<event>, story_arc=<prose>)`
-        # is dropped by `_EVENT_SERVER_MANAGED_PROPS` (the prose is refused, and
-        # rightly) while the record gets nothing, because the write names no
-        # session. Same rule, same refusal, same helper.
-        _refuse_unpaired_narrative(props, door="update_entity", label=None)
+        # measured at #10389's head, `update_entity(<object>, story_arc=<prose>,
+        # sessionId=…)` writes caller props straight onto the node (`SET n +=
+        # $props`), so the prose lands in the GRAPH as well as the record, and on
+        # a `:Point`/`:Object`/`:Subject` nothing refuses it. ⛔ It runs AFTER the
+        # `:Event`/`:Source` server-managed blocks BELOW (they own their own
+        # refusal, and their message is what two pins assert) — see the call
+        # there, not here.
         # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
         # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
         # ``_update_entity``) and it writes caller props with a live
@@ -38707,6 +38731,19 @@ class TortoiseSDK:
                         f"(D30/#3919, #3998). Declared :Source properties: "
                         f"{sorted(_SOURCE_NODE_PROP_NAMES)}."
                     )
+        # #10000 / §9.1: the UPDATE door, AFTER the label-owned refusals above
+        # (#10389 review cycle 1 P1). A narrative cannot be FILED by an update —
+        # the write is `SET n += $props` on whatever label `id_val` resolves to,
+        # so on `:Point`/`:Object`/`:Subject` it puts §9.1's prose on the node
+        # (measured: `update_entity(<object>, story_arc=…, sessionId=…)` left the
+        # prose on the `:Object` AND filed the record row — two drifting homes),
+        # and on `:Event`/`:Source` it is refused by their own server-managed
+        # blocks above. Ordered HERE so those two keep their own message: placed
+        # before them this guard shadowed `_SERVER_MANAGED_PROPS_BY_LABEL` and
+        # turned the table's `story_arc` entry into dead code (measured, review
+        # cycle 2). The call is unconditional on label because the label is only
+        # resolved inside this method; it runs only when the key is present.
+        _refuse_unpaired_narrative(props, door="update_entity", label=None)
         # #5482: `search_keys` must reach the graph FLAT, exactly as it does on
         # `create_point` and `update_point` — both flatten immediately after
         # `_sanitize_props`, and this surface did not. It wrote caller props

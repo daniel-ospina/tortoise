@@ -82,18 +82,20 @@ def test_an_unpaired_narrative_is_refused_rather_than_stored_nowhere(sdk):
 def test_the_update_door_refuses_it_too(sdk):
     """`update_entity` is the second write door onto the same key (measured at #10389).
 
-    ⚠️ ASSERT THE MESSAGE, not just the exception: an `:Event` update raises a
-    `ValueError` from `_EVENT_SERVER_MANAGED_PROPS` one frame later even WITHOUT
-    this guard (measured pre-fix), so `pytest.raises(ValueError)` alone would pin
-    nothing about this change.
+    ⚠️ ASSERT THE MESSAGE, not just the exception, and target a label whose
+    refusal does NOT already come from a server-managed set: an `:Event` update
+    is refused by `_EVENT_SERVER_MANAGED_PROPS` before this guard runs (measured
+    pre-fix), so `pytest.raises(ValueError)` on an `:Event` would pin nothing
+    about this change. `:Object` is the label that used to ACCEPT the write.
     """
-    event = sdk.create_event("probe-update-door", "AgentSession")
-    event_id = event.get("eventId") or event.get("id")
+    obj = sdk.create_object("probe-update-door")
+    object_id = obj.get("id") or obj.get("objectId")
     with pytest.raises(ValueError) as exc:
-        sdk.update_entity(event_id, story_arc=PROSE, sessionId=SESSION)
+        sdk.update_entity(object_id, story_arc=PROSE, sessionId=SESSION)
     assert "cannot be written through update_entity" in str(exc.value), (
         "the UPDATE door's own refusal must fire — a paired narrative is still "
         "unfileable through an update, which writes caller props onto the node")
+    assert _prose_on_nodes(sdk) == []
 
 
 def test_a_label_whose_fold_does_not_refuse_the_key_is_refused(sdk):
@@ -105,6 +107,30 @@ def test_a_label_whose_fold_does_not_refuse_the_key_is_refused(sdk):
     assert "cannot be written on a Object" in message
     assert "Object fold does not refuse the key" in message
     assert _prose_on_nodes(sdk) == []
+
+
+@pytest.mark.parametrize("bad", [{"a": 1}, ["x"], 42, True])
+def test_a_non_string_narrative_is_refused(sdk, bad):
+    """A non-string lands in NO store: the fold drops the key and the record
+    projects only a non-empty `str` (measured, review cycle 2 P2)."""
+    with pytest.raises(ValueError) as exc:
+        sdk.create_event("probe-nonstring", "AgentSession",
+                         story_arc=bad, sessionId=SESSION)
+    assert "must be the narrative TEXT" in str(exc.value)
+    assert _prose_on_nodes(sdk) == []
+
+
+def test_an_empty_journal_path_is_not_an_armed_journal(tmp_path, monkeypatch):
+    """`event_log_path=""` is falsy for `_get_event_log`, so it must be falsy for
+    the guard too — measured: the empty string defeated the no-journal refusal
+    and the prose was stored nowhere with a 2xx (review cycle 2 P2)."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    empty = TortoiseSDK(str(tmp_path / "graph-emptyjournal.db"), event_log_path="")
+    with pytest.raises(ValueError) as exc:
+        empty.create_event("probe-empty-journal", "AgentSession",
+                           story_arc=PROSE, sessionId=SESSION)
+    assert "no record to be filed in" in str(exc.value)
+    assert _prose_on_nodes(empty) == []
 
 
 def test_a_paired_narrative_with_no_journal_is_refused(tmp_path, monkeypatch):
@@ -146,3 +172,32 @@ def test_a_paired_narrative_is_journalled_and_files_its_record_row(sdk, tmp_path
         "the row's narrative column must carry the prose itself, not a count")
     assert any(SESSION in s.params for s in inserts), (
         "the row must be keyed by the session the narrative pairs with")
+
+
+@pytest.mark.parametrize("door,label", [
+    ("source", "Source"),
+    ("document", "Document"),
+])
+def test_the_other_two_refusing_labels_accept_a_paired_narrative(sdk, door, label):
+    """The ACCEPT side of `_NARRATIVE_LABELS` (#10389 review cycle 2 P3).
+
+    Only `Event` was pinned; a regression that re-admitted `story_arc` on the
+    `:Source`/`:Document` fold would ship green while the guard kept accepting
+    the write — prose in the graph AND in the record, the duplicate home
+    §9.1(b)/R7 exists to remove.
+    """
+    if door == "source":
+        created = sdk.create_source(f"https://example.test/{SESSION}",
+                                    "webpage", story_arc=PROSE, sessionId=SESSION)
+    else:
+        created = sdk.create_document(f"probe-{SESSION}", documentKind="transcript",
+                                      story_arc=PROSE, sessionId=SESSION)
+    assert created, f"the {label} door refused a paired narrative"
+    assert _prose_on_nodes(sdk) == [], (
+        f"the prose reached a {label} node through the create door")
+    # ⚠️ A document IS a `:Source` (D10/§9.2), so BOTH doors are read on that
+    # label — asking for `:Document` would find nothing and "prove" a refusal
+    # that never happened.
+    assert sdk._proj.g.query(
+        "MATCH (n:Source) RETURN count(n)").result_set[0][0] >= 1, (
+        f"a {label} create proved nothing — no :Source anchor exists")
