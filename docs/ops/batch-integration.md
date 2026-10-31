@@ -182,6 +182,7 @@ git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1 || exit 1
 ```
 
   Attribute to the **merge commit's PR** — the log line names it.
+
 - **Drop the culprit**, do not fix it inside the batch. Every merge in the batch is a merge commit **by
   construction**, and Git refuses to revert a merge without a mainline: a bare `git revert <sha>` exits
   128 (`is a merge but no -m option was given`) and drops nothing. The batch branch is mainline `1` —
@@ -225,12 +226,6 @@ drops `parity` (pyarrow). The extras are part of the lane definition, not setup 
 - The record of a *review* is not the record of a *batch*. Do not record a review of your own work
   (#825).
 - Landing the batch is a separate, human-routed step. The batch lane never merges its own PR.
-- **The batch PR is still a PR.** This ruling moves *what makes a constituent PR eligible*, not the
-  protections on the branch the batch lands on: `.github/settings.yml` keeps the seven required
-  contexts (`test-isolation`, `license-surface`, `legal-e2e`, `python-ci-gate`, `ai-review-gate`, …)
-  and they still gate the **rail**. Read the ruling as "do not wait on a constituent PR's checks",
-  never as "checks are abolished".
-
 
 ### Landing — `main` must still be the tree you tested
 
@@ -264,13 +259,15 @@ moved applies the batch's diff to a different tree, and the result is a composit
 seen — the same class of failure this doctrine exists to remove, arriving through the door marked
 "landing".
 
-**The landing rail still applies.** `main` is protected by seven required contexts
-(`pricing-artifact`, `docs`, `test-isolation`, `license-surface`, `legal-e2e`, `python-ci-gate`,
-`ai-review-gate`), and `.mergify.yml` re-checks `python-ci-gate` on the queue branch. The batch PR
-therefore still owes those contexts — the batch run is the *evidence* that they will pass, not a
-substitute for them, and this doctrine does not ask for an exemption. What it removes is waiting on
-each constituent PR's own CI before batching; what it adds is a full-suite run that the rail's tiered
-selection does not perform.
+**The landing rail still applies.** The ruling moves *what makes a constituent PR eligible*, never the
+protections on the branch the batch lands on. `main` keeps the seven required contexts declared in
+`.github/settings.yml` (`pricing-artifact`, `docs`, `test-isolation`, `license-surface`, `legal-e2e`,
+`python-ci-gate`, `ai-review-gate`; `.github/scripts/check-required-set.py --live` is the assertion that
+the file and the live protection agree), and `.mergify.yml` re-checks `python-ci-gate` on the queue
+branch. The batch PR therefore still owes those contexts — the batch run is the *evidence* that they
+will pass, not a substitute for them, and this doctrine does not ask for an exemption. What it removes
+is waiting on each constituent PR's own CI before batching; what it adds is a full-suite run that the
+rail's tiered selection does not perform.
 
 ## Prior art this matches (and where it diverges)
 
