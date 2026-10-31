@@ -975,7 +975,10 @@ EXPECTED_CLASSIFICATION = {
         # redemption (`401 invalid_token`) — an outage, not an oracle; it cannot assert a `sub`
         # the AS accepts. The forgery control is `consent_token_secret_problem()` in
         # `tortoise/consent_token.py`, which refuses a blank, padded, too-short or REUSED value
-        # (the anon key is public — the consent page embeds it in HTML). §2.3 requires the
+        # (the anon key is public by construct — Supabase designs it for browser exposure and
+        # bounds it only by Row Level Security — and the API reads it from its OWN env to REFUSE
+        # a collision with it; no page of this app embeds it: #4054/#4178, and §9 step 4 deleted
+        # the last one that did). §2.3 requires the
         # deploy preflight to fail closed until the key exists. The ORDERING cost is real and
         # accepted: the operator provisions it in the Pages project before/with the deploy that
         # ships functions/api/consent/token.ts, or that deploy fails this gate (#3616's
