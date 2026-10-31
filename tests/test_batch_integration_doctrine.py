@@ -945,6 +945,35 @@ def _is_pr_head_fetch_segment(segment: str) -> bool:
     return bool(_PR_HEAD_FETCH.search(segment))
 
 
+#: The batch MERGE line. `git merge --no-ff --no-edit -m "batch: merge PR #<N>" <ref>` on a head that
+#: is ALREADY contained prints `Already up to date` and exits **0** with no merge commit — so the
+#: `git log --oneline -1` after it is cosmetic, the manifest names a PR whose commits are not in the
+#: tree, and Phase 4's `git revert -m 1` has no mainline to revert. The fetch line directly above it
+#: got a halt for exactly this reason (a REFUSAL exits non-zero, a NO-OP exits zero — two different
+#: failures), and the merge line was the one left bare. Asserted with `HEAD^2`, because a no-op
+#: `Already up to date` merge exits 0 and the status alone cannot see it.
+_BATCH_MERGE = re.compile(r"^git\s+merge\s+--no-ff\b")
+_BATCH_MERGE_SUBJECT = re.compile(r"git\s+merge\s+--no-ff\b.*")
+_MERGE_COMMIT_ASSERT = re.compile(r"^git\s+rev-parse\s+-q\s+--verify\s+HEAD\^2\b")
+_MERGE_COMMIT_SUBJECT = re.compile(
+    r"git\s+rev-parse\s+-q\s+--verify\s+HEAD\^2(?:\s*>\s*/dev/null)?\s*"
+)
+
+
+def _is_halted_batch_merge(code: str) -> bool:
+    """Is this the assembly MERGE, as ONE command that HALTS?"""
+    code = _code(code)
+    return bool(_BATCH_MERGE.match(code)) and _halts(code, subject=_BATCH_MERGE_SUBJECT)
+
+
+def _is_merge_commit_assert(code: str) -> bool:
+    """Is this the `HEAD^2` merge-commit assertion, as ONE command that HALTS?"""
+    code = _code(code)
+    return bool(_MERGE_COMMIT_ASSERT.match(code)) and _halts(
+        code, subject=_MERGE_COMMIT_SUBJECT
+    )
+
+
 def _ends_at_halt(code: str, allow=_allows_pin_segment, subject=_pin_subject) -> bool:
     """Is the halt REACHABLE from the subject's failure — every separator `&&`?
 
@@ -2372,10 +2401,15 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
             # NOT `or _halts(code)`: that is a PRESENCE predicate, so a mover
             # followed by a legitimate `|| exit 1` would be exempt — the mover has
             # already run by the time the halt fires, which is the round-26 P1 one
-            # `|| exit 1` away from its own fix. The reviewed-head fetch is the one
-            # exemption, and it is not a presence predicate: `_reviewed_head_fetch`
-            # pins the whole shape (one command, forced, halted).
-            if _ends_at_halt(code) or _reviewed_head_fetch(code):
+            # `|| exit 1` away from its own fix. The reviewed-head fetch, the merge and
+            # its `HEAD^2` assert are the exemptions, and none is a presence predicate:
+            # each pins the whole shape (one command that halts).
+            if (
+                _ends_at_halt(code)
+                or _reviewed_head_fetch(code)
+                or _is_halted_batch_merge(code)
+                or _is_merge_commit_assert(code)
+            ):
                 continue
             assert not re.search(r"[;&|]", _unquoted(code)), (
                 "every line of the batch-assembly fence must be one command: a "
@@ -2724,3 +2758,313 @@ def test_the_live_queue_and_the_carve_out_registry_are_named() -> None:
             f"the doctrine must name {needle!r} — it is the authoritative source "
             "for a claim the document makes"
         )
+
+
+def test_the_batch_merge_halts_on_a_no_op_and_asserts_a_merge_commit() -> None:
+    """the ``4dc214c02`` P2: ``git merge --no-ff`` on an already-contained head is a silent no-op.
+
+    Git prints ``Already up to date`` and exits **0** without creating a merge commit, so the
+    documented ``git log --oneline -1`` after the merge is cosmetic, the manifest names a PR whose
+    commits are not in the tree, and Phase 4's ``git revert -m 1`` has no mainline to revert. The
+    reviewed-head fetch one line above got a halt for the adjacent failure (a REFUSAL exits
+    non-zero); this is the other half — a NO-OP exits zero — so the status is not enough on its own
+    and the ``HEAD^2`` assertion is what catches it.
+    """
+    fences = _fences()
+    merges = [
+        (fence, i)
+        for fence in fences
+        for i, c in enumerate(fence)
+        if _BATCH_MERGE.match(_code(c))
+    ]
+    assert merges, "the assembly fence no longer merges a PR head — re-point this guard"
+    for fence, i in merges:
+        command = fence[i]
+        assert _is_halted_batch_merge(command), (
+            "the batch merge must HALT (`… refs/tmp/pr-<N> || { echo …; exit 1; }`): `git merge "
+            "--no-ff` on an already-contained head prints 'Already up to date' and exits 0, so an "
+            f"unhalted line records a PR the batch never merged: {command}"
+        )
+        later = [_code(c) for c in fence[i + 1 :]]
+        assert any(_is_merge_commit_assert(c) for c in later), (
+            "the merge must be followed by a halted `git rev-parse -q --verify HEAD^2` assertion: "
+            "a no-op merge exits 0 and creates no merge commit, so the STATUS cannot see it, and "
+            "Phase 4's `git revert -m 1` would then have no mainline"
+        )
+        assert any(c.startswith("git log --oneline -1") for c in later), (
+            "`git log --oneline -1` must still follow every merge: the batch's record of merges "
+            "attempted is read from it, and a merge nobody looked at is a merge nobody can blame"
+        )
+
+
+#: Phase 1's skip carriers: the COUNT (a number Phase 3 compares) and the reason MULTISET (which
+#: catches a swap an equal count cannot). Both are baseline-diffed, never absolute.
+_SKIP_COUNT_WRITE = re.compile(
+    r'^printf\s+\S+\s+"?\$SKIPPED_TOTAL"?\s*>\s*"?(?P<path>' + _LEDGER + r')"?$'
+)
+_SKIP_REASONS_WRITE = re.compile(
+    r"^grep\s+-o\s+'<skipped[^']*'.*\bsort\s*>\s*\"?(?P<path>" + _LEDGER + r")\"?$"
+)
+_SKIP_BIND = re.compile(
+    r'^BASELINE_SKIPPED="?\$\(\s*cat\s+"?(?P<path>' + _LEDGER + r')"?\s*\)"?$'
+)
+_SKIP_COUNT_SUBJECT = re.compile(
+    r'\[\s*"\$BATCH_SKIPPED"\s+-le\s+"\$BASELINE_SKIPPED"\s*\]'
+)
+_SKIP_COUNT_NONEMPTY = re.compile(r'\[\s*-n\s+"\$BATCH_SKIPPED"\s*\]')
+
+
+#: The reason-diff halt. It is NOT a `||` halt (it must fire only when the diff is NON-empty), so
+#: it is pinned as its own shape: `[ -s <file> ] && { … exit 1; }`.
+_SKIP_REASON_HALT = re.compile(
+    r'^\[\s*-s\s+"?(?P<path>' + _LEDGER + r')"?\s*\]\s*&&\s*\{[^{}]*\bexit\s+[1-9]\d*\s*;?\s*\}$'
+)
+_SKIP_REASON_DIFF = re.compile(
+    r'^comm\s+-13\s+"?[^"\s]*skipped-reasons"?\s+"?[^"\s]*skipped-reasons"?\s*>\s*'
+    r'"?(?P<path>' + _LEDGER + r')"?$'
+)
+
+
+def test_a_skip_the_baseline_did_not_have_blocks_the_verdict() -> None:
+    """the ``4dc214c02`` P1: a SKIP is invisible to both completion detectors.
+
+    Phase 3's "did it actually run" machinery was a status predicate (rc ∈ {0,1}) and a junit test
+    COUNT. A skipped test is still COLLECTED: it is inside `tests=`, it contributes no failure id,
+    so rc is 0, the count is unchanged and the Phase 4 id diff is empty. The reachable bypass is a
+    socket probe, not an unset variable — ``tests/test_projection.py``'s ``live_proj`` fixture skips
+    when the FalkorDB probe fails, which it does with ``TORTOISE_DB_URI`` correctly exported and the
+    server gone — so every live test skips and the verdict is ``BATCH-GREEN`` on a tree where the
+    suite this document exists to gate never ran.
+
+    This repo already fails closed on exactly that class in CI (``tools/skip-guard.py``, #1382:
+    "the historical silent-green masked the #1382 EP regression class for days"). The batch records
+    the BASELINE's skips and halts on any skip the baseline did not have — baseline-diffed, never a
+    whole-run gate, because the batch lane's ``embedded_only`` skips are expected.
+    """
+    codes = _fenced_commands()
+    writes = [
+        (m.group("path"), c) for c in codes if (m := _SKIP_COUNT_WRITE.match(_code(c)))
+    ]
+    assert writes, (
+        "the baseline's SKIP COUNT is never recorded, so Phase 3 cannot diff it: a skipped test is "
+        "collected, contributes no failure id, and rc is 0 — a FalkorDB outage mid-run then reads "
+        'as BATCH-GREEN. Record it: `printf \'%s\\n\' "$SKIPPED_TOTAL" > "$B/baseline.skipped"`'
+    )
+    paths = {path for path, _c in writes}
+    assert len(paths) == 1, f"the skip count is carried through more than one file: {sorted(paths)}"
+    carrier = paths.pop()
+
+    producers = [
+        fence
+        for fence in _fences()
+        if any(_SKIP_COUNT_WRITE.match(_code(c)) for c in fence)
+    ]
+    assert len(producers) == 1, (
+        "the skip count must be produced in exactly ONE fence (Phase 1's), or Phase 3 compares two "
+        f"different runs: {len(producers)}"
+    )
+    fence = producers[0]
+    fence_codes = [_code(c) for c in fence]
+    assert any("baseline-junit" in c and 'skipped="' in c for c in fence_codes), (
+        "the recorded skip count must be READ FROM THE BASELINE's junit report — a count from "
+        "anywhere else measures a different run"
+    )
+    assert carrier in _cleared(fence_codes), (
+        f"{carrier} must be CLEARED before the baseline run: a previous batch's skip count survives "
+        "a killed baseline and Phase 3 then diffs against it"
+    )
+    reason_writes = {
+        m.group("path") for c in fence_codes if (m := _SKIP_REASONS_WRITE.match(c))
+    }
+    assert reason_writes, (
+        "the baseline's skip REASONS are not recorded: an equal COUNT can be a SWAP (one "
+        "live-FalkorDB skip traded for a collection skip), and only the reason multiset sees it"
+    )
+
+    consumers = [fence for fence in _fences() if any("batch-junit" in _code(c) for c in fence)]
+    assert consumers, "the gate fence no longer writes a junit report — re-point this guard"
+    gated = False
+    for fence in consumers:
+        fence_codes = [_code(c) for c in fence]
+        binds = [m.group("path") for c in fence_codes if (m := _SKIP_BIND.match(c))]
+        counts = [c for c in fence_codes if _SKIP_COUNT_SUBJECT.search(c)]
+        if not counts:
+            continue
+        gated = True
+        assert binds == [carrier], (
+            f"the gate fence compares a skip count without binding the baseline's from {carrier}: "
+            f'binds={binds}'
+        )
+        absent = [
+            i
+            for i, c in enumerate(fence_codes)
+            if _CARRIER_TEST.match(c) and _CARRIER_TEST.match(c).group("path") == carrier  # type: ignore[union-attr]
+        ]
+        assert absent and _halts(fence[absent[0]], subject=lambda seg: bool(_CARRIER_TEST.match(seg))), (
+            f"an ABSENT {carrier} must HALT the gate fence: without it the comparison runs against "
+            "an empty string and `-le` on an empty value is a silent pass"
+        )
+        assert min(absent) < fence_codes.index(counts[0]), (
+            "the absent-carrier halt must precede the comparison it protects"
+        )
+        assert all(_halts(c, subject=_SKIP_COUNT_SUBJECT) for c in counts), (
+            "the skip comparison must HALT on its own failure and compare the batch's count as "
+            "`-le` the baseline's (a flipped `-ge` refuses a clean run and passes a dirty one): "
+            f"{counts}"
+        )
+        assert any(_SKIP_REASON_HALT.match(c) for c in fence_codes), (
+            "no halt on NEW SKIP REASONS: the count comparison cannot see a swap, so the reason "
+            "diff (`comm -13` against the baseline's) must stop the fence when it is non-empty"
+        )
+        assert any(_SKIP_REASON_DIFF.match(c) for c in fence_codes), (
+            "the reason diff is not a `comm -13 <baseline> <batch>` of the two recorded multisets"
+        )
+    assert gated, (
+        "the gate fence never compares skips against the baseline: a run whose live-FalkorDB tests "
+        "all SKIP exits 0 with an unchanged test count, so it is indistinguishable from a full run"
+    )
+    verdict_rows = [
+        line for line in _text().splitlines() if line.startswith("| `UNPROVEN-FULL-SUITE")
+    ]
+    assert verdict_rows and any(
+        re.search(r"SKIP", row) for row in verdict_rows
+    ), (
+        "the verdict table's UNPROVEN-FULL-SUITE row must name the SKIPPED case: a verdict computed "
+        f"from id sets cannot see a skip, so the row is where an operator learns it is not green "
+        f"(row: {verdict_rows})"
+    )
+
+
+#: ``git bisect run``'s grading: 0 = good, 125 = skip this probe, anything else = bad. The pre-fix
+#: spelling was `uv run pytest … >/dev/null 2>&1 || exit 1`, which collapses every other status
+#: (pytest 2/3/4/5, 128+N for SIGKILL/OOM) into "this commit is the culprit".
+_BISECT_RUN = re.compile(r"^git\s+bisect\s+run\b")
+_BISECT_COLLAPSED = re.compile(r"\|\|\s*exit\s+1")
+
+
+def test_the_bisect_grader_does_not_convict_a_commit_on_an_infra_error() -> None:
+    """the ``4dc214c02`` P2: the bisect grader treated EVERY non-zero status as "bad".
+
+    Git's protocol for ``bisect run`` is 0 = good, **125 = skip this probe**, anything else = bad. A
+    bare ``|| exit 1`` therefore grades pytest rc 2/3/4/5 (interrupted / usage / internal /
+    misconfigured) and 128+N (SIGKILL/OOM — the class this document measured five times in 23
+    minutes on #10399) as "this commit is the culprit". Measured in a scratch repo against a
+    five-commit ``--no-ff`` batch whose probe always exits 2: ``bisect run`` printed "first bad
+    commit", exited 0, and named the OLDEST probe — the first merge in the batch. The next
+    documented step DROPS that PR, irreversibly within the batch, over an infrastructure error.
+
+    So the grader must accept only the two statuses the document already calls COMPLETED, and hand
+    everything else back to git as its own skip code.
+    """
+    runs = [c for c in _fenced_commands() if _BISECT_RUN.match(_code(c))]
+    assert runs, "the doctrine no longer documents `git bisect run` — re-point this guard"
+    for command in runs:
+        code = _code(command)
+        assert "exit 125" in code, (
+            "the bisect grader must hand an infrastructure error back to git as its skip code "
+            "(`exit 125`): without it a persistent rc=2 convicts the batch's FIRST merge as the "
+            f"culprit and the doctrine then drops an innocent PR: {code}"
+        )
+        assert '[ "$rc" -eq 0 ] && exit 0' in code and '[ "$rc" -eq 1 ] && exit 1' in code, (
+            "the grader must accept EXACTLY the two COMPLETED statuses (0 and 1) — the same rule "
+            f"the gate and baseline predicates carry: {code}"
+        )
+        assert not _BISECT_COLLAPSED.search(code), (
+            "the grader still collapses every non-zero status into `bad` (`|| exit 1`): a killed or "
+            f"misconfigured probe then convicts an innocent commit: {code}"
+        )
+
+
+def test_the_batch_pr_is_a_draft_until_the_landing_assertion_passes() -> None:
+    """the ``4dc214c02`` P1: the landing assertion runs NOWHERE on the merge path.
+
+    The doctrine called the ``origin/main == $PINNED`` fence "the one mechanical enforcement of the
+    invariant", but it is a bash block in a document: the batch PR is an ordinary PR to ``main``, so
+    the moment it carries its required contexts it satisfies this repo's live queue —
+    ``.mergify.yml``'s ``queue_rules`` declare ``queue_conditions: base=main`` + ``-draft`` + the
+    ``check-success`` contexts, and ``merge_protections_settings: auto_merge_conditions: true`` — and
+    is squash-merged onto whatever ``main`` is at that moment, with the fence never run.
+
+    The lever is ``-draft``, which is itself a queue condition: a draft is never queued, so it can
+    never be merged. Holding the batch PR as a draft until the assertion passes is what makes
+    tested-tree == landed-tree a property of the QUEUE rather than a step someone may remember.
+    """
+
+    text = _text()
+    landing = text[text.index("### Landing") : text.index("## Prior art")]
+    assert re.search(r"batch PR is opened as a\s+\**draft", landing, re.IGNORECASE), (
+        "the Landing section must say the batch PR is opened as a DRAFT: the base assertion is a "
+        "bash block nothing invokes, and the queue auto-merges any non-draft PR that carries its "
+        "required contexts"
+    )
+    assert "-draft" in landing and ".mergify.yml" in landing, (
+        "the draft rule must name its MECHANISM (`-draft` in `.mergify.yml`'s queue conditions): a "
+        "draft that no queue condition honours is not enforcement"
+    )
+    assert re.search(r"un-draft", landing, re.IGNORECASE), (
+        "the Landing section must say WHEN to un-draft (only after the pin still matches, or with "
+        "route 2's freeze declared): otherwise the draft is never released and the batch cannot land"
+    )
+    aftermath = text[text.index("## Aftermath") : text.index("### Landing")]
+    assert re.search(r"draft", aftermath, re.IGNORECASE), (
+        "the Aftermath section (where the batch PR is described) must carry the draft rule too: it "
+        "is the list an operator reads while opening the PR"
+    )
+
+
+#: A stated number of the required contexts, and a stated `batch_size` value. Both are properties of
+#: `.github/settings.yml` and `.mergify.yml`, not of the doctrine — the class the doctrine itself
+#: forbids for the `needs: changes` set ("that is a count to READ FROM THE WORKFLOW, never a literal
+#: written here"). Measured: the landing section said "the seven required contexts" (right today,
+#: stale on the next context added) and the queue section quoted `batch_size: 4` while
+#: `.mergify.yml` itself says batch_size is a separate lever #5384 owns.
+_CONTEXT_ORDINAL = re.compile(
+    r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+"
+    r"(?:required\s+|check-success\s+)?contexts\b",
+    re.IGNORECASE,
+)
+_BATCH_SIZE_LITERAL = re.compile(r"batch_size\s*:\s*[\d{]")
+
+
+def test_no_hand_counted_literals_of_live_repo_properties() -> None:
+    """the ``4dc214c02`` P3: the two literals that re-stale on a change this document does not own.
+
+    ``:636`` said "``main`` keeps the **seven** required contexts", and ``:61`` quoted
+    ``batch_size: 4``. Both are READINGS of live config — ``.github/settings.yml`` (with
+    ``.github/scripts/check-required-set.py --live`` as the live comparison) and ``.mergify.yml``,
+    which states that ``batch_size`` is a separate lever PR #5384 owns and may become
+    ``{min: 1, max: N}``. The guard pinned member NAMES and the ``needs: changes`` ordinal but not
+    these, so nothing could red. Same class, closed the same way: name the source, state no number.
+
+    Non-vacuity: restoring either literal reds this check and nothing else.
+    """
+    text = _text()
+    context_claim = _CONTEXT_ORDINAL.search(text)
+    assert context_claim is None, (
+        "the doctrine states a hand-written number of required contexts "
+        f"({context_claim.group(0)!r}): the count belongs to .github/settings.yml (asserted live by "
+        "`.github/scripts/check-required-set.py --live`), so any literal re-stales the moment a "
+        "context is added — name the file, state no number"
+    )
+    size_claim = _BATCH_SIZE_LITERAL.search(text)
+    assert size_claim is None, (
+        "the doctrine quotes a `batch_size` VALUE "
+        f"({size_claim.group(0)!r}): `.mergify.yml` says batch_size is a separate lever (#5384 owns "
+        "raising it, possibly to `{min: 1, max: N}`), so a literal here goes stale on a change this "
+        "document does not control — name `.mergify.yml`, state no number"
+    )
+    for needle in (
+        ".github/settings.yml",
+        "check-required-set.py --live",
+        ".mergify.yml",
+    ):
+        assert needle in text, (
+            f"the doctrine must name {needle!r} as the authority where it makes a claim about live "
+            "config, since it no longer restates the value"
+        )
+    assert re.search(r"CONCURRENT batch is out of scope", text), (
+        "the batch BRANCH name is fixed (`integration/batch-1`) while the LEDGER is per-batch, so "
+        "the doctrine must say a second concurrent batch is out of scope (its own clone/worktree and "
+        "a branch named after `$BATCH`) — otherwise the per-batch ledger reads as if two batches "
+        "could share one checkout"
+    )

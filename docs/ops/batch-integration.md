@@ -58,7 +58,8 @@ repository's own incident record** — `.mergify.yml` carries two recorded compo
 `.mergify.yml` is a **live** merge queue for `main`, not a plan. Today it merges a PR onto the current
 base inside a `mergify/merge-queue/main` branch and runs CI there, so a merge is validated against the
 tree that will actually exist; `merge_conditions: check-success=python-ci-gate` is evaluated on that
-queue branch, `batch_size: 4`, `merge_method: squash`. The queue is the reason a PR does not have to be
+queue branch, `merge_method: squash`, and its own `batch_size` (a separate lever — #5384 owns raising it,
+so this document never restates the number). The queue is the reason a PR does not have to be
 manually updated before merging, and it already catches composition failures.
 
 That overlap is real and must not be papered over — but it is not the same gate:
@@ -66,7 +67,7 @@ That overlap is real and must not be papered over — but it is not the same gat
 | | `.mergify.yml` queue | this batch |
 |---|---|---|
 | what runs | the **tiered selection** for the diff (`config/ci-surfaces.yml`) | the **full** deterministic suite, once |
-| over what | `main ∪ the queued PRs`, batch of up to 4 | an arbitrary set, assembled in ascending PR order |
+| over what | `main ∪ the queued PRs`, up to `.mergify.yml`'s own `batch_size` | an arbitrary set, assembled in ascending PR order |
 | baseline | none — a green run is absolute | a **Phase 1 baseline on `origin/main`**, so pre-existing red is separated from caused red |
 | on failure | re-tested, bisected | attributed to a merge commit, and the culprit **dropped** |
 | base drift | the queue **is** the writer, so its base cannot drift under it | the batch does not own `main`, so the base **can** drift — see Landing |
@@ -208,7 +209,7 @@ B="/tmp/batch-$BATCH"
 # `pytest_sessionfinish`, so a baseline run the kernel killed leaves the PREVIOUS batch's report at
 # this path — and the count below then reads it as THIS baseline, which is the ledger every later
 # verdict is diffed against (main's own red is hidden, and an innocent PR is convicted).
-rm -f "$B/baseline-junit.xml" "$B/baseline.total"
+rm -f "$B/baseline-junit.xml" "$B/baseline.total" "$B/baseline.skipped" "$B/baseline.skipped-reasons"
 # BOTH halves — a baseline that runs one half cannot contain the other half's pre-existing red.
 # `--junitxml` is not decoration: Phase 3 compares the gate run's test COUNT to this file,
 # because a run the kernel killed reports no summary and would otherwise read as green.
@@ -237,6 +238,21 @@ BASELINE_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/baseline-junit.xml" | grep -o '[0
 # "$BASELINE_TOTAL" ]` compares against the empty string, bash rejects the expression (rc=2), and
 # the count halt reports "SHORTER than the baseline" on a complete, green batch.
 printf '%s\n' "$BASELINE_TOTAL" > "$B/baseline.total"
+# ⛔ SKIPS are a THIRD axis, and neither of the two detectors above can see them. A skipped test is
+# still COLLECTED: it counts in `tests=` and it contributes no failure id, so rc is 0, the count is
+# unchanged and the Phase 4 id diff is empty. The reachable bypass is a SOCKET PROBE, not an unset
+# variable — `tests/test_projection.py`'s `live_proj` fixture skips when `_docker_falkor_reachable()`
+# fails, which it does with `TORTOISE_DB_URI` correctly exported and the server gone (the private
+# container reaped, a Docker restart). Every test using it skips, and the verdict is `BATCH-GREEN`
+# on a tree where the live-FalkorDB suite never ran. This repo already refuses that class in CI with
+# `tools/skip-guard.py` (#1382: *"the historical silent-green masked the #1382 EP regression class
+# for days"*, wired at `.github/workflows/python-ci.yml`), so the batch records the baseline's skips
+# and Phase 3 halts on any skip the baseline did not have. Baseline-DIFFED, never a whole-run gate:
+# the batch lane's `embedded_only` skips are expected (see the gate-legs list), so only a NEW skip
+# may convict. The reason multiset is recorded too, because a count alone cannot see a SWAP.
+SKIPPED_TOTAL="$(grep -o 'skipped="[0-9]*"' "$B/baseline-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
+printf '%s\n' "$SKIPPED_TOTAL" > "$B/baseline.skipped"
+grep -o '<skipped [^>]*' "$B/baseline-junit.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/baseline.skipped-reasons"
 git switch -                                      # back to the lane you came from
 ```
 
@@ -372,7 +388,13 @@ git fetch --force origin pull/<N>/head:refs/tmp/pr-<N> || { echo "the fetch of P
 # `batch: merge PR #<N>` subject, Phase 2's own eligibility invariant (`headRefOid` ==
 # the reviewed head) broken, and Phase 3 certifying a tree built from heads nobody
 # reviewed. The halt is what stops a REFUSED fetch instead of merging a stale ref.
-git merge --no-ff --no-edit -m "batch: merge PR #<N> (<sha>)" refs/tmp/pr-<N>
+# ⛔ The merge line HALTS, and the line after it asserts a MERGE COMMIT exists. `git merge --no-ff`
+# on a head that is already contained prints "Already up to date" and exits **0** with NO merge
+# commit — so the `git log` line below is cosmetic, the manifest names a PR whose commits are not in
+# the tree, and Phase 4's revert has nothing to revert. The fetch above got its halt for exactly this
+# reason (a refusal that exits non-zero and a no-op that exits zero are different failures).
+git merge --no-ff --no-edit -m "batch: merge PR #<N> (<sha>)" refs/tmp/pr-<N> || { echo "the merge of PR #<N> did not happen — a refusal, or 'Already up to date' because the reviewed head is already an ancestor of the batch branch"; exit 1; }
+git rev-parse -q --verify HEAD^2 >/dev/null || { echo "HEAD is not a merge commit — the batch would record a PR it never merged, and Phase 4's revert would have no mainline"; exit 1; }
 git log --oneline -1                                    # after EVERY merge
 ```
 
@@ -385,6 +407,14 @@ culprit: a revert adds `Revert "batch: merge PR #<N>"`, so the log then names a 
 **not** in the tree. Read it as attempted-and-maybe-dropped — the landed content is the **tree**, and
 the dropped PR is the one with a matching revert line (a re-run of the Phase 4 bisect that ignores
 this walks straight back to the already-dropped merge and re-blames it).
+
+**The branch name is fixed, deliberately — a second CONCURRENT batch is out of scope here.**
+`integration/batch-1` is a repo-global ref, and every fence below (the tree assertion in Phase 3, the
+bisect, the revert) names it literally; two batches sharing it would fast-forward each other's merges
+and neither's tree would be the one that lands. The *ledger* is already per-batch (`$BATCH`); the
+branch is not. A batch that must run alongside another therefore uses its own clone or worktree **and**
+names its branch after `$BATCH`, and the fences below must be re-pointed in that copy — this document
+does not claim to run two batches concurrently out of one checkout.
 
 **Conflicts.** Resolve only when the resolution is **unambiguous** — both sides additive, or the same
 fix applied two ways with identical effect. Write down which side you took and why. Otherwise **drop
@@ -458,6 +488,22 @@ BASELINE_TOTAL="$(cat "$B/baseline.total")"
 # The `-ge` comparison below is the real gate.
 BATCH_TOTAL="$(grep -o 'tests="[0-9]*"' "$B/batch-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
 [ -n "$BATCH_TOTAL" ] && [ "$BATCH_TOTAL" -ge "$BASELINE_TOTAL" ] || { echo "the gate run reported $BATCH_TOTAL tests against a baseline of $BASELINE_TOTAL — SHORTER than the baseline: investigate (a killed run, or a diff that legitimately removes or moves tests) — and never call it green: UNPROVEN-FULL-SUITE(<lane>)"; exit 1; }
+# ⛔ SKIPPED is not PASSED, and neither the status nor the count can see it: a skipped test is still
+# collected, so it is inside `tests=`, it adds no failure id, and Phase 4's diff is content. A
+# `live_proj`-style socket probe that stops reaching FalkorDB skips the whole live suite with rc=0 —
+# the tree is then certified green with the suite this document exists to gate unrun (#1382). Halt
+# on any skip the BASELINE did not have. Baseline-diffed on purpose: the batch lane's `embedded_only`
+# skips are expected, so a whole-run gate (`tools/skip-guard.py` un-diffed) would false-red.
+[ -s "$B/baseline.skipped" ] || { echo "no $B/baseline.skipped — Phase 1 never recorded the baseline's skips; re-run Phase 1 (Landing route 1)"; exit 1; }
+BASELINE_SKIPPED="$(cat "$B/baseline.skipped")"
+BATCH_SKIPPED="$(grep -o 'skipped="[0-9]*"' "$B/batch-junit.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
+[ -n "$BATCH_SKIPPED" ] && [ "$BATCH_SKIPPED" -le "$BASELINE_SKIPPED" ] || { echo "the gate run SKIPPED $BATCH_SKIPPED tests against a baseline of $BASELINE_SKIPPED — a skip carries no failure id, so the id diff cannot see it (a FalkorDB outage mid-run skips the whole live suite at rc=0): UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+# ...and the REASONS, because an equal COUNT can be a SWAP (one live-FalkorDB skip traded for a
+# collection skip). Every reason the batch has and the baseline did not is a test that had to run and
+# did not; `tools/skip-guard.py` guards the same three families upstream in CI.
+grep -o '<skipped [^>]*' "$B/batch-junit.xml" | sed -n 's/.*message="\([^"]*\)".*/\1/p' | sort > "$B/batch.skipped-reasons"
+comm -13 "$B/baseline.skipped-reasons" "$B/batch.skipped-reasons" > "$B/new-skip-reasons"
+[ -s "$B/new-skip-reasons" ] && { echo "the gate run has SKIP REASONS the baseline did not (listed in $B/new-skip-reasons) — a test that must run did not, and no failure id records it: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
 
 # Half 2 — the track_b leg CI runs as its own MUST-PASS, gate-member job (`-m track_b`).
 # ⛔ Instrumented exactly like half 1, because the fail-open is the same one: rc 0/1 is a COMPLETED
@@ -494,7 +540,16 @@ uv run pytest <the failing file(s)> -q
   `git bisect run` is the honest tool when the failing file set is stable:
 
 ```bash
-git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1 || exit 1'
+# ⛔ GRADE THE EXIT CODE. `git bisect run`'s protocol is 0 = good, 125 = SKIP THIS PROBE, anything
+# else = BAD. A bare `|| exit 1` collapses every other status into "bad": pytest rc 2/3/4/5
+# (interrupted / usage / internal / misconfigured) and 128+N (SIGKILL/OOM — the class this document
+# measured five times in 23 minutes on #10399) all become "this commit is the culprit". Measured in
+# a scratch repo against a five-commit batch whose probe always exits 2: `bisect run` printed
+# "first bad commit" and named the OLDEST probe — the first merge in the batch — and the next step
+# below would DROP an innocent PR for an infrastructure error, irreversibly within the batch. Accept
+# only the two statuses this document already calls COMPLETED, and hand every other one back to git
+# as its own skip code, so the probe is removed from the search instead of convicted.
+git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1; rc=$?; [ "$rc" -eq 0 ] && exit 0; [ "$rc" -eq 1 ] && exit 1; exit 125'
 BAD="$(git rev-parse refs/bisect/bad)" # ⛔ NOT `HEAD` — see below: `bisect run` leaves HEAD on the LAST
                                        # PROBE it tested. `refs/bisect/bad` is the ref git's own manual
                                        # names as the result, and it survives until `git bisect reset`,
@@ -557,7 +612,7 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
 | `BATCH-GREEN` | Full suite ran on the batched tree, no NEW failures vs baseline. It does **not** mean `python-ci-gate` passed: the `embedded_only` and record-postgres test legs, and the non-test legs, are skipped rather than reproduced (see the gate-legs list above). |
 | `BATCH-GREEN(BASELINE(<ids>))` | Green *relative to baseline*; the listed ids were already red on main. |
 | `BATCH-RED(<ids>)` | New failures remain after dropping the culprit(s). Do not merge. |
-| `UNPROVEN-FULL-SUITE(<lane>)` | **The full suite did not run, or did not COMPLETE.** Only the embedded carve-out or a subset ran; or the gate run was killed / interrupted and reported no final summary, so it has no failure set to diff. This is never "green". |
+| `UNPROVEN-FULL-SUITE(<lane>)` | **The full suite did not run, did not COMPLETE, or the tests that must run SKIPPED.** Only the embedded carve-out or a subset ran; or the gate run was killed / interrupted and reported no final summary, so it has no failure set to diff; or it skipped tests the baseline did not skip — a skip is not a pass and carries no failure id, so the id diff cannot see it. This is never "green". |
 
 ⛔ **A batch is never green on a partial lane.** If docker/FalkorDB was unavailable and only the
 embedded carve-out ran, the verdict is `UNPROVEN-FULL-SUITE(embedded-carve-out)`. Say that in those
@@ -581,7 +636,10 @@ drops `parity` (pyarrow). The extras are part of the lane definition, not setup 
   verdict. Written with `--body-file`, never an inline body.
 - The record of a *review* is not the record of a *batch*. Do not record a review of your own work
   (#825).
-- Landing the batch is a separate, human-routed step. The batch lane never merges its own PR.
+- Landing the batch is a separate, human-routed step — and the batch PR is opened as a **draft**,
+  un-drafted only once the [landing assertion](#landing--main-must-still-be-the-tree-you-tested)
+  passes, because `-draft` is a `.mergify.yml` queue condition and the one lever that keeps an
+  unasserted batch out of the merge queue. The batch lane never merges its own PR.
 
 ### Landing — `main` must still be the tree you tested
 
@@ -619,6 +677,18 @@ and the landing step exits 1 with *"no pinned-base: line in the batch PR body"* 
 the line — the check is impossible to pass as written, and the reachable improvisations are to skip the
 assertion or hand-copy the sha. `--jq '.body'` (or `--template '{{.body}}'`) emits the bare body.
 
+⛔ **The batch PR is opened as a DRAFT, and un-drafted only after the assertion above passes.** A bash
+block in a document is not enforcement: nothing on the merge path invokes it. The batch PR is an
+ordinary PR to `main`, so the moment it carries its required contexts it satisfies this repo's live
+queue — `.mergify.yml`'s `queue_rules` declare `queue_conditions: base=main`, the `-draft` negation and
+the `check-success` contexts, and `merge_protections_settings: auto_merge_conditions: true` — and is
+squash-merged onto **whatever `main` is at that moment**, with this fence never run. The draft state is
+the one thing the assertion can control, because `-draft` is itself a queue condition: a draft is
+never queued, so it can never be merged. Open the batch PR as a draft, run the fence above, and
+un-draft it only when the pin still matches (or route 2's freeze is declared and real). That is what
+turns the assertion from a step someone may remember into a queue condition — the guarantee bors and
+GitHub's queue get by owning the merge, borrowed here from the one lever this repo already has.
+
 If that assertion fails, there are exactly two honest routes and no third:
 
 1. **Re-baseline and re-run** — `PINNED` becomes the new main, phases 1 and 3 run again on a batch
@@ -633,10 +703,11 @@ seen — the same class of failure this doctrine exists to remove, arriving thro
 "landing".
 
 **The landing rail still applies.** The ruling moves *what makes a constituent PR eligible*, never the
-protections on the branch the batch lands on. `main` keeps the seven required contexts declared in
+protections on the branch the batch lands on. `main` keeps the required contexts declared in
 `.github/settings.yml` (`pricing-artifact`, `docs`, `test-isolation`, `license-surface`, `legal-e2e`,
 `python-ci-gate`, `ai-review-gate`; `.github/scripts/check-required-set.py --live` is the assertion that
-the file and the live protection agree), and `.mergify.yml` re-checks `python-ci-gate` on the queue
+the file and the live protection agree — and the LIST is that file's, never a count written here), and
+`.mergify.yml` re-checks `python-ci-gate` on the queue
 branch. The batch PR therefore still owes those contexts — the batch run is the *evidence* that they
 will pass, not a substitute for them, and this doctrine does not ask for an exemption. What it removes
 is waiting on each constituent PR's own CI before batching; what it adds is a full-suite run that the
