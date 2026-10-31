@@ -1215,11 +1215,22 @@ def _graph_namespace_for(cp, org_id: str, graph_id: str | None,
 def default_graph_id_for(cp, org_id: str) -> str | None:
     """The org's DEFAULT graph's stable id (#10025), or None (fail-closed).
 
-    The default graph is the organization's own graph, but until #10025 it had
-    **no row** in ``public.graphs``: its identity was the literal string
-    ``"default"`` (see :func:`graph_metadata`), which is not an id, so the
-    record's ``(org_id, graph_id) -> public.graphs`` foreign key could not name
-    it. Both lanes then answered the SAME org-wide credential differently —
+    "The default graph" is whichever ``public.graphs`` row carries
+    ``kind='default' AND status='active'`` for the org — today the row that
+    provisioning mints (:func:`ensure_default_graph_row`), because NO supported
+    path moves that marker afterwards (#10180). The measured reader inventory,
+    the two facts that answer "where is the default" differently, and the
+    options for a promotion verb are in
+    ``docs/ops/multi-graph-migration-runbook.md`` §6. Do not restate "the
+    organization's own graph" here (this docstring said exactly that until
+    #10180's measurement): it is true only while the control-plane row and the
+    org-ID derivation happen to agree.
+
+    Until #10025 it had **no row** in ``public.graphs``: its identity was the
+    literal string ``"default"`` (see :func:`graph_metadata`), which is not an
+    id, so the record's ``(org_id, graph_id) -> public.graphs`` foreign key
+    could not name it. Both lanes then answered the SAME org-wide credential
+    differently —
     :func:`_graph_namespace_for` resolved its namespace happily,
     :func:`tortoise.record_writer.record_tenant_for` refused it as
     ``no_tenant`` — and an armed deployment wrote nothing while reading green
