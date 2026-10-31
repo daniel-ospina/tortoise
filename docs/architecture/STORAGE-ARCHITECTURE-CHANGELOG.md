@@ -1757,3 +1757,51 @@ reproduce the measured 0.91 → 0.42 destruction). `sourceVersion` stays uncarri
 fold drops it too — so the two routes agree by both losing that anchor rather than the record keeping
 an attribute the graph does not have. Pinned by
 `tests/test_record_projection.py::test_a_structural_repoint_carries_the_descriptors_attributes`.
+
+**2026-10-31 — `#10000` (with `#10403`, `#10394`, `#10017`).** The S1 narrative left the node, and
+§9.1(b) was rewritten to state the design instead of the delivery. This entry keeps what moved out,
+because the design document is not where the record of the change belongs (#8542).
+
+**What changed in the graph.** `hosted_api._execute_commit_writes` used to raw-Cypher `SET
+s.story_arc=$arc` on the transcript `:Source` **and** `e.story_arc=$arc` on the AgentSession
+`:Event` — the whole S1 narrative, twice per commit, in the store §2.1 says can never unload it —
+while **no production read path read it back**. Both SETs are deleted; the narrative's one writer is
+the `SessionNarrated` carrier into `public.session_narrative` (`#9555`), unchanged. MEASURED live on
+a FalkorDB, one commit with a 167-char narrative: `sum(size(n.story_arc))` = **334 bytes** before the
+removal (`:Source` 167 + `:Event` 167), **0 bytes** after it, with `public.session_narrative` holding
+the same 167 chars. `summary`/`title` deliberately stay on the node (§4.4 metadata, not the prose).
+
+**The four re-entry routes, and where each one stood.** The key stays DECLARED in `_SOURCE_NODE_PROPS`
+so legacy nodes read back, and the declaration is what makes a route possible at all:
+
+- The journal `SourceCreated` fold was **recorded** as the open fold door and it never was one —
+  `_upsert_source` passes `allow_keys=_SOURCE_EXTRA_PROPS`, a closed set excluding `story_arc`, so
+  the key is dropped and warned about (`#3998: denied …`).
+- The LIVE TENANT route was CLOSED in review cycle 1: `story_arc` in
+  `_SOURCE_SERVER_MANAGED_PROPS` refuses `update_entity(url, story_arc=…)` rather than journalling
+  an `EntityMutated` record that a rebuild would restore (`#5196` round 3).
+- Door 1 — the DOCUMENT fold's open passthrough — was CLOSED HERE by `b771ccd85` (`#10403`):
+  `_upsert_document` passes NO `allow_keys` deliberately (`#228` pins the document route as a caller
+  passthrough), so the deny had to be `story_arc` in `_DOC_PASSTHROUGH_HANDLED`. MEASURED through the
+  SDK door behind `tortoise_create_document`, one call, before: `MATCH (s:Source) RETURN s.url,
+  s.story_arc` = `[[…, 'NARRATIVE-DOOR1-PROSE']]` — the PROSE on the node; after:
+  `[[…, None, 'kept-228']]` — denied, and `#228`'s arbitrary prop still landed, so the entry is ONE
+  key and not a blanket refusal. The departure is marked ON `#228` with an `OVERRIDES:` line
+  (`#issuecomment-6540959107`).
+- Door 2 — the RECORD → CACHE restore — is still OPEN, filed as `#10394`. `source.story_arc` is
+  marked **PRIMARY** on `#7879`'s placement table, so `projected_columns("source")` keeps it and
+  `restore_from_record_view` / `rebuild_from_record` writes it back onto `:Source`.
+  `tests/test_9555_narrative_cache_rebuild.py:187` measures that lane and asserts the prose IS on the
+  rebuilt node. **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
+  restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
+  table, plus that test's premise), which is why it is filed rather than absorbed.
+
+**Why this entry exists at all.** The first draft of §9.1(b) wrote that history INTO the design
+document — `CLOSED HERE (#10403)`, `OPEN, filed as #10394`, *"three are CLOSED, one is filed and
+still OPEN"*, and the before/after measurement — and
+`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
+reddened on it in CI (run 41183278512). That guard is the executable half of #8542's rule: the
+design document states the design, the changelog keeps the record of how it got there. §9.1(b) now
+states the four routes and their mechanisms in the present tense, with the measurement as evidence
+that the deny holds rather than as a before/after of the change; the delivery state and the
+before/after figure live here.
