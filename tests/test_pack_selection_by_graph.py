@@ -452,9 +452,11 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     `TortoiseSDK(db_path=…, namespace="registry")`, wrote through it and dropped
     it at return. In the CI window that SDK is the temp DB's ONLY client — the
     lifespan health probe has not built its own handle yet — so the dangling
-    handle's GC teardown WAS the last-client teardown: the daemon went down
-    without a snapshot, and the next construction over the same path started an
-    EMPTY server. Measured at `7a6301142` as **0** Team rows read through
+    handle's GC teardown WAS the last-client teardown: the daemon went down on
+    that branch, and the next construction over the same path came up EMPTY —
+    the Team/Graph rows written moments earlier did not come back (`_cleanup`
+    removes the store's `.settings` and reclaims its socket dir). Measured at
+    `7a6301142` as **0** Team rows read through
     `hosted_api._registry_anchor()` — the exact helper `_org_node` uses — for a
     team seeded moments earlier; that is the 404 that reddened CI `test (c)` of
     run `41210146871` at `:957`
@@ -464,16 +466,30 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     the lock must therefore ALSO verify visibility at seed time".
 
     THE FIX IS TWO INDEPENDENT HALVES, each measured sufficient on its own at
-    this head (each alone → this file's 54 tests pass): `sdk.close()` turns the
-    seeder's release into an EXPLICIT graceful close (a SAVE) instead of a
-    GC-timed NOSAVE teardown, and this guard's read through the app's OWN
-    anchor pins that handle, so the store has a live client that outlasts the
-    seeder. Both are kept because they prevent different failures: the close
-    removes the destructive teardown, the guard converts any recurrence into a
-    named `SeedVisibilityError` carrying the identity evidence — the diagnosis
-    that a bare 404 on an unrelated assertion cost a cycle to reach.
+    this head (each alone → this file's 54 tests pass): `sdk.close()` releases
+    the seeder through the GUARDED close seam — `tortoise.FalkorDB.close()`
+    (`tortoise/__init__.py:288`) asks `cotenant_holds_server()` and, with a
+    co-tenant present, takes `disconnect_only()` +
+    `_neutralize_redislite_cleanup()` instead of any teardown — and this
+    guard's read through the app's OWN anchor pins that handle, so the store has
+    a live client that outlasts the seeder. Both are kept because they prevent
+    different failures: the close keeps the release off the UNGUARDED teardown
+    path, the guard converts any recurrence into a named `SeedVisibilityError`
+    carrying the identity evidence — the diagnosis that a bare 404 on an
+    unrelated assertion cost a cycle to reach.
     `patched_tortoise_sdk` closes the anchor at fixture exit, so no extra server
     lifetime escapes the fixture.
+
+    THE MECHANISM IS THE CO-TENANT GUARD, NOT A SNAPSHOT (#10424 review P3,
+    re-measured at `redislite/client.py:112` on this head): `RedisMixin._cleanup()`
+    — the ONE teardown both paths reach — issues `shutdown(save=True, now=True,
+    force=True)`, so "an explicit SAVE instead of a GC-timed NOSAVE teardown" is
+    false in BOTH halves, and `RedisMixin.__del__` (`:473`) calls that same
+    `_cleanup`. With no co-tenant the guard does not fire, so `sdk.close()` is
+    exactly as destructive as dropping the handle: this close is safe HERE
+    because the store already has a second client, and it is not a standing fix
+    for the `Unknown organization` 404 class. `tests/_http_fixtures.py:25`
+    carries the same "SHUTDOWN SAVE" framing for its anchor close.
     """
     if not _app_addresses(db_path):
         return
