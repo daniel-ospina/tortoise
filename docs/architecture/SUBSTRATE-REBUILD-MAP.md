@@ -410,6 +410,22 @@ non-zero status that is not `1` (error), and a timeout is not a git status at
 all, so scoring it as drift would hand an operator *"the document and the tree
 disagree"* about a correct document.
 
+**Status `1` is therefore CORROBORATED, because git's contract assumes a complete
+history and a shallow clone does not have one.** When the
+`measured_at_commit` object is present but graft-unreachable, `--is-ancestor`
+walks the truncated history, finds no path, and exits `1` — the identical status
+an unrelated tree produces. Measured on #10406 (`test (e)`, run 41183423096,
+2026-10-31): the depth-1 `test` shard reported *"`measured_at_commit` … is not an
+ancestor of `HEAD`"* and reded two required tests, while the `fetch-depth: 0`
+`docs` job passed the same claim on the same head — the merge commit IS a
+descendant of it. Reproduced in a real depth-1 clone of this repo: write the
+object into the clone and `git cat-file -t` answers `commit` while
+`--is-ancestor` still exits `1`. So `1` is read as drift only where the
+repository reports its own history as complete
+(`git rev-parse --is-shallow-repository` → `false`); a shallow — or unresolvable —
+checkout gets the `UNVERIFIED` state error above, and the `docs` job proves the
+claim.
+
 ### Where the guard runs, and which half runs where
 
 Dual-registered on purpose, because the two halves need different checkouts:
@@ -417,7 +433,7 @@ Dual-registered on purpose, because the two halves need different checkouts:
 | home | what it proves | why there |
 |---|---|---|
 | `core` + `tier1` (`config/ci-surfaces.yml`) → the `test` shards | everything except the ancestry claim | a **docs-only** edit of this file selects no surface at all and runs `tier1` only, so a `core`-only row would never fire on the diff that actually staled three times |
-| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all six claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where the object is absent by construction) |
+| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all six claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where no walk of the history can reach the object) |
 | `CORE_ALSO` (`tools/ci_selection.py`) | the same `test`-shard set, on a **tool-only** edit | `tools/` is a flat non-python prefix and matches no `SOURCE_PATTERNS` row, so without that entry an edit to the tool itself selected nothing |
 
 What it checks, and deliberately does not:

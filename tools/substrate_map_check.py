@@ -37,9 +37,14 @@ tree disagree:
      `actions/checkout` fetches ONE commit by default, so in the `test` job the
      object is absent and the question is unanswerable THERE. That is reported as
      `UNVERIFIED` — a state error (exit 2), never a drift, because the document is
-     not wrong, the clone is shallow. The claim is proved by the REQUIRED `docs`
-     job: it checks out at `fetch-depth: 0` and runs `--check` unconditionally,
-     which is also the only home a docs-only PR reaches (#4454's precedent).
+     not wrong, the clone is shallow. ⛔ The SAME holds when the object is present
+     but the graft boundary cuts the path to it: `--is-ancestor` then exits **1**,
+     the status that otherwise means drift, so a shallow clone is asked to
+     corroborate its own completeness before status 1 may call the document wrong
+     (measured on #10406 — the depth-1 `test` job reded a TRUE claim while the
+     `docs` job passed it). The claim is proved by the REQUIRED `docs` job: it
+     checks out at `fetch-depth: 0` and runs `--check` unconditionally, which is
+     also the only home a docs-only PR reaches (#4454's precedent).
 
 ⛔ What it deliberately does NOT check, and why:
 
@@ -571,6 +576,19 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     git status at all, so it cannot be put in the status-1 (drift) channel — an
     operator told "the document and the tree disagree" on a slow clone is handed
     a wrong instruction about a correct document.
+
+    ⛔ **Status 1 is CORROBORATED, because that contract assumes a COMPLETE
+    history and a shallow checkout does not have one.** When the object is present
+    but graft-unreachable, `--is-ancestor` walks the truncated history, finds no
+    path, and exits 1 — the identical status a genuinely unrelated tree produces.
+    Measured on #10406 (`test (e)`, run 41183423096): the depth-1 `test` job
+    reported `measured_at_commit … is not an ancestor of HEAD` for a claim the
+    fetch-depth: 0 `docs` job passed on the same head; reproduced in a real
+    depth-1 clone carrying the object — `git cat-file -t` answers `commit` and
+    `--is-ancestor` still exits 1. So drift is claimed ONLY where the repository
+    says its history is complete (`--is-shallow-repository` → `false`); a shallow
+    — or unresolvable — checkout cannot tell drift from truncation and gets the
+    state error above, exit 2, with the `docs` job as the home that proves it.
     """
     match = _FRONTMATTER_SHA.search(doc)
     if not match:
@@ -606,7 +624,34 @@ def check_measured_at_commit(doc: str) -> tuple[list[str], list[str]]:
     except OSError as exc:  # pragma: no cover - git absent is a state error
         raise _state_error(f"git unavailable ({exc})") from exc
     if proc.returncode == 1:
-        return ([f"measured_at_commit {sha} is not an ancestor of HEAD"], [])
+        # ⛔ Status 1 is "not an ancestor" only where the WALK is complete. In a
+        # shallow checkout the graft boundary truncates it, so a commit whose
+        # connecting path was cut reports 1 as well — measured on #10406: the
+        # depth-1 `test` job reported exactly this while the fetch-depth: 0
+        # `docs` job passed the same claim on the same head, and a real depth-1
+        # clone carrying the object answers `commit` to `cat-file -t` while
+        # `--is-ancestor` still exits 1. Calling that drift hands the reader
+        # "the document and the tree disagree — do not delete the row to make
+        # this green" about a document that is right, so the status is
+        # corroborated with the repository's own completeness first.
+        shallow = _is_shallow_clone()
+        if shallow is False:
+            return ([f"measured_at_commit {sha} is not an ancestor of HEAD"], [])
+        why = (
+            "this checkout is SHALLOW, so the graft boundary cut the path to it "
+            "and a truncated walk exits with the same status as an unrelated tree"
+            if shallow
+            else "git could not say whether this checkout is shallow, so a "
+            "status-1 answer cannot be told apart from a truncated walk"
+        )
+        return (
+            [],
+            [
+                f"measured_at_commit {sha} cannot be verified here: {why} (the "
+                "REQUIRED `docs` job runs this check at fetch-depth: 0, which is "
+                "where the ancestry claim is proved)"
+            ],
+        )
     if proc.returncode != 0:
         # 128 = git does not HAVE the object. That says nothing about the
         # document: `actions/checkout` fetches one commit by default, so in the

@@ -134,14 +134,47 @@ def _label_hits() -> tuple[int, int, int]:
     return lines, files, narrow
 
 
+def _checkout_history_is_complete() -> bool:
+    """Whether THIS clone can walk its WHOLE history.
+
+    Asked of git directly rather than via `smc._is_shallow_clone()`, so a bug in
+    the tool's helper cannot make the oracle agree with it. This is the fact the
+    tool corroborates before it may read status **1** as drift: in a shallow clone
+    the graft boundary cuts the ancestry walk, so a commit that IS an ancestor in
+    the complete history answers with the same status an unrelated tree does
+    (#10406, the depth-1 `test` job). Anything other than a positive "not shallow"
+    is False — a clone whose completeness cannot be established cannot support an
+    expectation of CLEAN either.
+    """
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=smc.ANCESTRY_TIMEOUT_S,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return probe.returncode == 0 and probe.stdout.strip() == "false"
+
+
 def _ancestry_is_verifiable_here() -> bool:
-    """Whether THIS clone carries the object `measured_at_commit` names.
+    """Whether THIS clone can ADJUDICATE the `measured_at_commit` claim.
 
     Probed with its own `git` call on purpose — NOT via `smc._is_shallow_clone()`,
     so a bug in the helper cannot make the test agree with it. `actions/checkout`
     fetches one commit by default, so in the CI `test` job this is False and the
     ancestry claim is unprovable there; the REQUIRED `docs` job (fetch-depth 0)
     is where it is proved.
+
+    ⛔ **Status 1 needs the same corroboration the tool applies.** Three of the
+    four answers are arm-deciding on their own: `0` is proved ancestry, an absent
+    object (128) and a timeout are unverified in ANY clone. Status `1` is the one
+    that depends on the checkout — in a shallow clone a TRUNCATED walk returns it
+    for a true claim (#10406), so it only means drift where the history is
+    complete. Without this mirror the oracle would expect `CLEAN` from a run that
+    correctly said `UNVERIFIED` and fail in both branches.
 
     ⛔ **Bounded with the tool's own bound** (`smc.ANCESTRY_TIMEOUT_S`). Unbounded,
     this oracle ran the exact probe the tool deliberately caps: on a partial clone
@@ -162,7 +195,13 @@ def _ancestry_is_verifiable_here() -> bool:
         )
     except subprocess.TimeoutExpired:
         return False
-    return probe.returncode == 0
+    if probe.returncode == 0:
+        return True
+    if probe.returncode == 1:
+        # "Not an ancestor" — or a graft-truncated walk. Only a complete history
+        # tells the two apart, which is exactly what the tool corroborates.
+        return _checkout_history_is_complete()
+    return False
 
 
 def test_the_shipped_map_is_clean() -> None:
@@ -173,10 +212,13 @@ def test_the_shipped_map_is_clean() -> None:
     any one of them (e.g. unregistering the doc from the index) reds this.
 
     ⚠️ The ancestry claim is the ONE exception and it is stated, not silently
-    skipped: a `fetch-depth: 1` checkout (the CI `test` job's) does not carry the
-    object, so the question is unanswerable THERE. The offline half is asserted
-    FIRST — in a shallow clone a real drift still reds this — and only then is the
-    ancestry half handed to the job that has the history.
+    skipped: a `fetch-depth: 1` checkout (the CI `test` job's) cannot adjudicate
+    it — the object may be ABSENT (an empty history answers 128) or PRESENT but
+    graft-unreachable (a truncated walk answers **1**, the status that otherwise
+    means drift), so the question is unanswerable THERE. The offline half is
+    asserted FIRST — in a shallow clone a real drift of any OTHER claim still
+    reds this — and only then is the ancestry half handed to the job that has the
+    history.
 
     The unverified arm accepts EITHER wording the tool uses for "this checkout
     cannot answer": the absent-object status arm and the bounded-probe timeout
@@ -191,9 +233,10 @@ def test_the_shipped_map_is_clean() -> None:
         assert len(result["unverified"]) == 1, result["unverified"]
         assert "cannot be verified here" in result["unverified"][0], result["unverified"]
         pytest.skip(
-            "shallow checkout: `measured_at_commit` is absent here, so the offline "
-            "half is all this job proves; the ancestry claim is proved by the "
-            "REQUIRED `docs` job, which checks out at fetch-depth: 0 and runs "
+            "this checkout cannot adjudicate the ancestry claim (`measured_at_commit` "
+            "is absent, or present but graft-unreachable in a shallow clone), so the "
+            "offline half is all this job proves; the ancestry claim is proved by "
+            "the REQUIRED `docs` job, which checks out at fetch-depth: 0 and runs "
             "`tools/substrate_map_check.py --check` unconditionally"
         )
     assert result["verdict"] == "CLEAN", result["problems"]
@@ -578,15 +621,67 @@ def test_a_sha_that_is_not_an_ancestor_is_drift(monkeypatch) -> None:
     ancestor" — a re-cut against a branch, a rebase that dropped the commit, or a
     sha from another repository. That IS a disagreement between the document and
     the tree, so it must never collapse into the state-error arm.
+
+    The completeness stub states the premise the status alone cannot carry: this
+    answer only means drift in a clone that CAN walk its whole history (see
+    `test_a_truncated_history_cannot_certify_drift` for the other half).
     """
     monkeypatch.setattr(
         smc.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess(a[0], 1, "", ""),
     )
+    monkeypatch.setattr(smc, "_is_shallow_clone", lambda: False)
     problems, unverified = smc.check_measured_at_commit(_doc())
     assert any("not an ancestor" in p for p in problems), problems
     assert unverified == [], unverified
+
+
+def test_a_truncated_history_cannot_certify_drift(monkeypatch) -> None:
+    """Fails if a SHALLOW clone's status-1 answer is scored as document drift.
+
+    ⛔ MEASURED on #10406 (`test (e)`, run 41183423096, 2026-10-31): the depth-1
+    `test` job reported `measured_at_commit 4f68a2aa7… is not an ancestor of HEAD`
+    and reded two required tests, while the REQUIRED `docs` job — the same check at
+    `fetch-depth: 0`, on the same head — passed, because the merge commit IS a
+    descendant of that commit. The object was present in the shallow clone
+    (`git cat-file -t` answers `commit`) and `--is-ancestor` exits **1** anyway:
+    the graft boundary cuts the walk, so a truncated history answers with the same
+    status an unrelated tree produces. The instruction that status carries — "the
+    document and the tree disagree — do not delete the row to make this green" —
+    is then wrong about a document that is right.
+
+    Reproduced in a real depth-1 clone of this repo: writing the object into the
+    clone's object DB makes `cat-file -t` succeed and `--is-ancestor` still exit 1
+    with `rev-parse --is-shallow-repository` answering `true`.
+
+    ⛔ Non-vacuous: on the pre-fix tool this test FAILS — the drift problem comes
+    back and `unverified` is empty. The fix corroborates status 1 with the
+    repository's own completeness and defers the claim to the `docs` job.
+
+    The unresolvable arm (`_is_shallow_clone()` → None: git answered the ancestry
+    probe but not this one) is asserted too — it cannot certify drift either, and
+    it must not claim the checkout IS shallow.
+    """
+    monkeypatch.setattr(
+        smc.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 1, "", ""),
+    )
+    monkeypatch.setattr(smc, "_is_shallow_clone", lambda: True)
+    problems, unverified = smc.check_measured_at_commit(_doc())
+    assert problems == [], problems
+    assert len(unverified) == 1, unverified
+    assert "cannot be verified here" in unverified[0]
+    assert "SHALLOW" in unverified[0], unverified
+    assert "is not an ancestor" not in unverified[0], unverified
+
+    monkeypatch.setattr(smc, "_is_shallow_clone", lambda: None)
+    problems, unverified = smc.check_measured_at_commit(_doc())
+    assert problems == [], problems
+    assert len(unverified) == 1, unverified
+    assert "cannot be verified here" in unverified[0]
+    assert "SHALLOW" not in unverified[0], unverified
 
 
 def test_an_unbounded_ancestry_probe_cannot_hang_the_gate(monkeypatch) -> None:
