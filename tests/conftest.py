@@ -226,13 +226,43 @@ install_tolerant_tempdir_cleanup()
 # required: a cold cache still degrades exactly as before, and the CI steps that
 # provision it (`Cache HF embedding model` + `Embedding model REQUIRED`) keep
 # owning availability.
-os.environ.setdefault(
-    "HF_HOME",
-    # `os.path.expanduser` NOT `Path.home()`: identical value, but it reads the
-    # same mechanism huggingface_hub does (`~` expansion of the ambient HOME at
-    # THIS instant), so the two cannot disagree about which cache "default" means.
-    os.path.expanduser(os.path.join("~", ".cache", "huggingface")),
-)
+def _default_hf_home(environ=None) -> str:
+    """The cache root `huggingface_hub` itself would resolve — re-derived, not assumed.
+
+    ⛔ The default is NOT unconditionally ``~/.cache/huggingface``: the vendor's
+    own `environment_variables` reference says it *"Defaults to
+    \"~/.cache/huggingface\" unless XDG_CACHE_HOME is set"*, and the constant is
+    built that way (``huggingface_hub/constants.py``, v1.27.0)::
+
+        default_home = os.path.join(os.path.expanduser("~"), ".cache")
+        HF_HOME = os.path.expandvars(os.path.expanduser(os.getenv("HF_HOME",
+            os.path.join(os.getenv("XDG_CACHE_HOME", default_home), "huggingface"))))
+
+    This helper mirrors that expression exactly (including `XDG_CACHE_HOME`
+    being honoured only when UNSET, i.e. `os.environ.get(key, default)` rather
+    than an `or`, which differ for a set-but-empty value). Pinning the
+    XDG-blind arm instead REDIRECTED the suite away from the cache the loader
+    would have used on any host that sets `XDG_CACHE_HOME` — re-introducing the
+    per-test cold load this pin exists to remove, on exactly those hosts, and
+    silently, because the old pin could only compare the env value to itself
+    (#10010 review F4). `tests/test_capture_session.py::
+    test_the_default_hf_home_is_the_one_the_vendor_would_resolve` drives the
+    real vendor constant in a subprocess and would fail on the old formula.
+
+    `os.path.expanduser` NOT `Path.home()` for the same reason the vendor uses
+    it: it reads the same mechanism (`~` expansion of the ambient HOME at THIS
+    instant), so the two cannot disagree about which cache "default" means.
+    """
+    env = os.environ if environ is None else environ
+    default_home = os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.expandvars(
+        os.path.expanduser(
+            os.path.join(env.get("XDG_CACHE_HOME", default_home), "huggingface")
+        )
+    )
+
+
+os.environ.setdefault("HF_HOME", _default_hf_home())
 
 from tortoise.embeddings import EmbeddingModel as _EmbeddingModelForTestLane  # noqa: E402
 

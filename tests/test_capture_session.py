@@ -260,7 +260,16 @@ def test_the_pinned_cache_is_the_one_huggingface_hub_froze():
     "any modification made afterwards will not be taken into account", so an
     ``HF_HOME`` set per-test would be inert. This asserts the constant the loader
     actually uses is the pinned one — the difference between a pin and a wish.
+
+    ``importorskip``, not a bare import (#10010 review F5): ``huggingface_hub``
+    arrives only through the ``embeddings`` extra, plain ``uv sync`` is a
+    documented supported state (``AGENTS.md`` → *"Plain ``uv sync`` (no extras)
+    yields a KEYWORD-ONLY product"*), and this file imports nothing
+    embedder-related at module level so it otherwise runs there. In a bare dev
+    env this must SKIP, not ERROR — the rule this repo already wrote down for
+    this package in ``tests/test_sdk_group3.py`` (#880).
     """
+    pytest.importorskip("huggingface_hub")
     from huggingface_hub import constants
 
     hf_home = Path(os.environ["HF_HOME"])
@@ -270,6 +279,51 @@ def test_the_pinned_cache_is_the_one_huggingface_hub_froze():
     assert Path(constants.HF_HUB_CACHE) == hf_home / "hub", (
         f"the hub cache ({constants.HF_HUB_CACHE}) is not under the pinned "
         f"HF_HOME ({hf_home})")
+
+
+def test_the_default_hf_home_is_the_one_the_vendor_would_resolve(tmp_path):
+    """#10010 review F4: the pin must name the cache the VENDOR would pick.
+
+    The pin's own justification used to be "identical value" to the vendor's
+    default, but it hardcoded the no-XDG arm: `huggingface_hub` resolves
+    ``$XDG_CACHE_HOME/huggingface`` when that variable is set, so on any such
+    host the pin REDIRECTED the suite away from the cache the loader would have
+    used — silently, because ``test_the_pinned_cache_is_the_one_huggingface_hub_
+    froze`` only compares the pinned env value to the frozen constant, which is
+    equal by construction once the pin has landed.
+
+    Discriminating, not self-referential: the vendor's OWN constant is built in
+    a subprocess from the same environment, for both arms of the fallback, and
+    the pin's helper must agree with it. The old hardcoded
+    ``~/.cache/huggingface`` disagrees on the XDG arm — which is what this test
+    would have caught.
+    """
+    import subprocess
+    import sys
+
+    from tests.conftest import _default_hf_home
+
+    base = {k: v for k, v in os.environ.items() if k not in ("HF_HOME", "XDG_CACHE_HOME")}
+    xdg = str(tmp_path / "xdg")
+
+    for label, extra in (("XDG unset", {}), ("XDG set", {"XDG_CACHE_HOME": xdg})):
+        env = {**base, **extra}
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "from huggingface_hub import constants; print(constants.HF_HOME)"],
+            env=env, capture_output=True, text=True, timeout=300)
+        if probe.returncode != 0:
+            pytest.skip(f"huggingface_hub not importable in this env: {probe.stderr[-300:]}")
+        vendor = probe.stdout.strip()
+        ours = _default_hf_home(extra)
+        assert ours == vendor, (
+            f"[{label}] the HF_HOME pin resolves to {ours!r} but "
+            f"huggingface_hub resolves {vendor!r} from the same environment — "
+            f"the pin must name the cache the loader would use, or the suite "
+            f"cold-loads on every test")
+
+    # The XDG arm is not decorative: it moves the answer.
+    assert _default_hf_home({"XDG_CACHE_HOME": xdg}) == str(Path(xdg) / "huggingface")
 
 
 # Legacy predicate name for negative-direction tests (#281). Kept as a
