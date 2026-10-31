@@ -1172,3 +1172,91 @@ def test_the_changelog_entry_names_the_section_the_stamp_actually_left():
         "the entry's other §-reference must name its document: a bare `§N` in this "
         "changelog reads as a STORAGE section"
     )
+
+
+_PLACEMENT_FRAMING = re.compile(
+    r"What the design document now says in that place, as design\s*—\s*"
+    r"the statements this entry is the record\s+for:"
+)
+# The two statements the entry once claimed under that framing and §9.1 does NOT
+# carry: the torn-tail TOLERATED decision (its home is `tortoise/log.py:204`) and
+# the tenant precedence the store decision asks (its home is
+# `tortoise/record_writer.py:842`/`:875`). Each token is the statement's own
+# identifier, so the split can be checked without reading prose.
+_CODE_SETTLED_TOKENS = ("torn", "record_tenant_effective", "is_usable_tenant")
+
+
+def test_the_carrier_entry_claims_91_only_for_what_91_carries():
+    """The bullets under *"in that place"* have to be statements §9.1 actually carries.
+
+    The entry exists to say **what left §9.1 and what §9.1 now carries**
+    (`#8542`: a lane reads this file instead of the design document), and it once
+    introduced five (later six) bullets with *"What the design document now says
+    in that place, as design"* — while two of them, **The torn tail** and **The
+    tenant**, appear in **no** section of `STORAGE-ARCHITECTURE.md`
+    (`record_tenant_effective` / `is_usable_tenant` / the torn-tail tolerance are
+    absent from the whole document). A reader re-verifying the record of a §9.1
+    edit opened §9.1 and found two of the stated design facts not there — the
+    *"a reader who follows the pointer reads exactly what is asserted here"*
+    failure the sibling legs in this file exist for.
+
+    So the entry splits: the bullets §9.1 carries stay under that framing, and
+    the two the CODE settles are introduced separately, each naming its own home.
+    Non-vacuity: at the pre-fix head (`ccbc0339e7de`) this reds on the first
+    assertion — `The tenant.` sits under the framing and carries
+    `record_tenant_effective` — and it stays green only while §9.1 carries
+    neither token (the second assertion), so the split cannot be reverted by
+    moving the text INTO §9.1 instead.
+    """
+    entry = _changelog_entry("§9.1's carrier paragraph")
+    sec_9_1 = _section_body(STORAGE, "9.1")
+
+    # Premise: the tokens really are absent from §9.1. If a later change puts them
+    # there, the separation below is no longer required — move the bullets back
+    # rather than deleting this pin.
+    leaked = [token for token in _CODE_SETTLED_TOKENS if token in sec_9_1]
+    assert not leaked, (
+        f"§9.1 now carries {leaked}, so the entry no longer needs to separate these "
+        "two statements — put their bullets back under the *\"in that place\"* "
+        "framing and delete this pin."
+    )
+
+    framing = _PLACEMENT_FRAMING.search(entry)
+    assert framing, (
+        "the entry no longer frames its bullet list as what §9.1 says in that "
+        f"place:\n{entry}"
+    )
+    under_framing = entry[framing.end():]
+    # The framed list ends at the first line that is neither a bullet nor a
+    # continuation of one — the entry's next paragraph.
+    bullets: list[str] = []
+    for line in under_framing.splitlines()[1:]:
+        if line.startswith("- "):
+            bullets.append(line)
+        elif line.startswith("  ") and bullets:
+            bullets[-1] += "\n" + line
+        elif line.strip():
+            break
+    assert bullets, (
+        "the *\"in that place\"* framing introduces no bullets — this pin cannot "
+        f"tell what it is claiming:\n{entry}"
+    )
+    framed = "\n".join(bullets)
+    misplaced = [token for token in _CODE_SETTLED_TOKENS if token in framed]
+    assert not misplaced, (
+        f"the entry says §9.1 states {misplaced} *\"in that place\"*, but "
+        "`docs/architecture/STORAGE-ARCHITECTURE.md` §9.1 carries none of them — "
+        "their homes are `tortoise/log.py:204` (the torn-tail TOLERATED decision) "
+        "and `tortoise/record_writer.py:842`/`:875` (the tenant precedence). "
+        "Introduce them under their own framing, naming those homes, or add the "
+        "statements to §9.1 — but adding them back to §9.1 is a `#8542` violation, "
+        "so the split is the repair.\n\nframed bullets:\n" + framed
+    )
+    # And the statements must still be REPORTED — the split may not be satisfied
+    # by dropping what the entry was written to record.
+    reported = [token for token in _CODE_SETTLED_TOKENS if token in entry]
+    assert set(reported) == set(_CODE_SETTLED_TOKENS), (
+        f"the entry no longer reports {set(_CODE_SETTLED_TOKENS) - set(reported)} at "
+        "all — the repair is to say WHERE those statements live, not to stop "
+        "recording them"
+    )

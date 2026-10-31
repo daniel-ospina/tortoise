@@ -1257,7 +1257,7 @@ def _live_write_verdict(
         return "unarmed", None, None
     if not durable:
         return "no_durable_journal", None, None
-    # ``record_tenant_effective`` IS HEAD's #10067 resolution and this is the call
+    # ``record_tenant_effective`` IS the #10067 resolution and this is the call
     # that keeps it load-bearing: **carried > scope > env pair**, in ONE place.
     # Spelling it as `tenant if tenant is not None else record_tenant()` here (what
     # main wrote) is the same VALUE but a second copy of the precedence rule — and
