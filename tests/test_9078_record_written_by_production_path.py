@@ -77,7 +77,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from tortoise import monitoring, record_projection, record_writer  # noqa: E402
+from tortoise import (  # noqa: E402
+    cache_projection,
+    monitoring,
+    record_projection,
+    record_writer,
+)
 from tortoise.record_writer import use_record_tenant  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
@@ -259,13 +264,20 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # the constraints, `DROP COLUMN IF EXISTS` on the generated column).
     (REPO_ROOT / "supabase" / "migrations"
      / "20261027000001_record_semantic_id_key.sql", None),
-    # #10017 R2 — a COLUMN plus a re-declared refusal for `public.point`, which
-    # this tree's readers parse from the FILES: on a container that predates it,
-    # `table_columns()`/`refused_props_names()` report `cache_tier` and the cache
-    # projection emits a predicate on a column the container does not have
-    # (`42703`) — every record-sourced rebuild fails. Re-apply safe by
-    # construction: `ADD COLUMN IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` +
-    # `ADD`, and `COMMENT ON` are all idempotent.
+    # #10017 R2's `public.point.cache_tier`. A COLUMN on a landed table, which is
+    # why it needs an entry rather than the CREATE-exists shortcut — and why the
+    # entry matters beyond tidiness: `table_columns()` reads the FILES, so the
+    # projection emits `cache_tier` in a turn row's INSERT while a container
+    # migrated by a pre-#10017 tree has no such column, and the row is lost to
+    # `42703 UndefinedColumn` with the capture receipt still reporting ok (the
+    # #2782 class, one migration later). Re-apply safe by construction:
+    # `ADD COLUMN IF NOT EXISTS`, `DROP CONSTRAINT IF EXISTS` + `ADD CONSTRAINT`
+    # (the CHECK and the props refusal both), the `COMMENT ON`, and
+    # `CREATE INDEX IF NOT EXISTS`.
+    # ⚠️ AND it is the one entry here that can silently SHRINK the props
+    # refusal: the SQL re-declaration REPLACES while the parser UNIONS, so
+    # apply-then-`refused_props_names()` can report names the database stopped
+    # refusing. Pinned by `tests/test_10017_cache_tier.py`.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261029000001_record_point_cache_tier.sql", None),
 ]
@@ -1947,6 +1959,75 @@ def _count(conn, table: str, tenant: tuple[str, str]) -> int:
         cur.execute(f"SELECT count(*) FROM public.{table} WHERE org_id=%s "
                     f"AND graph_id=%s", (org, graph))
         return int(cur.fetchone()[0])
+
+
+def test_the_cache_tier_is_read_from_a_migrated_postgres_not_a_stub(tenant):
+    """#10017 R2 — the TIER predicate and the EDGE exclusion, on the SCHEMA.
+
+    Review P2-4: `tests/test_10017_cache_tier.py` pins both predicates by
+    monkeypatching `cache_projection._rows`, which proves the READER spells them
+    and proves nothing about whether a migrated DATABASE accepts them. A column
+    the migration never adds (`42703`), a relation subquery the schema cannot
+    execute, or a predicate the planner silently ignores all pass a stub.
+
+    So this leg seeds a real Postgres carrying `RECORD_MIGRATIONS` and asserts
+    the ROWS through the production reader, as the app role:
+
+    * the `record_only` turn row is NOT projected (the R2 property — without it
+      `rebuild_from_record` re-creates the turn node the journal rebuild skips);
+    * its CONTAINS edge is NOT projected either (review P2-1: a relation to an
+      unprojected endpoint lands in `relations_not_written` for ever, which is
+      the operator's "declared partial" signal, and makes it worthless);
+    * the CONTROL is projected — a graph-tier point and its edge — so the filter
+      cannot be satisfied by dropping every row or every edge.
+    """
+    conn = _record_db()
+    _ensure_record_schema(conn)
+    _seed_tenant(conn, tenant)
+    org, graph = tenant
+    rows = [("p-graph", "graph", "a real claim"), ("sess-1_t0", "record_only",
+                                                 "a captured turn")]
+    with conn.cursor() as cur:
+        for key, _tier, _content in rows:
+            cur.execute(
+                "INSERT INTO public.node_identity "
+                "(org_id, graph_id, node_label, node_key) "
+                "VALUES (%s, %s, 'Point', %s) ON CONFLICT DO NOTHING",
+                (org, graph, key))
+        cur.execute(
+            "INSERT INTO public.node_identity "
+            "(org_id, graph_id, node_label, node_key) "
+            "VALUES (%s, %s, 'Session', 'sess-1') ON CONFLICT DO NOTHING",
+            (org, graph))
+        for key, tier, content in rows:
+            cur.execute(
+                "INSERT INTO public.point (org_id, graph_id, node_key, id, "
+                "content, point_kind, is_episodic, cache_tier) "
+                "VALUES (%s, %s, %s, %s, %s, 'statement', %s, %s)",
+                (org, graph, key, key, content, tier == "record_only", tier))
+        for idx, tgt in enumerate(("p-graph", "sess-1_t0")):
+            cur.execute(
+                "INSERT INTO public.relation (org_id, graph_id, rel_type, "
+                "src_label, src_key, tgt_label, tgt_key, idx) "
+                "VALUES (%s, %s, 'CONTAINS', 'Session', 'sess-1', 'Point', "
+                "%s, %s)", (org, graph, tgt, idx))
+
+    read = _record_replay_db()
+    try:
+        view = cache_projection.read_record_view(
+            read, org_id=org, graph_id=graph, labels=("Point",))
+    finally:
+        read.rollback()
+        read.close()
+
+    assert [n.key for n in view.nodes] == ["p-graph"], (
+        "the record_only turn row was projected into the graph — on a "
+        f"migrated Postgres, from a real row set: {[n.key for n in view.nodes]}")
+    assert [(r.src_key, r.tgt_key) for r in view.relations] == [
+        ("sess-1", "p-graph")], (
+        "the CONTAINS edge to the record_only turn was projected (or the "
+        "graph-tier control edge was lost) — one of the two makes the "
+        f"`relations_not_written` signal lie: {view.relations}")
 
 
 #: Fold refusals that are PRE-EXISTING defects of the projection — not of this

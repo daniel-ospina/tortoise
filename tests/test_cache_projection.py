@@ -607,12 +607,23 @@ def test_the_declared_fold_defaults_are_the_folds_own_constants():
         "`subjectKind='other'` literal this table transcribes for Subject — the "
         "stub-minted half of the constant drifted. Re-derive, do not guess."
     )
-    # The Object twin: `_event_plain_merge` writes `o.objectKind='other'` for the
-    # stub Object an event's mechanism link mints.
-    assert re.search(r"o\.objectKind='other'", fold), (
-        "the Object stub path (`_event_plain_merge` in projection/entities.py) "
-        "no longer writes the same `objectKind='other'` literal this table "
-        "transcribes — the stub-minted half of the constant drifted."
+    # The Object twin's SECOND home is RETIRED, and asserting the literal is
+    # GONE is the pin that keeps it retired. `_event_plain_merge` used to write
+    # `o.objectKind='other'` for the stub Object an event's mechanism link
+    # minted; #3590 D1/D9 removed that mint (an `EventRecorded`'s `object` is a
+    # MENTION: it resolves to a live holder or drops its link and mints
+    # nothing), so the fold has exactly ONE home for this constant now — the
+    # `ON CREATE SET … coalesce($ok, 'other')` clause pinned above. The
+    # Subject twin survives (`_mint_subject_stub`, asserted just above, the
+    # recorded bounded exception) — which is why this half is asserted in the
+    # NEGATIVE: a lane that re-adds an Object stub mint must come here and
+    # re-derive the table, instead of silently re-opening the two-home drift
+    # this pin exists to catch.
+    assert not re.search(r"o\.objectKind='other'", fold), (
+        "`o.objectKind='other'` is back in the fold source — that literal "
+        "belonged to the fold-side Object name-stub mint #3590 D1 retired. If "
+        "a stub mint is genuinely returning, re-derive "
+        "FOLD_ON_CREATE_DEFAULTS and this pin together."
     )
     # The values the patterns above force, asserted so the table cannot drift
     # while the patterns still match (they pin the CONSTRUCTION, not the literal).
@@ -1150,15 +1161,24 @@ def test_an_empty_carrier_is_not_a_supersession():
     `public.object_current_status` reads the carriers with `IS NOT NULL`, so a
     row whose `superseded_by` is `''` answers `'superseded'` there. The GRAPH
     does not agree, and the graph is what this cache is a cache OF. Measured on
-    a live engine at this head:
+    a live engine:
 
         update_entity(obj, supersededBy="")   ->  status='live',  supersededBy=''
         update_entity(obj, supersededBy="v2") ->  status='live',  supersededBy='v2'
 
-    So truthiness — not `IS NOT NULL` — is what agrees with the live node, and
-    the record VIEW is the side that over-reports on this edge (a defect in the
-    view, named in `DERIVED_FROM_RECORD`'s bound). Deriving on an empty carrier
-    would resurrect a node as TERMINAL that the graph holds LIVE.
+    ⚠️ #10192 CLOSED that write door — both shapes are now REFUSED unless the
+    same call supplies `status='superseded'` (`sdk._refuse_bare_lifecycle_
+    carrier`), so a NEW row cannot be minted this way. That refusal keys on the
+    record's carrier COLUMN (`record_projection.snake`), so it covers the snake
+    spelling of the same column too — a prop-name list of the camelCase pair
+    left `update_entity(obj, superseded_by="")` open (PR #10379 review P1). The
+    row is still
+    reachable (one written before the guard, and the record's own legacy
+    id-only `ObjectSuperseded`), which is why this reading is unchanged: truthiness
+    — not `IS NOT NULL` — is what agrees with the graph, and the record VIEW is
+    the side that over-reports on this edge (a defect in the view, named in
+    `DERIVED_FROM_RECORD`'s bound). Deriving on an empty carrier would
+    resurrect a node as TERMINAL that the graph holds LIVE.
     """
     for label in ("Object", "Subject"):
         node = _node(label, {"id": "e-1", "name": "epsilon",

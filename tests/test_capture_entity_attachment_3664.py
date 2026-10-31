@@ -149,12 +149,23 @@ def test_entity_linked_not_resurrected_by_same_id_recreate(journal_sdk):
     """A journaled ``EntityLinked`` whose endpoint is HARD-DELETED and then
     re-created under the SAME id must NOT be folded back on replay.
 
-    ``_fold_entity_linked`` is an unconditional MATCH…MERGE and ids are reused
-    routinely (``_entity_name_id`` is name-deterministic for Object/Subject;
-    Point ids are content-addressed ``pt_<sha>``), so without a hard-delete
-    boundary the deleted link RESURRECTED on replay while live had no such
-    edge (live != rebuild). Reached through the public surface:
-    ``sdk.delete_entity`` journals ``EntityMutated op=delete``.
+    ``_fold_entity_linked`` is an unconditional MATCH…MERGE and ids ARE reused
+    (``EntityMutated op=delete`` followed by a re-create that lands on the same
+    id: a replayed registration, a restored backup, an explicit
+    ``_server_id``), so without a hard-delete boundary the deleted link
+    RESURRECTED on replay while live had no such edge (live != rebuild).
+    Reached through the public surface: ``sdk.delete_entity`` journals
+    ``EntityMutated op=delete``.
+
+    ⚠️ MIGRATED (#3590 D1, owner RULED 2026-10-26). The same-id re-create used
+    to be spelled *create the same NAME again*: Object/Subject ids were
+    name-deterministic (``ids.entity_name_id``), so a second ``create_object
+    ("X")`` recomputed the deleted id. #3590 retires that — ids are minted,
+    and the same name now mints a SECOND entity (pinned by
+    ``test_delete_then_recreate_the_same_name_yields_two_entities`` in
+    ``tests/test_3590_minted_identity_acceptance.py``). The premise this module
+    actually needs is a re-create under the SAME ID, so it is stated directly
+    through ``_server_id`` rather than inferred from the name.
 
     MUTATION: drop the ``hard_delete_seqs`` staleness check from
     ``fold_deferred_entity_links`` → the edge returns after ``rebuild_all`` and
@@ -172,8 +183,10 @@ def test_entity_linked_not_resurrected_by_same_id_recreate(journal_sdk):
 
     assert sdk.delete_entity(oid) is True
     assert _live_link_count(g, pid, oid) == 0, "delete left the live link"
-    oid2 = sdk.create_object("X")["id"]
-    assert oid2 == oid, "id is not name-deterministic — test premise broken"
+    # The premise is the ID, not the name (#3590: ids are minted, and the same
+    # name yields a second entity) — so state the re-use explicitly.
+    oid2 = sdk.create_object("X", _server_id=oid)["id"]
+    assert oid2 == oid, "the re-create did not land on the deleted id"
     assert _live_link_count(g, pid, oid) == 0, (
         "re-creating the endpoint resurrected the live link")
 
@@ -201,7 +214,9 @@ def test_entity_linked_not_resurrected_in_apply_engines(journal_sdk):
     pid = sdk.create_point("statement", "attached")["id"]
     link_entity(proj, "Point", pid, oid, sdk=sdk)
     sdk.delete_entity(oid)
-    assert sdk.create_object("Y")["id"] == oid
+    # Same-ID re-create, stated explicitly (#3590: the name no longer derives
+    # the id — see the sibling test's migration note).
+    assert sdk.create_object("Y", _server_id=oid)["id"] == oid
 
     class _Log:
         def read_all(self):
@@ -284,8 +299,10 @@ def test_noop_link_after_hard_delete_does_not_resurrect(journal_sdk):
     assert _live_link_count(g, pid, oid) == 0, "delete left the live link"
     # Endpoint absent → the link is a NO-OP: 0 and no journal record.
     assert link_entity(proj, "Point", pid, oid, sdk=sdk) == 0
-    assert sdk.create_object("Z-noop")["id"] == oid, (
-        "id is not name-deterministic — test premise broken")
+    # Same-ID re-create, stated explicitly (#3590: the name no longer derives
+    # the id — see ``test_entity_linked_not_resurrected_by_same_id_recreate``).
+    assert sdk.create_object("Z-noop", _server_id=oid)["id"] == oid, (
+        "the re-create did not land on the deleted id")
     assert _live_link_count(g, pid, oid) == 0, (
         "re-creating the endpoint resurrected the live link")
 

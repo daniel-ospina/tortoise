@@ -42,8 +42,8 @@ unknown". The blockers are named with the artefact that has to move first.
 | **E2** *mechanism* — the carve-out reaches the prompt | `tests/test_extractor_v2.py::TestMasterList::test_operational_value_carve_out_surfaces`; `tests/test_value_gate_4899.py::test_2453_decision_relevant_identifier_survives` | green | the operational/state value carve-out is rendered into the **real** S1 slot and the **real** S2/S4 master list (verbose *and* core-only), and the mechanical predicate cannot fire on a decision-relevant value. This is **not** a registered criterion — `E2a` is the survival count below — it is the mechanism the survival criterion depends on | ✔ measured: deleting the carve-out append in the verbose render reds it (`OPERATIONAL-VALUE CARVE-OUT` absent from the rendered master list) |
 | **E2a** values *strictly survive* a capture (bar `>= 13 of 14`) | **none** — and the property does not hold: **1/14** value-bearing units survives (`#9775`) | red | nothing. The loss is **upstream of the filter** (OFF arm 2/14 vs ON 1/14, gate drops 0), i.e. an extraction/render loss, not a selection loss — `#9775`. ⚠️ Two different claims, kept apart: `#9775` **reports** 1/14, while the bundle's README marks the row **BLOCKED** because the frozen **14-unit denominator is carried by no committed artifact** (`README.md:65`) — a reported count is not a certified one | — (no test can prove a property the pipeline does not have) |
 | **E2b** the *fusion* control (bar `<= 0.05`) | **none** — no test executes it; the figure exists only as an artifact reading | not RED | the registered anti-gaming control: surviving planted units whose matched `Point` also matches another distinct surviving unit. The artifact figure is **1/114 = 0.008772** (`README.md:65`) — **a proxy, not the criterion**: `README.md:430-435` records that 1/114 is *"printed, and NOT used to green the row, because the artifact counts atomic Points, not surviving planted units"*, so it does **not** certify the registered denominator, and `README.md:70-71` states plainly that neither E1's nor E2's proxy may become the verdict. The row is BLOCKED with `E2a`, and for the same reason: no committed artifact carries the registered denominators | — (a criterion that must stay *low*; what it needs is an artifact on its registered denominator, not a proof) |
-| **E3** every derivation carries its anchor | **NONE — both halves of this pin were DELETED by #4282 (2026-10-27).** `tests/test_8501_capture_path_anchor.py::test_capture_anchors_every_extractedfrom_link` went with the whole file, and `tests/test_graph_census_7949.py::test_the_session_source_to_event_reference_anchor_is_counted` was one of 15 tests removed from a file that keeps 4 (its fixture drove the deleted `capture_session`; see that file's header for the four probes that measured the boundary). **The anchor invariant is therefore unpinned at this head** — the surviving census tests check the census's own instrument, error handling, ratio arithmetic and retraction, not anchor coverage. | unpinned — **the `green` this row used to report is no longer observable** | on a **real `capture_session`**: every `(Point)-[:extractedFrom]->` link records the version it was read from, and `references` anchored == total | ✔ measured: making the anchor never stamp a version reds it with the unanchored rows printed |
-| **E3** `:Object` included | **NONE — `tests/test_graph_census_7949.py::test_an_object_reached_only_by_aboutObject_has_no_derivation_link` was DELETED by #4282** (one of the 15; its fixture drove the deleted `capture_session`) | unobserved (the `:Object` fact was previously reported as a gap) | the capture's `:Object` carries **no derivation link at all** (`with_derivation_link == 0`), so E3's literal "every derived node" bar is unreachable **as registered** — an owner metric decision (`#9736`), not a defect a lane may repair | n/a — the pin exists so a change in this fact is noticed, not to green the row |
+| **E3** every derivation carries its anchor | `tests/test_8501_capture_path_anchor.py::test_capture_anchors_every_extractedfrom_link`; `tests/test_graph_census_7949.py::test_the_session_source_to_event_reference_anchor_is_counted` | green | on a **real `capture_session`**: every `(Point)-[:extractedFrom]->` link records the version it was read from, and `references` anchored == total | ✔ measured: making the anchor never stamp a version reds it with the unanchored rows printed |
+| **E3** `:Object` included | `tests/test_graph_census_7949.py::test_an_object_reached_only_by_aboutObject_has_no_derivation_link` | green (as a **reported gap**) | the capture's `:Object` carries **no derivation link at all** (`with_derivation_link == 0`), so E3's literal "every derived node" bar is unreachable **as registered** — an owner metric decision (`#9736`), not a defect a lane may repair | n/a — the pin exists so a change in this fact is noticed, not to green the row |
 | **E4** planted operator edges wired + persisted | **none on the unpatched leg.** `tests/eval/write_path/test_write_path_operator_lane.py` monkeypatches `extract_session_v2` and says so in its own docstring | red (5 of 15) | nothing about the product: a patched extractor cannot say whether the extractor *forms* the operators | — (the criterion is not implemented; no proof is possible) |
 | **E5** the falsifier is run on OUR corpus | `tests/eval/write_path/test_score_qualifiers.py::test_the_committed_score_artifact_regenerates_byte_identically` | green | a fresh run of the registered scorer over the committed arm receipts reproduces the committed score artefact **byte for byte** | (pre-existing; its own docstring names the mutation class — an edit to `MARKERS`, the 0.6 threshold or `classify()`) |
 | **E5** …and **written back into §10** | **ADDED HERE** — `tests/test_7949_e5_section10_writeback.py::test_section10_publishes_the_numbers_the_registered_falsifier_produces` | green | §10's replicated-run table publishes exactly the figures a fresh falsifier run produces — the write-back half of E5's criterion, which nothing in the tree checked | ✔ measured ×8: `52.0%` → `53.0%` in §10 reds; deleting the replicated subsection reds (heading named); moving the scorer's claim threshold `0.6 → 0.9` reds (instrument drift with no write-back); swapping the arms table's `recall` / `precision` HEADER labels reds (the cells are read by position, so without this the table could publish the wrong figure green); swapping the SPLIT table's `raw loss` / `narrative loss` header labels reds (before the fix it left the decision input published inverted, GREEN); `holdout \| bound` `Δ +16.7 pp` → `+99.9 pp` reds (the figure §10 calls *past branch 1's trigger*); a `tuning` split row's rate or loss count moved reds; `Δloss +10.0 pp` → `+11.0 pp` reds while `+10 pp`, `+10.00 pp`, `+16.67 pp` and `0.0 pp` stay green (the Δ cells are parsed on the document's printed precision, not text-compared) |
@@ -173,19 +173,32 @@ sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`)
 `tools/*.py` cite and the bare `:N` continuation below are invisible to it — stated
 here so "swept" is never read into a number nothing re-checks.
 
-The only entry point the capstone may drive was `TortoiseSDK.capture_session` — deleted by `#4282`, so the probes now REFUSE by name rather than measuring a different door. What follows was written against it. Its
-receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:12832` is the fold (`"stats": out.get("stats") or {}`) — while the
-extractor builds `result["classify_later"]` (`tortoise/extractor_v2.py:8965`) and
-`result["vet"]` (`:8975`) on a surface the receipt never carries. `#9116` is open and
-still true at this head.
+The only entry point the capstone may drive WAS `TortoiseSDK.capture_session` (**DELETED by
+#4282**, 2026-10-27 — the probes refuse by name now, and the surviving in-process door is
+`sdk._extract_session_v2`, which the hosted handler still reaches). Its receipt folded the
+extractor's `stats` and `error_census` and nothing else — `tortoise/sdk.py:13438` is the meta fold
+that #9116 replaced with `_capture_stats_with_step_witness(...)` — while the extractor builds
+`result["classify_later"]` (`tortoise/extractor_v2.py:8965`) and `result["vet"]`
+(`tortoise/extractor_v2.py:8975`) on the extractor's OWN return.
 
-⇒ **S2.2 and S2.3 are unobservable through the capstone's own entry point**, so any
-table `probes/capstone_measure.py` can emit today reports 6 of 8 steps observed and
-**no row it contains can be certified GREEN**, whatever the underlying numbers do.
-This is a limit of the instrument, not of the verdicts — and it is the reason the
-epic's closing rule is unsatisfiable until `#9116` lands, ahead of every row's own
-blocker.
+⛔ **`#9116`'s seam has since LANDED, and this paragraph is the pre-seam state
+it was written in.** The fold no longer forwards `stats` alone — it calls
+`_capture_stats_with_step_witness`, which copies each stage's own counts onto
+`stats["step_witness"]` (a sub-key of the `stats` key the receipt already
+carried, so no new receipt key and no SDK/MCP verb). S2.2 and S2.3 are
+therefore REACHABLE through the capstone's own entry point at this head; what is
+still true is that they were **absent on the `e0fc940b` run**, which is what the
+scored log and the 6-of-8 row set record.
+
+⇒ **A table measured BEFORE the seam reports 6 of 8 steps observed** and no row
+the already-scored log contains can be certified GREEN, whatever the underlying
+numbers do — that is a limit of the measurement's stamp, not of the verdicts.
+The seam does not by itself move a row: a row moves only by RE-RUNNING
+`probes/capstone_measure.py` at a post-seam head, which is what makes those two
+rows **witnessable** — S2.2 moves on such a re-run, while S2.3 moves only once its
+classify pass carries a non-empty `s2`/`union` (on the measured corpus it is IDLE,
+so a re-run still reports it unobserved). Until such a re-run is committed, the epic's closing rule
+stays unsatisfiable on the committed evidence, ahead of every row's own blocker.
 
 ---
 
@@ -194,9 +207,9 @@ blocker.
 **`#7949` is not closeable, and nothing this lane can land changes that.** Ranked by
 what would have to move:
 
-| to make this row closable | what has to land first | state (the audit is at `3fbca18ed`; every row re-read at `6986dcd4d`, 2026-10-27) |
+| to make this row closable | what has to land first | state (the audit is at `3fbca18ed`; every row re-read at `6986dcd4d`, 2026-10-27; the `#9116` row re-read at this PR's head) |
 |---|---|---|
-| **every row** (GREEN is unreachable) | `#9116` — copy `vet` / `classify_later` (at least) onto the capture receipt, so S2.2/S2.3 become observable | **OPEN** |
+| **every row** (GREEN is unreachable) | `#9116`'s seam has **LANDED** (this PR): `stats["step_witness"]` carries `vet` / `classify_later` (and the other six) on the capture receipt, so S2.2/S2.3 are now observable through the capstone's own entry point. What still has to land is a **committed post-seam re-run** — and on the measured corpus that re-run still reports S2.3 unobserved (its classify pass is IDLE), so it refuses at G5 | `#9116` **LANDED** (this PR); what it leaves open is V5's 8/8 scoping — the owner's explicit decision, on that issue |
 | E1 | `#5333` — **its design half is no longer pending; it was DECIDED on 2026-10-26** (`EXTRACTOR-V4-ARCHITECTURE.md:869`, commit `6986dcd4d`, PR `#10069`): a pass may **add**, may execute an authorised `MERGE`, and after COMMIT may not remove a committed row except through **the journaled `restatus` fold where no visible successor exists, or the D7 `ObjectSuperseded` arm where one does** (`ONLY` is scoped to the successorless case and never denies the D7 arm); a physical delete is **foreclosed to every pass**; the journaled `restatus` fold — the only permitted form of removal-from-recall where no visible successor exists — is **deferred until recall cost is measured** and writes nothing until a relocation pass is authorised, while the D7 `ObjectSuperseded` arm is **permitted now** where a visible successor exists (that is pre-existing supersession, not the deferred relocation). The same paragraph records the measurement that settles this row's shape: **"E1's share is moved by no non-destructive mechanism"** (the shipped gate drops 0 of 34 `^the <X>`; `value_gate`'s own docstring says a definite description is *"left to the arbiter, and is reported, not dropped"*). So the ruling did not hand E1 a mechanism — it foreclosed the one that would move the number. What stays open in `#5333` is **task 1, the owner's authorisation to ever RUN a relocation**, and even that buys only a deferred fold, never a delete | `#5333` **OPEN** (design half **decided**) |
 | E2 | `#9775` — the carve-out is absent on the compact render path; and the surviving-value loss (1 of 14) is upstream of the filter, so the row needs the extraction loss fixed, not the gate | **OPEN** |
 | E3 | `#9736` — the registered denominator counts `:Object` mention links, which carry no anchor **by design** (owner option A, `#5199`). Either the metric is re-registered or the model reopened: an owner decision, not a lane's | **OPEN** |
@@ -241,6 +254,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_7949_e5_section10_writeback.p
 TORTOISE_TEST_CARVE_OUT=1 \
 uv run pytest tests/test_e1_e2_measurement.py::test_the_shipped_arm_moves_the_share_by_exactly_zero \
               tests/test_extractor_v2.py::TestMasterList::test_operational_value_carve_out_surfaces \
+              tests/test_8501_capture_path_anchor.py \
               tests/test_graph_census_7949.py \
               tests/eval/write_path/test_score_qualifiers.py -q -p no:cacheprovider
 ```

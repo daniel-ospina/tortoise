@@ -946,6 +946,17 @@ def test_no_redirect_stems_registry_exact():
         # first registration pass added the other two and missed this, reding
         # `test-slow (c)` at edd8f7ee (the pin working as designed).
         "test_mechanism_write_path_9963",
+        # #3590 round-5 review F3: the minted-identity acceptance pins build
+        # `TortoiseSDK(<tmp_path>/t.db, event_log_path=…)` BY DB PATH and drive
+        # `rebuild_all(...)` against that store, so a URI-set lane would discard
+        # the path and connect the construction to the server — the
+        # `rebuild == live` replay this file exists to prove would certify a
+        # lane the file does not target. The file carries NO module-level
+        # `embedded_only` marker, so the load-bearing reason is the REDIRECT, not
+        # a skip. Registered in all THREE homes — config/ci-surfaces.yml
+        # `carve_out:`, TEST_NO_REDIRECT_STEMS and this declaration — so the pin
+        # redin on the addition is the pin working as designed.
+        "test_3590_minted_identity_acceptance",
         # #10121: the recency-tie pins construct per-test embedded SDKs from a
         # tmpfile path and read the tie ORDER back off them, so the module-level
         # `embedded_only` marker is load-bearing and the file belongs in the

@@ -244,6 +244,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_fallback_snapshot.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # ── DELIBERATE_URI: module-level live-FalkorDB probes (set + restore at
     #    import; the probe asserts the docker lane) ──────────────────────────
+    # #8933: the identifier-preservation mechanism's live half. The probe sets
+    # the lane URI, imports FalkorProjection, opens+closes it, and RESTORES the
+    # previous value in a `finally` — so the three sites (set to `_LANE_URI`,
+    # set back to `_old`, `pop` when it was unset) are one save/restore pair at
+    # import, and DELIBERATE_URI is the point: the whole claim under test is that
+    # RediSearch matches the written alias on a REAL FTS index, which no
+    # pure-function test can observe. Nothing leaks into a later docker-lane
+    # test, and an unreachable lane degrades to `LIVE = False` (skips), never to
+    # a silently-embedded green (`requires_live`, #6673 probe pattern).
+    "test_identifier_tokens_8933.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
@@ -697,6 +707,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # function-scoped `monkeypatch`, auto-undone at teardown (no lane leak).
     "test_7949_capstone_verdict_check.py": [
         r'monkeypatch\.(?:setenv|delenv)\(\s*"TORTOISE_DB_URI"'],
+    # #9889: the three capstone probes read `TORTOISE_DB_URI` for the graph URI
+    # they census, so `main()` cannot run without one — the `setenv` sites point it
+    # at the deliberately-UNREACHABLE `docker://:@127.0.0.1:1/tortoise_test`
+    # (DELIBERATE_URI: nothing connects, every graph read is stubbed at the seam
+    # the probe calls, and the URI is the test input that the probe's own
+    # refusal/measurement branch depends on) — and `test_the_e2a_probe_refuses_a_
+    # run_with_no_backend` `delenv`s it (DELIBERATE_EMBEDDED_LANE: the absent-URI
+    # fallback IS what the refusal must catch). Both function-scoped, auto-undone
+    # at teardown.
+    "test_9889_capstone_probes.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # ⛔ NO second `test_9079_event_writers_journal.py` row here. This branch had
     # added the BROAD form (`r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'`) at
     # this anchor, while `main` carries the NARROW one above and deliberately

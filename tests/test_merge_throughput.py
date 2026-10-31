@@ -4061,10 +4061,18 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         "pip install -e . --quiet\n"
         "python3 tools/bridge_table.py --check\n"
         "python3 tools/mcp_rename_table.py --check\n"
-        "python3 tools/sdk_surface.py --check"
+        "python3 tools/sdk_surface.py --check\n"
+        # #5086: the substrate map's doc↔tree guard joins this step for the same
+        # `#4454` reason (a docs-only edit selects no surface, and `docs` is the
+        # only required context with no `paths:` filter), plus its own: its
+        # `measured_at_commit` ancestry claim needs HISTORY, and this job is the
+        # one that checks out at `fetch-depth: 0` (#5086 review P1-1). It is
+        # listed INSIDE the exact list rather than exempted — the exactness of
+        # this assertion is the whole point.
+        "python3 tools/substrate_map_check.py --check"
     )
     assert code.strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the three "
+        "the drift step must invoke EXACTLY the installer plus the four "
         "`--check` commands — no shell operator, no wrapper, no trailing "
         f"anything, or a real failure reports green (#2656); got {code!r}"
     )

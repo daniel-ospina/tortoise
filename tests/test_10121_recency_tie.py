@@ -38,6 +38,8 @@ import os
 import shutil
 import sys
 import tempfile
+import time
+import types
 
 import pytest
 
@@ -50,15 +52,67 @@ pytestmark = pytest.mark.embedded_only
 
 _SDKS: list[TortoiseSDK] = []
 
-#: The identifier-shaped query, reduced by the shipped `keep_numeric=False`
-#: policy to `capstone|write|probe` (the #8933 control, untouched here) — so
-#: every look-alike below matches the same three OR-terms.
-QUERY = "capstone-9664 write probe 2026-10-26"
+#: ⛔ #8933 RE-PIN (the corpus only — every FAIL VALUE below is unchanged).
+#: This module used to spell its query `capstone-9664 write probe 2026-10-26`
+#: and claimed the `keep_numeric=False` policy reduced it to
+#: `capstone|write|probe`, i.e. that "the #8933 control is untouched here".
+#: #8933 IS touched now, and its reopen (the owner ruling on #8933, 2026-10-26)
+#: means an identifier-shaped query no longer collapses to its bare words:
+#: `build_or_query` emits `capstone|write|probe|capstone9664|"capstone 9664"`
+#: and the WRITE side stores `capstone9664` on the target's `search_keys`, so the
+#: target and the look-alikes stop tying (measured on the shipped tree:
+#: `{1.857143, 2.0}`). That differentiates BY DESIGN — it is the ruling's own
+#: goal, not a #10121 regression — so the tie this module measures (the SCORE tie
+#: #10121 truncates on) has to be spelled on a corpus the identifier tokenizer is
+#: silent on: bare numbers only (`variant 9001` is numeric noise on both sides,
+#: no `<letter>-<digits>` span anywhere), which ties at a uniform score.
+#: The pin that keeps the re-pin from laundering anything: the corpus/query pair
+#: is asserted to carry NO derived alias and NO phrase term below.
+#:
+#: ⚠️ The fresh point must stay the SAME LENGTH as a look-alike: the BM25 arm
+#: normalises by document length, so giving the target a shorter body would
+#: separate the scores by a mechanism that has nothing to do with #10121. The
+#: look-alikes and the target therefore differ in exactly one numeric token —
+#: the same relationship the pre-#8933 corpus had, minus the identifier shape.
+#: The digits sit inside PARENTHESES, and that is load-bearing: `probe 9664`
+#: (a word, a space, digits) is itself an identifier span on the READ side, so
+#: the query would mint `probe9664` + `"probe 9664"` and re-break the tie —
+#: measured: `capstone write probe 9664` -> `capstone|write|probe|probe9664|
+#: "probe 9664"`. A punctuation guard (`(`) keeps the numeric token numeric.
+QUERY = "capstone write probe (9664)"
 
 #: Look-alikes: the SAME shape as the target, differing only in the digits the
 #: tokenizer drops. Every one of them scores identically to the target.
 def _lookalikes(n: int) -> list[str]:
-    return [f"capstone-{9000 + i} write probe 2026-10-2{i % 9}" for i in range(n)]
+    return [f"capstone write probe ({9000 + i})" for i in range(n)]
+
+
+def test_the_tie_corpus_is_one_the_identifier_tokenizer_is_SILENT_on():
+    """The uniform-score premise is a property of the SHIPPED tokenizer.
+
+    #8933's mechanism is additive and correct: an identifier-shaped corpus
+    differentiates (that is the ruling's intent, pinned in
+    ``tests/test_identifier_tokens_8933.py``). This module needs the opposite —
+    a corpus the tokenizer cannot tell apart — so the choice is pinned HERE, at
+    the corpus, instead of being left to fail as a TIE PREMISE assertion inside
+    a 200-point sweep. It also measures the tokenizer the re-pin was made
+    against, so a change to `identifier_alias`'s shape surfaces here rather
+    than as a corpus that silently stopped tying.
+    """
+    from tortoise.projection.entities import point_identifier_aliases
+    from tortoise.sparse import build_or_query, identifier_alias, identifier_phrase_terms
+
+    assert build_or_query(QUERY) == "capstone|write|probe", build_or_query(QUERY)
+    # ... and the arm that would have been added for an identifier still works,
+    # so "the corpus derives nothing" is a statement about THIS corpus, not
+    # about a tokenizer that stopped deriving.
+    assert identifier_alias("capstone-9664") == "capstone9664"
+    assert identifier_phrase_terms("capstone-9664") == ['"capstone 9664"']
+    for text in (QUERY, *_lookalikes(3)):
+        assert point_identifier_aliases({"content": text}) == [], (
+            f"the tie corpus derives an alias for {text!r} — it is "
+            "identifier-shaped again, and #8933 differentiates identifier "
+            "corpora BY DESIGN, so the uniform-score premise cannot hold")
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +166,95 @@ def _sdk() -> TortoiseSDK:
     return sdk
 
 
+# ── the leg is a DEPENDENCY, never the measurement ────────────────────────────
+
+#: How long ONE attempt at the FTS leg may take, and how long this file will keep
+#: re-asking before it refuses to measure. The 500 ms default `run_fts_query`
+#: ships is a PRODUCTION latency policy (a slow leg is degraded, not waited on); a
+#: fixture query on a COLD index on a loaded 10-CPU runner is not what that policy
+#: is about, and passing it here is what made this file's failures unreadable.
+_LEG_TIMEOUT_MS = 5000
+_LEG_DEADLINE_S = 60.0
+
+
+def _fts_rows(graph, query, *, limit, entity_type="point",
+              excluded_statuses=None, deadline_s: float = _LEG_DEADLINE_S):
+    """The FTS leg's rows — or a REFUSAL that names why there are none.
+
+    ⛔ ``excluded_statuses`` DEFAULTS TO ``None`` — ``run_fts_query``'s OWN
+    default — and that is load-bearing, not stylistic. The two values are not
+    near-synonyms: ``None`` applies ``TERMINAL_EXCLUDED_STATUSES``, while ``()``
+    emits NO status predicate at all (``search_engine.run_fts_query`` gates every
+    one of its status clauses on ``excluded_statuses == ()`` — ``:1589`` for the
+    operator leg, ``:1681`` for the point/object FTS leg — and otherwise falls
+    back to ``excluded_statuses or TERMINAL_EXCLUDED_STATUSES``), so ``()`` ranks
+    over a WIDER pool than ``None``. Six call sites in this file
+    (``limit=10``/``limit=25``/``limit=n + 5`` on ``QUERY``) reached the leg
+    through that default before this file grew a helper; a helper defaulting to
+    ``()`` would have widened their pool to include terminal-status rows and
+    silently changed what those legs measure — a fixture-semantics drift with no
+    assertion pointing at it. Pass ``()`` EXPLICITLY where no status predicate is
+    wanted (the Object fixtures below do, exactly as they did before).
+
+    Every test in this file measures a RANKING, so a leg that did not answer is
+    not a weak version of the measurement, it is none of it: `run_fts_query`
+    returns ``[]`` for FOUR different reasons (``query_failed``,
+    ``breaker_open``, ``index_missing``, ``empty_results``) and only the last one
+    is about the data. Reading ``[]`` as "no row led the window" publishes the
+    opposite of the truth, which is exactly how this file red-ed a CI shard with
+    a premise assertion whose message was bare ``[]``:
+
+        run 41007224545, job 123914139467, shard (b) —
+        `test_an_id_less_row_does_not_lead_a_tie_group_without_timestamps`
+        failed with `TIE PREMISE BROKEN: ...: []`.
+
+    Measured cause (reproduced on this host, `.repro_breaker.py`): the driver-side
+    ``timeout=500`` KILLS a cold Object index's first query after ~4.5 s →
+    ``reason='query_failed'``; three consecutive ones open the module-level
+    breaker, and then every later call in the SAME pytest worker short-circuits to
+    ``[]`` with ``reason='breaker_open'`` while the same query answers 4 rows as
+    soon as the breaker is reset. It passes in isolation and fails on a shard —
+    the fixture is fine, the INSTRUMENT was reading the leg's silence as a verdict.
+
+    So: reset the module-level breaker (per-worker shared state that an earlier
+    test in the shard can leave OPEN), give each attempt a fixture-appropriate
+    timeout, retry while the deadline holds, and then REFUSE with the leg's own
+    recorded reason rather than return an empty list. `leg_trace` is the leg's own
+    account of what it did (#1542) — this reads the instrument instead of
+    guessing from its output.
+    """
+    from tortoise.search_engine import reset_circuit_breakers
+
+    deadline = time.monotonic() + deadline_s
+    reasons: list[str] = []
+    while True:
+        # An OPEN breaker is a statement about an earlier failure, not about this
+        # query — and it is module state shared by every test in the worker.
+        reset_circuit_breakers()
+        trace: list[dict] = []
+        rows = run_fts_query(graph, query, entity_type=entity_type, limit=limit,
+                             excluded_statuses=excluded_statuses,
+                             timeout_ms=_LEG_TIMEOUT_MS, leg_trace=trace)
+        entry = trace[-1]
+        reasons.append(entry["reason"])
+        if entry["reason"] == "ok":
+            return rows
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                "THE FTS LEG DID NOT ANSWER, so this file cannot measure a "
+                f"RANKING: {query!r} → reason={entry['reason']!r} "
+                f"ran={entry['ran']} degraded={entry['degraded']} "
+                f"count={entry['count']} after {len(reasons)} attempt(s) in "
+                f"{deadline_s:.0f}s (reasons seen: {reasons}). An empty result is "
+                "indistinguishable from a leg that never ran, which is what "
+                "`leg_trace` exists for (#1542) — retry the leg, never read `[]` "
+                "as 'the id key decided'. A `query_failed` here is the driver's "
+                f"{_LEG_TIMEOUT_MS} ms timeout killing a COLD index's first "
+                "query; a `breaker_open` is that failure counted three times "
+                "over, short-circuiting this worker for 30 s.")
+        time.sleep(0.2)
+
+
 # ── the acceptance sweep ──────────────────────────────────────────────────
 
 
@@ -129,10 +272,10 @@ def test_fresh_match_survives_the_tie_at_every_corpus_size():
             sdk.create_point("statement", content)
         fresh = sdk.create_point("statement", QUERY)["id"]
 
-        rows = run_fts_query(graph, QUERY, limit=10)
+        rows = _fts_rows(graph, QUERY, limit=10)
         ids = [pid for pid, _ in rows]
         assert len(rows) == 10, f"FIXTURE NOT REACHED (n={n}): leg not saturated"
-        full = run_fts_query(graph, QUERY, limit=n + 5)
+        full = _fts_rows(graph, QUERY, limit=n + 5)
         assert len({round(s, 6) for _, s in full}) == 1, (
             f"TIE PREMISE BROKEN (n={n}): the corpus no longer scores "
             f"uniformly — this sweep exists for the all-tied case")
@@ -154,7 +297,7 @@ def test_the_tie_ranks_the_fresh_match_first_not_last():
         sdk.create_point("statement", content)
     fresh = sdk.create_point("statement", QUERY)["id"]
 
-    rows = run_fts_query(graph, QUERY, limit=25)
+    rows = _fts_rows(graph, QUERY, limit=25)
     assert rows, "FIXTURE NOT REACHED: the query matched nothing"
     scores = {round(score, 6) for _, score in rows}
     assert len(scores) == 1, (
@@ -208,14 +351,14 @@ def test_id_less_rows_do_not_reach_the_head_of_the_window():
             params={"name": name},
         )
 
-    rows = run_fts_query(graph, "obj dated", entity_type="object", limit=3,
-                         excluded_statuses=())
+    rows = _fts_rows(graph, "obj dated", entity_type="object", limit=3,
+                     excluded_statuses=())
     ids = [pid for pid, _ in rows]
     assert len(ids) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {rows}"
     # TIE PREMISE: the five Objects must score identically or this test measures
     # the score key, not the NULL guard.
-    full = run_fts_query(graph, "obj dated", entity_type="object", limit=10,
-                         excluded_statuses=())
+    full = _fts_rows(graph, "obj dated", entity_type="object", limit=10,
+                     excluded_statuses=())
     assert len({round(s, 6) for _, s in full}) == 1, (
         "TIE PREMISE BROKEN: the Object fixture no longer ties on score "
         f"({full}) — the recency key is not what is being tested here"
@@ -256,7 +399,7 @@ def test_legacy_ids_do_not_outrank_a_freshly_minted_point():
         )
     fresh = sdk.create_point("statement", QUERY)["id"]
 
-    rows = run_fts_query(graph, QUERY, limit=10)
+    rows = _fts_rows(graph, QUERY, limit=10)
     ids = [pid for pid, _ in rows]
     assert fresh in ids, "FIXTURE NOT REACHED: the fresh point is not in the leg"
     assert ids[0] == fresh, (
@@ -291,7 +434,7 @@ def test_updated_at_beats_created_at():
             params={"id": pid, "c": created, "u": updated},
         )
 
-    ids = [pid for pid, _ in run_fts_query(graph, QUERY, limit=10)]
+    ids = [pid for pid, _ in _fts_rows(graph, QUERY, limit=10)]
     assert ids, "FIXTURE NOT REACHED: the leg returned no rows"
     assert ids[0] == "edited-late", (
         "the tie must follow the latest REVISION (updatedAt before createdAt), "
@@ -335,7 +478,7 @@ def test_an_empty_updated_at_falls_through_to_created_at():
         "CREATE (n:Point {id:'older-dated', content:'capstone-9664 write "
         "probe', pointKind:'statement', createdAt:'2026-01-01T00:00:00Z', "
         "updatedAt:'2026-01-01T00:00:00Z'})")
-    ids = [pid for pid, _ in run_fts_query(graph, QUERY, limit=10)]
+    ids = [pid for pid, _ in _fts_rows(graph, QUERY, limit=10)]
     assert ids[:1] == ["empty-updated"], (
         "a row with an EMPTY updatedAt must fall through to its createdAt "
         f"rather than sorting as oldest: {ids}")
@@ -588,14 +731,14 @@ def test_an_id_less_row_does_not_lead_a_tie_group_without_timestamps():
             "CREATE (o:Object {name:$n, objectKind:'concept', "
             "content:'obj dated probe'})", params={"n": f"obj dated {suffix}"})
 
-    full = run_fts_query(graph, "obj dated", entity_type="object", limit=10,
-                         excluded_statuses=())
+    full = _fts_rows(graph, "obj dated", entity_type="object", limit=10,
+                     excluded_statuses=())
     assert len({round(s, 6) for _, s in full}) == 1, (
         "TIE PREMISE BROKEN: the Object rows must score identically, or the id "
         f"key is not what this test measures: {full}"
     )
-    rows = run_fts_query(graph, "obj dated", entity_type="object", limit=2,
-                         excluded_statuses=())
+    rows = _fts_rows(graph, "obj dated", entity_type="object", limit=2,
+                     excluded_statuses=())
     ids = [pid for pid, _ in rows]
     assert len(ids) == 2, f"FIXTURE NOT REACHED: expected 2 rows, got {rows}"
     assert ids[0] == "obj-aaa", (
@@ -603,3 +746,114 @@ def test_an_id_less_row_does_not_lead_a_tie_group_without_timestamps():
         "the cypher id key is sorting NULL first, so the pool is spent on rows "
         f"the caller cannot address (#10121 round-4 P1): {ids}"
     )
+
+
+# ── the instrument's own pin: a silent leg is REFUSED, never read as a ranking ─
+
+
+class _LegScript:
+    """A graph whose FTS leg answers with a scripted outcome per call.
+
+    Each outcome is either an exception to raise or the ``result_set`` to
+    return; the last one repeats. Engineless on purpose — this pins the
+    INSTRUMENT, so it must cost nothing and depend on nothing.
+    """
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        out = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
+        self.calls += 1
+        if isinstance(out, BaseException):
+            raise out
+        return types.SimpleNamespace(result_set=out)
+
+
+def test_the_shard_failure_signature_now_NAMES_the_leg():
+    """The exact `[]` this file reported on run 41007224545 can no longer be read
+    as a verdict, and the refusal says which of the four reasons it was.
+
+    FAIL VALUE: return the leg's rows unread (the pre-fix line did exactly that —
+    `full = run_fts_query(...)`, then `len(set()) == 1` over it) and this reds on
+    an EMPTY list instead, with no mention of the leg.
+    """
+    for outcome, reason in (
+            (([], None), "empty_results"),
+            ((Exception("Connection timeout"), None), "query_failed"),
+            ((Exception("graph index does not exist"), None), "index_missing"),
+    ):
+        graph = _LegScript(*outcome)
+        with pytest.raises(AssertionError) as ei:
+            _fts_rows(graph, "obj dated", entity_type="object", limit=10,
+                      deadline_s=0.0)
+        msg = str(ei.value)
+        assert f"reason={reason!r}" in msg, (reason, msg)
+        assert "cannot measure a RANKING" in msg, msg
+        assert "never read `[]` as 'the id key decided'" in msg, msg
+        # it must NOT masquerade as a returned value
+        assert not isinstance(ei.value, type(None))
+
+
+def test_the_refusal_cannot_be_reached_by_a_SUCCEEDING_leg():
+    """Non-vacuity for the pin above: a leg that answers is returned as-is."""
+    graph = _LegScript([("p1", 2.0), ("p2", 2.0)])
+    assert _fts_rows(graph, "obj dated", limit=10, deadline_s=0.0) == [
+        ("p1", 2.0), ("p2", 2.0)]
+    assert graph.calls == 1, "a healthy leg must be asked exactly once"
+
+
+def test_the_leg_is_RETRIED_on_a_cold_index():
+    """A cold index's first query is the failure the shard hit, and it is
+    transient — one retry is the difference between a flake and a red."""
+    graph = _LegScript(Exception("Connection timeout"), [("p1", 2.0)])
+    assert _fts_rows(graph, "obj dated", limit=10) == [("p1", 2.0)]
+    assert graph.calls == 2, "the retry did not re-ask the leg"
+
+
+def test_an_open_breaker_from_an_EARLIER_test_does_not_decide_this_one():
+    """The breaker is module state shared by every test in a pytest worker, so a
+    query-failure storm in another file could otherwise red THIS file with `[]`.
+
+    FAIL VALUE: drop the `reset_circuit_breakers()` call and `run_fts_query`
+    short-circuits to `[]` with `reason='breaker_open'` even though the engine
+    answers — the shard's signature.
+    """
+    from tortoise.search_engine import _breaker
+
+    for _ in range(_breaker("fts").fail_threshold):
+        _breaker("fts").record_failure()
+    assert _breaker("fts").is_open(), "the fixture did not actually open it"
+
+    graph = _LegScript([("p1", 2.0)])
+    assert _fts_rows(graph, "obj dated", limit=10, deadline_s=0.0) == [("p1", 2.0)]
+    assert graph.calls == 1, "an OPEN breaker short-circuited the leg"
+
+
+def test_the_helper_ranks_the_SAME_pool_the_engine_does_by_default():
+    """The port must not widen the pool it ranks over (#10121 review cycle, P2).
+
+    ⛔ `run_fts_query`'s default is ``None`` — ``TERMINAL_EXCLUDED_STATUSES`` is
+    applied — while ``()`` means NO status predicate at all, so the two rank over
+    different pools. Six legs in this file reached the engine through that default
+    before the helper existed (``limit=10`` / ``limit=25`` / ``limit=n + 5`` on
+    ``QUERY``); a helper defaulting to ``()`` silently ranked them over
+    terminal-status rows as well, and no assertion in the file pointed at it.
+
+    FAIL VALUE: default ``_fts_rows`` to ``()`` — this reds. Deriving the two
+    defaults from the two signatures (rather than comparing to a typed ``None``)
+    also catches the day the ENGINE's default moves, which is the half a reader
+    of this file cannot see.
+    """
+    import inspect
+
+    from tortoise import search_engine
+
+    helper = inspect.signature(_fts_rows).parameters["excluded_statuses"].default
+    engine = inspect.signature(
+        search_engine.run_fts_query).parameters["excluded_statuses"].default
+    assert helper == engine, (
+        "the fixture helper's status pool drifted from run_fts_query's default: "
+        f"helper={helper!r} engine={engine!r} — None applies "
+        "TERMINAL_EXCLUDED_STATUSES, () applies NO status predicate at all")

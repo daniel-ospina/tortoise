@@ -237,11 +237,14 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     "SessionNarrated": {"id": "e1", "sessionId": "sess1",
                        "story_arc": "the session, told as prose",
                        "summary": "one line"},
-    # #10017: the raw-TURN carrier. Its producer is step 7, so this is the shape
-    # that producer will emit: the capture writer's own per-turn snapshots
+    # #10017: the raw-TURN carrier. This is the shape its producer (step 7)
+    # emits: the capture writer's own per-turn snapshots
     # (`record_projection.TURNS_SNAPSHOT_KEYS`) under `turns`, with the
     # `contains_session` link on the ENVELOPE (#3947) — not an invented shape.
-    # It declares `NoRecordEffect`, so it must produce NO statement at all.
+    # It declares `NoRecordEffect` (no NODE — §9.1/D1), and its row statements
+    # come from the CARRIER-keyed projection `_turn_row_statements`, so the
+    # totality leg below must see statements here (an empty set would mean the
+    # turn never reaches the record, which is the migration's whole point).
     "TurnsRecorded": {"id": "e1", "sessionId": "sess1",
                       "contains_session": "sess1",
                       "turns": [{"id": "sess1_t0", "content": "hi",
@@ -289,6 +292,24 @@ def test_each_declared_type_materializes_or_declares_a_no_effect(record_type):
                 "statement — the shape-keyed secondary projection did not fire")
             assert any(rp.NARRATIVE_TABLE in s.sql for s in statements), (
                 f"{record_type}'s statements do not touch {rp.NARRATIVE_TABLE}")
+        elif record_type == rp.TURNS_RECORD_TYPE:
+            # #10017 step 7: the raw-turn carrier is the second such type — its
+            # RECORD home is `public.point` (one row per turn, tier
+            # `record_only`), declared by the carrier-keyed
+            # `_turn_row_statements` rather than by a node effect, because its
+            # payload is a LIST of snapshots and no node exists (§9.1/D1).
+            assert statements, (
+                "the raw-turn carrier produced no statement — the capture's "
+                "turns would reach no store at all")
+            assert any("INSERT INTO public.point" in s.sql for s in statements)
+            # ⛔ There is no `assert not any("INSERT INTO public.node" ...)`
+            # here: no migration creates a `public.node` table
+            # (`rp.NODE_TABLES` is source/event/session/object/subject/point),
+            # so that string cannot appear in any plan — the assertion could not
+            # fail, and it would have passed identically on the pre-fix code. A
+            # guard that cannot fire is worse than none: it reads as coverage.
+            # Its twin was removed from `tests/test_10017_record_carrier.py`
+            # for exactly this reason.
         else:
             assert statements == []
         # A declared no-op must say WHY. "No reason" is the silent skip.

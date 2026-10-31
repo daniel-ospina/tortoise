@@ -13,32 +13,35 @@ a stamp for any capstone log (the shipped log is stamped at `027c8c1ab`; see
 ``README.md``). Two of the body's statements are STALE and this probe is built on
 the corrected reading:
 
-1. **A single entry point DOES exist.**
-   The body says *"whether any single
+1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
-   the SDK's capture door → ``sdk._extract_session_v2`` (``sdk.py:12004``) →
+   ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
+   (``sdk.py:12610``, called from the hosted capture lane at ``tortoise/hosted_api.py:15508``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8484``) calls
    ``_edus_from_conversation`` (S0, ``:8599``), ``run_s1`` (S1, ``:8632``),
    ``run_s2`` (S2.1, ``:8656``), ``_run_vet_pass`` (S2.2, ``:8685``),
-   ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3,
-   ``:8700``), ``search_graph`` (S3, ``:8717``), ``run_s4`` (the gap filler,
-   ``:8738``), and ``execute_embed`` (S5+S6, ``:8937``).
-   ⚠️ #4282 deleted ``capture_session``, the SDK's ONLY caller of
-   ``_extract_session_v2``, so no ``sdk.py`` call-site cite is printed; the hosted
-   handler still reaches the helper (``tortoise/hosted_api.py:15503``), which is why
-   the claim is scoped to the SDK.
-   The SYMBOL is
-   authoritative and the line is a convenience: the three FILE-NAMED cites
-   above are resolved against the tree by the bundle's pin, and these eight
-   bare step cites are re-read by that same pin file
-   (`tests/test_7949_capstone_verdict_check.py`,
-   `test_the_readmes_line_citations_resolve_to_the_symbols_they_name`). They
-   need that separate leg because a bare `:NNNN` carries no filename, so the
-   bundle's own sweep (`_BUNDLE_CITE`) cannot see them: `#10243` moved
-   `extractor_v2.py` by +88 and all eight went stale while every pin stayed
-   green, which this sentence used to deny by pointing at a README cross-pin
-   `#10211` had already invalidated. No line here is claimed to be
-   self-detecting on its own. (No derivation head is named here on purpose: the
+   ``kind_classifier.classify_items`` (S2.3, ``:8700``),
+   ``_apply_classify_kinds`` (S2.3, ``:8701``), ``search_graph`` (S3,
+   ``:8717``), ``run_s4`` (the gap filler, ``:8738``), and ``execute_embed``
+   (S5+S6, ``:8937``). ONE cite per symbol, on the line that symbol is on:
+   S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
+   ``a``/``b`` pair cite could carry is only ever checkable for one of them —
+   that pair form is how ``_apply_classify_kinds`` sat on ``:8700`` (naming
+   ``classify_items``' line) while the README's one-symbol row was right. The
+   SYMBOL is authoritative and the line is a convenience — the three
+   FILE-NAMED cites above are resolved against the tree by the bundle's pin,
+   and EACH of the nine bare step cites is resolved by the same pin
+   (``tests/test_7949_capstone_verdict_check.py::
+   test_the_probes_line_citations_resolve_too``, which requires the cited line
+   to carry the symbol it is cited for), so a merge that moves them reds a
+   registered test instead of shipping a number that names unrelated code.
+   They need that separate leg because a bare ``:NNNN`` carries no filename, so
+   the bundle's own sweep (``_BUNDLE_CITE``) cannot see them: ``#10243`` moved
+   ``extractor_v2.py`` by +88 and every cite in the list went stale while every
+   other pin stayed green, which an earlier sentence here used to deny by
+   pointing at a README cross-pin ``#10211`` had already invalidated. No line in
+   that list is claimed to be self-detecting on its own. (No derivation head is
+   named here on purpose: the
    stamps such a sentence used to name re-staled the moment `main` moved, and a
    claim that can only re-stale is not worth keeping.) So the capstone drives
    the REAL entry point — it does not compose the step functions, which the
@@ -80,20 +83,20 @@ must not wrap the pipeline to watch it — a wrapper is the evidence-destroying
 move the row is guarding against. The probe READS the pipeline's own returned
 surface; it never installs a spy.
 
-⚠️ **That surface is only half-reachable, and the half that is not is #9116.**
-`extract_session_v2` returns the full per-stage block (``vet``,
+⚠️ **That surface was only half-reachable until #9116, and the seam is now
+landed.** `extract_session_v2` returns the full per-stage block (``vet``,
 ``classify_later``, ``search``, ``payload``, ``embed_list``, ``story_arc``), but
-`capture_session` — the entry point this probe drives — assembles its receipt
-from ``extracted`` + ``meta``, and `_extract_session_v2` forwards only
-``stats``/``error_census``/``errors``/``warnings``/``mode``/``operator_ids``/
-``provider``/``route``/``failover_used``/``source_change_notices``. So the four
-keys in ``WITNESS_KEYS_OFF_RECEIPT`` are **structurally unobservable on the
-object the probe holds**, and G5 refuses for EVERY input until the seam lands.
-The refusal is attributed to that INSTRUMENT gap (#9116) — never to "the
-pipeline did not run VET/classify/search/commit", which is the one wrong
-reading a bundle like this must not produce. Where the surface cannot witness a
-step, the step is reported **unobserved** — an honest finding for #7949, never
-a guess.
+`capture_session` — the entry point this probe drives — assembled its receipt
+from ``extracted`` + ``meta``, forwarding only ``stats``. So four witnesses did
+not exist on the object the probe holds and G5 refused for EVERY input.
+`_extract_session_v2` now copies those stages' own facts onto the existing
+``stats`` key as ``stats["step_witness"]`` (``_capture_step_witness`` in
+``sdk.py`` — a sub-key of a key the receipt already carried, so no new receipt
+key and no change to the SDK surface), and this probe reads THAT. Where a step
+still comes back unobserved, the run reports why from the witness's own values
+— and a receipt carrying no ``step_witness`` at all is still refused as the
+INSTRUMENT gap it is, never as "the pipeline did not run VET/classify/search/
+commit".
 
 Run:
     python docs/evidence/7949-capstone/probes/capstone_run.py \\
@@ -152,36 +155,26 @@ STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 #: provenance chain rest on free text.
 HEAD_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
-#: Every key ``observe_steps`` reads off the object it is handed. Declared so a
-#: witness can never be added silently. The surviving contract test is
-#: ``test_every_witness_observe_steps_reads_is_declared``
-#: (`tests/test_7949_capstone_verdict_check.py`): it derives the READ set from
-#: this module's source and requires it to equal this declaration, plus
-#: ``WITNESS_KEYS_OFF_RECEIPT ⊆ WITNESS_KEYS``, and it pins that
-#: ``TortoiseSDK.capture_session`` has NOT come back.
-#:
-#: ⚠️ What it no longer checks: the RECEIPT side. The test used to derive the
-#: receipt key set from ``tortoise/sdk.py``'s ``resp = {...}`` literal and require
-#: ``WITNESS_KEYS - receipt == WITNESS_KEYS_OFF_RECEIPT`` exactly — that half was
-#: dropped with #4282, because the literal belonged to the deleted door. If a
-#: capture receipt ever returns, the receipt half must be RE-DERIVED here rather
-#: than assumed; the `OFF_RECEIPT` declaration is now a claim nothing cross-checks
-#: against a real receipt. Drop a key
-#: from the receipt, or read an undeclared one, and it reds.
-WITNESS_KEYS = ("stats", "story_arc", "embed_list", "vet",
-                "classify_later", "search", "payload")
+#: Every witness BLOCK ``observe_steps`` reads out of the receipt's
+#: ``stats["step_witness"]`` record (#9116). Declared so a witness can never be
+#: added silently: the contract test
+#: ``test_every_witness_block_observe_steps_reads_is_produced_by_the_seam``
+#: derives the READ set from this module's source and the PRODUCED set by
+#: calling ``tortoise.sdk._capture_step_witness`` — the real seam, not a
+#: fixture — then requires ``WITNESS_KEYS <= produced`` exactly. Read an
+#: undeclared block, or let a block stop being produced, and it reds.
+WITNESS_KEYS = ("reader", "story", "map", "vet", "classify_later",
+                "search", "merge", "commit")
 
-#: The subset of ``WITNESS_KEYS`` that the receipt of ``TortoiseSDK.capture_session``
-#: (deleted by #4282 — G4 refuses by name when it is absent) did NOT carry (#9116). ``stats`` is the receipt's only pipeline surface, so
-#: every step whose witness lives in here is unobservable through this entry
-#: point — the run refuses at G5 and says so, attributed to the instrument.
-WITNESS_KEYS_OFF_RECEIPT = ("story_arc", "embed_list", "vet",
-                            "classify_later", "search", "payload")
-
-#: The steps with NO witness on the receipt at all. S1/S2.1 survive without
-#: their ``story_arc``/``embed_list`` fallbacks because ``stats.llm.by_stage``
-#: carries them; these four have no other witness.
-UNOBSERVABLE_STEPS = ("S2.2", "S2.3", "S3", "S6")
+#: The steps with no witness EXCEPT the seam's (#9116): S0/S1/S2.1/S5 are
+#: readable straight off ``stats`` (``edus``/``chunks``, ``llm.by_stage``,
+#: ``s4_merge``), so a receipt that carries no ``step_witness`` at all — a
+#: replay, a keyless capture, the M2 lane — still witnesses those four. These
+#: four have nothing else: on such a receipt their absence is the INSTRUMENT
+#: (#9116), and G5 says so instead of reporting a pipeline that skipped work.
+#: On a receipt that DOES carry the seam, an absent step is a different finding
+#: — the stage ran (or was gated off) and the witness shows which.
+STEPS_NEEDING_WITNESS = ("S2.2", "S2.3", "S3", "S6")
 
 # Each criterion's OWNER — the issue that must land for the row to be
 # measurable at all. The table's non-green rows cite these, so a red row always
@@ -252,50 +245,132 @@ def load_corpus(path: Path) -> list[dict]:
     return turns
 
 
+#: Which witness block accounts for which step — the ONE map G5's cause line
+#: reads. A step absent from it has no witness of its own (nothing to quote).
+STEP_WITNESS_BLOCK = {
+    "S0": "reader",
+    "S1": "story",
+    "S2.1": "map",
+    "S2.2": "vet",
+    "S2.3": "classify_later",
+    "S3": "search",
+    "S5": "merge",
+    "S6": "commit",
+}
+
+
+def _step_cause(witness: dict, step: str) -> str:
+    """The witness's OWN values for a step it does not witness, rendered.
+
+    A refusal that says only "S2.2 not observed" cannot be acted on: the same
+    absence is produced by a flag that is off, a pass that idled on an empty
+    list, and a stage that failed. Quoting the block verbatim is the difference
+    between a finding and a shrug — bounded, so a big block cannot flood the log.
+    """
+    block = witness.get(STEP_WITNESS_BLOCK.get(step, "")) or {}
+    rendered = json.dumps(block, sort_keys=True, default=str)
+    if len(rendered) > 240:
+        rendered = rendered[:237] + "..."
+    return rendered
+
+
 def observe_steps(result: dict) -> dict[str, str]:
     """Which of the EIGHT steps did THIS pass actually execute?
 
     Returns ``{step: why}`` for the steps observed, and nothing for the rest —
-    absence is the signal. Each witness is read off the pipeline's own returned
+    absence is the signal. Every witness is read off the pipeline's own returned
     surface (never a wrapper), so the observation cannot alter what it watches.
 
-    ⚠️ The keys in ``WITNESS_KEYS_OFF_RECEIPT`` are not on the object the
-    shipped caller can pass (#9116): ``capture_session``'s receipt carries
-    ``stats`` only. They are read anyway so that the day the seam lands the
-    observation is already complete — and ``UNOBSERVABLE_STEPS`` names which
-    steps that costs today, so G5's refusal is attributed to the instrument
-    rather than to the pipeline.
+    ⚠️ #9116: ``capture_session``'s receipt is the ONLY object the shipped caller
+    can hand in, and it carries no ``vet``/``classify_later``/``search``/
+    ``payload`` key — those live on ``extract_session_v2``'s return, one layer
+    down. The seam that closes that gap is ``stats["step_witness"]``
+    (``tortoise/sdk.py::_capture_step_witness``): the four stages' own facts,
+    copied onto the existing ``stats`` key rather than a new receipt key. This
+    observer reads THAT, and nothing it would have to reach for itself.
+
+    The fallbacks are deliberate and are not the seam: ``stats``'s own
+    ``edus``/``chunks``, ``llm.by_stage`` and ``s4_merge`` already witness S0/S1/
+    S2.1/S5 on any v2 receipt, seam or no seam, so a receipt that carries no
+    ``step_witness`` (a replay, a keyless capture) is still measured on those
+    four rather than reported as an empty pipeline.
     """
     stats = result.get("stats") or {}
+    w = stats.get("step_witness") or {}
     llm = stats.get("llm") or {}
     by_stage = llm.get("by_stage") or {}
-    embed = result.get("embed_list") or {}
-    items = sum(len(embed.get(k) or [])
-                for k in ("entities", "events", "points", "operators"))
-    vet = result.get("vet") or {}
-    classify = result.get("classify_later") or {}
+    reader = w.get("reader") or {}
+    story = w.get("story") or {}
+    mapped = w.get("map") or {}
+    vet = w.get("vet") or {}
+    classify = w.get("classify_later") or {}
+    search = w.get("search") or {}
+    merge = w.get("merge") or stats.get("s4_merge") or {}
+    commit = w.get("commit") or {}
+
+    edus = reader.get("edus", stats.get("edus"))
+    chunks = reader.get("chunks", stats.get("chunks"))
+    story_arc_chars = int(story.get("story_arc_chars") or 0)
+    items = mapped.get("items") or {}
+    candidate_count = (sum(int(n or 0) for n in items.values())
+                       if isinstance(items, dict) else 0)
 
     seen: dict[str, str] = {}
-    if stats.get("edus") or stats.get("chunks"):
-        seen["S0"] = (f"reader segmented the source: edus={stats.get('edus')} "
-                      f"chunks={stats.get('chunks')}")
-    if by_stage.get("s1") or result.get("story_arc"):
+    if edus or chunks:
+        seen["S0"] = (f"reader segmented the source: edus={edus} chunks={chunks}")
+    if story.get("by_stage_s1") or by_stage.get("s1") or story_arc_chars:
         seen["S1"] = (f"first LLM call reached: by_stage.s1="
-                      f"{bool(by_stage.get('s1'))} story_arc="
-                      f"{bool(result.get('story_arc'))}")
-    if by_stage.get("s2") or items:
-        seen["S2.1"] = f"S2 map produced {items} candidate item(s)"
-    if vet.get("s2") or vet.get("union"):
-        seen["S2.2"] = "the VET gate reported a pass (result['vet'])"
-    if classify.get("s2") or classify.get("union"):
-        seen["S2.3"] = "a classify pass reported assignments (result['classify_later'])"
-    if result.get("search"):
-        seen["S3"] = "S3 search surface present (result['search'])"
-    if (stats.get("s4_merge") or {}).get("merged_items") is not None:
-        seen["S5"] = (f"S5 merged {stats['s4_merge'].get('merged_items')} item(s) "
+                      f"{bool(story.get('by_stage_s1') or by_stage.get('s1'))} "
+                      f"story_arc_chars={story_arc_chars}")
+    if by_stage.get("s2") or candidate_count:
+        seen["S2.1"] = f"S2 map produced {candidate_count} candidate item(s)"
+    # S2.2/S2.3: the pass must be ENABLED and have DONE something. `enabled`
+    # alone is the flag, and a flag-on block with empty counters is the shape an
+    # idled (empty list) or fail-open pass leaves — the confusion that would
+    # report an OFF run as 8/8 (#9823).
+    if vet.get("enabled") is not False and (vet.get("s2") or vet.get("union")):
+        seen["S2.2"] = ("the VET gate reported a pass "
+                        f"(step_witness['vet']: s2={bool(vet.get('s2'))}, "
+                        f"union={bool(vet.get('union'))})")
+    if classify.get("enabled") is not False and (classify.get("s2")
+                                                 or classify.get("union")):
+        seen["S2.3"] = ("a classify pass reported assignments "
+                        "(step_witness['classify_later'])")
+    # S3: the search stage RESOLVED, not merely attempted. `queries_run` is the
+    # budget it spent and `degraded` is the stage's own verdict on itself:
+    # `search_graph` increments the counter BEFORE each attempt and returns
+    # `degraded=True` with a `reason` on the FIRST-QUERY exception
+    # (`extractor_v2.py::search_graph`), so `queries_run > 0 and degraded` is
+    # exactly "the graph search raised" — a spent budget with nothing resolved.
+    # G2 cannot catch it (its `backend_is_searchable` is env-derived and issues
+    # no query), so counting a degraded attempt as S3 lets V5 — the epic's ONLY
+    # closing gate — pass on a step that never resolved, and every E-row is
+    # published as a valid measurement off that run. The README's S3 RESOLVE row
+    # records the rule ("a degraded search is not S3") and the sibling probe
+    # implements it in its own S3 arm (`capstone_measure.py`); this arm must
+    # state the same thing (#10214 review, P1).
+    if search.get("queries_run") and not search.get("degraded"):
+        seen["S3"] = ("S3 searched the graph "
+                      f"(step_witness['search']: queries_run="
+                      f"{search.get('queries_run')}, degraded="
+                      f"{bool(search.get('degraded'))}, "
+                      f"hits={search.get('hits')})")
+    if merge.get("merged_items") is not None:
+        seen["S5"] = (f"S5 merged {merge.get('merged_items')} item(s) "
                       f"into the commit list")
-    if result.get("payload") is not None:
-        seen["S6"] = "the Layer-1 commit payload was produced (result['payload'])"
+    if commit.get("payload_produced"):
+        # ``committed`` is the count the write loop RESOLVED (created or folded
+        # onto an existing canonical) — never a minted-only count, so the
+        # message states it as such rather than as a second condition the
+        # branch does not test (#10214 review, P3). Gating on it would score a
+        # payload with nothing to commit as unwitnessed, which is a different
+        # claim; the honest fix is to say what the value is.
+        seen["S6"] = ("the Layer-1 payload was produced and its points went "
+                      "through the commit loop "
+                      f"(step_witness['commit']: entities={commit.get('entities')}, "
+                      f"points={commit.get('points')}, "
+                      f"operators={commit.get('operators')}, "
+                      f"resolved={commit.get('committed')})")
     return seen
 
 
@@ -913,18 +988,18 @@ def main(argv: list[str] | None = None) -> int:
     from tortoise.sdk import TortoiseSDK  # imported late: the gates above need no client
 
     sdk = TortoiseSDK()
-    session_id = f"capstone_{uuid.uuid4().hex[:12]}"
-    # #4282 deleted the entry point. The `except Exception` below would already
-    # turn the `AttributeError` into a refusal, but it would report "the entry
-    # point raised" — which reads as a bug in the pass rather than as the
-    # authorised deletion it is. Name it.
+    # ⛔ #4282 deleted the entry point. The `except Exception` below would already turn
+    # the `AttributeError` into a refusal, but it would report "the entry point raised" —
+    # which reads as a bug in the pass rather than as the authorised deletion it is. Name
+    # it, and name the surviving door.
     if not hasattr(sdk, "capture_session"):
-        return refuse("#4282 deleted TortoiseSDK.capture_session — the entry point "
-                      "G4 drives does not exist, so no pass can be observed; the "
-                      "surviving in-process door is the private "
-                      "sdk._extract_session_v2, which the hosted handler still "
-                      "reaches",
+        return refuse("#4282 deleted TortoiseSDK.capture_session — the entry point G4 "
+                      "drives does not exist, so no pass can be observed; the surviving "
+                      "in-process door is the private sdk._extract_session_v2, which the "
+                      "hosted handler still reaches, and a measurement against it is a "
+                      "NEW instrument with its own pre-registration",
                       prereg_ok=True, code=4, corpus=corpus)
+    session_id = f"capstone_{uuid.uuid4().hex[:12]}"
     try:
         captured = sdk.capture_session(turns, session_id=session_id)
         # The receipt IS the only surface. ``capture_session`` never returns an
@@ -947,25 +1022,50 @@ def main(argv: list[str] | None = None) -> int:
     observed = observe_steps(result)
     missing = [s for s in STEPS if s not in observed]
     if missing:
-        unobservable = [s for s in missing if s in UNOBSERVABLE_STEPS]
-        # Attribute an unobservable step to the INSTRUMENT. The receipt carries
-        # `stats` only (#9116), so a bare "steps not observed" reads as "the
-        # pipeline never ran VET/classify/search/commit" — a product finding
-        # this surface cannot support, and the one wrong reading that would
-        # send the epic's readers to the wrong issue.
-        if unobservable:
+        # THREE findings, not two (#9116). A receipt with NO step_witness at
+        # all is the INSTRUMENT: the seam never delivered, so nothing down
+        # there is observable and the four steps that need it must NOT be read
+        # as "the pipeline skipped VET/classify/search/commit". A receipt whose
+        # seam is present but MISSING a block is a defect in the seam itself —
+        # `_capture_step_witness` — and must not be published as the pipeline's
+        # own report (`f"{s}: {}"`) while asserting it accounts for the step. A
+        # receipt WITH every block, where a stage still reports no work, is the
+        # pipeline's own answer: the stage ran (or was gated off) and the witness
+        # says which. `capstone_measure._seam_cause` keeps the same three states,
+        # so the two probes cannot grade one fact oppositely (#10214 review, P3).
+        witness = (result.get("stats") or {}).get("step_witness")
+        if not isinstance(witness, dict) or not witness:
             return refuse(
                 "steps not observed in the pass: " + ", ".join(missing)
-                + f" — {', '.join(unobservable)} have NO witness on "
-                "capture_session's receipt (#9116: the receipt carries `stats` "
-                "only, and vet/classify_later/search/payload never leave "
-                "extract_session_v2), so this is an INSTRUMENT gap and NOT the "
-                "pipeline skipping those steps; §4.4 forbids a table from a "
-                "subset, so the epic stays open until #9116 lands",
+                + " — the receipt carries no stats['step_witness'] block, so"
+                " the pass did not run through extract_session_v2 (#9116; the"
+                " seam that copies vet/classify_later/search/payload onto the"
+                " receipt); extraction_mode="
+                f"{result.get('extraction_mode')!r}. This is an INSTRUMENT gap"
+                " and NOT the pipeline skipping those steps; §4.4 forbids a"
+                " table from a subset",
+                prereg_ok=True, code=5, corpus=corpus)
+        absent_blocks = [s for s in missing
+                         if STEP_WITNESS_BLOCK.get(s) not in witness]
+        if absent_blocks:
+            return refuse(
+                "steps not observed in the pass: " + ", ".join(missing)
+                + " — stats['step_witness'] IS present but carries no "
+                + ", ".join(f"{STEP_WITNESS_BLOCK[s]!r} block (for {s})"
+                             for s in absent_blocks)
+                + ": the seam is present and INCOMPLETE, which is a defect in"
+                " _capture_step_witness (tortoise/sdk.py), NOT the pipeline"
+                " skipping the step and not a missing surface; §4.4 forbids a"
+                " table from a subset",
                 prereg_ok=True, code=5, corpus=corpus)
         return refuse(
             "steps not observed in the pass: " + ", ".join(missing)
-            + " — §4.4 forbids a table assembled from a subset",
+            + " — the pass DID run through extract_session_v2 and its own"
+            " stats['step_witness'] accounts for the missing step(s): "
+            + "; ".join(f"{s}: {_step_cause(witness, s)}" for s in missing)
+            + ". This is the PIPELINE's own report (a flag gated the pass off,"
+            " or the stage produced nothing), not a missing surface; §4.4"
+            " forbids a table assembled from a subset",
             prereg_ok=True, code=5, corpus=corpus)
 
     # G6 — per-criterion evidence

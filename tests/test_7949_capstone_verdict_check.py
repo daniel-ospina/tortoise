@@ -949,8 +949,13 @@ def test_two_verdict_blocks_is_a_usage_error_not_a_stale_green(tmp_path, capsys)
 # conflating them is what made the original observer tests vacuous (#9080
 # review F2/P1). ``_extractor_result`` is ``extractor_v2.extract_session_v2``'s
 # OWN return; ``_receipt`` is what ``TortoiseSDK.capture_session`` — the entry
-# point the probe actually drives — hands back. The probe holds the SECOND one,
-# and it carries ``stats`` only (#9116).
+# point the probe actually drives — hands back. The probe holds the SECOND one.
+#
+# #9116's seam is what reconciles them: ``_capture_step_witness`` copies the
+# stages' own facts onto the receipt's ``stats`` key, so ``_seam_receipt`` below
+# is the object a CURRENT ``capture_session`` returns — built by calling the real
+# SDK helper, never by hand (a hand-built witness could not red when the SDK
+# stops producing one, which is the whole point of pinning this).
 def _extractor_result(**over) -> dict:
     """``extract_session_v2``'s return — NOT what the probe is handed."""
     result = {
@@ -964,9 +969,29 @@ def _extractor_result(**over) -> dict:
         "story_arc": "A narrative.",
         "embed_list": {"entities": [1], "events": [1], "points": [1],
                        "operators": [1]},
-        "vet": {"enabled": True, "s2": {"kept": 3}},
+        # The VET surface as ``_run_vet_pass`` really shapes it: its counts
+        # under ``stats``, plus a ``decisions`` block that mirrors the embed
+        # list's own text PER CANDIDATE (``vet_gate.vet_candidates``). The seam
+        # must forward the first and never the second (#10214 review, P1) — the
+        # text is here so a leak reds instead of passing on a thin fixture.
+        "vet": {"enabled": True,
+                "s2": {"stats": {"candidates": 3, "discarded": 0,
+                                  "by_outcome": {"KEEP": 3},
+                                  "arbiter": "none"},
+                       "batch": {"size": 3},
+                       "decisions": {"pt_0": {"section": "points",
+                                               "index": 0,
+                                               "text": "Ana Ruiz owns the "
+                                                       "rollout of the "
+                                                       "Postgres record",
+                                               "outcome": "KEEP",
+                                               "rule_id": None,
+                                               "reason": None}}},
+                "union": {}},
         "classify_later": {"enabled": True, "s2": {"assigned": 3}, "union": {}},
-        "search": {"found": []},
+        "search": {"mode": "docker", "degraded": False, "reason": None,
+                   "queries_run": 15, "entities": [{"id": "o_1"}],
+                   "points": [], "events": []},
         "payload": {"points": []},
     }
     for k, v in over.items():
@@ -977,14 +1002,46 @@ def _extractor_result(**over) -> dict:
     return result
 
 
+def _seam_receipt(**over) -> dict:
+    """A CURRENT ``capture_session`` receipt — built by the real SDK seam.
+
+    ``tortoise.sdk._capture_stats_with_step_witness`` is the production code that
+    puts ``stats["step_witness"]`` on the receipt (#9116), so calling it here
+    makes every assertion below a statement about shipped behaviour: let the SDK
+    stop copying a stage's block and these tests red.
+    """
+    from tortoise.sdk import _capture_stats_with_step_witness
+
+    out = _extractor_result(**over)
+    return {
+        "session_id": "capstone_abc123",
+        "turns": 1,
+        "extracted": 15,
+        "points": [],
+        "extraction_mode": "llm:deepseek-direct",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+        "diagnostics": [],
+        "stats": _capture_stats_with_step_witness(out, 15),
+        "capture_redactions": 0,
+    }
+
+
 def _receipt(**over) -> dict:
-    """``capture_session``'s receipt, VERBATIM from ``tortoise/sdk.py``.
+    """A ``capture_session`` receipt that carries NO ``step_witness``.
 
     The keys are the ``resp`` literal the SDK builds (minus the additive
-    protocol keys, which merge flat and add no pipeline surface). A test that
-    shapes this fixture differently from that literal is asserting a
-    contract the caller can never satisfy — which is the vacuity this file
-    was caught in.
+    protocol keys, which merge flat and add no pipeline surface) with the
+    ``stats`` sub-key the seam adds REMOVED — i.e. the receipt a REPLAY, a
+    keyless capture or the M2 lane returns. A test that shapes this fixture
+    differently from that literal is asserting a contract the caller can never
+    satisfy — which is the vacuity this file was caught in.
+
+    It is not "the receipt" any more: since #9116's seam a v2 receipt carries
+    ``stats["step_witness"]``. Keeping this shape is what lets the tests below
+    hold BOTH arms apart — a receipt with no seam must still witness the four
+    steps ``stats`` carries and be refused for the four that need the seam.
     """
     result = {
         "session_id": "capstone_abc123",
@@ -1013,58 +1070,51 @@ def _receipt(**over) -> dict:
     return result
 
 
-def test_all_eight_steps_are_observable_when_the_full_surface_is_passed():
-    """The observer CAN map eight steps — given ``extract_session_v2``'s return.
+def test_all_eight_steps_are_observable_on_the_object_the_probe_holds():
+    """#9116, the acceptance: 8/8 through the REAL entry point's receipt.
 
-    This is the capability half, and it is NOT evidence about the shipped run:
-    the probe is handed ``capture_session``'s receipt (next test). Kept because
-    the day #9116 lands a seam, this is the shape it must carry.
+    Both halves are the shipped code — ``tortoise.sdk._capture_stats_with_step
+    _witness`` builds the ``stats`` the SDK puts on the receipt, and the probe's
+    ``observe_steps`` reads it. Non-vacuity: at the pre-fix head this receipt
+    carried no ``step_witness``, so the four steps that need it were absent and
+    this equality reds.
     """
-    seen = probe.observe_steps(_extractor_result())
+    result = _seam_receipt()
+    assert "step_witness" in result["stats"], sorted(result["stats"])
+    seen = probe.observe_steps(result)
     assert set(seen) == set(cvc.STEPS), sorted(set(cvc.STEPS) - set(seen))
     assert all(isinstance(v, str) and v for v in seen.values())
 
 
-def test_the_shipped_receipt_observes_exactly_the_four_steps_it_carries():
-    """#9116, pinned: on the REAL receipt four steps are unobservable.
+def test_a_receipt_with_no_seam_still_witnesses_the_four_stats_carry():
+    """The other arm: no seam ⟹ four steps, and the gap NAMED as the instrument.
 
-    Non-vacuity: this is the assertion the old suite lacked. Pass the receipt
-    (what ``capture_session`` returns) and the four off-receipt witnesses are
-    absent; re-add any of them to the receipt and the equality reds, which is
-    what makes ``UNOBSERVABLE_STEPS`` a measurement rather than a comment.
+    A replay, a keyless capture and the M2 lane all return a receipt with no
+    ``step_witness``. Those four are then unobservable, and that must be stated
+    as the missing surface (``STEPS_NEEDING_WITNESS``) rather than as a pipeline
+    that skipped VET/classify/search/commit.
     """
     seen = probe.observe_steps(_receipt())
     assert set(seen) == {"S0", "S1", "S2.1", "S5"}, sorted(seen)
-    assert set(probe.UNOBSERVABLE_STEPS) == set(cvc.STEPS) - set(seen)
-    # and NOT one of the unobservable steps is quietly satisfied by a
-    # same-named key the receipt happens to carry
-    assert "extraction" not in probe.observe_steps.__code__.co_consts
+    assert set(probe.STEPS_NEEDING_WITNESS) == set(cvc.STEPS) - set(seen)
 
 
-def test_every_witness_observe_steps_reads_is_declared():
-    """The observer's READ set is derived from source, not from a comment (#9116).
+def test_every_witness_block_observe_steps_reads_is_produced_by_the_seam():
+    """The contract between the observer and the seam that feeds it (#9116).
 
-    The contract this test guarded had TWO sides:
-      * the READ set — every ``result.get("X")`` in ``observe_steps`` — must equal
+    Derives BOTH sides from code, so neither can drift behind a comment:
+      * the READ set — every ``w.get("X")`` in ``observe_steps`` — must equal
         ``probe.WITNESS_KEYS``;
-      * the RECEIPT set — the keys of the ``resp = {...}`` literal in
-        ``TortoiseSDK.capture_session``.
+      * the PRODUCED set — the top-level keys of
+        ``tortoise.sdk._capture_step_witness``'s return, called on a real
+        ``extract_session_v2``-shaped ``out`` — must cover every one of them.
 
-    **The receipt side is gone, and this is why it could not be re-pointed.** The
-    receipt literal lived inside ``capture_session``, which #4282 deleted; the hosted
-    lane builds its OWN receipt (`hosted_api._capture_session_impl`) with a different
-    key set, so re-pointing would have re-labelled a different writer's contract as
-    the observer's rather than keeping this one. What survives is the half that never
-    depended on the writer, and it is the half that catches the mutation the original
-    test was written for (an undeclared ``result.get("foo")``):
-
-      * the read set still must equal ``WITNESS_KEYS``;
-      * ``WITNESS_KEYS_OFF_RECEIPT`` must still be a subset of it — over-declaring
-        still hides a witness;
-      * the deleted side must stay deleted: a `capture_session` reappearing reds here
-        so the receipt half is RE-DERIVED against it rather than silently unchecked.
+    Mutations that red it: read an undeclared ``w.get("foo")``; let the SDK drop
+    a block from the witness; rename a block on either side.
     """
     import ast
+
+    from tortoise.sdk import _capture_step_witness
 
     tree = ast.parse(PROBE.read_text())
     fn = next(n for n in ast.walk(tree)
@@ -1077,39 +1127,259 @@ def test_every_witness_observe_steps_reads_is_declared():
         if node.func.attr != "get" or len(node.args) != 1:
             continue
         target, key = node.func.value, node.args[0]
-        if (isinstance(target, ast.Name) and target.id == "result"
+        if (isinstance(target, ast.Name) and target.id == "w"
                 and isinstance(key, ast.Constant) and isinstance(key.value, str)):
             read.add(key.value)
     assert read == set(probe.WITNESS_KEYS), (
         sorted(read ^ set(probe.WITNESS_KEYS)), "observer read set != declared")
 
-    off = set(probe.WITNESS_KEYS_OFF_RECEIPT)
-    assert off <= set(probe.WITNESS_KEYS), "off-receipt keys must be witnesses"
+    produced = _capture_step_witness(_extractor_result(), committed=15)
+    assert set(probe.WITNESS_KEYS) <= set(produced), (
+        sorted(set(probe.WITNESS_KEYS) - set(produced)),
+        "the observer reads a witness block the seam does not produce")
+    # the dead branch the review found: neither side names a receipt key that
+    # does not exist, so a "just copy the extractor's keys" fix cannot sneak in
+    assert "extraction" not in produced
+    # and the block that carries the one fact no fallback can supply
+    assert "queries_run" in produced["search"]
 
-    # The receipt half's subject is deleted (see the docstring). Pin that, so a
-    # resurrected `capture_session` cannot quietly re-open an unchecked receipt.
-    sdk_src = (_REPO / "tortoise/sdk.py").read_text()
-    assert not re.search(r"^\s+def capture_session\(", sdk_src, re.M), (
-        "`capture_session` exists again: re-derive the RECEIPT half of this contract "
-        "against its `resp = {...}` literal instead of leaving the witness keys "
-        "unchecked against it")
+
+def test_the_witness_forwards_the_vet_counts_and_never_its_candidate_text():
+    """The seam's stated bound, held against the surface's real shape (#10214).
+
+    ``_run_vet_pass`` returns ``{"stats", "batch", "decisions"}`` and
+    ``decisions`` carries one row PER CANDIDATE with that candidate's own
+    ``text`` (plus a ``counterfactual`` quoting it on a discard). The receipt is
+    the object ``capture_session`` returns and the hosted response body, so a
+    witness that forwards the surface grows with candidate count × text length —
+    the exact content ``payload``/``embed_list`` were kept off it to avoid, and
+    the opposite of the docstring's "counts and the stage's OWN small stats".
+
+    Mutation that reds it: forward the surface (``"s2": vet.get("s2") or {}``),
+    which is what the pre-fix helper did — the fixture's candidate text then
+    appears inside ``stats["step_witness"]``.
+    """
+    import json
+
+    from tortoise.sdk import _capture_step_witness
+
+    out = _extractor_result()
+    assert out["vet"]["s2"]["decisions"], "the fixture must carry the leak"
+    witness = _capture_step_witness(out, committed=15)
+    assert witness["vet"]["enabled"] is True
+    # the COUNTS are forwarded — a witness still says the pass did work
+    assert witness["vet"]["s2"]["candidates"] == 3, witness["vet"]
+    assert "decisions" not in witness["vet"]["s2"], witness["vet"]
+    rendered = json.dumps(witness)
+    assert "Ana Ruiz owns the rollout" not in rendered, (
+        "the witness carried extracted candidate text — a per-candidate surface "
+        f"was forwarded instead of its counts: {witness['vet']}")
+    # a projection of the surface, not merely "smaller today": the witness's
+    # vet block is measured against the surface it projects
+    assert len(json.dumps(witness["vet"])) < len(json.dumps(out["vet"])), (
+        "the witness is not a projection of the Vet surface: "
+        f"{len(json.dumps(witness['vet']))} >= {len(json.dumps(out['vet']))}")
+
+
+def test_gate_counts_reads_the_bare_classify_shape_it_documents():
+    """``_gate_counts`` must answer for BOTH gate shapes it names (#10214 review, P3).
+
+    Two shapes reach this helper and they are not the same shape:
+
+      * the VET surface — ``_run_vet_pass``' ``{"stats", "batch", "decisions"}``,
+        counts NESTED under ``stats``;
+      * a classify pass's stats — the BARE dict, with no ``stats`` key at all
+        (``extractor_v2``: ``s2_classify_stats = out["stats"]``).
+
+    The docstring named both and the code implemented one, so
+    ``_gate_counts(<bare classify block>)`` answered ``{}``: a pass that DID work
+    reported as IDLE — the misattribution the three-state G5 split exists to
+    prevent, one layer below where it was fixed. No verdict shipped wrong only
+    because ``_capture_step_witness`` forwards ``classify_later`` raw; the trap was
+    armed for the next caller who read the docstring and routed a classify surface
+    through this helper.
+
+    Mutation that reds it: return ``{}`` when ``surface["stats"]`` is absent (the
+    pre-fix body) — the bare block then reads as an idle pass.
+    """
+    from tortoise.sdk import _gate_counts
+
+    # (1) the BARE classify shape: counts only, returned as they are.
+    classify_block = {"items": 7, "assigned_knn": 5, "assigned_llm": 2,
+                      "unassigned": 0}
+    assert _gate_counts(classify_block) == classify_block
+    assert _gate_counts(classify_block), (
+        "a classify pass that assigned 7 kinds was reported as an IDLE pass — "
+        "the bare shape is not read"
+    )
+
+    # (2) the NESTED VET shape: only its ``stats``, never the per-candidate block.
+    vet_surface = {"stats": {"candidates": 3, "kept": 2},
+                   "batch": {"prompt": "…"},
+                   "decisions": [{"text": "candidate text", "verdict": "keep"}]}
+    assert _gate_counts(vet_surface) == {"candidates": 3, "kept": 2}
+
+    # (3) the bound holds in the BARE shape too: a surface that carries candidate
+    # material is stripped even when it has no ``stats`` key, so the fallback can
+    # never become the leak the nested branch was written to prevent.
+    leaked = _gate_counts({"decisions": [{"text": "candidate text"}],
+                           "batch": {"prompt": "…"}, "candidates": 3})
+    assert leaked == {"candidates": 3}, leaked
+
+    # (4) a non-dict is no pass at all.
+    assert _gate_counts(None) == {}
+    assert _gate_counts([]) == {}
+
+def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch):
+    """#9116, the WIRING: the production assembly returns the seam's record.
+
+    Everything above builds the receipt by calling the helper directly, so none of
+    it can tell whether ``_extract_session_v2`` — the production assembly —
+    actually puts the helper's output on what it returns. This drives that
+    assembly over the deterministic mock extractor and reads the ``stats`` block
+    it hands back.
+
+    ⚠️ #4282 (2026-10-27) DELETED ``TortoiseSDK.capture_session`` — the public
+    wrapper this pin originally drove — so the pin now drives
+    ``_extract_session_v2`` directly (the same production assembly, privatised
+    rather than removed) and reads the identical ``stats["step_witness"]``. The
+    wrapper added ``ok``/``errors``/``graph_ops`` around it; none of those is what
+    this pin measures, and the receipt it re-forms below carries ``stats`` alone
+    so ``observe_steps`` sees exactly the object it always saw. The mutation still
+    reds: revert the meta fold to ``"stats": out.get("stats")`` and the key
+    disappears from a REAL pass.
+
+    Mutation that reds it: revert the meta fold to ``"stats": out.get("stats")``
+    (the pre-fix line) and the ``step_witness`` key disappears from a REAL
+    capture.
+
+    ⚠️ It asserts **7 of 8**, not 8: the mock's classify pass is ENABLED and does
+    NO work (``{'enabled': True, 's2': {}, 'union': {}}``), so S2.3 is not
+    witnessed — and must not be. Claiming it would be the "OFF population under an
+    ON label" failure the bundle already paid for once (#9823). What S2.3 needs is
+    a run whose classify pass assigns kinds, not a looser rule here.
+
+    ⚠️ Two properties of the LANE it runs in are handled here rather than
+    assumed, because this file is a `core` fast-surface member and NOT
+    `uri_requiring:` (and that list is re-derived from COLLECTION aborts, so a
+    test-level skip/failure is never subtracted from a URI-empty leg):
+
+      * **the graph is `test`-prefixed** — `graph_name=` binds verbatim, and
+        only `test_`/`tortoise_test_*` names are DETACH-DELETEd by the
+        session-end sweep (`tests/_embedded.py::wipe_server`). A
+        `capstone_…` name is outside every sweep, i.e. one stray graph per run
+        on the shared instance (the #5084 class).
+      * **S3 is asserted only where the backend can search** — over
+        embedded/no URI the extractor's own `search_graph` short-circuits
+        (`queries_run=0`, `degraded=True`), so S3 is unwitnessed by the
+        BACKEND's answer, not by a seam defect. The wiring claim this test
+        exists for does not need S3, so it is stated for the arm it is in
+        rather than reding a leg that never promised a searchable backend.
+    """
+    import uuid as _uuid
+
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_VET", "1")
+    monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
+    graph = f"test_capstone_9116_{_uuid.uuid4().hex[:10]}"
+    sdk = TortoiseSDK(graph_name=graph)
+    try:
+        _extracted, meta = sdk._extract_session_v2(
+            [{"role": "user",
+              "content": ("Daniel Ospina at Premise Labs decided on 2026-10-10 "
+                          "to adopt the Postgres record as the system of "
+                          "record; the rollout is owned by Ana Ruiz.")}],
+            session_id=graph,
+            now="2026-10-31T00:00:00+00:00")
+    finally:
+        sdk.close()
+
+    assert isinstance(meta, dict), meta
+    receipt = {"ok": True, "stats": meta.get("stats") or {}}
+    stats = receipt.get("stats") or {}
+    witness = stats.get("step_witness")
+    assert isinstance(witness, dict) and witness, (
+        "the production capture path does not put stats['step_witness'] on the "
+        f"receipt — the #9116 seam is not wired into _extract_session_v2's meta "
+        f"fold (stats keys: {sorted(stats)})")
+    assert set(witness) == set(probe.WITNESS_KEYS), (
+        sorted(set(probe.WITNESS_KEYS) ^ set(witness)))
+
+    seen = probe.observe_steps(receipt)
+    searchable, why = probe.backend_is_searchable()
+    expected = set(cvc.STEPS) - {"S2.3"} - (set() if searchable else {"S3"})
+    assert set(seen) == expected, (sorted(set(cvc.STEPS) - set(seen)), why)
+    # S2.3's absence is the PASS's own answer, quoted from its block
+    assert witness["classify_later"]["s2"] == {}, witness["classify_later"]
+    assert witness["vet"]["s2"], witness["vet"]
+    if searchable:
+        assert witness["search"]["queries_run"], witness["search"]
+    else:
+        # the backend's own skip answer, NOT a seam defect — stated, not elided
+        assert witness["search"]["queries_run"] == 0, (witness["search"], why)
+    assert witness["commit"]["payload_produced"] is True, witness["commit"]
 
 
 def test_a_vet_disabled_pass_does_not_observe_s2_2():
     """The flag-off arm runs no S2.2 — so its table cannot claim S2.2."""
-    seen = probe.observe_steps(_extractor_result(vet={"enabled": False, "s2": {}}))
+    seen = probe.observe_steps(_seam_receipt(vet={"enabled": False, "s2": {}}))
     assert "S2.2" not in seen
+    # and the other seven are still witnessed: one gated pass is not a reason
+    # to lose the run's other evidence
+    assert set(seen) == set(cvc.STEPS) - {"S2.2"}, sorted(seen)
 
 
 def test_a_classify_disabled_pass_does_not_observe_s2_3():
-    seen = probe.observe_steps(_extractor_result(
+    seen = probe.observe_steps(_seam_receipt(
         classify_later={"enabled": False, "s2": {}, "union": {}}))
     assert "S2.3" not in seen
 
 
+def test_a_flag_on_pass_with_no_activity_is_not_s2_2():
+    """`enabled: true` with empty counters is the flag, not the pass (#9823).
+
+    The shape an idled (empty embed list) or fail-open pass leaves. Counting it
+    would report an 8/8 from a run whose VET pass never ran — the "OFF
+    population under an ON label" failure one layer up.
+    """
+    seen = probe.observe_steps(_seam_receipt(
+        vet={"enabled": True, "s2": {}, "union": {}}))
+    assert "S2.2" not in seen
+
+
 def test_a_pass_without_a_payload_does_not_observe_s6():
-    seen = probe.observe_steps(_extractor_result(payload=None))
+    seen = probe.observe_steps(_seam_receipt(payload=None))
     assert "S6" not in seen
+
+
+def test_a_degraded_search_is_not_s3():
+    """A spent budget with `degraded=True` is a search that RAISED, not S3.
+
+    `search_graph` increments `queries_run` BEFORE each attempt and, on the
+    first-query exception, returns `{"degraded": True, "reason": "S3 degraded: 
+    graph search failed (...)", "queries_run": q_run, ...}`
+    (`tortoise/extractor_v2.py:2662-2692`) — so the pair (queries_run > 0,
+    degraded=True) is exactly the shape of a search that failed. Scoring that
+    attempt as resolved let V5, the epic's ONLY closing gate, pass on a step
+    that never resolved, and every E-row measured on the run was then published
+    as valid. `README.md:204` records the rule ("a degraded search is not S3")
+    and the sibling probe already implements it (`capstone_measure.py:1366`).
+
+    Non-vacuity: the healthy arm is asserted FIRST, so deleting the S3 witness
+    outright cannot satisfy this pin.
+    """
+    assert "S3" in probe.observe_steps(_seam_receipt()), (
+        "the healthy receipt must still witness S3, or the arm below proves "
+        "nothing but an empty stage")
+    degraded = probe.observe_steps(_seam_receipt(search={
+        "mode": "docker", "degraded": True,
+        "reason": "S3 degraded: graph search failed (timeout)",
+        "queries_run": 1, "entities": [], "points": [], "events": []}))
+    assert "S3" not in degraded, (
+        "a degraded search was scored as S3 observed, so V5 can pass on a step "
+        f"that never resolved: {degraded.get('S3')}")
 
 
 def test_a_g5_refusal_blames_the_instrument_not_the_pipeline(tmp_path, monkeypatch):
@@ -1139,26 +1409,168 @@ def test_a_g5_refusal_blames_the_instrument_not_the_pipeline(tmp_path, monkeypat
                        "--out", str(out)])
     assert code == 5, code
     reason = cvc.extract_block(out.read_text())["run"]["reason"]
-    assert "#9116" in reason, reason
     assert "INSTRUMENT gap" in reason, reason
-    for step in probe.UNOBSERVABLE_STEPS:
+    for step in probe.STEPS_NEEDING_WITNESS:
         assert step in reason, (step, reason)
     assert "NOT the pipeline" in reason, reason
+    # and it says WHICH surface is missing, so the next lane does not have to
+    # re-derive it: the receipt carries no step_witness block at all
+    assert "step_witness" in reason, reason
 
 
-def test_a_green_branch_is_unreachable_until_9116_lands(tmp_path, monkeypatch):
-    """G6 is dead code by construction while the receipt carries no witnesses.
+def test_a_g5_refusal_on_a_seam_receipt_blames_the_pipeline_not_the_seam(
+        tmp_path, monkeypatch):
+    """The other arm (#9116): with the seam PRESENT, an absent step is the run's.
 
-    This is the fact the bundle must not hide: no run of this probe can emit a
-    COMPLETED table, so no row can ever be GREEN — even with every dependency
-    closed. Pinned so the day #9116 lands the seam this test reds and forces
-    the README/Reproduce update with it.
+    A v2 receipt carries ``stats["step_witness"]``. If a step is then
+    unobserved it is because that stage produced nothing or was gated off — a
+    PIPELINE finding, quoted from the witness's own values. Conflating the two
+    arms is what sent the epic's readers to the wrong issue in the first place.
     """
-    assert set(probe.UNOBSERVABLE_STEPS), "the gap must be named"
-    full = probe.observe_steps(_extractor_result())
-    receipt = probe.observe_steps(_receipt())
-    assert len(receipt) < len(full)
-    assert set(cvc.STEPS) - set(receipt) == set(probe.UNOBSERVABLE_STEPS)
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            # VET gated off: the seam is here and says so
+            return _seam_receipt(vet={"enabled": False, "s2": {}, "union": {}})
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "g5-seam.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    assert "S2.2" in reason, reason
+    # the PIPELINE arm, not the instrument one
+    assert "INSTRUMENT gap" not in reason, reason
+    assert "PIPELINE" in reason, reason
+    # and the witness's own values are quoted, so the reader can act on it
+    assert '"enabled": false' in reason, reason
+    assert "step_witness" in reason, reason
+
+
+def test_a_g5_refusal_names_an_incomplete_seam_as_the_seam(
+        tmp_path, monkeypatch):
+    """The THIRD state (#10214 review, P3): present seam, MISSING block.
+
+    G5 split on "is there any ``step_witness``", so a seam that was present but
+    carried no block for a step fell into the PIPELINE arm — the refusal then
+    asserted the witness *"accounts for the missing step(s)"* and rendered
+    ``S2.2: {}``, publishing a defect in ``_capture_step_witness`` as the
+    extractor's own report. That is the misattribution the bundle's rule forbids;
+    the sibling probe keeps the three states apart (``capstone_measure._seam_cause``
+    names this one "present and INCOMPLETE, which is a defect in
+    _capture_step_witness").
+
+    Non-vacuity: on the pre-fix arm the reason says ``PIPELINE`` and quotes `{}`.
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _IncompleteSeamSDK:
+        def capture_session(self, _turns, session_id=None):
+            receipt = _seam_receipt()
+            # the seam IS here — one of its blocks is not
+            del receipt["stats"]["step_witness"]["vet"]
+            return receipt
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _IncompleteSeamSDK)
+    out = tmp_path / "g5-incomplete.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    assert "INCOMPLETE" in reason, reason
+    assert "_capture_step_witness" in reason, reason
+    assert "'vet' block" in reason, reason
+    assert "PIPELINE" not in reason, reason
+    # it must NOT claim the witness accounts for the step it does not carry
+    assert "accounts for the missing" not in reason, reason
+
+
+def test_a_degraded_search_refuses_the_completed_table(tmp_path, monkeypatch):
+    """END TO END (#10214 review, P1): a degraded search cannot emit a table.
+
+    `queries_run > 0` with `degraded=True` reaches G5 exactly like a resolved
+    search did, and G2 cannot catch it (its `backend_is_searchable` is
+    env-derived and issues no query). Before this pin the run took the G6 branch
+    and wrote `status="COMPLETED"`, `reason="eight steps observed in one pass"`
+    — a capstone table published from a step that raised.
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            return _seam_receipt(search={
+                "mode": "docker", "degraded": True,
+                "reason": "S3 degraded: graph search failed (timeout)",
+                "queries_run": 1, "entities": [], "points": [],
+                "events": []})
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "g5-degraded.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    record = cvc.extract_block(out.read_text())
+    assert code == 5, (code, record["run"])
+    assert record["run"]["status"] != "COMPLETED", record["run"]
+    assert "S3" in record["run"]["reason"], record["run"]["reason"]
+
+
+def test_a_completed_run_is_reachable_now_that_the_seam_landed(
+        tmp_path, monkeypatch):
+    """#9116's acceptance, end to end: G5 passes and G6 emits a table.
+
+    Before the seam this was unreachable — the run refused at G5 for EVERY
+    input, so no row could ever be GREEN and G6 was dead code. The pre-fix
+    version of this test pinned that unreachability; this one pins the other
+    side, so the gate cannot silently regress to refusing every run.
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            return _seam_receipt()
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "g6.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 0, (code, out.read_text()[-800:])
+    record = cvc.extract_block(out.read_text())
+    assert record["run"]["status"] == "COMPLETED", record["run"]
+    assert record["run"]["steps_observed"] == list(cvc.STEPS), record["run"]
+    assert not record["run"].get("steps_unobserved"), record["run"]
+    assert {row["evidence_kind"] for row in record["rows"]} == {"measurement"}
+    # every step a table is built from was OBSERVED in this pass
+    assert set(record["run"]["steps_required"]) == set(cvc.STEPS)
 
 
 def test_a_completed_run_does_not_blame_the_preregistration_it_just_read():
@@ -1551,72 +1963,33 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     was open, which is exactly the drift this test exists to catch.
 
     Non-vacuity: at the pre-fix head `sdk.py:10341` is a comment line inside
-    `_extract_session_v2`, so the `startswith("def …")` assertion reds. The call-site
-    half was retired by #4282 (see (a)) and is replaced by the stronger pair of
-    assertions that no call site exists and that the README still says so.
+    `_extract_session_v2`, so the `startswith("def …")` assertion reds, and
+    `:9358` carries no call to it, so the call-site assertion reds too.
     """
     readme = (PROBE.parents[1] / "README.md").read_text()
     sources = {
         "sdk": (_REPO / "tortoise/sdk.py").read_text().splitlines(),
         "extractor_v2": (_REPO / "tortoise/extractor_v2.py").read_text().splitlines(),
-        # The SURVIVING caller lives here, and the README's claim is only true
-        # with its scope — so the scan covers the file the scope names (#4282).
-        "hosted_api": (_REPO / "tortoise/hosted_api.py").read_text().splitlines(),
     }
 
-    # (a) The entry-point cite. Until #4282 this was TWO cites — the def and the call
-    # site — because the sentence named the SDK lane's only caller. `capture_session`
-    # was that caller and it is DELETED, so `_extract_session_v2` now has no call site
-    # to cite; the README says so, and both halves are pinned: the def cite must still
-    # resolve, and the sentence must still SAY there is no caller. Re-adding a
-    # `called at :N` cite is exactly the stale-cite drift this test exists to catch.
-    sdk_cite = re.search(r"`sdk\._extract_session_v2` \(`sdk\.py:(\d+)`\)", readme)
-    assert sdk_cite, "the sdk.py entry-point cite moved; re-derive it, do not drop the pin"
-    def_line = int(sdk_cite.group(1))
+    # (a) The entry-point cites: the def, the CALL site and the one-pass body.
+    # ⚠️ #4282 DELETED `TortoiseSDK.capture_session`, which held the only in-`sdk.py`
+    # call (`self._extract_session_v2(`). The surviving production caller is the
+    # hosted capture lane, which passes the method as a CALLABLE — so the cite is
+    # resolved in `hosted_api.py`, and it is still an assertion about a real call
+    # site rather than about a number nobody checks.
+    sdk_cites = re.search(
+        r"`sdk\.py:(\d+)`; called from the hosted capture lane at `hosted_api\.py:(\d+)`",
+        readme)
+    assert sdk_cites, "the sdk.py cite paragraph moved; re-derive it, do not drop the pin"
+    def_line, call_line = (int(n) for n in sdk_cites.groups())
     assert sources["sdk"][def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"README cites the _extract_session_v2 def at sdk.py:{def_line}, which is "
         f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did not")
-    assert not re.search(r"`sdk\.py:\d+`; called at `:\d+`", readme), (
-        "the README cites a CALL SITE for _extract_session_v2 again; the SDK's only "
-        "caller (`capture_session`) was deleted by #4282, so such a cite names a line "
-        "that does not call it any more")
-    assert "SDK's ONLY caller" in readme, (
-        "the README no longer says `capture_session` was the SDK's only caller of "
-        "_extract_session_v2 — that sentence is what makes the single cite honest, "
-        "and its SCOPE is what makes it true: the hosted handler still calls the "
-        "helper, so an unscoped 'ONLY caller' would be a false claim")
-    callers = [n for n, line in enumerate(sources["sdk"], 1)
-               if "self._extract_session_v2(" in line]
-    assert not callers, (
-        f"_extract_session_v2 has a call site in sdk.py again ({callers}) — the "
-        f"README's 'SDK's ONLY caller … was deleted' claim is now false, and the "
-        f"call-site cite must be re-derived")
-    # ⛔ The scoped claim is only true while the SURVIVING caller is where the README
-    # says it is. Pinning only the absence made the instrument narrower than the
-    # sentence: `sdk.py` was scanned, the tree was not, and the hosted handler's
-    # `sdk._extract_session_v2(` call site — the reason the claim needs a scope at
-    # all — was unread.
-    # ⛔ The number is RESOLVED from the README and checked against `hosted_api.py`,
-    # never hardcoded: `15288` was itself a stale literal that `main` moved to 15500
-    # while this branch was open, so the pin red-ed on a cite that was CORRECT and a
-    # re-derivation could not make it green. A cite is a pointer — pin the resolution,
-    # not the digits (the same rule `tools/sdk_surface.py --check` follows).
-    hosted_cite = re.search(r"hosted_api\.py:(\d+)", readme)
-    assert hosted_cite, (
-        "the README no longer names the surviving call site of _extract_session_v2 "
-        "— do not drop the note: without it 'the SDK's ONLY caller' reads as 'the "
-        "only caller'")
-    hosted = sources.get("hosted_api") or []
-    hosted_line = int(hosted_cite.group(1))
-    assert "sdk._extract_session_v2" in hosted[hosted_line - 1], (
-        f"the README cites the surviving caller at hosted_api.py:{hosted_line}, which "
-        f"is {hosted[hosted_line - 1].strip()!r} — re-derive the cite from the tree")
-    hosted_callers = [n for n, line in enumerate(hosted, 1)
-                      if "sdk._extract_session_v2" in line]
-    assert hosted_callers, (
-        "the hosted capture handler no longer calls sdk._extract_session_v2 — the "
-        "README's 'the hosted handler still reaches it' note and the cite must be "
-        "re-derived together")
+    hosted = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
+    assert "sdk._extract_session_v2," in hosted[call_line - 1], (
+        f"README cites the call at hosted_api.py:{call_line}, which is "
+        f"{hosted[call_line - 1].strip()!r} — the line moved and the cite did not")
     # Anchored on the entry-point SENTENCE, not on the first backticked
     # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
     # dozens of lines in that file (the flag reads, the gates, the surfaces),
@@ -1641,29 +2014,39 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
         assert symbol.split(".")[-1] in text, (
             f"README cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
             f"{text.strip()!r} — the line moved and the cite did not")
-    # (c) The probe's eight bare step cites (#10211). They name a SYMBOL and a
+    # (c) The probe's nine bare step cites (#10211). They name a SYMBOL and a
     # bare `:NNNN` with no filename, so rule (b) cannot see them (it reads the
     # README) and the bundle's own sweep cannot either (`_BUNDLE_CITE` requires
     # `file.py:line`). Nothing watched them: `#10243` moved `extractor_v2.py` by
-    # +88 and all eight went stale while both pin files stayed green. Same rule
+    # +88 and every cite went stale while both pin files stayed green. Same rule
     # as (b), applied to the file that carries them.
+    #
+    # #10214 review (blocking): this sweep accepted the cite if EITHER symbol of
+    # a `a`/`b` PAIR appeared on the line (`any`), so the S2.3 pair
+    # (`classify_items`/`_apply_classify_kinds` at `:8700`) passed here on
+    # `classify_items` alone while `_apply_classify_kinds` sat on `:8701`. A pair
+    # cite claims BOTH symbols are on that line, so the test for it is `all` —
+    # and the probe now carries one cite per symbol anyway, which is the shape
+    # the README's step table already had. Non-vacuity: restoring the pair at
+    # `:8700` reds both this rule (all → False on `_apply_classify_kinds`) and
+    # the population assert below (8 vs 9).
     probe = re.sub(r"`{2}", "`", PROBE.read_text())
     step_pairs = re.findall(
         r"`([A-Za-z_][\w.]*)`(?:\s*/\s*`([A-Za-z_][\w.]*)`)?"
         r"\s*\((?:S[\d.]+(?:\+S\d+)?|the gap filler),[^`]*`:(\d+)`",
         probe)
-    assert len(step_pairs) >= 8, (
+    assert len(step_pairs) >= 9, (
         f"the probe's step list is gone or was reformatted: {step_pairs}")
     for first, second, lineno in step_pairs:
         text = sources["extractor_v2"][int(lineno) - 1]
         named = [s.split(".")[-1] for s in (first, second) if s]
-        assert any(sym in text for sym in named), (
+        assert all(sym in text for sym in named), (
             f"the probe cites `{first}`"
             + (f" / `{second}`" if second else "")
             + f" at extractor_v2.py:{lineno}, which reads {text.strip()!r} — "
             "the line moved and the cite did not")
     # (d) The probe's ENTRY-POINT sentence, the same (def, call) pair rule (a)
-    # pins in the README (#10021 review). Rule (c) covers only the probe's eight
+    # pins in the README (#10021 review). Rule (c) covers only the probe's nine
     # bare STEP cites, so this sentence — the one that names the entry point a
     # reader reproduces from — was the ONLY cite in the bundle that nothing
     # re-checked. It rotted exactly as rule (a)'s README twin did: the
@@ -1673,28 +2056,31 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     # green. Two documents stating one fact is a claim that can only be pinned
     # where each one states it.
     #
-    # #4282 RETIRED the call-site half here: `capture_session` was the SDK's only
-    # caller of the helper and it is deleted, so the probe's sentence is the def
-    # alone. The pin is therefore (i) the def cite still resolves, (ii) no SDK call
-    # site exists, (iii) the probe still SAYS so — the three assertions together are
-    # strictly stronger than the pair was, because a re-added call-site cite now
-    # needs a call site that does not exist to be green.
-    probe_entry = re.search(r"`sdk\.py:(\d+)`", probe)
+    # Non-vacuity: the pre-fix probe reads `(``sdk.py:13236``, called at
+    # ``:11682``)`, and `sdk.py:11682` at this head is
+    # `from tortoise.commit_schema import compute_client_commit_id` — so the
+    # call-site assertion reds there. It is the assertion that was already red
+    # in the README before this round; the pin now covers the second site too.
+    # ⚠️ The CALL half moved to `hosted_api.py` with #4282 (the deleted
+    # `TortoiseSDK.capture_session` held the only in-`sdk.py` call); the cite names the
+    # surviving caller, which passes the method as a CALLABLE, and this pin resolves it
+    # THERE rather than dropping the claim it makes.
+    probe_entry = re.search(
+        r"`sdk\.py:(\d+)`, called from the hosted capture lane at "
+        r"`tortoise/hosted_api\.py:(\d+)`", probe)
     assert probe_entry, (
         "the probe's entry-point cite moved or was reformatted; re-derive it, "
         "do not drop the pin")
-    p_def = int(probe_entry.group(1))
+    p_def, p_call = (int(n) for n in probe_entry.groups())
     assert sources["sdk"][p_def - 1].lstrip().startswith("def _extract_session_v2("), (
         f"the probe cites the _extract_session_v2 def at sdk.py:{p_def}, which "
         f"is {sources['sdk'][p_def - 1].strip()!r} — the line moved and the "
         "cite did not")
-    assert not re.search(r"`sdk\.py:\d+`, called at `:\d+`", probe), (
-        "the probe cites a CALL SITE for _extract_session_v2 again; #4282 deleted "
-        "its only SDK caller (`capture_session`)")
-    assert not [n for n, line in enumerate(sources["sdk"], 1)
-                if "self._extract_session_v2(" in line], (
-        "_extract_session_v2 has an SDK call site again, so the probe's "
-        "call-site cite can and must be restored")
+    hosted_lines = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
+    assert "sdk._extract_session_v2," in hosted_lines[p_call - 1], (
+        f"the probe cites the call at hosted_api.py:{p_call}, which is "
+        f"{hosted_lines[p_call - 1].strip()!r} — the line moved and the cite "
+        "did not")
 
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():
@@ -2414,37 +2800,54 @@ def test_a_row_that_blames_the_landed_pre_registration_says_it_landed():
 def test_the_probes_line_citations_resolve_too():
     """The README is pinned; the PROBE carried the same numbers with no pin at all.
 
-    #9089 review P2: the probe docstring cites the same entry point and the same eight step call
-    sites, and `test_the_readmes_line_citations_resolve_to_the_symbols_they_name` reads only
+    #9089 review P2: the probe docstring cites the same entry point and the same step call sites
+    (nine cites over the eight steps, after the S2.3 pair was split — see below), and
+    `test_the_readmes_line_citations_resolve_to_the_symbols_they_name` reads only
     `README.md` — so a merge-up that moves `sdk.py` re-stales the probe silently, which is exactly
     how the earlier rounds went stale. Same check, other file.
 
-    #4282 deleted `capture_session`, the entry point's only caller, so the probe's cite is the
-    def alone; the call-site assertions became "no call site exists, and the probe says so".
+    #10214 review P2 (round 8): that same failure had ALREADY recurred one layer down. The eight
+    BARE step cites (`` ``run_s1`` (S1, ``:8540``) ``) were never read by anything — the README's
+    twin check pins only the README's copy — so a merge of `main` that added 88 lines to
+    `extractor_v2.py` re-staled all eight by exactly +88 and every gate stayed green. The paragraph
+    below the list even claimed they were "pinned only where the README's step table repeats the same
+    numbers", which nothing compared. The README's own step-table check is the right shape, so this
+    test now applies it here too: each `` ``symbol`` (LABEL, ``:NNNN``) `` in the header must name a
+    line that CARRIES that symbol. The claim of coverage is now true rather than asserted.
+
+    Non-vacuity: at the pre-fix head every one of the eight cited +88 lines is unrelated code
+    (`:8507` is `extract_session_v2`'s docstring prose, `:8646` is a blank line, `:8845` a comment
+    about `aboutObject`), so all eight assertions red; `sdk.py:11611` is a comment inside an
+    unrelated M2 paragraph, so the call-site assertion reds as well.
+
+    #10214 review (blocking): the cites were previously carried as a PAIR —
+    `` ``kind_classifier.classify_items``/``_apply_classify_kinds`` (S2.3, ``:8700``) `` — and one
+    line number cannot be right for two symbols on two different lines. This loop reads the LAST
+    symbol of a pair, so it asserted `_apply_classify_kinds` against `classify_items`' line and the
+    pin red-ed in CI while the README's one-symbol row (`:8701`) stayed right. The pair is now two
+    cites on their own lines, so BOTH symbols are pinned, and the population is 9 (eight steps;
+    S2.3 makes two calls). Non-vacuity of the fix: restoring the pair at `:8700` reds this loop on
+    both counts — the population assert (8 vs 9) and `_apply_classify_kinds` against `:8700`.
     """
     probe = PROBE.read_text()
     sdk = (_REPO / "tortoise/sdk.py").read_text().splitlines()
     extractor = (_REPO / "tortoise/extractor_v2.py").read_text().splitlines()
 
-    # Same retirement as the README test's (a): the call-site half of this cite went
-    # with `capture_session` (#4282), so the pin is the def cite PLUS the claim that
-    # there is no caller left — and it reds if either moves.
-    entry = re.search(r"``sdk\.py:(\d+)``", probe)
+    # ⚠️ #4282 deleted `TortoiseSDK.capture_session`, the only in-`sdk.py` caller, so the
+    # cite names the surviving caller — the hosted capture lane, which passes the method as a
+    # CALLABLE. Same re-pointing as the README's twin check, and still an assertion about a
+    # line that does something rather than about a number nobody reads.
+    entry = re.search(
+        r"``sdk\.py:(\d+)``, called from the hosted capture lane at "
+        r"``tortoise/hosted_api\.py:(\d+)``", probe)
     assert entry, "the probe's sdk.py cite moved; re-derive it, do not drop the pin"
-    def_line = int(entry.group(1))
+    def_line, call_line = (int(n) for n in entry.groups())
     assert sdk[def_line - 1].lstrip().startswith("def _extract_session_v2("), (
         f"probe cites the def at sdk.py:{def_line}, which is {sdk[def_line - 1].strip()!r}")
-    assert not re.search(r"``sdk\.py:\d+``, called at ``:\d+``", probe), (
-        "the probe cites a CALL SITE for _extract_session_v2 again; the SDK's only "
-        "caller was deleted by #4282")
-    assert "SDK's" in probe and "only" in probe and "caller" in probe, (
-        "the probe no longer says the deleted `capture_session` was the SDK's only "
-        "caller — the SCOPE is what makes the sentence true (the hosted handler "
-        "still calls the helper), and it is what makes the single cite honest")
-    callers = [n for n, line in enumerate(sdk, 1) if "self._extract_session_v2(" in line]
-    assert not callers, (
-        f"_extract_session_v2 has a call site in sdk.py again ({callers}) — re-derive "
-        f"the call-site cite instead of leaving the probe stale")
+    hosted = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
+    assert "sdk._extract_session_v2," in hosted[call_line - 1], (
+        f"probe cites the call at hosted_api.py:{call_line}, which is "
+        f"{hosted[call_line - 1].strip()!r}")
 
     module_cite = re.search(r"``extractor_v2\.py:(\d+)``", probe)
     assert module_cite, "the probe's extractor_v2 entry cite is gone"
@@ -2452,6 +2855,27 @@ def test_the_probes_line_citations_resolve_too():
     assert extractor[module_line - 1].lstrip().startswith("def extract_session_v2("), (
         f"probe cites the entry point at extractor_v2.py:{module_line}, which is "
         f"{extractor[module_line - 1].strip()!r}")
+
+    # (b) The nine step call cites: `` ``symbol`` (LABEL, ``:NNNN``) `` into the same file, ONE
+    # cite per symbol on the line that symbol is on. The
+    # line WRAPS (`run_s4` and `_apply_classify_kinds` split their paren group), so the text is
+    # whitespace-normalised before matching — the unit is the cite, not the physical line.
+    flat = re.sub(r"\s+", " ", probe)
+    # The entry-point cite is FILE-NAMED and asserted above; a bare step cite has no file name inside
+    # the parenthesis, which is how the two shapes are told apart here.
+    steps = [
+        (symbol, int(lineno))
+        for symbol, inner, lineno in re.findall(
+            r"``([A-Za-z_][\w.]*)``\s*\(([^()]*?)``:(\d+)``\)", flat)
+        if ".py:" not in inner
+    ]
+    assert len(steps) == 9, (
+        f"the probe's nine step cites are gone (eight steps; S2.3 makes two calls): {steps}")
+    for symbol, lineno in steps:
+        text = extractor[lineno - 1]
+        assert symbol.split(".")[-1] in text, (
+            f"probe cites `{symbol}` at extractor_v2.py:{lineno}, which reads "
+            f"{text.strip()!r} — the line moved and the cite did not")
 
 
 # ── V7 across a multi-artifact table (the capstone's own rows) ────────────

@@ -328,6 +328,8 @@ The general rule:
 > **⇒ The rebuild path is REPLAY, never re-extraction.** The only thing that makes the derived tables regenerable is that the journal **stores the resulting rows**. A journal entry saying *"a point was created"* with just an id regenerates nothing.
 >
 > **And the payoff is identity, not just recoverability:** replay reproduces the graph **exactly**, so a v3 rebuild can be **diffed against** a v2 graph. A recompute-everything rebuild would silently produce a *different* graph each time — no stable baseline, and no reproducible audit.
+>
+> ⚠️ **"Exactly" is bounded by a declared exception: the journal may carry entries whose replay materialises NO graph node.** Two do, and both are §9.1 placements rather than omissions — `SessionNarrated` (the narrative, #9555) and `TurnsRecorded` (a capture's turn set while the record holds the turns, #10017 R2). Both are declared in `projection._NO_PROJECTION_FOLD`, so the exception is a *decision the dispatcher states*, never a silent skip; and both still carry their text into the record, so a rebuild loses nothing that a read can see. ⛔ The exception does not extend to REMOVALS: a `EntityMutated` op=delete that a replayed journal drops is a resurrection, not an exception (#3316), which is why `tortoise/log.py`'s torn-tail tolerance is an allow-list of additive types.
 
 **✅ The schema test this gives you, for any type or field:**
 > **If the journal does not carry it, it is not derived — it is PRIMARY, and belongs in a truth-layer table.**
@@ -522,7 +524,30 @@ The S1 narrative (the connected prose form of a captured session) is stored as *
 
 **A turn row DECLARES that it is not for the graph.** `public.point.cache_tier` (`'graph'` by default, `'record_only'` for §9.1's **raw-turn** tier — the narrative tier has its OWN table, `public.session_narrative`, and no tier column, so the two tiers are not both `public.point` rows) is how a row states it is not graph state, and `tortoise/cache_projection.py::read_record_view` skips every `record_only` point **and any edge incident to one**. The tier is a COLUMN, so it cannot be set through an event payload (it is stripped before the insert); a writer states it as its own statement. Migration `supabase/migrations/20261029000001_record_point_cache_tier.sql`, PR `#10070`.
 
-⚠️ **And nothing sets `'record_only'` yet — which is not the same thing as the routes agreeing.** Measured at #10129: a real capture replays to the SAME turn nodes on BOTH routes (`recover_from_log` and `rebuild_all` fold each per-turn `PointAdded`; the record route plans the turn rows at the schema default `'graph'`). They agree **only because both materialise the turns**. The tier and the carrier are what make them agree for the RIGHT reason — turns living outside the graph — and **step 7 of `#10017`** is what applies both halves: it stops emitting the per-turn `PointAdded` records AND writes the turn rows itself, stating `'record_only'` in that statement. Applying one half alone is the failure mode, and it is worse than a divergence: stop the emission and any turn row the record **already** holds is node-ified by the record route alone while the journal route skips it — this section's divergence, newly created — and a turn captured **after** the change reaches **no store at all**. Those per-turn `PointAdded` records ARE the record's turn-row write (`_write_capture_turns` issues no row statement of its own — measured: drop them and the record projects zero turn rows — and the graph write is already skipped once the record is armed). **So step 7 must give the writer that row statement in the same change**, not merely swap one journal type for another. The ordering is deliberate: the reader must exist before a writer can feed it, or the first `record_only` row would be projected as a graph node. Do not read the paragraph above as a description of current behaviour.
+**Where that placement is now EXECUTABLE** (it was prose until #10000/#10017/#10076, which is step 7):
+
+- **The write.** The capture writer stores turns in the graph **only** when the record cannot hold
+  them (no journal, or no `TORTOISE_RECORD_DSN`) — the capability decides, never a policy flag
+  (#10000, `sdk._write_capture_turns`).
+- **The journal.** On the record-held lane a capture's turns are journalled as ONE `TurnsRecorded`
+  carrier (`turns: [<the writer's per-turn snapshots, verbatim>]`) instead of one `PointAdded` per
+  turn, and its replay materialises **no node** (`_NO_PROJECTION_FOLD`) (#10017 R2) — a `PointAdded`
+  there re-created the turn nodes on every rebuild, i.e. a rebuild that *undid* this placement
+  (#10067).
+- **The row.** The carrier's turns are written as `public.point` rows by the projection's own
+  carrier-keyed statement (`record_projection._turn_row_statements`), each stating
+  `cache_tier = 'record_only'` in that statement. Doing it in the PROJECTION rather than at the
+  writer is what keeps `record == replay(journal)`: a live write and a record rebuilt from the same
+  journal run the same statement. The tier is **in the data**, not in a reader's predicate, so
+  `read_record_view` skips those rows and `rebuild_from_record` cannot node-ify them either —
+  otherwise the two rebuild routes produce two different graphs.
+- **The removal.** Deleting a legacy turn from the graph is journalled
+  (`EntityMutated` op=delete, `cache_tier: 'record_only'`), and its record effect is a **tier demote, not
+  a row delete** — the transcript stays (#10017 R1).
+- **The change feed.** The carrier is deliberately NOT in `sdk._GRAPH_EVENT_TYPES`, so an armed
+  capture's turns leave `poll_events` — a `:GraphEvent` for a turn the writer deliberately skipped
+  would advertise an entity that does not exist in the graph (recorded in `docs/event-catalog.md` and
+  pinned by `tests/test_10017_turn_carrier_replay.py`, #10017 step 7).
 
 ### 9.2 A GitHub PR is an **`Object` + an `Event` + a `Source`** — never a `Source`-per-event (D2, decided)
 

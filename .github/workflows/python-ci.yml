@@ -626,9 +626,9 @@ jobs:
           # 4) AN UNREADABLE INDEX IS UNKNOWN (2), NOT AN EMPTY DIRECTORY. This is the fail-open the
           #    review reproduced: `git ls-files … 2>/dev/null` with the exit status ignored printed
           #    "ok: … a pointer, not a copy" and exited 0 over a directory full of harness scripts.
-          printf 'garbage' > /tmp/harness-guard-index
+          printf 'garbage' > "${RUNNER_TEMP:-/tmp}/harness-guard-index"
           rc=0
-          GIT_INDEX_FILE=/tmp/harness-guard-index bash tools/check-harness-fork.sh \
+          GIT_INDEX_FILE="${RUNNER_TEMP:-/tmp}/harness-guard-index" bash tools/check-harness-fork.sh \
             operations/orchestrator-harness || rc=$?
           [ "$rc" -eq 2 ] || { echo "FAIL: a broken index must exit 2 (never a pass), got $rc"; exit 1; }
 
@@ -937,8 +937,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -1836,13 +1838,26 @@ jobs:
     # `WATCHDOG_CEILING_MIN` (55m) and past this job's own 60m outer cap — and a
     # budget built for the slowest class would also let a genuinely hung HOSTED leg
     # hold the REQUIRED aggregate red for 55m, the regression #6135/#6145 exists to
-    # prevent. This leg cannot be carried by the pool inside the policy, so it must
-    # not be schedulable onto it.
+    # prevent. This leg cannot be carried by the pool inside the policy, so this
+    # pin is written to keep it off the pool — though, as the next paragraph
+    # records, the pin alone no longer achieves that while the mitigation is on.
     #
-    # `ubuntu-24.04` is claimed by NO self-hosted runner (the pool carries
-    # `self-hosted,Linux,ARM64,self-hosted-arm64` plus, only while the fallback is
-    # attached, `ubuntu-latest`) — the same pin, and the same reasoning, as
-    # `workflow-lint` (#7867) and finding-provenance.
+    # `ubuntu-24.04` is HOSTED-ONLY for THIS job by choice — NOT because the pool
+    # cannot answer it. Since the 2026-10-29 mitigation (#6897 suspended;
+    # docs/ops/ci-runner-x64.md, "the label contract") the installer CAN emit
+    # `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`
+    # (tools/install-ci-runner-x64.sh), so the premise this comment used to end
+    # on, "`ubuntu-24.04` is claimed by no self-hosted runner", is
+    # FALSE. Re-measure it rather than trusting this text:
+    # `gh api repos/<owner>/<repo>/actions/runners`.
+    # ⛔ THE COST, STATED: label matching is cumulative and unscoped (github/docs,
+    # "Using self-hosted runners in a workflow"), so while the mitigation is
+    # engaged this leg IS pool-eligible — and on the pool it is not merely slower,
+    # it is KILLED: 5.49x on the same 365 nodeids (1352.5 s vs 246.5 s), and
+    # `test-slow (e)` killed at 2402 s with 375 of 850 done (#6897,
+    # 2026-10-29T04:49:36Z). That is an accepted cost of the temporary mitigation,
+    # recorded in the runbook; the fix is a budget matching the class or a move,
+    # not this label.
     # Cost when GitHub-hosted is healthy: none — the pool only wins these jobs while
     # the fallback label is attached. During a real GitHub-hosted outage these two
     # legs WAIT for a hosted runner (the aggregate stays pending — "not answered
@@ -2092,8 +2107,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2619,8 +2636,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -2734,6 +2753,9 @@ jobs:
           fi
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload — same contract as the fast job's upload.
+        # `${{ runner.temp }}` (not the `$PYTEST_LOG` shell variable, which
+        # `with:` does not expand) is the same per-job path the first step
+        # resolved, so the artifact is this leg's own log (#10280).
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
@@ -2895,6 +2917,14 @@ jobs:
         # The track-b run uses `-m track_b` — the manifest's collect-only
         # MUST use the same marker (never the default 'not track_b'), or the
         # expected set would not match the observed set.
+        # ⛔ AND IT MUST BE THIS JOB'S OWN FILE (`${RUNNER_TEMP}`, #7815). This
+        # job is where the shared `/tmp/expected-nodeids.txt` was MEASURED red:
+        # run 40986966578 wrote `emit-manifest: 4 expected nodeids` here at
+        # 02:57:07, its 4 track_b tests passed, and 94 s later the guard read the
+        # file back and reported `630 expected nodeid(s) absent` naming
+        # `tests/test_10122_point_name_not_indexed.py`,
+        # `tests/test_ci_runner_x64_install.py` and others this job never
+        # collected — a peer's manifest, a false red on a required gate.
         run: |
           FILES="tests/test_ingest_safety.py"
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
@@ -3078,13 +3108,48 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Cache pip dependency caches (#7612)
+      - name: Restore pip dependency caches (#7612, RESTORE-ONLY — #10182)
         # #7612: ephemeral runners, no dependency cache — every job downloaded
         # its wheels cold on every run. Placed BEFORE install-cpu-torch so torch
         # (140 wheels, ~3.2 GB) is served from the cache as well.
         # Coverage-neutral: pip-only job, no uv.lock to enforce; pip's cache is
         # content-addressed and cannot substitute a different version.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY, and this job is the one that must be
+        # (`actions/cache/restore` has no post step — the post save is what
+        # #10182 established is charged against this job's `timeout-minutes`
+        # like any other step).
+        #
+        # MEASURED (run 41100829071, job `test-carve-out (b)` 124223444008):
+        # the restore was a PARTIAL hit (1 s, via `restore-keys`), so the post
+        # step reserved the exact key and began a ~3.6 GB save. Every WORK step
+        # was green — pytest finished at 18:10:55 — and then `Post Cache pip
+        # dependency caches` ran 18:12:33 → 18:29:46, when the job's 30m cap
+        # elapsed (`The job has exceeded the maximum execution time of 30m0s`).
+        # The leg reported `cancelled`, which `python-ci-gate` reads as red BY
+        # DESIGN (#5219: a cancelled leg certifies nothing) — so a green shard
+        # reddened a REQUIRED check on a diff that never touched this job.
+        #
+        # This job cannot amortize that save, and no cap can make it able to.
+        # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
+        # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
+        # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
+        # (floor-clamped, `carve_shards: 3`) + ~1.5m setup/provision, i.e. ~9m
+        # of headroom against a ~9m COLD save and none at all against a slow
+        # one. Raising the cap instead would re-open #3239's stale-head
+        # exposure (the cap IS that exposure) and buy finite headroom under an
+        # UNBOUNDED term — the save has no timeout of its own.
+        #
+        # Nothing is lost by not saving here: the key is SHARED
+        # (`pip-<os>-<hash uv.lock>`), and it is written on EVERY run by
+        # `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`.
+        # This job only ever READ it.
+        #
+        # `continue-on-error`: a cache-SERVICE error (transport/503) must never
+        # red this leg — a miss is the fail-open case, and install-cpu-torch
+        # downloads the pinned CPU wheel either way.
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -3106,8 +3171,10 @@ jobs:
         # on that SIGTERM, and the victim then reddened with "redis.socket … No
         # such file or directory" on a diff it never touched. The replacement
         # reaps only on a PROOF that no running leg can own the server (its
-        # socket dir is gone, or it is older than the widest leg watchdog) and
-        # KEEPS every case it cannot measure.
+        # socket dir is gone, or it is older than the widest job `timeout-minutes`
+        # among the jobs that can OWN one — those that run this reaper plus every
+        # job that opts into the URI-less embedded lane
+        # (`TORTOISE_TEST_CARVE_OUT`)) and KEEPS every case it cannot measure.
         # Best-effort like the find below: a cleanup that cannot run must not red
         # a leg, and a leak it fails to reap is the orphan gate's to report.
         run: |
@@ -3358,7 +3425,7 @@ jobs:
       - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
         # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
         # discarded by pytest capture (measured on the fast job's flags — 0
-        # occurrences in /tmp/pytest.log and 0 in the junit XML), so the
+        # occurrences in this shard's pytest log and 0 in the junit XML), so the
         # ENOTEMPTY teardown leaks tolerated by `TemporaryDirectory.cleanup`
         # are mirrored to an artifact at session end. The writer MERGES by path
         # so a future xdist admission cannot truncate a peer's record wholesale
@@ -3575,8 +3642,8 @@ jobs:
           # is indistinguishable from a clean leg, on a job `python-ci-gate` needs.
           rc=0
           timeout -s INT -k 10 15m python -m pytest tests/ -m embedded_only \
-            -v --timeout=300 -p no:cacheprovider --junitxml=/tmp/junit-d14.xml -o junit_family=xunit1 2>&1 | tee /tmp/pytest-d14.log || rc=$?
-          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest-d14.log --rc "$rc"
+            -v --timeout=300 -p no:cacheprovider --junitxml="${RUNNER_TEMP:-/tmp}/junit-d14.xml" -o junit_family=xunit1 2>&1 | tee "${RUNNER_TEMP:-/tmp}/pytest-d14.log" || rc=$?
+          bash .github/scripts/pytest-attribution.sh --log "${RUNNER_TEMP:-/tmp}/pytest-d14.log" --rc "$rc"
           [ "$rc" -eq 0 ] || exit "$rc"
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
           # widened. The floor is 30 and the number is NOT arbitrary: the four
@@ -3593,7 +3660,7 @@ jobs:
           # markers, and the two darwin-gated #3845 fork tests; no real test skips
           # for any other reason). The contract is that the marks RUN; the exact
           # count is free to grow.
-          passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
+          passed=$(grep -c ' PASSED' "${RUNNER_TEMP:-/tmp}/pytest-d14.log" || true)
           echo "embedded_only-marked tests passed: $passed"
           [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
           # #4207: the floor above is a COUNT of PASSED lines, so a single
@@ -3607,8 +3674,8 @@ jobs:
           # --manifest-only: this lane's skips are the expected state (URI unset),
           # so the docker-calibrated skip matchers would false-red every e2e
           # module (24, measured); the coverage property is what this lane owes.
-          python3 tools/skip-guard.py /tmp/pytest-d14.log \
-            --junitxml=/tmp/junit-d14.xml \
+          python3 tools/skip-guard.py "${RUNNER_TEMP:-/tmp}/pytest-d14.log" \
+            --junitxml="${RUNNER_TEMP:-/tmp}/junit-d14.xml" \
             --manifest config/ci-expected-nodeids/embedded-only.txt --manifest-only
       - name: Dump tolerated tempdir-cleanup leaks (issue #7735)
         # Same capture trap as #1103 above: a PASSING test's `logger.warning` is
@@ -3638,8 +3705,8 @@ jobs:
         with:
           name: pytest-log-d14-hosted-api
           path: |
-            /tmp/pytest-d14.log
-            /tmp/junit-d14.xml
+            ${{ runner.temp }}/pytest-d14.log
+            ${{ runner.temp }}/junit-d14.xml
           if-no-files-found: ignore
 
   canary-streak:
@@ -3710,7 +3777,7 @@ jobs:
         run: |
           set -e
           gh run list --workflow python-ci.yml --branch main --event push --limit 5 \
-            --json databaseId --jq '.[].databaseId' > /tmp/prev-runs.txt
+            --json databaseId --jq '.[].databaseId' > "${RUNNER_TEMP:-/tmp}/prev-runs.txt"
           set +e
           # #4367: the nightly schedule trigger was removed, so this query can
           # only ever return HISTORICAL scheduled runs. It is kept as a
@@ -3719,7 +3786,7 @@ jobs:
           # it is `|| true`-guarded and becomes unreachable once the old
           # nightly runs age out of the run-list window.
           gh run list --workflow python-ci.yml --branch main --event schedule --limit 3 \
-            --json databaseId --jq '.[].databaseId' >> /tmp/prev-runs.txt 2>/dev/null || true
+            --json databaseId --jq '.[].databaseId' >> "${RUNNER_TEMP:-/tmp}/prev-runs.txt" 2>/dev/null || true
           CUR="${{ github.run_id }}"
           FOUND=""
           mkdir -p prev-streak
@@ -3730,7 +3797,7 @@ jobs:
               FOUND="$rid"
               break
             fi
-          done < /tmp/prev-runs.txt
+          done < "${RUNNER_TEMP:-/tmp}/prev-runs.txt"
           if [ -n "$FOUND" ]; then
             echo "previous streak from run $FOUND"
             ls -la prev-streak/
@@ -4016,7 +4083,23 @@ jobs:
     # routing is ambiguous, not fixed" — so `ubuntu-latest` does NOT mean
     # "GitHub-hosted with its own egress IP". That premise is load-bearing here:
     # this leg pulls its actionlint image with a single literal reference.
-    # `ubuntu-24.04` is claimed by no self-hosted runner.
+    #
+    # `ubuntu-24.04` is HOSTED-ONLY for THIS job by choice, but NOT — any more —
+    # because the pool cannot answer it. Since the 2026-10-29 mitigation (#6897
+    # suspended; docs/ops/ci-runner-x64.md, "the label contract") the installer
+    # CAN emit `…,ubuntu-24.04` under `CI_RUNNER_OS_LABEL=on|auto`
+    # (tools/install-ci-runner-x64.sh), so the premise this comment used to end
+    # on — "`ubuntu-24.04` is claimed by no self-hosted runner" — is FALSE.
+    # Re-measure it rather than trusting this text:
+    # `gh api repos/<owner>/<repo>/actions/runners`.
+    # ⛔ THE COST, STATED: GitHub's label matching is cumulative and unscoped
+    # (github/docs, "Using self-hosted runners in a workflow"), so while the
+    # mitigation is engaged this leg is POOL-ELIGIBLE and its single literal
+    # `rhysd/actionlint` pull spends the fleet's shared anonymous Docker Hub
+    # quota — a rate-limit red on healthy code. That is an accepted cost of the
+    # temporary mitigation, recorded in the runbook; if the mitigation becomes
+    # permanent the fix is a `runs-on` only GitHub-hosted can answer, not this
+    # label.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -4033,11 +4116,18 @@ jobs:
             exit 1
           fi
           # #7867: deliberately NOT routed through the GHCR/mirror resolver.
-          # This leg is pinned to a HOSTED label (`runs-on: ubuntu-24.04`, see
-          # the job header), so it has its own egress IP and never shares the
-          # fleet's anonymous Docker Hub quota — there is nothing to fall back
-          # FROM. Keeping the pin literal and unquoted in the `docker run` line
-          # is also structural: tests/test_ci_selection.py reads it from there.
+          # The reference stays a single literal (and unquoted) in the `docker
+          # run` line for a structural reason: tests/test_ci_selection.py reads
+          # it from there.
+          # ⛔ The egress argument this comment used to make — "pinned to a HOSTED
+          # label, so it has its own egress IP and never shares the fleet's
+          # anonymous Docker Hub quota" — is NO LONGER a guarantee. The pool can
+          # answer `ubuntu-24.04` while the mitigation is engaged (see the job
+          # header), so this pull CAN spend the quota the pin used to protect.
+          # That is an accepted cost of the temporary mitigation, recorded in the
+          # runbook; a resolver on this fleet would not restore the guarantee,
+          # because it is the same fleet. If the mitigation becomes permanent the
+          # fix is a `runs-on` only GitHub-hosted answers, not this label.
           docker run --rm -v "$PWD:/repo" -w /repo \
             rhysd/actionlint:1.7.12 \
             -shellcheck= "${files[@]}"

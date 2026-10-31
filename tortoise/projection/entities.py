@@ -24,9 +24,7 @@ from datetime import datetime, timezone
 # registers, or a node's IDENTITY is not a pure function of the journal (a
 # random stub id moved on every replay) and the reference fold cannot model
 # the stub at all.
-from tortoise.entity_identity import all_name_holder_ids
 from tortoise.ids import content_hash as _content_hash
-from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.live import (
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
     epistemic_disjunction,  # #5380: the target-position widening
@@ -58,6 +56,18 @@ from tortoise.projection.nonfolded import (
     record_non_folded,
 )
 from tortoise.source_identity import normalize_source_url, resolve_source_key
+
+# #8933: the identifier ALIAS derivation shares ONE implementation with the
+# query path (`tortoise/sparse.py` is stdlib-only + env_truthy, so this cannot
+# cycle). Deriving the write-side alias from anywhere else is how the two
+# halves of the mechanism drift and every identifier query silently returns
+# nothing — the ruling's load-bearing invariant.
+from tortoise.sparse import (
+    MAX_ALIASES_PER_POINT,
+    identifier_aliases,
+    identifier_tokens_enabled,
+    index_text,
+)
 from tortoise.vector_write import (
     clear_embedding,
     clear_then_set_prefix,
@@ -67,50 +77,22 @@ from tortoise.vector_write import (
 logger = logging.getLogger(__name__)
 
 
-#: ``_name_holder_count`` DELEGATES to ``entity_identity.all_name_holder_ids``
-#: — that module owns both the label vocabulary (it is what
-#: ``_require_identity_label`` refuses on) and the name-holder predicate
-#: (``_name_predicate``). A second hand-written query here is how the fold's
-#: MERGE-key decision silently stops following the shared predicate — if
-#: ``_name_predicate`` ever gains case-folding or a second name spelling, the
-#: count and the identity probes would disagree. The same #2901 drift lesson
-#: that keeps the label tuple shared applies to the count itself.
+#: ⛔ The fold's MERGE-key decision used to live here: ``_name_holder_count``
+#: counted every carrier of a name (any status) so ``_upsert_object`` could
+#: choose between the ``name`` key (#7369) and the ``id`` key when 2+ carriers
+#: shared one name (#8864 — a name ``MERGE`` matched EVERY carrier and the
+#: ``ON MATCH`` write stamped ONE id onto ALL of them, so two entities then
+#: answered every ``MATCH (n {id:$x})`` read as one).
 #:
-#: See :func:`_name_holder_count` for why the count matters.
-def _name_holder_count(g, label: str, name: str) -> int:
-    """How many ``label`` nodes hold ``name`` — **any** status.
-
-    The two name-keyed labels MERGE by NAME (``MERGE (o:Object {name:$name})``,
-    #7369), so this count decides whether the name can serve as the MERGE key at
-    all. When it exceeds one, that pattern matches EVERY carrier and the
-    ``ON MATCH`` id write stamps ONE id onto ALL of them — duplicate-id
-    corruption (#8864): two distinct entities then answer every id-keyed read
-    (``MATCH (n {id:$x})``) as one.
-
-    ⛔ Count EVERY carrier, not only the LIVE ones. ``MERGE … {name:$name}``
-    matches terminal carriers too, so a ``status='superseded'`` twin is re-id'd
-    by the same ``ON MATCH`` clause — measured: one live + one superseded
-    carrier of a single name both come out carrying the incoming id. The
-    read-side predicate (``live._terminal_excluded``, as used by
-    ``entity_identity.resolve_entity_id``) is the WRONG count here precisely
-    because it excludes the terminal twin that participates in the corruption.
-    ``all_name_holder_ids`` is the ANY-status probe for exactly that reason.
-
-    Cost: one index seek — ``Object.name`` / ``Subject.name`` are range-indexed
-    (``_RANGE_INDEX_LABEL_PROPS``).
-
-    ⛔ This counts the GRAPH, and the graph has MORE carrier sources than the
-    journal models read (#8864 review P2): explicit-id writers, connector
-    writers, and the name-STUBs ``_event_plain_merge`` / ``_mint_subject_stub``
-    mint during replay. Those models now materialise the mention-stub half
-    (``projection._event_mentioned_name_stubs``) because an undercount there
-    puts them on the opposite MERGE-key branch and they bury an id the graph
-    keeps; ``edges._mint_subject_stub`` is still unmodelled (#8914). A future
-    carrier source must therefore be taught to the models as well — counting
-    the graph is right HERE (the MERGE sees every node), and the models are the
-    side that must catch up.
-    """
-    return len(all_name_holder_ids(g, label, name))
+#: **#3590 removed the branch, and the count with it.** Both labels now MERGE on
+#: ``id`` unconditionally, so no write path makes a key decision from a carrier
+#: count and the helper had no production caller left. The read-side models that
+#: still report same-name coexistence (``journal_epistemic_existence``,
+#: ``journal_object_surviving_keys``) build their own ``by_name`` maps from the
+#: journal and never called this. The ANY-status vs live-only distinction it
+#: documented is preserved where it still decides something:
+#: ``entity_identity.all_name_holder_ids`` is the ANY-status probe, and
+#: ``live._terminal_excluded`` is the read-side predicate — do not swap them.
 
 
 # #6239: live's TWO ``PointPromoted`` emitters are both gated on the Point's
@@ -1156,6 +1138,346 @@ def flatten_search_keys_prop(props: dict) -> None:
                 props.pop(key, None)
 
 
+def point_identifier_aliases(props: dict) -> list[str]:
+    """#8933 Stage 2 — the identifier aliases this Point's INDEXED TEXT implies.
+
+    Derived from ``content`` ∪ ``search_keys`` — the exact text the ``Point``
+    fulltext index already holds (``("Point", ["content", "search_keys"])``,
+    ``projection/__init__.py``) — and written into ``search_keys``, which is
+    already one of its fields. So the alias needs **no schema change, no new
+    indexed property and no DDL**: it is additive text in a channel that is
+    already indexed.
+
+    Two properties this function deliberately has, both from the ruling:
+
+    * **The write side is the PRECISE half.** ``space_separated=False``, so a
+      document's prose cannot mint an alias ("sprint 2024" must not spend
+      index space on ``sprint2024``). The read side accepts the space form
+      because a person typed it, and its noise is bounded to one query.
+    * **It is derived, never recorded.** The journal keeps E3's ``search_keys``
+      list unchanged; a replay re-derives the same aliases from ``content``,
+      so the backfill for records written before this change is the EXISTING
+      rebuild path (pass 1a → ``_upsert_point_props``), not new code — and it
+      is idempotent by construction.
+
+    Returns ``[]`` when the mechanism is switched off
+    (``TORTOISE_IDENTIFIER_TOKENS``) or nothing identifier-shaped is present —
+    in which case the writer takes no copy and writes byte-identically to
+    before. Redaction is not re-litigated here: the capture path scrubs BEFORE
+    the payload reaches the projection (``sdk._redact_turn_contents``), and a
+    scrub REPLACES the whole matched value (``security._REDACTION_VALUE``), so
+    no secret bytes survive into the source text.
+    """
+    if not identifier_tokens_enabled():
+        return []
+    return _derive_point_identifier_aliases(props)
+
+
+def _derive_point_identifier_aliases(props: dict) -> list[str]:
+    """The alias derivation WITHOUT the ``TORTOISE_IDENTIFIER_TOKENS`` gate.
+
+    Split out for the CANONICALISER only (:func:`strip_identifier_aliases`),
+    and the split is load-bearing rather than tidiness (#10203 review round 7,
+    F2). The switch is the ruling's fail-safe BISECT lever: an operator flips
+    it to measure the feature off. A verifier whose verdict depends on the
+    verifier's own environment is not a verifier — with the gate in the strip,
+    `check_consistency` run under ``TORTOISE_IDENTIFIER_TOKENS=0`` against a
+    graph written with it ON (the shipped default) compared the alias
+    un-stripped, reported `divergence="content"` on a faithful graph, and moved
+    `db_hash` (`_graph_fingerprint` reads the same canonical view), so a stored
+    baseline read back as `unrecorded-mutation`. Both answers were a function of
+    the process env on an unchanged journal+graph pair.
+
+    The alias's SHAPE does not depend on whether the writer was enabled — it is
+    a pure function of the view's own ``content``/``search_keys`` — so the
+    canonical form must be computed unconditionally. Never call this from a
+    write path; the gate belongs there.
+    """
+    keys = props.get("search_keys")
+    if isinstance(keys, (list, tuple)):
+        keys = " ".join(str(s) for s in keys)
+    return identifier_aliases(
+        index_text(props.get("content"), keys), space_separated=False)
+
+
+def append_identifier_aliases(props: dict, aliases: list[str]) -> bool:
+    """#8933 Stage 2 — write the aliases into ``search_keys`` (already FLAT).
+
+    ``search_keys`` must already be in its canonical flat STRING form — every
+    caller runs :func:`flatten_search_keys_prop` first, on the same copy. The
+    append is a set difference against the tokens already present, so applying
+    it twice (a replay, a re-derivation, a caller that pre-computed the alias)
+    is a NO-OP rather than a growth loop, and it is capped at
+    ``MAX_ALIASES_PER_POINT`` so a pathological input cannot mint an unbounded
+    index value.
+
+    Returns ``True`` when a write happened (the caller uses it only for
+    diagnostics; the copy it must take is decided BEFORE this is called).
+    """
+    if not aliases:
+        return False
+    current = props.get("search_keys")
+    current = current if isinstance(current, str) else ""
+    present = set(current.split())
+    fresh = [a for a in aliases if a and a not in present]
+    if not fresh:
+        return False
+    if len(fresh) > MAX_ALIASES_PER_POINT:
+        fresh = fresh[:MAX_ALIASES_PER_POINT]
+    props["search_keys"] = " ".join([current, *fresh]).strip()
+    return True
+
+
+def strip_identifier_aliases(view: dict, extra=None) -> bool:
+    """#8933 Stage 2 — remove the DERIVED aliases from a canonical view.
+
+    The alias is a PURE function of the view's own ``content``/``search_keys``
+    (:func:`point_identifier_aliases`), so it states nothing the view does not
+    already state. Two views that agree on ``content`` and on the payload-owned
+    keys are the same point whether or not the node's ``search_keys`` carries
+    the derived token — which makes REMOVING it the canonical form that is
+    exact on BOTH sides of a journal-replay comparison.
+
+    Deriving it on the JOURNAL side instead (the first shape of this change,
+    ``_canonical_point_fields(..., derive_identifier_aliases=True)``) measured
+    as a P0 at #10203 review round 6: the revise door never derives. A content
+    edit (``PointRevised`` / ``update_point``) writes ``n.content`` and does not
+    touch ``search_keys`` — the ruling writes the alias AT CAPTURE — so the node
+    kept the creation's tokens while the reference view minted the alias of the
+    NEW content and reported ``divergence="content"`` on ``search_keys``, with
+    an action ("reconcile by replaying the journal") that reproduces the same
+    red. An unclearable false red on a faithful graph is the #5048/#8006/#8317
+    class this checker exists to refuse. Under the strip both directions are
+    clean: a MISSING alias is not a divergence (it is derived, not independent
+    evidence) and neither is a stale one — the last clause is what ``extra``
+    below carries, because round 9's revise door DOES retract the stale half
+    from the node while the record keeps it.
+
+    The same reasoning removes the need for a ``_PROJECTION_STATE_FORMAT``
+    bump: ``db_hash`` is computed from a view this function has already
+    canonicalised, so a rebuild or backfill that only ADDS aliases cannot move
+    a recorded baseline into ``unrecorded-mutation``.
+
+    ⛔ The derivation here is UNCONDITIONAL — it deliberately does NOT go
+    through :func:`point_identifier_aliases`, whose ``TORTOISE_IDENTIFIER_TOKENS``
+    gate is a WRITE-side switch. A canonical form that honoured the checker's own
+    env would make ``check_consistency`` and ``db_hash`` answer differently about
+    an unchanged journal+graph pair when an operator flips the bisect lever
+    (#10203 review round 7, F2).
+
+    ⛔ ``extra`` is the OTHER half of the same canonical form, and it is
+    required for the write path to be comparable at all (#10203 review, P1).
+    The strip above removes the alias of the view's CURRENT content, but a
+    CONTENT EDIT also RETRACTS the aliases the PREVIOUS content derived
+    (:func:`revise_identifier_aliases`), and a token the caller happened to
+    supply itself is in both sets — ``create(search_keys="err4032 release")``
+    over ``content="error ERR-4032 on deploy"``, then an edit to
+    ``"deploy failed"``: the node keeps ``release`` while the journal side (the
+    create payload, which owns the caller's keys) keeps ``err4032 release``.
+    The token was invisible while it was derivable and became DECISIVE the
+    moment it went stale, so ``check_consistency`` reported
+    ``fields=['search_keys']`` on a FAITHFUL graph and its advice ("replay the
+    journal") reproduced exactly that graph — the unclearable false red of
+    #5048/#8006/#8317, reintroduced on the previous-content edge of the same
+    ambiguity the current-content strip already resolves.
+
+    The caller passes the tokens the write path retracted for THAT point,
+    derived from the journal's own content history (``consistency``), so this
+    stays a pure function and stays env-invariant: whether a stale alias is
+    still on the node is a fact about the WRITER's ``TORTOISE_IDENTIFIER_TOKENS``
+    gate at edit time, not about the graph's faithfulness — an operator
+    bisecting with the switch flipped must not move the verdict.
+
+    Returns ``True`` when the view changed.
+    """
+    keys = view.get("search_keys")
+    if not isinstance(keys, str) or not keys:
+        return False
+    derived = set(_derive_point_identifier_aliases(view))
+    if extra:
+        derived |= set(extra)
+    if not derived:
+        return False
+    tokens = keys.split()
+    kept = [t for t in tokens if t not in derived]
+    if len(kept) == len(tokens):
+        return False
+    if kept:
+        view["search_keys"] = " ".join(kept)
+    else:
+        view.pop("search_keys", None)
+    return True
+
+
+#: The node's ``search_keys`` seen as the FLAT STRING the fulltext index needs,
+#: without ever handing a LIST to a string operator.
+#:
+#: ``NULL`` views as the empty string (the ordinary "no vocabulary yet"
+#: case). ``String`` passes through untouched, so the emitted clause is
+#: byte-identical to the pre-guard one for every node this repo writes today.
+#: ``List`` is flattened with the rule :func:`flatten_search_keys_prop` applies
+#: to a payload, so the vocabulary it holds survives instead of being dropped:
+#: ``['a','b']`` views as ``' a b'``, which ``trim(...)`` normalises in the ELSE
+#: arm. Any OTHER scalar views as its own text (``7`` -> ``' 7'``), so a shape
+#: no writer produces is still not silently discarded.
+#:
+#: ⛔ The inner ``CASE`` around the ``reduce`` source is NOT decoration. Both
+#: engines evaluate/type-check a ``CASE`` arm for EVERY row, so the moment the
+#: reduce's ``IN`` source is the raw property, a STRING row raises
+#: ``Type mismatch: expected List or Null but was String`` even though its
+#: ``WHEN`` is false (measured on the embedded lane — the naive
+#: ``THEN reduce(_sk = '', _v IN n.search_keys | …)`` reds every string node).
+#: Feeding ``IN`` a list-typed expression in every branch is what makes the
+#: guard safe. ``typeof``/``reduce``/``toString`` and ``IS NULL`` in a searched
+#: ``CASE`` were verified on the embedded lane (FalkorDBLite 4.18.3) against
+#: array-, empty-array-, string-, absent- and integer-valued nodes, and
+#: ``typeof(n.search_keys) = 'List'`` is already load-bearing here on BOTH
+#: engines (``_array_valued_search_keys_exist``). Idempotence re-checked by
+#: applying each clause twice (#10203 review round 8, F3).
+_NODE_SEARCH_KEYS_VIEW = (
+    "CASE WHEN n.search_keys IS NULL THEN '' "
+    "WHEN typeof(n.search_keys) = 'String' THEN n.search_keys "
+    "ELSE reduce(_sk = '', _v IN (CASE WHEN typeof(n.search_keys) = 'List' "
+    "THEN n.search_keys ELSE [n.search_keys] END) "
+    "| _sk + ' ' + toString(_v)) END"
+)
+
+
+def identifier_alias_append_clauses(aliases: list[str]) -> tuple[list[str], dict]:
+    """#10203 — Cypher `SET` clauses that APPEND ``search_keys``, never replace it.
+
+    ``SET n += $extra`` can only ASSIGN, and a payload that does not carry its
+    own ``search_keys`` list used to materialise the derived alias as the WHOLE
+    value. Measured (review round 6, P1): `PointAdded{content: "error
+    ERR-4032…", search_keys: []}` — the E3 ``PointPayload`` default spelling —
+    replaced a node's stored ``"release deploy rollout"`` with ``"err4032"``,
+    silently destroying the retrieval vocabulary the A4/#2070 expansion leg
+    reads. The pre-#8933 writer popped the blank list and wrote NOTHING, so the
+    node kept its value; this restores that outcome while still landing the
+    alias.
+
+    Each clause is the same set difference :func:`append_identifier_aliases`
+    does in Python, evaluated against the NODE's own value, so it is idempotent
+    (a replay, a re-derivation, a repeated emit) and needs no read. The
+    containment test pads with spaces: a bare ``CONTAINS`` would treat
+    ``err4032`` as present inside ``xerr40321``.
+
+    ⛔ The NODE side is TYPE-GUARDED (:data:`_NODE_SEARCH_KEYS_VIEW`), because
+    ``search_keys`` can be an ARRAY in a graph this repo maintains and
+    ``' ' + <list>`` is not a string expression (#10203 review round 8, F3).
+    Measured on the embedded lane at the previous head: the whole
+    ``_persist_extra_props`` statement raised ``Type mismatch: expected String
+    or Null but was List``, so a write whose only job was to add one alias
+    ABORTED. :func:`flatten_search_keys_prop` flattens the PAYLOAD, never a node
+    value that predates the flatten rule, and
+    ``_array_valued_search_keys_exist``/``_array_search_keys_rows`` exist
+    precisely because such rows can be present at any time.
+
+    Returns ``(clauses, params)`` for ``_persist_extra_props``.
+    """
+    clauses: list[str] = []
+    params: dict = {}
+    for i, token in enumerate(aliases):
+        if not token:
+            continue
+        name = f"alias{i}"
+        params[name] = token
+        clauses.append(
+            "SET n.search_keys = CASE "
+            f"WHEN (' ' + {_NODE_SEARCH_KEYS_VIEW} + ' ') "
+            f"CONTAINS (' ' + ${name} + ' ') "
+            "THEN n.search_keys "
+            f"ELSE trim({_NODE_SEARCH_KEYS_VIEW} + ' ' + ${name}) "
+            "END")
+    return clauses, params
+
+
+def _flat_search_keys_value(value) -> str:
+    """#10203 — ANY ``search_keys`` value a NODE can hand back, as one string.
+
+    A node's value crosses the driver boundary as a ``list`` whenever the array
+    shape is present, and that state is reachable at any time —
+    :data:`_NODE_SEARCH_KEYS_VIEW` and ``_array_valued_search_keys_exist`` exist
+    for exactly that reason (a later ``update_entity``'s ``SET n += $props`` has
+    no flatten, #5482; a RESTORE/DR graph carries them). ``str(value)`` on a list
+    is NOT the value — it is ``"['alpha', 'beta']"`` — so joining it directly
+    silently REPLACED the whole stored vocabulary with the new alias, which is
+    the loss ``revise_identifier_aliases``'s own docstring forbids (#10203
+    review round 9, F1).
+
+    ``None``/absent flattens to ``""``; a string is returned as-is; a sequence
+    is space-joined token-wise (the same rule
+    :func:`_derive_point_identifier_aliases` applies to the node value for the
+    ``stale`` half), and any other scalar contributes its own text rather than
+    disappearing.
+
+    This is the read-side counterpart of :func:`flatten_search_keys_prop`, which
+    applies the same rule to a PAYLOAD: an array is never a legal stored form,
+    so flattening it on the way in loses nothing.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return " ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value)
+
+
+def revise_identifier_aliases(*, new_content, old_content, old_search_keys,
+                              caller_search_keys=None) -> str | None:
+    """#10203 — the ``search_keys`` value a CONTENT EDIT must store.
+
+    A content edit is not a capture: the ruling writes the alias AT CAPTURE, so
+    a revision has to RECOMPUTE the derived part rather than leave the creation's
+    token on the node. Without this, an edit that introduces an identifier never
+    indexes it, and an edit that REMOVES one leaves a stale alias behind that
+    still matches the old code — measured both ways at review round 6.
+
+    The rule, in the same shape the SDK already applies to the OTHER derived
+    fields on a content edit (``content_hash`` #1904, the vector #4208):
+
+      * ``base`` = what the caller supplied now, else the node's own value
+        MINUS the aliases its PREVIOUS content derived (those are the stale
+        ones; a non-alias key is never touched, so the retrieval vocabulary an
+        earlier write established survives);
+      * ...plus the aliases THIS content derives (``space_separated=False`` —
+        the write side stays precise, per ``point_identifier_aliases``).
+
+    Returns the flat value, or ``None`` when nothing is left — the caller must
+    REMOVE the property (``SET n.search_keys = null``), never store ``""``.
+
+    One read is owed: the node's previous ``content``/``search_keys`` is what
+    says which tokens are stale, and it is not in the event. The caller passes
+    it in, so this stays a pure function (the ``_revise_point``/``update_point``
+    doors read it in the SAME round trip as the write).
+
+    ⛔ ``old_search_keys`` is a NODE VALUE, so it can be a LIST (see
+    :func:`_flat_search_keys_value`). Both callers pass the raw column —
+    ``MATCH (n:Point {id:$id}) RETURN n.content, n.search_keys`` — and FalkorDB
+    hands an array property back as a Python ``list``. Treating a non-``str`` as
+    empty discarded every stored token and returned the new content's alias
+    alone (or ``None``, which both doors write as ``SET n.search_keys = null``),
+    destroying the retrieval vocabulary the A4/#2070 expansion leg reads — the
+    same loss the ADD door's append-vs-assign fix prevents, through the door it
+    did not cover (#10203 review round 9, F1).
+    """
+    if caller_search_keys is not None:
+        # The caller OWNS the list in this call: replace rather than merge, so a
+        # removed key really goes away. The old aliases cannot leak into it.
+        base = _flat_search_keys_value(caller_search_keys)
+    else:
+        stale = set(point_identifier_aliases(
+            {"content": old_content, "search_keys": old_search_keys}))
+        current = _flat_search_keys_value(old_search_keys)
+        base = " ".join(t for t in current.split() if t not in stale)
+    base = " ".join(base.split())
+    tokens = base.split()
+    for alias in identifier_aliases(
+            index_text(new_content, base), space_separated=False):
+        if alias and alias not in tokens:
+            tokens.append(alias)
+    return " ".join(tokens) or None
+
+
 class _EntityHandlers:
     """Mixin: entity upsert/delete methods for FalkorProjection."""
 
@@ -1823,7 +2145,9 @@ class _EntityHandlers:
     def _persist_extra_props(self, match_clause: str, match_params: dict,
                               ev: dict, handled_keys: frozenset,
                               list_props: frozenset | None = None,
-                              allow_keys: frozenset | None = None) -> dict:
+                              allow_keys: frozenset | None = None,
+                              extra_set_clauses: list[str] | None = None,
+                              extra_params: dict | None = None) -> dict:
         """Persist arbitrary caller-supplied props not explicitly handled.
 
         Computes the set difference between event dict keys and the union of
@@ -1848,6 +2172,12 @@ class _EntityHandlers:
 
         Returns the dict of props actually persisted (empty when none) so the
         caller can report unrecognised keys (#2795 drift warning).
+
+        ``extra_set_clauses`` are extra ``SET`` statements spliced into the SAME
+        query (with ``extra_params``), for a value the map-assign form cannot
+        express — #10203's ``search_keys`` alias APPEND, which must read the
+        node's own value rather than replace it. A query is issued when either
+        the map or the clauses carry work, so a clause-only call still runs.
         """
         skip = self._META_KEYS | handled_keys
         extra = {}
@@ -1863,10 +2193,11 @@ class _EntityHandlers:
                     and k not in list_props:
                 continue
             extra[k] = v
-        if extra:
+        if extra or extra_set_clauses:
             self.g.query(
-                match_clause + " SET n += $extra",
-                params={**match_params, "extra": extra},
+                match_clause + " SET n += $extra"
+                + "".join(" " + c for c in (extra_set_clauses or [])),
+                params={**match_params, "extra": extra, **(extra_params or {})},
             )
         return extra
 
@@ -1965,10 +2296,40 @@ class _EntityHandlers:
         # blank-list pop is visible to the drop-report loop below, which would
         # otherwise log a false "list prop dropped" for a key that was
         # deliberately normalized away.
-        if any(isinstance(p.get(k), (list, tuple))
-               for k in _POINT_FLATTEN_LIST_PROPS):
+        #
+        # #8933 Stage 2: the SAME copy carries the derived IDENTIFIER ALIASES —
+        # `ERR-4032` -> `err4032` in `search_keys`, the alias channel already in
+        # the Point fulltext field set. Derived from the payload's own
+        # `content`/`search_keys` on every write (live, replay, promote), so the
+        # value is a pure function of the journal record and a rebuild
+        # re-derives it identically. The alias list is computed ONCE, before the
+        # copy, because that is also the condition that decides whether a copy
+        # is needed at all: a point with no identifier takes the pre-#8933 path
+        # and writes byte-identically.
+        alias_tokens = point_identifier_aliases(p)
+        # #10203 review round 6 (measured P1): whether the payload OWNS
+        # `search_keys` decides REPLACE vs APPEND. It owns it only when it
+        # carries a non-blank list of its own; the pre-#8933 writer popped a
+        # blank list and wrote NOTHING (the node kept what it held), so
+        # materialising the alias alone would be a silent DOWNGRADE of the
+        # stored vocabulary — the E3 `PointPayload` default spelling
+        # (`search_keys: []`) turned `"release deploy rollout"` into
+        # `"err4032"`. Owned: the whole value is rewritten from the payload, so
+        # an earlier content's aliases go with it. Not owned: the alias is
+        # APPENDED to the node's own value below (`identifier_alias_append_
+        # clauses`), which is also why a repeat stays a no-op.
+        _pk = p.get("search_keys")
+        if isinstance(_pk, (list, tuple)):
+            owns_search_keys = any(str(_s).strip() for _s in _pk)
+        elif isinstance(_pk, str):
+            owns_search_keys = bool(_pk.strip())
+        else:
+            owns_search_keys = False
+        if alias_tokens or any(isinstance(p.get(k), (list, tuple))
+                               for k in _POINT_FLATTEN_LIST_PROPS):
             p = dict(p)
             flatten_search_keys_prop(p)
+            append_identifier_aliases(p, alias_tokens)
         op = p.get("operator")
         if not isinstance(op, dict):
             # #331 (review r5): parity with _create_edges' r4 guard — a
@@ -2268,10 +2629,23 @@ class _EntityHandlers:
         # are excluded (precedence: the fixed clauses above already wrote
         # updatedAt/embedding/content_hash), and only persistable values
         # survive the shared type filter (#2894).
+        # #10203 (P1): the alias is APPENDED when the payload did not own
+        # `search_keys` — see the ownership note at `alias_tokens` above. The
+        # key is dropped from the map (`SET n += $extra` can only assign) and
+        # re-stated as a guarded append in the same query.
+        alias_append_clauses: list[str] = []
+        alias_append_params: dict = {}
+        if alias_tokens and not owns_search_keys:
+            p = dict(p)
+            p.pop("search_keys", None)
+            alias_append_clauses, alias_append_params = \
+                identifier_alias_append_clauses(alias_tokens)
         extras = self._persist_extra_props(
             "MATCH (n:Point {id:$id})", {"id": p["id"]}, p,
             self._POINT_HANDLED | self._POINT_DENY,
             list_props=self._POINT_LIST_PROPS,
+            extra_set_clauses=alias_append_clauses,
+            extra_params=alias_append_params,
         )
         for key in extras:
             if key not in self._POINT_DECLARED_PROPS:
@@ -3906,43 +4280,23 @@ class _EntityHandlers:
     # ── Entity nodes ───────────────────────────────────────────────
 
     def _upsert_subject(self, ev: dict) -> None:
-        """MERGE Subject by name (content-hash dedup), or by id once the name is shared."""
+        """MERGE the Subject by its opaque ``id``; ``name`` is a property."""
         sid = ev.get("id")
         name = ev.get("name", "")
-        # #7369: `name` is the MERGE KEY (`MERGE (s:Subject {name:$name})`), and
-        # a null/refused key aborts the replay. `sid` is only a property value
-        # on the SINGLE-carrier path, so there it is left to the parameter
-        # boundary; on the shared-name path it becomes the MERGE key and is
-        # gated below (#8864 review P2). Function-local import — the
-        # module-level cycle-avoidance pattern this file already uses.
+        # #3590: `id` is the MERGE KEY. The name is a mutable NATURAL KEY — a
+        # property a rename rewrites, never the identity. This replaced the
+        # #8864 name/id dual key, which existed only to stop one id being
+        # stamped onto every same-name carrier produced by NAME-DERIVED ids;
+        # with a minted id there is exactly one node per id, so the dual key
+        # has no job left.
         from tortoise.projection import _log_identity_skip, _writable_id
-        # Split so the reporter names the identity that ACTUALLY failed: a
-        # missing `sid` is an absent PROPERTY (pre-change silent, and
-        # `_log_identity_skip` deliberately does not warn for an absent
-        # identity), so logging `name` here would have claimed a writable name
-        # was unwritable.
         if not sid:
             return
-        if not _writable_id(name):
-            _log_identity_skip("Subject", name, "name (MERGE key)")
-            return
-        # #8864: WHICH key identifies this record — see the long note at the
-        # MERGE below. Computed here, before the side effects, because the
-        # branch decides whether `sid` is a MERGE KEY (a merge key is never
-        # nulled by the parameter boundary, so it must be gated by the FOLD).
-        carriers = _name_holder_count(self.g, "Subject", name)
-        name_is_shared = carriers > 1
-        if name_is_shared and not _writable_id(sid):
-            # ⛔ The boundary deliberately FORWARDS a MERGE key untouched (a
-            # null key is its own abort: `Cannot merge node using null property
-            # value`), so an unwritable `sid` would reach the engine and raise
-            # `Failed to parse query parameter 'key' value` out of `apply()` /
-            # a replay pass that carries no per-event `try/except` — i.e. AFTER
-            # ``_wipe_all_nodes``. Pre-#8864 `$id` was only ever a property
-            # VALUE there (nulled by the boundary, so `coalesce` kept the
-            # stored id); promoting it to the key is what re-opens that class,
-            # so the FOLD must skip-and-report exactly as it does for `name`.
+        if not _writable_id(sid):
             _log_identity_skip("Subject", sid, "id (MERGE key)")
+            return
+        if not _writable_id(name):
+            _log_identity_skip("Subject", name, "name")
             return
         # Compute embedding for Subject name (#7845)
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
@@ -3981,17 +4335,16 @@ class _EntityHandlers:
         # a fresh MERGE has nothing to remove. The pattern carries the SAME key
         # the MERGE below uses (``merge_key``), or this misses its own node.
         #
-        # #8864: WHICH key that is — `name` while it identifies exactly ONE
-        # carrier (the #452 content-hash dedup and the stub adoption below both
-        # depend on name-keying), and `id` once two or more carriers hold it.
-        # A name held by N nodes makes `MERGE (s:Subject {name:$name})` match ALL
-        # of them and the `ON MATCH` id write stamp ONE id onto EVERY one of
-        # them: duplicate-id corruption, after which every id-keyed read folds
+        # ⛔ #3590: the MERGE key is the id — ONE node per id, always. The
+        # pre-#3590 key was `name` (while exactly ONE carrier held it, #8864),
+        # and a name held by N nodes made `MERGE (s:Subject {name:$name})`
+        # match ALL of them and the `ON MATCH` id write stamp ONE id onto EVERY
+        # one: duplicate-id corruption, after which every id-keyed read folds
         # two distinct entities into one result set. The record's id IS the
-        # identity (#3590 R1), so an ambiguous name never has to be resolved to
-        # fold the record — it just stops being the key. (`carriers` is read
-        # above, before the embedding work, because the branch also decides
-        # whether `sid` needs the `_writable_id` gate.)
+        # identity (R1), so a name never has to be resolved to fold the record
+        # — it is not a key at all any more. (`carriers` is gone with the
+        # branch that chose between the keys: `sid` still takes the same
+        # `_writable_id` gate below, on the id that is now the only key.)
         #
         # ⚠️ KNOWN GAP, recorded deliberately (#8902 review P3, filed as #8919):
         # in the `id`-keyed branch the `ON MATCH` below writes the id and the
@@ -4005,14 +4358,12 @@ class _EntityHandlers:
         # `journal_object_surviving_keys`; `_fold_journal_entities` already moves
         # the id with its merge key), or they diverge in the fail-CLOSED
         # direction — so it is its own change, not a rider on #8864.
-        if name_is_shared:
-            logger.warning(
-                "projection: %d Subject carriers already hold the name %r — "
-                "a shared name cannot serve as the MERGE key; folding by id "
-                "%r instead, so one id is never stamped onto every same-name "
-                "carrier (#8864)", carriers, name, sid)
-        merge_key = "id" if name_is_shared else "name"
-        merge_value = sid if name_is_shared else name
+        # #3590: the MERGE key is the id — ONE node per id, always. `name` is a
+        # mutable natural key (R2): a rename is a journaled mutation on this id
+        # (`EntityMutated op=rename`), never a re-key, so it does not have to be
+        # part of the identity to survive replay.
+        merge_key = "id"
+        merge_value = sid
         clear_embedding(self.g, f"(s:Subject {{{merge_key}:$key}})", "s",
                         {"key": merge_value}, embedding)
         _set_emb = set_embedding_clause("s")
@@ -4069,19 +4420,17 @@ class _EntityHandlers:
                     "st": ev.get("status"),  # #1423: status ON CREATE only
                     "embedding": embedding},
         )
-        # #228: persist arbitrary caller-supplied props. The anchor follows the
-        # MERGE key (#8864): a name-keyed MATCH would write the caller's props
-        # onto EVERY same-name carrier, which is the same over-reach as the id
-        # clobber.
+        # #228: persist arbitrary caller-supplied props. The anchor is the
+        # entity's id (#3590) — the same node the MERGE above keyed, so the
+        # caller's props land on exactly one entity.
         self._persist_extra_props(
-            "MATCH (n:Subject {id: $id})" if name_is_shared
-            else "MATCH (n:Subject {name: $name})",
-            {"id": sid} if name_is_shared else {"name": name},
+            "MATCH (n:Subject {id: $id})",
+            {"id": sid},
             ev, self._SUBJECT_HANDLED,
         )
 
     def _upsert_object(self, ev: dict) -> None:
-        """MERGE Object by name (content-hash dedup), or by id once the name is shared.
+        """MERGE the Object by its opaque ``id``; ``name`` is a property.
 
         Objects are encoded via the Source→references→Object chain —
         embedding from name provides direct vector search capability
@@ -4089,23 +4438,17 @@ class _EntityHandlers:
         """
         oid = ev.get("id")
         name = ev.get("name", "")
-        # #7369: `name` is the MERGE KEY (`MERGE (o:Object {name:$name})`).
+        # #3590: `id` is the MERGE KEY; `name` is a mutable natural key. The
+        # #8864 name/id dual key existed only because a NAME-DERIVED id made
+        # same-name carriers share one id; a minted id is one node, always.
         from tortoise.projection import _log_identity_skip, _writable_id
-        # Split so the reporter names the identity that ACTUALLY failed (see
-        # the sibling note in `_upsert_subject`).
         if not oid:
             return
-        if not _writable_id(name):
-            _log_identity_skip("Object", name, "name (MERGE key)")
-            return
-        # #8864: which key identifies this record — see the note at the MERGE
-        # below. Computed here, before the side effects, because the branch
-        # decides whether `oid` is a MERGE KEY (never nulled by the parameter
-        # boundary, so the FOLD must gate it — see `_upsert_subject`).
-        carriers = _name_holder_count(self.g, "Object", name)
-        name_is_shared = carriers > 1
-        if name_is_shared and not _writable_id(oid):
+        if not _writable_id(oid):
             _log_identity_skip("Object", oid, "id (MERGE key)")
+            return
+        if not _writable_id(name):
+            _log_identity_skip("Object", name, "name")
             return
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
         ok = ev.get("object_kind")  # None default — same issue
@@ -4137,15 +4480,15 @@ class _EntityHandlers:
         # only when a new vector is being written; key ``merge_key`` below — the
         # SAME key the MERGE uses, or this misses its own node.
         #
-        # #8864: WHICH key that is — `name` while exactly ONE carrier holds it
-        # (the #452 dedup and the stub adoption above depend on name-keying),
-        # `id` once two or more do. A shared name makes
-        # `MERGE (o:Object {name:$name})` match ALL the carriers and the
-        # `ON MATCH` id write stamp ONE id onto EVERY one of them, i.e.
-        # duplicate-id corruption: two distinct entities then answer every
-        # id-keyed read as one. See `_upsert_subject` for the shared rationale.
-        # (`carriers` is computed with the gates above so the branch can also
-        # decide whether `oid` needs the `_writable_id` gate.)
+        # ⛔ #3590: the MERGE key is the id — ONE node per id, always. The
+        # pre-#3590 key was `name` (while exactly ONE carrier held it, #8864):
+        # a shared name made `MERGE (o:Object {name:$name})` match ALL the
+        # carriers and the `ON MATCH` id write stamp ONE id onto EVERY one of
+        # them, i.e. duplicate-id corruption — two distinct entities then answer
+        # every id-keyed read as one. See `_upsert_subject` for the shared
+        # rationale. (`carriers` is gone with the branch that chose between the
+        # keys; `oid` still takes the same `_writable_id` gate below, on the id
+        # that is now the only key.)
         #
         # ⚠️ KNOWN GAP, recorded deliberately (#8902 review P3, filed as #8919):
         # in the `id`-keyed branch the `ON MATCH` below writes the id and the
@@ -4157,14 +4500,9 @@ class _EntityHandlers:
         # above: closing it means writing the name on the id-keyed `ON MATCH` AND
         # teaching the two read-side carrier models the same name move, which is
         # its own change (#8919), not a rider on #8864.
-        if name_is_shared:
-            logger.warning(
-                "projection: %d Object carriers already hold the name %r — "
-                "a shared name cannot serve as the MERGE key; folding by id "
-                "%r instead, so one id is never stamped onto every same-name "
-                "carrier (#8864)", carriers, name, oid)
-        merge_key = "id" if name_is_shared else "name"
-        merge_value = oid if name_is_shared else name
+        # #3590: the MERGE key is the id — ONE node per id, always.
+        merge_key = "id"
+        merge_value = oid
         clear_embedding(self.g, f"(o:Object {{{merge_key}:$key}})", "o",
                         {"key": merge_value}, embedding)
         _set_emb = set_embedding_clause("o")
@@ -4202,13 +4540,11 @@ class _EntityHandlers:
                     "title": title,
                     "embedding": embedding},
         )
-        # #228: persist arbitrary caller-supplied props. The anchor follows the
-        # MERGE key (#8864) — a name-keyed MATCH would write the caller's props
-        # onto EVERY same-name carrier.
+        # #228: persist arbitrary caller-supplied props on the entity the MERGE
+        # above addressed by id (#3590).
         self._persist_extra_props(
-            "MATCH (n:Object {id: $id})" if name_is_shared
-            else "MATCH (n:Object {name: $name})",
-            {"id": oid} if name_is_shared else {"name": name},
+            "MATCH (n:Object {id: $id})",
+            {"id": oid},
             ev, self._OBJECT_HANDLED,
         )
 
@@ -4235,10 +4571,12 @@ class _EntityHandlers:
         concurrent commit folded it between this record's gate probe and the
         fold); direct fold callers can also produce it as an idempotent
         re-fold. folded > 0 = claimed. First-fold stamps are kept on a
-        terminal re-fold (never re-SET). The id→name fallback (#2164 ISSUE B
-        legacy) fires ONLY on matched == 0 (genuine absence) — never when
-        the id node exists but is terminal (a fallback could fold a dup-name
-        carrier or re-claim a terminal target).
+        terminal re-fold (never re-SET). ⛔ #3590 RETIRED the id→name fallback
+        (#2164 ISSUE B legacy) that this paragraph used to describe as firing
+        "ONLY on matched == 0": there is no such fallback left to fire, because
+        under same-name coexistence a name-keyed re-resolution supersedes a
+        DIFFERENT incarnation (#3573's burial class). What replaced it is the
+        unified miss classifier described at the end of this docstring.
 
         ``cas=False`` (the DEFAULT — replay/rebuild surfaces: the pass-1b
         sweep, the apply dispatch, backup restore, consistency, migrate,
@@ -4258,6 +4596,18 @@ class _EntityHandlers:
         = no Object matched (missing Object / stale id / no id+name
         supplied), distinct from a successful fold without a separate
         existence pre-query.
+
+        #3590 RETIRED the id→name fallback: the fold addresses the target's ID
+        only. A legacy/stale id that matches nothing is NOT re-resolved by name
+        (under same-name coexistence a name-keyed fold supersedes a DIFFERENT
+        incarnation — #3573's burial class), and an id-less record is
+        unaddressable. Neither arm fabricates an address here: the miss is
+        recorded by ONE shared classifier — ``classify_terminalizer_miss``
+        driven by ``_supersede_name_unregistered`` — which exempts the bounded
+        ``object-superseded-unregistered`` case (D2, adopted on #3590: the
+        journal established NEITHER limb, so live and replay agree by
+        construction) and refuses ``object-superseded-miss`` whenever the name
+        WAS established (a reachable target was genuinely missed).
         """
         oid = ev.get("id")
         name = ev.get("name")
@@ -4265,8 +4615,8 @@ class _EntityHandlers:
             return (0, 0)
         # #5370: store the successor name VERBATIM — no 200-char cap. A cap
         # here is LOSSY: a successor named >200 chars is stored on its
-        # Object in full (identity is the NAME — `_upsert_object` MERGEs on
-        # it — and `create_entity` has never capped), but the fold would
+        # Object in full (identity is the id — `_upsert_object` MERGEs on it
+        # since #3590 — and `create_entity` has never capped), but the fold would
         # record only its 200-char prefix — a value that names NO Object.
         # The ask path's name-keyed successor probe
         # (assembly._probe_visible_successors — MATCH (o:Object) WHERE
@@ -4318,29 +4668,30 @@ class _EntityHandlers:
         common_params = {"sb": supersedes_by, "sa": superseded_at}
         if cas:
             common_params["excluded"] = excluded
-        if oid:
-            result = self.g.query(
-                "MATCH (o:Object {id:$id}) " + live,
-                params={"id": oid, **common_params})
-            folded, matched = _classify(result)
-            if folded == 0 and matched == 0 and name:
-                # #2164 review (P2, ISSUE B): the id branch matched NOTHING
-                # — the event's id is not the key the node carries (a legacy
-                # id-less Object journaled with its SYNTHESIZED canonical
-                # id). Fall back to the name branch — the same name-keyed
-                # fold the live path uses. #2242: fallback ONLY on genuine
-                # absence (matched == 0) — a present-but-terminal id node
-                # (0, 1) is a CAS loss and must NOT fall back (a fallback
-                # could fold a dup-name carrier or re-claim a terminal
-                # target under a different name spelling).
-                result = self.g.query(
-                    "MATCH (o:Object {name:$name}) " + live,
-                    params={"name": name, **common_params})
-                folded, matched = _classify(result)
-            return (folded, matched)
+        if not oid:
+            # #3590: ID-KEYED ONLY. The name-keyed fallback (#2164 ISSUE B) is
+            # RETIRED: it is the one remaining fold that reached a node by NAME,
+            # and under same-name coexistence a name-keyed fold can supersede a
+            # DIFFERENT incarnation (#3573's burial class). It also forced
+            # `_update_entity` to WITHHOLD rename records (#3377/#4769): a
+            # journaled rename moves the name before this fold's deferred sweep
+            # runs, so the fallback stopped matching.
+            # ⛔ Fold NOTHING here and record NOTHING here: the miss is
+            # classified ONE level up, by the same predicate the sweep and
+            # `check_consistency` use (`classify_terminalizer_miss` +
+            # `_supersede_name_unregistered`). Recording a non-exempt
+            # `unregistered-reference` at this site — an earlier draft of this
+            # branch did — refuses a journal the recorded D2 exemption covers
+            # (`object-superseded-unregistered`: the journal established
+            # NEITHER limb, so live and replay agree by construction) and that
+            # `rebuild()` folds, i.e. one journal, two engines, opposite
+            # verdicts. The classifier keeps the refusal where it belongs: a
+            # name the journal DID establish still records the non-exempt
+            # `object-superseded-miss`.
+            return (0, 0)
         result = self.g.query(
-            "MATCH (o:Object {name:$name}) " + live,
-            params={"name": name, **common_params})
+            "MATCH (o:Object {id:$id}) " + live,
+            params={"id": oid, **common_params})
         return _classify(result)
 
     def _upsert_document(self, ev: dict) -> None:
@@ -4862,7 +5213,8 @@ class _EntityHandlers:
         return self._event_guarded_merge(inner, eid, props, guard_source_file)
 
     def _fold_object_status(self, name: str | None, event_kind: str, *,
-                            about_names=()) -> None:
+                            about_names=(), object_id: str | None = None,
+                            object_is_entity: bool = True) -> None:
         """#2729 — THE ONE Object-status fold dispatcher.
 
         Two halves, applied in this order:
@@ -4899,22 +5251,92 @@ class _EntityHandlers:
         signal (a mis-named object in the event, or a kind that drifted) — it
         is emitted at the kind's #1934 enforcement level rather than
         swallowed.
+
+        ⚠️ **#3590 narrowed when that signal can fire.** The report rides on the
+        resolved ID: an explicit target whose name resolves to no single live
+        entity is not folded AND is not reported through
+        ``_emit_fold_violation``, because the resolver
+        (`entity_identity.resolve_fold_name`) records it instead — as the
+        NON-exempt ``unregistered-reference`` / ``ambiguous-entity-name``
+        identity miss (see the re-resolve below). So a name that matches TWO
+        carriers (the #8864 shape) — which the pre-#3590 name-keyed probe used
+        to report — now produces the resolver's record instead of a
+        ``status_fold_unapplied`` violation, and the run still fails.
+
+        ⛔ **The two targets are classified in OPPOSITE directions (#3590
+        review F1/F2), and the distinction is the fold's own contract:**
+
+        * the explicit ``object`` is the fold's DECLARED target, and the fold
+          may MOVE its state, so an unresolved one is a NON-exempt identity
+          miss — it fails the run. Taking the attribution exemption here would
+          leave a lifecycle event that folded nothing behind a green run;
+        * ``about_entities`` is a LOOSE list ("a non-match is NOT a
+          violation" — the extraction pipeline emits events with
+          ``about_entities`` and no ``object``), so an unresolved entry keeps
+          the EXEMPT ``unfolded-mention`` shape: the miss is recorded and
+          named, and a journal that replays on ``main`` stays rebuildable.
         """
         index = _status_fold_index()
         from tortoise.status_folds import builtin_fold_status
 
         excluded = _terminal_object_statuses()
         declared = index.folds_for_event(event_kind)
-        if declared:
-            # The explicit target is REPORTED on a miss; an `about_entities`
-            # target is folded silently (see the docstring). `name` wins when
-            # it is also present in the list — one write, one report.
-            targets: list[tuple[str, bool]] = []
-            if name:
-                targets.append((name, True))
+        builtin_status = builtin_fold_status(event_kind)
+        # #3590: the fold addresses an ENTITY, so it addresses the entity's id.
+        # `object_id` is the id `_event_plain_merge` resolved for the event's
+        # explicit `object`; `about_entities` are loose names, resolved here to
+        # their single live holder. A name-keyed status write under same-name
+        # coexistence would move EVERY carrier's status — the harm class the
+        # identity change exists to remove — so an unresolved name is left
+        # unfolded and recorded rather than written by name.
+        from tortoise.entity_identity import resolve_fold_name
+
+        def _targets() -> list[tuple[str, str, bool, str]]:
+            """``(key_prop, key_value, report, display_name)`` per fold target.
+
+            The key prop is always ``id``: the fold addresses an ENTITY. An
+            unresolved name has no id and is NOT folded by name — the caller's
+            ``resolve_fold_name`` already recorded it as an
+            ``unregistered-reference`` non-fold (a name-keyed status write
+            would move every same-name carrier, and folding a guess is the
+            class #3590 removes).
+            """
+            out: list[tuple[str, str, bool, str]] = []
+            if name and object_id:
+                out.append(("id", str(object_id), True, name))
             for about in about_names or ():
-                if isinstance(about, str) and about and about != name:
-                    targets.append((about, False))
+                if not (isinstance(about, str) and about and about != name):
+                    continue
+                # #3590 review F2: `mention=True` IS right here, and round 3's
+                # removal of it is reverted. `about_entities` is the LOOSE list
+                # — this fold's own contract says "a non-match is NOT a
+                # violation (the extraction pipeline emits events with
+                # `about_entities` and no `object`)" — so a miss is a producer
+                # omission on a best-effort list, not the record's identity.
+                # A non-exempt record here made `rebuild_all` REFUSE journals
+                # that replay on `main` (one extracted event naming an
+                # unregistered subject was enough), which is the durable-copy
+                # regression the exemption exists to prevent. The miss stays
+                # visible: it is recorded and named by the run boundary.
+                # The EXPLICIT `object` above is the opposite case — see the
+                # re-resolve below.
+                about_id = resolve_fold_name(self.g, "Object", about,
+                                             context="status fold about",
+                                             mention=True)
+                if about_id:
+                    out.append(("id", about_id, False, about))
+            return out
+
+        matched_any = False
+        if declared:
+            # The explicit target is REPORTED on a miss — as long as it has a
+            # resolved id to miss on (#3590): an unresolved name is recorded by
+            # the non-exempt re-resolve below, and `_targets()` drops it rather
+            # than reporting twice. A RESOLVED `about_entities` target is folded
+            # silently (`report=False`); an unresolved one keeps the exempt
+            # mention shape (`mention=True` there). `name` wins when it is also
+            # present in the list — one write, one report.
+            targets = _targets()
             # #2729 review P2: the event-kind key is form-widened (namespaced
             # AND bare), so two packs that declare the same bare event name
             # share it. A declared target that MISSES because its kind has no
@@ -4922,18 +5344,17 @@ class _EntityHandlers:
             # event folded anything — otherwise it is a false
             # `status_fold_unapplied` for a correctly-folding write (the other
             # pack's kind simply is not this Object's kind).
-            matched_any = False
             missed: list[tuple[str, str]] = []
-            for target_name, report in targets:
+            for _key_prop, key_value, report, target_name in targets:
                 for target_kind, status in declared:
                     kinds = index.kind_forms_for(target_kind)
                     rows = self.g.query(
-                        "MATCH (o:Object {name:$n}) "
+                        "MATCH (o:Object {id:$n}) "
                         "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds "
                         "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
                         "SET o.status = $status "
                         "RETURN count(o) AS n",
-                        params={"n": target_name, "kinds": kinds,
+                        params={"n": key_value, "kinds": kinds,
                                 "status": status, "excluded": excluded},
                     ).result_set
                     if rows and rows[0][0]:
@@ -4945,18 +5366,115 @@ class _EntityHandlers:
                     # silent) or no Object of the declaring kind exists (a
                     # fold violation).
                     present = self.g.query(
-                        "MATCH (o:Object {name:$n}) "
+                        "MATCH (o:Object {id:$n}) "
                         "WHERE toLower(toStringOrNull(o.objectKind)) IN $kinds "
                         "RETURN count(o) AS n",
-                        params={"n": target_name, "kinds": kinds},
+                        params={"n": key_value, "kinds": kinds},
                     ).result_set
                     if not (present and present[0][0]):
                         missed.append((target_kind, target_name))
             if not matched_any:
                 for target_kind, target_name in missed:
                     _emit_fold_violation(target_kind, event_kind, target_name)
-        builtin_status = builtin_fold_status(event_kind)
-        if builtin_status is not None and name:
+        # ── the EXPLICIT target's own disposition (#3590 review F1) ──
+        # `_event_plain_merge` resolved this name with `mention=True` for the
+        # `produces` edge — ATTRIBUTION, where the exemption is correct — and
+        # handed us the id, or its absence. The same name is this fold's
+        # DECLARED target, and the fold MOVES its state, so an absence may not
+        # ride on that exempt record: `EXEMPT_SHAPES[SHAPE_UNFOLDED_MENTION]`'s
+        # recorded bound is "attribution only … a fold that must MOVE an
+        # entity's state can never take this exemption". Re-resolving WITHOUT
+        # `mention=True` re-classifies the SAME name for THIS use, so a miss is
+        # recorded as the non-exempt `unregistered-reference` /
+        # `ambiguous-entity-name` identity miss and the run fails — instead of a
+        # lifecycle event that moved nothing behind a GREEN run (the pre-#3590
+        # fold minted a name stub, so this arm was reachable and at least
+        # wrote).
+        #
+        # Gated two ways, because a refusal is a real cost:
+        #   * `object_is_entity` — the `objectType='Document'` arm carries a
+        #     :Source URL, not an entity name; resolving it would manufacture an
+        #     `unregistered-reference` for a document on every such event;
+        #   * `declared or builtin_status` — a kind that declares NO status fold
+        #     has no state to move, and refusing there would turn every event
+        #     that merely mentions an unregistered object into a failed run.
+        #
+        # ⛔ `not matched_any` is deliberately NOT a gate here (#3590 review,
+        # finding 1 — fail-OPEN). The #2729 rule above is about the
+        # `status_fold_unapplied` REPORT for a kind mismatch, and it is
+        # per-target by construction; borrowing it for this re-resolve inverted
+        # its meaning. When this branch is reached `object_id is None`, so
+        # `_targets()` never added the EXPLICIT target — every row that could
+        # set `matched_any` came from an `about_entities` target. An ATTRIBUTION
+        # target that happened to fold therefore silenced the identity miss of
+        # the record's OWN declared target: no status write, no
+        # `status_fold_unapplied` (it never entered `targets`/`missed`), no
+        # non-exempt record (the only record left was `_event_plain_merge`'s
+        # EXEMPT `unfolded-mention`) — a state-moving fold that moved NOTHING
+        # behind a green run, i.e. exactly what the exemption's recorded bound
+        # forbids. Pinned by
+        # `tests/test_3590_minted_identity_acceptance.py::
+        # test_an_about_target_that_folds_cannot_mask_the_explicit_targets_miss`.
+        #
+        # ⛔ …and the miss is classified by WHY it missed (#3590 round-5 review
+        # F2), because the two causes are different defects with different
+        # owners:
+        #   * **no carrier at all** — the producer referenced a name nothing
+        #     registered. The non-exempt `unregistered-reference` is right, and
+        #     the run fails: the SDK doors register before appending (D9), so
+        #     such a journal is a producer bug, and a green pass would fold
+        #     nothing while claiming success.
+        #   * **carriers exist, none LIVE** (superseded / id-less) — the entity
+        #     IS registered; the incarnation it names is simply buried, and this
+        #     fold may not resurrect it (R5). That is a deliberate, bounded
+        #     NO-OP, not a missing creation event, so it takes the recorded
+        #     `unfolded-mention` exemption with `cause=no-live-holder`: still
+        #     recorded and named by the run boundary, and — the reason it must
+        #     not be fatal — the door CANNOT make it resolvable without minting
+        #     a ghost (that was review F2), so a non-exempt class here would
+        #     turn every journal with a post-supersede lifecycle event into one
+        #     `rebuild_all` refuses. Measured before this split: such a journal
+        #     raised `NonFoldedEventsError` on replay while replaying cleanly on
+        #     the tree that minted the ghost.
+        if (name and object_is_entity and not object_id
+                and (declared or builtin_status is not None)):
+            # ⛔ The exemption is decided by the LIVE count, not by "any
+            # holder exists" (#3590 review, finding 1 — fail-open).
+            # `all_name_holder_ids` is ANY-status, so `mention=bool(_held)` was
+            # TRUE for a name held by TWO OR MORE LIVE carriers — the exact
+            # case the recorded bound forbids taking the exemption on
+            # (`identity-decision.md`: "a fold that must MOVE an entity's state
+            # can never take this exemption"). It left a lifecycle event that
+            # moved NOTHING behind a green run: `object_id` stayed None, no
+            # target was built, no `status_fold_unapplied` fired, and the only
+            # record was the EXEMPT `unfolded-mention`.
+            # So `mention=True` — the bounded, non-fatal NO-OP — is granted
+            # ONLY to the terminal-only arm (carriers exist, none live: the
+            # entity IS registered, this fold may not resurrect it, R5). With
+            # any LIVE holder the re-resolve is NON-exempt and records the
+            # identity miss (`ambiguous-entity-name` for 2+, or
+            # `unregistered-reference` for a live-but-id-less carrier), which
+            # fails the run.
+            from tortoise.entity_identity import (
+                all_name_holder_ids,
+                live_name_holder_ids,
+            )
+            _held = all_name_holder_ids(self.g, "Object", name)
+            _live_holders = live_name_holder_ids(self.g, "Object", name)
+            object_id = resolve_fold_name(
+                self.g, "Object", name, context="status fold object",
+                mention=bool(_held) and not _live_holders)
+        if builtin_status is not None and object_id:
+            # Guarded on the RESOLVED ID, not on `name` (#3590). A name is not an
+            # identity any more, so a name-keyed write here would move EVERY
+            # carrier's status — the harm class the identity change exists to
+            # remove. `object_id` is None in two reachable shapes: the event's
+            # `object` is a Document rather than an entity (the caller passes
+            # None deliberately), and an unresolved name (recorded just above —
+            # NON-exempt when nothing holds it, the bounded `no-live-holder`
+            # exemption when every holder is terminal).
+            # Guarding on `name` instead would issue this query with the literal
+            # string "None" as the id — a silent no-op that looks like a fold.
             # `toStringOrNull` (not `toLower` on the raw property) so a
             # payload-supplied non-string `objectKind` (an int, an array —
             # `create_entity(objectKind=...)`, `uses[].kind`) cannot raise
@@ -4967,13 +5485,13 @@ class _EntityHandlers:
             # coercion is exact: null/absent -> apply; non-string/null-able
             # -> `IS NULL` -> apply; a string -> the case-folded set test.
             self.g.query(
-                "MATCH (o:Object {name:$n}) "
+                "MATCH (o:Object {id:$n}) "
                 "WHERE (o.objectKind IS NULL "
                 "       OR toStringOrNull(o.objectKind) IS NULL "
                 "       OR NOT (toLower(toStringOrNull(o.objectKind)) IN $declared)) "
                 "  AND (o.status IS NULL OR NOT (o.status IN $excluded)) "
                 "SET o.status=$status",
-                params={"n": name, "status": builtin_status,
+                params={"n": object_id, "status": builtin_status,
                         "declared": sorted(index.kind_forms),
                         "excluded": excluded},
             )
@@ -5052,27 +5570,43 @@ class _EntityHandlers:
         # #7369: `subj`/`obj`/`use_name` are MERGE keys; function-local import
         # (no module-level binding — the cycle-avoidance pattern this file uses).
         from tortoise.projection import _log_identity_skip, _writable_id
+        # The RESOLVED performer id, reused by the `participatesIn` fallback
+        # below (#3590 round-5 review F2) so one reference cannot be refused in
+        # one arm and broadcast to every same-name carrier in another.
+        _performer_id: str | None = None
         if not _writable_id(subj):
             _log_identity_skip("Event subject", subj, "subject (MERGE key)")
         else:
-            # #7936: DETERMINISTIC id (the canonical one for this name), not a
-            # random ulid — the graph must be a pure function of the journal.
-            # ON CREATE ONLY is unchanged (#1155-P1): a late stub still cannot
-            # clobber a canonical id, and a generic registration for the name
-            # is now a no-op (same id) rather than a re-key.
-            stub_id = _entity_name_id("Subject", subj)
-            self.g.query(
-                "MERGE (s:Subject {name:$name}) "
-                "ON CREATE SET s.id=$id, s.subjectKind='other', s._stub=true",
-                params={"name": subj, "id": stub_id},
-            )
-            self.g.query(
-                "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) "
-                "MERGE (s)-[:performs]->(e)",
-                params={"name": subj, "eid": eid},
-            )
+            # #3590: the fold never MINTS the Subject a mention names. A
+            # fold-time mint is not replay-deterministic (replay would mint a
+            # different id and `rebuild != live`), and an id derived from the
+            # name is the very defect this change removes. So the name resolves
+            # to the single LIVE holder and otherwise stays unwired with a
+            # fail-closed record.
+            # ⛔ It is NOT discharged upstream: since #3590 D1 (RULED
+            # 2026-10-26) a bare mention does not create an entity and NO door
+            # registers `about*`/`subject`/`object`/`uses[]` on a mention's
+            # behalf, so this resolve-only arm is where the link is dropped and
+            # the miss is recorded — never "the producer registers what it
+            # references" (``entity_identity``'s D1 note retires that claim;
+            # #9876 review P2).
+            from tortoise.entity_identity import resolve_fold_name
+            stub_id = resolve_fold_name(self.g, "Subject", subj,
+                                        context="EventRecorded.subject",
+                                        mention=True)
+            if stub_id:
+                _performer_id = stub_id
+                self.g.query(
+                    "MATCH (s:Subject {id:$id}), (e:Event {eventId:$eid}) "
+                    "MERGE (s)-[:performs]->(e)",
+                    params={"id": stub_id, "eid": eid},
+                )
         # Event -[:produces]-> Object (or Document when objectType='document', #125)
         obj = inner.get("object", "")
+        # #3590: the RESOLVED id of the event's explicit `object`, when it has
+        # one — the status fold below addresses the entity by id rather than by
+        # name (a name-keyed status write moves every same-name carrier).
+        stub_id: str | None = None
         object_type = inner.get("objectType", "")  # 'Document' | 'Object' | '' (legacy)
         # #7369: `obj` becomes a Source/Object MERGE key below.
         if not _writable_id(obj):
@@ -5159,35 +5693,21 @@ class _EntityHandlers:
                 params={"id": obj, "eid": eid},
             )
         else:
-            # #7936: DETERMINISTIC id (the canonical one for this name), not a
-            # random ulid — a random stub id moved on every replay, so the
-            # graph was not a pure function of the journal.
-            stub_id = _entity_name_id("Object", obj)
-            # #7936: `_stub=true` is the discriminator the first-registration
-            # probe (sdk._create_entity) excludes — a marked stub is NOT a
-            # registered node, so a later `create_entity` for this name still
-            # journals its ObjectRegistered. Cleared on adoption by
-            # `_upsert_object`'s ON MATCH.
-            # #1155-P1: id is written ON CREATE ONLY, and THIS is the clause the
-            # ruling protects. A poll/webhook event may arrive before the
-            # entity path's ObjectRegistered; if this MERGE also wrote id on
-            # MATCH, a late stub would CLOBBER the canonical id
-            # (github-issue-{repo}-{n}) that _upsert_object set. The canonical
-            # id wins via _upsert_object's ON MATCH `o.id=coalesce($id, o.id)`
-            # — do not add an id write here. The ruling is about the CLAUSE, not
-            # about the stub value: a deterministic stub IS the canonical id
-            # for the generic path (a no-op there) and is still replaced by a
-            # foreign/connector canonical id.
-            self.g.query(
-                "MERGE (o:Object {name:$name}) "
-                "ON CREATE SET o.id=$id, o.objectKind='other', o._stub=true",
-                params={"name": obj, "id": stub_id},
-            )
-            self.g.query(
-                "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
-                "MERGE (e)-[:produces]->(o)",
-                params={"name": obj, "eid": eid},
-            )
+            # #3590: RESOLVE the mention's Object — the fold never mints it.
+            # A fold-time mint is not replay-deterministic, and a name-derived
+            # id is the defect this change removes. No live holder ⇒ the edge
+            # stays unwired and a fail-closed record is entered; the producer
+            # registers what it references (D9).
+            from tortoise.entity_identity import resolve_fold_name
+            stub_id = resolve_fold_name(self.g, "Object", obj,
+                                        context="EventRecorded.object",
+                                        mention=True)
+            if stub_id:
+                self.g.query(
+                    "MATCH (o:Object {id:$id}), (e:Event {eventId:$eid}) "
+                    "MERGE (e)-[:produces]->(o)",
+                    params={"id": stub_id, "eid": eid},
+                )
         # #1350: work-item status fold — GitHub/Linear lifecycle events derive
         # the Object's status (decision 2a: in_progress/completed, completed
         # stays NON-terminal — history recallable, not presented as current).
@@ -5242,7 +5762,26 @@ class _EntityHandlers:
         if isinstance(_about, str):
             _about = [_about]
         if _wk and (_obj_name or _about):
-            self._fold_object_status(_obj_name, _wk, about_names=_about)
+            # #3590: pass the RESOLVED id of the event's explicit `object`, so
+            # the status fold addresses one entity rather than every carrier of
+            # a name. An unresolved name is NOT silently dropped: `object_is_entity`
+            # tells the fold that this arm carried an entity NAME at all (a
+            # Document carries a :Source url), and the fold re-resolves a
+            # missing id itself, NON-exemptly, so the state-moving miss is
+            # recorded as the identity miss and fails the run (#3590 review F1).
+            # ⛔ The Document arm is the ONLY arm without an entity name: its
+            # `object` is a :Source url, not an entity (the branch above writes
+            # the Source), and `stub_id` is None there by construction. Keying
+            # this on `not object_type` instead — as an earlier revision did —
+            # discarded the id for a DECLARED `objectType='Object'`: both halves
+            # of `_fold_object_status` are guarded on the id, so the work-item
+            # status fold silently stopped and reported nothing (fail-open, the
+            # opposite direction to the rest of the change). `objectType` is
+            # reachable from a public door (`EventAPI.add_event(object_type=…)`).
+            self._fold_object_status(
+                _obj_name, _wk, about_names=_about,
+                object_id=(None if object_type == "Document" else stub_id),
+                object_is_entity=(object_type != "Document"))
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:
@@ -5268,28 +5807,26 @@ class _EntityHandlers:
                     _log_identity_skip(
                         "Event use", use_name, "name (MERGE key)")
                 else:
-                    # #7936: deterministic canonical id, as for the subject and
-                    # `object` stubs above — never a random ulid.
-                    stub_id = _entity_name_id("Object", use_name)
-                    # #7936: mark the `uses[]` stub with the same discriminator
-                    # as the subject/object stubs — it too can precede a
-                    # canonical `ObjectRegistered` for the name, and the probe
-                    # must still journal that registration.
-                    self.g.query(
-                        "MERGE (o:Object {name:$name}) "
-                        "ON CREATE SET o.id=$id, "
-                        "o.objectKind=coalesce($kind, 'other'), o._stub=true "
-                        # #9572: coalesce, not a hard SET — a `uses[]` entry that
-                        # names no kind must not reset a stored discriminator
-                        # (the Subject arm's ON MATCH already works this way).
-                        "ON MATCH SET o.objectKind=coalesce($kind, o.objectKind)",
-                        params={"name": use_name, "kind": use_kind, "id": stub_id},
-                    )
-                    self.g.query(
-                        "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
-                        "MERGE (e)-[:uses]->(o)",
-                        params={"name": use_name, "eid": eid},
-                    )
+                    # #3590: RESOLVE a `uses[]` Object — never mint it in the
+                    # fold (see the subject/object mentions above).
+                    from tortoise.entity_identity import resolve_fold_name
+                    stub_id = resolve_fold_name(self.g, "Object", use_name,
+                                                context="EventRecorded.uses",
+                                                mention=True)
+                    if stub_id:
+                        # #9572: coalesce, not a hard SET — a `uses[]` entry
+                        # that names no kind must not reset a stored
+                        # discriminator.
+                        self.g.query(
+                            "MATCH (o:Object {id:$id}) "
+                            "SET o.objectKind=coalesce($kind, o.objectKind)",
+                            params={"id": stub_id, "kind": use_kind},
+                        )
+                        self.g.query(
+                            "MATCH (o:Object {id:$id}), (e:Event {eventId:$eid}) "
+                            "MERGE (e)-[:uses]->(o)",
+                            params={"id": stub_id, "eid": eid},
+                        )
         # ── Auto-create participatesIn edges (#212) ──
         # (Subject)-[:participatesIn]->(Event) for each participant id,
         # falling back to the event.subject field when no explicit participants.
@@ -5304,11 +5841,22 @@ class _EntityHandlers:
                     params={"sid": pid, "eid": eid},
                 )
         elif subj:
-            # Fallback: performer is an implicit participant
+            # Fallback: performer is an implicit participant, wired on the SAME
+            # resolved id as the `performs` arm (#3590 round-5 review F2).
+            # ⛔ The retired form was `MATCH (s:Subject {name: $name}) … MERGE`
+            # — a NAME-keyed write that wired EVERY live carrier of the name from
+            # one reference, and that contradicted the arm above, which refuses
+            # to guess between carriers (route-then-refuse, D2/#8864). One
+            # reference must not be simultaneously refused and broadcast.
+            # Unresolved (`_performer_id is None`) ⇒ nothing is wired, and the
+            # resolver's own non-fold record already names the miss (D9: the
+            # fold never mints; and since D1 — RULED 2026-10-26 — no door
+            # registers a mention either, so nothing discharges it upstream;
+            # #9876 review P2).
             self.g.query(
-                "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) "
+                "MATCH (s:Subject {id: $sid}), (e:Event {eventId: $eid}) "
                 "MERGE (s)-[:participatesIn]->(e)",
-                params={"name": subj, "eid": eid},
+                params={"sid": _performer_id, "eid": eid},
             )
 
         # #228: persist arbitrary caller-supplied props (iterate inner dict

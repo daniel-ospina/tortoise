@@ -794,11 +794,30 @@ jobs:
         # already has the package installed cannot exhibit the failure mode:
         # inject a line into a listed artifact -> exit 1 naming the file;
         # restore -> exit 0.
+        #
+        # #5086: the substrate-map drift guard
+        # (`tools/substrate_map_check.py`, pinning
+        # `docs/architecture/SUBSTRATE-REBUILD-MAP.md` against the tree) is the
+        # second such guard and joins this step for the SAME reason, plus one of
+        # its own. Same reason: a docs-only edit of the map selects NO surface, so
+        # the guard's own test (`tests/test_substrate_map.py`, `core` + `tier1`)
+        # reaches it only through the curated `tier1` list — and `docs` is the
+        # REQUIRED, path-filter-free context that cannot inherit that skip.
+        # Extra reason, and it is why it must be HERE rather than only in the
+        # matrix: one of the guard's five claims is that the map's
+        # `measured_at_commit` is an ancestor of HEAD, which needs HISTORY. The
+        # `test` job checks out at the default `fetch-depth: 1`, so the object is
+        # absent there and the tool reports that claim UNVERIFIED (exit 2) rather
+        # than blaming the document (#5086 review P1-1). This job checks out at
+        # `fetch-depth: 0` (see the checkout above), so this is where the ancestry
+        # claim is actually proved. `--check` is verify-only; stdlib only, so it
+        # needs nothing from the `pip install` above (kept for its siblings).
         run: |
           pip install -e . --quiet
           python3 tools/bridge_table.py --check
           python3 tools/mcp_rename_table.py --check
           python3 tools/sdk_surface.py --check
+          python3 tools/substrate_map_check.py --check
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -1848,7 +1867,7 @@ jobs:
         with:
           node-version: '22'   # .ts type stripping + syntax detection is DEFAULT-ON from 22.18; the parity driver passes --experimental-strip-types (>= 22.7), test_pi_capture_hooks' `node --test` does not (#373 harness, #4714 parity test)
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
       # #1511: serve THIS branch's website/ (wrangler pages dev, mirroring the
       # legal-e2e job) instead of the LIVE page — the strict-validity gates,
       # the provision-401 clear→/auth path and the waitForSession validity
@@ -2064,7 +2083,7 @@ jobs:
       # Install the package (pulls falkordblite/redislite needed by
       # tortoise/__init__) + the e2e test extras (playwright, pytest-playwright).
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
       # The boot below runs the binary this step verified (#8816): the version
       # comes from config/wrangler-version and is asserted against what npm
       # resolved, before the boot clock starts (#2178: a cold fetch used to eat
@@ -2272,7 +2291,7 @@ jobs:
         with:
           node-version: '22'
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
       # #3775: `dist/` is a build artifact (untracked). Build it before any
       # preview boots — `npm ci` is lockfile-pinned, so this is the same
       # vite output the deploy-dashboard job ships (byte-identical, verified
@@ -2520,6 +2539,20 @@ jobs:
     # `bash .github/scripts/verify-cutover --live` with prod creds right
     # before dispatching the flip (sequence in supabase-deploy.yml).
     runs-on: ubuntu-latest
+    # OUTER CAP (#10327 review, ISSUE 1): this job OWNS an embedded redislite
+    # server — `verify-cutover` runs ten pytest files on FalkorDBLite from
+    # inside a shell script (the URI-less opt-in below) — and it shares its
+    # host with `python-ci.yml`'s legs, whose setup runs
+    # `.github/scripts/reap-redislite-orphans.py --apply`. Uncapped it inherits
+    # GitHub's 360-minute default, and the reaper's proof ("older than the
+    # widest job `timeout-minutes`") can never cover a job permitted to live
+    # 360 minutes: a server this job still owns would look orphaned.
+    # Measured 2 m on 2026-10-30 and 3 m 07 s in the 2026-09-02 ci audit
+    # (`pip install -e '.[test]'` + the gate); 30 m is the runner-stall
+    # allowance, not the work — the same reasoning as `test-isolation`'s 15 m.
+    # ⛔ Keep it UNDER `DEFAULT_MAX_AGE_MINUTES` (95): the pin at
+    # `tests/test_reap_redislite_orphans.py` reds otherwise.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

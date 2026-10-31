@@ -1653,7 +1653,19 @@ def run_fts_query(
     # string through backslash-escaped). A1/A4 (#2070): ``keep_numeric``
     # (the ask-lane numeric-token policy) and ``expansion_terms`` (additive
     # pseudo-relevance-feedback aliases) thread into ``build_or_query`` —
-    # both default off, so the search lane's query bytes are unchanged.
+    # both default off, so neither of THEM moves a query's bytes.
+    #
+    # #8933: that is no longer a claim about the WHOLE call. The identifier
+    # mechanism is a separate, ON-by-default input to ``build_or_query`` that
+    # takes no argument here, so an identifier-SHAPED query does change bytes
+    # (``ERR-4032`` -> ``err|err4032|"err 4032"``) while every other query
+    # stays byte-identical. That is the owner's ruling on #8933, which
+    # reopened the #2070 byte-identity control for exactly that shape; the
+    # bisect switch is ``TORTOISE_IDENTIFIER_TOKENS`` (``.env.example``),
+    # pinned by ``tests/test_identifier_tokens_8933.py``.
+    # (#10203 review round 11: this comment said "the search lane's query
+    # bytes are unchanged" directly above the call the change moved — the two
+    # more stale claims of that family, left in prose by the round-10 F3 fix.)
     from .sparse import build_or_query
     fts_query = build_or_query(
         query, keep_numeric=keep_numeric,
@@ -1919,8 +1931,13 @@ def run_bm25_query(
     search_keys)`` — the SAME fields each served label's own FTS index is
     declared on (``tortoise.sparse``; see ``BM25_ENTITY_TYPES`` for the
     per-family mapping), so the lexical stacks cannot disagree about what a
-    document says. A family outside ``BM25_ENTITY_TYPES`` is REFUSED at entry
-    rather than scanned for nothing — see that constant.
+    document says. That claim is only true because the CORPUS is tokenised with
+    the WRITE side of the #8933 identifier asymmetry (``bm25_scores`` /
+    ``bm25_tokens(..., space_separated_identifiers=False)``): the write path
+    stores ``err4032`` for ``ERR-4032`` and NOTHING for the prose "sprint
+    2024", so a read-side corpus would put a token in this leg's bag that the
+    graph lane's index does not hold. A family outside ``BM25_ENTITY_TYPES`` is
+    REFUSED at entry rather than scanned for nothing — see that constant.
 
     Returns ``[(id, score)]`` ranked descending, ties broken by id (#3019: RRF
     is rank-based, so an unstable tie would make the fused order a function of
@@ -1958,10 +1975,14 @@ def run_bm25_query(
     AND the read is impaired by it (a failed read, an open breaker), never on
     a clean empty result and never on a decline.
 
-    ``keep_numeric`` is threaded, never decided: the search lane's
-    byte-identical control is a RECORDED decision and its reopen belongs to the
-    owner (#8933). With the default, ``ERR-4032`` contributes ``err`` only —
-    the leg is honest about the policy it was given.
+    ``keep_numeric`` is threaded, never decided: it governs BARE NUMERIC tokens
+    (with the default, a bare ``4032`` contributes nothing) and this leg does
+    not decide it. The #8933 identifier control is a SEPARATE, LANDED decision
+    — the owner reopened the byte-identity control for identifier-shaped input,
+    so under the shipped defaults ``ERR-4032`` contributes ``err`` AND the
+    composite ``err4032``, on the identifier switch in ``tortoise/sparse.py``
+    rather than on this flag. A caller may still ask for the numeric half;
+    nothing here changes either default.
 
     ``meter=False`` suppresses the retrieval-tally note while keeping the trace
     entry. The read path uses it when it runs this leg ALONGSIDE the shipped

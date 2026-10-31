@@ -16,14 +16,37 @@ the row again, silently.
 is load-bearing, not cosmetic: `_props_from_row` has three destinations and "no
 fourth" — a column it can neither place nor refuse raises `UnknownRecordColumn`
 and would break cache projection for every tenant.
+
+THIS FILE IS THE MERGE OF PR #10076 AND PR #10070'S TIGHTENINGS (review P1-2,
+P1-3). #10070's head decides that the tier may NOT ride an event payload — the
+record's strip set (`_RECORD_ONLY_KEYS`) drops it, the graph's skip set
+(`_META_KEYS`) drops it, and `EntityMutated` drops it — while #10076's first
+draft carried it through the payload straight into the column. Keeping only
+#10076's removal left a PUBLIC write able to set placement authority
+(`create_point(cache_tier=...)`, measured); keeping only #10070's strip silently
+killed R2's record half. Both are kept here: the strip stays, and R2's tier
+reaches the COLUMN through one explicit statement that only the CARRIER may
+issue (`record_projection._turn_row_statements`, the carrier-keyed projection
+that writes one `public.point` row per turn in `turns`). The property pinned is
+unchanged — a turn row is `record_only` and never a node — and it is pinned from
+one more direction (a forged `PointAdded` cannot move it).
 """
 
 from __future__ import annotations
 
+import pytest
+
 from tortoise import cache_projection as cp
 from tortoise import record_projection as rp
+from tortoise.log import EventLog
 from tortoise.projection.entities import _EntityHandlers
-from tortoise.record_projection import _RECORD_ONLY_KEYS, refused_props_names, table_columns
+from tortoise.record_projection import (
+    _RECORD_ONLY_KEYS,
+    RECORD_ONLY_TIER,
+    refused_props_names,
+    table_columns,
+)
+from tortoise.sdk import TortoiseSDK
 
 # ── the schema half ────────────────────────────────────────────────────────
 
@@ -47,11 +70,134 @@ def test_the_tier_never_reaches_a_node_as_a_property() -> None:
     and the record strip is checked below by its own leg.
 
     ⛔ Which is also why the tier CANNOT be set through an event payload — it is
-    stripped before the insert, so the row lands the DEFAULT `graph`. Step 7
-    must write it as its own column statement; a test that assumed otherwise
-    would pass here and materialise turns in production."""
+    stripped before the insert, so the row lands the DEFAULT `graph`. The
+    carrier's own tier is written as its own column statement
+    (`test_the_carrier_writes_the_tier_to_the_column_not_the_props_tail`); a
+    test that assumed the payload passthrough would pass here and materialise
+    turns in production."""
     assert "cache_tier" in _EntityHandlers._META_KEYS, "the GRAPH half is gone"
     assert "cache_tier" in _RECORD_ONLY_KEYS, "the RECORD half is gone"
+
+
+def test_a_forged_point_added_cannot_place_the_row() -> None:
+    """#10017 review P1-2, the hole #10070's strip closes and this branch's
+    first draft opened: a `PointAdded` payload carrying the tier.
+
+    Measured on that draft, through the public SDK:
+    `create_point(..., cache_tier="record_only")` put `cache_tier` on the NODE
+    and wrote `public.point.cache_tier` from the journal snapshot — a real claim
+    permanently hidden from `read_record_view` and therefore from every
+    `rebuild_from_record`. The strip is what makes that a silent no-op at the
+    record layer; the intake rejection
+    (`test_a_tenant_write_cannot_place_the_row`) is what tells the caller.
+    """
+    record = {"type": "PointAdded",
+              "point": {"id": "p1", "content": "a real graph claim",
+                        "pointKind": "statement",
+                        "cache_tier": RECORD_ONLY_TIER}}
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    assert statements, "no mutation emitted, so this proves nothing"
+    for st in statements:
+        assert "cache_tier" not in st.sql, st.sql
+        assert not any(RECORD_ONLY_TIER in str(p) for p in st.params), (
+            st.sql, st.params)
+
+
+def test_the_carrier_writes_the_tier_to_the_column_not_the_props_tail() -> None:
+    """R2's record half, under the strip: the turn row IS `record_only`.
+
+    This is the assertion #10070's own comment predicted would be needed
+    ("Step 7 must write it as its own column statement"). Delete that statement
+    and the row lands the `graph` DEFAULT, so `read_record_view` projects the
+    turn and `rebuild_from_record` re-creates it — the resurrection, restored.
+
+    Pinned as the property (the plan), not the call site: the INSERT carries the
+    COLUMN and the props tail does not carry the key at all.
+    """
+    statements = rp.mutations_for(
+        {"type": rp.TURNS_RECORD_TYPE, "contains_session": "s1",
+         "turns": [{"id": "s1_t0", "content": "c", "is_episodic": True,
+                    "pointKind": "event", "speaker": "user",
+                    "status": "draft", "createdAt": "2026-10-25T00:00:00Z",
+                    "embedding": None}]},
+        org_id="o", graph_id="g")
+    insert = next(s for s in statements
+                  if s.sql.startswith("INSERT INTO public.point"))
+    assert "cache_tier" in insert.sql, insert.sql
+    assert RECORD_ONLY_TIER in insert.params, insert.params
+    # …and NOT through the tail, which is the passthrough that let a public
+    # write reach the column.
+    assert "cache_tier" not in str(insert.params[-1]), insert.params[-1]
+
+
+def test_a_carrier_with_no_turns_is_REFUSED() -> None:
+    """A `TurnsRecorded` with an empty turn list is not a turn row — it reports a
+    capture as filed while the record holds none of it. Refuse rather than fall
+    back to an empty statement set (the DEFAULT-tier bug's silent cousin)."""
+    with pytest.raises(rp.RecordProjectionError, match="turns"):
+        rp.mutations_for(
+            {"type": rp.TURNS_RECORD_TYPE, "turns": []},
+            org_id="o", graph_id="g")
+
+
+def test_a_tenant_write_cannot_place_the_row(tmp_path) -> None:
+    """#10017 review P1-2, the INTAKE half — measured through the public SDK.
+
+    `create_point(..., cache_tier="record_only")` and
+    `update_point(pid, cache_tier="graph")` were both accepted on this branch's
+    head and MOVED placement: the first hid a real claim from the cache
+    projection (and so from `rebuild_from_record`), the second un-hid it. The
+    tier is the record's own declaration, written by the record's producers, so
+    a props bag reaching it is refused at the one intake every props surface
+    passes through (`sdk._sanitize_props`).
+    """
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        with pytest.raises(ValueError, match="cache_tier"):
+            sdk.create_point("statement", "a claim that must stay visible",
+                             cache_tier=RECORD_ONLY_TIER)
+        point = sdk.create_point("statement", "a claim that must stay visible")
+        assert sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) RETURN p.cache_tier",
+            params={"i": point["id"]}).result_set == [[None]]
+        with pytest.raises(ValueError, match="cache_tier"):
+            sdk.update_point(point["id"], cache_tier="graph")
+    finally:
+        sdk.close()
+
+
+def test_a_legacy_journal_line_cannot_put_the_tier_on_a_node(tmp_path) -> None:
+    """The GRAPH half, BEHAVIOURALLY: a replay must not write the key.
+
+    A journal written before this change can carry `cache_tier` inside a
+    `PointAdded` snapshot (nothing refused it then), and `_persist_extra_props`
+    applies an open-set payload onto the node. Without the `_META_KEYS` entry
+    the replay puts the tier on `:Point` while a record-sourced rebuild drops it
+    (`_RECORD_ONLY_KEYS`) — the two rebuild routes diverge on a property, which
+    is the divergence this whole change removes.
+
+    ⛔ Asserted through a REAL replay, not by reading the skip set: membership
+    of a frozenset is a shape, and the shape is what a later edit preserves
+    while the behaviour changes.
+    """
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    EventLog(log_path).append({
+        "type": "PointAdded", "id": "p-legacy-10017", "kind": "statement",
+        "point": {"id": "p-legacy-10017", "content": "a legacy claim",
+                  "pointKind": "statement", "is_episodic": False,
+                  "cache_tier": RECORD_ONLY_TIER},
+    })
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
+    try:
+        sdk._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) RETURN p.cache_tier",
+            params={"i": "p-legacy-10017"}).result_set
+    finally:
+        sdk.close()
+    assert rows == [[None]], (
+        "the replay materialised `cache_tier` as a NODE property — a "
+        f"record-sourced rebuild never does: {rows}")
 
 
 def test_an_entity_mutation_cannot_carry_the_tier() -> None:
@@ -78,6 +224,45 @@ def test_an_entity_mutation_cannot_carry_the_tier() -> None:
                 label, st.sql, st.params)
             assert not any("record_only" in str(p) for p in st.params), (
                 label, st.sql, st.params)
+
+
+def test_the_builder_REFUSES_a_tier_on_any_op_but_delete() -> None:
+    """#10017 review P3 — a tier on a state op is a record that lies.
+
+    `_journal_entity_mutation` accepted `cache_tier` for ANY op although only
+    the delete arm has a fold that reads it (`_delete_statements`' demote).
+    Pre-fix the call below is accepted and the assembled record carries a tier
+    no fold applies — placed-by-nothing, while reading as an applied placement.
+    """
+    sdk = TortoiseSDK()
+    try:
+        with pytest.raises(ValueError, match="cache_tier"):
+            sdk._journal_entity_mutation(
+                "Point", "p-1", "restatus", state={"status": "retracted"},
+                cache_tier=RECORD_ONLY_TIER)
+    finally:
+        sdk.close()
+
+
+def test_provenance_cannot_rewrite_the_tier(monkeypatch) -> None:
+    """#10017 review P3 — the EXPLICIT argument wins over a provenance bag.
+
+    `provenance` is merged AFTER `cache_tier`, so without the reserve entry a
+    caller passing both could have the tier silently replaced — and the tier
+    decides hard-delete vs demote in the delete fold (`graph` is refused loudly
+    by `_delete_statements`; a VALID value would not be)."""
+    sdk = TortoiseSDK()
+    seen: dict = {}
+    monkeypatch.setattr(sdk, "_emit_event",
+                        lambda _type, **record: seen.update(record))
+    try:
+        sdk._journal_entity_mutation(
+            "Point", "s1_t0", "delete", cache_tier=RECORD_ONLY_TIER,
+            provenance={"cache_tier": "graph", "session_id": "s1"})
+    finally:
+        sdk.close()
+    assert seen.get("cache_tier") == RECORD_ONLY_TIER, seen
+    assert seen.get("session_id") == "s1", "non-reserved provenance was dropped"
 
 
 # ── the read half
@@ -118,14 +303,28 @@ def test_a_record_only_row_is_not_planned_into_the_graph(monkeypatch) -> None:
     assert any("cache_tier = 'graph'" in sql for sql in sqls)
 
 
-def test_the_filter_is_never_applied_to_a_table_without_the_column(monkeypatch) -> None:
-    """A `cache_tier` predicate on any other node table is a SQL error on every
-    rebuild of every tenant (`42703`), so where it may appear is the contract.
+def test_the_filter_is_applied_to_point_only(monkeypatch) -> None:
+    """Other tables have no such column; a filter added to them would be a
+    SQL error on every rebuild, so it is exquisitely important that it is not."""
+    sqls: list[str] = []
 
-    ⛔ Read EVERY node table here, not just `Point`: with `labels=("Point",)` the
-    only statements mentioning the tier are the point read and the relation
-    subquery, so applying the predicate to every table — the exact reversal this
-    test names — left it green (round-2 review, measured)."""
+    def _rows(cur, sql, params):
+        sqls.append(sql)
+        return []
+
+    monkeypatch.setattr(cp, "_rows", _rows)
+    monkeypatch.setattr(cp._rp, "scope_connection", lambda conn, org: conn)
+    cp.read_record_view(object(), org_id="o1", graph_id="g1")
+    assert all("cache_tier" not in sq for sq in sqls if "public.point " not in sq)
+
+
+def test_the_filter_is_never_applied_to_a_table_without_the_column(monkeypatch) -> None:
+    """Same property as the leg above, read EVERY node table.
+
+    ⛔ `labels=("Point",)` (the leg above) leaves the relation subquery as the
+    only other statement mentioning the tier, so applying the predicate to every
+    table — the exact reversal this test names — left that leg green
+    (#10070 round-2 review, measured)."""
     _v, sqls = _read_view(monkeypatch, [], labels=tuple(cp.NODE_TABLES))
     node_reads = {f"SELECT * FROM public.{t}" for t in cp.NODE_TABLES.values()}
     other_tables = [sq for sq in sqls
@@ -155,6 +354,7 @@ def test_a_tiered_turns_edge_is_not_planned_either(monkeypatch) -> None:
     assert "NOT (tgt_label = 'Point' AND tgt_key IN" in relation_sql[0]
     # …and the exclusion is of the record-only keys, not of every key.
     assert "cache_tier <> 'graph'" in relation_sql[0]
+
 
 def test_the_forward_re_definition_cannot_shrink_the_refusal_set() -> None:
     """`refused_props_names()` UNIONS the CREATE with the forward ALTERs, so a
