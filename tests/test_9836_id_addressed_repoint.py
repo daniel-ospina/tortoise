@@ -126,7 +126,12 @@ def test_a_supersede_MOVES_the_edge_and_the_journal_rebuild_agrees(
     assert live == {(ids["new"], ids["target"])}, live
     # The descriptor exists, and it names the TARGET'S OWN ID under the label the
     # transfer observed — never the internal node id, never a natural key.
-    [rep] = [r for r in _repoints(journal) if r.get("edge_type") == rel]
+    reps = [r for r in _repoints(journal) if r.get("edge_type") == rel]
+    assert len(reps) == 1, (
+        f"{rel}: the 2b transfer MOVED the edge live ({live}) and journalled "
+        f"NO repoint for it ({reps}) — the journal route has nothing to replay, "
+        "which is the whole of #9836 (the emission was gated on `derivable`)")
+    rep = reps[0]
     assert rep["src"] == ids["old"]
     assert rep["tgt"] == ids["target"]
     assert rep["target_label"] == "Point"
