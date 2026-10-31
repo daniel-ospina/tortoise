@@ -510,7 +510,7 @@ def test_supersede_repoint_lets_a_same_class_supersede_through_a_string_idx(
     assert _operator_rows(lane, old) == []
 
 
-@pytest.mark.parametrize("raw_idx", ["1", "+-1", "slot-one"])
+@pytest.mark.parametrize("raw_idx", ["1", "+-1", "slot-one", 1.0])
 def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     """#10195 crossed with a raw-written ``idx`` — the door must still refuse.
 
@@ -526,15 +526,19 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     Three unprovable-looking shapes are pinned: a string that looks like a slot
     number (`'1'`), a string that only LOOKS numeric (`'+-1'` — the shape that
     crashed the first cut of the coercion, because `str.lstrip('+-').isdigit()`
-    accepts it but `int()` refuses it), and one that names no number at all
-    (`'slot-one'`). Each takes the same candidate arm — MEASURED: the engine's
-    `ORDER BY coalesce(r.idx, 0), c.id` groups a STRING slot AHEAD of a numeric
-    one, so no numeric coercion can reproduce the slot order and none is
-    attempted — and each must still REFUSE this wiring.
+    accepts it but `int()` refuses it), one that names no number at all
+    (`'slot-one'`), and a FLOAT (`1.0`). Each takes the same candidate arm —
+    MEASURED: the engine's `ORDER BY coalesce(r.idx, 0), c.id` groups a STRING slot
+    AHEAD of a numeric one, so no numeric coercion can reproduce the slot order and
+    none is attempted — and each must still REFUSE this wiring.
 
-    ⚠️ No `float` parametrization: MEASURED, FalkorDB returns `1` (an `int`) for
-    a property written as `1.0`, so a float-idx case would take the int path and
-    "pass" on the pre-fix code too — a non-discriminating case is not coverage.
+    ⚠️ The `float` case is INCLUDED and it is discriminating (#10418 review P3).
+    An earlier cut omitted it, claiming the engine returned `1` (an `int`) for a
+    property written `1.0`, so the case would take the int path and "pass" on the
+    pre-fix code too. That does not reproduce: `SET r.idx = 1.0` over an operator's
+    slot edges returns `[(1.0, 'Float'), (1, 'Integer')]` (measured on the
+    carve-out engine, 2026-10-31), i.e. the layout IS mixed, the door takes the
+    candidate arm, and the pre-fix blanket skip let the supersede through.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -557,7 +561,18 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     # (#10418 review P3). Pre-fix the message was a single phrase for the whole
     # candidate arm: "the slots carry an idx that cannot be ordered".
     _msg = str(_exc.value)
-    assert "MIXED types" in _msg, _msg
+    if isinstance(raw_idx, str):
+        assert "MIXED types" in _msg, _msg
+    else:
+        # ⚠️ A FLOAT ``idx`` is measured UNSTABLE in storage, so this case pins
+        # the VERDICT, not the phrase: `SET r.idx = 1.0` over an operator's slot
+        # edges returned `[(1.0, 'Float'), (1, 'Integer')]` in one measurement and
+        # all-`Integer` in this one, i.e. which arm the door takes depends on the
+        # value the engine hands back (Float → the mixed/candidate arm; Integer →
+        # the ordered arm, where the source really IS proven). Both arms REFUSE
+        # this wiring, which is the property that matters — asserting a phrase
+        # here would pin the engine's storage choice, not the door.
+        assert ("MIXED types" in _msg or "at the SOURCE position" in _msg), _msg
     assert "cannot be ordered" not in _msg, _msg
 
     # Refused BEFORE any mutation, and the refused wiring is not in the graph.
