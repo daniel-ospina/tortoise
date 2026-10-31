@@ -496,7 +496,7 @@ mechanisms:
       story-selected pack sections), never the guarantee. That row used to record
       an ABSENCE here; it now records the rule that keeps the absence from coming
       back. `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
-      `_s2s4_rules()` — never S1, never a master render. Pinned, in four places
+      `_s2s4_rules()` — never S1, never a master render. Pinned, in five places
       because each catches a different insertion: never-S1 by
       `tests/test_extractor_v4_citation_rot.py`; the core-only render
       byte-for-byte by `tests/test_extractor_v2.py`; the `VALUE_FIDELITY_RULE`
@@ -506,14 +506,22 @@ mechanisms:
       cannot pass by vacancy — measured before that test: appending the rule to
       `_render_master_verbose`, the DEFAULT render, shipped a second copy of one
       instruction inside one prompt with every gate green); and — since `#9775` —
-      the carve-out PRESENT, whole, on every render path, its vocabulary on both
-      master renders (S1 renders granularity, never the master list), and through
-      both dispatch entry points, by
-      `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires`,
-      exercised over three story shapes (matched, `None`, unmatched) precisely
-      because a carve-out appended INSIDE the story gate passes the matched case
-      — measured red before that test existed, and the mutation it is written to
-      catch is the story-gated variant, not deletion alone.
+      the carve-out PRESENT, whole, on every render path, the vocabulary it names
+      on all three master renders (S1 renders granularity, never the master
+      list), and through both dispatch entry points, by
+      `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires`
+      together with
+      `tests/test_v4_declared_mechanisms.py::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly`
+      — the render-path pin over three story shapes (matched, `None`, unmatched)
+      precisely because a carve-out appended INSIDE the story gate passes the
+      matched case, and the dispatcher pin because that one never reaches a
+      dispatcher: it is the half that passes `core_only=False` EXPLICITLY (the
+      default resolves from `TORTOISE_CLASSIFY_LATER`, and with that flag on the
+      dispatcher half contributed NOTHING — measured), that proves the COMPACT
+      branch is the one rendered (`PACK KINDS` plus the compact master header),
+      and that asserts `count(...) == 1` on the real S2/S4 path. The mutation the
+      render-path pin is written to catch is the story-gated variant, not
+      deletion alone.
       ⚠️ Pinned, and NOT read off a comment: the `SEAMS:` comment above
       `SHORT_SESSION_FACT_RULE` belongs to a different constant and names S1 as
       one of ITS seams, so citing it as authority for value-fidelity's never-S1

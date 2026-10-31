@@ -1136,6 +1136,75 @@ def test_the_state_value_carve_out_is_registered_and_marked_absent() -> None:
     assert "_render_master_compact" in row["note"], row["note"]
 
 
+#: Number words the registry prose may spell, keyed by the count they name. A
+#: row that counts something must spell the count the SOURCE gives (below), not
+#: a number someone typed once and nobody can falsify.
+_COUNT_WORDS = {2: "both", 3: "three", 4: "four", 5: "five", 6: "six"}
+
+
+def test_the_carve_out_row_counts_the_master_renders_and_names_both_pins() -> None:
+    """The row must describe the code that SHIPPED, not the pre-#9775 tree (#10382).
+
+    Two claims in the row's own sentence were false at the head the review read,
+    and both are the declared-vs-present class this registry exists to catch:
+
+    * the dispatcher half was routed to ONE pin,
+      `test_every_render_path_carries_the_carve_out_the_guarantee_requires`, which
+      never reaches a dispatcher — it ends in `_render_master_compact` direct
+      calls. `render_s2_prompt` / `render_s4_prompt` are exercised only by
+      `::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly`, so
+      the only assertion covering `core_only=False` (the flag whose DEFAULT
+      silently moves the render under test), the `PACK KINDS` + compact-header
+      proof that the compact branch was taken, and `count(...) == 1` on the real
+      S2/S4 path, was invisible from the registry — and the row still claimed the
+      coverage;
+    * the vocabulary was said to ride "both master renders", but `_render_master`
+      dispatches to THREE (`_render_master_core_only`, `_render_master_verbose`,
+      `_render_master_compact`), all three carrying it since #9775. "both" is the
+      arithmetic of the pre-#9775 tree, where compact carried neither block.
+
+    The count is taken from `extractor_v2` rather than typed here, so adding or
+    removing a master render without updating the row reds this test instead of
+    leaving a sentence nothing can falsify.
+    """
+    from tortoise import extractor_v2 as v2
+
+    rows = {r["id"]: r for r in load_registry()["mechanisms"]}
+    note = rows["state_value_carve_out"]["note"]
+    renders = sorted(
+        name for name in dir(v2)
+        if name.startswith("_render_master_") and callable(getattr(v2, name))
+    )
+    assert renders, "the `_render_master_*` family is the thing this row counts"
+    word = _COUNT_WORDS.get(len(renders))
+    assert word is not None, (
+        f"the master-render family is now {len(renders)} strong ({renders}) — "
+        "extend _COUNT_WORDS and the registry sentence together"
+    )
+    assert f"{word} master renders" in note, (
+        f"the row does not spell the count of master renders that exist: "
+        f"{len(renders)} ({renders}) → expected `{word} master renders`"
+    )
+    assert "both master renders" not in note, (
+        "the row still spells the pre-#9775 arithmetic: compact carried neither "
+        f"the carve-out nor the vocabulary then; all {len(renders)} master "
+        "renders carry both now (~#9775, #10382 review)"
+    )
+    dispatcher_pin = (
+        "::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly"
+    )
+    assert dispatcher_pin in note, (
+        "the row routes the dispatch half to a pin that never calls a "
+        "dispatcher — the dispatcher guard must be NAMED in the row, or a "
+        "reader is sent to the wrong test and deleting its `core_only=False` "
+        "leaves every gate green (~#10382 review)"
+    )
+    assert (
+        "::test_every_render_path_carries_the_carve_out_the_guarantee_requires"
+        in note
+    ), "the render-path pin the dispatcher pin complements must stay named"
+
+
 #: The carve-out's BOUNDARY SENTENCE, as a literal: the clause that says what
 #: may STILL be dropped once the durable values are carried. It is pinned as a
 #: literal rather than through `STATE_VALUE_CARVE_OUT` because comparing the
