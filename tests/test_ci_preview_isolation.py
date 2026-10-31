@@ -51,6 +51,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -581,4 +582,275 @@ def test_the_helper_carries_no_process_name_kill() -> None:
     assert not offenders, (
         "the preview helper signals processes by name again; it must only ever signal "
         "the pid it recorded and that pid's descendants (#10283):\n" + "\n".join(offenders)
+    )
+
+
+# ── #10305: the CONSUMER's readiness budget ───────────────────────────────────
+# The arms above pin `preview-server.sh`'s `ready` verb. #10305 is the other end
+# of the same contract: the specs' own preflight (`tests/e2e/preview_preflight.py`)
+# re-probes both origins before any spec drives them, and it used to sample ONCE.
+# Measured (run 41141786500 job 124361929728): auth `ready` at 23:21:53.99, the
+# dashboard preview booted beside it at 23:21:56.09, and the single preflight
+# probe at 23:21:59.36 caught a 500 — the job reddened with "local preview
+# server(s) unreachable" over a server that had served 200 four seconds earlier,
+# while run 41140572622 (head `b3bbf2f1c`, byte-identical `website/`, `tests/e2e/`
+# and `.github/`) ran the same suite GREEN. A budget is the fix; these arms pin
+# that it is a BUDGET (retries, then still refuses) and not a blanket pass.
+
+
+class _FakeResponse:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+
+class _StatusScript:
+    """An `opener` that answers a scripted sequence of statuses, per URL.
+
+    A status >= 400 is raised the way `urllib` raises it (`HTTPError`), because
+    that is what the real probe sees for the measured failure — a 500 from
+    wrangler is an exception, not a response object.
+    """
+
+    def __init__(self, script: dict[str, list[int]], default: int = 200) -> None:
+        self.script = {url: list(codes) for url, codes in script.items()}
+        self.default = default
+        self.calls: list[str] = []
+
+    def open(self, url: str, timeout: float | None = None):
+        self.calls.append(url)
+        codes = self.script.get(url) or []
+        status = codes.pop(0) if codes else self.default
+        if status >= 400:
+            raise urllib.error.HTTPError(url, status, "Internal Server Error", {}, None)
+        return _FakeResponse(status)
+
+
+class _Clock:
+    """A monotonic stand-in that advances only when the poll sleeps."""
+
+    def __init__(self, step: float) -> None:
+        self.now = 0.0
+        self.step = step
+        self.sleeps = 0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps += 1
+        self.now += max(self.step, seconds)
+
+
+def _preflight(**kwargs):
+    from tests.e2e.preview_preflight import preflight_local_servers
+    return preflight_local_servers(**kwargs)
+
+
+def test_preflight_polls_through_a_transient_5xx() -> None:
+    """A single 500 must not declare the previews unreachable (#10305).
+
+    The measured failure is exactly this: one 500 from a preview that had
+    answered 200 seconds earlier. On the pre-fix gate (one sample, then
+    `pytest.exit`) this test cannot even reach its assertion — the call raises,
+    which is the non-vacuity proof for this arm.
+    """
+    auth = "http://127.0.0.1:8836/"
+    app = "http://127.0.0.1:8791/"
+    opener = _StatusScript({auth: [500, 500]})
+    clock = _Clock(step=0.5)
+
+    _preflight(targets=(("auth", auth), ("dashboard", app)), budget=20.0,
+               interval=0.5, opener=opener, sleep=clock.sleep,
+               monotonic=clock.monotonic)
+
+    assert opener.calls == [auth, app, auth, auth], (
+        "round 1 probes BOTH origins, then only the one still failing is "
+        f"re-probed: {opener.calls}"
+    )
+    assert clock.sleeps == 2, (
+        "two transient 500s must cost two polls, not a refusal: "
+        f"sleeps={clock.sleeps}"
+    )
+
+
+def test_preflight_still_refuses_once_the_budget_is_spent() -> None:
+    """A server that never serves still reds — the budget is not a blanket pass.
+
+    The positive-control mirror of the arm above: without it, a gate that
+    retried forever would satisfy `test_preflight_polls_through_a_transient_5xx`.
+    """
+    auth = "http://127.0.0.1:8836/"
+    opener = _StatusScript({auth: [500] * 500})
+    clock = _Clock(step=0.5)
+
+    with pytest.raises(pytest.exit.Exception) as excinfo:
+        _preflight(targets=(("auth", auth),), budget=3.0, interval=0.5,
+                   opener=opener, sleep=clock.sleep, monotonic=clock.monotonic)
+
+    message = str(excinfo.value)
+    assert "500" in message, message
+    assert "auth http://127.0.0.1:8836/" in message, message
+    assert "Polled for 3s" in message, (
+        "the refusal must say it was a BUDGET that ran out, so the next reader "
+        f"does not re-diagnose it as a one-shot miss: {message}"
+    )
+    assert len(opener.calls) > 1, (
+        "a refusal after ONE sample is the pre-fix behaviour this fixes: "
+        f"calls={len(opener.calls)}"
+    )
+
+
+def test_a_serving_preview_costs_exactly_one_probe_and_no_sleep() -> None:
+    """The happy path stays fail-FAST — the budget must not slow a green job.
+
+    Positive control for the two arms above: a gate that always waited the full
+    budget would pass them both and add 20 s to every CI run.
+    """
+    auth = "http://127.0.0.1:8836/"
+    app = "http://127.0.0.1:8791/"
+    opener = _StatusScript({})
+    clock = _Clock(step=0.5)
+
+    _preflight(targets=(("auth", auth), ("dashboard", app)), budget=20.0,
+               interval=0.5, opener=opener, sleep=clock.sleep,
+               monotonic=clock.monotonic)
+
+    assert opener.calls == [auth, app], opener.calls
+    assert clock.sleeps == 0, f"a serving preview must not be waited on: {clock.sleeps}"
+
+
+def test_preflight_refuses_a_non_loopback_origin_without_burning_the_budget() -> None:
+    """A refusal polling cannot fix must not be retried (#2731 review P2).
+
+    The loopback rule is request-INDEPENDENT: re-probing `10.0.0.5` twenty times
+    cannot make it local, so it refuses on the first evaluation and the opener is
+    never called. Without this arm a poll could paper over a misconfigured origin
+    (the guard would still fire, but only after the budget — and the message
+    would imply the far end answered something).
+    """
+    opener = _StatusScript({})
+    clock = _Clock(step=0.5)
+
+    with pytest.raises(pytest.exit.Exception) as excinfo:
+        _preflight(targets=(("auth", "http://10.0.0.5:8788/"),), budget=20.0,
+                   interval=0.5, opener=opener, sleep=clock.sleep,
+                   monotonic=clock.monotonic)
+
+    message = str(excinfo.value)
+    assert "non-loopback host" in message, message
+    assert opener.calls == [], (
+        f"a non-local origin must not be probed at all: {opener.calls}"
+    )
+    assert clock.sleeps == 0, clock.sleeps
+
+
+# ── #10305: the fix's own CI WIRING, pinned so it cannot silently unwind ──────
+# The two halves of the #10305 fix are only useful if CI keeps running them: a
+# polled preflight that the job SKIPS is not a fix (#4221's inversion — a
+# skipped job reports green), and a diagnostic step that no longer exists is
+# how the next red is undiagnosable again. Both are `ci.yml` wiring, so both are
+# pinned here — the file that already pins this job's preview machinery.
+
+
+def _changes_gate_source() -> str:
+    """The `changes` job's inline python gate — the per-surface path filters."""
+    steps = _load_workflow("ci.yml")["jobs"]["changes"]["steps"]
+    gate = [step for step in steps if step.get("id") == "gate"]
+    assert len(gate) == 1, f"expected exactly one `id: gate` step, got {len(gate)}"
+    return gate[0]["run"]
+
+
+def _any_file_entry(source: str, key: str) -> str:
+    """The argument list of `"<key>": any_file( … )` in the gate source.
+
+    Keyed on the ENTRY, never on a line range: a sibling entry that grows or
+    shrinks must not be able to change this answer, and `dashboard_e2e` is a
+    multi-line call whose arguments are exactly what is under test.
+    """
+    match = re.search(
+        rf'^(\s*)"{re.escape(key)}": any_file\(\n(.*?)^\1\),',
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, f"no `{key}: any_file(...)` entry in the ci.yml `changes` gate"
+    return match.group(2)
+
+
+def test_the_dashboard_e2e_gate_names_the_shared_preflight_module() -> None:
+    """A change to the shared readiness gate must RE-RUN the job, not skip it.
+
+    `tests/e2e/preview_preflight.py` (#10305) is the readiness gate every spec
+    the job runs calls — `test_keys_table_mixed`, `test_graphs_management`,
+    `test_ship_test_onboarding`, `test_dashboard_onboarding`, and the flow
+    module that exports `_preflight_local_servers`. The `dashboard_e2e` path
+    gate names those SPECS, which does not cover a file it had never seen: a PR
+    touching only the new module would leave the job `skipped` — reported as
+    Success — so the suite that would catch a broken gate never runs on the
+    change that breaks it (#4221 is this exact inversion).
+    """
+    entry = _any_file_entry(_changes_gate_source(), "dashboard_e2e")
+    named = set(re.findall(r'"([^"]+)"', entry))
+
+    assert "tests/e2e/preview_preflight.py" in named, (
+        "the `dashboard_e2e` change gate does not name "
+        "tests/e2e/preview_preflight.py, so a PR touching ONLY the shared "
+        "preflight skips the job that exercises it (#4221's inversion).\n"
+        f"named: {sorted(named)}"
+    )
+    # The module is named as a PATH, not as prose: an `isfile(...)` argument is
+    # what the gate actually evaluates, and a mention inside a comment (which
+    # this file's own `_cut_comment` rationale would not even see) changes
+    # nothing about which jobs run.
+    assert re.search(r'isfile\([^)]*"tests/e2e/preview_preflight\.py"', entry), (
+        "tests/e2e/preview_preflight.py is mentioned in the `dashboard_e2e` "
+        "gate but not as an `isfile(...)` argument, so it gates nothing"
+    )
+
+
+def test_a_preflight_red_dumps_the_preview_servers_own_logs() -> None:
+    """A preflight red is undiagnosable unless the servers' logs are read.
+
+    The measured failure (#10305, job 124361929728) reddened on
+    `auth http://127.0.0.1:8836/ -> HTTPError: HTTP Error 500`, and nothing on
+    the runner ever read `auth.log` — which records every request wrangler
+    answered, `[wrangler:info] GET / 500` included. The two boot steps `cat`
+    their log only when the BOOT fails, which is the opposite case. This pins
+    the diagnostic step: it exists, it runs on FAILURE, and it reads the logs
+    through the same per-job state directory the boot wrote to (`dir`), never a
+    shared `/tmp/wrangler*.log` path.
+    """
+    job = _load_workflow("ci.yml")["jobs"]["dashboard-e2e"]
+    # Selected by SHAPE, not by name: the two boot steps also call
+    # `preview-server.sh … dir` and `tail` a log (their OWN, and only when the
+    # boot fails). A step that dumps BOTH servers' logs is the only one that
+    # iterates them.
+    dumps = [
+        step
+        for step in job["steps"]
+        if "preview-server.sh" in str(step.get("run", ""))
+        and " dir" in str(step.get("run", ""))
+        and "tail" in str(step.get("run", ""))
+        and "for name in" in str(step.get("run", ""))
+    ]
+    assert len(dumps) == 1, (
+        "expected exactly one step that dumps the preview logs on failure, "
+        f"found {[step.get('name') for step in dumps]}"
+    )
+    step = dumps[0]
+    assert step.get("if") == "failure()", (
+        "the log dump must be `if: failure()` — on success it is noise, and on "
+        f"any other condition it does not run for the red it exists for: {step.get('if')!r}"
+    )
+    run = str(step["run"])
+    for name in ("auth", "app"):
+        assert name in run, f"the dump does not name the {name} log: {run}"
+    assert "/tmp/wrangler" not in run, (
+        "the dump reads a shared /tmp path; the boot writes to the per-job "
+        f"state dir `preview-server.sh dir` (#10283): {run}"
     )

@@ -501,6 +501,14 @@ jobs:
                   # #4221 flags; the entry is now load-bearing rather than idle.
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
+                  # #10305: the readiness gate the specs above CALL is its own
+                  # module now — the loopback rule, the 200 requirement and the
+                  # polled budget live in `tests/e2e/preview_preflight.py`, so a
+                  # PR touching ONLY that file would otherwise leave this job
+                  # `skipped` (reported as Success) and never run the suite that
+                  # exercises it. Same #4221 inversion the harness entry above
+                  # exists for, and it is the file a fix to a preflight red edits.
+                  isfile("tests/e2e/preview_preflight.py"),
                   # #4221: the onboarding wizard spec (36 collected cases) was
                   # registered and green but never invoked. It is the one spec
                   # of the four that #4221 named as never-run that still passes
@@ -2444,6 +2452,22 @@ jobs:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
           # enforcement opt-in (this suite needs no FalkorDB server).
           TORTOISE_TEST_CARVE_OUT: "1"
+      # ⛔ #10305: the servers' OWN logs are the only place that says WHY a
+      # preflight red happened, and until this step existed nothing on the runner
+      # read them when the SPECS failed (the two boot steps cat their log only
+      # when the BOOT fails). Measured: job 124361929728 reddened on
+      # `auth ... 500` while `auth.log` — which records every request wrangler
+      # answered, `[wrangler:info] GET / 500` included — went unread, so the red
+      # was undiagnosable after the fact. `preview-server.sh dir` is the same
+      # per-run/per-job state directory the boot steps wrote to.
+      - name: Dump the preview servers' logs (a preflight red leaves no other trace)
+        if: failure()
+        run: |
+          PREVIEW_STATE="$(bash "$GITHUB_WORKSPACE/.github/scripts/preview-server.sh" dir)"
+          for name in auth app; do
+            echo "--- ${PREVIEW_STATE}/${name}.log ---"
+            tail -80 "${PREVIEW_STATE}/${name}.log" 2>/dev/null || echo "(no ${name}.log)"
+          done
       - name: Stop wrangler dev servers (scoped to this job's pids)
         if: always()
         # #10283: `stop-all` signals the pids THIS job recorded (and their
