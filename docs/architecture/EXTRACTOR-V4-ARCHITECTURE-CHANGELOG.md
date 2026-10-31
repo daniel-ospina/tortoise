@@ -1419,8 +1419,12 @@ token in the story, and a `{story}` token arriving from the embed list (literal 
 count stays 1, the JSON region still parses).
 
 **What this does NOT claim.** Not that injection is impossible: the model still reads
-attacker-influenceable text, and the framing lowers the odds rather than removing them (OWASP's own
-position on the control is that labels and wording are not a security boundary). The scope is the
+attacker-influenceable text, and the framing lowers the odds rather than removing them. That caveat is
+OWASP's own, not our hedge: LLM01:2025 lists **"Segregate and identify external content"** (mitigation
+6) among its mitigations — *"Separate and clearly denote untrusted content to limit its influence on
+user prompts"* — and states in the same section that *"it is unclear if there are fool-proof methods of
+prevention for prompt injection."* So the label is credited as a mitigation and claimed as nothing
+more: one layer, not a boundary. The scope is the
 S2/S4 renderers, and the map below names every session-text region this change leaves unframed, with
 the reason and the home that owns it — a region left off this list would read as "framed" to the next
 lane, which is the failure mode `#10117` recorded (*"recorded rather than … left silent"*):
