@@ -1543,7 +1543,7 @@ def _bundle_in_scope(doc_name: str, line: str) -> bool:
     scope = _BUNDLE_ROW_FILTER.get(doc_name)
     return scope is None or bool(scope.search(line))
 
-# `tortoise/sdk.py:14555`, ``tortoise/projection/edges.py:2573-2598``, `edges.py:587`,
+# `tortoise/sdk.py:14725`, ``tortoise/projection/edges.py:2832-2857``, `edges.py:747`,
 # ``tortoise/extractor_v2.py:8975-8979``
 _BUNDLE_CITE = re.compile(
     r"(?<![\w.])(?:tortoise/)?(?:projection/)?"
@@ -1817,7 +1817,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     was that comment; an earlier round quoted an older read of it, which the
     extractor's own growth had since moved).
     The index row's cites are pinned by the same sweep: re-staling `00_index.md`'s
-    `sdk.py:14555` to `12401` reds it, and before this leg nothing read that row.
+    `sdk.py:14725` to `12401` reds it, and before this leg nothing read that row.
     """
     result = _bundle_sweep(_BUNDLE_DOCS, _BUNDLE_SOURCES)
     fired, checked = result["fired"], result["checked"]

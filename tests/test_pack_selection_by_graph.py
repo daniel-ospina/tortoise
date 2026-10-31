@@ -32,7 +32,10 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import pytest
 
-from tests._http_fixtures import patched_tortoise_sdk
+from tests._http_fixtures import (
+    patched_tortoise_sdk,
+    quiesce_testclient_background_work,
+)
 from tortoise import pack_state as ps
 from tortoise.pack_state import (
     InvalidPackStatus,
@@ -373,6 +376,21 @@ def sel_client(monkeypatch):
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    # #10067 CI: this fixture SEEDS the registry and then asserts on it, so the
+    # lifespan-armed sweeps must not run against that store while it does —
+    # `TestClient(app)` entry arms `_run_boot_sweeps` and `_event_retention_loop`
+    # mode-independently, and both call `_purge_deleted_orgs`. That sweep selects
+    # every row with `deleted_at <= now` and HARD-deletes it once its stored
+    # grace has elapsed, and the seed below is not a clean insert: `MERGE (t:Team
+    # {id:$id})` in `_seed_org` does NOT clear a `deleted_at` a previous run left
+    # on the row, so on a registry that OUTLIVES one run (the shared docker lane)
+    # the reseeded team is a live purge target. A sweep landing in the window
+    # between the seed and the read is exactly the measured failure: a `PUT
+    # /v1/graphs/{graph_id}/packs` answered `{"detail":"Unknown organization"}`
+    # (404) with `hosted_api.py` byte-identical to `main` — the #4816/
+    # #3472/#3505 class, at the fixture the `quiesce_testclient_background_work`
+    # seam names (see `test_8920_harness_pointer.py`, which pins this fixture).
+    quiesce_testclient_background_work(monkeypatch)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "sel.db")
         with patched_tortoise_sdk(db_path), TestClient(app) as tc:
@@ -384,8 +402,17 @@ def _seed_org(db_path: str, org_id: str) -> dict:
     shape: ``/internal/provision`` mints the Team, ``_graph_create`` mints the
     Graph node — #2728 resolves the physical namespace from the Graph node)."""
     sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+    # `deleted_at = NULL` (a property DELETION in Cypher, not a stored null) is
+    # what makes this a resurrection rather than a re-label. On a registry that
+    # outlives one run — the shared docker lane — the row can still carry a
+    # `deleted_at` left by an earlier run, and `MERGE … SET name/tier` does not
+    # clear it: the team reads as alive here but stays a live target for
+    # `_purge_deleted_orgs` (every row with `deleted_at <= now` and its stored
+    # grace elapsed), which HARD-deletes it. That read-then-vanish is the
+    # measured `Unknown organization` 404 on PR #10199's `test (c)` (#10067 CI).
     sdk._get_registry().query(
-        "MERGE (t:Team {id:$id}) SET t.name=$id, t.tier='free'",
+        "MERGE (t:Team {id:$id}) SET t.name=$id, t.tier='free', "
+        "t.deleted_at = NULL",
         params={"id": org_id})
     default = sdk._graph_create(org_id, "default", kind="default",
                                 namespace=f"org_{org_id}")
@@ -844,6 +871,42 @@ class TestGraphPacksRest:
             "packs": [{"namespace": "not-a-pack"}], "expected_revision": 0})
         assert r.status_code == 422, r.text
         assert r.json()["detail"]["error_code"] == "UNKNOWN_PACK_NAMESPACE"
+
+    def test_reseeding_a_team_clears_a_stale_soft_delete(self, sel_client):
+        """A persistent registry outlives one run, and `MERGE` alone does not
+        resurrect a row.
+
+        On a registry that is NOT recreated per run — the shared docker lane —
+        a team id can still carry a `deleted_at` an earlier run left behind.
+        `_seed_org`'s `MERGE (t:Team {id:$id}) SET t.name=…, t.tier=…` leaves
+        that property in place, so the team reads as alive here while staying a
+        live target for `_purge_deleted_orgs`, which HARD-deletes every row with
+        `deleted_at <= now` once its stored grace has elapsed.
+
+        FAIL-ON: the stale property is on the row after the seed → `deleted_at`
+        in `props` (pre-fix), and the reseeded team can be reaped between a
+        seed and its own read. That read-then-vanish is the MEASURED failure on
+        PR #10199's `test (c)`: `test_put_unknown_namespace_is_422` above took
+        `{"detail":"Unknown organization"}` (404) from `_org_node` while
+        `tortoise/hosted_api.py` was byte-identical to `main` (#10067 CI).
+        """
+        tc, db_path = sel_client
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")._get_registry()
+        reg.query("MERGE (t:Team {id:$id}) SET t.name=$id, "
+                  "t.deleted_at='2020-01-01T00:00:00Z'",
+                  params={"id": "t-sel-stale"})
+        _seed_org(db_path, "t-sel-stale")
+        rows = reg.query("MATCH (t:Team {id:$id}) RETURN properties(t)",
+                         params={"id": "t-sel-stale"}).result_set
+        assert rows, "the seed removed the row it was meant to resurrect"
+        props = rows[0][0]
+        assert "deleted_at" not in props, (
+            f"the reseeded team still carries a soft delete ({dict(props)}), so "
+            "a `_purge_deleted_orgs` sweep can hard-delete it between the seed "
+            "and the test's own read")
+        _auth(tc, "t-sel-stale")
+        r = tc.get("/v1/graphs/default/packs?org_id=t-sel-stale")
+        assert r.status_code == 200, r.text
 
     def test_graph_bound_key_cannot_mutate(self, sel_client):
         """C5 #2114's boundary is preserved: pack selection is the management
